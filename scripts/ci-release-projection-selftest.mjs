@@ -559,6 +559,10 @@ if (args[0] === "api") {
     UNIT_DEFERRED: "", UNIT_DEFERRED_COUNT: "0", PACKAGE_COUNT: "0", CLOSURE_COUNT: "0",
     GENERATED_CONTRACT: "true", RELEASE_PROJECTION: "true",
     RELEASE_EVIDENCE_COMMIT: BUMP_PARENT, RELEASE_EVIDENCE_RUN_ID: String(RUN_ID), RELEASE_EVIDENCE_RUN_ATTEMPT: "1",
+    // A Core version bump: Core's tree only, no product lane (ci/products.json).
+    CORE_CHANGED: "false", CORE_PATHS_CHANGED: "true", PRODUCTS_CHANGED: "core",
+    FLOOR_CHECK_COUNT: "0", PUBLISHED_FLOOR_RESULT: "skipped", DOWNSTREAM_PRODUCTS: "",
+    CONNECT_CHECKS: "false", CONNECT_CHECKS_RESULT: "skipped", GOVERNANCE_DOCS_GATE_RESULT: "skipped",
   };
   // The gate reads each two-wave lane (long rows first) as two jobs and their
   // row counts. The cases below name a lane's result and count once: all its
@@ -623,6 +627,8 @@ if (args[0] === "api") {
     RELEASE_EVIDENCE_COMMIT: "", RELEASE_EVIDENCE_RUN_ID: "", RELEASE_EVIDENCE_RUN_ATTEMPT: "", RUST_CHANGED: "true",
     SHARD_COUNT: "1", CLIPPY_RESULT: "success", UNIT_SHARD_COUNT: "1", UNIT_RESULT: "success", PACKAGE_COUNT: "1",
     GENERATED_CONTRACT: "false", BAZEL_GRAPH: "false", BAZEL_GRAPH_RESULT: "skipped",
+    // A Core package changed: Core's push lanes are required.
+    CORE_CHANGED: "true",
   };
   const pullRequestGate = {
     ...rustGate, IS_MAIN_PUSH: "false", IS_PULL_REQUEST: "true", PLAN_EVENT: "pull_request",
@@ -687,6 +693,24 @@ if (args[0] === "api") {
     ["unit rows on main whose packed main unit lane failed", { ...unitOnMainGate, MAIN_UNIT_PACKED_RESULT: "failure" }],
     ["a push with neither unit rows nor a deferral", { ...unitOnMainGate, UNIT_ROWS_ON_MAIN: "", UNIT_ROWS_ON_MAIN_COUNT: "0" }],
     ["unit rows on main beside a failed unit lane", { ...unitOnMainGate, UNIT_RESULT: "failure" }],
+  ]) {
+    assert.equal(runGate(env).status, 1, `the gate refuses ${label}`);
+  }
+  // A push that changed only a product's crates (ci/products.json) runs none
+  // of Core's guard, wasm, SDK or example lanes, and the gate requires none.
+  const productPush = {
+    ...pushGate, CORE_CHANGED: "false", CORE_PATHS_CHANGED: "false", PRODUCTS_CHANGED: "meta",
+    GOVERNED_JSONL: "false", GOVERNED_JSONL_RESULT: "skipped", MCP_CONFINEMENT_POSITIVE: "false",
+    MCP_CONFINEMENT_POSITIVE_RESULT: "skipped", WASM_CHECK_RESULT: "skipped", SDK_HOST_RESULT: "skipped",
+    EXAMPLE_WEB_RESULT: "skipped", WASM_TIMERS_RESULT: "skipped",
+    FLOOR_CHECK_COUNT: "1", PUBLISHED_FLOOR_RESULT: "success",
+  };
+  const productPushRun = runGate(productPush);
+  assert.equal(productPushRun.status, 0, `the gate accepts a product-only push: ${productPushRun.stdout}`);
+  for (const [label, env] of [
+    ["a product push whose floor check did not run", { ...productPush, PUBLISHED_FLOOR_RESULT: "skipped" }],
+    ["a product push whose skipped wasm check failed", { ...productPush, WASM_CHECK_RESULT: "failure" }],
+    ["a product push without its main unit rows", { ...productPush, MAIN_UNIT_PACKED_RESULT: "skipped" }],
   ]) {
     assert.equal(runGate(env).status, 1, `the gate refuses ${label}`);
   }
@@ -831,6 +855,57 @@ process.stdout.write(JSON.stringify(fixture[path]));
   assert.equal(budget.status, 1, `a rest-wave row over the execution budget fails: ${budget.stdout}`);
   assert.equal(budget.outputs.exec_path_seconds, "1081", "1046 s of the row, 30 s of classification, 5 s of stagger");
   assert.equal(budget.outputs.budget_verdict, "exec_over_budget");
+
+  // Meta CI's gate runs this same step (.github/workflows/meta-ci.yml), byte
+  // for byte, with its own job names, and names the jobs its lanes wait for
+  // besides the classification (LANE_UPSTREAMS): such a lane's execution
+  // path is its own run time plus the longest path among them, and its path
+  // queue that path's queue. This workflow sets no LANE_UPSTREAMS, so its
+  // paths are the classification's and the stagger job's, as above.
+  const metaWorkflow = readFileSync(resolve(root, ".github/workflows/meta-ci.yml"), "utf8");
+  assert.equal(
+    extractStepRun(metaWorkflow, "Enforce lane execution budget").trimEnd(),
+    budgetStep.trimEnd(),
+    "meta-ci.yml's gate runs ci.yml's budget step unchanged",
+  );
+  assert.equal(budgetEnv.LANE_UPSTREAMS, undefined, "ci.yml's lanes wait for no other lane");
+  const metaEnv = Object.fromEntries(
+    Object.entries(extractStepLiteralEnv(metaWorkflow, "Enforce lane execution budget"))
+      .map(([key, value]) => [key, value.replace(/^"(.*)"$/, "$1")]),
+  );
+  assert.equal(metaEnv.GATE_JOB_NAME, "Meta gate");
+  assert.equal(metaEnv.LANE_UPSTREAMS, "console=console-backends;console-browser*=console-backends");
+  // The backends waited 100 s for a runner and ran 500 s; the console job
+  // ran 400 s after them, a browser leg 300 s after a 63 s queue.
+  const metaRun = (consoleSeconds) => [
+    job(metaEnv.CLASSIFICATION_JOB_NAME, 0, 5, 35),
+    job("console-backends", 36, 136, 636),
+    job("console", 637, 640, 640 + consoleSeconds),
+    job("console-browser (3)", 637, 700, 1000),
+    job("test-typescript", 36, 40, 100),
+    { name: metaEnv.GATE_JOB_NAME, created_at: at(1500), started_at: at(1504), completed_at: null, conclusion: null },
+  ];
+  budget = runBudget([0], metaRun(400), metaEnv);
+  assert.equal(budget.status, 0, `a chain within the budget: ${budget.stdout}${budget.stderr}`);
+  assert.deepEqual(
+    budget.outputs,
+    {
+      exec_path_seconds: "930", terminal_seconds: "1040", terminal_excluding_queue_seconds: "932",
+      queue_seconds: "108", budget_verdict: "within_budget", guard_lanes_outside_budget: "[]",
+    },
+    `the console job's path holds the backends' and the classification's: ${budget.stdout}`,
+  );
+  assert.match(budget.stdout, /^\| console \| 1 \| 3 \| 400 \| 930 \| 1040 \| 932 \| success \|$/m, "the console job waits for the backends");
+  assert.match(budget.stdout, /^\| console-browser \(3\) \| 1 \| 63 \| 300 \| 830 \| 1000 \| 832 \| success \|$/m, "so does a browser leg");
+  assert.match(budget.stdout, /^\| test-typescript \| 1 \| 4 \| 60 \| 90 \| 100 \| 91 \| success \|$/m, "a lane that waits only for the classification");
+  budget = runBudget([0], metaRun(600), metaEnv);
+  assert.equal(budget.status, 1, `a chain over the budget fails: ${budget.stdout}`);
+  assert.equal(budget.outputs.exec_path_seconds, "1130", "600 s of the console job, 500 s of the backends, 30 s of classification");
+  assert.equal(budget.outputs.budget_verdict, "exec_over_budget");
+  // Without the upstream names the same run would measure the console job
+  // alone after the classification, and pass.
+  budget = runBudget([0], metaRun(600), { ...metaEnv, LANE_UPSTREAMS: "" });
+  assert.equal(budget.outputs.exec_path_seconds, "630");
 
   // An exact-profile lane the plan ran only because the change touched its
   // inputs or changed its definition is outside a pull request's budget:

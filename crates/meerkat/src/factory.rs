@@ -221,7 +221,7 @@ impl SessionStore for EphemeralSessionStore {
             .map(SessionMeta::from)
             .collect();
 
-        metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        metas.sort_by_key(|meta| std::cmp::Reverse(meta.updated_at));
 
         if let Some(created_after) = filter.created_after {
             metas.retain(|m| m.created_at >= created_after);
@@ -520,6 +520,8 @@ struct AgentAssembly {
     tool_execution_policy: Option<meerkat_core::ToolExecutionPolicy>,
     consequence_policy: AssemblyConsequencePolicy,
     tool_dispatch_admission: Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
+    /// The build's scoped tool grant gate, for the outermost dispatch gate.
+    tool_grant_gate: Option<meerkat_core::tool_grant::ToolGrantGate>,
     builder: AgentBuilder,
     session: Session,
     factory_metadata: SessionMetadata,
@@ -722,6 +724,29 @@ fn resolve_session_comms_runtime_override(
             "session_comms_runtime_override is not supported on wasm32 builds".to_string(),
         )),
     }
+}
+
+/// The root a factory whose user-global convention root is
+/// `user_config_root` keeps its sessions' comms identities under: the one
+/// its session-scoped comms construction resolves
+/// (`build_session_scoped_comms_runtime_from_config_scoped_with_silent_intents_typed`).
+#[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
+fn session_comms_identity_root_under(
+    user_config_root: Option<&std::path::Path>,
+) -> meerkat_core::SessionCommsIdentityRoot {
+    match crate::sdk::canonical_session_comms_identity_root(user_config_root) {
+        Ok(root) => meerkat_core::SessionCommsIdentityRoot::Durable(root),
+        Err(reason) => meerkat_core::SessionCommsIdentityRoot::Unresolved(reason),
+    }
+}
+
+/// Without the `comms` feature a build has no comms, and a browser runtime
+/// keeps a session's comms identity in memory: neither keeps a durable one.
+#[cfg(not(all(feature = "comms", not(target_arch = "wasm32"))))]
+fn session_comms_identity_root_under(
+    _user_config_root: Option<&std::path::Path>,
+) -> meerkat_core::SessionCommsIdentityRoot {
+    meerkat_core::SessionCommsIdentityRoot::NotKept
 }
 
 /// A1/ADJ-17 predicate: the factory-appended skill-inventory prompt section
@@ -939,6 +964,11 @@ pub struct AgentBuildConfig {
     /// member's session. Persisted onto `SessionMetadata.mob_member_binding`,
     /// where mob ownership routing reads it directly on resume/restart.
     pub mob_member_binding: Option<meerkat_core::MobMemberBinding>,
+    /// The witness of the mob runtime performing this member build (a fresh
+    /// spawn, a restore or a wake), set only by that runtime; see
+    /// `SessionBuildOptions::mob_incarnation`, which carries it to a host's
+    /// member build hook. Never persisted, and not consumed by the build.
+    pub mob_incarnation: Option<meerkat_core::service::LiveMobIncarnation>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn.
     pub silent_comms_intents: Vec<String>,
@@ -1061,6 +1091,13 @@ pub struct AgentBuildConfig {
     /// It is not persisted; live delegation reconstructs it from generated
     /// operation admission when rematerialization is supported.
     pub tool_dispatch_admission: Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
+    /// The built-in tool families and tool names this build marks
+    /// grant-gated: mounted (a gated family as if enabled) but hidden and
+    /// refused until a live scoped tool grant opens them. Persisted as
+    /// `SessionMetadata.tooling.grant_gated`; a resume that leaves this
+    /// `None` restores the recorded gate. A gate needs the runtime's grant
+    /// service, on the session's runtime bindings.
+    pub grant_gated_tools: Option<meerkat_core::tool_grant::GrantGatedTools>,
     /// Stable application consequence-policy binding for the member/session.
     pub application_tool_policy: meerkat_core::ApplicationToolPolicyBinding,
     /// Host-scoped registry containing in-process immutable policy providers.
@@ -1173,6 +1210,7 @@ impl std::fmt::Debug for AgentBuildConfig {
                 "mob_tool_authority_context",
                 &self.mob_tool_authority_context.is_some(),
             )
+            .field("mob_incarnation", &self.mob_incarnation)
             .field("mob_tools", &self.mob_tools.is_some())
             .field("realm_id", &self.realm_id)
             .field("instance_id", &self.instance_id)
@@ -1216,6 +1254,7 @@ impl std::fmt::Debug for AgentBuildConfig {
                 "tool_dispatch_admission",
                 &self.tool_dispatch_admission.is_some(),
             )
+            .field("grant_gated_tools", &self.grant_gated_tools)
             .field(
                 "session_comms_runtime_override",
                 &self.session_comms_runtime_override.is_some(),
@@ -1287,6 +1326,7 @@ impl AgentBuildConfig {
             config_generation: None,
             auth_binding: None,
             mob_member_binding: None,
+            mob_incarnation: None,
             silent_comms_intents: Vec::new(),
             max_inline_peer_notifications: None,
             tool_dispatcher_override: None,
@@ -1312,6 +1352,7 @@ impl AgentBuildConfig {
             tool_access_policy: None,
             declared_tool_restriction: None,
             tool_dispatch_admission: None,
+            grant_gated_tools: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             tool_consequence_policy_registry: None,
             session_comms_runtime_override: None,
@@ -1438,6 +1479,7 @@ impl AgentBuildConfig {
         // AgentBuildConfig so surfaces can drive binding selection per-request.
         self.auth_binding = build.auth_binding.clone();
         self.mob_member_binding = build.mob_member_binding.clone();
+        self.mob_incarnation = build.mob_incarnation;
         self.keep_alive = build.keep_alive;
         self.silent_comms_intents
             .clone_from(&build.silent_comms_intents);
@@ -1452,6 +1494,7 @@ impl AgentBuildConfig {
         self.tool_access_policy = build.tool_access_policy.clone();
         self.declared_tool_restriction = build.declared_tool_restriction.clone();
         self.tool_dispatch_admission = build.tool_dispatch_admission.clone();
+        self.grant_gated_tools = build.grant_gated_tools.clone();
         self.application_tool_policy = build.application_tool_policy.clone();
         self.tool_consequence_policy_registry = build.tool_consequence_policy_registry.clone();
         self.shell_env = build.shell_env.clone();
@@ -1525,6 +1568,7 @@ impl AgentBuildConfig {
             config_generation: self.config_generation,
             auth_binding: self.auth_binding.clone(),
             mob_member_binding: self.mob_member_binding.clone(),
+            mob_incarnation: self.mob_incarnation,
             keep_alive: self.keep_alive,
             silent_comms_intents: self.silent_comms_intents.clone(),
             max_inline_peer_notifications: self.max_inline_peer_notifications,
@@ -1553,6 +1597,7 @@ impl AgentBuildConfig {
             // handed to; a projection never carries it to another build.
             prepared_controller: None,
             host_prompt_sections: self.host_prompt_sections,
+            grant_gated_tools: self.grant_gated_tools.clone(),
         }
     }
 }
@@ -1681,6 +1726,310 @@ fn builtin_tool_vocabulary() -> Vec<(meerkat_core::ToolVocabularySource, Vec<&'s
     ]
 }
 
+/// The tool names a built-in tool family can provide, whether or not a given
+/// build mounts it: the snapshot a family grant target names. `None` for a
+/// name that is not a built-in tool family.
+#[must_use]
+pub fn tool_family_names(family: &str) -> Option<Vec<&'static str>> {
+    builtin_tool_vocabulary()
+        .into_iter()
+        .find_map(|(source, names)| match source {
+            meerkat_core::ToolVocabularySource::Family(name) if name == family => Some(names),
+            _ => None,
+        })
+}
+
+/// Why a build's scoped tool grant gate was refused: core's
+/// [`meerkat_core::tool_grant::GrantGateRefusal`], which a session service
+/// surfaces as the typed `AgentError::ToolGrantGateRefused`.
+pub use meerkat_core::tool_grant::GrantGateRefusal as GrantGateBuildError;
+
+/// Whether a build's gate covers web search, by name or through its family.
+/// Such a build disables every provider-native tool, so the gated `web_search`
+/// tool is its only search path and the gate adjudicates every search.
+fn grant_gate_covers_web_search(gated: &meerkat_core::tool_grant::GrantGatedTools) -> bool {
+    meerkat_tools::builtin::WEB_SEARCH_TOOL_NAMES
+        .iter()
+        .any(|name| {
+            gated.tools.iter().any(|tool| tool.as_str() == *name)
+                || gated.families.iter().any(|family| {
+                    tool_family_names(family).is_some_and(|names| names.contains(name))
+                })
+        })
+}
+
+/// The category overrides a session's metadata records: the caller's own,
+/// before the build's grant gate mounted its gated families.
+#[derive(Debug, Clone, Copy)]
+struct RecordedToolOverrides {
+    shell: ToolCategoryOverride,
+    comms: ToolCategoryOverride,
+    memory: ToolCategoryOverride,
+    schedule: ToolCategoryOverride,
+    workgraph: ToolCategoryOverride,
+    image_generation: ToolCategoryOverride,
+    web_search: ToolCategoryOverride,
+}
+
+impl RecordedToolOverrides {
+    fn of(build_config: &AgentBuildConfig) -> Self {
+        Self {
+            shell: build_config.override_shell,
+            comms: build_config.override_comms,
+            memory: build_config.override_memory,
+            schedule: build_config.override_schedule,
+            workgraph: build_config.override_workgraph,
+            image_generation: build_config.override_image_generation,
+            web_search: build_config.override_web_search,
+        }
+    }
+}
+
+/// A build's grant gate, rules 1 and 2: every gated family is a built-in
+/// tool family, and a gated family whose category override mounts it is
+/// mounted as if enabled; the build may not disable it. A family that shares
+/// its category with ungated tools (the builtins), or whose tools mount only
+/// with a runtime of their own (comms needs a comms runtime), is not mounted
+/// by the gate. Every gated family must still reach the final dispatcher
+/// (`grant_gate_for_build`), or the build is refused.
+fn mount_grant_gated_families(
+    build_config: &mut AgentBuildConfig,
+    gated: &meerkat_core::tool_grant::GrantGatedTools,
+) -> Result<(), GrantGateBuildError> {
+    for family in &gated.families {
+        if tool_family_names(family).is_none() {
+            return Err(GrantGateBuildError::UnknownFamily {
+                family: family.clone(),
+            });
+        }
+        let category = match family.as_str() {
+            "shell" => &mut build_config.override_shell,
+            "memory" => &mut build_config.override_memory,
+            "schedule" => &mut build_config.override_schedule,
+            "workgraph" => &mut build_config.override_workgraph,
+            "image_generation" => &mut build_config.override_image_generation,
+            "web_search" => &mut build_config.override_web_search,
+            _ => continue,
+        };
+        match *category {
+            ToolCategoryOverride::Disable => {
+                return Err(GrantGateBuildError::FamilyDisabled {
+                    family: family.clone(),
+                });
+            }
+            ToolCategoryOverride::Inherit => *category = ToolCategoryOverride::Enable,
+            ToolCategoryOverride::Enable => {}
+        }
+    }
+    Ok(())
+}
+
+/// A build's grant gate, rules 3 to 6, over the build's final dispatcher:
+/// every gated tool name is mounted (a name a pending source may provide once
+/// it connects is gated from the moment it appears), the build's tool policy
+/// refuses no gated name, every gated family has a mounted name, and the
+/// runtime carries the session's grants. Answers the gate to install, or
+/// `None` for an empty gate. A gate that covers web search has already
+/// disabled every provider-native tool for the build
+/// (`grant_gate_covers_web_search`), so no gated name is served natively.
+fn grant_gate_for_build(
+    gated: &meerkat_core::tool_grant::GrantGatedTools,
+    tools: &Arc<dyn AgentToolDispatcher>,
+    tool_execution_policy: Option<&meerkat_core::ToolExecutionPolicy>,
+    declared_tool_restriction: Option<&meerkat_core::ops::DeclaredToolRestriction>,
+    session_grants: Option<Arc<dyn meerkat_core::tool_grant::SessionToolGrants>>,
+) -> Result<Option<meerkat_core::tool_grant::ToolGrantGate>, GrantGateBuildError> {
+    use meerkat_core::types::ToolName;
+    if gated.is_empty() {
+        return Ok(None);
+    }
+    let mut families = BTreeMap::new();
+    for family in &gated.families {
+        let names =
+            tool_family_names(family).ok_or_else(|| GrantGateBuildError::UnknownFamily {
+                family: family.clone(),
+            })?;
+        families.insert(
+            family.clone(),
+            names
+                .into_iter()
+                .map(ToolName::from)
+                .collect::<BTreeSet<_>>(),
+        );
+    }
+    let table = meerkat_core::tool_grant::GatedToolTable::new(
+        families,
+        gated.tools.iter().cloned().collect(),
+    );
+
+    let mounted: std::collections::HashSet<String> = tools
+        .tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .chain(
+            tools
+                .tool_catalog()
+                .iter()
+                .map(|entry| entry.tool.name.to_string()),
+        )
+        .collect();
+    let vocabulary: std::collections::HashSet<&str> = builtin_tool_vocabulary()
+        .into_iter()
+        .flat_map(|(_, names)| names)
+        .collect();
+    let declared = |name: &str| {
+        declared_tool_restriction.is_some_and(|restriction| {
+            restriction
+                .vocabulary
+                .values()
+                .any(|names| names.contains(name))
+        })
+    };
+    let pending_sources = !tools.pending_catalog_sources().is_empty()
+        || declared_tool_restriction
+            .is_some_and(|restriction| !restriction.deferred_mcp_servers.is_empty());
+    for name in table.tools() {
+        let name = name.as_str();
+        if mounted.contains(name) {
+            continue;
+        }
+        if pending_sources {
+            tracing::info!(
+                tool = name,
+                "grant-gated name deferred: a pending tool source may provide it"
+            );
+            continue;
+        }
+        return Err(if vocabulary.contains(name) || declared(name) {
+            GrantGateBuildError::ToolNotMounted {
+                tool: name.to_string(),
+            }
+        } else {
+            GrantGateBuildError::UnknownTool {
+                tool: name.to_string(),
+            }
+        });
+    }
+
+    if let Some(policy) = tool_execution_policy {
+        for name in table.gated_names() {
+            let name = name.as_str();
+            let refused = if mounted.contains(name) {
+                !policy.permits_call(name, tools.tool_mutation_class(name))
+            } else if table.tools().contains(name) {
+                // Not mounted yet: only a refusal by name is certain now.
+                !policy.permits_call(name, meerkat_core::ToolMutationClass::ReadOnly)
+            } else {
+                false
+            };
+            if refused {
+                return Err(GrantGateBuildError::PolicyRefused {
+                    tool: name.to_string(),
+                });
+            }
+        }
+    }
+
+    // Every gated family reaches the final dispatcher: a family none of whose
+    // names this build mounts (comms without a comms runtime, a builtin
+    // family the build leaves off) could never open.
+    for (family, names) in table.families() {
+        if !names.iter().any(|name| mounted.contains(name.as_str())) {
+            return Err(GrantGateBuildError::FamilyNotMounted {
+                family: family.clone(),
+            });
+        }
+    }
+
+    let grants = session_grants.ok_or(GrantGateBuildError::NoGrantService)?;
+    Ok(Some(meerkat_core::tool_grant::ToolGrantGate::new(
+        grants, table,
+    )))
+}
+
+/// Where the operator-instruction entry rows `session` wrote itself stand in
+/// the requests of a build that resumes it
+/// ([`Session::own_operator_instruction_entry_placement`]). A prompt row the
+/// build authors (`authors_prompt_row`: the session carries no metadata, or
+/// the build names its prompt) stands beside them as another System row.
+/// The judgment runs before the prompt is assembled, so a named prompt
+/// counts even when the builder will append nothing because it is already
+/// the newest prompt row ([`Session::newest_prompt_row_is`]); that changes
+/// no verdict, since the newest prompt row is then another System row of
+/// the placement already.
+pub(crate) fn resumed_build_entry_placement(
+    session: &Session,
+    authors_prompt_row: bool,
+) -> Result<meerkat_core::InstructionEntryPlacement, meerkat_core::ModelBoundaryProjectionError> {
+    let placement = session.own_operator_instruction_entry_placement()?;
+    Ok(if authors_prompt_row && !placement.is_empty() {
+        placement.with_another_system_row()
+    } else {
+        placement
+    })
+}
+
+/// Why a build that resumes `session` cannot serve its own
+/// operator-instruction entries on `identity`, or `None` when it can
+/// ([`meerkat_core::InstructionEntryPlacement::refusal`]). The model is
+/// judged by the weakest lowering its binding may serve
+/// ([`ModelRegistry::weakest_instruction_lowering_for_target`]), before any
+/// client for it is built.
+fn resumed_build_entry_refusal(
+    session: &Session,
+    registry: &ModelRegistry,
+    config: &Config,
+    identity: &SessionLlmIdentity,
+    preferred_realm: Option<&RealmId>,
+    authors_prompt_row: bool,
+) -> Result<Option<meerkat_core::InstructionEntryLoweringRefusal>, BuildAgentError> {
+    let placement = resumed_build_entry_placement(session, authors_prompt_row)
+        .map_err(|error| BuildAgentError::Config(error.to_string()))?;
+    if placement.is_empty() {
+        return Ok(None);
+    }
+    let lowering =
+        registry.weakest_instruction_lowering_for_target(config, identity, preferred_realm);
+    Ok(placement.refusal(lowering))
+}
+
+/// Refuse a build that resumes `session` onto a model that cannot carry the
+/// operator-instruction entry rows the session wrote itself where they stand
+/// ([`resumed_build_entry_refusal`]), before the build resolves the model's
+/// client.
+fn refuse_resumed_entries_the_model_cannot_carry(
+    session: &Session,
+    registry: &ModelRegistry,
+    config: &Config,
+    build_config: &AgentBuildConfig,
+    provider: Provider,
+    self_hosted_server_id: &Option<String>,
+    authors_prompt_row: bool,
+) -> Result<(), BuildAgentError> {
+    let identity = SessionLlmIdentity {
+        model: build_config.model.clone(),
+        provider,
+        self_hosted_server_id: self_hosted_server_id.clone(),
+        provider_params: build_config.provider_params.clone(),
+        auth_binding: build_config.auth_binding.clone(),
+    };
+    match resumed_build_entry_refusal(
+        session,
+        registry,
+        config,
+        &identity,
+        build_config.realm_id.as_ref(),
+        authors_prompt_row,
+    )? {
+        None => Ok(()),
+        Some(refusal) => Err(BuildAgentError::Config(format!(
+            "model '{}' cannot represent the operator-instruction entries already applied in session {}: {refusal}",
+            identity.model,
+            session.id()
+        ))),
+    }
+}
+
 /// Errors that can occur when building an agent via [`AgentFactory::build_agent()`].
 #[derive(Debug, thiserror::Error)]
 pub enum BuildAgentError {
@@ -1737,6 +2086,10 @@ pub enum BuildAgentError {
     /// composed nor finds in any tool vocabulary.
     #[error(transparent)]
     DeclaredToolUnknown(Box<meerkat_core::error::DeclaredToolUnknown>),
+
+    /// The build's scoped tool grant gate cannot be honoured.
+    #[error(transparent)]
+    GrantGate(GrantGateBuildError),
 
     /// An explicit tool-category `Enable` could not be satisfied.
     ///
@@ -4741,6 +5094,17 @@ impl AgentFactory {
         self
     }
 
+    /// Where this factory's agents keep the durable comms identity (the key
+    /// pair) of each session they build with session-scoped comms
+    /// (in-process comms): `<root>/<session id>`, under the root
+    /// `canonical_session_comms_identity_root` resolves from the factory's
+    /// `user_config_root` (the platform's per-user default when it is
+    /// unset). A build keeps no durable one without the `comms` feature, or
+    /// in a browser runtime.
+    pub fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        session_comms_identity_root_under(self.user_config_root.as_deref())
+    }
+
     /// Set runtime root used for realm-scoped runtime artifacts.
     ///
     /// On Linux and macOS this also starts, once per root per process, a
@@ -5481,6 +5845,12 @@ impl AgentFactory {
         if !mask.application_tool_policy {
             build_config.application_tool_policy = metadata.tooling.application_tool_policy.clone();
         }
+        // The grant gate is durable session truth, like the launch policy: a
+        // resume that names no gate restores the recorded one, so a gated
+        // session cannot shed its gate by being resumed.
+        if build_config.grant_gated_tools.is_none() && !metadata.tooling.grant_gated.is_empty() {
+            build_config.grant_gated_tools = Some(metadata.tooling.grant_gated.clone());
+        }
         if !mask.keep_alive {
             build_config.keep_alive = metadata.keep_alive;
         }
@@ -5991,6 +6361,9 @@ impl AgentFactory {
             } else {
                 meerkat_core::ProviderNativeToolPolicy::Inherit
             },
+            // A live hot swap installs it: the agent cannot judge the binding.
+            operator_instruction_lowering: registry
+                .instruction_lowering_for_identity(config, identity),
         })
     }
 
@@ -7188,6 +7561,13 @@ impl AgentFactory {
         // the resumed binding is settled against the registry's provider below.
         let caller_auth_binding = build_config.auth_binding.clone();
         let resumed_session_metadata = Self::apply_resumed_session_metadata(&mut build_config)?;
+        // The build's scoped tool grant gate. The session's metadata records
+        // the category overrides the caller asked for, before the gate mounts
+        // its gated families as if enabled.
+        let grant_gated = build_config.grant_gated_tools.clone().unwrap_or_default();
+        let recorded_overrides = RecordedToolOverrides::of(&build_config);
+        mount_grant_gated_families(&mut build_config, &grant_gated)
+            .map_err(BuildAgentError::GrantGate)?;
         self.validate_runtime_profile(&build_config, config)?;
         let mut session =
             build_config.resume_session.clone().unwrap_or_else(|| {
@@ -7305,6 +7685,18 @@ impl AgentFactory {
                 session_mob_authority.clone()
             };
             external_tools.bind_session_mob_tool_authority(bound);
+        }
+        // External tools that only observe that binding (a mob runtime's
+        // receiver for a member whose build has no external tools of its
+        // own) compose as no external tools: they change nothing in the
+        // build's surface, its catalog exactness included. The session's
+        // agent holds the authority handle bound to them.
+        if build_config
+            .external_tools
+            .as_ref()
+            .is_some_and(|external_tools| external_tools.observes_bindings_only())
+        {
+            build_config.external_tools = None;
         }
 
         if let Some(value) = build_config.max_inline_peer_notifications
@@ -7504,12 +7896,17 @@ impl AgentFactory {
         // Every governed input to the provider-native tool policy is final
         // here: nothing below changes the effective restriction, consequence
         // binding or admission. The policy is derived once, from these inputs
-        // and the final model identity, before any helper is provisioned.
+        // and the final model identity, before any helper is provisioned. A
+        // grant gate that covers web search is one of them: provider-native
+        // search would bypass the gate on every request (session and turn
+        // provider params included), so the build disables it and the gated
+        // `web_search` tool is the only search path.
         let governed_tool_inputs_disable_native = tool_dispatch_admission.is_some()
             || consequence_policy.governs()
             || tool_execution_policy
                 .as_ref()
-                .is_some_and(|policy| !policy.is_unrestricted());
+                .is_some_and(|policy| !policy.is_unrestricted())
+            || grant_gate_covers_web_search(&grant_gated);
         // Refuse a fallback the browser profile cannot provision before any
         // credential is resolved. Governed inputs already disable native
         // search; the final identity is rechecked before helper provisioning.
@@ -7604,12 +8001,30 @@ impl AgentFactory {
             RuntimeBuildMode::SessionOwned(bindings) => Some(bindings.auth_lease().clone()),
             RuntimeBuildMode::StandaloneEphemeral => None,
         };
+        // A session that resumes holds its own operator-instruction entry
+        // rows where they stand: a model that cannot carry them there is
+        // refused here, before its client is built (credential resolution,
+        // lease publication). A prompt row this build authors stands beside
+        // them too; a named prompt that is already the newest prompt row is
+        // counted though the builder appends nothing, which changes no
+        // verdict (`resumed_build_entry_placement`).
+        let authors_prompt_row =
+            resumed_session_metadata.is_none() || build_config.system_prompt.is_explicit();
         let primary_llm_client_phase = match prepared_controller.as_deref() {
             Some(graph) => {
                 build_config.model.clone_from(&graph.resolved_model);
                 build_config
                     .auth_binding
                     .clone_from(&graph.resolved_auth_binding);
+                refuse_resumed_entries_the_model_cannot_carry(
+                    &session,
+                    &registry,
+                    config,
+                    &build_config,
+                    provider,
+                    &self_hosted_server_id,
+                    authors_prompt_row,
+                )?;
                 Ok(ResolvedLlmClientPhase {
                     llm_client: None,
                     credential_identity: graph.credential_identity.clone(),
@@ -7619,6 +8034,15 @@ impl AgentFactory {
                 })
             }
             None => {
+                refuse_resumed_entries_the_model_cannot_carry(
+                    &session,
+                    &registry,
+                    config,
+                    &build_config,
+                    provider,
+                    &self_hosted_server_id,
+                    authors_prompt_row,
+                )?;
                 self.resolve_llm_client_phase(
                     config,
                     &registry,
@@ -7637,6 +8061,22 @@ impl AgentFactory {
                 let Some(bootstrap_identity) = handoff_bootstrap_identity.as_ref() else {
                     return Err(primary_error);
                 };
+                // A target that cannot carry the session's own
+                // operator-instruction entries where they stand gets no
+                // bootstrap client: it would serve a transcript its wire
+                // refuses, and the realization denies the request anyway.
+                if resumed_build_entry_refusal(
+                    &session,
+                    &registry,
+                    config,
+                    bootstrap_identity,
+                    build_config.realm_id.as_ref(),
+                    authors_prompt_row,
+                )?
+                .is_some()
+                {
+                    return Err(primary_error);
+                }
                 let auth_lease_handle = match &build_config.runtime_build_mode {
                     RuntimeBuildMode::SessionOwned(bindings) => Some(bindings.auth_lease().clone()),
                     RuntimeBuildMode::StandaloneEphemeral => None,
@@ -8966,7 +9406,7 @@ impl AgentFactory {
                 let mut preload = build_config
                     .preload_skills
                     .take()
-                    .and_then(|ids| if ids.is_empty() { None } else { Some(ids) });
+                    .filter(|ids| !ids.is_empty());
 
                 // Resumed sessions may carry persisted skill IDs from an older
                 // surface or older metadata semantics. Filter to the skills
@@ -9126,7 +9566,9 @@ impl AgentFactory {
         }
         // A bare resume authors nothing. An explicit prompt decision on resume
         // is different: it materializes a new ordinary System message at the
-        // current transcript boundary, whatever the binding. Nothing here
+        // current transcript boundary, whatever the binding, unless the
+        // assembled prompt is exactly the newest prompt row the model reads
+        // (the builder then appends nothing). Nothing here
         // checks the provider wire: a wire that cannot carry a System message
         // at that position refuses the request that would carry it with a
         // typed projection error, and the session's resolved
@@ -9303,22 +9745,21 @@ impl AgentFactory {
             metadata.self_hosted_server_id = self_hosted_server_id.clone();
             metadata.provider_params = build_config.provider_params.clone();
             metadata.tooling.builtins = build_config.override_builtins;
-            metadata.tooling.shell = build_config.override_shell;
+            metadata.tooling.shell = recorded_overrides.shell;
             // Apply an explicit comms override on resume; preserve the persisted
             // value when the build carries no explicit comms intent (Inherit) so
             // a prior explicit Enable/Disable survives across resumes.
-            if !matches!(build_config.override_comms, ToolCategoryOverride::Inherit) {
-                metadata.tooling.comms = build_config.override_comms;
+            if !matches!(recorded_overrides.comms, ToolCategoryOverride::Inherit) {
+                metadata.tooling.comms = recorded_overrides.comms;
             }
             metadata.tooling.mob = build_config.override_mob;
-            metadata.tooling.memory = metadata_memory_override_for_realm(
-                build_config.override_memory,
-                build_config.backend,
-            );
-            metadata.tooling.schedule = build_config.override_schedule;
-            metadata.tooling.workgraph = build_config.override_workgraph;
-            metadata.tooling.image_generation = build_config.override_image_generation;
-            metadata.tooling.web_search = build_config.override_web_search;
+            metadata.tooling.memory =
+                metadata_memory_override_for_realm(recorded_overrides.memory, build_config.backend);
+            metadata.tooling.schedule = recorded_overrides.schedule;
+            metadata.tooling.workgraph = recorded_overrides.workgraph;
+            metadata.tooling.image_generation = recorded_overrides.image_generation;
+            metadata.tooling.web_search = recorded_overrides.web_search;
+            metadata.tooling.grant_gated = grant_gated.clone();
             // Effective (resolved) policy only — an unresolved `Inherit`
             // failed the build above, so `Inherit` can never persist here.
             metadata.tooling.tool_access_policy = build_config.tool_access_policy.clone();
@@ -9352,17 +9793,17 @@ impl AgentFactory {
                 provider_params: build_config.provider_params.clone(),
                 tooling: SessionTooling {
                     builtins: build_config.override_builtins,
-                    shell: build_config.override_shell,
-                    comms: build_config.override_comms,
+                    shell: recorded_overrides.shell,
+                    comms: recorded_overrides.comms,
                     mob: build_config.override_mob,
                     memory: metadata_memory_override_for_realm(
-                        build_config.override_memory,
+                        recorded_overrides.memory,
                         build_config.backend,
                     ),
-                    schedule: build_config.override_schedule,
-                    workgraph: build_config.override_workgraph,
-                    image_generation: build_config.override_image_generation,
-                    web_search: build_config.override_web_search,
+                    schedule: recorded_overrides.schedule,
+                    workgraph: recorded_overrides.workgraph,
+                    image_generation: recorded_overrides.image_generation,
+                    web_search: recorded_overrides.web_search,
                     // Effective (resolved) policy only — an unresolved
                     // `Inherit` failed the build above.
                     tool_access_policy: build_config.tool_access_policy.clone(),
@@ -9373,6 +9814,7 @@ impl AgentFactory {
                     ),
                     application_tool_policy: build_config.application_tool_policy.clone(),
                     active_skills: active_skill_ids.clone(),
+                    grant_gated: grant_gated.clone(),
                 },
                 keep_alive: build_config.keep_alive,
                 comms_name: build_config.comms_name.clone(),
@@ -9444,6 +9886,14 @@ impl AgentFactory {
         if let Some(max_turns) = config.agent.max_turns {
             builder = builder.max_turns(max_turns);
         }
+        // Operator instructions lower as the session's model is served by its
+        // backend (`ModelRegistry::instruction_lowering_for_identity`): the
+        // ChatGPT backend's wire carries only the prompt's leading System
+        // row, so it lowers no entry, and it narrows a model that carries
+        // mid-conversation System rows.
+        builder = builder.with_operator_instruction_lowering(
+            registry.instruction_lowering_for_identity(config, &resolved_llm_identity),
+        );
 
         if let Some(defaults) = provider_request_defaults_for(
             provider,
@@ -9790,6 +10240,25 @@ impl AgentFactory {
             }
         }
 
+        // 12i-gate. The scoped tool grant gate over the final dispatcher: the
+        // agent opens the gated names a live grant admits at each boundary,
+        // and the outermost dispatch gate adjudicates every gated call.
+        let session_grants = match resolved_mode {
+            RuntimeBuildMode::SessionOwned(bindings) => bindings.tool_grants().cloned(),
+            RuntimeBuildMode::StandaloneEphemeral => None,
+        };
+        let tool_grant_gate = grant_gate_for_build(
+            &grant_gated,
+            &tools,
+            tool_execution_policy.as_ref(),
+            declared_tool_restriction.as_ref(),
+            session_grants,
+        )
+        .map_err(BuildAgentError::GrantGate)?;
+        if let Some(gate) = &tool_grant_gate {
+            builder = builder.with_tool_grant_gate(gate.clone());
+        }
+
         let visibility_filters = capability_base_filter_override
             .into_iter()
             .chain(
@@ -9804,6 +10273,7 @@ impl AgentFactory {
             tool_execution_policy,
             consequence_policy,
             tool_dispatch_admission,
+            tool_grant_gate,
             builder,
             session,
             factory_metadata,
@@ -9831,6 +10301,7 @@ impl AgentFactory {
             tool_execution_policy,
             consequence_policy,
             tool_dispatch_admission,
+            tool_grant_gate,
             mut builder,
             mut session,
             mut factory_metadata,
@@ -9901,9 +10372,12 @@ impl AgentFactory {
         // reach the inner dispatcher. Provider-native server tools never
         // traverse the dispatcher and cannot be gated here; hosts that need
         // them gated must disable the native capability on gated builds.
+        // A grant-gated build's gate adjudicates every gated call last, after
+        // the policy, the consequence policy and any dispatch admission.
         if tool_execution_policy.is_some()
             || bound_consequence_policy.is_some()
             || tool_dispatch_admission.is_some()
+            || tool_grant_gate.is_some()
         {
             let mut gate = meerkat_core::ExecutionPolicyGatedDispatcher::new(
                 tools,
@@ -9915,6 +10389,9 @@ impl AgentFactory {
             }
             if let Some(admission) = tool_dispatch_admission {
                 gate = gate.with_dispatch_admission(admission);
+            }
+            if let Some(grant_gate) = tool_grant_gate {
+                gate = gate.with_tool_grant_gate(grant_gate);
             }
             tools = Arc::new(gate);
         }
@@ -11831,7 +12308,7 @@ mod tests {
                 Provider::OpenAI,
                 "gpt-5.4"
             ),
-            Some(std::time::Duration::from_secs(600))
+            Some(std::time::Duration::from_mins(10))
         );
         assert_eq!(
             meerkat_core::ModelOperationalDefaultsResolver::call_timeout_for(
@@ -13737,6 +14214,53 @@ mod tests {
         );
     }
 
+    /// The request policy a live hot swap installs carries the
+    /// operator-instruction lowering the identity's binding serves: none on
+    /// the ChatGPT backend, whose wire carries only the prompt's leading
+    /// System row, and what the model row lowers on the public API, for an
+    /// identity naming no binding too.
+    #[test]
+    fn a_request_policy_carries_the_operator_instruction_lowering_its_binding_serves() {
+        let temp = tempfile::tempdir().expect("temp sessions");
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let (mut config, chatgpt_binding) = chatgpt_backend_cache_config();
+        config.realm.insert(
+            "public".to_string(),
+            inline_realm_section(&[("openai", "test-key")]),
+        );
+        let lowering = |auth_binding: Option<AuthBindingRef>| {
+            factory
+                .request_policy_for_llm_identity(
+                    &config,
+                    &SessionLlmIdentity {
+                        model: "gpt-5.6-sol".to_string(),
+                        provider: Provider::OpenAI,
+                        self_hosted_server_id: None,
+                        provider_params: None,
+                        auth_binding,
+                    },
+                    ToolCategoryOverride::Disable,
+                )
+                .expect("request policy")
+                .operator_instruction_lowering
+        };
+        assert_eq!(
+            lowering(Some(chatgpt_binding)),
+            meerkat_core::InstructionLowering::Unavailable,
+            "the ChatGPT backend's wire carries no entry"
+        );
+        assert_eq!(
+            lowering(Some(configured_auth_binding("public", "default_openai"))),
+            meerkat_core::InstructionLowering::MidConversation,
+            "the public API carries the row's mid-conversation System rows"
+        );
+        assert_eq!(
+            lowering(None),
+            meerkat_core::InstructionLowering::MidConversation,
+            "an identity naming no binding is served by the API-key backend"
+        );
+    }
+
     /// Lower `identity`'s request policy through a ChatGPT-backend client, as
     /// the session's turn does, and return the body the wire would carry.
     #[cfg(feature = "openai")]
@@ -13824,6 +14348,359 @@ mod tests {
             "cache defaults computed for an unresolved binding reached the ChatGPT backend wire: {:?}",
             cache_fields(&body)
         );
+    }
+
+    /// Answers a request only after lowering it through the real ChatGPT
+    /// backend Responses request builder, as the OpenAI client does before
+    /// it sends one: a request that wire cannot carry fails the turn.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    struct ChatGptWireAnsweringClient {
+        wire: meerkat_openai::OpenAiClient,
+        bodies: std::sync::Mutex<Vec<serde_json::Value>>,
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    impl ChatGptWireAnsweringClient {
+        fn new() -> Self {
+            Self {
+                wire: meerkat_openai::OpenAiClient::new("test-key".to_string())
+                    .with_chatgpt_backend_wire(),
+                bodies: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn bodies(&self) -> Vec<serde_json::Value> {
+            self.bodies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[async_trait]
+    impl LlmClient for ChatGptWireAnsweringClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+            self.wire.project_replay_messages(messages)
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>>
+        {
+            match self.wire.build_request_body(request) {
+                Err(error) => Box::pin(futures::stream::iter(vec![Err(error)])),
+                Ok(body) => {
+                    self.bodies
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(body);
+                    Box::pin(futures::stream::iter(vec![
+                        Ok(LlmEvent::TextDelta {
+                            delta: "done".to_string(),
+                            meta: None,
+                        }),
+                        Ok(LlmEvent::UsageUpdate {
+                            usage: meerkat_core::TurnUsage::host_declared(
+                                Provider::OpenAI,
+                                &request.model,
+                                meerkat_core::Usage::default(),
+                            ),
+                        }),
+                        Ok(LlmEvent::Done {
+                            outcome: LlmDoneOutcome::success(StopReason::EndTurn),
+                        }),
+                    ]))
+                }
+            }
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// A session the factory builds on the ChatGPT backend: that wire
+    /// carries exactly one leading System row, the session's prompt, so the
+    /// build resolves no operator-instruction lowering. A recorded target
+    /// stays pending at the fresh session's first run and at the next one,
+    /// no entry row is written, and every request reaches the wire through
+    /// the real ChatGPT backend request builder.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn chatgpt_backend_session_keeps_the_target_pending_and_every_request_succeeds() {
+        const REALM: &str = "operator_instructions_chatgpt";
+        let mut config = Config::default();
+        let mut realm = inline_realm_section(&[("openai", "test-key")]);
+        realm
+            .backend
+            .get_mut("default_openai")
+            .expect("OpenAI backend")
+            .backend_kind = "chatgpt_backend".to_string();
+        realm
+            .auth
+            .get_mut("default_openai")
+            .expect("OpenAI auth")
+            .auth_method = "managed_chatgpt_oauth".to_string();
+        config.realm.insert(REALM.to_string(), realm);
+        let client = Arc::new(ChatGptWireAnsweringClient::new());
+        let wire_client: Arc<dyn LlmClient> = client.clone();
+        let temp = tempfile::tempdir().expect("temp sessions");
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .without_provider_auth_persistence()
+            .builtins(false);
+        let session = Session::new();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_bindings(session.id().clone())
+            .await
+            .expect("session runtime bindings");
+        let mut build = AgentBuildConfig::new("gpt-5.5");
+        build.provider = Some(Provider::OpenAI);
+        build.realm_id = Some(RealmId::parse(REALM).expect("test realm"));
+        build.auth_binding = Some(configured_auth_binding(REALM, "default_openai"));
+        build.llm_client_override = Some(wire_client);
+        build.system_prompt =
+            crate::SystemPromptOverride::Set("You are a careful assistant.".to_string());
+        build.resume_session = Some(session);
+        build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+        build.override_builtins = ToolCategoryOverride::Disable;
+        build.override_web_search = ToolCategoryOverride::Disable;
+        let mut agent = factory
+            .build_agent(build, &config)
+            .await
+            .expect("a ChatGPT backend session builds");
+        assert_eq!(
+            agent.operator_instruction_lowering(),
+            meerkat_core::InstructionLowering::Unavailable,
+            "the build resolves the backend's lowering, not the model row's"
+        );
+
+        agent
+            .session_mut()
+            .set_session_instruction(meerkat_core::SessionInstructionWrite {
+                slot: meerkat_core::InstructionSlot {
+                    namespace: meerkat_core::InstructionNamespace::new("app.example")
+                        .expect("namespace"),
+                    key: meerkat_core::InstructionKey::new("tone").expect("key"),
+                },
+                revision: meerkat_core::InstructionRevision::new(1).expect("revision"),
+                change: meerkat_core::SessionInstructionChange::Activate {
+                    body: "Answer formally.".to_string(),
+                    content_sha256: None,
+                },
+            })
+            .expect("the session records the target");
+        for input in ["first", "second"] {
+            assert_eq!(
+                agent
+                    .apply_run_start_operator_instructions(
+                        meerkat_core::InstructionRunStart::FreshRun,
+                        None,
+                    )
+                    .expect("the run start resolves"),
+                meerkat_core::RunStartInstructionOutcome::Deferred(
+                    meerkat_core::InstructionDeferReason::LoweringUnavailable
+                ),
+                "the target stays pending at the {input} run's start"
+            );
+            agent.set_runtime_execution_kind(Some(
+                meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+            ));
+            agent
+                .run(meerkat_core::ContentInput::Text(input.to_string()))
+                .await
+                .expect("the request reaches the ChatGPT backend wire");
+        }
+
+        let bodies = client.bodies();
+        assert_eq!(bodies.len(), 2, "every request reached the wire");
+        for body in &bodies {
+            assert!(
+                !body.to_string().contains("Answer formally."),
+                "no instruction body reaches the wire: {body}"
+            );
+        }
+        assert!(
+            agent.session().messages().iter().all(|message| !matches!(
+                message,
+                meerkat_core::Message::System(system) if system.instruction_entry.is_some()
+            )),
+            "no entry row is written"
+        );
+        let state = agent
+            .session()
+            .instruction_target_state()
+            .expect("the target state reads")
+            .expect("the target is recorded");
+        assert_eq!(
+            state.slots()[0].pending_body.as_deref(),
+            Some("Answer formally."),
+            "the target stays pending"
+        );
+    }
+
+    /// A resumed build is refused, before its client is built, where the
+    /// model it resumes on cannot carry the operator-instruction entry rows
+    /// the session wrote itself where they stand: an entry after a
+    /// conversation row on a model that lowers System rows only in the
+    /// leading prefix, and an entry beside the session's prompt on the
+    /// ChatGPT backend, whose wire takes one leading System row. The first
+    /// session resumes on a model that lowers entries anywhere.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_resumed_build_is_refused_where_its_model_cannot_carry_the_sessions_own_entries() {
+        const REALM: &str = "operator_instructions_resume";
+        let temp = tempfile::tempdir().expect("temp sessions");
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .without_provider_auth_persistence()
+            .builtins(false);
+        let mut api_config = Config::default();
+        api_config.realm.insert(
+            REALM.to_string(),
+            inline_realm_section(&[("openai", "test-key")]),
+        );
+        api_config.models.custom.insert(
+            "custom-prefix-model".to_string(),
+            meerkat_core::config::CustomModelConfig {
+                provider: Provider::OpenAI,
+                display_name: None,
+                context_window: Some(128_000),
+                max_input_tokens: None,
+                max_output_tokens: Some(16_000),
+                vision: Some(false),
+                web_search: Some(false),
+                call_timeout_secs: None,
+            },
+        );
+        let mut chatgpt_config = Config::default();
+        let mut chatgpt_realm = inline_realm_section(&[("openai", "test-key")]);
+        chatgpt_realm
+            .backend
+            .get_mut("default_openai")
+            .expect("OpenAI backend")
+            .backend_kind = "chatgpt_backend".to_string();
+        chatgpt_realm
+            .auth
+            .get_mut("default_openai")
+            .expect("OpenAI auth")
+            .auth_method = "managed_chatgpt_oauth".to_string();
+        chatgpt_config
+            .realm
+            .insert(REALM.to_string(), chatgpt_realm);
+        let resume = |model: &str, session: Session| {
+            let mut build = AgentBuildConfig::new(model);
+            build.provider = Some(Provider::OpenAI);
+            build.realm_id = Some(RealmId::parse(REALM).expect("test realm"));
+            build.auth_binding = Some(configured_auth_binding(REALM, "default_openai"));
+            build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::for_provider(
+                Provider::OpenAI,
+            )));
+            build.resume_session = Some(session);
+            build.override_builtins = ToolCategoryOverride::Disable;
+            build.override_web_search = ToolCategoryOverride::Disable;
+            build
+        };
+        // A session the factory built and persisted on `model` through the
+        // realm's binding: its durable session metadata names that identity,
+        // so the resume reaches the operator-instruction check.
+        let resumable = |model: &str| {
+            let mut session = Session::new();
+            session
+                .set_session_metadata(meerkat_core::SessionMetadata {
+                    model_fallback: None,
+                    schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                    model: model.to_string(),
+                    max_tokens: 8_192,
+                    structured_output_retries: 2,
+                    provider: Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    tooling: SessionTooling::default(),
+                    keep_alive: false,
+                    comms_name: None,
+                    peer_meta: None,
+                    realm_id: Some(RealmId::parse(REALM).expect("test realm")),
+                    instance_id: None,
+                    backend: None,
+                    config_generation: None,
+                    auth_binding: Some(configured_auth_binding(REALM, "default_openai")),
+                    mob_member_binding: None,
+                })
+                .expect("durable session metadata");
+            session
+        };
+        let after_conversation = |model: &str| {
+            let mut session = resumable(model);
+            session.push(meerkat_core::Message::User(
+                meerkat_core::UserMessage::text("Hello"),
+            ));
+            session
+                .append_operator_instruction_activation_for_test(
+                    "app.example",
+                    "tone",
+                    1,
+                    "Answer formally.",
+                )
+                .expect("an entry after the conversation row");
+            session
+        };
+        let mut beside_the_prompt = resumable("gpt-5.5");
+        beside_the_prompt.push(meerkat_core::Message::System(
+            meerkat_core::SystemMessage::new("You are a careful assistant."),
+        ));
+        beside_the_prompt
+            .append_operator_instruction_activation_for_test(
+                "app.example",
+                "tone",
+                1,
+                "Answer formally.",
+            )
+            .expect("an entry beside the prompt");
+
+        for (target, build, config) in [
+            (
+                "a leading-prefix-only model",
+                resume(
+                    "custom-prefix-model",
+                    after_conversation("custom-prefix-model"),
+                ),
+                &api_config,
+            ),
+            (
+                "the ChatGPT backend",
+                resume("gpt-5.5", beside_the_prompt),
+                &chatgpt_config,
+            ),
+        ] {
+            let Err(error) = factory.build_agent(build, config).await else {
+                panic!("a resumed build on {target} must be refused");
+            };
+            assert!(
+                matches!(
+                    &error,
+                    BuildAgentError::Config(message)
+                        if message.contains("cannot represent the operator-instruction entries")
+                ),
+                "unexpected build error on {target}: {error}"
+            );
+        }
+
+        factory
+            .build_agent(
+                resume("gpt-5.5", after_conversation("gpt-5.5")),
+                &api_config,
+            )
+            .await
+            .expect("a model that lowers entries anywhere resumes the session");
     }
 
     /// An inherited tool-visibility ceiling keeps the identity witnesses that
@@ -14813,7 +15690,7 @@ mod tests {
             let opener = {
                 let gate = gate.clone();
                 tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(1_000)).await;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                     std::fs::write(&gate, b"open").expect("open the server gate");
                 })
             };
@@ -15451,6 +16328,8 @@ mod tests {
     const FALLBACK_REALM_UNBOUND_SOURCE: &str = "fallback_unbound_source";
     const FALLBACK_REALM_CHATGPT_BOUND: &str = "fallback_chatgpt_bound";
     const FALLBACK_REALM_CHATGPT_UNBOUND: &str = "fallback_chatgpt_unbound";
+    const FALLBACK_REALM_CHATGPT_BOUND_LOWERING: &str = "fallback_chatgpt_bound_lowering";
+    const FALLBACK_REALM_CHATGPT_UNBOUND_LOWERING: &str = "fallback_chatgpt_unbound_lowering";
     const FALLBACK_REALM_RELOAD: &str = "fallback_reload";
     const FALLBACK_REALM_HEAD_CANONICAL: &str = "fallback_head_canonical";
     const FALLBACK_REALM_SETTLED_ACTOR: &str = "fallback_settled_actor";
@@ -16108,14 +16987,18 @@ mod tests {
     /// Run one sticky fallback from an Anthropic source onto `gpt-5.5`
     /// through realm `realm_name` (the caller's own), whose OpenAI binding is the private
     /// ChatGPT backend, and return the session's resolved capability surface
-    /// afterwards. `bound` names that binding on both the source and the
+    /// and the agent's operator-instruction lowering afterwards. `bound`
+    /// names that binding on both the source and the
     /// fallback target; otherwise neither names one, and the target is served
     /// by the binding its client resolution selects (the ChatGPT one).
     #[cfg(not(target_arch = "wasm32"))]
     async fn chatgpt_backend_sticky_fallback_capabilities(
         realm_name: &str,
         bound: bool,
-    ) -> meerkat_runtime::SessionLlmCapabilitySurface {
+    ) -> (
+        meerkat_runtime::SessionLlmCapabilitySurface,
+        meerkat_core::InstructionLowering,
+    ) {
         use meerkat_runtime::SessionServiceRuntimeExt as _;
 
         let primary_model = "claude-sonnet-4-5";
@@ -16228,11 +17111,12 @@ mod tests {
             Some(backup_binding),
             "the fallback is served through the ChatGPT-backend binding"
         );
-        runtime
+        let capabilities = runtime
             .resolved_session_llm_capabilities(&session_id)
             .await
             .expect("resolved capability read")
-            .expect("the fallback records a resolved capability surface")
+            .expect("the fallback records a resolved capability surface");
+        (capabilities, agent.operator_instruction_lowering())
     }
 
     /// A sticky fallback onto a target that names the ChatGPT-backend binding
@@ -16243,7 +17127,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn sticky_fallback_onto_a_chatgpt_binding_records_its_backend_capability() {
-        let capabilities =
+        let (capabilities, _) =
             chatgpt_backend_sticky_fallback_capabilities(FALLBACK_REALM_CHATGPT_BOUND, true).await;
         assert!(
             !capabilities.supports_mid_conversation_system_messages,
@@ -16258,7 +17142,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn unbound_fallback_target_is_judged_by_the_binding_it_resolves() {
-        let capabilities =
+        let (capabilities, _) =
             chatgpt_backend_sticky_fallback_capabilities(FALLBACK_REALM_CHATGPT_UNBOUND, false)
                 .await;
         assert!(
@@ -16266,6 +17150,27 @@ mod tests {
             "the target resolves the ChatGPT-backend binding; the row's capability \
              must not stand for it"
         );
+    }
+
+    /// A sticky fallback onto the ChatGPT backend, through a binding the
+    /// target names or the one its client resolution selects, lowers no
+    /// operator-instruction entry afterwards: that wire carries exactly one
+    /// leading System row, the session's prompt. The activated witness,
+    /// judged through that binding, states it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn sticky_fallback_onto_a_chatgpt_binding_lowers_no_operator_instruction_entry() {
+        for (realm, bound) in [
+            (FALLBACK_REALM_CHATGPT_BOUND_LOWERING, true),
+            (FALLBACK_REALM_CHATGPT_UNBOUND_LOWERING, false),
+        ] {
+            let (_, lowering) = chatgpt_backend_sticky_fallback_capabilities(realm, bound).await;
+            assert_eq!(
+                lowering,
+                meerkat_core::InstructionLowering::Unavailable,
+                "a fallback onto the ChatGPT backend (target names its binding: {bound})"
+            );
+        }
     }
 
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]

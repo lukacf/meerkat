@@ -321,10 +321,13 @@ mod tests {
     ///
     /// During the first lifetime the runtime records system context (comms
     /// roster, host context) beside the persisted ordered transcript. The
-    /// The resume build used to blind-replace `messages[0]` with the
-    /// re-assembled base prompt. The correct behavior is to preserve every
-    /// existing row and append the explicitly supplied System message at the
-    /// resume boundary.
+    /// resume build used to blind-replace `messages[0]` with the
+    /// re-assembled base prompt. Every existing row must survive the resume.
+    /// An explicit resume prompt equal to the newest prompt row appends
+    /// nothing: here that row is the first System row, since the roster row
+    /// carries an append identity and is no prompt row. A changed prompt
+    /// appends one row at the resume boundary
+    /// (`cold_restart_resume_survives_changed_explicit_prompt`).
     #[tokio::test]
     async fn cold_restart_resume_survives_runtime_context_appended_prompt() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -366,9 +369,9 @@ mod tests {
             (session_id, systems)
         };
 
-        // Second host lifetime: resume with the SAME explicit prompt. Exact
-        // duplicates are legal ordered messages; no content-based deduplication
-        // may reinterpret caller intent.
+        // Second host lifetime: resume with the SAME explicit prompt. It is
+        // already the newest prompt row, so the resume appends no System row
+        // and keeps every existing one.
         let (service, adapter) = build_service(temp.path()).await;
         let resume_source = service
             .load_authoritative_session(&session_id)
@@ -376,6 +379,22 @@ mod tests {
             .expect("authoritative load after restart")
             .expect("session should survive restart");
         materialize(&service, &adapter, resume_source).await;
+        let system_rows_after_materialize = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("authoritative load after the resume")
+            .expect("session should survive the resume")
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                meerkat_core::Message::System(system) => Some(system.content.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            system_rows_after_materialize, system_rows_before_restart,
+            "a resume whose explicit prompt is the newest prompt row appends no System row"
+        );
         run_prompt(&adapter, &session_id, "second turn after restart").await;
 
         let final_session = service
@@ -408,19 +427,8 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(
-            &system_rows_after_resume[..system_rows_before_restart.len()],
-            system_rows_before_restart.as_slice(),
-            "resume must preserve all preexisting System rows in exact order"
-        );
-        assert_eq!(
-            system_rows_after_resume.len(),
-            system_rows_before_restart.len() + 1,
-            "the explicitly supplied resume prompt must append exactly one System row"
-        );
-        assert_eq!(
-            system_rows_after_resume.last(),
-            system_rows_before_restart.first(),
-            "the repeated explicit prompt must remain an exact duplicate ordered System row"
+            system_rows_after_resume, system_rows_before_restart,
+            "the resumed turn keeps every preexisting System row in exact order and adds none"
         );
         assert!(
             projected.iter().any(|message| {

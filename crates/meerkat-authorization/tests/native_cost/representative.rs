@@ -1108,7 +1108,7 @@ async fn native_representative_correctness() {
         ] {
             for mode in [HostMode::TrustedHost, HostMode::LocalGoverned] {
                 tokio::time::timeout(
-                    Duration::from_secs(60),
+                    Duration::from_mins(1),
                     representative_sample(mode, depth, workload, path.clone(), 0, true),
                 )
                 .await
@@ -1366,7 +1366,7 @@ async fn native_representative_correctness() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "explicit quiet-host performance lease; full representative setup is expensive"]
 async fn native_representative_matrix() {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(1200);
+    let deadline = tokio::time::Instant::now() + Duration::from_mins(20);
     assert_eq!(
         std::env::var("NATIVE_COST_RUN").as_deref(),
         Ok("approved-quiet-window")
@@ -1406,7 +1406,7 @@ async fn native_representative_matrix() {
                     };
                     for (position, mode) in order.into_iter().enumerate() {
                         let value = tokio::time::timeout(
-                            Duration::from_secs(60),
+                            Duration::from_mins(1),
                             representative_sample(
                                 mode,
                                 depth,
@@ -1505,7 +1505,7 @@ async fn tool_dispatch_tail_depth(
         )
         .await;
         let completion = fixture.start().await;
-        tokio::time::timeout(Duration::from_secs(60), fixture.provider.barrier.notified())
+        tokio::time::timeout(Duration::from_mins(1), fixture.provider.barrier.notified())
             .await
             .expect("actual prefix reaches its held model boundary");
         assert_eq!(fixture.provider.requests.load(Ordering::Relaxed), 1);
@@ -1673,7 +1673,7 @@ async fn tool_dispatch_tail_depth(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "explicit quiet-host performance lease; empirical tool tails, not full acceptance"]
 async fn native_tool_dispatch_tail() {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(1200);
+    let deadline = tokio::time::Instant::now() + Duration::from_mins(20);
     assert_eq!(
         std::env::var("NATIVE_COST_RUN").as_deref(),
         Ok("approved-quiet-window")

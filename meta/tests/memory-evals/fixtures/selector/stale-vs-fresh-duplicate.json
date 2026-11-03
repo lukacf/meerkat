@@ -1,0 +1,35 @@
+{
+  "name": "stale-vs-fresh-duplicate",
+  "manifest": [
+    {
+      "id": "mem-030",
+      "kind": "Procedure",
+      "title": "Run Rust tests with plain cargo nextest",
+      "description": "Matters when running the Rust test suite. Written before the repo-cargo wrapper existed; superseded by the repo-cargo procedure.",
+      "age_days": 190,
+      "rank": 11
+    },
+    {
+      "id": "mem-031",
+      "kind": "Procedure",
+      "title": "All Rust commands go through scripts/repo-cargo",
+      "description": "Matters when running any cargo command in this repo: use scripts/repo-cargo (or the Makefile), which isolates CARGO_HOME and CARGO_TARGET_DIR per worktree. Supersedes the plain-cargo procedure.",
+      "age_days": 2,
+      "rank": 11
+    },
+    {
+      "id": "mem-032",
+      "kind": "Fact",
+      "title": "routing_delivery contract_009 is a load flake",
+      "description": "Matters when triaging CI failures in routing_delivery: contract_009 failing under load is pre-existing, not a regression.",
+      "age_days": 20,
+      "rank": 7
+    }
+  ],
+  "turn_text": "Kick off the Rust test suite for the workspace and tell me if anything fails.",
+  "expected": {
+    "must_select": ["mem-031"],
+    "must_not_select": ["mem-030"]
+  },
+  "notes": "Stale-vs-fresh duplicate: two records cover how to run Rust tests; the fresh one (age 2d, inheriting the stale one's rank per §7.1) declares itself the successor. Selecting the stale one would inject an outdated procedure."
+}

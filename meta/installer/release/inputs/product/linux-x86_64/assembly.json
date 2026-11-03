@@ -1,0 +1,165 @@
+{
+  "schema_version": 1,
+  "target": "linux-x86_64",
+  "scope": "installed_gateway_schema4_resource_startup_and_shutdown_preview",
+  "not_qualified": [
+    "model_execution",
+    "account_sign_in",
+    "acquisition",
+    "component_install",
+    "installed_integration_realm_persistence",
+    "frontend_activation",
+    "other_targets"
+  ],
+  "archive": "meerkat-connect-gateway-0.9.5-linux-x86_64.tar.gz",
+  "archive_sha256": "86f6bc883b38de5c06520a928ff2c64aa8170e2fe1fd9ab594cc532a9ad2d816",
+  "archive_bytes": 482238079,
+  "binary_sha256": "1bf67a1966621cad906a899793179b3e0f9c2d894574a1ae8860b34540af7453",
+  "binary_bytes": 898696272,
+  "resources_sha256": "aba32d4a5bf2a2238cae8aa5993ea83ce5fb8c2c79167cd05d30675d6c0fd8ae",
+  "resource_component_sha256": "197b9f6c65fb5e7af4542d80e414123148633deb7e8dddadd04f410b4594d27c",
+  "build_record_sha256": "3c9bd3c09bb2d123fb947d999869dd15046e4a9b419ebc9493f4f358b357887a",
+  "qualification": {
+    "candidate": {
+      "target": "linux-x86_64",
+      "source_manifest_sha256": "11176a73ce4e376cbce906d4133cbbcd8685ec2e06ab789944d83f85587d44b7",
+      "resources_sha256": "aba32d4a5bf2a2238cae8aa5993ea83ce5fb8c2c79167cd05d30675d6c0fd8ae",
+      "binary_kind": "toolkit_gateway",
+      "binary": {
+        "sha256": "1bf67a1966621cad906a899793179b3e0f9c2d894574a1ae8860b34540af7453",
+        "size": 898696272
+      },
+      "resource_build_record_sha256": "d0cbde86f22e68b40b0303de4605b3744399bfb52350131982604fdf330beaaf"
+    },
+    "installed_gateway_verification_sha256": "c10449e6171e8ffc1bbc7a0906e1712fcc99eb1b7a1c2198efe92825e8ba0f91",
+    "cli_tty_qualified": false
+  },
+  "assembler_sha256": "d709405ff8dac41486aee737d22ab7a718cccd4ea4de018dfafa6850ebebc4bb",
+  "licenses": {
+    "LICENSE-MIT": "b45d1f632f83aeb359da8e2b8716ad72591ec7267a489fdda39989c618d65a0f",
+    "LICENSE-APACHE": "3a0ffd02ca79c2a687921b0f5d8094f2f6a7058a4c01775d1351ea6514fcd180"
+  },
+  "readme_sha256": "e52c5a8ead13aa722ec1377f997ecc59fce9ece98c18fc6f68da970d0ce367cc",
+  "resource_closure_unchanged": true,
+  "package_envelope": {
+    "members": 18603,
+    "member_bytes": 1654925937,
+    "largest_member": {
+      "name": "meerkat-connect-linux-x86_64/bin/toolkit_gateway",
+      "bytes": 898696272
+    },
+    "member_limit": 1073741824,
+    "embedded_archives": [
+      {
+        "name": "meerkat-connect-linux-x86_64/libexec/meerkat-connect/archives/toolkit-library-20261031-application-4d519f-linux-inputs-linux-x86_64.tar.gz",
+        "bytes": 132374145,
+        "members": 4928,
+        "largest_member_bytes": 30378738
+      },
+      {
+        "name": "meerkat-connect-linux-x86_64/libexec/meerkat-connect/runtime/npm-acquisition.tgz",
+        "bytes": 3054025,
+        "members": 1942,
+        "largest_member_bytes": 151278
+      }
+    ],
+    "raw_tar_bytes": 1683425280,
+    "raw_tar_limit": 4294967296,
+    "archive_bytes": 482238079,
+    "archive_limit": 2147483647,
+    "archive_king_member_limit": 1073741824,
+    "archive_within_king_member_limit": true
+  },
+  "tooling": {
+    "source_root": "/mnt/connect-release/a1/root",
+    "source_tree": "fcf43572f7d66ca9459126af6538a70001c59bf9",
+    "assembler_sha256": "d709405ff8dac41486aee737d22ab7a718cccd4ea4de018dfafa6850ebebc4bb",
+    "prepare_sha256": "5a2aec2c5477a94c8d45adf62bbff20628b6c26e9c0f8f035bc29777eb59aff3",
+    "resource_packager_sha256": "4bfdb4ba728183e32fa9e1c10cc1626735bd1bf0a32fefade5b880b95ca92bbe",
+    "gateway_verifier": {
+      "path": "/mnt/connect-release/a1/tools/verify_native_gateway_subprocess.py",
+      "sha256": "c311ec28de513e0cb9a57c3735d0b8ea653b2c79dc4b38a30256a432ef337a48"
+    }
+  },
+  "binary_kind": "toolkit_gateway",
+  "resource_build_record_sha256": "d0cbde86f22e68b40b0303de4605b3744399bfb52350131982604fdf330beaaf",
+  "release_version": "0.9.5",
+  "derived_binary": {
+    "record_sha256": "bce8c2f2ce30d7c3361419484c55cd0a7c5a281b42637af012c614796933a8d3",
+    "kind": "meerkat_connect_derived_gateway",
+    "derivation": "strip_debug",
+    "original": {
+      "path": "/mnt/connect-release/a1/parent/20261101T113908Z/binary/toolkit_gateway",
+      "sha256": "102598814924ba043ade5d772e6dc44b684c54cd2bd7707a74ca4f553ed645c8",
+      "size": 2544390736
+    },
+    "derived": {
+      "sha256": "1bf67a1966621cad906a899793179b3e0f9c2d894574a1ae8860b34540af7453",
+      "size": 898696272
+    },
+    "records": {
+      "derived_binary": "derived-binary-record.json",
+      "transformation_start": "transformation-start.json",
+      "transformation_result": "transformation-result.json"
+    },
+    "transformation": {
+      "start_sha256": "88a4e37570af5576f6a1222327206cdfc00b312332bb56f6694d6661d1df28d7",
+      "result_sha256": "02c85ae5b30ac19ea731c9f7311760752101bb6f6df12566e09cd488db90bf5a",
+      "argv": [
+        "/usr/bin/x86_64-linux-gnu-objcopy",
+        "--strip-debug",
+        "/mnt/connect-release/a1/parent/20261101T113908Z/binary/toolkit_gateway",
+        "/mnt/connect-release/a1/out/derived-gateway/toolkit_gateway"
+      ],
+      "tool": {
+        "path": "/usr/bin/x86_64-linux-gnu-objcopy",
+        "sha256": "9276e918e3c26d3aa7ef9dd2232cd8ac692f03d3c1f270bfa5144a2b5492b713",
+        "version": "GNU objcopy (GNU Binutils for Ubuntu) 2.42"
+      },
+      "exit_code": 0
+    },
+    "validation": {
+      "header": {
+        "type": 3,
+        "machine": 62,
+        "version": 1,
+        "entry": 137648000,
+        "flags": 0
+      },
+      "build_id": "98e45ec29e10b72a0a373c3309cea18122c58abc",
+      "needed": [
+        "libgcc_s.so.1",
+        "libm.so.6",
+        "libc.so.6",
+        "ld-linux-x86-64.so.2"
+      ],
+      "loaded_segments": 4,
+      "program_headers": 12,
+      "allocated_sections": 31,
+      "allocated_debug_sections_kept": [
+        ".debug_gdb_scripts"
+      ],
+      "dynamic_and_relocation_sections": [
+        ".dynsym",
+        ".rela.dyn",
+        ".rela.plt",
+        ".dynamic"
+      ],
+      "removed_sections": [
+        ".debug_abbrev",
+        ".debug_aranges",
+        ".debug_info",
+        ".debug_line",
+        ".debug_macro",
+        ".debug_ranges",
+        ".debug_str"
+      ],
+      "masked_header_fields": [
+        "e_shoff",
+        "e_shnum",
+        "e_shstrndx"
+      ],
+      "load_and_allocated_content_identical": true
+    }
+  }
+}

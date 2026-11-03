@@ -1,0 +1,101 @@
+/* The Schedules agenda (console v2 spec B10): rows by agent on one time
+   axis. The marks reuse the kit's DotStrip mark classes (cc-dots__mark with
+   data-shape, is-live, is-active, is-selected); this sheet adds the grid of
+   rows, the paused and band forms, and the narrow layout. Colours come only
+   from the A2.3 visualisation tokens and the kit's inks; every chart svg
+   sets its own fill and stroke (the console resets svg to a stroked icon). */
+
+.cc-agenda {
+  container-type: inline-size;
+  container-name: cc-agenda;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  font-family: var(--_cc-font-display);
+}
+.cc-agenda__row {
+  display: grid;
+  grid-template-columns: var(--_cc-agenda-head-w, 168px) minmax(0, 1fr);
+  align-items: center;
+  column-gap: var(--_cc-sp-5, 12px);
+  min-width: 0;
+  border-bottom: 1px solid var(--_cc-viz-grid);
+}
+.cc-agenda__row--axis { border-bottom-color: var(--_cc-border-soft); }
+.cc-agenda__head {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--_cc-panel-fs-body);
+  color: var(--_cc-foreground);
+  white-space: nowrap;
+}
+.cc-agenda__head > * { min-width: 0; max-width: 100%; }
+.cc-agenda__lane {
+  position: relative;
+  min-width: 0;
+  line-height: 0;
+}
+.cc-agenda__svg {
+  display: block;
+  overflow: visible;
+  fill: none;
+  stroke: none;
+}
+.cc-agenda.is-selectable .cc-agenda__svg { cursor: pointer; }
+.cc-agenda__grid { stroke: var(--_cc-viz-grid); stroke-width: 1; }
+.cc-agenda__grid.is-major { stroke: var(--_cc-viz-edge); stroke-opacity: 0.5; }
+.cc-agenda__now-label { fill: var(--_cc-accent-ink, var(--_cc-member-accent)); }
+
+/* A paused schedule's would-be runs: hollow and muted. */
+.cc-agenda__mark[data-paused="true"] {
+  --_cc-dot-ink: var(--_cc-viz-mid);
+  fill: var(--_cc-viz-plate);
+  stroke: var(--_cc-viz-mid);
+  stroke-width: 1.25;
+}
+.cc-agenda__mark[data-paused="true"][data-shape="tick"] {
+  fill: var(--_cc-viz-faint);
+  stroke: none;
+}
+.cc-agenda__mark[data-paused="true"].is-active,
+.cc-agenda__mark[data-paused="true"]:focus-visible {
+  stroke: var(--_cc-focus-ring);
+  stroke-width: 2;
+}
+
+/* A repeat too dense to draw run by run: a dashed band with its words. */
+.cc-agenda__band { outline: none; }
+.cc-agenda__band-line {
+  stroke: var(--_cc-viz-mid);
+  stroke-width: 2;
+  stroke-dasharray: 2 3;
+}
+.cc-agenda__band.is-paused .cc-agenda__band-line { stroke: var(--_cc-viz-faint); }
+.cc-agenda__band-hit { fill: transparent; stroke: none; }
+.cc-agenda__band.is-active .cc-agenda__band-line,
+.cc-agenda__band:focus-visible .cc-agenda__band-line { stroke: var(--_cc-viz-edge-strong); }
+.cc-agenda__band:focus-visible .cc-agenda__band-hit,
+.cc-agenda__band.is-selected .cc-agenda__band-hit {
+  stroke: var(--_cc-focus-ring);
+  stroke-width: 1.5;
+}
+.cc-agenda__empty,
+.cc-agenda__band-words {
+  font-family: var(--_cc-font-mono);
+  font-size: var(--_cc-fs-tick, 9.5px);
+  fill: var(--_cc-foreground-meta);
+  stroke: none;
+}
+
+.cc-agenda__empty { font-family: var(--_cc-font-display); font-size: 11px; }
+
+@container cc-agenda (max-width: 560px) {
+  .cc-agenda__row { --_cc-agenda-head-w: 112px; column-gap: var(--_cc-sp-4, 8px); }
+}
+@container cc-agenda (max-width: 400px) {
+  .cc-agenda__row { --_cc-agenda-head-w: 84px; }
+  .cc-agenda__head { font-size: var(--_cc-panel-fs-meta); }
+}

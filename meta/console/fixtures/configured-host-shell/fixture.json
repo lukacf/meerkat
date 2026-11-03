@@ -1,0 +1,43 @@
+{
+  "name": "configured-host-shell",
+  "models": "configured stock console in a host shell",
+  "consoleToml": "config/console.toml",
+  "hostToolbarActions": [
+    {
+      "id": "reset-project-cache",
+      "label": "Reset Cache",
+      "provenance": "host-adapter",
+      "requiresConfirmation": true,
+      "postRoute": "/host/actions/reset-project-cache"
+    }
+  ],
+  "sidebarButtons": {
+    "mutationSemantics": false,
+    "allowedFields": ["id", "label", "href", "target", "control", "icon_name"]
+  },
+  "persistedPreferences": {
+    "namespace": "configured-host-shell",
+    "configuredSectionOrder": ["Projects", "Workers"],
+    "storedSectionOrder": ["Workers"],
+    "expectedSectionOrder": ["Workers", "Projects"],
+    "configuredPins": ["identity:project-alpha"],
+    "storedPins": ["identity:thread-alpha-plan"],
+    "expectedPins": ["identity:thread-alpha-plan"]
+  },
+  "directRouteProtectionWhenMetaAuthDisabled": {
+    "/console": "host-proxy",
+    "/console/": "host-proxy",
+    "/console/assets/console-app.js": "host-proxy",
+    "/console/assets/console-app.css": "host-proxy",
+    "/console/experience": "host-proxy",
+    "/console/modules": "host-proxy",
+    "/console/identities": "host-proxy",
+    "/console/rpc": "host-proxy",
+    "/console/rpc/multipart": "host-proxy",
+    "/console/timeline": "host-proxy",
+    "/console/timeline/stream": "host-proxy",
+    "/console/identity/{identity}/stream": "host-proxy",
+    "/console/send": "host-proxy",
+    "/blobs/{blob_id}": "host-proxy"
+  }
+}

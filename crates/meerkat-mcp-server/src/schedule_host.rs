@@ -350,6 +350,7 @@ impl McpScheduleContext {
                     config_generation: current_generation,
                     auth_binding: None,
                     mob_member_binding: None,
+                    mob_incarnation: None,
                     keep_alive: create.keep_alive,
                     checkpointer: None,
                     silent_comms_intents: Vec::new(),
@@ -386,6 +387,7 @@ impl McpScheduleContext {
                     ),
                     initial_turn_metadata: None,
                     initial_work_authorization: None,
+                    grant_gated_tools: None,
                 };
                 let request = CreateSessionRequest {
                     injected_context: Vec::new(),

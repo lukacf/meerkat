@@ -1577,7 +1577,7 @@ async fn interactive_login_discovers_registers_exchanges_and_stores_token() {
     assert_eq!(stored.primary_secret.as_deref(), Some("access-token"));
     assert_eq!(stored.account_id.as_deref(), Some("fixture-account-42"));
     assert_eq!(stored.scopes, vec!["mcp.read".to_owned()]);
-    assert!(stored.metadata["client"]["client_id"] == "client-123");
+    assert_eq!(stored.metadata["client"]["client_id"], "client-123");
     assert!(
         stored.metadata["client"].get("client_secret").is_none(),
         "MCP DCR requests a public PKCE client and must not persist a DCR secret"
@@ -2222,7 +2222,7 @@ async fn interactive_login_timeout_fails_closed() {
     let browser: Arc<dyn TestBrowser> = Arc::new(NoCallbackBrowser {
         state: Arc::clone(&state),
     });
-    assert_eq!(MCP_INTERACTIVE_LOGIN_TIMEOUT, Duration::from_secs(300));
+    assert_eq!(MCP_INTERACTIVE_LOGIN_TIMEOUT, Duration::from_mins(5));
     let authority =
         FixtureAuthority::with_test_http(store.clone(), browser, Client::new(), test_auth_lease());
     let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))

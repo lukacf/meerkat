@@ -1,0 +1,94 @@
+{
+  "name": "@rkat/toolkit",
+  "version": "0.9.4",
+  "description": "Optional Meerkat Toolkit host-injected service operations",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./connectors/home-assistant": {
+      "types": "./dist/connectors/home-assistant.d.ts",
+      "import": "./dist/connectors/home-assistant.js"
+    },
+    "./connectors/gmail": {
+      "types": "./dist/connectors/gmail.d.ts",
+      "import": "./dist/connectors/gmail.js"
+    },
+    "./ui": {
+      "types": "./dist/ui/index.d.ts",
+      "import": "./dist/ui/index.js"
+    },
+    "./ui/style.css": "./src/ui/style.css",
+    "./setup-session": {
+      "types": "./dist/setup-session.d.ts",
+      "import": "./dist/setup-session.js"
+    },
+    "./connectors/slack": {
+      "types": "./dist/connectors/slack.d.ts",
+      "import": "./dist/connectors/slack.js"
+    },
+    "./connectors/google-calendar": {
+      "types": "./dist/connectors/google-calendar.d.ts",
+      "import": "./dist/connectors/google-calendar.js"
+    },
+    "./private-host": {
+      "types": "./dist/private-host.d.ts",
+      "import": "./dist/private-host.js"
+    },
+    "./native-host": {
+      "types": "./dist/native-host.d.ts",
+      "import": "./dist/native-host.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "GMAIL.md",
+    "UI.md",
+    "src/ui/style.css",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "SLACK.md",
+    "GOOGLE-CALENDAR.md",
+    "NATIVE-HOST.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "validate": "npm run typecheck && npm test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "entities": "8.1.0",
+    "jsonc-parser": "3.3.1",
+    "marked": "18.1.0"
+  },
+  "devDependencies": {
+    "@rkat/meta-sdk": "0.9.4",
+    "@rkat/sdk": "0.9.4",
+    "@types/node": "22.19.15",
+    "jsdom": "26.1.0",
+    "typescript": "5.8.3"
+  },
+  "peerDependencies": {
+    "@rkat/meta-sdk": "0.9.4",
+    "@rkat/sdk": "0.9.4"
+  },
+  "peerDependenciesMeta": {
+    "@rkat/sdk": {
+      "optional": true
+    },
+    "@rkat/meta-sdk": {
+      "optional": true
+    }
+  },
+  "license": "MIT OR Apache-2.0"
+}

@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # TLC audit of MobMachine member residency (Dormant, Waking, Live).
 #
-# usage: member_residency_audit.sh [--mutants] [extra tlc args...]
+# usage: member_residency_audit.sh [--mutants] [--part spaces|witnesses]
+#                                   [extra tlc args...]
+#
+# --part spaces runs only the whole-space runs, --part witnesses only the
+# witness runs (and, with --mutants, the mutants); with no --part it runs
+# both, in that order. The canonical lane runs the two parts in two shards.
 #
 # Derives the TLC configs from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then adds the audit's model
@@ -11,7 +16,7 @@
 # out the two counters no guard, other variable's update or invariant of the
 # generated model reads (model_step_count and topology_epoch). The runner
 # first checks that the model still reads neither counter anywhere else, and
-# fails otherwise. It checks eight small runs over their whole space with TLC
+# fails otherwise. It checks eleven small runs over their whole space with TLC
 # coverage (see member_residency_audit.tla):
 # - seed (AuditSeedSpec): one identity, its seat session unborn or born,
 #   through every build seed, every boot verdict, the seal and the host
@@ -20,23 +25,48 @@
 #   plan and seal, every WakeMember arm for six input shapes, every
 #   attempt-fenced resolution (the fresh create of an unborn seat's session
 #   among them), the late feedback in Running and Stopped, the seat session
-#   replay, the member's own profile check, the runtime-ready observation,
-#   three release shapes, the drift and terminal classifications, the peer
-#   notice classification, the release verdict, Stop and Resume;
+#   replay, the member's own profile check, the replay of an exempt row
+#   before the seal, the runtime-ready observation, three release shapes, the
+#   drift and terminal classifications, the peer notice classification, the
+#   release verdict, Stop and Resume;
 # - retire (AuditRetireSpec): one identity woken, released and retired, the
 #   routed and archive-only retirement starts, the routed retire retry, the
 #   archives, the replayed starts, a rotation finished in Running and in
-#   Stopped, a host-pending seed, the identity seated again on its first
-#   seat's session, and the mob's destroy;
-# - terminal (AuditTerminalSpec): the Completed and Destroyed phases;
+#   Stopped (owing a kickoff or not), a host-pending seed, the identity seated
+#   again on its first seat's session, its exemption from the definition's
+#   wiring rules (from its reseat's or rotation's own input, or the replay of
+#   its row) in Running and Stopped, its custody restore recorded
+#   unrestored and restored again in Running and Stopped, and the mob's
+#   destroy;
+# - terminal (AuditTerminalSpec): the Completed and Destroyed phases, with
+#   member 1's custody record and its restore in Running;
 # - resume (AuditResumeSpec): one identity through an explicit resume, its
 #   readiness before Resume (while Stopped) included;
 # - edge (AuditEdgeSpec): two identities and one wiring edge and its
 #   trust realization outcomes (an owed edge repair);
 # - seat (AuditSeatSpec): two identities from the spawn ladder's Opened phase
 #   through the dormant seat (one over an existing session, one over an
-#   unborn one), the embodied spawn commit, the release and the rotation;
-# - wake2 (AuditWake2Spec): two identities woken beside each other.
+#   unborn one, the first exempt from the definition's wiring rules or not),
+#   the embodied spawn commit, the release and the rotation;
+# - wake2 (AuditWake2Spec): two identities woken beside each other;
+# - rotate-same (AuditRotateSameSpec): one identity, an identity entry or
+#   not, host-pending or not, rotated onto its own session (a respawn) from
+#   any residency, its terminal owing a kickoff or not in Running and in
+#   Stopped, the host's seat step that ends the mark, the
+#   archive-only retirement starts and re-drives beside it, the plain
+#   archives, the next incarnation's wake, the scoped release verdict, its
+#   custody restore recorded unrestored and restored again in Running and
+#   Stopped, and the mob's destroy;
+# - recover-rotation (AuditRecoverRotationSpec): one identity whose
+#   retirement start and rotation (FreshSession or SameSession) are
+#   replayed, re-driven and finished by the rotation's own terminal, owing a
+#   kickoff or not, in Running and in Stopped, and the mob's destroy;
+# - replay-same (AuditReplaySameSpec): two identities, member 1 wired to
+#   member 2 and to an external peer, whose committed same-session rotation's
+#   rows are replayed (its MemberRetired row, then its successor's spawn row
+#   on the same session, and the edge rows its terminal batch records
+#   again), the end-of-replay topology convergence, the seal and the
+#   successor's wake.
 # Every run checks every generated invariant (the residency invariants among
 # them), AuditAttemptEndsClosed and AuditWakingClosable (an open attempt is
 # never replaced and ends only Live, Dormant or without a phase; every Waking
@@ -49,20 +79,50 @@
 # close Live when it owes no endpoint cause, that the release verdict is
 # Release exactly when the Released arm would honour the member's own
 # registration, that a refused binding request applies only to the wake it
-# belongs to, that only an unborn seat's session is created afresh, and that a
-# release of another epoch never demotes. The seed run checks that the boot
+# belongs to, that only an unborn seat's session is created afresh, that a
+# release of another epoch never demotes, and that after the seal a member
+# becomes exempt from the definition's wiring rules only in a step that seats
+# a new incarnation of it. The seed run checks that the boot
 # plan never leaves a member that blocks the seal. The retire run checks that
 # no runtime retire is routed for a member with no registration, that a
 # settled retirement can always archive and under an admitted destroy nothing
-# holds it, that no rotation begins or commits under an admitted destroy, and
-# that a resume seat is unborn exactly when no build created its session. The
+# holds it, that no rotation begins or commits under an admitted destroy, that
+# a resume seat is unborn exactly when no build created its session, and that
+# a rotation's terminal records its next incarnation exempt exactly when its
+# own input says so. The seat run checks that a dormant seat leaves its
+# identity Dormant (AuditSeatLeavesDormant) and that a dormant seat or a spawn
+# commit records its member exempt exactly when its own input says so
+# (AuditSeatDecidesExemptionFromInput). The
 # resume run checks that the explicit resume can always join a wake in flight
 # while its readiness is not in flight and its topology has not started,
 # whatever readiness it already settled (AuditResumeJoinable), that it
 # holds no member work while its readiness is in flight or once its topology
 # started (AuditResumeStagesHoldNoWork), and that it reserves a member it
 # rebuilds (Dormant or Live) only before a readiness of its own started
-# (AuditResumeReservesBeforeReadiness).
+# (AuditResumeReservesBeforeReadiness). The rotate-same run checks that the
+# same-session terminal seats the next incarnation Dormant on the member's
+# own session, keeping its binding and endpoint
+# (AuditSameSessionTerminalKeepsSession), that no step but the destroy's
+# leaves a member with a pending same-session rotation unseated or unbound
+# (AuditSameSessionNeverUnseats), that no same-session rotation begins or
+# commits under an admitted destroy (AuditDestroyFencesSameSessionRotation),
+# that it keeps an identity entry (AuditSameSessionKeepsEntry), that its
+# terminal keeps a host's preparation mark, which only the host's seat step
+# ends (AuditSameSessionTerminalKeepsHostMark), and that the
+# release verdict answers every scope by exactly one arm, Stale
+# exactly when the scope is not the current incarnation on its current
+# session (AuditScopedReleaseFenced). The recover-rotation run checks that a
+# replayed rotation, once its grant is recorded and its ingress detach
+# closed, can always be finished by its own terminal while the plain archive
+# waits (AuditRecoveredRotationFinishable). Its mutants and the rotate-same
+# run's also seed a same-session start or replay that records no started
+# role, and a terminal that keeps it: the generated invariants that hold the
+# started role exactly while a same-session rotation is pending refuse them.
+# The replay-same run checks that a
+# step that keeps member 1's incarnation and member 2 seated keeps their edge
+# and member 1's external edge (AuditReplayKeepsKeptTopology), and that before
+# the seal the replay of those edges' rows is accepted by exactly one arm
+# each, recorded already or not (AuditKeptRowsReplayable).
 # TLC evaluates the module's wake refusal ASSUME (a present, bound member with
 # a phase is never refused as not a member) and its release ASSUMEs (the
 # verdict helper, and no member wired to a placed member is releasable) at the
@@ -80,20 +140,39 @@
 set -euo pipefail
 
 run_mutants=false
-if [[ "${1:-}" == "--mutants" ]]; then
-  run_mutants=true
-  shift
-fi
+part="all"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mutants)
+      run_mutants=true
+      shift
+      ;;
+    --part)
+      part="${2:-}"
+      if [[ "${part}" != "spaces" && "${part}" != "witnesses" ]]; then
+        echo "error: --part needs spaces or witnesses, got '${part}'" >&2
+        exit 2
+      fi
+      shift 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 # Each run's distinct-state floor is 90% of the whole space its first green
 # run found, so a guard that silently disables arms fails the lane.
 seed_states=3078
-wake_states=1608
-retire_states=5659
-terminal_states=238
+wake_states=3198
+retire_states=22492
+terminal_states=422
 resume_states=4004
 edge_states=1148
-seat_states=23452
+seat_states=46248
 wake2_states=1425
+rotate_same_states=11898
+recover_rotation_states=973
+replay_same_states=1400
 
 # Every arm each run must fire. TLC names an arm after the generated
 # operator, since every audit wrapper here is a plain application.
@@ -167,6 +246,7 @@ wake_covered_actions=(
   ResolveMemberRevivalSessionCreatedStaleStopped
   RecoverMemberSeatSessionUnbornRunning
   RecoverMemberSeatSessionBornRunning
+  ExemptMemberFromDefinitionWiringSeatedRunning
   AuthorizeSpawnProfileSeatedRunning
   ObserveRuntimeReady
   ReleaseMemberMaterializationReleasedRunning
@@ -214,6 +294,12 @@ retire_covered_actions=(
   CommitMemberRotationRetiredRunning
   CommitMemberRotationLiveStopped
   CommitMemberRotationRetiredStopped
+  CommitMemberRotationLiveKickoffRunning
+  CommitMemberRotationRetiredKickoffRunning
+  CommitMemberRotationLiveKickoffStopped
+  CommitMemberRotationRetiredKickoffStopped
+  ExemptMemberFromDefinitionWiringSeatedRunning
+  ExemptMemberFromDefinitionWiringSeatedStopped
   AdmitDestroyCleanup
   AdmitDestroyMemberRetireLiveRunning
   AdmitDestroyMemberRetireArchiveOnlyRunning
@@ -222,6 +308,10 @@ retire_covered_actions=(
   ObserveDestroyMemberRetirementArchivedLiveRunning
   ObserveDestroyMemberRetirementArchivedRetiredRunning
   DestroyMob
+  RecordMemberCustodyUnrestoredSeatedRunning
+  RecordMemberCustodyUnrestoredSeatedStopped
+  ResolveMemberCustodyRestoredRecordedRunning
+  ResolveMemberCustodyRestoredRecordedStopped
 )
 
 terminal_covered_actions=(
@@ -251,11 +341,15 @@ terminal_covered_actions=(
   ClassifyPeerNoticeDestroyed
   ClassifyMemberReleaseCompleted
   ClassifyMemberReleaseDestroyed
+  ClassifyMemberReleaseStaleCompleted
+  ClassifyMemberReleaseStaleDestroyed
   ResolveRuntimeBindingRefusalStaleCompleted
   ResolveRuntimeBindingRefusalStaleDestroyed
   CompleteRunning
   MarkCompleted
   ShutdownRunning
+  RecordMemberCustodyUnrestoredSeatedRunning
+  ResolveMemberCustodyRestoredRecordedRunning
 )
 
 resume_covered_actions=(
@@ -298,6 +392,67 @@ wake2_covered_actions=(
   WakeMemberAuthorizedRunning
   WakeMemberRefusedRunning
   RetireRunningPreservingBindingArchiveOnly
+)
+
+rotate_same_covered_actions=(
+  SeedMemberResidencyRunning
+  ResolveMemberHostPreparationRunning
+  BeginMemberRotationSameSessionRunning
+  AuthorizeSpawnProfileRunning
+  CommitMemberRotationSameSessionRunning
+  CommitMemberRotationSameSessionStopped
+  CommitMemberRotationSameSessionKickoffRunning
+  CommitMemberRotationSameSessionKickoffStopped
+  RetireRunningReleasingArchiveOnly
+  RetireStoppedReleasingArchiveOnly
+  RetireRunningPreservingBindingArchiveOnly
+  RetireStoppedPreservingBindingArchiveOnly
+  ObserveMemberRetirementArchivedLive
+  ClassifyMemberReleaseRunning
+  ClassifyMemberReleaseStopped
+  ClassifyMemberReleaseStaleRunning
+  ClassifyMemberReleaseStaleStopped
+  ResolveMemberRevivalSucceededRunningLocal
+  AdmitDestroyMemberRetireAlreadyRetiringSessionRunning
+  ObserveDestroyMemberRetirementArchivedLiveRunning
+  RecordMemberCustodyUnrestoredSeatedRunning
+  RecordMemberCustodyUnrestoredSeatedStopped
+  ResolveMemberCustodyRestoredRecordedRunning
+  ResolveMemberCustodyRestoredRecordedStopped
+)
+
+recover_rotation_covered_actions=(
+  RecoverRosterMemberRetirementStartedReleasing
+  RecoverRosterMemberRetirementStartedPreservingBinding
+  RecoverMemberRotationIntentFreshSessionRunning
+  RecoverMemberRotationIntentSameSessionRunning
+  RecoverMemberRotationIntentDestroyingRunning
+  RetireRunningPreservingBindingArchiveOnly
+  SessionIngressDetachedForMobDestroyRunning
+  CommitMemberRotationLiveRunning
+  CommitMemberRotationLiveStopped
+  CommitMemberRotationLiveKickoffRunning
+  CommitMemberRotationLiveKickoffStopped
+  CommitMemberRotationSameSessionRunning
+  CommitMemberRotationSameSessionStopped
+  CommitMemberRotationSameSessionKickoffRunning
+  CommitMemberRotationSameSessionKickoffStopped
+)
+
+replay_same_covered_actions=(
+  RecoverRosterMemberRunning
+  RecoverSpawnedMemberPeerEndpointFreshRunning
+  RecoverMemberSessionBindingFreshRunning
+  RecoverRosterWiringRunning
+  RecoverRosterWiringAlreadyRecovered
+  RecoverExternalPeerWiringRunning
+  RecoverExternalPeerWiringAlreadyRecovered
+  RecoverRosterMemberRetiredRunning
+  ConvergeRecoveredRosterTopologyPrune
+  ConvergeRecoveredRosterTopologyRetain
+  SealBootMaterializationPlan
+  WakeMemberAuthorizedRunning
+  ResolveMemberRevivalSucceededRunningLocal
 )
 
 spec_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -364,7 +519,8 @@ step_index="${view_positions% *}"
 epoch_index="${view_positions#* }"
 
 # usage: write_cfg <run> <file> <extra invariant lines> <extra property lines>
-# where <run> is seed, wake, retire, terminal, resume, edge, seat or wake2.
+# where <run> is seed, wake, retire, terminal, resume, edge, seat, wake2,
+# rotate-same, recover-rotation or replay-same.
 write_cfg() {
   local run="$1" cfg="$2" invariants="$3" properties="$4"
   local spec run_properties run_invariants max_attempts section_end
@@ -390,7 +546,8 @@ write_cfg() {
   AuditSucceededLeavesEndpoint
   AuditReleaseEpochFence
   AuditBindingRefusalFenced
-  AuditFreshCreateOnlyUnborn"
+  AuditFreshCreateOnlyUnborn
+  AuditSealedExemptsOnlyASeat"
       run_invariants="
   AuditWakingClosable
   AuditWakeExactlyOne
@@ -404,7 +561,8 @@ write_cfg() {
   AuditAttemptEndsClosed
   AuditRetireRoutesOnlyRegistered
   AuditDestroyFencesRotation
-  AuditReseatUnbornIffNeverBorn"
+  AuditReseatUnbornIffNeverBorn
+  AuditRotationDecidesExemptionAnew"
       run_invariants="
   AuditWakingClosable
   AuditRetirementArchivable"
@@ -445,7 +603,8 @@ write_cfg() {
       run_properties="
   AuditSeatRecoverKeepsPhase
   AuditAttemptEndsClosed
-  AuditSeatLeavesDormant"
+  AuditSeatLeavesDormant
+  AuditSeatDecidesExemptionFromInput"
       run_invariants="
   AuditWakingClosable"
       ;;
@@ -456,6 +615,39 @@ write_cfg() {
   AuditAttemptEndsClosed"
       run_invariants="
   AuditWakingClosable"
+      ;;
+    rotate-same)
+      spec="AuditRotateSameSpec"
+      max_attempts=2
+      run_properties="
+  AuditAttemptEndsClosed
+  AuditSameSessionTerminalKeepsSession
+  AuditSameSessionNeverUnseats
+  AuditDestroyFencesSameSessionRotation
+  AuditSameSessionKeepsEntry
+  AuditSameSessionTerminalKeepsHostMark"
+      run_invariants="
+  AuditWakingClosable
+  AuditScopedReleaseFenced"
+      ;;
+    recover-rotation)
+      spec="AuditRecoverRotationSpec"
+      max_attempts=1
+      run_properties="
+  AuditAttemptEndsClosed"
+      run_invariants="
+  AuditWakingClosable
+  AuditRecoveredRotationFinishable"
+      ;;
+    replay-same)
+      spec="AuditReplaySameSpec"
+      max_attempts=1
+      run_properties="
+  AuditAttemptEndsClosed
+  AuditReplayKeepsKeptTopology"
+      run_invariants="
+  AuditWakingClosable
+  AuditKeptRowsReplayable"
       ;;
     *)
       echo "error: unknown audit run '${run}'" >&2
@@ -581,14 +773,23 @@ check_space() {
 }
 
 tlc_args=("$@")
-check_space seed "${seed_states}" "${seed_covered_actions[@]}"
-check_space wake "${wake_states}" "${wake_covered_actions[@]}"
-check_space retire "${retire_states}" "${retire_covered_actions[@]}"
-check_space terminal "${terminal_states}" "${terminal_covered_actions[@]}"
-check_space resume "${resume_states}" "${resume_covered_actions[@]}"
-check_space edge "${edge_states}" "${edge_covered_actions[@]}"
-check_space seat "${seat_states}" "${seat_covered_actions[@]}"
-check_space wake2 "${wake2_states}" "${wake2_covered_actions[@]}"
+if [[ "${part}" != "witnesses" ]]; then
+  check_space seed "${seed_states}" "${seed_covered_actions[@]}"
+  check_space wake "${wake_states}" "${wake_covered_actions[@]}"
+  check_space retire "${retire_states}" "${retire_covered_actions[@]}"
+  check_space terminal "${terminal_states}" "${terminal_covered_actions[@]}"
+  check_space resume "${resume_states}" "${resume_covered_actions[@]}"
+  check_space edge "${edge_states}" "${edge_covered_actions[@]}"
+  check_space seat "${seat_states}" "${seat_covered_actions[@]}"
+  check_space wake2 "${wake2_states}" "${wake2_covered_actions[@]}"
+  check_space rotate-same "${rotate_same_states}" "${rotate_same_covered_actions[@]}"
+  check_space recover-rotation "${recover_rotation_states}" "${recover_rotation_covered_actions[@]}"
+  check_space replay-same "${replay_same_states}" "${replay_same_covered_actions[@]}"
+fi
+if [[ "${part}" == "spaces" ]]; then
+  echo "member residency audit passed over the whole reachable space of its domains (whole-space runs)"
+  exit 0
+fi
 
 # Each witness is <run>:<kind>:<name>: a state goal's negation joins the
 # invariants, a step goal's negation ([][~step]_vars) joins the properties.
@@ -609,7 +810,18 @@ for witness in \
   "seat:Invariant:SeatUnborn" "seat:Action property:RotatedUnborn" \
   "seat:Invariant:BothSeated" "seat:Invariant:SeatEndpointPending" \
   "seat:Action property:Rotated" "seat:Action property:ReleasedSpawn" \
-  "wake2:Action property:CrossNotice" "wake2:Action property:RetireBesideWaking"; do
+  "wake2:Action property:CrossNotice" "wake2:Action property:RetireBesideWaking" \
+  "retire:Action property:ExemptArchived" "retire:Action property:ExemptRotated" \
+  "rotate-same:Action property:SameSessionWokeLive" \
+  "rotate-same:Action property:DestroyEndsSameSession" \
+  "rotate-same:Invariant:StaleScopeAfterRotation" \
+  "rotate-same:Action property:EntryRotatedSameSession" \
+  "rotate-same:Action property:HostMarkKept" \
+  "rotate-same:Action property:HeldSuccessorRefused" \
+  "recover-rotation:Action property:RecoveredFreshRotated" \
+  "recover-rotation:Action property:RecoveredSameRotated" \
+  "replay-same:Invariant:ReplayedKeptTopology" \
+  "replay-same:Action property:ReplayedSuccessorWokeLive"; do
   run="${witness%%:*}"
   rest="${witness#*:}"
   kind="${rest%%:*}"
@@ -784,6 +996,12 @@ PY
     "Error: Invariant retiring_incarnation_never_waking is violated" \
     'for var in ("member_materialization", "member_wake_attempts", "member_wake_bound", "member_materialization_epoch", "member_boot_obligation_owed"):
     keep_var("RetireRunningPreservingBindingArchiveOnly", var)' "$@"
+  # The archive that ends a member's seat keeps its custody record: the
+  # record arms the retire run drives put one in place, so the seat
+  # invariant refuses it (it holds over a real record, not an empty map).
+  mutate retire archive_keeps_custody_record \
+    "Error: Invariant custody_unrestored_members_are_seated is violated" \
+    'keep_var("ObserveMemberRetirementArchivedLive", "member_custody_unrestored")' "$@"
   # The build seed turns the composition non-authoritative over an open
   # attempt.
   mutate seed seed_over_open_attempt \
@@ -864,6 +1082,26 @@ rewrite_frame("RecoverMemberSessionBindingAlreadyCurrentRunning", {
   mutate retire archive_keeps_unborn \
     "Error: Invariant seat_session_unborn_is_seated is violated" \
     'keep_var("ObserveMemberRetirementArchivedLive", "member_seat_session_unborn")' "$@"
+  # An archive that keeps the archived member's exemption from the
+  # definition's wiring rules.
+  mutate retire archive_keeps_exemption \
+    "Error: Invariant definition_wiring_exempt_member_is_seated is violated" \
+    'keep_var("ObserveMemberRetirementArchivedLive", "member_definition_wiring_exempt")' "$@"
+  # A rotation's terminal that keeps the retiring incarnation's exemption
+  # whatever its own input says.
+  mutate retire rotation_keeps_exemption \
+    "Error: Action property AuditRotationDecidesExemptionAnew is violated" \
+    'keep_var("CommitMemberRotationLiveRunning", "member_definition_wiring_exempt")' "$@"
+  # A dormant seat that keeps the exemption its member had whatever its own
+  # input says: a seat named exempt is seated bound by the rules.
+  mutate seat seat_keeps_exemption \
+    "Error: Action property AuditSeatDecidesExemptionFromInput is violated" \
+    'keep_var("CommitDormantSeatRunning", "member_definition_wiring_exempt")' "$@"
+  # The replay of an exempt row applied after the seal: a seated member
+  # becomes exempt in a step that seats nothing.
+  mutate wake exempt_after_seal \
+    "Error: Action property AuditSealedExemptsOnlyASeat is violated" \
+    'drop_guard("ExemptMemberFromDefinitionWiringSeatedRunning", "boot_plan_sealed")' "$@"
   # A restore that binds an unborn seat, whose session was never created.
   mutate wake bound_without_born_guard \
     "Error: Invariant seat_session_unborn_is_never_bound is violated" \
@@ -992,7 +1230,7 @@ add_guard("ResolveRuntimeBindingRefusalRunning", "((attempt = None) \\/ ((IF (ag
   # The destroy keeps the pending host preparations.
   mutate retire destroy_keeps_host_pending \
     "Error: Invariant destroyed_mob_holds_no_member_lifecycle is violated" \
-    'keep_var("DestroyMob", "member_host_preparation_pending")' "$@"
+    'keep_var("DestroyMob", "member_host_preparation_causes")' "$@"
   # The join refused once the resume settled a readiness: the lift of a
   # stopped mob, whose readiness ran before its Resume, could not join the
   # wakes its member plan opened.
@@ -1027,5 +1265,64 @@ add_guard("AuthorizeExplicitResumeMemberRunning", "(explicit_resume_readiness_pe
     "Error: Action property AuditResumeReservesBeforeReadiness is violated" \
     'drop_guard("AuthorizeExplicitResumeMemberLiveRunning", "explicit_resume_readiness_settled")
 add_guard("AuthorizeExplicitResumeMemberLiveRunning", "(explicit_resume_readiness_pending = FALSE)")' "$@"
+  # A same-session terminal that archives the member's session: it drops the
+  # binding its next incarnation is seated on.
+  mutate rotate-same same_session_commit_archives \
+    "Error: (Invariant materialization_domain_is_session_bound_membership|Action property AuditSameSessionTerminalKeepsSession) is violated" \
+    'rewrite_frame("CommitMemberRotationSameSessionRunning", {"member_session_bindings": "MapRemove(member_session_bindings, agent_identity)"})' "$@"
+  # A releasing re-drive of a same-session rotation's retirement (its guard
+  # dropped): the kept binding is released while the rotation stands.
+  mutate rotate-same redrive_releases_kept_session \
+    "Error: (Invariant same_session_rotation_keeps_its_binding|Action property AuditSameSessionNeverUnseats) is violated" \
+    'drop_guard("RetireRunningReleasingArchiveOnly", "\"SameSession\"")' "$@"
+  # A same-session terminal that ends a host's preparation mark (the
+  # terminal ends only a role hold, when it commits another role): the
+  # successor could wake before the host's seat step.
+  mutate rotate-same same_session_commit_ends_host_mark \
+    "Error: Action property AuditSameSessionTerminalKeepsHostMark is violated" \
+    'replace_in_update("CommitMemberRotationSameSessionRunning", "member_host_preparation_causes", "ELSE member_host_preparation_causes", "ELSE MapRemove(member_host_preparation_causes, agent_identity)")' "$@"
+  # The same releasing re-drive in a stopped mob (the guard's Stopped copy).
+  mutate rotate-same stopped_redrive_releases_kept_session \
+    "Error: (Invariant same_session_rotation_keeps_its_binding|Action property AuditSameSessionNeverUnseats) is violated" \
+    'drop_guard("RetireStoppedReleasingArchiveOnly", "\"SameSession\"")' "$@"
+  # The scoped release verdict without its fence: a scope whose fence is not
+  # its runtime's current one is answered as the current incarnation.
+  mutate rotate-same scoped_release_ignores_fence \
+    "Error: Invariant AuditScopedReleaseFenced is violated" \
+    'drop_guard("ClassifyMemberReleaseRunning", "scope_fence_token")
+add_guard("ClassifyMemberReleaseRunning", "((scope_agent_runtime_id = None) \\/ ((agent_identity \\in DOMAIN identity_to_runtime) /\\ (Some(identity_to_runtime[agent_identity]) = scope_agent_runtime_id) /\\ (agent_identity \\in DOMAIN member_session_bindings) /\\ (Some(member_session_bindings[agent_identity]) = scope_session_id)))")' "$@"
+  # A same-session start that records no started role: its terminal would
+  # take the role from the grant again.
+  mutate rotate-same same_session_start_pins_no_role \
+    "Error: Invariant same_session_rotation_keeps_its_binding is violated" \
+    'keep_var("BeginMemberRotationSameSessionRunning", "member_rotation_profile_names")' "$@"
+  # A same-session terminal that keeps the started role once the rotation
+  # ended.
+  mutate rotate-same same_session_commit_keeps_started_role \
+    "Error: Invariant rotation_started_role_is_a_same_session_rotations is violated" \
+    'keep_var("CommitMemberRotationSameSessionRunning", "member_rotation_profile_names")' "$@"
+  # The replay of a same-session rotation that records no started role.
+  mutate recover-rotation recovered_same_session_pins_no_role \
+    "Error: Invariant same_session_rotation_keeps_its_binding is violated" \
+    'keep_var("RecoverMemberRotationIntentSameSessionRunning", "member_rotation_profile_names")' "$@"
+  # The replay of a same-session rotation recorded for a runtime that is not
+  # Retiring.
+  mutate recover-rotation recovered_intent_not_retiring \
+    "Error: Invariant rotation_intent_is_a_retiring_member is violated" \
+    'drop_guard("RecoverMemberRotationIntentSameSessionRunning", "member_state_markers")' "$@"
+  # The end-of-replay convergence prunes an edge whose ends are both seated:
+  # the edge a same-session terminal kept, recorded again, is lost.
+  mutate replay-same convergence_prunes_kept_edge \
+    "Error: Action property AuditReplayKeepsKeptTopology is violated" \
+    'rewrite_frame("ConvergeRecoveredRosterTopologyRetain", {"wiring_edges": "(wiring_edges \\ {edge})"})' "$@"
+  # The replay refuses an edge row it recorded already: a row the
+  # same-session terminal records again would fail the replay.
+  mutate replay-same duplicate_kept_row_refused \
+    "Error: Invariant AuditKeptRowsReplayable is violated" \
+    'add_guard("RecoverRosterWiringAlreadyRecovered", "FALSE")' "$@"
 fi
-echo "member residency audit passed over the whole reachable space of its domains"
+if [[ "${part}" == "witnesses" ]]; then
+  echo "member residency audit reached every witness (witness runs)"
+else
+  echo "member residency audit passed over the whole reachable space of its domains"
+fi

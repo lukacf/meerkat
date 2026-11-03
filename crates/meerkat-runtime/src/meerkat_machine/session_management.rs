@@ -5461,6 +5461,8 @@ impl MeerkatMachine {
                     Err(reason) => {
                         if let Some(removed) = sessions.remove(&session_id) {
                             removed.notify_registration_removed();
+                            // The session is no longer served here.
+                            self.tool_grant_deadlines.disarm(&session_id);
                         }
                         break ExistingExecutorClaim::Rejected(reason);
                     }
@@ -13190,6 +13192,10 @@ Ok::<(), RuntimeDriverError>(())
         if let Some(entry) = removed_entry.as_ref() {
             entry.post_commit_hooks.shutdown();
             entry.notify_registration_removed();
+            // The session is no longer served: its grants' deadlines are
+            // settled by the next read, boundary or dispatch, wherever it is
+            // served next.
+            self.tool_grant_deadlines.disarm(session_id);
         }
         drop(sessions);
         drop(mutation_guard);
@@ -13420,11 +13426,15 @@ Ok::<(), RuntimeDriverError>(())
     /// durable unregister progress remain cleanup residue. Retired, Destroyed,
     /// and an absent row are likewise quiescent. Store read failures are
     /// surfaced so callers fail closed instead of misclassifying unknown
-    /// durable state as a completed archive.
+    /// durable state as a completed archive. The read is the only failure,
+    /// and it keeps the store's typed error, so a caller can tell a store
+    /// that could not serve now ([`crate::store::RuntimeStoreError::Unavailable`])
+    /// from data that does not decode
+    /// ([`crate::store::RuntimeStoreError::Corrupt`]).
     pub async fn archive_runtime_residue_present(
         &self,
         session_id: &SessionId,
-    ) -> Result<bool, RuntimeDriverError> {
+    ) -> Result<bool, crate::store::RuntimeStoreError> {
         if let Some(live_state) = self
             .existing_session_visible_runtime_state(session_id)
             .await
@@ -13438,9 +13448,8 @@ Ok::<(), RuntimeDriverError>(())
             return Ok(false);
         };
         let runtime_id = LogicalRuntimeId::for_session(session_id);
-        let durable_lifecycle = crate::store::load_machine_lifecycle(store.as_ref(), &runtime_id)
-            .await
-            .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?;
+        let durable_lifecycle =
+            crate::store::load_machine_lifecycle(store.as_ref(), &runtime_id).await?;
         Ok(durable_lifecycle
             .as_ref()
             .is_some_and(machine_lifecycle_has_runtime_archive_residue))

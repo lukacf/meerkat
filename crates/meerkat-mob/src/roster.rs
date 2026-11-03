@@ -156,6 +156,12 @@ pub struct RosterEntry {
         skip_serializing_if = "crate::runtime::ForkOverlayOrigin::is_source"
     )]
     pub fork_overlay: crate::runtime::ForkOverlayOrigin,
+    /// Whether the mob definition's wiring rules apply to this member, from
+    /// its `MemberSpawned` row (see [`crate::DefinitionWiring`]). Read-only:
+    /// MobMachine holds the exempt members, and a respawn of the member keeps
+    /// it. The default (`applies`) is omitted from the serialized entry.
+    #[serde(default, skip_serializing_if = "crate::DefinitionWiring::is_applies")]
+    pub definition_wiring: crate::DefinitionWiring,
 }
 
 /// Directed projection presence state for an undirected peer edge.
@@ -179,6 +185,7 @@ pub(crate) struct RosterAddEntry {
     pub(crate) fork_job: Option<crate::runtime::ForkJobRecord>,
     pub(crate) fork_source: Option<meerkat_core::ForkBuildSource>,
     pub(crate) fork_overlay: crate::runtime::ForkOverlayOrigin,
+    pub(crate) definition_wiring: crate::DefinitionWiring,
 }
 
 /// Tracks active members and their wiring in a mob.
@@ -198,6 +205,20 @@ pub struct Roster {
     /// kickoff is still owed; this is only its content.
     #[serde(skip)]
     owed_kickoff_prompts: BTreeMap<AgentIdentity, (Generation, meerkat_core::types::ContentInput)>,
+    /// The continuity intent each member's incarnation was spawned with, with
+    /// that incarnation's generation, from its `MemberSpawned` row
+    /// (`MemberSpawnedEvent::continuity_intent`): a same-session successor
+    /// keeps the intent of the incarnation it replaces.
+    #[serde(skip)]
+    spawn_continuity: BTreeMap<AgentIdentity, (Generation, crate::runtime::SpawnContinuityIntent)>,
+    /// The role each member's current incarnation declares to its session's
+    /// next build, with that incarnation's generation, from its
+    /// `MemberSpawned` row (`MemberSpawnedEvent::resume_from_role`): the
+    /// role the session was last built under, when a same-session successor
+    /// took another one. A session already built under the member's role
+    /// reads the declaration as nothing to migrate.
+    #[serde(skip)]
+    resume_from_roles: BTreeMap<AgentIdentity, (Generation, ProfileName)>,
     /// What each unborn seat session carries to its first build, keyed by
     /// the session: the build inputs its seat rows journaled
     /// (`MemberSpawnedEvent::seat_build_inputs`, a later seat of the same
@@ -239,30 +260,11 @@ impl Roster {
     pub fn apply(&mut self, event: &MobEvent) {
         match &event.kind {
             MobEventKind::MemberSpawned(member_spawned) => {
-                self.creation_history.observe(event);
-                // Fail closed on a malformed spawn event: a member with no
-                // bridge member ref cannot be admitted with a real backend
-                // identity, so skip the projection rather than fabricate a
-                // synthetic nil-UUID `MemberRef`. Mirrors the invalid
-                // `ExternalPeerWired` descriptor handling below. The
-                // production spawn path always populates `bridge_member_ref`
-                // (`actor.rs` `with_bridge_member_ref(Some(..))`); an absent
-                // ref only appears for legacy/malformed stored events.
-                let Some(member_ref) = member_spawned.bridge_member_ref.clone() else {
-                    tracing::warn!(
-                        agent_identity = %member_spawned.agent_identity,
-                        role = %member_spawned.role,
-                        "skipping MemberSpawned with no bridge_member_ref during roster projection"
-                    );
+                // What the row records besides its entry; a row with no
+                // member ref adds no entry ([`Self::record_spawn_row`]).
+                let Some(member_ref) = self.record_spawn_row(event) else {
                     return;
                 };
-                if let Some(session_id) = member_ref.bridge_session_id() {
-                    self.record_seat_build(session_id, member_spawned);
-                    if member_spawned.member_peer_endpoint().is_some() {
-                        self.sessions_with_recorded_endpoint
-                            .insert(session_id.clone());
-                    }
-                }
                 self.add(RosterAddEntry {
                     agent_identity: member_spawned.agent_identity.clone(),
                     generation: member_spawned.generation,
@@ -284,19 +286,8 @@ impl Roster {
                     fork_job: member_spawned.fork_job.clone(),
                     fork_source: member_spawned.fork_source.clone(),
                     fork_overlay: member_spawned.fork_overlay,
+                    definition_wiring: member_spawned.definition_wiring,
                 });
-                match member_spawned.kickoff_prompt() {
-                    Some(prompt) => {
-                        self.owed_kickoff_prompts.insert(
-                            member_spawned.agent_identity.clone(),
-                            (member_spawned.generation, prompt.clone()),
-                        );
-                    }
-                    None => {
-                        self.owed_kickoff_prompts
-                            .remove(&member_spawned.agent_identity);
-                    }
-                }
             }
             // Retirement admission is not roster terminality. Keep the spawn
             // projection intact so a restart retains the cleanup anchor.
@@ -354,6 +345,20 @@ impl Roster {
                     .is_some_and(|(owed, _)| owed == generation)
                 {
                     self.owed_kickoff_prompts.remove(agent_identity);
+                }
+                if self
+                    .spawn_continuity
+                    .get(agent_identity)
+                    .is_some_and(|(spawned, _)| spawned == generation)
+                {
+                    self.spawn_continuity.remove(agent_identity);
+                }
+                if self
+                    .resume_from_roles
+                    .get(agent_identity)
+                    .is_some_and(|(spawned, _)| spawned == generation)
+                {
+                    self.resume_from_roles.remove(agent_identity);
                 }
             }
             MobEventKind::RespawnTopologyAbandoned { agent_identity, .. } => {
@@ -475,6 +480,8 @@ impl Roster {
             MobEventKind::MobReset => {
                 self.entries.clear();
                 self.owed_kickoff_prompts.clear();
+                self.spawn_continuity.clear();
+                self.resume_from_roles.clear();
                 self.seat_builds.clear();
                 self.sessions_with_recorded_endpoint.clear();
             }
@@ -509,6 +516,7 @@ impl Roster {
                     fork_job: entry.fork_job,
                     fork_source: entry.fork_source,
                     fork_overlay: entry.fork_overlay,
+                    definition_wiring: entry.definition_wiring,
                 },
             )
             .is_none()
@@ -519,6 +527,8 @@ impl Roster {
         let mut projected = Self {
             creation_history: Default::default(),
             owed_kickoff_prompts: BTreeMap::new(),
+            spawn_continuity: BTreeMap::new(),
+            resume_from_roles: BTreeMap::new(),
             seat_builds: BTreeMap::new(),
             sessions_with_recorded_endpoint: BTreeSet::new(),
             entries: entries
@@ -627,6 +637,28 @@ impl Roster {
         (self.entries.get(agent_identity)?.generation == *generation).then_some(prompt)
     }
 
+    /// The continuity intent the current incarnation of `agent_identity` was
+    /// spawned with, from its `MemberSpawned` row. `None` when the roster
+    /// holds no incarnation of the identity, or the row is not the current
+    /// incarnation's.
+    pub(crate) fn spawn_continuity_intent(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Option<&crate::runtime::SpawnContinuityIntent> {
+        let (generation, intent) = self.spawn_continuity.get(agent_identity)?;
+        (self.entries.get(agent_identity)?.generation == *generation).then_some(intent)
+    }
+
+    /// The role the current incarnation of `agent_identity` declares to its
+    /// session's next build (`MemberLaunchMode::Resume::resume_from_role`),
+    /// from its `MemberSpawned` row: the role its session was last built
+    /// under, when a same-session successor took another one. `None` when
+    /// the incarnation declares none.
+    pub(crate) fn resume_from_role(&self, agent_identity: &AgentIdentity) -> Option<&ProfileName> {
+        let (generation, role) = self.resume_from_roles.get(agent_identity)?;
+        (self.entries.get(agent_identity)?.generation == *generation).then_some(role)
+    }
+
     /// What the session `agent_identity` is bound to carries to its first
     /// build, while no build has created it: the inputs its seat named (see
     /// [`crate::runtime::SeatBuild`]). Whether the session is still unborn
@@ -641,6 +673,34 @@ impl Roster {
             .member_ref
             .bridge_session_id()?;
         self.seat_builds.get(session_id).cloned()
+    }
+
+    /// Set the descriptive inputs a store-owned identity's seat carries to
+    /// the first build of its session from the identity's row: `context`
+    /// and `instructions`, as its spec holds them now (its row is its
+    /// record, so a descriptive update applies at the member's next build).
+    /// The caller has checked that no build created the session (MobMachine's
+    /// `member_seat_session_unborn`); the session's born row drops them, as
+    /// it drops every seat's. The seat's other inputs are kept.
+    pub(crate) fn set_store_owned_seat_inputs(
+        &mut self,
+        agent_identity: &AgentIdentity,
+        context: Option<serde_json::Value>,
+        instructions: Vec<String>,
+    ) {
+        let Some(session_id) = self
+            .entries
+            .get(agent_identity)
+            .and_then(|entry| entry.member_ref.bridge_session_id())
+            .cloned()
+        else {
+            return;
+        };
+        let build = self.seat_builds.entry(session_id).or_default();
+        let mut next = crate::runtime::SeatBuild::clone(build);
+        next.inputs.context = context;
+        next.inputs.additional_instructions = Some(instructions);
+        *build = Arc::new(next);
     }
 
     /// Whether a journal row of this mob recorded the member comms endpoint
@@ -664,6 +724,71 @@ impl Roster {
         let mut next = crate::runtime::SeatBuild::clone(build);
         next.local = local;
         *build = Arc::new(next);
+    }
+
+    /// Record what a `MemberSpawned` row projects besides its member's
+    /// entry: the creation its session records, what its unborn seat
+    /// session's first build applies, whether it recorded the session's
+    /// comms endpoint, and its incarnation's owed kickoff prompt, spawn
+    /// continuity and declared predecessor role. A replay records them with
+    /// the entry ([`Self::apply`]). A live spawn records them once its row is
+    /// durable and adds the entry at its membership commit, so its
+    /// incarnation reads what a replay of its row reads. Returns the row's
+    /// member ref. Any other event records nothing, and so does a spawn row
+    /// with no member ref beyond its creation: a member with no bridge
+    /// member ref cannot be admitted with a real backend identity, so it is
+    /// skipped rather than given a synthetic nil-UUID `MemberRef` (the
+    /// production spawn path always populates `bridge_member_ref`; an
+    /// absent ref only appears in a legacy or malformed stored row).
+    pub(crate) fn record_spawn_row(&mut self, event: &MobEvent) -> Option<MemberRef> {
+        let MobEventKind::MemberSpawned(member_spawned) = &event.kind else {
+            return None;
+        };
+        self.creation_history.observe(event);
+        let Some(member_ref) = member_spawned.bridge_member_ref.clone() else {
+            tracing::warn!(
+                agent_identity = %member_spawned.agent_identity,
+                role = %member_spawned.role,
+                "skipping MemberSpawned with no bridge_member_ref during roster projection"
+            );
+            return None;
+        };
+        if let Some(session_id) = member_ref.bridge_session_id() {
+            self.record_seat_build(session_id, member_spawned);
+            if member_spawned.member_peer_endpoint().is_some() {
+                self.sessions_with_recorded_endpoint
+                    .insert(session_id.clone());
+            }
+        }
+        let identity = &member_spawned.agent_identity;
+        match member_spawned.kickoff_prompt() {
+            Some(prompt) => {
+                self.owed_kickoff_prompts.insert(
+                    identity.clone(),
+                    (member_spawned.generation, prompt.clone()),
+                );
+            }
+            None => {
+                self.owed_kickoff_prompts.remove(identity);
+            }
+        }
+        self.spawn_continuity.insert(
+            identity.clone(),
+            (
+                member_spawned.generation,
+                member_spawned.continuity_intent.clone(),
+            ),
+        );
+        match member_spawned.resume_from_role() {
+            Some(role) => {
+                self.resume_from_roles
+                    .insert(identity.clone(), (member_spawned.generation, role.clone()));
+            }
+            None => {
+                self.resume_from_roles.remove(identity);
+            }
+        }
+        Some(member_ref)
     }
 
     /// Record what a `MemberSpawned` row's seat carries to the first build
@@ -970,6 +1095,7 @@ mod tests {
             fork_job: None,
             fork_source: None,
             fork_overlay: Default::default(),
+            definition_wiring: crate::DefinitionWiring::Applies,
         }
     }
 
@@ -1025,6 +1151,8 @@ mod tests {
             agent_identity: AgentIdentity::from(agent_identity),
             generation: Generation::INITIAL,
             role: ProfileName::from(role),
+            session_archived: false,
+            facts: crate::event::MemberRetiredFacts::default(),
         }
     }
 
@@ -1552,12 +1680,31 @@ mod tests {
             fork_job: None,
             fork_source: None,
             fork_overlay: Default::default(),
+            definition_wiring: crate::DefinitionWiring::Applies,
             direct_member_fence: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: RosterEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.agent_identity, entry.agent_identity);
         assert_eq!(parsed.wired_to.len(), 1);
+
+        // An entry the definition's wiring rules apply to keeps the
+        // pre-existing serialized shape, and an entry serialized before the
+        // field existed reads `applies`; an exempt entry round-trips.
+        assert!(
+            !json.contains("definition_wiring"),
+            "the default is omitted: {json}"
+        );
+        assert_eq!(parsed.definition_wiring, crate::DefinitionWiring::Applies);
+        let mut exempt = entry;
+        exempt.definition_wiring = crate::DefinitionWiring::Exempt;
+        let exempt_json = serde_json::to_value(&exempt).unwrap();
+        assert_eq!(
+            exempt_json["definition_wiring"],
+            serde_json::json!("exempt")
+        );
+        let parsed: RosterEntry = serde_json::from_value(exempt_json).unwrap();
+        assert_eq!(parsed.definition_wiring, crate::DefinitionWiring::Exempt);
     }
 
     #[test]
@@ -1670,6 +1817,8 @@ mod tests {
                 session_id: Some(bound.clone()),
                 retiring_peer_endpoint: None,
                 preserve_machine_topology: false,
+                rotation: None,
+                cause: None,
             },
         );
         let roster = Roster::project(&[spawned.clone(), recovered.clone()]);
@@ -2090,6 +2239,8 @@ mod tests {
                 agent_identity: identity.clone(),
                 generation: Generation::INITIAL,
                 role: ProfileName::from("worker"),
+                session_archived: false,
+                facts: crate::event::MemberRetiredFacts::default(),
             },
         ));
         assert!(
@@ -2167,6 +2318,8 @@ mod tests {
             session_id: Some(retired.clone()),
             retiring_peer_endpoint: None,
             preserve_machine_topology: false,
+            rotation: None,
+            cause: None,
         };
         retirement
             .set_retiring_peer_endpoint(endpoint)
@@ -2198,5 +2351,67 @@ mod tests {
         assert!(roster.session_endpoint_recorded(&spawned));
         assert!(roster.session_endpoint_recorded(&retired));
         assert!(!roster.session_endpoint_recorded(&unrecorded));
+    }
+
+    /// A live spawn records its durable row's projections besides the entry
+    /// when the row is appended (`record_spawn_row`) and adds the entry at
+    /// its membership commit: its incarnation then reads the continuity and
+    /// the recorded endpoint a replay of the row reads, and no continuity
+    /// before the entry holds it.
+    ///
+    /// RED: record only the row's creation at the append, as the live path
+    /// did: the live roster reads no continuity for the spawned incarnation,
+    /// so a same-session successor of a spawned member is refused, and no
+    /// recorded endpoint for its session.
+    #[test]
+    fn a_live_spawn_reads_what_a_replay_of_its_row_reads() {
+        let identity = AgentIdentity::from("spawned");
+        let session = session_id();
+        let pubkey = [7u8; 32];
+        let endpoint = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "mob/worker/spawned",
+            PeerId::from_ed25519_pubkey(&pubkey).to_string(),
+            pubkey,
+            "inproc://mob/worker/spawned",
+        )
+        .expect("a valid endpoint");
+        let mut spawned = crate::event::MemberSpawnedEvent::new(
+            identity.clone(),
+            Generation::INITIAL,
+            FenceToken::new(0),
+            AgentRuntimeId::initial(identity.clone()),
+            ProfileName::from("worker"),
+        )
+        .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(session.clone())))
+        .with_member_peer_endpoint(Some(endpoint));
+        spawned.continuity_intent = crate::runtime::SpawnContinuityIntent::DurableIdentity {
+            continuity_key: identity.to_string(),
+        };
+        let row = make_event(1, MobEventKind::MemberSpawned(spawned));
+        let replayed = Roster::project(std::slice::from_ref(&row));
+        assert!(replayed.spawn_continuity_intent(&identity).is_some());
+
+        let mut live = Roster::new();
+        assert!(live.record_spawn_row(&row).is_some(), "a spawn row records");
+        assert!(
+            live.spawn_continuity_intent(&identity).is_none(),
+            "no incarnation reads the row's continuity before its entry is added"
+        );
+        assert!(add_member(
+            &mut live,
+            identity.clone(),
+            ProfileName::from("worker"),
+            MobRuntimeMode::TurnDriven,
+            MemberRef::from_bridge_session_id(session.clone()),
+        ));
+        assert_eq!(
+            live.spawn_continuity_intent(&identity),
+            replayed.spawn_continuity_intent(&identity),
+            "the spawned incarnation reads the continuity its replay reads"
+        );
+        assert!(
+            live.session_endpoint_recorded(&session),
+            "the live roster knows the row recorded the session's endpoint"
+        );
     }
 }

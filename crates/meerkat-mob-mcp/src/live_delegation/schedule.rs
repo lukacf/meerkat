@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use meerkat::{
     AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
-    WorkEdgeKind, WorkEvidenceRef, WorkGraphService, WorkGraphSnapshotFilter, WorkItem, WorkItemId,
-    WorkOwner, WorkOwnerKey, WorkStatus,
+    WorkEdgeKind, WorkEvidenceRef, WorkGraphService, WorkGraphSnapshot, WorkGraphSnapshotFilter,
+    WorkItem, WorkItemId, WorkOwner, WorkOwnerKey, WorkStatus,
 };
 use meerkat_core::LiveChannelId;
 use meerkat_runtime::live_execution::LiveDelegationNarrationKind;
@@ -361,6 +361,17 @@ impl std::fmt::Display for WorkItemCloseFailure {
     }
 }
 
+/// The voice items a scheduling decision reads: every voice item of every
+/// channel, terminal ones included (blockers may have finished, and may
+/// belong to another channel).
+fn voice_snapshot_filter() -> WorkGraphSnapshotFilter {
+    WorkGraphSnapshotFilter {
+        labels: vec![VOICE_WORK_LABEL.to_string()],
+        include_terminal: true,
+        ..WorkGraphSnapshotFilter::default()
+    }
+}
+
 /// WorkGraph access scoped the way the mob's members see it.
 #[derive(Clone)]
 pub(super) struct VoiceWorkGraph {
@@ -421,15 +432,11 @@ impl VoiceWorkGraph {
             session_id,
             delegation_ref,
             transcript,
-            Some(WorkEvidenceRef {
-                kind: "superseded_voice_item".to_string(),
-                id: item.id.to_string(),
-                label: Some("replaced voice item".to_string()),
-                summary: Some(failed_blockers_evidence_summary(failed)),
-                confirmation_kind: None,
-                confirming_owner_key: None,
-                execution_binding_id: None,
-            }),
+            Some(
+                WorkEvidenceRef::new("superseded_voice_item", item.id.to_string())
+                    .with_label("replaced voice item")
+                    .with_summary(failed_blockers_evidence_summary(failed)),
+            ),
         )
         .await
     }
@@ -447,33 +454,11 @@ impl VoiceWorkGraph {
         labels.insert(VOICE_WORK_LABEL.to_string());
         labels.insert(channel_work_label(channel_id));
         let mut evidence_refs = vec![
-            WorkEvidenceRef {
-                kind: "live_delegation".to_string(),
-                id: delegation_ref.to_string(),
-                label: Some("provider delegation".to_string()),
-                summary: None,
-                confirmation_kind: None,
-                confirming_owner_key: None,
-                execution_binding_id: None,
-            },
-            WorkEvidenceRef {
-                kind: "live_channel".to_string(),
-                id: channel_id.to_string(),
-                label: Some("live channel".to_string()),
-                summary: None,
-                confirmation_kind: None,
-                confirming_owner_key: None,
-                execution_binding_id: None,
-            },
-            WorkEvidenceRef {
-                kind: "live_session".to_string(),
-                id: session_id.to_string(),
-                label: Some("source session".to_string()),
-                summary: None,
-                confirmation_kind: None,
-                confirming_owner_key: None,
-                execution_binding_id: None,
-            },
+            WorkEvidenceRef::new("live_delegation", delegation_ref)
+                .with_label("provider delegation"),
+            WorkEvidenceRef::new("live_channel", channel_id.to_string()).with_label("live channel"),
+            WorkEvidenceRef::new("live_session", session_id.to_string())
+                .with_label("source session"),
         ];
         evidence_refs.extend(extra_evidence);
         let item = self
@@ -509,18 +494,25 @@ impl VoiceWorkGraph {
                 realm_id: None,
                 namespace: None,
                 expected_revision: current.revision,
-                evidence: WorkEvidenceRef {
-                    kind: "live_delegation_result".to_string(),
-                    id: result_evidence_digest(summary),
-                    label: Some("a different label".to_string()),
-                    summary: Some("different content".to_string()),
-                    confirmation_kind: None,
-                    confirming_owner_key: None,
-                    execution_binding_id: None,
-                },
+                evidence: WorkEvidenceRef::new(
+                    "live_delegation_result",
+                    result_evidence_digest(summary),
+                )
+                .with_label("a different label")
+                .with_summary("different content"),
             })
             .await
             .expect("conflicting evidence");
+    }
+
+    /// Every voice item in one uncut namespace observation, however many the
+    /// mob holds: each scheduling decision reads one consistent snapshot of
+    /// the items, their edges and their readiness.
+    async fn voice_snapshot(&self) -> Result<WorkGraphSnapshot, String> {
+        self.service
+            .snapshot_uncut(voice_snapshot_filter())
+            .await
+            .map_err(|error| error.to_string())
     }
 
     async fn get(&self, id: &WorkItemId) -> Result<WorkItem, String> {
@@ -531,18 +523,14 @@ impl VoiceWorkGraph {
     }
 
     /// Scheduling facts for one channel's queue, read from one snapshot of
-    /// every voice item (blockers may belong to another channel).
+    /// the voice items of every channel (blockers may belong to another
+    /// channel).
     pub(super) async fn channel_readiness(
         &self,
         channel_id: &LiveChannelId,
     ) -> Result<ChannelReadiness, String> {
         let snapshot = self
-            .service
-            .snapshot(WorkGraphSnapshotFilter {
-                labels: vec![VOICE_WORK_LABEL.to_string()],
-                include_terminal: true,
-                ..WorkGraphSnapshotFilter::default()
-            })
+            .voice_snapshot()
             .await
             .map_err(|error| format!("voice work readiness snapshot failed: {error}"))?;
         let channel_label = channel_work_label(channel_id);
@@ -640,12 +628,7 @@ impl VoiceWorkGraph {
         self.classification_snapshots
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let snapshot = self
-            .service
-            .snapshot(WorkGraphSnapshotFilter {
-                labels: vec![VOICE_WORK_LABEL.to_string()],
-                include_terminal: true,
-                ..WorkGraphSnapshotFilter::default()
-            })
+            .voice_snapshot()
             .await
             .map_err(|error| format!("voice work snapshot failed: {error}"))?;
         let items_by_id = snapshot
@@ -739,15 +722,12 @@ impl VoiceWorkGraph {
                     realm_id: None,
                     namespace: None,
                     expected_revision: current.revision,
-                    evidence: WorkEvidenceRef {
-                        kind: "live_delegation_result".to_string(),
-                        id: result_evidence_digest(summary),
-                        label: Some("worker result".to_string()),
-                        summary: Some(truncate_chars(summary, EVIDENCE_SUMMARY_CHARS)),
-                        confirmation_kind: None,
-                        confirming_owner_key: None,
-                        execution_binding_id: None,
-                    },
+                    evidence: WorkEvidenceRef::new(
+                        "live_delegation_result",
+                        result_evidence_digest(summary),
+                    )
+                    .with_label("worker result")
+                    .with_summary(truncate_chars(summary, EVIDENCE_SUMMARY_CHARS)),
                 })
                 .await
                 .map_err(|error| {
@@ -784,6 +764,8 @@ impl VoiceWorkGraph {
     reason = "focused template tests use explicit assertion messages"
 )]
 mod tests {
+    use meerkat::WorkGraphStore as _;
+
     use super::*;
 
     async fn voice_workgraph() -> VoiceWorkGraph {
@@ -803,6 +785,249 @@ mod tests {
             .await
             .expect("voice item")
             .id
+    }
+
+    /// `count` voice items on the test channel, each closed as completed.
+    async fn closed_voice_items(workgraph: &VoiceWorkGraph, count: usize) {
+        for index in 0..count {
+            let item = voice_item(workgraph, &format!("finished request {index}")).await;
+            workgraph
+                .close(&item, WorkStatus::Completed, None)
+                .await
+                .expect("close the voice item");
+        }
+    }
+
+    /// A new voice item is offered after a long voice history. The
+    /// scheduling snapshot read the 100 least recently updated voice items,
+    /// all of them closed, so the new item never became ready and the queue
+    /// stalled.
+    #[tokio::test]
+    async fn a_new_voice_item_is_ready_after_150_closed_voice_items() {
+        let workgraph = voice_workgraph().await;
+        closed_voice_items(&workgraph, 150).await;
+        let item = voice_item(&workgraph, "the new request").await;
+        let readiness = workgraph
+            .channel_readiness(&LiveChannelId::new("schedule-test-channel"))
+            .await
+            .expect("channel readiness");
+        assert!(readiness.ready.contains(&item), "{readiness:?}");
+    }
+
+    /// A new voice item is classified after a long voice history. The
+    /// classification snapshot read the 100 least recently updated voice
+    /// items and reported the worker's item missing from its namespace.
+    #[tokio::test]
+    async fn a_new_voice_item_is_classified_after_150_closed_voice_items() {
+        let workgraph = voice_workgraph().await;
+        closed_voice_items(&workgraph, 150).await;
+        let item = voice_item(&workgraph, "the new request").await;
+        assert_eq!(
+            workgraph.disposition_after_worker_turn(&item).await,
+            Ok(WorkItemDisposition::ReleasedReady)
+        );
+    }
+
+    /// The scheduling reads see every voice item: an open voice item and a
+    /// blocker with more newer voice items in front of them than a WorkGraph
+    /// page holds are both seen.
+    #[tokio::test]
+    async fn an_open_voice_item_and_a_blocker_past_the_first_page_are_both_seen() {
+        let workgraph = voice_workgraph().await;
+        let old_open = voice_item(&workgraph, "the old request").await;
+        let blocker = voice_item(&workgraph, "the old blocker").await;
+        // As many newer voice items as the largest WorkGraph page (1000).
+        for index in 0..1000 {
+            voice_item(&workgraph, &format!("newer request {index}")).await;
+        }
+        let waiting = voice_item(&workgraph, "the waiting request").await;
+        workgraph
+            .service
+            .link(meerkat::LinkWorkItemsRequest {
+                realm_id: None,
+                namespace: None,
+                kind: WorkEdgeKind::Blocks,
+                from_id: blocker.clone(),
+                to_id: waiting.clone(),
+            })
+            .await
+            .expect("blocks edge");
+
+        let readiness = workgraph
+            .channel_readiness(&LiveChannelId::new("schedule-test-channel"))
+            .await
+            .expect("channel readiness");
+        assert!(
+            readiness.ready.contains(&old_open),
+            "the old open voice item is offered"
+        );
+        assert_eq!(
+            workgraph.disposition_after_worker_turn(&waiting).await,
+            Ok(WorkItemDisposition::Waiting {
+                blockers: vec![(blocker, "the old blocker".to_string())],
+                explicit_block: false,
+            }),
+            "the old blocker is named"
+        );
+    }
+
+    /// A memory store that counts the namespace snapshots it serves.
+    struct CountingSnapshotStore {
+        inner: meerkat::MemoryWorkGraphStore,
+        snapshots: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat::WorkGraphStore for CountingSnapshotStore {
+        fn kind(&self) -> meerkat::WorkGraphStoreKind {
+            self.inner.kind()
+        }
+
+        async fn get_store_time_utc(
+            &self,
+        ) -> Result<chrono::DateTime<chrono::Utc>, meerkat::WorkGraphError> {
+            self.inner.get_store_time_utc().await
+        }
+
+        async fn insert_item(
+            &self,
+            item: meerkat::WorkItem,
+            event: meerkat::WorkGraphEvent,
+        ) -> Result<meerkat::WorkItem, meerkat::WorkGraphError> {
+            self.inner.insert_item(item, event).await
+        }
+
+        async fn update_item_cas(
+            &self,
+            item: meerkat::WorkItem,
+            expected_previous_revision: u64,
+            event: meerkat::WorkGraphEvent,
+        ) -> Result<meerkat::WorkItem, meerkat::WorkGraphError> {
+            self.inner
+                .update_item_cas(item, expected_previous_revision, event)
+                .await
+        }
+
+        async fn update_item_and_attention_cas(
+            &self,
+            item: meerkat::WorkItem,
+            expected_previous_revision: u64,
+            item_event: meerkat::WorkGraphEvent,
+            attention_updates: Vec<(meerkat::WorkAttentionBinding, u64, meerkat::WorkGraphEvent)>,
+        ) -> Result<meerkat::WorkItem, meerkat::WorkGraphError> {
+            self.inner
+                .update_item_and_attention_cas(
+                    item,
+                    expected_previous_revision,
+                    item_event,
+                    attention_updates,
+                )
+                .await
+        }
+
+        async fn get_item(
+            &self,
+            realm_id: &str,
+            namespace: &meerkat::WorkNamespace,
+            id: &meerkat::WorkItemId,
+        ) -> Result<Option<meerkat::WorkItem>, meerkat::WorkGraphError> {
+            self.inner.get_item(realm_id, namespace, id).await
+        }
+
+        async fn list_items(
+            &self,
+            filter: meerkat::WorkItemFilter,
+        ) -> Result<Vec<meerkat::WorkItem>, meerkat::WorkGraphError> {
+            self.inner.list_items(filter).await
+        }
+
+        async fn read_namespace_snapshot(
+            &self,
+            realm_id: &str,
+            namespace: &meerkat::WorkNamespace,
+        ) -> Result<meerkat::WorkGraphNamespaceRead, meerkat::WorkGraphError> {
+            self.snapshots
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner
+                .read_namespace_snapshot(realm_id, namespace)
+                .await
+        }
+
+        async fn list_attention_matching_bounded(
+            &self,
+            filter: meerkat::AttentionListRequest,
+            observed_at: chrono::DateTime<chrono::Utc>,
+            limit: usize,
+        ) -> Result<Vec<meerkat::WorkAttentionBinding>, meerkat::WorkGraphError> {
+            self.inner
+                .list_attention_matching_bounded(filter, observed_at, limit)
+                .await
+        }
+
+        async fn insert_edge(
+            &self,
+            edge: meerkat::WorkEdge,
+            event: meerkat::WorkGraphEvent,
+        ) -> Result<meerkat::WorkEdge, meerkat::WorkGraphError> {
+            self.inner.insert_edge(edge, event).await
+        }
+
+        async fn list_edges(
+            &self,
+            realm_id: &str,
+            namespace: &meerkat::WorkNamespace,
+        ) -> Result<Vec<meerkat::WorkEdge>, meerkat::WorkGraphError> {
+            self.inner.list_edges(realm_id, namespace).await
+        }
+
+        async fn list_events(
+            &self,
+            filter: meerkat::WorkGraphEventFilter,
+        ) -> Result<Vec<meerkat::WorkGraphEvent>, meerkat::WorkGraphError> {
+            self.inner.list_events(filter).await
+        }
+
+        async fn latest_event_seq(
+            &self,
+            filter: meerkat::WorkGraphEventFilter,
+        ) -> Result<Option<i64>, meerkat::WorkGraphError> {
+            self.inner.latest_event_seq(filter).await
+        }
+    }
+
+    /// A scheduling pass reads every voice item, however many, in one
+    /// namespace observation: past 1000 voice items readiness and
+    /// classification each read the namespace once, and the oldest item is
+    /// seen by both.
+    #[tokio::test]
+    async fn a_voice_scheduling_pass_reads_every_voice_item_in_one_observation() {
+        let store = std::sync::Arc::new(CountingSnapshotStore {
+            inner: meerkat::MemoryWorkGraphStore::new(),
+            snapshots: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let workgraph = VoiceWorkGraph::new(WorkGraphService::new(store.clone()));
+        let oldest = voice_item(&workgraph, "the oldest request").await;
+        for index in 0..1000 {
+            voice_item(&workgraph, &format!("newer request {index}")).await;
+        }
+        let reads = || store.snapshots.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(reads(), 0);
+
+        let readiness = workgraph
+            .channel_readiness(&LiveChannelId::new("schedule-test-channel"))
+            .await
+            .expect("channel readiness");
+        assert!(
+            readiness.ready.contains(&oldest),
+            "the oldest of 1001 voice items is offered"
+        );
+        assert_eq!(reads(), 1, "readiness reads the namespace once");
+
+        assert_eq!(
+            workgraph.disposition_after_worker_turn(&oldest).await,
+            Ok(WorkItemDisposition::ReleasedReady)
+        );
+        assert_eq!(reads(), 2, "classification reads the namespace once");
     }
 
     /// #1820 follow-up: the four simple statuses come from the item alone. A
@@ -882,15 +1107,12 @@ mod tests {
                 realm_id: None,
                 namespace: None,
                 expected_revision: current.revision,
-                evidence: WorkEvidenceRef {
-                    kind: "live_delegation_result".to_string(),
-                    id: result_evidence_digest(summary),
-                    label: Some("worker result".to_string()),
-                    summary: Some(truncate_chars(summary, EVIDENCE_SUMMARY_CHARS)),
-                    confirmation_kind: None,
-                    confirming_owner_key: None,
-                    execution_binding_id: None,
-                },
+                evidence: WorkEvidenceRef::new(
+                    "live_delegation_result",
+                    result_evidence_digest(summary),
+                )
+                .with_label("worker result")
+                .with_summary(truncate_chars(summary, EVIDENCE_SUMMARY_CHARS)),
             })
             .await
             .expect("evidence from the failed attempt");

@@ -2767,7 +2767,7 @@ mod tests {
                     handling_mode: None,
                 },
                 true,
-                Duration::from_secs(3600),
+                Duration::from_hours(1),
             ),
         )
         .await

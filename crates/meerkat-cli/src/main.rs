@@ -700,7 +700,7 @@ where
 
 /// Bound on waiting, at CLI exit, for a session's durable event projection
 /// (the realm event log and `.rkat/sessions/<id>/events.jsonl`) to drain.
-const CLI_EVENT_PROJECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
+const CLI_EVENT_PROJECTION_DRAIN_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Wait until every event the session published is in its durable event log
 /// and the derived `.rkat/` files are synced.
@@ -2576,12 +2576,17 @@ enum AuthCommands {
     /// from `--secret` (or one line of stdin) under
     /// `global:default_<provider>`, for CI and scripted provisioning; it
     /// writes no binding config, so a matching binding must already exist.
+    /// For `copilot`, `--non-interactive` uses a GitHub token instead of the
+    /// device flow, as GitHub Copilot CLI does: it checks the token, stores it
+    /// under the shared `github_copilot` account (or, with `--from-env`,
+    /// stores nothing and has the routes read the environment), and writes
+    /// the three Copilot routes.
     Login {
         /// Provider. Interactive login accepts `anthropic` (or `claude`,
         /// `claude.ai`), `openai` (or `chatgpt`), `gemini` (or `google`,
         /// `code_assist`) and `copilot` (or `github_copilot`, GitHub
-        /// Copilot). --non-interactive accepts `anthropic`, `openai` or
-        /// `gemini`. Prompted for when omitted; required with
+        /// Copilot). --non-interactive accepts `anthropic`, `openai`,
+        /// `gemini` or `copilot`. Prompted for when omitted; required with
         /// --non-interactive.
         provider: Option<String>,
 
@@ -2607,6 +2612,13 @@ enum AuthCommands {
         /// secret from stdin, which keeps it out of the process list.
         #[arg(long, requires = "non_interactive")]
         secret: Option<String>,
+
+        /// With --non-interactive and `copilot`: have the three GitHub
+        /// Copilot routes read a GitHub token from COPILOT_GITHUB_TOKEN, then
+        /// GH_TOKEN, then GITHUB_TOKEN, as GitHub Copilot CLI does, and store
+        /// nothing. A token that is set now is checked first.
+        #[arg(long, requires = "non_interactive", conflicts_with = "secret")]
+        from_env: bool,
     },
 
     /// Clear persisted credentials for an auth binding from the TokenStore.
@@ -3313,6 +3325,10 @@ enum WorkGraphCommands {
         /// Maximum number of items (default 100, at most 1000)
         #[arg(long)]
         limit: Option<usize>,
+        /// Continue a walk: the cursor the previous page printed (its
+        /// `next_cursor`)
+        #[arg(long)]
+        cursor: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -3341,6 +3357,10 @@ enum WorkGraphCommands {
         /// Maximum number of items (default 100, at most 1000)
         #[arg(long)]
         limit: Option<usize>,
+        /// Continue a walk: the cursor the previous page printed (its
+        /// `next_cursor`)
+        #[arg(long)]
+        cursor: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -3368,6 +3388,10 @@ enum WorkGraphCommands {
         /// Maximum number of items (default 100, at most 1000)
         #[arg(long)]
         limit: Option<usize>,
+        /// Continue a walk: the cursor the previous page printed (its
+        /// `next_cursor`)
+        #[arg(long)]
+        cursor: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -6343,6 +6367,34 @@ fn auth_config_realm_or_default(config_realm_override: Option<&str>) -> String {
         .to_string()
 }
 
+/// The connection set `rkat auth test` and `rkat auth status` read `id` (a
+/// binding or auth profile id) from: `realm` as configured, or, for a
+/// reserved GitHub Copilot route of `global` while `global` configures no
+/// Copilot route, the zero-config Copilot token routes a run resolves it to.
+/// A realm that does not load is reported first.
+fn cli_auth_realm_set(
+    config: &Config,
+    realm: &str,
+    id: &str,
+) -> anyhow::Result<meerkat_core::RealmConnectionSet> {
+    let zero_config = || {
+        meerkat_core::RealmId::parse(realm)
+            .ok()
+            .and_then(|realm_id| {
+                meerkat_core::RealmConnectionSet::copilot_token_default(config, &realm_id, id)
+            })
+    };
+    let Some(section) = config.realm.get(realm) else {
+        return zero_config().ok_or_else(|| anyhow::anyhow!("Unknown realm '{realm}'"));
+    };
+    let realm_set = meerkat_core::RealmConnectionSet::from_config(realm, section)
+        .map_err(|e| anyhow::anyhow!("Realm config invalid: {e}"))?;
+    if realm_set.bindings.contains_key(id) || realm_set.auth_profiles.contains_key(id) {
+        return Ok(realm_set);
+    }
+    Ok(zero_config().unwrap_or(realm_set))
+}
+
 async fn handle_auth_command(
     command: AuthCommands,
     scope: &RuntimeScope,
@@ -6466,12 +6518,7 @@ async fn handle_auth_command(
             use meerkat_providers::auth_store::TokenStoreBackend;
 
             let realm = auth_config_realm_or_default(config_realm_override);
-            let section = config
-                .realm
-                .get(&realm)
-                .ok_or_else(|| anyhow::anyhow!("Unknown realm '{realm}'"))?;
-            let realm_set = meerkat_core::RealmConnectionSet::from_config(&realm, section)
-                .map_err(|e| anyhow::anyhow!("Realm config invalid: {e}"))?;
+            let realm_set = cli_auth_realm_set(&config, &realm, &binding_id)?;
             let registry = cli_provider_registry(scope);
             let persistence = TokenStoreBackend::default_auto()
                 .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
@@ -6488,6 +6535,14 @@ async fn handle_auth_command(
                 profile: None,
                 origin: meerkat_core::connection::BindingOrigin::Configured,
             };
+            // A GitHub Copilot route with an operator token names the GitHub
+            // account the token resolved to, and its refusal is a token to
+            // replace rather than a sign-in to repeat.
+            let operator_token_route = realm_set
+                .bindings
+                .get(&binding_id)
+                .and_then(|binding| realm_set.auth_profiles.get(&binding.auth_profile))
+                .is_some_and(is_copilot_operator_token_profile);
             match registry.resolve(&realm_set, &auth_binding, &env).await {
                 Ok(conn) => {
                     println!("state: {}", AuthStatusPhase::Valid.as_public_str());
@@ -6497,22 +6552,49 @@ async fn handle_auth_command(
                         "has_credential: {}",
                         conn.resolved_secret().is_some() || conn.resolved_authorizer().is_some(),
                     );
+                    let metadata = conn.auth_lease.metadata();
+                    match metadata.account_id.as_deref() {
+                        Some(account) => println!("account: {account}"),
+                        // GitHub names no account for a GitHub App
+                        // installation token, nor for a token its identity
+                        // lookup does not answer (the route then lists the
+                        // models on the default Copilot API host).
+                        None if operator_token_route => {
+                            println!(
+                                "account: not named by GitHub (a GitHub App installation token, \
+                                 or a token GitHub's identity lookup does not answer)"
+                            );
+                        }
+                        None => {}
+                    }
+                    if let Some(plan) = metadata.plan.as_deref() {
+                        println!("plan: {plan}");
+                    }
                 }
                 Err(e) => {
                     println!("state: error");
                     println!("error: {e}");
+                    if operator_token_route
+                        && matches!(
+                            e,
+                            meerkat_providers::ProviderAuthError::Auth(
+                                meerkat_core::AuthError::UserReauthRequired
+                            )
+                        )
+                    {
+                        println!(
+                            "hint: GitHub refused this token; replace the GitHub token \
+                             (COPILOT_GITHUB_TOKEN, GH_TOKEN, GITHUB_TOKEN or the stored token) \
+                             instead of signing in again"
+                        );
+                    }
                     return Err(anyhow::anyhow!("Binding resolution failed: {e}"));
                 }
             }
         }
         AuthCommands::Status { profile_id } => {
             let realm = auth_config_realm_or_default(config_realm_override);
-            let section = config
-                .realm
-                .get(&realm)
-                .ok_or_else(|| anyhow::anyhow!("Unknown realm '{realm}'"))?;
-            let realm_set = meerkat_core::RealmConnectionSet::from_config(&realm, section)
-                .map_err(|e| anyhow::anyhow!("Realm config invalid: {e}"))?;
+            let realm_set = cli_auth_realm_set(&config, &realm, &profile_id)?;
             let Some(profile) = realm_set.auth_profiles.get(&profile_id) else {
                 anyhow::bail!("Auth profile '{realm}:{profile_id}' not found in realm '{realm}'");
             };
@@ -6697,6 +6779,7 @@ async fn handle_auth_command(
             method,
             non_interactive,
             secret,
+            from_env,
         } => {
             #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
             {
@@ -6706,6 +6789,7 @@ async fn handle_auth_command(
                         backend.as_deref(),
                         method.as_deref(),
                         secret.as_deref(),
+                        from_env,
                         scope,
                     )
                     .await?;
@@ -6716,7 +6800,7 @@ async fn handle_auth_command(
             }
             #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
             {
-                let _ = (provider, backend, method, non_interactive, secret);
+                let _ = (provider, backend, method, non_interactive, secret, from_env);
                 anyhow::bail!(
                     "`rkat auth login` requires the `anthropic`, `openai`, and `gemini` \
                      features to be enabled at build time."
@@ -6758,6 +6842,21 @@ async fn handle_auth_command(
         }
     }
     Ok(())
+}
+
+/// Whether an auth profile is a GitHub Copilot route with an operator token
+/// (`github_copilot_token`), read through the typed provider matrix.
+fn is_copilot_operator_token_profile(profile: &meerkat_core::AuthProfile) -> bool {
+    use meerkat_core::provider_matrix::{AnthropicAuthMethod, GoogleAuthMethod, OpenAiAuthMethod};
+    use meerkat_providers::NormalizedAuthMethod;
+    matches!(
+        NormalizedAuthMethod::from_auth_profile(profile),
+        Some(
+            NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::GitHubCopilotToken)
+                | NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::GitHubCopilotToken)
+                | NormalizedAuthMethod::Google(GoogleAuthMethod::GitHubCopilotToken)
+        )
+    )
 }
 
 /// `rkat auth refresh <realm> <profile_id>` handler (deferral §6).
@@ -7388,7 +7487,7 @@ fn resolve_login_provider(hint: Option<&str>) -> anyhow::Result<LoginProvider> {
             .ok_or_else(|| anyhow::anyhow!("Selection must be 1 or greater"))?
     };
     ALL_LOGIN_PROVIDERS.get(idx).copied().ok_or_else(|| {
-        anyhow::anyhow!("Selection out of range (1..={})", ALL_LOGIN_PROVIDERS.len(),)
+        anyhow::anyhow!("Selection out of range (1..={})", ALL_LOGIN_PROVIDERS.len())
     })
 }
 
@@ -7400,19 +7499,59 @@ struct CliOAuthLoginTarget {
     auth_profile: meerkat_core::AuthProfile,
 }
 
-#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-fn validate_reserved_copilot_route(
+/// The shape a login gives one reserved GitHub Copilot route
+/// (`global:copilot_<provider>`).
+#[cfg(feature = "copilot")]
+struct ReservedCopilotRoute<'a> {
+    route: meerkat_copilot::CopilotProviderRoute,
+    /// The auth method the login writes: the device sign-in's or the
+    /// operator token's.
+    auth_method: &'a str,
+    /// Where the route reads its credential.
+    source: &'a meerkat_core::CredentialSourceSpec,
+    /// Whether the auth profile must allow interactive login (the device
+    /// sign-in does; an operator token has no interactive login).
+    interactive_login: bool,
+}
+
+/// Refuse a reserved Copilot route configured for the other Copilot auth
+/// method: one credential account holds one method, and a login never
+/// rewrites routes the operator set up for the other one.
+#[cfg(feature = "copilot")]
+fn refuse_other_copilot_method(
     section: &meerkat_core::RealmConfigSection,
     route_id: &str,
-    provider: meerkat_core::Provider,
-    backend_kind: &str,
     auth_method: &str,
+    other_auth_method: &str,
+) -> anyhow::Result<()> {
+    if let Some(auth) = section.auth.get(route_id)
+        && auth.auth_method == other_auth_method
+    {
+        anyhow::bail!(
+            "reserved Copilot route 'global:{route_id}' uses auth_method '{other_auth_method}', \
+             and this login configures '{auth_method}'; the Copilot routes share one \
+             credential account, which holds one method. Run `rkat auth logout \
+             global:{route_id}` and remove the backend, auth and binding tables of \
+             copilot_openai, copilot_anthropic and copilot_gemini under [realm.global] in \
+             ~/.rkat/config.toml, or keep them and define routes for the other method on \
+             another credential_account"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "copilot")]
+fn validate_reserved_copilot_route(
+    section: &meerkat_core::RealmConfigSection,
+    expected: &ReservedCopilotRoute<'_>,
     account: &meerkat_core::CredentialAccountId,
     canonical_options: &serde_json::Value,
 ) -> anyhow::Result<()> {
+    let route_id = expected.route.binding_id();
+    let provider = expected.route.provider();
     if let Some(backend) = section.backend.get(route_id)
         && (backend.provider != provider.as_str()
-            || backend.backend_kind != backend_kind
+            || backend.backend_kind != expected.route.backend_kind()
             || backend.base_url.is_some()
             || backend.server.is_some()
             || &backend.options != canonical_options)
@@ -7424,12 +7563,9 @@ fn validate_reserved_copilot_route(
     }
     if let Some(auth) = section.auth.get(route_id)
         && (auth.provider != provider.as_str()
-            || auth.auth_method != auth_method
-            || !matches!(
-                auth.source,
-                meerkat_core::CredentialSourceSpec::ManagedStore
-            )
-            || !auth.constraints.allow_interactive_login)
+            || auth.auth_method != expected.auth_method
+            || &auth.source != expected.source
+            || (expected.interactive_login && !auth.constraints.allow_interactive_login))
     {
         anyhow::bail!(
             "reserved Copilot auth profile '{route_id}' conflicts with the built-in {} route",
@@ -7481,12 +7617,20 @@ fn ensure_cli_interactive_oauth_config(
             .map_or(serde_json::Value::Null, |backend| backend.options.clone());
         #[cfg(feature = "copilot")]
         for route in meerkat_copilot::CopilotProviderRoute::ALL {
-            validate_reserved_copilot_route(
+            refuse_other_copilot_method(
                 section,
                 route.binding_id(),
-                route.provider(),
-                route.backend_kind(),
                 route.auth_method(),
+                route.token_auth_method(),
+            )?;
+            validate_reserved_copilot_route(
+                section,
+                &ReservedCopilotRoute {
+                    route,
+                    auth_method: route.auth_method(),
+                    source: &meerkat_core::CredentialSourceSpec::ManagedStore,
+                    interactive_login: true,
+                },
                 account,
                 &canonical_options,
             )?;
@@ -7652,10 +7796,12 @@ fn ensure_cli_interactive_oauth_config(
         for route in meerkat_copilot::CopilotProviderRoute::ALL {
             validate_reserved_copilot_route(
                 section,
-                route.binding_id(),
-                route.provider(),
-                route.backend_kind(),
-                route.auth_method(),
+                &ReservedCopilotRoute {
+                    route,
+                    auth_method: route.auth_method(),
+                    source: &meerkat_core::CredentialSourceSpec::ManagedStore,
+                    interactive_login: true,
+                },
                 account,
                 canonical_options,
             )?;
@@ -7663,6 +7809,425 @@ fn ensure_cli_interactive_oauth_config(
     }
 
     Ok(changed)
+}
+
+/// The environment variables a `--from-env` GitHub Copilot route reads, in
+/// GitHub Copilot CLI's order. The resolver also reads `RKAT_<VAR>` before
+/// each.
+#[cfg(feature = "copilot")]
+const COPILOT_TOKEN_ENV_VARS: [&str; 3] = ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"];
+
+/// Where the three `github_copilot_token` routes read the operator's GitHub
+/// token.
+#[cfg(feature = "copilot")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopilotTokenSource {
+    /// `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then `GITHUB_TOKEN`; nothing
+    /// is stored.
+    Environment,
+    /// The token `rkat auth login copilot --non-interactive` stored under the
+    /// shared `github_copilot` account.
+    Stored,
+}
+
+#[cfg(feature = "copilot")]
+impl CopilotTokenSource {
+    fn spec(self) -> meerkat_core::CredentialSourceSpec {
+        match self {
+            Self::Environment => meerkat_core::CredentialSourceSpec::Env {
+                env: COPILOT_TOKEN_ENV_VARS[0].to_string(),
+                fallback: COPILOT_TOKEN_ENV_VARS[1..]
+                    .iter()
+                    .map(|name| (*name).to_string())
+                    .collect(),
+            },
+            Self::Stored => meerkat_core::CredentialSourceSpec::ManagedStore,
+        }
+    }
+}
+
+/// The shared GitHub Copilot credential account in the reserved `global`
+/// realm.
+#[cfg(feature = "copilot")]
+fn copilot_credential_account() -> anyhow::Result<meerkat_core::CredentialAccountId> {
+    meerkat_core::CredentialAccountId::parse(meerkat_copilot::GITHUB_COPILOT_CREDENTIAL_ACCOUNT_ID)
+        .map_err(|error| anyhow::anyhow!("invalid built-in Copilot account id: {error}"))
+}
+
+/// Write the three `github_copilot_token` routes (`global:copilot_openai`,
+/// `global:copilot_anthropic`, `global:copilot_gemini`) on the shared
+/// `github_copilot` account, reading the token from `source`. Reserved routes
+/// already configured otherwise (the device sign-in, another source, other
+/// backend options) are refused before anything changes. Returns whether the
+/// config changed.
+#[cfg(feature = "copilot")]
+fn ensure_cli_copilot_token_config(
+    config: &mut Config,
+    source: CopilotTokenSource,
+) -> anyhow::Result<bool> {
+    let account = copilot_credential_account()?;
+    let source = source.spec();
+    let section = config
+        .realm
+        .entry(CLI_INTERACTIVE_OAUTH_REALM_ID.to_string())
+        .or_default();
+    let canonical_options = section
+        .backend
+        .get(meerkat_copilot::CopilotProviderRoute::OpenAi.binding_id())
+        .map_or(serde_json::Value::Null, |backend| backend.options.clone());
+    for route in meerkat_copilot::CopilotProviderRoute::ALL {
+        refuse_other_copilot_method(
+            section,
+            route.binding_id(),
+            route.token_auth_method(),
+            route.auth_method(),
+        )?;
+        validate_reserved_copilot_route(
+            section,
+            &ReservedCopilotRoute {
+                route,
+                auth_method: route.token_auth_method(),
+                source: &source,
+                interactive_login: false,
+            },
+            &account,
+            &canonical_options,
+        )?;
+    }
+    let mut changed = false;
+    for route in meerkat_copilot::CopilotProviderRoute::ALL {
+        let route_id = route.binding_id();
+        let provider = route.provider().as_str();
+        if !section.backend.contains_key(route_id) {
+            section.backend.insert(
+                route_id.to_string(),
+                meerkat_core::BackendProfileConfig {
+                    provider: provider.to_string(),
+                    backend_kind: route.backend_kind().to_string(),
+                    base_url: None,
+                    options: canonical_options.clone(),
+                    server: None,
+                },
+            );
+            changed = true;
+        }
+        if !section.auth.contains_key(route_id) {
+            section.auth.insert(
+                route_id.to_string(),
+                meerkat_core::AuthProfileConfig {
+                    provider: provider.to_string(),
+                    auth_method: route.token_auth_method().to_string(),
+                    source: source.clone(),
+                    constraints: meerkat_core::AuthConstraints::default(),
+                    metadata_defaults: meerkat_core::AuthMetadataDefaults::default(),
+                },
+            );
+            changed = true;
+        }
+        if !section.binding.contains_key(route_id) {
+            // Copilot serves an account-specific model list; the Gemini route
+            // keeps a model it is known to serve (see
+            // COPILOT_GEMINI_SAMPLE_MODEL). The others follow the catalog.
+            let default_model = match route {
+                meerkat_copilot::CopilotProviderRoute::Gemini => {
+                    Some(COPILOT_GEMINI_SAMPLE_MODEL.to_string())
+                }
+                meerkat_copilot::CopilotProviderRoute::OpenAi
+                | meerkat_copilot::CopilotProviderRoute::Anthropic => None,
+            };
+            section.binding.insert(
+                route_id.to_string(),
+                meerkat_core::ProviderBindingConfig {
+                    backend_profile: route_id.to_string(),
+                    auth_profile: route_id.to_string(),
+                    credential_account: Some(account.clone()),
+                    default_model,
+                    policy: meerkat_core::BindingPolicy::default(),
+                    provider_default: false,
+                },
+            );
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+/// What checking an operator GitHub token found.
+#[cfg(feature = "copilot")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CopilotTokenCheck {
+    login: Option<String>,
+    plan: Option<String>,
+    installation: bool,
+}
+
+#[cfg(feature = "copilot")]
+impl CopilotTokenCheck {
+    /// How the check names the account, as GitHub Copilot CLI does.
+    fn label(&self) -> String {
+        if self.installation {
+            return "github.com installation (server-to-server)".to_string();
+        }
+        let login = self.login.as_deref().unwrap_or("an unnamed GitHub account");
+        match self.plan.as_deref() {
+            Some(plan) => format!("{login} (plan {plan})"),
+            None => login.to_string(),
+        }
+    }
+}
+
+/// `--backend` and `--method` do not apply to `rkat auth login copilot
+/// --non-interactive`: it configures the three Copilot routes with the
+/// operator-token method.
+#[cfg(feature = "copilot")]
+fn refuse_copilot_login_flags(
+    backend_hint: Option<&str>,
+    method_hint: Option<&str>,
+) -> anyhow::Result<()> {
+    if backend_hint.is_some() || method_hint.is_some() {
+        anyhow::bail!(
+            "--backend and --method do not apply to `rkat auth login copilot --non-interactive`, \
+             which configures the three Copilot routes with auth_method github_copilot_token"
+        );
+    }
+    Ok(())
+}
+
+/// The variable a `--from-env` route reads its token from now, and the
+/// token: the resolver's own rule for the route's `env` source (`RKAT_<VAR>`
+/// before `<VAR>`, variable by variable, a blank variable skipped as for
+/// every `github_copilot_token` route).
+#[cfg(feature = "copilot")]
+fn copilot_token_from_env(lookup: impl Fn(&str) -> Option<String>) -> Option<(String, String)> {
+    let meerkat_core::CredentialSourceSpec::Env { env, fallback } =
+        CopilotTokenSource::Environment.spec()
+    else {
+        return None;
+    };
+    let route = meerkat_copilot::CopilotProviderRoute::OpenAi;
+    let method = meerkat_providers::NormalizedAuthMethod::parse_for_provider(
+        route.provider(),
+        route.token_auth_method(),
+    )?;
+    meerkat_auth_core::resolver::env_credential_variable(
+        &env,
+        &fallback,
+        meerkat_auth_core::resolver::BlankEnvValue::of_auth_method(method),
+        &lookup,
+    )
+}
+
+/// Check an operator GitHub token the way the routes will use it
+/// (`meerkat_copilot::verify_operator_token`), with the routes' client
+/// identity, and without lease, store or cache effects.
+#[cfg(feature = "copilot")]
+async fn check_copilot_operator_token(
+    token: String,
+    options: serde_json::Value,
+) -> anyhow::Result<CopilotTokenCheck> {
+    let config = meerkat_copilot::CopilotBackendConfig::from_token_options(&options)
+        .map_err(|error| anyhow::anyhow!("invalid Copilot backend options: {error}"))?;
+    let identity = meerkat_copilot::verify_operator_token(&token, &config)
+        .await
+        .map_err(copilot_token_check_error)?;
+    Ok(CopilotTokenCheck {
+        login: identity.login,
+        plan: identity.plan,
+        installation: identity.installation,
+    })
+}
+
+#[cfg(feature = "copilot")]
+fn copilot_token_check_error(error: meerkat_providers::ProviderAuthError) -> anyhow::Error {
+    use meerkat_core::AuthError;
+    use meerkat_providers::ProviderAuthError;
+    match error {
+        ProviderAuthError::Auth(AuthError::UserReauthRequired) => anyhow::anyhow!(
+            "GitHub refused this token (revoked, expired, or not a valid token); \
+             nothing was stored or configured"
+        ),
+        ProviderAuthError::Auth(AuthError::UnsupportedCombination { .. }) => anyhow::anyhow!(
+            "classic personal access tokens (ghp_) do not work with GitHub Copilot; use a \
+             fine-grained personal access token with the Copilot Requests permission, an \
+             OAuth or GitHub App user token, or a GitHub App installation token"
+        ),
+        ProviderAuthError::Auth(AuthError::MissingSecret) => {
+            anyhow::anyhow!("the GitHub token is empty")
+        }
+        other => anyhow::anyhow!(
+            "GitHub Copilot did not accept this token: {other}; nothing was stored or configured"
+        ),
+    }
+}
+
+/// The shared GitHub Copilot credential identity:
+/// `global:account:github_copilot`.
+#[cfg(feature = "copilot")]
+fn copilot_account_identity() -> anyhow::Result<meerkat_core::AuthCredentialIdentity> {
+    Ok(meerkat_core::AuthCredentialIdentity::Account(
+        meerkat_core::CredentialAccountRef {
+            realm: meerkat_core::RealmId::global(),
+            account: copilot_credential_account()?,
+        },
+    ))
+}
+
+/// Store an operator GitHub token under the shared `github_copilot` account
+/// once `check` accepted it, and publish its AuthMachine lifecycle. A token
+/// the check refuses is never written.
+#[cfg(feature = "copilot")]
+async fn store_checked_copilot_operator_token(
+    persistence: meerkat_providers::auth_store::ProviderAuthPersistence,
+    auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
+    token: String,
+    check: impl std::future::Future<Output = anyhow::Result<CopilotTokenCheck>>,
+) -> anyhow::Result<CopilotTokenCheck> {
+    let checked = check.await?;
+    let tokens = meerkat_providers::auth_store::PersistedTokens {
+        auth_mode: meerkat_providers::auth_store::PersistedAuthMode::StaticBearer,
+        primary_secret: Some(token),
+        refresh_token: None,
+        id_token: None,
+        expires_at: None,
+        last_refresh: Some(chrono::Utc::now()),
+        scopes: Vec::new(),
+        account_id: checked.login.clone(),
+        metadata: serde_json::json!({
+            "provider": "copilot",
+            "auth_method": "github_copilot_token",
+            "source": "rkat auth login copilot --non-interactive",
+        }),
+    };
+    meerkat_providers::browser_login::save_tokens_and_publish_lifecycle(
+        persistence,
+        auth_lease,
+        copilot_account_identity()?,
+        tokens,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("storing the GitHub token failed: {error}"))?;
+    Ok(checked)
+}
+
+/// The operator token from `--secret` or one line of stdin.
+#[cfg(feature = "copilot")]
+fn read_copilot_operator_token(secret: Option<&str>) -> anyhow::Result<String> {
+    if let Some(secret) = secret.map(str::trim).filter(|secret| !secret.is_empty()) {
+        return Ok(secret.to_string());
+    }
+    use std::io::BufRead;
+    eprintln!("GitHub token for GitHub Copilot (reading one line from stdin):");
+    let line = std::io::stdin()
+        .lock()
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no GitHub token on stdin"))??;
+    let token = line.trim();
+    if token.is_empty() {
+        anyhow::bail!("the GitHub token is empty");
+    }
+    Ok(token.to_string())
+}
+
+/// `rkat auth login copilot --non-interactive`: GitHub Copilot with an
+/// operator-supplied GitHub token (`github_copilot_token`), the way GitHub
+/// Copilot CLI uses `COPILOT_GITHUB_TOKEN`, with no device flow.
+///
+/// With `--from-env` the three routes read the token from the environment
+/// and nothing is stored; a token that is set now is checked. Otherwise the
+/// token from `--secret` or one line of stdin is checked and stored under
+/// the shared `github_copilot` account, and the routes read it from there.
+/// Routes configured for the device sign-in are refused before anything
+/// else; a token that fails the check is never stored, and the routes are
+/// written only after the check passed.
+#[cfg(feature = "copilot")]
+async fn noninteractive_copilot_login(
+    backend_hint: Option<&str>,
+    method_hint: Option<&str>,
+    secret: Option<&str>,
+    from_env: bool,
+    scope: &RuntimeScope,
+) -> anyhow::Result<()> {
+    use meerkat_providers::auth_store::TokenStoreBackend;
+
+    refuse_copilot_login_flags(backend_hint, method_hint)?;
+    let source = if from_env {
+        CopilotTokenSource::Environment
+    } else {
+        CopilotTokenSource::Stored
+    };
+    let config_store = cli_global_config_store(scope);
+    let mut config = config_store
+        .get()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+    let config_changed = ensure_cli_copilot_token_config(&mut config, source)?;
+    let options = config
+        .realm
+        .get(CLI_INTERACTIVE_OAUTH_REALM_ID)
+        .and_then(|section| {
+            section
+                .backend
+                .get(meerkat_copilot::CopilotProviderRoute::OpenAi.binding_id())
+        })
+        .map_or(serde_json::Value::Null, |backend| backend.options.clone());
+    let checked = match source {
+        CopilotTokenSource::Environment => {
+            match copilot_token_from_env(|name| std::env::var(name).ok()) {
+                Some((variable, token)) => Some((
+                    variable,
+                    check_copilot_operator_token(token, options).await?,
+                )),
+                None => None,
+            }
+        }
+        CopilotTokenSource::Stored => {
+            let token = read_copilot_operator_token(secret)?;
+            let persistence = TokenStoreBackend::default_auto()
+                .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
+                .open_with_refresh_authority()
+                .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
+            // One-time, idempotent: carry any pre-`global` (`dev`) login
+            // credentials forward, as every login does.
+            if let Err(e) = migrate_legacy_login_credentials_to_global(
+                persistence.clone(),
+                scope.auth_lease.clone(),
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "legacy dev->global credential migration skipped");
+            }
+            let check = check_copilot_operator_token(token.clone(), options);
+            let checked = store_checked_copilot_operator_token(
+                persistence,
+                scope.auth_lease.clone(),
+                token,
+                check,
+            )
+            .await?;
+            Some(("the stored token".to_string(), checked))
+        }
+    };
+    if config_changed {
+        config_store
+            .set(config)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to write the GitHub Copilot routes: {e}"))?;
+    }
+    let routes = meerkat_copilot::CopilotProviderRoute::ALL
+        .map(|route| format!("global:{}", route.binding_id()))
+        .join(", ");
+    match checked {
+        Some((via, checked)) => println!(
+            "ok: GitHub Copilot ready as {} via {via}; routes {routes}",
+            checked.label()
+        ),
+        None => println!(
+            "ok: wrote routes {routes}; they read the GitHub token from {} (none is set now)",
+            COPILOT_TOKEN_ENV_VARS.join(", then ")
+        ),
+    }
+    Ok(())
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
@@ -8527,18 +9092,37 @@ async fn noninteractive_login(
     backend_hint: Option<&str>,
     method_hint: Option<&str>,
     secret: Option<&str>,
+    from_env: bool,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     use meerkat_providers::auth_store::{PersistedTokens, TokenKey, TokenStoreBackend};
 
     let provider = provider_hint
         .ok_or_else(|| anyhow::anyhow!("--non-interactive requires a positional <provider> arg"))?;
+    // GitHub Copilot is not a model provider: its non-interactive login takes
+    // a GitHub token for the three Copilot routes.
+    #[cfg(feature = "copilot")]
+    {
+        if LoginProvider::parse(provider) == Some(LoginProvider::Copilot) {
+            return noninteractive_copilot_login(
+                backend_hint,
+                method_hint,
+                secret,
+                from_env,
+                scope,
+            )
+            .await;
+        }
+    }
     let provider_lc = provider.to_lowercase();
     // K18: provider identity is owned by the typed `Provider` parser — no
     // CLI-local provider-string allowlist.
     let provider_enum = meerkat_core::Provider::parse_strict(&provider_lc).ok_or_else(|| {
         anyhow::anyhow!("unknown provider '{provider}' — expected anthropic / openai / gemini")
     })?;
+    if from_env {
+        anyhow::bail!("--from-env applies to `rkat auth login copilot --non-interactive` only");
+    }
 
     // K18: the auth-method taxonomy and the method→persisted-mode mapping are
     // owned by the per-provider typed matrix (`NormalizedAuthMethod`), the
@@ -8712,8 +9296,8 @@ async fn interactive_login(
     if let Some(env_var) = provider.env_var()
         && std::env::var(env_var)
             .ok()
-            .filter(|v| !v.is_empty())
-            .is_some()
+            .as_ref()
+            .is_some_and(|v| !v.is_empty())
     {
         eprintln!();
         print_warn(&format!("{env_var} is set in your environment."));
@@ -8831,7 +9415,7 @@ async fn interactive_login(
         4,
         "Waiting for you to finish the sign-in (timeout: 2 minutes)",
     );
-    let outcome = match handle.wait(Duration::from_secs(120)).await {
+    let outcome = match handle.wait(Duration::from_mins(2)).await {
         Ok(o) => o,
         Err(OAuthError::Timeout) => {
             eprintln!();
@@ -8898,7 +9482,7 @@ async fn interactive_login(
         auth_green(&format!("Signed in to {}.", provider.display_name())),
     );
     eprintln!();
-    eprintln!("  {} {}", auth_bold("Profile:"), key,);
+    eprintln!("  {} {}", auth_bold("Profile:"), key);
     eprintln!("  {} {}", auth_bold("Storage:"), storage_location);
     if let Some(expiry) = expires_at {
         let human_delta = (expiry - chrono::Utc::now()).num_minutes();
@@ -9011,10 +9595,10 @@ async fn interactive_logout(binding_key: &str, scope: &RuntimeScope) -> anyhow::
             )
             .await
             .map_err(|e| anyhow::anyhow!("Token lifecycle clear failed: {e}"))?;
-            eprintln!("{} Cleared {}", auth_green("✓"), key,);
+            eprintln!("{} Cleared {}", auth_green("✓"), key);
             cleared += 1;
         } else {
-            eprintln!("{} No stored credentials for {}", auth_dim("·"), key,);
+            eprintln!("{} No stored credentials for {}", auth_dim("·"), key);
         }
     }
     if cleared == 0 {
@@ -9439,8 +10023,8 @@ async fn handle_doctor(scope: &RuntimeScope) -> anyhow::Result<()> {
 fn env_var_present(env_key: &str) -> bool {
     std::env::var(env_key)
         .ok()
-        .filter(|value| !value.is_empty())
-        .is_some()
+        .as_ref()
+        .is_some_and(|value| !value.is_empty())
 }
 
 /// The doctor's self-hosted probe sends the server's configured credential,
@@ -9994,10 +10578,11 @@ async fn handle_workgraph_command(
             labels,
             include_terminal,
             limit,
+            cursor,
             json,
         } => {
-            let items = service
-                .list(meerkat::WorkItemFilter {
+            let page = service
+                .list_page(meerkat::WorkItemFilter {
                     realm_id: None,
                     namespace: parse_work_namespace(namespace)?,
                     all_namespaces,
@@ -10005,9 +10590,10 @@ async fn handle_workgraph_command(
                     labels,
                     include_terminal,
                     limit,
+                    cursor,
                 })
                 .await?;
-            print_workgraph_items(items, json)
+            print_workgraph_items(page, json)
         }
         WorkGraphCommands::Show {
             id,
@@ -10032,17 +10618,19 @@ async fn handle_workgraph_command(
             namespace,
             labels,
             limit,
+            cursor,
             json,
         } => {
-            let items = service
-                .ready(meerkat::ReadyWorkFilter {
+            let page = service
+                .ready_page(meerkat::ReadyWorkFilter {
                     realm_id: None,
                     namespace: parse_work_namespace(namespace)?,
                     labels,
                     limit,
+                    cursor,
                 })
                 .await?;
-            print_workgraph_items(items, json)
+            print_workgraph_items(page, json)
         }
         WorkGraphCommands::Snapshot {
             namespace,
@@ -10051,6 +10639,7 @@ async fn handle_workgraph_command(
             labels,
             include_terminal,
             limit,
+            cursor,
             json,
         } => {
             let snapshot = service
@@ -10062,6 +10651,7 @@ async fn handle_workgraph_command(
                     labels,
                     include_terminal,
                     limit,
+                    cursor,
                 })
                 .await?;
             if json {
@@ -10095,6 +10685,13 @@ async fn handle_workgraph_command(
                             .join(", ")
                     );
                 }
+                print_workgraph_page_footer(
+                    snapshot.items.len(),
+                    snapshot.total_items,
+                    snapshot.next_cursor.as_deref(),
+                    snapshot.changed_since_anchor,
+                    snapshot.anchor_event_seq,
+                );
             }
             Ok(())
         }
@@ -10105,8 +10702,8 @@ async fn handle_workgraph_command(
             limit,
             json,
         } => {
-            let events = service
-                .events(meerkat::WorkGraphEventFilter {
+            let page = service
+                .events_page(meerkat::WorkGraphEventFilter {
                     realm_id: None,
                     namespace: parse_work_namespace(namespace)?,
                     all_namespaces,
@@ -10115,12 +10712,15 @@ async fn handle_workgraph_command(
                 })
                 .await?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({ "events": events }))?
-                );
+                println!("{}", serde_json::to_string_pretty(&page)?);
             } else {
-                print_workgraph_events(&events);
+                print_workgraph_events(&page.events);
+                if let Some(next_after_seq) = page.next_after_seq {
+                    println!(
+                        "{} events, more with --after-seq {next_after_seq}",
+                        page.events.len()
+                    );
+                }
             }
             Ok(())
         }
@@ -10191,14 +10791,11 @@ async fn handle_workgraph_command(
                     realm_id: None,
                     namespace: parse_work_namespace(namespace)?,
                     expected_revision,
-                    evidence: meerkat::WorkEvidenceRef {
-                        kind,
-                        id,
-                        label,
-                        summary,
-                        confirmation_kind: None,
-                        confirming_owner_key: None,
-                        execution_binding_id: None,
+                    evidence: {
+                        let mut evidence = meerkat::WorkEvidenceRef::new(kind, id);
+                        evidence.label = label;
+                        evidence.summary = summary;
+                        evidence
                     },
                     principal: None,
                     trusted_principal: None,
@@ -10321,15 +10918,15 @@ fn parse_work_namespace(
         .map_err(Into::into)
 }
 
-fn print_workgraph_items(items: Vec<meerkat::WorkItem>, json: bool) -> anyhow::Result<()> {
+/// `--json` prints the page as the service returns it: the rows, then
+/// `total_items`, `truncated`, `next_cursor` and the walk's anchor. The text
+/// ends with the continuation when the page ended early.
+fn print_workgraph_items(page: meerkat::WorkGraphItemsResponse, json: bool) -> anyhow::Result<()> {
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({ "items": items }))?
-        );
+        println!("{}", serde_json::to_string_pretty(&page)?);
         return Ok(());
     }
-    if items.is_empty() {
+    if page.items.is_empty() {
         println!("No WorkGraph items found.");
         return Ok(());
     }
@@ -10338,7 +10935,7 @@ fn print_workgraph_items(items: Vec<meerkat::WorkItem>, json: bool) -> anyhow::R
         "ID", "STATUS", "PRIORITY", "UPDATED"
     );
     println!("{}", "-".repeat(110));
-    for item in items {
+    for item in &page.items {
         println!(
             "{:<42} {:<12} {:<8} {:<18} {}",
             item.id,
@@ -10348,7 +10945,39 @@ fn print_workgraph_items(items: Vec<meerkat::WorkItem>, json: bool) -> anyhow::R
             item.title
         );
     }
+    print_workgraph_page_footer(
+        page.items.len(),
+        page.total_items,
+        page.next_cursor.as_deref(),
+        page.changed_since_anchor,
+        page.anchor_event_seq,
+    );
     Ok(())
+}
+
+/// The text end of a list, ready or snapshot page: when the page ended early,
+/// how many rows it shows of how many matched and the cursor that continues
+/// it; when the WorkGraph changed since the walk began, where to read what
+/// changed.
+fn print_workgraph_page_footer(
+    shown: usize,
+    total_items: Option<usize>,
+    next_cursor: Option<&str>,
+    changed_since_anchor: Option<bool>,
+    anchor_event_seq: Option<i64>,
+) {
+    if let Some(cursor) = next_cursor {
+        match total_items {
+            Some(total) => println!("{shown} of {total}, more with --cursor {cursor}"),
+            None => println!("{shown} shown, more with --cursor {cursor}"),
+        }
+    }
+    if changed_since_anchor == Some(true) {
+        println!(
+            "The WorkGraph changed since this walk began: rkat workgraph events --after-seq {} lists the changes.",
+            anchor_event_seq.unwrap_or(0)
+        );
+    }
 }
 
 fn print_workgraph_item(item: &meerkat::WorkItem) {
@@ -13127,6 +13756,11 @@ impl meerkat_core::service::SessionServiceHistoryExt for RunMobSessionService {
 #[async_trait::async_trait]
 #[cfg(feature = "mob")]
 impl meerkat_mob::MobSessionService for RunMobSessionService {
+    // Forwarded: the wrapped service's builds keep the members' comms identities.
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_mob::MobSessionService::session_comms_identity_root(self.inner.as_ref())
+    }
+
     async fn recorded_auth_binding(
         &self,
         auth_binding: &meerkat_core::AuthBindingRef,
@@ -14872,6 +15506,8 @@ async fn run_agent(
             mob_tools: mob_tools_factory,
             auth_binding,
             mob_member_binding: None,
+            mob_incarnation: None,
+            grant_gated_tools: None,
         };
         build.apply_generated_create_only_mob_operator_access(
             meerkat_core::ToolCategoryOverride::from_effective(effective_mob),
@@ -17080,6 +17716,11 @@ impl meerkat_core::service::SessionServiceHistoryExt for MobCliSessionService {
 #[async_trait::async_trait]
 #[cfg(all(feature = "mob", feature = "session-store"))]
 impl meerkat_mob::MobSessionService for MobCliSessionService {
+    // Forwarded: the wrapped service's builds keep the members' comms identities.
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_mob::MobSessionService::session_comms_identity_root(self.inner.as_ref())
+    }
+
     async fn recorded_auth_binding(
         &self,
         auth_binding: &meerkat_core::AuthBindingRef,
@@ -17998,6 +18639,65 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
             session_id,
             request,
             write_fence,
+        )
+        .await
+    }
+
+    async fn record_member_instruction_target(
+        self: Arc<Self>,
+        delivery: meerkat_mob::MemberInstructionDelivery,
+    ) -> Result<
+        meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::record_member_instruction_target(
+            Arc::clone(&self.inner),
+            delivery,
+        )
+        .await
+    }
+
+    async fn release_member_instruction_target(
+        self: Arc<Self>,
+        release: meerkat_mob::MemberInstructionRelease,
+    ) -> Result<
+        meerkat_core::InstructionReleaseDisposition,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::release_member_instruction_target(
+            Arc::clone(&self.inner),
+            release,
+        )
+        .await
+    }
+
+    async fn read_member_instructions(
+        &self,
+        session_ids: &[meerkat_core::types::SessionId],
+    ) -> Vec<
+        Result<
+            meerkat_core::service::SessionInstructionRead,
+            meerkat_core::service::SessionInstructionError,
+        >,
+    > {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::read_member_instructions(
+            &self.inner,
+            session_ids,
+        )
+        .await
+    }
+
+    async fn bind_seated_member_session(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+        mob_id: &str,
+        member: &str,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::bind_seated_member_session(
+            &self.inner,
+            session_id,
+            mob_id,
+            member,
         )
         .await
     }
@@ -24753,7 +25453,7 @@ mod tests {
             .await
             .expect("the schedule is created");
 
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_mins(1);
         let occurrence = loop {
             let occurrence = schedules
                 .list_occurrences(&schedule.schedule_id)
@@ -25276,6 +25976,328 @@ mod tests {
             .expect_err("reserved Copilot route conflict must fail closed");
 
         assert!(error.to_string().contains("copilot_anthropic"));
+    }
+
+    /// The routes `rkat auth login copilot --non-interactive --from-env`
+    /// writes, exactly as the auth guide documents them.
+    #[cfg(feature = "copilot")]
+    const DOCUMENTED_COPILOT_TOKEN_ROUTES: &str = r#"
+[realm.global.backend.copilot_openai]
+provider = "openai"
+backend_kind = "copilot"
+
+[realm.global.backend.copilot_anthropic]
+provider = "anthropic"
+backend_kind = "copilot"
+
+[realm.global.backend.copilot_gemini]
+provider = "gemini"
+backend_kind = "copilot"
+
+[realm.global.auth.copilot_openai]
+provider = "openai"
+auth_method = "github_copilot_token"
+source = { kind = "env", env = "COPILOT_GITHUB_TOKEN", fallback = ["GH_TOKEN", "GITHUB_TOKEN"] }
+
+[realm.global.auth.copilot_anthropic]
+provider = "anthropic"
+auth_method = "github_copilot_token"
+source = { kind = "env", env = "COPILOT_GITHUB_TOKEN", fallback = ["GH_TOKEN", "GITHUB_TOKEN"] }
+
+[realm.global.auth.copilot_gemini]
+provider = "gemini"
+auth_method = "github_copilot_token"
+source = { kind = "env", env = "COPILOT_GITHUB_TOKEN", fallback = ["GH_TOKEN", "GITHUB_TOKEN"] }
+
+[realm.global.binding.copilot_openai]
+backend_profile = "copilot_openai"
+auth_profile = "copilot_openai"
+credential_account = "github_copilot"
+
+[realm.global.binding.copilot_anthropic]
+backend_profile = "copilot_anthropic"
+auth_profile = "copilot_anthropic"
+credential_account = "github_copilot"
+
+[realm.global.binding.copilot_gemini]
+backend_profile = "copilot_gemini"
+auth_profile = "copilot_gemini"
+credential_account = "github_copilot"
+default_model = "gemini-3.8-flash"
+"#;
+
+    /// T17: `--from-env` writes the three operator-token routes of the auth
+    /// guide (method, Copilot CLI's variable order, shared account), they
+    /// load as a realm, and writing them again changes nothing.
+    #[cfg(feature = "copilot")]
+    #[test]
+    fn test_cli_copilot_from_env_writes_three_routes() {
+        let mut config = Config::default();
+        assert!(
+            ensure_cli_copilot_token_config(&mut config, CopilotTokenSource::Environment).unwrap()
+        );
+
+        let documented: Config = toml::from_str(DOCUMENTED_COPILOT_TOKEN_ROUTES).unwrap();
+        assert_eq!(config.realm.get("global"), documented.realm.get("global"));
+        meerkat_core::RealmConnectionSet::from_config("global", &config.realm["global"])
+            .expect("the token routes load as a realm");
+        assert!(
+            !ensure_cli_copilot_token_config(&mut config, CopilotTokenSource::Environment).unwrap(),
+            "complete token routes are left as they are"
+        );
+    }
+
+    /// T18: a token login never rewrites routes configured for the device
+    /// sign-in, and the device login never rewrites token routes; the
+    /// refusal names the route, its method and the remedy, and leaves the
+    /// config as it was.
+    #[cfg(feature = "copilot")]
+    #[test]
+    fn test_cli_copilot_token_login_refuses_device_routes() {
+        let mut config = Config::default();
+        ensure_cli_interactive_oauth_config(LoginProvider::Copilot, &mut config).unwrap();
+        let before = config.realm.get("global").cloned();
+        let error = ensure_cli_copilot_token_config(&mut config, CopilotTokenSource::Environment)
+            .expect_err("device routes are not rewritten");
+        let message = error.to_string();
+        for named in [
+            "global:copilot_",
+            "github_copilot_oauth",
+            "github_copilot_token",
+            "rkat auth logout",
+        ] {
+            assert!(message.contains(named), "{named}: {message}");
+        }
+        assert_eq!(config.realm.get("global").cloned(), before);
+
+        let mut config = Config::default();
+        ensure_cli_copilot_token_config(&mut config, CopilotTokenSource::Stored).unwrap();
+        let before = config.realm.get("global").cloned();
+        let error = ensure_cli_interactive_oauth_config(LoginProvider::Copilot, &mut config)
+            .expect_err("token routes are not rewritten");
+        let message = error.to_string();
+        for named in [
+            "global:copilot_",
+            "github_copilot_token",
+            "rkat auth logout",
+        ] {
+            assert!(message.contains(named), "{named}: {message}");
+        }
+        assert_eq!(config.realm.get("global").cloned(), before);
+
+        let mut config = Config::default();
+        ensure_cli_copilot_token_config(&mut config, CopilotTokenSource::Environment).unwrap();
+        let before = config.realm.get("global").cloned();
+        ensure_cli_copilot_token_config(&mut config, CopilotTokenSource::Stored)
+            .expect_err("routes reading the environment are not switched to the store");
+        assert_eq!(config.realm.get("global").cloned(), before);
+    }
+
+    /// T19: a checked token is stored as a static bearer under the shared
+    /// account with the login as its account id, and its lease is valid; a
+    /// token the check refuses is never stored.
+    #[cfg(feature = "copilot")]
+    #[tokio::test]
+    async fn test_cli_copilot_noninteractive_stores_static_bearer_under_account() {
+        use meerkat_providers::auth_store::{PersistedAuthMode, TokenKey, TokenStore};
+        let store = Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new());
+        let persistence = meerkat_providers::auth_store::ProviderAuthPersistence::new(
+            store.clone(),
+            Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+        );
+        let auth_lease = meerkat_runtime::MeerkatMachine::ephemeral().generated_auth_lease_handle();
+        let identity = copilot_account_identity().unwrap();
+        let key = TokenKey::from_credential_identity(&identity);
+        let lease_key = meerkat_core::handles::LeaseKey::from_credential_identity(&identity);
+        assert_eq!(key.to_string(), "global:account:github_copilot");
+
+        let refused = store_checked_copilot_operator_token(
+            persistence.clone(),
+            auth_lease.clone(),
+            "github_pat_refused".to_string(),
+            async { Err(anyhow::anyhow!("GitHub refused this token")) },
+        )
+        .await;
+        assert!(refused.is_err());
+        assert!(
+            store.load(&key).await.unwrap().is_none(),
+            "a refused token is never stored"
+        );
+        assert_eq!(auth_lease.snapshot(&lease_key).phase, None);
+
+        let checked = store_checked_copilot_operator_token(
+            persistence,
+            auth_lease.clone(),
+            "github_pat_accepted".to_string(),
+            async {
+                Ok(CopilotTokenCheck {
+                    login: Some("svc-bot".to_string()),
+                    plan: Some("business".to_string()),
+                    installation: false,
+                })
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(checked.label(), "svc-bot (plan business)");
+        let stored = store
+            .load(&key)
+            .await
+            .unwrap()
+            .expect("the token is stored");
+        assert_eq!(stored.auth_mode, PersistedAuthMode::StaticBearer);
+        assert_eq!(
+            stored.primary_secret.as_deref(),
+            Some("github_pat_accepted")
+        );
+        assert_eq!(stored.account_id.as_deref(), Some("svc-bot"));
+        assert_eq!(
+            auth_lease.snapshot(&lease_key).phase,
+            Some(meerkat_core::handles::AuthLeasePhase::Valid)
+        );
+    }
+
+    /// T20: `--backend` and `--method` do not apply to the Copilot token
+    /// login, and `--from-env` needs `--non-interactive` and excludes
+    /// `--secret`.
+    #[cfg(feature = "copilot")]
+    #[test]
+    fn test_cli_copilot_noninteractive_refuses_backend_and_method() {
+        assert!(refuse_copilot_login_flags(Some("copilot"), None).is_err());
+        assert!(refuse_copilot_login_flags(None, Some("api_key")).is_err());
+        assert!(refuse_copilot_login_flags(None, None).is_ok());
+        assert!(
+            Cli::try_parse_from(["rkat", "auth", "login", "copilot", "--from-env"]).is_err(),
+            "--from-env needs --non-interactive"
+        );
+        assert!(
+            Cli::try_parse_from([
+                "rkat",
+                "auth",
+                "login",
+                "copilot",
+                "--non-interactive",
+                "--from-env",
+                "--secret",
+                "github_pat_x",
+            ])
+            .is_err(),
+            "--from-env stores nothing, so it takes no secret"
+        );
+        assert!(
+            Cli::try_parse_from([
+                "rkat",
+                "auth",
+                "login",
+                "copilot",
+                "--non-interactive",
+                "--from-env",
+            ])
+            .is_ok()
+        );
+    }
+
+    /// `--from-env` reports the variable a route would read, in the
+    /// resolver's order: `RKAT_<VAR>` before `<VAR>`, variable by variable.
+    #[cfg(feature = "copilot")]
+    #[test]
+    fn test_cli_copilot_token_from_env_follows_the_resolver_order() {
+        let found = |set: &[(&str, &str)]| {
+            let set: Vec<(String, String)> = set
+                .iter()
+                .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+                .collect();
+            copilot_token_from_env(|name| {
+                set.iter()
+                    .find(|(candidate, _)| candidate == name)
+                    .map(|(_, value)| value.clone())
+            })
+            .map(|(variable, _)| variable)
+        };
+        assert_eq!(found(&[]), None);
+        assert_eq!(
+            found(&[("GITHUB_TOKEN", "a"), ("GH_TOKEN", "b")]).as_deref(),
+            Some("GH_TOKEN")
+        );
+        assert_eq!(
+            found(&[("GH_TOKEN", "b"), ("COPILOT_GITHUB_TOKEN", "c")]).as_deref(),
+            Some("COPILOT_GITHUB_TOKEN")
+        );
+        assert_eq!(
+            found(&[
+                ("COPILOT_GITHUB_TOKEN", "c"),
+                ("RKAT_COPILOT_GITHUB_TOKEN", "d")
+            ])
+            .as_deref(),
+            Some("RKAT_COPILOT_GITHUB_TOKEN")
+        );
+        // A blank variable is skipped, as the routes' resolver skips it.
+        assert_eq!(
+            found(&[
+                ("RKAT_COPILOT_GITHUB_TOKEN", " "),
+                ("COPILOT_GITHUB_TOKEN", ""),
+                ("GH_TOKEN", "b")
+            ])
+            .as_deref(),
+            Some("GH_TOKEN")
+        );
+        assert_eq!(found(&[("COPILOT_GITHUB_TOKEN", "\t")]), None);
+        assert_eq!(
+            CopilotTokenCheck {
+                login: None,
+                plan: None,
+                installation: true,
+            }
+            .label(),
+            "github.com installation (server-to-server)"
+        );
+    }
+
+    /// Zero-config: while no Copilot route is configured, `rkat auth test`
+    /// and `rkat auth status` read a reserved Copilot route of `global` from
+    /// the zero-config token routes, which are the `--from-env` routes but
+    /// for the Gemini route's default model. Other ids keep their refusal,
+    /// and configured routes win.
+    #[cfg(feature = "copilot")]
+    #[test]
+    fn test_cli_zero_config_copilot_routes_are_the_from_env_routes() {
+        let zero = Config::default();
+        let mut written = Config::default();
+        ensure_cli_copilot_token_config(&mut written, CopilotTokenSource::Environment).unwrap();
+        let written =
+            meerkat_core::RealmConnectionSet::from_config("global", &written.realm["global"])
+                .unwrap();
+        for route in meerkat_copilot::CopilotProviderRoute::ALL {
+            let id = route.binding_id();
+            let zero_set = cli_auth_realm_set(&zero, "global", id).expect("zero-config routes");
+            assert_eq!(zero_set.backends.get(id), written.backends.get(id), "{id}");
+            assert_eq!(
+                zero_set.auth_profiles.get(id),
+                written.auth_profiles.get(id),
+                "{id}"
+            );
+            let binding = zero_set.bindings.get(id).expect("a zero-config binding");
+            assert_eq!(
+                binding.credential_account, written.bindings[id].credential_account,
+                "{id}"
+            );
+            assert_eq!(binding.default_model, None, "{id}");
+        }
+
+        let refused = cli_auth_realm_set(&zero, "global", "default_openai")
+            .expect_err("no global realm is configured");
+        assert!(
+            refused.to_string().contains("Unknown realm 'global'"),
+            "{refused}"
+        );
+
+        let mut device = Config::default();
+        ensure_cli_interactive_oauth_config(LoginProvider::Copilot, &mut device).unwrap();
+        let device = cli_auth_realm_set(&device, "global", "copilot_openai").unwrap();
+        assert_eq!(
+            device.auth_profiles["copilot_openai"].auth_method,
+            "github_copilot_oauth"
+        );
     }
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
@@ -26364,7 +27386,7 @@ mod tests {
             .expect("test AuthLeaseHandle must be certified by generated AuthMachine authority");
         let authority = Arc::new(
             meerkat_runtime::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
-                std::time::Duration::from_secs(60),
+                std::time::Duration::from_mins(1),
                 Arc::clone(&raw_auth_lease),
             ),
         );
@@ -27837,6 +28859,10 @@ default_model = "gemma"
     #[cfg(feature = "mob")]
     #[async_trait]
     impl meerkat_mob::MobSessionService for TestMobSessionService {
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn subscribe_session_activity(
             &self,
             _session_id: &meerkat_core::SessionId,
@@ -28262,6 +29288,7 @@ default_model = "gemma"
             spawn_tool_access_policy: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             active_skills: None,
+            grant_gated: Default::default(),
         };
 
         apply_yolo_tooling_override(&mut tooling);
@@ -28960,6 +29987,27 @@ default_model = "gemma"
                 || err.to_string().contains("Found argument '--full'"),
             "unexpected parse error for --full: {err}"
         );
+    }
+
+    #[test]
+    fn cli_workgraph_list_accepts_cursor() {
+        for read in ["list", "ready", "snapshot"] {
+            let cli =
+                Cli::try_parse_from(["rkat", "workgraph", read, "--cursor", "wg1.e30", "--json"])
+                    .unwrap_or_else(|error| {
+                        panic!("rkat workgraph {read} --cursor should parse: {error}")
+                    });
+            let cursor = match cli.command.expect("test invocation parses a subcommand") {
+                Commands::WorkGraph {
+                    command:
+                        WorkGraphCommands::List { cursor, .. }
+                        | WorkGraphCommands::Ready { cursor, .. }
+                        | WorkGraphCommands::Snapshot { cursor, .. },
+                } => cursor,
+                _ => unreachable!("expected rkat workgraph {read}"),
+            };
+            assert_eq!(cursor.as_deref(), Some("wg1.e30"), "{read}");
+        }
     }
 
     #[test]
@@ -32876,7 +33924,7 @@ capabilities = ["core", "skills", "hooks", "adaptive_flow"]
             config.budget_limits(),
             BudgetLimits {
                 max_tokens: Some(200_000),
-                max_duration: Some(Duration::from_secs(900)),
+                max_duration: Some(Duration::from_mins(15)),
                 max_turn_duration: None,
                 max_tool_calls: Some(50),
             }
@@ -32915,7 +33963,7 @@ capabilities = ["core", "skills", "hooks", "adaptive_flow"]
             config.budget_limits(),
             BudgetLimits {
                 max_tokens: Some(1000),
-                max_duration: Some(Duration::from_secs(900)),
+                max_duration: Some(Duration::from_mins(15)),
                 max_turn_duration: None,
                 max_tool_calls: Some(7),
             },
@@ -34179,7 +35227,7 @@ auth_profile = "inline"
             *observed.lock().expect("lock observed"),
             Some(BudgetLimits {
                 max_tokens: Some(1000),
-                max_duration: Some(Duration::from_secs(900)),
+                max_duration: Some(Duration::from_mins(15)),
                 max_turn_duration: None,
                 max_tool_calls: Some(7),
             }),

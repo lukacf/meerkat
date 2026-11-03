@@ -1,0 +1,1092 @@
+/* Chat pane: conversation, messages, typing indicator, composer.
+   Split from console-host.css (imported there, in this order). */
+
+/* ── Conversation / composer polish ──────────────────────────── */
+
+.cc-empty-state__mark { display: none; }
+.cc-empty-state {
+  flex: 1;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+}
+.cc-conversation-pane {
+  grid-template-rows: 1fr auto;
+  height: 100%;
+}
+.cc-conversation-pane__scroll { display: flex; flex-direction: column; }
+.cc-conversation-pane__body { flex: 1; display: flex; flex-direction: column; }
+
+.cc-composer { width: 100%; min-width: 0; margin: 0 auto; }
+
+/* Composer: Rams chip styling */
+.cc-composer__shell {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elev-2);
+  box-shadow: none;
+}
+.cc-composer__shell:focus-within { border-color: var(--line-strong); }
+.cc-composer__pill,
+.cc-composer__sub-pill {
+  background: var(--bg-elev-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  box-shadow: none;
+  color: var(--ink-muted);
+  font-family: var(--disp);
+  font-size: 11px;
+}
+.cc-composer__send,
+.cc-composer__submit {
+  background: var(--accent) !important;
+  color: var(--bg) !important;
+  border-radius: var(--r-sm) !important;
+  font-family: var(--disp) !important;
+  font-weight: 600 !important;
+  box-shadow: none !important;
+}
+[data-cc-variant="terminal"] .cc-composer__send,
+[data-cc-variant="terminal"] .cc-composer__submit {
+  border-radius: 0 !important;
+}
+
+/* Conversation pane: typographic hierarchy */
+.cc-conversation-pane,
+.cc-conversation-pane__scroll,
+.cc-conversation-pane__body {
+  background: var(--bg-elev-1);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Conversation pane
+   ══════════════════════════════════════════════════════════════ */
+
+.conv {
+  display: flex; flex-direction: column; height: 100%;
+  min-width: 0; min-height: 0;
+  position: relative;
+  overflow: hidden;
+  background: var(--bg-elev-1);
+}
+/* The header's compact-action query container. It must not be .conv itself:
+   a size container re-lays out its whole subtree on every layout pass that
+   reaches it, and .conv holds the transcript and the composer, so each
+   keystroke and each streamed token re-laid out every mounted message. */
+.conv__head-frame {
+  container-type: inline-size;
+  flex: none;
+  position: relative;
+  z-index: 30;
+}
+/* ── Header (spec B17): the agent, its status and live line, its actions ──
+   Two lines beside a 28 px avatar: the name, "Role · group" and the
+   status pill; under them the live line ("Running web search · 12 s")
+   or the last activity. Kit buttons on the right, the overflow menu last. */
+.conv__head {
+  padding: 12px 24px 11px;
+  border-bottom: 1px solid var(--_cc-border-soft);
+  display: flex; align-items: center; gap: 12px;
+  flex: none;
+  position: relative;
+  z-index: 30;
+  background: var(--_cc-surface-card);
+  font-family: var(--_cc-font-display);
+}
+.conv__head .conv__avatar { flex: none; }
+.conv__target {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.conv__title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.conv__title {
+  flex: 0 1 auto;
+  min-width: 4ch;
+  font-size: var(--_cc-panel-fs-title);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  color: var(--_cc-foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conv__role {
+  flex: 0 10 auto;
+  min-width: 0;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conv__status { flex: none; }
+/* The live line is the kit's "now" line (spec A3.4): 12.5 px in ink, at
+   the face's own tracking. */
+.conv__live {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 18px;
+  font-size: 12.5px;
+  line-height: 18px;
+  letter-spacing: 0;
+  color: var(--_cc-foreground-meta);
+  font-variant-numeric: tabular-nums;
+}
+.conv__live[data-live="true"] { color: var(--_cc-foreground); }
+.conv__live-text,
+.conv__last-active {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conv__live .conv__sep { color: var(--_cc-foreground-meta); }
+.conv__elapsed {
+  flex: none;
+  color: var(--_cc-foreground-meta);
+  font-variant-numeric: tabular-nums;
+}
+.conv__actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.conv__action .conv__action-label { white-space: nowrap; }
+.conv__actions .conv__menu { margin-left: -2px; }
+
+/* Respawn and Retire ask first: a strip under the header row. */
+.conv__confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 8px 24px;
+  border-bottom: 1px solid var(--_cc-border-soft);
+  background: var(--_cc-surface-soft);
+  font-family: var(--_cc-font-display);
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--_cc-foreground);
+}
+.conv__confirm-mark { flex: none; }
+.conv__confirm-text { flex: 1 1 24ch; min-width: 0; margin: 0; }
+.conv__confirm-text strong { font-weight: 600; }
+.conv__confirm-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+
+/* Notices under the header: the side chat's source, its own notice, a stop
+   receipt. Quiet strips on the sunken surface with a leading mark. */
+.conv__notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 24px;
+  border-bottom: 1px solid var(--_cc-border-soft);
+  background: var(--_cc-surface-soft);
+  color: var(--_cc-foreground);
+  font-family: var(--_cc-font-display);
+  font-size: 12.5px;
+  line-height: 1.45;
+  flex: none;
+}
+.conv__notice--side-chat { gap: 10px; }
+.conv__notice-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--_cc-foreground-meta);
+}
+.conv__notice-icon svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.conv__notice-mark { flex: none; }
+.conv__notice-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.conv__notice-text strong { font-weight: 600; }
+.conv__notice-text .cc-agent--link { font: inherit; font-weight: 600; }
+.conv__notice-action { flex: none; }
+
+.conv__body {
+  flex: 1; overflow-y: auto; overflow-x: hidden;
+  padding: 18px 24px 12px 46px;
+  display: flex; flex-direction: column; gap: 14px;
+  min-height: 0;
+  position: relative;
+  z-index: 0;
+  scroll-padding-block: 26px 36px;
+  scroll-snap-type: y proximity;
+}
+
+.conv-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  scroll-margin-block: 26px;
+  scroll-snap-align: start;
+}
+
+.conv-turn-rail {
+  position: absolute;
+  z-index: 100;
+  top: 72px;
+  bottom: 150px;
+  left: 12px;
+  width: 18px;
+  overflow: visible;
+  pointer-events: none;
+  display: grid;
+  align-content: center;
+}
+
+/* Nothing to scrub when the whole transcript fits in the pane. */
+.conv-turn-rail[data-overflowing="false"] {
+  visibility: hidden;
+}
+
+.conv-turn-rail__list {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: min(560px, calc(100vh - 180px));
+  overflow: visible;
+}
+
+.conv-turn-rail__item {
+  position: relative;
+  z-index: 8;
+  height: 7px;
+  display: flex;
+  align-items: center;
+  pointer-events: auto;
+}
+
+.conv-turn-rail__button {
+  position: relative;
+  z-index: 9;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  cursor: pointer;
+}
+
+.conv-turn-rail__tick {
+  width: 7px;
+  height: 2px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--ink) 24%, transparent);
+  transition: width var(--motion-hover), background var(--motion-hover);
+}
+
+.conv-turn-rail__tick--overflow {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: transparent;
+  border: 1.5px solid color-mix(in oklch, var(--ink) 32%, transparent);
+}
+
+.conv-turn-rail__button:hover .conv-turn-rail__tick--overflow {
+  border-color: color-mix(in oklch, var(--ink) 60%, transparent);
+}
+
+.conv-turn-rail__button:hover .conv-turn-rail__tick,
+.conv-turn-rail__button:focus-visible .conv-turn-rail__tick {
+  background: color-mix(in oklch, var(--ink) 52%, transparent);
+}
+
+.conv-turn-rail__button.is-active .conv-turn-rail__tick,
+.conv-turn-rail__button[aria-current="true"] .conv-turn-rail__tick {
+  background: color-mix(in oklch, var(--ink) 65%, transparent);
+}
+
+.conv-turn-rail__item:has(+ .conv-turn-rail__item + .conv-turn-rail__item:hover) .conv-turn-rail__tick,
+.conv-turn-rail__item:hover + .conv-turn-rail__item + .conv-turn-rail__item .conv-turn-rail__tick {
+  width: 9px;
+}
+
+.conv-turn-rail__item:has(+ .conv-turn-rail__item:hover) .conv-turn-rail__tick,
+.conv-turn-rail__item:hover + .conv-turn-rail__item .conv-turn-rail__tick {
+  width: 11px;
+}
+
+.conv-turn-rail__item:hover .conv-turn-rail__tick {
+  width: 13px;
+}
+
+.conv-turn-preview {
+  position: absolute;
+  left: 28px;
+  top: 50%;
+  width: min(320px, calc(var(--conv-pane-inline-size, 100vw) - 72px));
+  min-height: 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(33, 34, 36, 0.96);
+  box-shadow: 0 18px 52px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  color: rgba(246, 247, 249, 0.96);
+  display: grid;
+  gap: 6px;
+  opacity: 0;
+  transform: translateY(-50%) translateX(-6px);
+  pointer-events: none;
+  transition: opacity var(--motion-hover), transform var(--motion-hover);
+}
+
+:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .conv-turn-preview {
+  border-color: var(--line);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 18px 44px rgba(33, 34, 36, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.64);
+}
+
+:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .conv-turn-preview__title {
+  color: rgba(24, 24, 27, 0.96);
+}
+
+:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .conv-turn-preview__body {
+  color: rgba(82, 82, 91, 0.78);
+}
+
+.conv-turn-rail__item:hover .conv-turn-preview,
+.conv-turn-rail__button:focus-visible + .conv-turn-preview {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+}
+
+.conv-turn-preview__title {
+  min-width: 0;
+  color: rgba(248, 249, 251, 0.98);
+  font-size: 14px;
+  line-height: 1.25;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conv-turn-preview__body {
+  min-width: 0;
+  color: rgba(190, 195, 204, 0.72);
+  font-size: 12px;
+  line-height: 1.46;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+@media (max-width: 760px) {
+  .conv-turn-rail {
+    left: 8px;
+  }
+
+  .conv-turn-rail__button {
+    width: 18px;
+    height: 18px;
+  }
+
+  .conv-turn-rail__button:hover .conv-turn-rail__tick,
+  .conv-turn-rail__button:focus-visible .conv-turn-rail__tick,
+  .conv-turn-rail__button.is-active .conv-turn-rail__tick,
+  .conv-turn-rail__button[aria-current="true"] .conv-turn-rail__tick {
+    width: 7px;
+  }
+
+  .conv-turn-preview {
+    display: none;
+  }
+}
+
+.conv__history {
+  align-self: center;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink-muted);
+  font-family: var(--disp);
+  font-size: 11px;
+  flex: none;
+}
+.conv__history:hover:not(:disabled) { color: var(--ink); border-color: var(--line-strong); }
+.conv__history:disabled { opacity: 0.55; cursor: default; }
+
+.msg {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  min-width: 0;
+  max-width: 100%;
+}
+/* Source header: who/what the entry is, when, and its copy action. */
+.msg__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-height: 22px;
+  font-family: var(--disp);
+  font-size: 11.5px;
+  color: var(--ink-dim);
+}
+.msg__source {
+  color: var(--ink-muted);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.msg--user .msg__source { color: var(--ink); }
+.msg__source-detail {
+  color: var(--ink-dim);
+  overflow-wrap: anywhere;
+}
+.msg__source-detail::before {
+  content: "\00B7";
+  margin-right: 8px;
+  color: var(--ink-faint);
+}
+.msg__time {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+.msg__badge {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-family: var(--disp);
+  font-size: 10.5px;
+  line-height: 16px;
+  cursor: help;
+}
+.msg__badge--untrusted {
+  color: var(--warn);
+  border: 1px solid color-mix(in oklch, var(--warn) 45%, var(--line));
+  background: color-mix(in oklch, var(--warn) 9%, transparent);
+}
+.msg__badge[data-tooltip]:hover::after,
+.msg__badge[data-tooltip]:focus-visible::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  top: calc(100% + 6px);
+  width: max-content;
+  max-width: 300px;
+  padding: 7px 9px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-strong);
+  background: var(--bg-elev-2);
+  color: var(--ink);
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: normal;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+}
+.msg__badge:focus-visible {
+  outline: 2px solid var(--line-strong);
+  outline-offset: 1px;
+}
+
+/* Day separator between rows on different local calendar days. */
+.conv__day {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink-dim);
+  font-family: var(--disp);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.conv__day::before,
+.conv__day::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+.msg__bubble {
+  min-width: 0;
+  max-width: 100%;
+  display: flex; flex-direction: column; gap: 4px;
+  overflow-wrap: anywhere;
+  position: relative;
+}
+.msg__bubble > * {
+  min-width: 0;
+  max-width: 100%;
+}
+.msg__bubble .cc-rich-paragraph,
+.msg__bubble .cc-rich-heading {
+  margin: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.msg__bubble .cc-rich-image {
+  width: auto;
+  height: auto;
+  max-width: min(100%, 320px);
+}
+.msg__who {
+  font-size: 11px; color: var(--ink-dim);
+  display: flex; align-items: center; gap: 6px;
+  font-family: var(--disp);
+}
+.msg__who b { color: var(--ink-muted); font-weight: 600; }
+.msg__text { color: var(--ink); white-space: pre-wrap; word-break: break-word; }
+
+/* Long assistant replies: a readable measure and line height. */
+.msg--agent .msg__bubble {
+  max-width: min(100%, 78ch);
+  line-height: 1.6;
+  font-size: 13.5px;
+}
+.msg--agent .msg__bubble .cc-rich-paragraph + .cc-rich-paragraph {
+  margin-top: 6px;
+}
+
+.msg__copy {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 2;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: color-mix(in oklch, var(--bg-elev-1) 92%, transparent);
+  color: var(--ink-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity var(--motion-hover), color var(--motion-hover), border-color var(--motion-hover), background var(--motion-hover);
+}
+.msg:hover .msg__copy,
+.msg:focus-within .msg__copy,
+.conv__body:hover > .conv__tools > .msg__copy,
+.conv__body:focus-within > .conv__tools > .msg__copy {
+  opacity: 1;
+}
+.msg__copy:hover:not(:disabled),
+.msg__copy:focus-visible {
+  color: var(--ink);
+  border-color: var(--line-strong);
+  background: var(--bg-elev-2);
+}
+.msg__copy:disabled { display: none; }
+.msg__copy[data-copied="true"] {
+  color: var(--ok);
+  border-color: color-mix(in oklch, var(--ok) 38%, var(--line));
+}
+/* Transcript tools (find, copy): pinned to the top-right, taking no space. */
+.conv__tools {
+  position: sticky;
+  top: 2px;
+  z-index: 2;
+  align-self: flex-end;
+  display: flex;
+  gap: 4px;
+  margin-bottom: -32px;
+}
+.conv__tools > .msg__copy { position: static; }
+/* In-app Find in transcript. */
+.conv__find {
+  position: absolute;
+  top: 8px;
+  right: 16px;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--bg-elev-1);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 12%);
+}
+.conv__find input { width: 220px; font: inherit; border: 0; background: transparent; color: var(--ink); outline: none; }
+.conv__find-count { min-width: 64px; font-size: 12px; color: var(--ink-dim); }
+.conv__find button { border: 0; background: transparent; color: var(--ink-muted); cursor: pointer; padding: 2px 6px; }
+.conv__find button:disabled { opacity: 0.4; cursor: default; }
+::highlight(transcript-find) { background-color: color-mix(in oklch, var(--warn, #f5c542) 55%, transparent); color: inherit; }
+.msg__copy--head {
+  position: static;
+  width: 22px;
+  height: 22px;
+  flex: none;
+}
+.msg__copy svg { display: block; }
+.msg__copy--inline {
+  position: static;
+  width: 22px;
+  height: 22px;
+  opacity: 0;
+  flex: none;
+}
+.msg:hover .msg__copy--inline,
+.msg:focus-within .msg__copy--inline {
+  opacity: 1;
+}
+.msg__worked {
+  margin-top: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  color: var(--ink-faint);
+  font-family: var(--disp);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Compact runtime-event / system-notice rows. */
+.msg--event .msg__bubble,
+.msg--origin .msg__bubble {
+  gap: 2px;
+}
+.msg__event-line {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  color: var(--ink-dim);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.msg__event-mark {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--line-strong);
+  transform: translateY(-1px);
+}
+.msg--event[data-source-kind="peer_message"] .msg__event-mark {
+  background: color-mix(in oklch, var(--ink-dim) 70%, transparent);
+}
+.msg__event-text {
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.msg__event-details {
+  margin-left: 14px;
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+.msg__event-details > summary {
+  cursor: pointer;
+  width: max-content;
+  font-family: var(--disp);
+}
+.msg__event-details > summary:focus-visible {
+  outline: 2px solid var(--line-strong);
+  outline-offset: 2px;
+}
+.msg__event-details > pre {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg-sunken);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.msg--user .msg__bubble {
+  background: var(--bg-elev-1);
+  border: 1px solid var(--line);
+  border-left-color: var(--ink-dim);
+  border-left-width: 3px;
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  align-self: flex-start;
+  color: var(--ink);
+}
+.msg--user .msg__text {
+  color: var(--ink);
+}
+
+.msg--tool .msg__bubble,
+.msg--thought .msg__bubble,
+.msg--gate .msg__bubble {
+  font-family: var(--mono); font-size: 11.5px;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background: var(--bg-sunken);
+  color: var(--ink-muted);
+  gap: 2px;
+}
+.msg--tool .msg__bubble::before {
+  content: "TOOL  "; color: var(--ink-dim); letter-spacing: 0.1em;
+  font-size: 10px; font-weight: 600;
+}
+
+.msg--gate .msg__bubble {
+  border-color: var(--warn);
+  background: color-mix(in oklch, var(--warn) 8%, var(--bg-elev-1));
+  color: var(--ink);
+}
+.msg--gate .msg__bubble::before {
+  content: "GATE  "; color: var(--warn); letter-spacing: 0.1em;
+  font-size: 10px; font-weight: 700;
+}
+
+/* Inline WorkGraph card rides the message lane full-width; the card brings
+   its own chrome (cc-work-graph), so the bubble stays transparent. */
+.msg--workgraph .msg__bubble {
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+.msg--workgraph .cc-work-graph {
+  width: 100%;
+}
+
+/* ── Typing / "agent is working" indicator ──────────────────── */
+@keyframes chat-typing-bounce {
+  0%, 60%, 100% { transform: translateY(0);   opacity: 0.45; }
+  30%           { transform: translateY(-3px); opacity: 1; }
+}
+/* Keep provisional speech readable with a quiet rail and explicit live label. */
+.conv-turn--live {
+  border-left: 1px solid var(--line-strong);
+  padding-left: 8px;
+}
+.msg--live .msg__bubble {
+  font-style: normal;
+  background: transparent;
+  border: none;
+}
+.msg--live-user .msg__bubble {
+  align-self: flex-end;
+}
+.msg__live-label {
+  font-size: 0.7em;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+.msg--typing .msg__bubble {
+  align-self: flex-start;
+  padding: 0;
+  gap: 0;
+}
+.msg__typing {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  align-self: flex-start;
+}
+.msg__typing-dots {
+  display: inline-flex;
+  align-items: end;
+  gap: 3px;
+  height: 10px;
+}
+.msg__typing-dots span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+  display: inline-block;
+  animation: chat-typing-bounce 1.1s ease-in-out infinite;
+}
+.msg__typing-dots span:nth-child(2) { animation-delay: 0.18s; }
+.msg__typing-dots span:nth-child(3) { animation-delay: 0.36s; }
+.msg__typing-label {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-dim);
+  letter-spacing: 0.02em;
+}
+.msg__typing-label::after { content: "…"; opacity: 0.6; margin-left: 1px; }
+.reduced-motion .msg__typing-dots span {
+  animation: none;
+  opacity: 0.7;
+}
+@media (prefers-reduced-motion: reduce) {
+  .msg__typing-dots span {
+    animation: none;
+    opacity: 0.7;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Composer (new, replaces cc-composer overrides above)
+   ══════════════════════════════════════════════════════════════ */
+
+.composer {
+  padding: 12px 24px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-elev-1);
+  flex: none;
+  position: relative;
+  z-index: 30;
+}
+
+.composer > [role="alert"] { margin: 0 0 8px; color: var(--danger, #b64339); font-size: 12px; }
+.conv > small[role="status"] { display: block; padding: 4px 16px; color: var(--ink-dim); font-size: 10px; }
+/* Block layout, not flex: .composer__input must not be a flex item. */
+.composer__shell {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elev-2);
+  padding: 10px 12px;
+  display: block;
+}
+.composer__shell > * + * { margin-top: 8px; }
+/* Typing only lays out this box: size and layout containment make it a
+   relayout boundary, so a keystroke never reaches the transcript. Two rows
+   of the textarea's 1.5 line-height plus its 2px block padding. */
+.composer__input {
+  contain: strict;
+  height: calc(3em + 4px);
+}
+.composer__shell:focus-within { border-color: var(--line-strong); }
+.composer__shell.is-drag-active { border-color: var(--accent); }
+.composer__attachments {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+}
+.composer__attachment {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  background: var(--bg-elev-1);
+}
+.composer__attachment img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.composer__attachment button {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--ink) 84%, transparent);
+  color: var(--bg);
+  line-height: 18px;
+  cursor: pointer;
+}
+.composer textarea {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  resize: none;
+  outline: none;
+  line-height: 1.5;
+}
+.composer textarea::placeholder { color: var(--ink-faint); }
+.composer__row { display: flex; align-items: center; gap: 6px; }
+.composer__chip {
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--ink-muted);
+  background: var(--bg-elev-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  font-family: var(--disp);
+  display: flex; align-items: center; gap: 4px;
+  line-height: 1.3;
+}
+.composer__chip--button {
+  min-width: 26px;
+  justify-content: center;
+  cursor: pointer;
+}
+.composer__chip .k { color: var(--ink-dim); font-family: var(--mono); }
+.composer__spacer { flex: 1; }
+.composer__send {
+  padding: 5px 12px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--bg);
+  background: var(--accent);
+  border-radius: var(--r-sm);
+  border: none;
+  font-family: var(--disp);
+  letter-spacing: -0.003em;
+  cursor: pointer;
+}
+[data-cc-variant="terminal"] .composer__send { border-radius: 0; }
+.composer__send:disabled { background: var(--line-strong); color: var(--ink-faint); cursor: default; }
+
+/* The composer footer (spec B17): facts about the destination in meta ink,
+   a status fact led by its mark ("To: Billing · Specialist · ● active ·
+   ◉ writing a reply"). */
+.composer__footer {
+  margin-top: 8px;
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: 2px 6px;
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-panel-fs-meta);
+  line-height: 1.4;
+  color: var(--_cc-foreground-meta);
+  font-variant-numeric: tabular-nums;
+}
+.composer__fact {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+/* The footer's marks hold still: the header's live line is the one that
+   pulses, and a pulse here would repaint beside the composer every frame. */
+.composer__fact > .cc-mark { flex: none; animation: none; }
+.composer__fact > .cc-mark[data-tone="live"] {
+  box-shadow: 0 0 0 1.5px var(--_cc-surface-card), 0 0 0 2.5px var(--_cc-viz-live);
+}
+.composer__to b { font-weight: 600; color: var(--_cc-foreground-muted); }
+.composer__sep { color: var(--_cc-foreground-meta); }
+.composer__fact[data-tone="crit"] { color: var(--_cc-negative-ink); }
+
+/* Compact overrides when view content lives inside a narrow pane */
+.pane__body .msg {
+  grid-template-columns: 1fr;
+  gap: 4px;
+}
+.pane__body .msg__bubble {
+  width: 100%;
+  align-self: stretch;
+}
+.pane__body .msg__time { padding-top: 0; }
+.pane__body .conv__body { padding: 14px 16px 8px 46px; gap: 10px; }
+.pane__body .conv__head { padding: 10px 16px 9px; }
+.pane__body .conv__notice,
+.pane__body .conv__confirm { padding-inline: 16px; }
+.pane__body .composer { padding: 10px 16px 12px; }
+
+.conv__history-status { flex: none; padding: 4px 16px; color: var(--ink-muted); font-size: 12px; }
+
+
+/* A console pane's header: the same two lines, tighter. */
+.conv__head--compact { padding-block: 9px 8px; gap: 10px; }
+.conv__head--compact .conv__title { font-size: 14px; }
+/* Narrow panes (the header frame is the query container): the role and
+   group give way first, then the action labels (icons keep their names and
+   tooltips), then the spacing. */
+@container (max-width: 720px) {
+  .conv__role { display: none; }
+}
+@container (max-width: 600px) {
+  .conv__actions { gap: 4px; }
+  .conv__action.cc-btn { width: var(--_cc-panel-control-h); padding: 0; }
+  .conv__action .conv__action-label { display: none; }
+  .conv__action .cc-btn__icon svg { width: 16px; height: 16px; }
+}
+@container (max-width: 440px) {
+  .conv__head, .pane__body .conv__head { padding-inline: 10px; gap: 8px; }
+  .conv__confirm, .pane__body .conv__confirm { padding-inline: 10px; }
+  .conv__action.cc-btn { border-color: transparent; }
+  .conv__action.cc-btn:hover:not(:disabled) { background: var(--_cc-surface-hover); }
+}
+
+/* Where the queue is kept: a caption under the queue, in meta ink. */
+.conv > .queue-storage-note {
+  display: block;
+  flex: none;
+  padding: 0 16px 6px 40px;
+  background: var(--_cc-surface-card);
+  font-family: var(--_cc-font-display);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--_cc-foreground-meta);
+}
+.conv > .queue-storage-error {
+  flex: none;
+  margin: 0;
+  padding: 4px 16px 6px 40px;
+  font-family: var(--_cc-font-display);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--_cc-negative-ink);
+  overflow-wrap: anywhere;
+}
+
+/* Older queued messages to import: a quiet notice with one action. */
+.queue-import {
+  display: flex; align-items: center; gap: 10px; flex: none;
+  margin: 6px 16px;
+  padding: 8px 10px;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-md);
+  background: var(--_cc-surface-soft);
+  color: var(--_cc-foreground-muted);
+  font-family: var(--_cc-font-display);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.queue-import__icon { display: inline-flex; flex: none; color: var(--_cc-foreground-meta); }
+.queue-import__icon svg {
+  width: 16px; height: 16px;
+  fill: none; stroke: currentColor; stroke-width: 1.75;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.queue-import__text { display: flex; flex-direction: column; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.queue-import__title { color: var(--_cc-foreground); font-weight: 600; }
+.queue-import__action {
+  flex: none; min-height: 28px; padding: 0 10px;
+  border: 1px solid var(--_cc-border-strong); border-radius: var(--_cc-radius-sm);
+  background: var(--_cc-surface-card); color: var(--_cc-foreground);
+  font: inherit; font-weight: 500; cursor: pointer;
+  transition: border-color var(--_cc-dur-fast) ease, background var(--_cc-dur-fast) ease;
+}
+.queue-import__action:hover { background: var(--_cc-surface-hover); border-color: var(--_cc-foreground-muted); }
+.queue-import__action:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: 2px; }
+
+

@@ -45,6 +45,7 @@ export const WIRE_AUTH_METHODS = [
   "external_chatgpt_tokens",
   "external_authorizer",
   "github_copilot_oauth",
+  "github_copilot_token",
   "claude_ai_oauth",
   "oauth_to_api_key",
   "bedrock_bearer",
@@ -101,6 +102,7 @@ export const WIRE_PROVIDER_AUTH_METHODS = {
     "foundry_api_key",
     "foundry_azure_ad",
     "github_copilot_oauth",
+    "github_copilot_token",
   ],
   openai: [
     "api_key",
@@ -110,6 +112,7 @@ export const WIRE_PROVIDER_AUTH_METHODS = {
     "external_chatgpt_tokens",
     "external_authorizer",
     "github_copilot_oauth",
+    "github_copilot_token",
   ],
   gemini: [
     "api_key",
@@ -120,6 +123,7 @@ export const WIRE_PROVIDER_AUTH_METHODS = {
     "google_oauth",
     "compute_adc",
     "github_copilot_oauth",
+    "github_copilot_token",
   ],
   self_hosted: [
     "api_key",

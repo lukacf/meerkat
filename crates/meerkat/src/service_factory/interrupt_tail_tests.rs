@@ -263,6 +263,10 @@ pub(super) struct ScriptedBuilder {
 impl SessionAgentBuilder for ScriptedBuilder {
     type Agent = FactoryAgent;
 
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        self.factory.session_comms_identity_root()
+    }
+
     async fn build_agent(
         &self,
         request: &CreateSessionRequest,

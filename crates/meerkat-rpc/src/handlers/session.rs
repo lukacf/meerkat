@@ -396,6 +396,13 @@ pub struct CreateSessionParams {
     /// Optional session-local tool visibility filter.
     #[serde(default)]
     pub tool_filter: Option<ToolFilter>,
+    /// Scoped tool grant gate: built-in tool families and tool names the
+    /// session mounts hidden and refuses at dispatch until a live
+    /// `tool_grants/grant` opens them. The session records it, and a gate no
+    /// grant could honour (an unknown or disabled family, a name nothing
+    /// mounts) refuses the build with typed invalid-params data.
+    #[serde(default)]
+    pub grant_gated_tools: Option<meerkat_contracts::WireGrantGatedTools>,
     /// Enable WorkGraph tools. Omit to use runtime defaults.
     #[serde(default)]
     pub enable_workgraph: Option<bool>,
@@ -689,6 +696,7 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
         // channel that could fail to serialize), so this is infallible.
         build_config.set_initial_tool_filter(tool_filter);
     }
+    build_config.grant_gated_tools = params.grant_gated_tools.map(Into::into);
     // Mob tools factory — injected via FactoryAgentBuilder.default_mob_tools or
     // AgentFactory.mob_tools. No per-handler wiring needed; the factory resolves
     // it at build time.

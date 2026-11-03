@@ -12,6 +12,12 @@ pub const GITHUB_COPILOT_AUTHORIZER_LABEL: &str = "github-copilot";
 pub const GITHUB_COPILOT_CREDENTIAL_ACCOUNT_ID: &str = "github_copilot";
 
 const DEFAULT_INTEGRATION_ID: &str = "vscode-chat";
+/// The `Copilot-Integration-Id` a `github_copilot_token` route sends when its
+/// backend options set none: the integration id the Copilot API accepts for a
+/// GitHub token sent as its bearer, a personal access token and an OAuth token
+/// alike (GitHub Copilot CLI's). The API refuses `vscode-chat`, the device
+/// sign-in's default, for such a token.
+const OPERATOR_TOKEN_INTEGRATION_ID: &str = "copilot-developer-cli";
 const DEFAULT_USER_AGENT: &str = meerkat_auth_core::github_copilot::GITHUB_COPILOT_USER_AGENT;
 const DEFAULT_EDITOR_VERSION: &str = "vscode/1.107.0";
 const DEFAULT_EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.35.0";
@@ -70,6 +76,153 @@ impl CopilotProviderRoute {
             }
         }
     }
+
+    /// The operator-token auth method of this route (`github_copilot_token`):
+    /// an operator-supplied GitHub token is the Copilot API credential, with
+    /// no device sign-in.
+    pub fn token_auth_method(self) -> &'static str {
+        match self {
+            Self::OpenAi => {
+                meerkat_core::provider_matrix::openai::OpenAiAuthMethod::GitHubCopilotToken.as_str()
+            }
+            Self::Anthropic => {
+                meerkat_core::provider_matrix::anthropic::AnthropicAuthMethod::GitHubCopilotToken
+                    .as_str()
+            }
+            Self::Gemini => {
+                meerkat_core::provider_matrix::google::GoogleAuthMethod::GitHubCopilotToken.as_str()
+            }
+        }
+    }
+}
+
+/// The GitHub identity an operator-supplied token resolves to
+/// (`github_copilot_token` routes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CopilotAccountIdentity {
+    /// The GitHub login. `None` for a GitHub App installation token, which
+    /// has no user.
+    pub login: Option<String>,
+    /// The Copilot plan GitHub reports for the login, such as `business`.
+    pub plan: Option<String>,
+    /// The Copilot API host the token is sent to.
+    pub api_base: String,
+    /// Whether the token is a GitHub App installation token
+    /// (server-to-server, billed to the organization that installed the
+    /// App).
+    pub installation: bool,
+    /// Whether GitHub's identity lookup (`copilot_internal/user`) answered
+    /// for the token. `false` for an installation token, which skips it, and
+    /// for a token it does not answer (a 403 or a 404, as a fine-grained
+    /// personal access token can get): such a token is used only once the
+    /// account's model list on the default Copilot API host loads, and a 401
+    /// or 403 from that list is the Copilot API refusing it, as for a
+    /// looked-up token.
+    pub looked_up: bool,
+}
+
+/// How a Copilot route authenticates, chosen by its auth method.
+#[cfg(all(feature = "oauth", not(target_arch = "wasm32")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CopilotCredentialMode {
+    /// `github_copilot_oauth`: the GitHub token from the device sign-in is
+    /// exchanged for a short-lived Copilot token.
+    DeviceSignIn,
+    /// `github_copilot_token`: an operator-supplied GitHub token is the
+    /// Copilot API bearer itself.
+    OperatorToken,
+}
+
+#[cfg(all(feature = "oauth", not(target_arch = "wasm32")))]
+impl CopilotCredentialMode {
+    /// The mode of a validated route's auth method, or `None` for a method
+    /// that is not a Copilot method.
+    pub(crate) fn for_auth_method(
+        method: meerkat_llm_core::provider_runtime::NormalizedAuthMethod,
+    ) -> Option<Self> {
+        use meerkat_core::provider_matrix::{
+            AnthropicAuthMethod, GoogleAuthMethod, OpenAiAuthMethod,
+        };
+        use meerkat_llm_core::provider_runtime::NormalizedAuthMethod;
+        match method {
+            NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::GitHubCopilotOauth)
+            | NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::GitHubCopilotOauth)
+            | NormalizedAuthMethod::Google(GoogleAuthMethod::GitHubCopilotOauth) => {
+                Some(Self::DeviceSignIn)
+            }
+            NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::GitHubCopilotToken)
+            | NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::GitHubCopilotToken)
+            | NormalizedAuthMethod::Google(GoogleAuthMethod::GitHubCopilotToken) => {
+                Some(Self::OperatorToken)
+            }
+            _ => None,
+        }
+    }
+
+    /// The persisted credential mode this mode's auth method stores.
+    pub(crate) fn persisted_auth_mode(self) -> meerkat_core::auth::PersistedAuthMode {
+        match self {
+            Self::DeviceSignIn => meerkat_core::auth::PersistedAuthMode::GithubCopilotOauth,
+            Self::OperatorToken => meerkat_core::auth::PersistedAuthMode::StaticBearer,
+        }
+    }
+
+    /// The wire auth method of this mode.
+    pub(crate) fn auth_method(self) -> &'static str {
+        match self {
+            Self::DeviceSignIn => CopilotProviderRoute::OpenAi.auth_method(),
+            Self::OperatorToken => CopilotProviderRoute::OpenAi.token_auth_method(),
+        }
+    }
+}
+
+/// The kind of a GitHub token, read from its documented prefix only, never
+/// from its length or character set (installation tokens, for one, changed
+/// their length when they became stateless).
+#[cfg(all(feature = "oauth", not(target_arch = "wasm32")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GitHubTokenKind {
+    /// `ghp_`: a classic personal access token, which Copilot does not
+    /// accept.
+    ClassicPersonalAccessToken,
+    /// `ghs_`: a GitHub App installation token (server-to-server). It has no
+    /// user, so it has no identity lookup.
+    Installation,
+    /// Any other token: a fine-grained personal access token (`github_pat_`),
+    /// an OAuth app token (`gho_`) or a GitHub App user token (`ghu_`).
+    User,
+}
+
+#[cfg(all(feature = "oauth", not(target_arch = "wasm32")))]
+impl GitHubTokenKind {
+    pub(crate) fn classify(token: &str) -> Self {
+        if token.starts_with("ghp_") {
+            Self::ClassicPersonalAccessToken
+        } else if token.starts_with("ghs_") {
+            Self::Installation
+        } else {
+            Self::User
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ClassicPersonalAccessToken => "classic_personal_access_token",
+            Self::Installation => "installation",
+            Self::User => "user",
+        }
+    }
+}
+
+/// The `copilot_internal/user` endpoint, parsed like the other GitHub
+/// endpoints (`https`, no user information).
+#[cfg(all(feature = "oauth", not(target_arch = "wasm32")))]
+pub(crate) fn copilot_user_url() -> Result<Url, CopilotProtocolError> {
+    parse_https(
+        meerkat_auth_core::github_copilot::GITHUB_COPILOT_USER_URL,
+        "copilot_user_url",
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +312,22 @@ impl CopilotBackendConfig {
         Ok(config)
     }
 
+    /// The configuration of a `github_copilot_token` route: as
+    /// [`Self::from_options`], except that options which set no
+    /// `integration_id` send `copilot-developer-cli`, the integration id the
+    /// Copilot API accepts for a GitHub token sent as its bearer (it refuses
+    /// `vscode-chat`, the device sign-in's default, for a personal access
+    /// token). An `integration_id` the options set is kept, whatever its
+    /// value. Pass this configuration to `verify_operator_token` to
+    /// check a token the way the token routes use it.
+    pub fn from_token_options(options: &serde_json::Value) -> Result<Self, CopilotProtocolError> {
+        let mut config = Self::from_options(options)?;
+        if configured_integration_id(options).is_none() {
+            config.integration_id = OPERATOR_TOKEN_INTEGRATION_ID.to_string();
+        }
+        Ok(config)
+    }
+
     pub fn endpoints(&self) -> Result<GitHubCopilotEndpoints, CopilotProtocolError> {
         GitHubCopilotEndpoints::public()
     }
@@ -180,6 +349,15 @@ impl CopilotBackendConfig {
         }
         Ok(())
     }
+}
+
+/// The `integration_id` a route's backend options set, if any. A resolved
+/// [`CopilotBackendConfig`] always holds one, so only the options tell a value
+/// the operator chose from the default of the route's auth method.
+fn configured_integration_id(options: &serde_json::Value) -> Option<&str> {
+    options
+        .get("integration_id")
+        .and_then(serde_json::Value::as_str)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -254,6 +432,29 @@ impl std::fmt::Debug for CopilotTokenEnvelope {
 pub struct CopilotTokenEndpoints {
     #[serde(default)]
     pub api: Option<String>,
+}
+
+/// The fields read from `GET copilot_internal/user`; everything else in the
+/// response is ignored.
+#[cfg(all(feature = "oauth", not(target_arch = "wasm32")))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub(crate) struct CopilotUserEnvelope {
+    #[serde(default)]
+    pub login: Option<String>,
+    #[serde(default)]
+    pub chat_enabled: Option<bool>,
+    #[serde(default)]
+    pub copilot_plan: Option<String>,
+    #[serde(default)]
+    pub endpoints: Option<CopilotTokenEndpoints>,
+}
+
+/// GitHub's JSON error body: only its human-readable `message` is read.
+#[cfg(all(feature = "oauth", not(target_arch = "wasm32")))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub(crate) struct GitHubErrorEnvelope {
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 #[cfg(all(feature = "oauth", not(target_arch = "wasm32")))]
@@ -591,6 +792,143 @@ mod tests {
             CopilotBackendConfig::from_options(&insecure),
             Err(CopilotProtocolError::InvalidBackendOptions(_))
         ));
+    }
+
+    /// A token route defaults to `copilot-developer-cli`, the device sign-in
+    /// to `vscode-chat`; an `integration_id` the options set is kept on a
+    /// token route, the device sign-in's default value included, and is
+    /// still validated as a header value.
+    #[test]
+    fn token_routes_default_to_the_cli_integration_id() {
+        let token_default = |options: serde_json::Value| {
+            CopilotBackendConfig::from_token_options(&options)
+                .expect("valid token route options")
+                .integration_id
+        };
+        assert_eq!(
+            token_default(serde_json::Value::Null),
+            "copilot-developer-cli"
+        );
+        assert_eq!(
+            token_default(serde_json::json!({"editor_version": "vscode/1.200.0"})),
+            "copilot-developer-cli"
+        );
+        assert_eq!(
+            token_default(serde_json::json!({"integration_id": "enterprise-approved"})),
+            "enterprise-approved"
+        );
+        assert_eq!(
+            token_default(serde_json::json!({"integration_id": "vscode-chat"})),
+            "vscode-chat"
+        );
+        assert_eq!(
+            CopilotBackendConfig::from_options(&serde_json::Value::Null)
+                .expect("valid device route options")
+                .integration_id,
+            "vscode-chat"
+        );
+        let other_fields = CopilotBackendConfig::from_token_options(&serde_json::json!({
+            "editor_version": "vscode/1.200.0"
+        }))
+        .expect("valid token route options");
+        assert_eq!(other_fields.editor_version, "vscode/1.200.0");
+        assert!(matches!(
+            CopilotBackendConfig::from_token_options(&serde_json::json!({"integration_id": " "})),
+            Err(CopilotProtocolError::InvalidBackendOptions(_))
+        ));
+    }
+
+    #[test]
+    fn every_route_names_its_operator_token_method() {
+        for route in CopilotProviderRoute::ALL {
+            assert_eq!(route.token_auth_method(), "github_copilot_token");
+            assert_ne!(route.token_auth_method(), route.auth_method());
+        }
+    }
+
+    /// Classification reads the documented prefix only: no length or
+    /// character-set rule, so a long stateless installation token is still an
+    /// installation token.
+    #[cfg(all(feature = "oauth", not(target_arch = "wasm32")))]
+    #[test]
+    fn github_token_kind_is_read_from_the_documented_prefix() {
+        for (token, expected) in [
+            ("ghp_classic", GitHubTokenKind::ClassicPersonalAccessToken),
+            ("ghs_installation", GitHubTokenKind::Installation),
+            ("github_pat_fine_grained", GitHubTokenKind::User),
+            ("gho_oauth_app", GitHubTokenKind::User),
+            ("ghu_app_user", GitHubTokenKind::User),
+            ("unprefixed", GitHubTokenKind::User),
+        ] {
+            assert_eq!(GitHubTokenKind::classify(token), expected, "{token}");
+        }
+        let stateless = format!("ghs_{}", "a".repeat(516));
+        assert_eq!(
+            GitHubTokenKind::classify(&stateless),
+            GitHubTokenKind::Installation
+        );
+    }
+
+    #[cfg(all(feature = "oauth", not(target_arch = "wasm32")))]
+    #[test]
+    fn copilot_user_lookup_reads_identity_and_tolerates_extra_fields() {
+        assert_eq!(
+            copilot_user_url().expect("user url").as_str(),
+            "https://api.github.com/copilot_internal/user"
+        );
+        let user: CopilotUserEnvelope = serde_json::from_value(serde_json::json!({
+            "login": "svc-bot",
+            "copilot_plan": "business",
+            "chat_enabled": true,
+            "endpoints": {"api": "https://api.business.githubcopilot.com", "proxy": "x"},
+            "organization_list": []
+        }))
+        .expect("identity response");
+        assert_eq!(user.login.as_deref(), Some("svc-bot"));
+        assert_eq!(user.copilot_plan.as_deref(), Some("business"));
+        assert_eq!(user.chat_enabled, Some(true));
+        assert_eq!(
+            user.endpoints
+                .and_then(|endpoints| endpoints.api)
+                .as_deref(),
+            Some("https://api.business.githubcopilot.com")
+        );
+        let sparse: CopilotUserEnvelope =
+            serde_json::from_value(serde_json::json!({"endpoints": null})).expect("sparse");
+        assert_eq!(sparse, CopilotUserEnvelope::default());
+    }
+
+    #[cfg(all(feature = "oauth", not(target_arch = "wasm32")))]
+    #[test]
+    fn copilot_modes_follow_the_route_auth_method() {
+        use meerkat_core::provider_matrix::{AnthropicAuthMethod, GoogleAuthMethod};
+        use meerkat_llm_core::provider_runtime::NormalizedAuthMethod;
+        assert_eq!(
+            CopilotCredentialMode::for_auth_method(NormalizedAuthMethod::Anthropic(
+                AnthropicAuthMethod::GitHubCopilotOauth
+            )),
+            Some(CopilotCredentialMode::DeviceSignIn)
+        );
+        assert_eq!(
+            CopilotCredentialMode::for_auth_method(NormalizedAuthMethod::Google(
+                GoogleAuthMethod::GitHubCopilotToken
+            )),
+            Some(CopilotCredentialMode::OperatorToken)
+        );
+        assert_eq!(
+            CopilotCredentialMode::for_auth_method(NormalizedAuthMethod::Google(
+                GoogleAuthMethod::ApiKey
+            )),
+            None
+        );
+        assert_eq!(
+            CopilotCredentialMode::OperatorToken.persisted_auth_mode(),
+            meerkat_core::auth::PersistedAuthMode::StaticBearer
+        );
+        assert_eq!(
+            CopilotCredentialMode::OperatorToken.auth_method(),
+            "github_copilot_token"
+        );
     }
 
     #[test]

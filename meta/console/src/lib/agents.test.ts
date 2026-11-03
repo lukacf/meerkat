@@ -1,0 +1,484 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { agentDirectoryEntry, agentDisplayTitle, agentKindLabel, canonicalConsoleIdentity, normalizeAgents } from "./agents";
+
+test("normalizeAgents preserves identity-status summary fields without invention", () => {
+  const agents = normalizeAgents(
+    {
+      agent_sidebar: {
+        live_snapshot: {
+          agents: [
+            {
+              identity: " identity:luka ",
+              display_name: " Luka ",
+              role: " operator ",
+              state: " running ",
+              addressability: "addressable",
+              generation: 4,
+            // A 0.9.3 gateway still sends these; 0.9.4 has no such fields.
+            checkpoint_version: 8,
+            lease_healthy: true,
+            progress: {
+              run_state: "run_open",
+              in_flight_work: 1,
+              last_progress_at_ms: 1752300000000,
+              last_progress_event: "execution_advanced",
+              health: "wedged",
+            },
+            labels: { team: " console " },
+            model_capabilities: { image_input: true },
+          },
+        ],
+      },
+      },
+    },
+    [],
+  );
+
+  assert.equal(agents.length, 1);
+  const agent = agents[0];
+  assert.equal(agent?.identity, "identity:luka");
+  assert.equal(agent?.member_id, "identity:luka");
+  assert.equal(agent?.label, "Luka");
+  assert.equal(agent?.role, "operator");
+  assert.equal(agent?.state, "running");
+  assert.equal(agent?.addressability, "addressable");
+  assert.equal(agent?.generation, 4);
+  assert.ok(agent && !("checkpoint_version" in agent) && !("lease_healthy" in agent));
+  assert.equal(agent?.progress?.health, "wedged");
+  assert.equal(agent?.progress?.run_state, "run_open");
+  assert.deepEqual(agent?.labels, { team: "console" });
+});
+
+test("normalizeAgents falls back to identity_status rows when sidebar snapshot is absent", () => {
+  const agents = normalizeAgents(
+    {
+      identity_status: {
+        schema_version: "1",
+        refresh: { mode: "poll", interval_ms: 5000 },
+        rows: [
+          {
+            identity: " identity:luka ",
+            display_name: " Luka ",
+            role: " operator ",
+            state: " running ",
+            addressability: "addressable",
+            labels: { team: " console " },
+            generation: 4,
+            // 0.9.4 first sends the removed fields as null.
+            checkpoint_version: null,
+            lease_healthy: null,
+            model_capabilities: { image_input: true },
+          },
+        ],
+      },
+    },
+    [],
+  );
+
+  assert.equal(agents.length, 1);
+  const agent = agents[0];
+  assert.equal(agent?.identity, "identity:luka");
+  assert.equal(agent?.member_id, "identity-only:identity:luka");
+  assert.equal(agent?.label, "Luka");
+  assert.equal(agent?.role, "operator");
+  assert.equal(agent?.state, "running");
+  assert.equal(agent?.addressability, "addressable");
+  assert.equal(agent?.addressable, false);
+  assert.equal(agent?.generation, 4);
+  assert.ok(agent && !("checkpoint_version" in agent) && !("lease_healthy" in agent));
+  assert.deepEqual(agent?.labels, { team: "console" });
+  assert.deepEqual(agent?.model_capabilities, { image_input: true });
+  assert.deepEqual(agent?.affordances, { can_send_message: false });
+});
+
+test("normalizeAgents enriches sidebar snapshot rows with identity_status when both surfaces exist", () => {
+  const agents = normalizeAgents(
+    {
+      agent_sidebar: {
+        live_snapshot: {
+          agents: [
+            {
+              agent_id: "domain:billing",
+              member_id: "domain:billing",
+              label: "Billing",
+              kind: "module_agent",
+              state: "running",
+              addressable: true,
+            },
+          ],
+        },
+      },
+      identity_status: {
+        schema_version: "1",
+        refresh: { mode: "poll", interval_ms: 5000 },
+        rows: [
+          {
+            identity: "domain:billing",
+            display_name: "Billing",
+            role: "operator",
+            state: "running",
+            addressability: "addressable",
+            labels: { team: "finance" },
+            generation: 2,
+            model_capabilities: { image_input: true },
+          },
+        ],
+      },
+    },
+    [],
+  );
+
+  assert.equal(agents.length, 1);
+  const agent = agents[0];
+  assert.equal(agent?.identity, "domain:billing");
+  assert.equal(agent?.member_id, "domain:billing");
+  assert.equal(agent?.addressability, "addressable");
+  assert.equal(agent?.addressable, true);
+  assert.equal(agent?.generation, 2);
+  assert.ok(agent && !("checkpoint_version" in agent) && !("lease_healthy" in agent));
+  assert.deepEqual(agent?.labels, { team: "finance" });
+  assert.deepEqual(agent?.model_capabilities, { image_input: true });
+});
+
+test("normalizeAgents maps runtime member sidebar rows back to durable agent identity", () => {
+  const agents = normalizeAgents(
+    {
+      agent_sidebar: {
+        live_snapshot: {
+          agents: [
+            {
+              identity: "rt:channel:C0SMOKEOPS:0",
+              member_id: "rt:channel:C0SMOKEOPS:0",
+              label: "C0SMOKEOPS",
+              kind: "channel",
+              state: "active",
+              addressable: true,
+              labels: {
+                agent_identity: "channel:C0SMOKEOPS",
+                agent_type: "channel",
+              },
+            },
+          ],
+        },
+      },
+      identity_status: {
+        schema_version: "1",
+        rows: [
+          {
+            identity: "channel:C0SMOKEOPS",
+            display_name: "C0SMOKEOPS",
+            role: "domain",
+            state: "active",
+            addressability: "addressable",
+            labels: {
+              agent_identity: "channel:C0SMOKEOPS",
+              agent_type: "channel",
+            },
+          },
+        ],
+      },
+    },
+    [],
+  );
+
+  assert.equal(agents.length, 1);
+  const agent = agents[0];
+  assert.equal(agent?.identity, "channel:C0SMOKEOPS");
+  assert.equal(agent?.member_id, "rt:channel:C0SMOKEOPS:0");
+  assert.equal(agent?.agent_id, "channel:C0SMOKEOPS");
+});
+
+test("canonicalConsoleIdentity maps runtime/member aliases back to durable chat identity", () => {
+  const agents = normalizeAgents(
+    {
+      agent_sidebar: {
+        live_snapshot: {
+          agents: [
+            {
+              identity: "rt:deep-investigator:0",
+              agent_id: "deep-investigator",
+              member_id: "rt:deep-investigator:0",
+              label: "Deep Investigator",
+              role: "deep-investigator",
+              state: "active",
+              addressable: true,
+              labels: {
+                agent_identity: "deep-investigator:singleton",
+              },
+            },
+          ],
+        },
+      },
+      identity_status: {
+        schema_version: "1",
+        rows: [
+          {
+            identity: "deep-investigator:singleton",
+            display_name: "Deep Investigator",
+            role: "deep-investigator",
+            state: "active",
+            addressability: "addressable",
+          },
+        ],
+      },
+    },
+    [],
+  );
+
+  assert.equal(
+    canonicalConsoleIdentity("deep-investigator", agents),
+    "deep-investigator:singleton",
+  );
+  assert.equal(
+    canonicalConsoleIdentity("rt:deep-investigator:0", agents),
+    "deep-investigator:singleton",
+  );
+  assert.equal(
+    canonicalConsoleIdentity("deep-investigator:singleton", agents),
+    "deep-investigator:singleton",
+  );
+  assert.equal(canonicalConsoleIdentity("unknown-agent", agents), "unknown-agent");
+});
+
+test("normalizeAgents appends live identities missing from the sidebar snapshot", () => {
+  const agents = normalizeAgents(
+    {
+      agent_sidebar: {
+        live_snapshot: {
+          agents: [
+            {
+              identity: "full-tools-worker-1",
+              member_id: "full-tools-worker-1",
+              label: "full-tools-worker-1",
+              role: "full-tools-worker",
+              state: "active",
+              addressable: true,
+            },
+          ],
+        },
+      },
+      identity_status: {
+        schema_version: "1",
+        rows: [
+          {
+            identity: "full-tools-worker-1",
+            role: "full-tools-worker",
+            state: "active",
+            addressability: "addressable",
+            labels: {},
+          },
+          {
+            identity: "sub-worker-1",
+            role: "identity",
+            state: "active",
+            addressability: "addressable",
+            labels: {},
+          },
+        ],
+      },
+    },
+    [],
+  );
+
+  assert.equal(agents.length, 2);
+  const subWorker = agents.find((agent) => agent.identity === "sub-worker-1");
+  assert.equal(subWorker?.member_id, "sub-worker-1");
+  assert.equal(subWorker?.addressable, true);
+  assert.deepEqual(subWorker?.affordances, { can_send_message: true });
+});
+
+test("normalizeAgents carries last activity from the sidebar row, else from the identity status row", () => {
+  const status = (identity: string, last_activity_ms?: number) => ({
+    identity,
+    state: "active",
+    addressability: "addressable",
+    labels: {},
+    ...(last_activity_ms === undefined ? {} : { last_activity_ms }),
+  });
+  const withSidebar = normalizeAgents(
+    {
+      agent_sidebar: {
+        live_snapshot: {
+          agents: [
+            { identity: "router:main", member_id: "router:main", label: "Router", state: "active", last_activity_ms: 300 },
+            { identity: "domain:delivery", member_id: "domain:delivery", label: "Delivery", state: "active" },
+          ],
+        },
+      },
+      identity_status: {
+        schema_version: "1",
+        rows: [status("router:main", 100), status("domain:delivery", 200), status("sub-worker", 50)],
+      },
+    },
+    [],
+  );
+  const at = (agents: ReturnType<typeof normalizeAgents>, identity: string) =>
+    agents.find((agent) => agent.identity === identity)?.last_activity_ms;
+  assert.equal(at(withSidebar, "router:main"), 300);
+  assert.equal(at(withSidebar, "domain:delivery"), 200);
+  assert.equal(at(withSidebar, "sub-worker"), 50);
+
+  const statusOnly = normalizeAgents(
+    { identity_status: { schema_version: "1", rows: [status("router:main", 100), status("domain:delivery")] } },
+    [],
+  );
+  assert.equal(at(statusOnly, "router:main"), 100);
+  assert.equal(statusOnly.some((agent) => agent.identity === "domain:delivery" && "last_activity_ms" in agent), false);
+});
+
+test("normalizeAgents distinguishes explicit quiet phase from missing or invalid activity", () => {
+  const phases = [null, undefined, "waiting", "tool-executing", "generating", "thinking"];
+  const agents = normalizeAgents({ agent_sidebar: { live_snapshot: { agents: phases.map((phase, index) => ({
+    identity: `agent-${index}`, ...(phase === undefined ? {} : { response_phase: phase }),
+  })) } } } as never, []);
+  assert.equal(agents[0].response_phase, null);
+  assert.equal(Object.hasOwn(agents[1], "response_phase"), false);
+  assert.equal(agents[2].response_phase, "waiting");
+  assert.equal(agents[3].response_phase, "tool-executing");
+  assert.equal(agents[4].response_phase, "generating");
+  assert.equal(Object.hasOwn(agents[5], "response_phase"), false);
+});
+
+test("normalizeAgents carries the unobserved marker of a pending sidebar row", () => {
+  const unobserved = { reason: "refresh_pending", fields: ["state", "role", "labels"] };
+  const agents = normalizeAgents(
+    {
+      agent_sidebar: {
+        live_snapshot: {
+          agents: [
+            {
+              agent_id: "voice-keeper",
+              member_id: "voice-keeper",
+              identity: "voice-keeper",
+              label: "voice-keeper",
+              kind: "mob_agent",
+              state: "unknown",
+              session_id: "successor-session",
+              labels: { agent_identity: "voice-keeper" },
+              addressable: false,
+              affordances: { addressable: false, can_send_message: false, can_retire: false, can_respawn: true },
+              unobserved,
+            },
+            {
+              agent_id: "other-keeper",
+              member_id: "other-keeper",
+              identity: "other-keeper",
+              label: "other-keeper",
+              kind: "mob_agent",
+              state: "active",
+            },
+          ],
+        },
+      },
+      identity_status: {
+        schema_version: "1",
+        refresh: { mode: "poll", interval_ms: 5000 },
+        rows: [
+          {
+            identity: "voice-keeper",
+            state: "unknown",
+            addressability: "internal_only",
+            labels: { agent_identity: "voice-keeper" },
+            unobserved,
+          },
+        ],
+      },
+    },
+    [],
+  );
+
+  assert.equal(agents.length, 2);
+  assert.deepEqual(agents[0]?.unobserved, unobserved);
+  assert.equal(agents[0]?.session_id, "successor-session");
+  assert.equal(agents[0]?.state, "unknown");
+  assert.equal(agents[0]?.affordances?.can_send_message, false);
+  assert.equal(agents[1]?.unobserved, undefined);
+});
+
+test("normalizeAgents carries a side chat's source from the experience row", () => {
+  const agents = normalizeAgents(
+    {
+      agent_sidebar: {
+        live_snapshot: {
+          agents: [
+            { agent_id: "alpha", member_id: "alpha", identity: "alpha", label: "Alpha", kind: "mob_agent" },
+            {
+              agent_id: "alpha-side-ab12",
+              member_id: "alpha-side-ab12",
+              identity: "alpha-side-ab12",
+              label: "Alpha (side chat)",
+              kind: "mob_agent",
+              side_chat_of: " alpha ",
+            },
+            { agent_id: "beta", member_id: "beta", identity: "beta", label: "Beta", kind: "mob_agent", side_chat_of: " " },
+          ],
+        },
+      },
+    },
+    [],
+  );
+
+  assert.equal(agents.find((agent) => agent.member_id === "alpha-side-ab12")?.side_chat_of, "alpha");
+  assert.equal("side_chat_of" in (agents.find((agent) => agent.member_id === "alpha") ?? {}), false);
+  assert.equal("side_chat_of" in (agents.find((agent) => agent.member_id === "beta") ?? {}), false);
+});
+
+test("agentDisplayTitle keeps a display name and gives an agent without one a human name", () => {
+  const agent = (label: string, extra: Record<string, unknown> = {}) => ({
+    agent_id: "router:main",
+    member_id: "router:main",
+    identity: "router:main",
+    label,
+    ...extra,
+  });
+
+  assert.equal(agentDisplayTitle(agent("Router")), "Router");
+  assert.equal(agentDisplayTitle(agent("router:main")), "Router main", "a readable identity reads as words");
+  assert.equal(agentDisplayTitle({ agent_id: "w", member_id: "worker-2024", label: "worker-2024" }), "Worker 2024");
+  assert.equal(agentDisplayTitle({ agent_id: "w", member_id: "w", identity: "worker2024", label: "worker2024" }), "Worker2024");
+  assert.equal(
+    agentDisplayTitle({
+      agent_id: "a",
+      member_id: "3f2a9c1e-8b7d-4c6e-9f0a-1b2c3d4e5f60",
+      identity: "3f2a9c1e-8b7d-4c6e-9f0a-1b2c3d4e5f60",
+      label: "3f2a9c1e-8b7d-4c6e-9f0a-1b2c3d4e5f60",
+      role: "code_reviewer",
+    }),
+    "Code reviewer 4e5f60",
+    "a generated id reads as the kind and a short suffix",
+  );
+  assert.equal(
+    agentDisplayTitle({ agent_id: "x", member_id: "x", identity: "agent:01HXYZ8Q9ABCDEF", label: "agent:01HXYZ8Q9ABCDEF" }),
+    "Agent abcdef",
+  );
+  assert.equal(
+    agentDisplayTitle({ agent_id: "x", member_id: "x", identity: "x", label: "x", labels: { agent_identity: "router:main" } }),
+    "X",
+  );
+  assert.equal(agentKindLabel({ role: "", group: "domain_agents" }), "Domain agents");
+});
+
+test("agentDisplayTitle drops the identity:, agent: and member: prefixes before wording", () => {
+  const nameless = (key: string) => ({ agent_id: key, member_id: key, identity: key, label: key });
+  assert.equal(agentDisplayTitle(nameless("identity:queue-agent")), "Queue agent");
+  assert.equal(agentDisplayTitle(nameless("member:release-manager")), "Release manager");
+  assert.equal(agentDisplayTitle(nameless("agent:router:main")), "Router main");
+  assert.equal(agentDisplayTitle({ ...nameless("agent:01HXYZ8Q9ABCDEF"), role: "reviewer" }), "Reviewer abcdef");
+  assert.equal(agentDisplayTitle({ ...nameless("identity:queue-agent"), label: "Front Desk" }), "Front Desk");
+});
+
+test("the panels' name directory names an agent the way the sidebar does", () => {
+  const unnamed = { agent_id: "router:main", member_id: "router:main", identity: "router:main", session_id: "session-1", label: "router:main", role: "router" };
+  assert.deepEqual(agentDirectoryEntry(unnamed), {
+    id: "router:main",
+    label: "Router main",
+    role: "router",
+    aliases: ["router:main", "router:main", "session-1"],
+  });
+  const generated = { agent_id: "a", member_id: "agent:01HXYZ8Q9ABCDEF", identity: "agent:01HXYZ8Q9ABCDEF", label: "agent:01HXYZ8Q9ABCDEF", role: "reviewer" };
+  assert.equal(agentDirectoryEntry(generated).label, agentDisplayTitle(generated));
+  assert.equal(agentDirectoryEntry(generated).label, "Reviewer abcdef");
+  assert.equal(agentDirectoryEntry({ ...unnamed, label: "Front Desk" }).label, "Front Desk");
+});

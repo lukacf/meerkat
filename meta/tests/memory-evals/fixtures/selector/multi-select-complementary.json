@@ -1,0 +1,40 @@
+{
+  "name": "multi-select-complementary",
+  "manifest": [
+    {
+      "id": "mem-070",
+      "kind": "Procedure",
+      "title": "Release cut runs through cargo-release on a rel- branch",
+      "description": "Matters when cutting a release: cargo-release refuses detached HEAD, so create a rel-<version> branch first, then push commit and tag manually.",
+      "age_days": 3,
+      "rank": 10
+    },
+    {
+      "id": "mem-071",
+      "kind": "Gotcha",
+      "title": "Release tag push must NOT re-publish registries",
+      "description": "Matters when re-running any release workflow: dispatching with release_tag set skips registry publish; pushing a duplicate tag version to crates.io fails the whole job.",
+      "age_days": 5,
+      "rank": 9
+    },
+    {
+      "id": "mem-072",
+      "kind": "Fact",
+      "title": "Console dark theme uses tokens.css",
+      "description": "Matters when changing console styling: colors come from tokens.css variables, never inline hex.",
+      "age_days": 40,
+      "rank": 4
+    }
+  ],
+  "turn_text": "Cut the next release of the crate and make sure the registries end up correct.",
+  "expected": {
+    "must_select": [
+      "mem-070",
+      "mem-071"
+    ],
+    "must_not_select": [
+      "mem-072"
+    ]
+  },
+  "notes": "Complementary multi-select: the procedure AND the gotcha are both load-bearing for a correct release; under-selection (picking only one) is the failure mode this guards."
+}

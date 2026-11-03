@@ -346,7 +346,7 @@ fn checked_fact_delta(after: u64, before: u64, label: &str) -> u64 {
 }
 
 async fn wait_for_requests(capture: &CaptureClient, at_least: usize, what: &str) {
-    let deadline = Instant::now() + Duration::from_secs(240);
+    let deadline = Instant::now() + Duration::from_mins(4);
     while capture.count() < at_least {
         assert!(
             Instant::now() < deadline,
@@ -370,7 +370,7 @@ async fn active_member_count(handle: &MobHandle) -> usize {
 /// boundary commits are finished (and their CPU is attributed) before a
 /// measurement window closes or the next one opens.
 async fn quiesce(what: &str) {
-    let deadline = Instant::now() + Duration::from_secs(240);
+    let deadline = Instant::now() + Duration::from_mins(4);
     loop {
         let probe_start = process_cpu_time();
         sleep(Duration::from_secs(2)).await;
@@ -596,7 +596,7 @@ async fn run_turn_latency_harness() -> (TurnCost, TurnCost) {
         .await
         .expect("spawn large worker");
 
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     while active_member_count(&handle).await < MEMBER_IDS.len() {
         assert!(
             Instant::now() < deadline,
@@ -677,7 +677,7 @@ async fn run_turn_latency_harness() -> (TurnCost, TurnCost) {
 
     // The defect class is size-proportional durable-boundary work, so the
     // large document must actually be durable before anything is measured.
-    let deadline = Instant::now() + Duration::from_secs(240);
+    let deadline = Instant::now() + Duration::from_mins(4);
     let grown_store_bytes = loop {
         let bytes = dir_size_bytes(&stores_root);
         if bytes >= baseline_store_bytes + MIN_LARGE_GROWTH_BYTES {

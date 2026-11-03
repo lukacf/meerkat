@@ -391,6 +391,13 @@ pub enum AgentErrorReason {
         )]
         detail: Option<crate::types::ProviderStopDetail>,
     },
+    /// The session's build refused its scoped tool grant gate
+    /// ([`AgentError::ToolGrantGateRefused`]): no grant could honour it. A
+    /// turn whose build was refused carries it, so a surface answers the
+    /// turn with the refusal it answers the session error with.
+    ToolGrantGateRefused {
+        refusal: crate::tool_grant::GrantGateRefusal,
+    },
 }
 
 impl AgentErrorReason {
@@ -511,6 +518,9 @@ impl AgentErrorReason {
                 stop: *stop,
                 detail: detail.as_deref().cloned(),
             }),
+            AgentError::ToolGrantGateRefused(refusal) => Some(Self::ToolGrantGateRefused {
+                refusal: (**refusal).clone(),
+            }),
             _ => None,
         }
     }
@@ -553,7 +563,8 @@ impl From<&AgentError> for AgentErrorClass {
             AgentError::BuildError(_)
             | AgentError::SessionIdentityInUse(_)
             | AgentError::DeclaredToolUnknown(_)
-            | AgentError::ToolArtifactRefused(_) => Self::Build,
+            | AgentError::ToolArtifactRefused(_)
+            | AgentError::ToolGrantGateRefused(_) => Self::Build,
             AgentError::AuthReauthRequired { .. } => Self::Auth,
             AgentError::CallbackPending { .. } | AgentError::CallbackBatchPending { .. } => {
                 Self::CallbackPending
@@ -5563,6 +5574,32 @@ mod tests {
                 )),
             }
         );
+    }
+
+    /// A refused scoped tool grant gate is a typed reason: the agent error's
+    /// report carries it, and its wire form is the refusal under the
+    /// `tool_grant_gate_refused` tag, which reads back to the same reason.
+    #[test]
+    fn refused_grant_gate_reason_is_typed_on_the_wire() {
+        let refusal = crate::tool_grant::GrantGateRefusal::UnknownFamily {
+            family: "shel".to_string(),
+        };
+        let error = crate::error::AgentError::ToolGrantGateRefused(Box::new(refusal.clone()));
+        let reason = AgentErrorReason::ToolGrantGateRefused { refusal };
+        let report = AgentErrorReport::from_agent_error(&error);
+        assert_eq!(report.class, AgentErrorClass::Build);
+        assert_eq!(report.reason, Some(reason.clone()));
+
+        let wire = serde_json::to_value(&reason).expect("serialize");
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "reason_type": "tool_grant_gate_refused",
+                "refusal": {"kind": "unknown_family", "family": "shel"},
+            })
+        );
+        let decoded: AgentErrorReason = serde_json::from_value(wire).expect("decode");
+        assert_eq!(decoded, reason);
     }
 
     #[test]

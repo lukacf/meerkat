@@ -20,7 +20,7 @@ use std::sync::atomic::AtomicUsize;
 use tokio::sync::Semaphore;
 
 /// Bound on one step of a row: it only turns a hang into a failure.
-const DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+const DEADLINE: std::time::Duration = std::time::Duration::from_mins(1);
 /// The realm every row opens.
 const REALM: &str = "cli-committed-reads";
 /// The model id every row's session runs.

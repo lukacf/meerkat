@@ -194,7 +194,7 @@ async fn fixture_with(
     let persistence = ProviderAuthPersistence::new(store.clone(), coordinator);
     let lifecycle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
     let flows = Arc::new(RuntimeOAuthFlowHandle::new_with_auth_lease(
-        std::time::Duration::from_secs(300),
+        std::time::Duration::from_mins(5),
         lifecycle,
     ));
     let subjects = Arc::new(Mutex::new(HashMap::new()));
@@ -393,7 +393,7 @@ async fn cold_owner_read_preserves_credential(read_status: bool) {
         LeaseKey::from_credential_identity(&AuthCredentialIdentity::Account(work.clone()));
     assert!(!lifecycle.snapshot(&lease_key).credential_present);
     let flows = Arc::new(RuntimeOAuthFlowHandle::new_with_auth_lease(
-        std::time::Duration::from_secs(300),
+        std::time::Duration::from_mins(5),
         lifecycle,
     ));
     let cold = ConnectorOAuthAuthority::with_http(
@@ -465,7 +465,7 @@ async fn cold_owner_expiring_bearer_refreshes_once_and_preserves_account_and_sco
         LeaseKey::from_credential_identity(&AuthCredentialIdentity::Account(work.clone()));
     assert!(!lifecycle.snapshot(&lease_key).credential_present);
     let flows = Arc::new(RuntimeOAuthFlowHandle::new_with_auth_lease(
-        std::time::Duration::from_secs(300),
+        std::time::Duration::from_mins(5),
         lifecycle.clone(),
     ));
     let cold = ConnectorOAuthAuthority::with_http(
@@ -965,7 +965,7 @@ async fn a_refused_rehydration_read_keeps_its_typed_cause() {
     // A fresh process-local owner has no lifecycle: its admission reads the
     // stored credential, then rehydrates it with a second read.
     let flows = Arc::new(RuntimeOAuthFlowHandle::new_with_auth_lease(
-        std::time::Duration::from_secs(300),
+        std::time::Duration::from_mins(5),
         Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new()),
     ));
     let cold = ConnectorOAuthAuthority::with_http(

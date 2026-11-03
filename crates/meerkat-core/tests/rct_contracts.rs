@@ -123,6 +123,7 @@ fn test_resume_metadata_contract() -> Result<(), Box<dyn std::error::Error>> {
             spawn_tool_access_policy: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             active_skills: None,
+            grant_gated: Default::default(),
         },
         keep_alive: true,
         comms_name: Some("agent-a".to_string()),

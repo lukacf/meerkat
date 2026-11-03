@@ -1,0 +1,68 @@
+[package]
+name = "toolkit-package"
+version = "0.9.4"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[package.metadata.release]
+# Core's `cargo release` (shared version, tag v{{version}}) must never bump
+# this crate: its product releases on a version line of its own
+# (ci/products.json).
+release = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+todo = "deny"
+unimplemented = "deny"
+
+[features]
+local-artifacts = ["dep:rustix", "dep:zip", "dep:flate2"]
+local-recipes = ["dep:toolkit-store", "dep:tokio"]
+
+[[bin]]
+name = "toolkit-local-recipes"
+path = "src/bin/toolkit-local-recipes.rs"
+required-features = ["local-recipes"]
+
+[[bin]]
+name = "toolkit-node-plan"
+path = "src/bin/toolkit-node-plan.rs"
+
+[[bin]]
+name = "toolkit-python-plan"
+path = "src/bin/toolkit-python-plan.rs"
+
+[[bin]]
+name = "toolkit-mcpb-install"
+path = "src/bin/toolkit-mcpb-install.rs"
+required-features = ["local-artifacts"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_path_to_error = "=0.1.20"
+thiserror.workspace = true
+sha2.workspace = true
+hex = "0.4"
+url = { workspace = true, features = ["serde"] }
+cap-std = "4.0.3"
+toolkit-store = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+rustix = { version = "=1.1.5", features = ["fs"], optional = true }
+zip = { version = "=2.4.2", default-features = false, features = ["deflate-flate2", "flate2"], optional = true }
+flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true
+async-trait.workspace = true
+rusqlite.workspace = true
+tokio.workspace = true

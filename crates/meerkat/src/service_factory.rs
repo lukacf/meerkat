@@ -111,6 +111,9 @@ fn build_agent_error_to_session_error(
         BuildAgentError::DeclaredToolUnknown(unknown) => SessionError::Agent(
             meerkat_core::error::AgentError::DeclaredToolUnknown(unknown),
         ),
+        BuildAgentError::GrantGate(refusal) => SessionError::Agent(
+            meerkat_core::error::AgentError::ToolGrantGateRefused(Box::new(refusal)),
+        ),
         other => SessionError::Agent(meerkat_core::error::AgentError::BuildError(
             other.to_string(),
         )),
@@ -560,6 +563,62 @@ impl SessionAgent for FactoryAgent {
     ) -> Result<meerkat_core::InstructionActivationMutation, meerkat_core::InstructionActivationError>
     {
         self.agent.session_mut().activate_instruction(request)
+    }
+
+    fn set_session_instruction_control(
+        &mut self,
+        write: meerkat_core::SessionInstructionWrite,
+    ) -> Result<
+        meerkat_core::SessionInstructionReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        self.agent
+            .session_mut()
+            .set_session_instruction(write)
+            .map_err(meerkat_core::service::SessionInstructionError::from)
+    }
+
+    fn record_instruction_target_control(
+        &mut self,
+        record: meerkat_core::InstructionTargetRecord,
+    ) -> Result<
+        meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        // A mob's delivery: a target the session's own host wrote before
+        // the mob seated it (an attach) is the mob's from its first delivery.
+        self.agent
+            .session_mut()
+            .record_instruction_target(record)
+            .map_err(meerkat_core::service::SessionInstructionError::from)
+    }
+
+    fn release_instruction_target_control(
+        &mut self,
+        mob_id: &str,
+    ) -> Result<
+        meerkat_core::InstructionReleaseDisposition,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        self.agent
+            .session_mut()
+            .release_instruction_target(mob_id)
+            .map_err(meerkat_core::service::SessionInstructionError::from)
+    }
+
+    fn apply_run_start_operator_instructions(
+        &mut self,
+        run_start: meerkat_core::InstructionRunStart,
+        run_id: Option<meerkat_core::lifecycle::RunId>,
+    ) -> Result<meerkat_core::RunStartInstructionOutcome, meerkat_core::error::AgentError> {
+        self.agent
+            .apply_run_start_operator_instructions(run_start, run_id)
+    }
+
+    fn conclude_run_start_operator_instructions(
+        &mut self,
+    ) -> Result<bool, meerkat_core::error::AgentError> {
+        self.agent.conclude_run_start_operator_instructions()
     }
 
     fn stage_external_tool_filter(
@@ -1736,6 +1795,11 @@ impl meerkat_session::McpAttemptGuardSource for FactoryAgentBuilder {
 impl SessionAgentBuilder for FactoryAgentBuilder {
     type Agent = FactoryAgent;
 
+    /// The factory's root ([`AgentFactory::session_comms_identity_root`]).
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        self.factory.session_comms_identity_root()
+    }
+
     /// A build resolves an explicit binding on its realm's chain and records
     /// it stamped with the realm that declares it; this is that resolution,
     /// on the config a build would read.
@@ -1826,6 +1890,17 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             .ok()
             .and_then(|registry| registry.profile_for_provider(identity.provider, &identity.model))
             .map(|profile| profile.inline_video)
+    }
+
+    async fn instruction_lowering_for_identity(
+        &self,
+        identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Option<meerkat_core::InstructionLowering> {
+        // As for inline video: a config that cannot be read freshly answers
+        // "unknown", never a lowering from a stale snapshot.
+        let config = self.resolve_config().await.ok()?;
+        let registry = config.model_registry(meerkat_models::canonical()).ok()?;
+        Some(registry.instruction_lowering_for_identity(&config, identity))
     }
 
     async fn build_agent(
@@ -2262,6 +2337,39 @@ mod tests {
         );
 
         assert!(error.is_build_llm_identity_unresolvable());
+    }
+
+    /// A refused grant gate stays typed on the session error path: the agent
+    /// error carries the refusal, and the error's structured data names it.
+    #[test]
+    fn grant_gate_build_failure_keeps_its_typed_refusal() {
+        let error = build_agent_error_to_session_error(
+            BuildAgentError::GrantGate(crate::GrantGateBuildError::FamilyNotMounted {
+                family: "comms".to_string(),
+            }),
+            Some(Provider::OpenAI),
+            None,
+        );
+
+        assert!(
+            matches!(
+                &error,
+                SessionError::Agent(meerkat_core::error::AgentError::ToolGrantGateRefused(refusal))
+                    if matches!(
+                        refusal.as_ref(),
+                        meerkat_core::tool_grant::GrantGateRefusal::FamilyNotMounted { family }
+                            if family == "comms"
+                    )
+            ),
+            "got: {error:?}"
+        );
+        assert_eq!(
+            error.structured_data(),
+            Some(serde_json::json!({
+                "kind": "tool_grant_gate_refused",
+                "tool_grant_gate_refusal": {"kind": "family_not_mounted", "family": "comms"},
+            }))
+        );
     }
 
     #[test]
@@ -3012,6 +3120,138 @@ mod tests {
             durable
         );
 
+        Ok(())
+    }
+
+    /// The session service's own hot swap, the path every live model change
+    /// passes (a direct `SessionService` caller included), refuses a target
+    /// that cannot carry the operator-instruction entry rows the session
+    /// wrote itself where they stand. The session's entry stands after a
+    /// conversation row: a target that lowers System rows only in the
+    /// leading prefix cannot carry it, nor can a wire that carries one
+    /// leading System row. The refusal is typed and changes nothing; a
+    /// target that lowers entries anywhere is admitted.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_direct_hot_swap_is_refused_where_the_target_cannot_carry_the_sessions_own_entries()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let mut builder = FactoryAgentBuilder::new(
+            AgentFactory::new(temp.path().join("sessions")),
+            Config::default(),
+        );
+        builder.default_llm_client = Some(Arc::new(MockLlmClient::default()));
+        let service = EphemeralSessionService::new(builder, 10);
+        // A session the factory built and persisted on `gpt-5.5`: its durable
+        // session metadata names that identity, so the resumed build accepts
+        // it.
+        let mut durable_session = Session::new();
+        durable_session
+            .set_session_metadata(meerkat_core::SessionMetadata {
+                model_fallback: None,
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: "gpt-5.5".to_string(),
+                max_tokens: 8_192,
+                structured_output_retries: 2,
+                provider: Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: meerkat_core::SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                auth_binding: None,
+                mob_member_binding: None,
+            })
+            .map_err(|err| format!("durable session metadata: {err}"))?;
+        durable_session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("Hello"),
+        ));
+        durable_session.append_operator_instruction_activation_for_test(
+            "app.example",
+            "tone",
+            1,
+            "Answer formally.",
+        )?;
+        let created = service
+            .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "gpt-5.5".to_string(),
+                prompt: "defer the next turn".to_string().into(),
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+                max_tokens: None,
+                event_tx: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(durable_session),
+                    ..SessionBuildOptions::default()
+                }),
+                labels: None,
+            })
+            .await
+            .map_err(|err| err.to_string())?;
+        let durable = service
+            .live_session_llm_identity(&created.session_id)
+            .await
+            .map_err(|err| err.to_string())?;
+        let swap = |lowering: meerkat_core::InstructionLowering| {
+            let client = meerkat_client::LlmClientAdapter::try_for_provider_identity(
+                Arc::new(MockLlmClient::default()),
+                durable.model.clone(),
+                durable.provider,
+            )
+            .map_err(|err| err.to_string())?;
+            let policy = meerkat_core::SessionLlmRequestPolicy {
+                model: durable.model.clone(),
+                credential_identity: None,
+                provider_params: durable.provider_params.clone(),
+                provider_tool_defaults: None,
+                provider_native_tools: meerkat_core::ProviderNativeToolPolicy::Inherit,
+                operator_instruction_lowering: lowering,
+            };
+            Ok::<_, String>((
+                Arc::new(client) as Arc<dyn meerkat_core::AgentLlmClient>,
+                policy,
+            ))
+        };
+
+        for lowering in [
+            meerkat_core::InstructionLowering::LeadingPrefixOnly,
+            meerkat_core::InstructionLowering::Unavailable,
+        ] {
+            let (client, policy) = swap(lowering)?;
+            match service
+                .hot_swap_session_llm_identity(&created.session_id, client, durable.clone(), policy)
+                .await
+            {
+                Err(SessionError::Agent(meerkat_core::error::AgentError::ConfigError(message)))
+                    if message.contains("cannot represent the operator-instruction entries") => {}
+                other => {
+                    return Err(format!(
+                        "a {lowering:?} target must be refused typed, got {other:?}"
+                    ));
+                }
+            }
+            assert_eq!(
+                service
+                    .live_session_llm_identity(&created.session_id)
+                    .await
+                    .map_err(|err| err.to_string())?,
+                durable,
+                "a refused swap changes nothing"
+            );
+        }
+
+        let (client, policy) = swap(meerkat_core::InstructionLowering::MidConversation)?;
+        service
+            .hot_swap_session_llm_identity(&created.session_id, client, durable.clone(), policy)
+            .await
+            .map_err(|err| format!("a target that lowers entries anywhere is admitted: {err}"))?;
         Ok(())
     }
 

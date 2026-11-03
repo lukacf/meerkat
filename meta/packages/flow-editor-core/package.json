@@ -1,0 +1,11 @@
+{
+  "name": "@flow-editor-core",
+  "private": true,
+  "version": "0.0.0",
+  "exports": {
+    ".": "./src/index.ts",
+    "./shared": "./src/shared/index.ts",
+    "./rpc": "./src/rpc/index.ts",
+    "./facade": "./src/controller-facade.ts"
+  }
+}

@@ -708,6 +708,40 @@ pub struct FailingOnceSessionService {
     withheld_durable_tails: std::sync::Mutex<Option<meerkat_core::service::DurableResumeHold>>,
     fail_durable_tail_settles: AtomicBool,
     durable_tail_settle_failed: AtomicBool,
+    session_load_faults:
+        std::sync::Mutex<std::collections::BTreeMap<meerkat_core::SessionId, SessionLoadFault>>,
+    session_loads: std::sync::Mutex<std::collections::BTreeMap<meerkat_core::SessionId, u64>>,
+}
+
+/// What [`FailingOnceSessionService::fail_session_loads`] answers for every
+/// persisted read of one session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionLoadFault {
+    /// The store cannot serve the read now (a session store error the
+    /// store-failure split classes unavailable).
+    Unavailable,
+    /// The session's stored state does not decode (one it classes
+    /// malformed).
+    Unreadable,
+    /// The session is not persisted (its archive ran): the read answers
+    /// none.
+    Absent,
+}
+
+impl SessionLoadFault {
+    fn answer(
+        self,
+        session_id: &meerkat_core::SessionId,
+    ) -> Result<Option<meerkat_core::Session>, meerkat_core::service::SessionError> {
+        let store = match self {
+            Self::Unavailable => meerkat_core::SessionStoreError::Internal(format!(
+                "injected: the session store cannot serve {session_id} now"
+            )),
+            Self::Unreadable => meerkat_core::SessionStoreError::Corrupted(session_id.clone()),
+            Self::Absent => return Ok(None),
+        };
+        Err(meerkat_core::service::SessionError::Store(Box::new(store)))
+    }
 }
 
 /// The build facts of one member create: one a fixture host's session
@@ -763,7 +797,55 @@ impl FailingOnceSessionService {
             withheld_durable_tails: std::sync::Mutex::new(None),
             fail_durable_tail_settles: AtomicBool::new(false),
             durable_tail_settle_failed: AtomicBool::new(false),
+            session_load_faults: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            session_loads: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         })
+    }
+
+    /// Answer every persisted read of `session_id` with `fault`'s typed
+    /// store failure, without reading, until [`Self::serve_session_loads`].
+    pub fn fail_session_loads(&self, session_id: meerkat_core::SessionId, fault: SessionLoadFault) {
+        self.session_load_faults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id, fault);
+    }
+
+    /// Serve every persisted read again.
+    pub fn serve_session_loads(&self) {
+        self.session_load_faults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    /// How many persisted reads of `session_id` this service received.
+    pub fn session_loads(&self, session_id: &meerkat_core::SessionId) -> u64 {
+        self.session_loads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Count one persisted read of `session_id`, and answer its injected
+    /// fault, if any.
+    fn session_load_fault(
+        &self,
+        session_id: &meerkat_core::SessionId,
+    ) -> Option<Result<Option<meerkat_core::Session>, meerkat_core::service::SessionError>> {
+        *self
+            .session_loads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(session_id.clone())
+            .or_default() += 1;
+        self.session_load_faults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .map(|fault| fault.answer(session_id))
     }
 
     /// Every member create received, in order.
@@ -990,6 +1072,10 @@ impl meerkat_core::service::SessionServiceHistoryExt for FailingOnceSessionServi
 
 #[async_trait::async_trait]
 impl meerkat_mob::MobSessionService for FailingOnceSessionService {
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_mob::MobSessionService::session_comms_identity_root(self.inner.as_ref())
+    }
+
     async fn fork_source_tools(
         &self,
         session_id: &meerkat_core::SessionId,
@@ -1347,6 +1433,9 @@ impl meerkat_mob::MobSessionService for FailingOnceSessionService {
         &self,
         session_id: &meerkat_core::SessionId,
     ) -> Result<Option<meerkat_core::Session>, meerkat_core::service::SessionError> {
+        if let Some(answer) = self.session_load_fault(session_id) {
+            return answer;
+        }
         self.inner.load_persisted_session(session_id).await
     }
 
@@ -1354,6 +1443,9 @@ impl meerkat_mob::MobSessionService for FailingOnceSessionService {
         &self,
         session_id: &meerkat_core::SessionId,
     ) -> Result<Option<meerkat_core::Session>, meerkat_core::service::SessionError> {
+        if let Some(answer) = self.session_load_fault(session_id) {
+            return answer;
+        }
         self.inner
             .load_persisted_session_tolerating_tail(session_id)
             .await
@@ -4118,6 +4210,12 @@ impl RecordingAgentBuilder {
 impl meerkat_session::SessionAgentBuilder for RecordingAgentBuilder {
     type Agent = <meerkat::FactoryAgentBuilder as meerkat_session::SessionAgentBuilder>::Agent;
 
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        <meerkat::FactoryAgentBuilder as meerkat_session::SessionAgentBuilder>::session_comms_identity_root(
+            &self.inner,
+        )
+    }
+
     async fn model_supports_inline_video(
         &self,
         identity: &meerkat_core::SessionLlmIdentity,
@@ -5624,7 +5722,7 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
-    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+    tokio::time::timeout(std::time::Duration::from_mins(1), async {
         loop {
             if predicate().await {
                 return;

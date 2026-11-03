@@ -56,7 +56,10 @@ impl OpenAiBackendKind {
                 OpenAiAuthMethod::ExternalChatGptTokens,
             ],
             Self::AzureOpenAi => &[OpenAiAuthMethod::AzureApiKey],
-            Self::Copilot => &[OpenAiAuthMethod::GitHubCopilotOauth],
+            Self::Copilot => &[
+                OpenAiAuthMethod::GitHubCopilotOauth,
+                OpenAiAuthMethod::GitHubCopilotToken,
+            ],
         }
     }
 
@@ -79,6 +82,18 @@ impl OpenAiBackendKind {
     /// that decision: the OpenAI client refuses such a row on this wire, and
     /// session capability resolution reads it from here.
     pub fn admits_mid_conversation_system_messages(self) -> bool {
+        !matches!(self, Self::ChatGptBackend)
+    }
+
+    /// Whether this backend's wire carries more than one System message in
+    /// the leading system prefix. The ChatGPT backend's single top-level
+    /// `instructions` string carries exactly one leading System row, the
+    /// session's prompt, and the OpenAI client refuses a second one there
+    /// even before any conversation row. The other backends carry each
+    /// leading System row as an input item of its own. Operator instructions
+    /// resolve their lowering from this fact: a wire that carries only the
+    /// prompt's row lowers no entry.
+    pub fn admits_additional_leading_system_messages(self) -> bool {
         !matches!(self, Self::ChatGptBackend)
     }
 
@@ -115,6 +130,41 @@ mod tests {
             assert_eq!(
                 kind.admits_mid_conversation_system_messages(),
                 *kind != OpenAiBackendKind::ChatGptBackend,
+                "{}",
+                kind.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_chatgpt_backend_refuses_additional_leading_system_messages() {
+        for kind in OpenAiBackendKind::ALL {
+            assert_eq!(
+                kind.admits_additional_leading_system_messages(),
+                *kind != OpenAiBackendKind::ChatGptBackend,
+                "{}",
+                kind.as_str()
+            );
+        }
+    }
+
+    /// The operator GitHub token authenticates the Copilot backend and no
+    /// other OpenAI backend.
+    #[test]
+    fn only_the_copilot_backend_accepts_the_operator_token_method() {
+        let token = OpenAiAuthMethod::parse("github_copilot_token");
+        assert!(
+            token.is_some_and(|method| OpenAiBackendKind::Copilot
+                .supported_auth_methods()
+                .contains(&method)),
+            "copilot must accept github_copilot_token"
+        );
+        for kind in OpenAiBackendKind::ALL
+            .iter()
+            .filter(|kind| **kind != OpenAiBackendKind::Copilot)
+        {
+            assert!(
+                token.is_none_or(|method| !kind.supported_auth_methods().contains(&method)),
                 "{}",
                 kind.as_str()
             );

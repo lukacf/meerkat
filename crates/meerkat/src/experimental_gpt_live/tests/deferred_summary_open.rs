@@ -1354,7 +1354,7 @@ async fn concurrent_open_with_a_turn_mid_flight_stays_body_free_and_summarizes_t
     env.store
         .set_gate(MaterializeGate::HoldExcept(tokio::task::try_id()));
     let (opened, elapsed, materializations) =
-        tokio::time::timeout(Duration::from_secs(60), env.open())
+        tokio::time::timeout(Duration::from_mins(1), env.open())
             .await
             .expect("the open never waits on the parked turn");
     assert!(
@@ -1537,7 +1537,7 @@ async fn canonical_open_with_a_turn_mid_flight_seeds_the_committed_boundary_and_
     // The turn stays held until the open has returned: an open that waited
     // for it could never complete.
     let (opened, _elapsed, _materializations) =
-        tokio::time::timeout(Duration::from_secs(60), env.open())
+        tokio::time::timeout(Duration::from_mins(1), env.open())
             .await
             .expect("the open never waits on the parked turn");
     assert!(!turn.is_finished(), "the turn is still in flight");
@@ -2484,7 +2484,7 @@ async fn reopen_with_a_turn_still_committing_seeds_the_retained_summary_up_to_th
     // boundary, and the turn stays parked until released.
     let turn = env.start_held_turn().await;
 
-    let (reopened, _, _) = tokio::time::timeout(Duration::from_secs(60), env.open())
+    let (reopened, _, _) = tokio::time::timeout(Duration::from_mins(1), env.open())
         .await
         .expect("the reopen never waits on the parked turn");
     assert_eq!(env.producer.observed().len(), 1, "no generation");

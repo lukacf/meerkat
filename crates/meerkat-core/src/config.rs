@@ -2691,7 +2691,7 @@ impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
             mcp_servers: Vec::new(),
-            default_timeout: Duration::from_secs(600),
+            default_timeout: Duration::from_mins(10),
             tool_timeouts: HashMap::new(),
             max_concurrent: 10,
             builtins_enabled: false,
@@ -5345,7 +5345,7 @@ max_request_bytes = 9000000
     fn test_budget_config_serialization() {
         let budget = BudgetConfig {
             max_tokens: Some(100_000),
-            max_duration: Some(Duration::from_secs(300)),
+            max_duration: Some(Duration::from_mins(5)),
             max_tool_calls: Some(50),
         };
 
@@ -5353,7 +5353,7 @@ max_request_bytes = 9000000
         let parsed: BudgetConfig = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed.max_tokens, Some(100_000));
-        assert_eq!(parsed.max_duration, Some(Duration::from_secs(300)));
+        assert_eq!(parsed.max_duration, Some(Duration::from_mins(5)));
         assert_eq!(parsed.max_tool_calls, Some(50));
     }
 
@@ -5754,7 +5754,7 @@ call_timeout = "60s"
         assert_eq!(config.retry.max_retries, 5);
         assert_eq!(
             config.retry.call_timeout_override,
-            CallTimeoutOverride::Value(Duration::from_secs(60))
+            CallTimeoutOverride::Value(Duration::from_mins(1))
         );
     }
 
@@ -5844,7 +5844,7 @@ stream_inactivity_timeout = "2m"
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(
             config.retry.stream_inactivity_timeout_override,
-            CallTimeoutOverride::Value(Duration::from_secs(120))
+            CallTimeoutOverride::Value(Duration::from_mins(2))
         );
 
         let toml_str = r#"
@@ -5952,7 +5952,7 @@ stream_inactivity_timeout = "2m"
         assert_eq!(config.retry.max_retries, 2); // Not overridden
         assert_eq!(
             config.retry.stream_inactivity_timeout_override,
-            CallTimeoutOverride::Value(Duration::from_secs(120))
+            CallTimeoutOverride::Value(Duration::from_mins(2))
         );
     }
 

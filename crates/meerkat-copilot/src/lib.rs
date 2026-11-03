@@ -2,7 +2,9 @@
 //!
 //! This crate intentionally does not depend on the Copilot SDK or CLI. It owns
 //! the observed GitHub OAuth and CAPI contracts shared by the OpenAI,
-//! Anthropic, and Gemini provider-family backends.
+//! Anthropic, and Gemini provider-family backends, in two modes: the device
+//! sign-in (`github_copilot_oauth`) and an operator-supplied GitHub token sent
+//! as the Copilot API credential (`github_copilot_token`).
 
 mod protocol;
 
@@ -10,11 +12,11 @@ mod protocol;
 mod runtime;
 
 pub use protocol::{
-    CopilotBackendConfig, CopilotEndpoint, CopilotModel, CopilotModelCapabilities,
-    CopilotModelLimits, CopilotModelOffering, CopilotModelPolicy, CopilotModelPolicyState,
-    CopilotModelSnapshot, CopilotModelSupports, CopilotModelsEnvelope, CopilotProviderRoute,
-    CopilotTokenEnvelope, DEFAULT_COPILOT_API_BASE, GITHUB_COPILOT_AUTHORIZER_LABEL,
-    GITHUB_COPILOT_CREDENTIAL_ACCOUNT_ID, GitHubCopilotEndpoints,
+    CopilotAccountIdentity, CopilotBackendConfig, CopilotEndpoint, CopilotModel,
+    CopilotModelCapabilities, CopilotModelLimits, CopilotModelOffering, CopilotModelPolicy,
+    CopilotModelPolicyState, CopilotModelSnapshot, CopilotModelSupports, CopilotModelsEnvelope,
+    CopilotProviderRoute, CopilotTokenEnvelope, DEFAULT_COPILOT_API_BASE,
+    GITHUB_COPILOT_AUTHORIZER_LABEL, GITHUB_COPILOT_CREDENTIAL_ACCOUNT_ID, GitHubCopilotEndpoints,
     PROVISIONAL_GITHUB_COPILOT_CLIENT_ID,
 };
 
@@ -22,5 +24,5 @@ pub use protocol::{
 pub use runtime::{
     CopilotAuthorizer, CopilotChatCompletionsClientFactory, CopilotChatCompletionsClientSpec,
     CopilotModelAccess, CopilotResolvedAuth, CopilotRouteClientFactory, CopilotRouteResolution,
-    CopilotRuntime, capability_gated_client, routed_client,
+    CopilotRuntime, capability_gated_client, routed_client, verify_operator_token,
 };

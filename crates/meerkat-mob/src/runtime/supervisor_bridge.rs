@@ -76,7 +76,7 @@ pub(crate) enum BridgeRequestFailure {
     AfterSend(MobError),
 }
 
-const SUPERVISOR_REQUEST_TOMBSTONE_TTL: Duration = Duration::from_secs(300);
+const SUPERVISOR_REQUEST_TOMBSTONE_TTL: Duration = Duration::from_mins(5);
 const SUPERVISOR_REQUEST_CORRELATION_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, Copy)]

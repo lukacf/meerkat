@@ -43,7 +43,7 @@ const REDIRECT_URI: &str = "http://127.0.0.1:1/mcp/oauth/callback";
 
 /// Bound for one RPC answer or one stderr line. Startup under a fully
 /// parallel crate run has been observed near 70 s.
-const STEP_DEADLINE: Duration = Duration::from_secs(120);
+const STEP_DEADLINE: Duration = Duration::from_mins(2);
 
 /// The sweep runs after the 10 s request drain bound; its own grace is 10 s.
 const SWEEP_DEADLINE: Duration = Duration::from_secs(90);

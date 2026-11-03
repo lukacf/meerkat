@@ -18,7 +18,7 @@ use meerkat_runtime::{
     RuntimeOpsLifecycleRegistry,
 };
 
-const ROW_STEP: Duration = Duration::from_secs(60);
+const ROW_STEP: Duration = Duration::from_mins(1);
 
 fn worker(index: usize) -> AgentIdentity {
     AgentIdentity::from(format!("obligation-{index:02}"))
@@ -351,4 +351,115 @@ async fn work_a_dormant_member_of_a_stopped_mob_owes_is_delivered_at_the_lift() 
             );
         }
     }
+}
+
+/// The profile the member's host grants it to spawn.
+const GRANTED_PROFILE: &str = "worker";
+
+/// Row (RED): a member whose runtime still owed a background operation
+/// completion at a crash is restored by the start that follows, and that
+/// restore build carries the spawn grant its host mints there. The build
+/// reaches the host's member build hook with the witness of the mob runtime
+/// performing it, so the hook, which holds no mob handle, enables the
+/// member's mob tools and grants it spawn scope for one profile in the mob as
+/// it runs. The build's authority spawns that profile in the mob as it runs,
+/// and no other. The session service here builds no agent: it binds the
+/// build's authority to the build's external tools as the agent factory
+/// does, so the runtime's receiver gets it, and the runtime's read of the
+/// restored member's spawn grant finds that profile too (the factory's own
+/// binding is covered by
+/// `a_member_spawn_grant_is_read_through_the_runtime_receiver`). The
+/// restored member then delivers the completion.
+///
+/// RED on the old tree: a build carried no witness (the build options had no
+/// `mob_incarnation`; the row does not compile there), so a hook without the
+/// mob's handle minted nothing in the boot's restore build.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_restored_at_boot_with_pending_work_keeps_its_spawn_grant_in_that_build() {
+    use meerkat_runtime::mob_operator_authority::{
+        create_only_mob_operator_authority, grant_spawn_profiles_in_mob,
+    };
+
+    let mob = CrashedStoreMob::new("boot-rows-member-keeps-spawn-grant", 3).await;
+    let member = mob.session(1);
+    mob.store
+        .persist_ops_lifecycle(
+            &LogicalRuntimeId::for_session(&member),
+            &undelivered_completion(&member),
+        )
+        .await
+        .expect("the completion is durable");
+    // The host's member build hook holds no mob handle: it mints from the
+    // build alone.
+    mob.service
+        .set_member_build_hook(Arc::new(|req: &mut CreateSessionRequest| {
+            let Some(build) = req.build.as_mut() else {
+                return;
+            };
+            let (Some(binding), Some(witness)) =
+                (build.mob_member_binding.as_ref(), build.mob_incarnation)
+            else {
+                return;
+            };
+            let grant = create_only_mob_operator_authority()
+                .and_then(|authority| {
+                    grant_spawn_profiles_in_mob(
+                        &authority,
+                        binding.mob_id.clone(),
+                        witness,
+                        [GRANTED_PROFILE],
+                    )
+                })
+                .expect("mint the spawn grant in the build");
+            build.mob_tool_authority_context = Some(grant);
+            build.override_mob = ToolCategoryOverride::Enable;
+        }));
+
+    let handle = mob.resume().await;
+    assert_eq!(
+        handle.status().await.expect("the mob's phase"),
+        MobState::Running
+    );
+    assert_eq!(
+        mob.materialized().await,
+        vec![member.clone()],
+        "the start restored exactly the member, which owes the completion"
+    );
+    let build = mob
+        .service
+        .recorded_create_requests()
+        .await
+        .into_iter()
+        .find(|record| record.session_id == member)
+        .expect("the member's restore build");
+    assert_eq!(
+        build
+            .mob_incarnation
+            .map(meerkat_core::service::LiveMobIncarnation::incarnation),
+        Some(handle.incarnation()),
+        "the restore build carries the witness of the runtime performing it"
+    );
+    let grant = build
+        .mob_tool_authority_context
+        .as_ref()
+        .expect("the hook's spawn grant in the restore build");
+    let mob_id = handle.mob_id();
+    assert!(
+        grant.spawn_profile_scope_contains(mob_id.as_str(), handle.incarnation(), GRANTED_PROFILE),
+        "the member keeps its spawn grant in that build"
+    );
+    assert!(!grant.spawn_profile_scope_contains(mob_id.as_str(), handle.incarnation(), "lead"));
+    assert!(
+        handle.member_spawn_profile_scope_contains(&member, GRANTED_PROFILE),
+        "the runtime received the restored member's authority"
+    );
+    assert!(!handle.member_spawn_profile_scope_contains(&member, "lead"));
+
+    tokio::time::timeout(ROW_STEP, async {
+        while !mob.service.has_started_turn_for(&member).await {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the restored member's runtime delivers the completion as a turn");
 }

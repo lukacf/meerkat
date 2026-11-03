@@ -1,0 +1,17 @@
+# Steward calibration profile v0 (agent-memory-architecture.md §8.5/§11).
+# Consolidation judgment is weightier than extraction (merges, contradiction
+# resolution, promotion rulings), so the default tier sits above the
+# Distiller's haiku; the `agent_memory.steward.model` config override adjusts
+# per-deployment without a new profile file.
+
+stage         = "steward"
+version       = "1"
+model         = "claude-sonnet-4-6"
+prompt_bundle = "prompts/steward-v0.md"
+
+[params]
+temperature         = 0.0
+max_output_tokens   = 4096
+max_manifest_records = 200
+max_gather_requests = 16
+max_gather_rounds   = 2

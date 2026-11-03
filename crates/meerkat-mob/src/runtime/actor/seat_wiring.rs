@@ -8,7 +8,10 @@
 //! auto-wires to it, which a spawn of it is not; and the members of every
 //! profile a `role_wiring` rule pairs with its own). An identity that was
 //! seated already, or that a spawn embodied, is wired by nothing here: it
-//! holds the edges it holds.
+//! holds the edges it holds. A member exempt from the definition's wiring
+//! rules (MobMachine's `member_definition_wiring_exempt`, recorded by its
+//! seat or rotation input in that input's own transition) is neither wired
+//! when it is seated nor a target of another member's seat or rotation.
 //!
 //! The edges are staged on the seat step's own prepared authority, after its
 //! seats, so the members seated in one chunk see each other: their lifecycle
@@ -318,7 +321,9 @@ impl MobActor {
     /// for an orchestrator member (`declared_wiring_targets` over the active
     /// members of each profile the rule reads). An edge `state` holds already
     /// is left out, as is a seated member that is not active (a Broken one,
-    /// say).
+    /// say). A member exempt from the definition's wiring rules
+    /// (`member_definition_wiring_exempt`, which each exempt seat's own input
+    /// records, before this read) has no targets and is no target.
     fn seated_declared_pairs(
         &self,
         state: &mob_dsl::MobMachineState,
@@ -339,14 +344,17 @@ impl MobActor {
             wired_profiles.insert(rule.a.as_str());
             wired_profiles.insert(rule.b.as_str());
         }
+        let exempt = &state.member_definition_wiring_exempt;
         // An orchestrator member auto-wires to the members of every other
         // profile, so a step that seats one indexes every active member.
         let seats_an_orchestrator = orchestrator_profile.is_some_and(|orchestrator| {
             seated.iter().any(|member| {
-                state
-                    .member_profile_names
-                    .get(&mob_dsl::AgentIdentity::from_domain(member))
-                    .is_some_and(|profile| profile.as_str() == orchestrator)
+                let dsl_member = mob_dsl::AgentIdentity::from_domain(member);
+                !exempt.contains(&dsl_member)
+                    && state
+                        .member_profile_names
+                        .get(&dsl_member)
+                        .is_some_and(|profile| profile.as_str() == orchestrator)
             })
         });
         let is_active = |identity: &mob_dsl::AgentIdentity| {
@@ -354,9 +362,11 @@ impl MobActor {
                 &state.member_lifecycle_for_identity(identity),
             )
         };
+        // The members the rules may wire to: active, and not exempt.
         let mut active: BTreeMap<&str, Vec<AgentIdentity>> = BTreeMap::new();
         for (identity, profile) in &state.member_profile_names {
             if (seats_an_orchestrator || wired_profiles.contains(profile.as_str()))
+                && !exempt.contains(identity)
                 && is_active(identity)
             {
                 active
@@ -369,7 +379,7 @@ impl MobActor {
         let mut paired = BTreeSet::new();
         for member in seated {
             let dsl_member = mob_dsl::AgentIdentity::from_domain(member);
-            if !is_active(&dsl_member) {
+            if !is_active(&dsl_member) || exempt.contains(&dsl_member) {
                 continue;
             }
             let Some(profile) = state.member_profile_names.get(&dsl_member) else {

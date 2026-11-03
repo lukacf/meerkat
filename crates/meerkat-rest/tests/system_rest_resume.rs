@@ -165,7 +165,7 @@ async fn inner_test_rest_resume_metadata() {
         ))
         .expect("build request");
 
-    let response = timeout(Duration::from_secs(120), app.oneshot(request))
+    let response = timeout(Duration::from_mins(2), app.oneshot(request))
         .await
         .expect("run request timed out")
         .expect("run request");
@@ -326,7 +326,7 @@ async fn inner_test_rest_resume_metadata() {
         ))
         .expect("build request");
 
-    let response = timeout(Duration::from_secs(120), app.oneshot(request))
+    let response = timeout(Duration::from_mins(2), app.oneshot(request))
         .await
         .expect("resume request timed out")
         .expect("resume request");

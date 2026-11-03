@@ -1,0 +1,667 @@
+/* WorkGraph panel (console v2 spec B2): the glance strip, the graph of goal
+   frames with its drawer and activity strip, and the outline twin.
+   Imported by console-host.css. Colours, type, radii and motion come only
+   from the kit tokens; the graph itself is the kit's GraphView (viz.css),
+   and the rules here only place it and dress the WorkGraph parts. */
+
+/* === Header and glance strip ======================================== */
+
+/* The team picker sits next to the title as a quiet chip; the native
+   select keeps its name ("Work Graph team"), its visible label is for
+   assistive tech only. */
+.workgraph .cc-panel-head__scope .cc-field {
+  flex-direction: row;
+  align-items: center;
+  gap: 0;
+}
+.workgraph .cc-panel-head__scope .cc-field__label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.workgraph .cc-panel-head__scope select {
+  height: 26px;
+  border-radius: var(--_cc-radius-pill);
+  font-size: var(--_cc-fs-control);
+}
+
+/* The critical path toggle: a pill under TO FINISH, accent while on. */
+.workgraph__critical-toggle.cc-btn {
+  height: 24px;
+  margin-top: 2px;
+  padding: 0 10px;
+  gap: 4px;
+  border: 1px solid var(--_cc-border-strong);
+  border-radius: var(--_cc-radius-pill);
+  font-size: var(--_cc-fs-control);
+}
+.workgraph__critical-toggle.cc-btn[aria-pressed="true"] {
+  border-color: var(--_cc-member-accent);
+  background: var(--_cc-member-surface);
+  color: var(--_cc-accent-ink);
+}
+.workgraph__critical-toggle .cc-glyph {
+  width: 12px;
+  height: 12px;
+}
+
+/* === Body ============================================================ */
+
+.workgraph__measure {
+  height: 0;
+  overflow: hidden;
+}
+/* The graph fills the body edge to edge; the outline scrolls. */
+.workgraph__body.is-graph {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: 0;
+}
+.workgraph__body.is-graph > .workgraph-graph {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* A lone state (empty, no access, failed) sits a little above the middle. */
+.workgraph__body.is-state {
+  display: flex;
+  flex-direction: column;
+}
+.workgraph__body.is-state > .cc-panel-empty {
+  margin-block: auto;
+  padding-bottom: max(40px, 8%);
+}
+
+/* The summary's facts wrap whole onto another line instead of clipping a
+   word where the header runs out of room (a 520 px pane beside another). */
+.workgraph__head.cc-panel-head--v2 .cc-panel-head__summary {
+  max-height: none;
+  line-height: 1.45;
+}
+.workgraph__head.cc-panel-head--v2 .cc-panel-head__facts { flex-wrap: wrap; }
+
+/* === Graph view ====================================================== */
+
+.workgraph-graph {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 380px;
+  height: 100%;
+}
+.workgraph-graph > * {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.workgraph-graph__main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+.workgraph-graph__canvas {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 300px;
+  background: var(--_cc-surface-raised);
+}
+.workgraph-graph__view {
+  position: absolute;
+  inset: 0;
+}
+/* The graph's own bar under the canvas: the zoom controls and the note on
+   items not drawn. Nothing floats on the picture, so nothing covers it. */
+.workgraph-graph__bar {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 12px;
+  min-height: 36px;
+  padding: 3px calc(var(--_cc-panel-pad-x) - 6px);
+  border-top: 1px solid var(--_cc-border-soft);
+  background: var(--_cc-surface-card);
+}
+.workgraph-graph__zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.workgraph-graph__zoom-level {
+  min-width: 46px;
+  height: 28px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--_cc-radius-sm);
+  background: none;
+  color: var(--_cc-foreground-muted);
+  font: inherit;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.workgraph-graph__zoom-level:hover {
+  background: var(--_cc-surface-hover);
+  color: var(--_cc-foreground);
+}
+.workgraph-graph__zoom-level:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring, var(--_cc-accent));
+  outline-offset: 1px;
+}
+.workgraph-graph__overflow {
+  padding: 2px 10px;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-pill);
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-warning-ink);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Cards and headers are the kit's; these keep the pinned label contract
+   (no inherited icon stroke on the text, the console's own font) and
+   dress the WorkGraph states the kit leaves to the panel. */
+.workgraph-graph__node-title,
+.workgraph-graph__node-meta {
+  stroke: none;
+  font-family: inherit;
+}
+.workgraph-graph__node.is-cancelled { opacity: 0.55; }
+.workgraph-graph__node.is-cancelled .workgraph-graph__node-title { text-decoration: line-through; }
+/* An attention binding rests on the node: a quiet dashed ring around its
+   mark, in the strong edge ink (never the accent: it is not "now"). */
+.workgraph-graph__node-goal-ring {
+  fill: none;
+  stroke: var(--_cc-viz-edge-strong);
+  stroke-width: 1.25;
+  stroke-dasharray: 2 2.5;
+  pointer-events: none;
+}
+
+/* === Activity strip (under the canvas) =============================== */
+
+.workgraph-strip {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px 32px;
+  padding: 12px var(--_cc-panel-pad-x) 14px;
+  border-top: 1px solid var(--_cc-border-soft);
+  background: var(--_cc-surface-card);
+}
+.workgraph-strip__chart {
+  display: grid;
+  grid-template-columns: auto auto;
+  grid-template-areas:
+    "label bars"
+    ". legend";
+  align-items: end;
+  gap: 2px 16px;
+}
+.workgraph-strip__label {
+  grid-area: label;
+  align-self: start;
+  font-size: var(--_cc-panel-fs-label);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+  white-space: nowrap;
+}
+.workgraph-strip__bars {
+  grid-area: bars;
+  display: block;
+  fill: initial;
+  stroke: none;
+  stroke-width: 1;
+}
+.workgraph-strip__base {
+  stroke: var(--_cc-viz-grid);
+  stroke-width: 1;
+}
+.workgraph-strip__created { fill: var(--_cc-viz-mid); }
+.workgraph-strip__closed { fill: var(--_cc-viz-ink); }
+.workgraph-strip__zero { fill: var(--_cc-viz-faint); }
+.workgraph-strip__legend {
+  grid-area: legend;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  color: var(--_cc-foreground-meta);
+}
+.workgraph-strip__key {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 1px;
+}
+.workgraph-strip__key.is-created { background: var(--_cc-viz-mid); }
+.workgraph-strip__key.is-closed { margin-left: 6px; background: var(--_cc-viz-ink); }
+.workgraph-strip__latest {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--_cc-foreground-muted);
+}
+.workgraph-strip__event {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.workgraph-strip__sentence { color: var(--_cc-foreground); }
+.workgraph-strip__none { color: var(--_cc-foreground-meta); }
+.workgraph-strip__all.cc-btn {
+  height: 22px;
+  margin-left: -6px;
+  padding: 0 6px;
+  font-size: 12px;
+}
+
+/* === Drawer (selected item or goal, or the activity) ================= */
+
+.workgraph-drawer { display: contents; }
+.workgraph-drawer__facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.workgraph-drawer__created {
+  margin-left: auto;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+}
+.workgraph-graph__detail-description {
+  margin: 14px 0 0;
+  font-size: var(--_cc-panel-fs-body);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--_cc-foreground);
+}
+.workgraph-drawer__section { margin-top: 20px; }
+.workgraph-drawer__section > .cc-section-head {
+  padding: 0 0 6px;
+  border-bottom: 1px solid var(--_cc-border-soft);
+}
+.workgraph-drawer__section-body { padding-top: 6px; }
+.workgraph-drawer__links {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.workgraph-drawer__link {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+}
+.workgraph-drawer__link.is-missing {
+  display: block;
+  color: var(--_cc-foreground-meta);
+}
+.workgraph-drawer__link-title {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: inherit;
+  font-weight: 500;
+  color: var(--_cc-foreground);
+}
+button.workgraph-drawer__link-title { cursor: pointer; }
+button.workgraph-drawer__link-title:hover { text-decoration: underline; text-underline-offset: 3px; }
+button.workgraph-drawer__link-title:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--_cc-radius-xs);
+}
+.workgraph-drawer__link-meta {
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+  white-space: nowrap;
+}
+.workgraph-drawer__evidence {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.workgraph-drawer__evidence li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+}
+.workgraph-drawer__evidence-label { font-weight: 500; color: var(--_cc-foreground); }
+.workgraph-drawer__evidence-summary { font-size: 12px; color: var(--_cc-foreground-muted); }
+.workgraph-drawer__empty {
+  margin: 2px 0;
+  font-size: 12px;
+  color: var(--_cc-foreground-meta);
+}
+.workgraph-drawer__progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--_cc-foreground-muted);
+  font-variant-numeric: tabular-nums;
+}
+.workgraph-drawer__policy {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--_cc-foreground-muted);
+}
+.workgraph-drawer__bindings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.workgraph-drawer__more.cc-btn { margin-top: 2px; }
+.workgraph-graph__metadata { margin-top: 20px; }
+.workgraph-graph__detail-facts { margin-top: 0; }
+.workgraph-graph__detail-id {
+  align-items: flex-start;
+  white-space: normal;
+}
+.workgraph-graph__detail-id code {
+  min-width: 0;
+  font-family: var(--_cc-font-mono);
+  font-size: var(--_cc-panel-fs-mono);
+  color: var(--_cc-foreground-muted);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+/* === Outline: goal cards, rows and agents ============================ */
+
+.workgraph__outline { padding-top: 12px; }
+.workgraph__goals {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 0 var(--_cc-panel-pad-x);
+}
+.workgraph-goal {
+  /* Rows inside a card line up with its inset. */
+  --_cc-panel-pad-x: 14px;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-md);
+  background: var(--_cc-surface-card);
+  transition: border-color var(--_cc-dur-fast) var(--_cc-ease-out);
+}
+.workgraph-goal:hover { border-color: var(--_cc-border-strong); }
+/* Work moving: the 2 px accent rule of a live card (A3.4). */
+.workgraph-goal[data-state="in_progress"] { box-shadow: inset 2px 0 0 var(--_cc-member-accent); }
+.workgraph-goal__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  min-width: 0;
+  padding: 12px 14px 10px;
+}
+.workgraph-goal__name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.workgraph-goal__flag {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  color: var(--_cc-foreground);
+}
+.workgraph-goal__title {
+  min-width: 12ch;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-fs-card);
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--_cc-foreground);
+}
+.workgraph-goal__progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+  font-variant-numeric: tabular-nums;
+}
+.workgraph-goal__chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+.workgraph-goal__actions {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity var(--_cc-dur-fast) var(--_cc-ease-out);
+}
+.workgraph-goal__head:hover .workgraph-goal__actions,
+.workgraph-goal__head:focus-within .workgraph-goal__actions { opacity: 1; }
+.workgraph-goal__owner {
+  margin-left: auto;
+  max-width: 40%;
+  font-size: 12px;
+  color: var(--_cc-foreground-muted);
+}
+.workgraph-goal__actions + .workgraph-goal__owner { margin-left: 0; }
+.workgraph-goal__blocked {
+  margin: -4px 14px 10px 37px;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-warning-ink);
+}
+.workgraph-goal__bindings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 14px 12px 37px;
+}
+.workgraph-goal__items { border-top: 1px solid var(--_cc-viz-grid); }
+.workgraph-goal__fold { padding: 4px 8px 6px 31px; }
+.workgraph-goal__tech.cc-tech {
+  margin: 0;
+  padding: 8px 14px 10px 37px;
+  border-top: 1px solid var(--_cc-viz-grid);
+}
+
+/* Attention: who, what they do with the goal and its state, then the
+   actions, wrapping. */
+.workgraph-binding { min-width: 0; }
+.workgraph-binding__line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 0;
+}
+.workgraph-binding__summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 24ch;
+  min-width: 0;
+}
+.workgraph-binding__text {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--_cc-foreground-muted);
+}
+.workgraph-binding__agent { font-weight: 500; color: var(--_cc-foreground); }
+.workgraph-binding__mode { color: var(--_cc-foreground); }
+.workgraph-binding__state.is-paused { color: var(--_cc-warning-ink); }
+.workgraph-binding__countdown {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+.workgraph-binding__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.workgraph-binding__reassign {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding-left: 26px;
+}
+.workgraph-binding__reassign .cc-input { flex: 1 1 180px; max-width: 320px; }
+
+/* Work item rows: actions sit before the status so the status words line up
+   at the right edge whether or not a row has actions. */
+.workgraph-row {
+  --workgraph-indent: 0px;
+  grid-template-areas: "lead main actions meta";
+  padding-left: calc(var(--_cc-panel-pad-x) + var(--workgraph-indent));
+}
+.workgraph-row[data-depth="2"] { --workgraph-indent: 16px; }
+.workgraph-row[data-depth="3"] { --workgraph-indent: 32px; }
+.workgraph-row[data-depth="4"] { --workgraph-indent: 48px; }
+.workgraph-row[data-depth="5"] { --workgraph-indent: 64px; }
+.workgraph-row[data-depth="6"] { --workgraph-indent: 80px; }
+.workgraph-row[data-depth="7"] { --workgraph-indent: 96px; }
+.workgraph-row[data-depth="8"] { --workgraph-indent: 112px; }
+/* Tree guide: a 1 px rule under the parent's mark, beside its nested rows. */
+.workgraph-row:not([data-depth="0"]):not([data-depth="1"]) {
+  background-image: linear-gradient(var(--_cc-border-soft), var(--_cc-border-soft));
+  background-repeat: no-repeat;
+  background-size: 1px 100%;
+  background-position: calc(var(--_cc-panel-pad-x) + var(--workgraph-indent) - 7px) 0;
+}
+.workgraph-row .cc-row__lead { display: inline-flex; align-items: center; }
+.workgraph-row .cc-row__sub { color: var(--_cc-warning-ink); }
+.workgraph-row .cc-row__meta { gap: 10px; }
+.workgraph-row[data-status="cancelled"] .cc-row__title {
+  text-decoration: line-through;
+  color: var(--_cc-foreground-muted);
+}
+.workgraph-row__status {
+  order: 3;
+  min-width: 7em;
+  text-align: right;
+  color: var(--_cc-foreground-muted);
+}
+.workgraph-row__priority { order: 1; }
+.workgraph-row__owner { order: 2; max-width: 180px; }
+.workgraph-row__unassigned { color: var(--_cc-foreground-meta); }
+.workgraph-row__bindings {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 0 4px 26px;
+}
+
+.workgraph__overflow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 10px var(--_cc-panel-pad-x) 0;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+}
+.workgraph__attention {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 2px var(--_cc-panel-pad-x) 4px;
+}
+.workgraph-event .cc-row__title {
+  font-size: 12.5px;
+  font-weight: 400;
+}
+/* Activity rows have no lead mark: no empty lead column either. */
+.workgraph-event.cc-row {
+  grid-template-columns: minmax(12ch, 1fr) auto auto;
+  grid-template-areas: "main meta actions";
+}
+.workgraph-drawer .workgraph-event.cc-row {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+/* === Narrow panes ===================================================== */
+
+@media (hover: none) {
+  .workgraph-goal__actions { opacity: 1; }
+}
+/* Below the single-pane width a goal's actions wrap under its title: they
+   stay shown there, or the wrapped row would read as an empty gap. */
+@container cc-panel (max-width: 719px) {
+  .workgraph-goal__actions { opacity: 1; }
+}
+@container cc-panel (max-width: 640px) {
+  .workgraph-strip {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+}
+/* A 330 px pane: the strip's label, bars and key stack. */
+@container cc-panel (max-width: 359px) {
+  .workgraph-strip__chart {
+    grid-template-columns: auto;
+    grid-template-areas: "label" "bars" "legend";
+  }
+}
+@container cc-panel (max-width: 479px) {
+  .workgraph-goal__actions { opacity: 1; }
+  .workgraph-goal__owner { max-width: 100%; }
+  /* Actions, always shown here, move under the title instead of pushing
+     the row past the pane's edge. */
+  .workgraph-row {
+    grid-template-columns: 18px minmax(12ch, 1fr) auto;
+    grid-template-areas: "lead main meta" ". actions actions";
+  }
+  .workgraph-row .cc-row__actions { margin-top: 2px; }
+  .workgraph-row__status { min-width: 0; }
+  .workgraph-graph { min-height: 320px; }
+}
+@container cc-panel (max-width: 359px) {
+  /* Very narrow: the status and the actions stack under the title. */
+  .workgraph-row {
+    grid-template-columns: 18px minmax(0, 1fr);
+    grid-template-areas: "lead main" ". meta" ". actions";
+  }
+  .workgraph-row .cc-row__meta { justify-content: flex-start; flex-wrap: wrap; }
+  .workgraph-goal__title { min-width: 0; }
+  .workgraph-goal__blocked { margin-left: 14px; }
+  .workgraph-goal__tech.cc-tech { padding-left: 14px; }
+  .workgraph-goal__bindings { padding-left: 14px; }
+}

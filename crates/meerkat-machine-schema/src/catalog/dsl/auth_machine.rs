@@ -15,6 +15,14 @@ use super::OptionValueExt;
 //   * the expiry timestamp, last refresh timestamp, credential-publication
 //     generation/time, and consecutive refresh-failure count associated
 //     with the lease
+//   * which credential value the lease's current publication carries, as an
+//     opaque fingerprint, when its publisher re-reads the value from a source
+//     (an environment variable, a command, an external resolver): a value
+//     that was refused or logged out is never published again until a
+//     different value appears
+//   * which publication a consumer's refusal withdraws: only the one it
+//     names, so a late refusal of an earlier credential never withdraws a
+//     newer one
 //   * short-lived OAuth login-flow membership for the same binding:
 //     browser PKCE states, admitted device codes, and active device
 //     poll leases
@@ -75,6 +83,23 @@ macro_rules! auth_catalog_machine_dsl {
             ReauthRequired,
         }
 
+        /// Machine-owned verdict on a credential value its publisher read
+        /// from a source it re-reads (an environment variable, a command, an
+        /// external resolver). The publisher mirrors it: `Publish` fires
+        /// `Acquire` with the value's fingerprint, `AlreadyPublished` fires
+        /// nothing.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum SourceCredentialPublicationDisposition {
+            /// Nothing was published, the lease records another value, or a
+            /// declared freshness window ran out (Expiring, Expired): publish
+            /// this value.
+            Publish,
+            /// The lease's current publication carries this value, including
+            /// a value that was refused (ReauthRequired) or logged out
+            /// (Released): publish nothing.
+            AlreadyPublished,
+        }
+
         meerkat_machine_dsl::machine! {
         machine AuthMachine {
             version: 1,
@@ -88,6 +113,19 @@ macro_rules! auth_catalog_machine_dsl {
                 credential_present: bool,
                 credential_generation: u64,
                 credential_published_at_millis: Option<u64>,
+                // Opaque fingerprint of the credential value the current
+                // publication carries, when its publisher declared one (a
+                // publisher that re-reads the value from a source). None when
+                // the publisher declared none, before any publication and
+                // after a restore (durable markers never hold it).
+                // MarkReauthRequired, RefreshFailed, ClearCredentialLifecycle
+                // and the release transitions keep it, so the machine itself
+                // remembers which value was refused or logged out. A
+                // publication that names no value (a login's or a store's
+                // Acquire, CompleteRefresh, a restore, the rollback of a
+                // failed login) clears it, so a value refused before it is
+                // published, and tried, once more.
+                #[redacted] credential_material_fingerprint: Option<String>,
                 oauth_browser_flow_ids: Set<String>,
                 oauth_browser_flow_providers: Map<String, String>,
                 oauth_browser_flow_redirect_uris: Map<String, String>,
@@ -112,6 +150,7 @@ macro_rules! auth_catalog_machine_dsl {
                 credential_present = false,
                 credential_generation = 0,
                 credential_published_at_millis = None,
+                credential_material_fingerprint = None,
                 oauth_browser_flow_ids = EmptySet,
                 oauth_browser_flow_providers = EmptyMap,
                 oauth_browser_flow_redirect_uris = EmptyMap,
@@ -136,7 +175,12 @@ macro_rules! auth_catalog_machine_dsl {
             }
 
             input AuthMachineInput {
-                Acquire { expires_at_ts: Option<u64>, credential_published_at_millis: u64 },
+                // `credential_material_fingerprint` names the credential value
+                // the publication carries, for a publisher that re-reads it
+                // from a source and asked ResolveSourceCredentialPublication
+                // first. Every other publisher (logins, stores, restores)
+                // passes None.
+                Acquire { expires_at_ts: Option<u64>, credential_published_at_millis: u64, #[redacted] credential_material_fingerprint: Option<String> },
                 MarkExpiring,
                 ObserveCredentialFreshness { now_ts: u64, refresh_window_secs: u64 },
                 BeginRefresh,
@@ -247,6 +291,31 @@ macro_rules! auth_catalog_machine_dsl {
                     force_refresh: bool,
                     refresh_allowed: bool,
                 },
+                // Source-credential publication classification. A publisher
+                // that re-reads its credential value from a source (an
+                // operator's environment variable, a command, an external
+                // resolver) supplies only the opaque fingerprint of the value
+                // it read, after feeding ObserveCredentialFreshness. This
+                // machine owns the COMPLETE (lifecycle_phase,
+                // self.credential_material_fingerprint, fingerprint) -> verdict
+                // policy, emitting `SourceCredentialPublicationResolved`; the
+                // publisher fires Acquire with the fingerprint only on Publish.
+                // Each transition self-loops in its phase (classification
+                // never mutates state).
+                ResolveSourceCredentialPublication { #[redacted] credential_material_fingerprint: String },
+                // A consumer refused the credential of one publication (a
+                // provider answered that it is revoked or invalid). The
+                // refusal names that publication: the credential generation
+                // it was admitted under, and the fingerprint the publication
+                // recorded (None for a publisher that names no value). The
+                // lease is withdrawn only while it still carries that
+                // publication; any other refusal is a benign no-op, so a
+                // refusal that arrives after a newer value was published
+                // never withdraws the newer one.
+                MarkPublicationRefused {
+                    refused_credential_generation: u64,
+                    #[redacted] refused_credential_material_fingerprint: Option<String>,
+                },
             }
 
             effect AuthMachineEffect {
@@ -280,6 +349,11 @@ macro_rules! auth_catalog_machine_dsl {
                     browser_flow_ids: Set<String>,
                     device_flow_ids: Set<String>,
                 },
+                // Source-credential publication verdict decided by this
+                // machine. The publisher mirrors `disposition`: Publish ->
+                // Acquire with the fingerprint it classified, AlreadyPublished
+                // -> nothing.
+                SourceCredentialPublicationResolved { disposition: Enum<SourceCredentialPublicationDisposition> },
             }
 
             disposition EmitLifecycleEvent => external handoff auth_lease_lifecycle_publication seam SurfaceResultAlignment,
@@ -287,6 +361,7 @@ macro_rules! auth_catalog_machine_dsl {
             disposition RefreshFailureDispositionResolved => local seam SurfaceResultAlignment,
             disposition CredentialUseAdmissionResolved => local seam SurfaceResultAlignment,
             disposition CancelOAuthFlowsForRelease => external handoff auth_release_oauth_flow_drain seam NoOwnerRealization,
+            disposition SourceCredentialPublicationResolved => local seam SurfaceResultAlignment,
 
             invariant oauth_flow_membership_consistent {
                 self.oauth_browser_flow_providers.keys() == self.oauth_browser_flow_ids
@@ -313,14 +388,37 @@ macro_rules! auth_catalog_machine_dsl {
 
             // --- Transitions ---
 
+            // A publication that names its credential value never publishes
+            // again the value the lease records, except to renew a lease whose
+            // declared freshness window ran out (Expiring, Expired): a value
+            // that was refused (ReauthRequired) or logged out (Released)
+            // stays so until a different value is published. A publication
+            // that names no value (logins, stores) is accepted from every
+            // phase, as before. The rule is split by phase, so each arm's
+            // guard lowers to the TLA+ model exactly as production evaluates
+            // it (a phase predicate inside a disjunction would be dropped
+            // there): Acquire takes the phases outside a run-out window and
+            // refuses the recorded value in them, and AcquireFromExpiring and
+            // AcquireFromExpired (at the end of this list) take any value,
+            // the recorded one included. ResolveSourceCredentialPublication
+            // answers Publish exactly when one of these arms accepts.
             transition Acquire {
-                on input Acquire { expires_at_ts, credential_published_at_millis }
+                on input Acquire { expires_at_ts, credential_published_at_millis, credential_material_fingerprint }
+                guard {
+                    self.lifecycle_phase != Phase::Expiring
+                    && self.lifecycle_phase != Phase::Expired
+                }
+                guard "credential_material_publishable" {
+                    credential_material_fingerprint == None
+                    || self.credential_material_fingerprint != credential_material_fingerprint
+                }
                 update {
                     self.expires_at = expires_at_ts;
                     self.refresh_attempt = 0;
                     self.credential_present = true;
                     self.credential_generation = self.credential_generation + 1;
                     self.credential_published_at_millis = Some(credential_published_at_millis);
+                    self.credential_material_fingerprint = credential_material_fingerprint;
                 }
                 to Valid
                 emit EmitLifecycleEvent {
@@ -544,6 +642,7 @@ macro_rules! auth_catalog_machine_dsl {
                     self.credential_present = true;
                     self.credential_generation = self.credential_generation + 1;
                     self.credential_published_at_millis = Some(credential_published_at_millis);
+                    self.credential_material_fingerprint = None;
                 }
                 to Valid
                 emit EmitLifecycleEvent {
@@ -851,6 +950,7 @@ macro_rules! auth_catalog_machine_dsl {
                         self.credential_generation = credential_generation;
                     }
                     self.credential_published_at_millis = credential_published_at_millis;
+                    self.credential_material_fingerprint = None;
                 }
                 to Valid
                 emit EmitLifecycleEvent {
@@ -882,6 +982,7 @@ macro_rules! auth_catalog_machine_dsl {
                         self.credential_generation = credential_generation;
                     }
                     self.credential_published_at_millis = credential_published_at_millis;
+                    self.credential_material_fingerprint = None;
                 }
                 to Expiring
                 emit EmitLifecycleEvent {
@@ -913,6 +1014,7 @@ macro_rules! auth_catalog_machine_dsl {
                         self.credential_generation = credential_generation;
                     }
                     self.credential_published_at_millis = credential_published_at_millis;
+                    self.credential_material_fingerprint = None;
                 }
                 to Refreshing
                 emit EmitLifecycleEvent {
@@ -944,6 +1046,7 @@ macro_rules! auth_catalog_machine_dsl {
                         self.credential_generation = credential_generation;
                     }
                     self.credential_published_at_millis = credential_published_at_millis;
+                    self.credential_material_fingerprint = None;
                 }
                 to Expired
                 emit EmitLifecycleEvent {
@@ -975,6 +1078,7 @@ macro_rules! auth_catalog_machine_dsl {
                         self.credential_generation = credential_generation;
                     }
                     self.credential_published_at_millis = credential_published_at_millis;
+                    self.credential_material_fingerprint = None;
                 }
                 to ReauthRequired
                 emit EmitLifecycleEvent {
@@ -1007,6 +1111,7 @@ macro_rules! auth_catalog_machine_dsl {
                         self.credential_generation = credential_generation;
                     }
                     self.credential_published_at_millis = None;
+                    self.credential_material_fingerprint = None;
                 }
                 to ReauthRequired
                 emit EmitLifecycleEvent {
@@ -1040,6 +1145,7 @@ macro_rules! auth_catalog_machine_dsl {
                         self.credential_generation = credential_generation;
                     }
                     self.credential_published_at_millis = None;
+                    self.credential_material_fingerprint = None;
                     self.oauth_browser_flow_ids = EmptySet;
                     self.oauth_browser_flow_providers = EmptyMap;
                     self.oauth_browser_flow_redirect_uris = EmptyMap;
@@ -1079,6 +1185,7 @@ macro_rules! auth_catalog_machine_dsl {
                         self.credential_generation = credential_generation;
                     }
                     self.credential_published_at_millis = credential_published_at_millis;
+                    self.credential_material_fingerprint = None;
                 }
                 to Valid
                 emit EmitLifecycleEvent {
@@ -1109,6 +1216,7 @@ macro_rules! auth_catalog_machine_dsl {
                         self.credential_generation = credential_generation;
                     }
                     self.credential_published_at_millis = credential_published_at_millis;
+                    self.credential_material_fingerprint = None;
                 }
                 to Expiring
                 emit EmitLifecycleEvent {
@@ -1139,6 +1247,7 @@ macro_rules! auth_catalog_machine_dsl {
                         self.credential_generation = credential_generation;
                     }
                     self.credential_published_at_millis = credential_published_at_millis;
+                    self.credential_material_fingerprint = None;
                 }
                 to Refreshing
                 emit EmitLifecycleEvent {
@@ -1169,6 +1278,7 @@ macro_rules! auth_catalog_machine_dsl {
                         self.credential_generation = credential_generation;
                     }
                     self.credential_published_at_millis = credential_published_at_millis;
+                    self.credential_material_fingerprint = None;
                 }
                 to Expired
                 emit EmitLifecycleEvent {
@@ -1199,6 +1309,7 @@ macro_rules! auth_catalog_machine_dsl {
                         self.credential_generation = credential_generation;
                     }
                     self.credential_published_at_millis = credential_published_at_millis;
+                    self.credential_material_fingerprint = None;
                 }
                 to ReauthRequired
                 emit EmitLifecycleEvent {
@@ -1230,6 +1341,7 @@ macro_rules! auth_catalog_machine_dsl {
                         self.credential_generation = credential_generation;
                     }
                     self.credential_published_at_millis = credential_published_at_millis;
+                    self.credential_material_fingerprint = None;
                 }
                 to Released
                 emit EmitLifecycleEvent {
@@ -1925,6 +2037,209 @@ macro_rules! auth_catalog_machine_dsl {
                 update {}
                 to Valid
                 emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::RefreshDisallowed }
+            }
+
+            // --- Source-credential publication classification ---
+            //
+            // A publisher that re-reads its credential value from a source
+            // feeds the fingerprint of the value it read; this machine answers
+            // whether that value is a new publication. Publish exactly when
+            // an Acquire arm naming the value is accepted (Acquire with its
+            // guard `credential_material_publishable`, or AcquireFromExpiring,
+            // AcquireFromExpired): nothing was published or the lease records
+            // another value (every phase), or the lease records this value and
+            // its declared freshness window ran out (Expiring, Expired).
+            // AlreadyPublished otherwise: the lease carries this value as it
+            // is, a refused (ReauthRequired) or logged-out (Released) value
+            // included. Each transition self-loops; the guards partition every
+            // phase.
+            transition ResolveSourceCredentialPublicationNewMaterial {
+                per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired, Released]
+                on input ResolveSourceCredentialPublication { credential_material_fingerprint }
+                guard "source_credential_material_differs" {
+                    self.credential_material_fingerprint != Some(credential_material_fingerprint)
+                }
+                update {}
+                to Valid
+                emit SourceCredentialPublicationResolved { disposition: SourceCredentialPublicationDisposition::Publish }
+            }
+
+            transition ResolveSourceCredentialPublicationRenewal {
+                per_phase [Expiring, Expired]
+                on input ResolveSourceCredentialPublication { credential_material_fingerprint }
+                guard "source_credential_material_recorded" {
+                    self.credential_material_fingerprint == Some(credential_material_fingerprint)
+                }
+                update {}
+                to Valid
+                emit SourceCredentialPublicationResolved { disposition: SourceCredentialPublicationDisposition::Publish }
+            }
+
+            transition ResolveSourceCredentialPublicationAlreadyPublished {
+                per_phase [Valid, Refreshing, ReauthRequired, Released]
+                on input ResolveSourceCredentialPublication { credential_material_fingerprint }
+                guard "source_credential_material_recorded" {
+                    self.credential_material_fingerprint == Some(credential_material_fingerprint)
+                }
+                update {}
+                to Valid
+                emit SourceCredentialPublicationResolved { disposition: SourceCredentialPublicationDisposition::AlreadyPublished }
+            }
+
+            // --- Acquire from a lease whose declared freshness window ran out ---
+            //
+            // The renewal arms of Acquire (see Acquire): from Expiring or
+            // Expired every publication is accepted, the value the lease
+            // records included, so a source that re-asserts its value renews
+            // the lease with a new expiry. One arm per phase, each guarded by
+            // its phase alone, so the TLA+ model keeps the renewal production
+            // performs. Same update and lifecycle event as Acquire.
+            transition AcquireFromExpiring {
+                on input Acquire { expires_at_ts, credential_published_at_millis, credential_material_fingerprint }
+                guard { self.lifecycle_phase == Phase::Expiring }
+                update {
+                    self.expires_at = expires_at_ts;
+                    self.refresh_attempt = 0;
+                    self.credential_present = true;
+                    self.credential_generation = self.credential_generation + 1;
+                    self.credential_published_at_millis = Some(credential_published_at_millis);
+                    self.credential_material_fingerprint = credential_material_fingerprint;
+                }
+                to Valid
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition AcquireFromExpired {
+                on input Acquire { expires_at_ts, credential_published_at_millis, credential_material_fingerprint }
+                guard { self.lifecycle_phase == Phase::Expired }
+                update {
+                    self.expires_at = expires_at_ts;
+                    self.refresh_attempt = 0;
+                    self.credential_present = true;
+                    self.credential_generation = self.credential_generation + 1;
+                    self.credential_published_at_millis = Some(credential_published_at_millis);
+                    self.credential_material_fingerprint = credential_material_fingerprint;
+                }
+                to Valid
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            // --- A consumer's refusal of one publication ---
+            //
+            // MarkPublicationRefused withdraws the lease (ReauthRequired, as
+            // MarkReauthRequired does) only when it names the publication the
+            // lease carries: the same credential generation and the same
+            // recorded fingerprint. A refusal is observation-shaped and can
+            // arrive late, after another session or machine published a
+            // newer value: it then names a superseded publication and
+            // changes nothing, so the newer value stays valid. A lease that
+            // was already refused or released is left as it is too. The
+            // guards partition every phase; the refusing arms are split by
+            // phase like MarkReauthRequired's, and the no-op arms are
+            // per-phase self-loops. Every arm emits the lifecycle event, as
+            // the freshness self-loops do.
+            transition MarkPublicationRefusedFromValid {
+                on input MarkPublicationRefused { refused_credential_generation, refused_credential_material_fingerprint }
+                guard { self.lifecycle_phase == Phase::Valid }
+                guard "refused_publication_current" {
+                    self.credential_generation == refused_credential_generation
+                    && self.credential_material_fingerprint == refused_credential_material_fingerprint
+                }
+                to ReauthRequired
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition MarkPublicationRefusedFromExpiring {
+                on input MarkPublicationRefused { refused_credential_generation, refused_credential_material_fingerprint }
+                guard { self.lifecycle_phase == Phase::Expiring }
+                guard "refused_publication_current" {
+                    self.credential_generation == refused_credential_generation
+                    && self.credential_material_fingerprint == refused_credential_material_fingerprint
+                }
+                to ReauthRequired
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition MarkPublicationRefusedFromExpired {
+                on input MarkPublicationRefused { refused_credential_generation, refused_credential_material_fingerprint }
+                guard { self.lifecycle_phase == Phase::Expired }
+                guard "refused_publication_current" {
+                    self.credential_generation == refused_credential_generation
+                    && self.credential_material_fingerprint == refused_credential_material_fingerprint
+                }
+                to ReauthRequired
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition MarkPublicationRefusedFromRefreshing {
+                on input MarkPublicationRefused { refused_credential_generation, refused_credential_material_fingerprint }
+                guard { self.lifecycle_phase == Phase::Refreshing }
+                guard "refused_publication_current" {
+                    self.credential_generation == refused_credential_generation
+                    && self.credential_material_fingerprint == refused_credential_material_fingerprint
+                }
+                to ReauthRequired
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition MarkPublicationRefusedSuperseded {
+                per_phase [Valid, Expiring, Expired, Refreshing]
+                on input MarkPublicationRefused { refused_credential_generation, refused_credential_material_fingerprint }
+                guard "refused_publication_superseded" {
+                    self.credential_generation != refused_credential_generation
+                    || self.credential_material_fingerprint != refused_credential_material_fingerprint
+                }
+                update {}
+                to Valid
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition MarkPublicationRefusedWithdrawn {
+                per_phase [ReauthRequired, Released]
+                on input MarkPublicationRefused { refused_credential_generation, refused_credential_material_fingerprint }
+                update {}
+                to Valid
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
             }
         }
             }

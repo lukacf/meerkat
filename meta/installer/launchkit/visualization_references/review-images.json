@@ -1,0 +1,31 @@
+{
+  "version": "user-supplied-visual-references-v1",
+  "source_reference_hash": "7f7f2002d39c5697a37d79021871e0b6e8d613e114675ca1d2f480a3eee7030e",
+  "source_files": {
+    "household.js": "1ac3faa22dfd3ba8bd96df5f8f7e7fe68af3b0bd7f0ce5dae64e94429679e335",
+    "scenes.js": "e898af3490ce4218ce351bc1e3af345247fa6a3dabc29b94a31ebd921fc22394",
+    "net.js": "a8da3a5dd65c698cbfb4a2592b96f8d0bc596549af29350ebf92335b4d503341"
+  },
+  "images": [
+    {
+      "id": "household",
+      "title": "Household: people, specialist contexts and shared knowledge",
+      "filename": "household-reference.png",
+      "origin": "user-supplied-design-reference",
+      "source_filename": "Screenshot 2026-09-27 at 18.58.56.png",
+      "width": 1810,
+      "height": 1416,
+      "png_hash": "094ce20f169dfe41df903ad6fd76274d68d0831e2221eb23cb15684ef5308575"
+    },
+    {
+      "id": "engineering-organisation",
+      "title": "Engineering organisation: hundreds of agents and temporary worker populations",
+      "filename": "engineering-reference.png",
+      "origin": "user-supplied-design-reference",
+      "source_filename": "Screenshot 2026-09-27 at 18.59.19.png",
+      "width": 1720,
+      "height": 1088,
+      "png_hash": "1ce53b3d8bbee596adca8e0814c50c02341139c10f58d105aca546e77f549919"
+    }
+  ]
+}

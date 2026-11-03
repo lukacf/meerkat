@@ -446,6 +446,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SetModelRoutingBaselineRetired`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
+- `RequestFiniteSwitchTurnTranscriptUnsupportedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestFiniteSwitchTurnTranscriptUnsupportedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestFiniteSwitchTurnTranscriptUnsupportedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestUntilChangedSwitchTurnTranscriptUnsupportedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestUntilChangedSwitchTurnTranscriptUnsupportedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestUntilChangedSwitchTurnTranscriptUnsupportedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestFiniteSwitchTurnApprovalUnavailableIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -6320,6 +6338,51 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ReplaceVisibilityStateStopped`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
+- `ReplaceToolGrantGateIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReplaceToolGrantGateAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReplaceToolGrantGateRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReplaceToolGrantGateRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReplaceToolGrantGateStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ApplyToolGrantOpenSetChangedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ApplyToolGrantOpenSetChangedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ApplyToolGrantOpenSetChangedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ApplyToolGrantOpenSetChangedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ApplyToolGrantOpenSetChangedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ApplyToolGrantOpenSetUnchangedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ApplyToolGrantOpenSetUnchangedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ApplyToolGrantOpenSetUnchangedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ApplyToolGrantOpenSetUnchangedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ApplyToolGrantOpenSetUnchangedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `McpServerConnectPendingIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -9208,6 +9271,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `supervisor_rotation_phase_shape`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `tool_grant_open_names_are_gated`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

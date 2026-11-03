@@ -2871,7 +2871,7 @@ mod tests {
                 .all(|fault| fault.schedule_id != healthy.schedule_id),
             "the healthy schedule must not fault"
         );
-        assert!(report.fault_count() == 3);
+        assert_eq!(report.fault_count(), 3);
         assert!(!report.fault_fingerprint().is_empty());
     }
 

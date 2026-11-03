@@ -3,6 +3,8 @@
 //! The Agent struct ties together all components and runs the agent loop.
 
 #[cfg(all(test, feature = "workspace-tests"))]
+mod activation_retirement_fold_tests;
+#[cfg(all(test, feature = "workspace-tests"))]
 mod assistant_message_identity_tests;
 #[cfg(all(test, feature = "workspace-tests"))]
 mod brain_swap_promotion_tests;
@@ -22,8 +24,15 @@ mod extraction;
 mod hook_impl;
 #[cfg(all(test, feature = "workspace-tests"))]
 mod hooks_behavior_tests;
+mod instruction_run_start;
 #[cfg(test)]
 mod observation_barrier_tests;
+#[cfg(all(test, feature = "workspace-tests"))]
+mod operator_instruction_fold_tests;
+#[cfg(all(test, feature = "workspace-tests"))]
+mod operator_instruction_run_start_tests;
+#[cfg(all(test, feature = "workspace-tests"))]
+mod operator_instruction_turn_tests;
 pub(crate) mod reasoning_preference;
 #[cfg(all(test, feature = "workspace-tests"))]
 mod round_commit_tests;
@@ -2932,6 +2941,16 @@ pub trait AgentToolDispatcher: Send + Sync {
         Arc::from([])
     }
 
+    /// Whether this dispatcher adjudicates scoped tool grants: it hands a
+    /// grant-gated call to its tool only when a live grant admits it, as
+    /// `ExecutionPolicyGatedDispatcher::with_tool_grant_gate` does. An agent
+    /// with a grant gate requires it, since its visibility precheck lets a
+    /// closed gated name through to this one refusal site. The default
+    /// adjudicates nothing.
+    fn adjudicates_tool_grants(&self) -> bool {
+        false
+    }
+
     /// Execute a tool call, returning the transcript result and any async operations.
     ///
     /// The `ToolDispatchOutcome` separates transcript data (`result`) from
@@ -3066,6 +3085,21 @@ pub trait AgentToolDispatcher: Send + Sync {
         &self,
         _authority: Option<Arc<std::sync::RwLock<crate::service::MobToolAuthorityContext>>>,
     ) {
+    }
+
+    /// Whether this dispatcher only observes the bindings the agent factory
+    /// gives a build's external tools, and surfaces nothing of its own.
+    ///
+    /// Such a dispatcher lists no tool, catalog entry or pending catalog
+    /// source, now or later (for example a wrapper of a build's external
+    /// tools that wraps none). The agent factory binds the session's mob
+    /// operator authority to it ([`Self::bind_session_mob_tool_authority`])
+    /// as to any external tools, and then composes the build as one with no
+    /// external tools, so it changes nothing in the composed surface, its
+    /// catalog exactness included. A wrapper forwards the answer of the
+    /// dispatcher it wraps. The default is `false`.
+    fn observes_bindings_only(&self) -> bool {
+        false
     }
 }
 
@@ -4377,6 +4411,10 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
         self.inner.pending_catalog_sources()
     }
 
+    fn adjudicates_tool_grants(&self) -> bool {
+        self.inner.adjudicates_tool_grants()
+    }
+
     async fn poll_external_updates(&self) -> ExternalToolUpdate {
         self.inner.poll_external_updates().await
     }
@@ -5236,6 +5274,10 @@ where
     client: Arc<C>,
     tools: Arc<T>,
     tool_scope: ToolScope,
+    /// The build's scoped tool grant gate: each model-request boundary opens
+    /// the gated names a live grant admits. The dispatch gate carries the
+    /// same binding and adjudicates every gated call again.
+    pub(crate) tool_grant_gate: Option<crate::tool_grant::ToolGrantGate>,
     store: Arc<S>,
     session: Session,
     budget: Budget,
@@ -5428,6 +5470,12 @@ where
     /// Registry-minted facts for the active model. This replaces client-local
     /// capability/limit projections as the durable source used by later turns.
     pub(crate) active_model_profile: Option<crate::ModelProfileWitness>,
+    /// How the active model carries an operator-instruction entry, as the
+    /// build resolved it from the model as its backend serves it. `None`
+    /// derives it from [`Self::active_model_profile`]; a hot swap, whose
+    /// witness is the catalog row, installs the lowering its request policy
+    /// carries, which the host resolved for the new binding's backend.
+    pub(crate) operator_instruction_lowering: Option<crate::InstructionLowering>,
     /// True when the runtime control plane must stamp execution kind metadata.
     pub(crate) runtime_execution_kind_required: bool,
     /// Resources this agent's construction handed over that must be released
@@ -5442,6 +5490,21 @@ where
     /// failures can return before `StartConversationRun` and must never reuse
     /// the previous turn's terminal snapshot.
     pub(crate) runtime_started_run_id: Option<crate::lifecycle::RunId>,
+    /// The run in flight started fresh, not from a run cursor. A compaction
+    /// before its first model response may fold operator instructions at
+    /// the run's start (`Session::authorize_instruction_fold`).
+    pub(crate) run_started_fresh: bool,
+    /// The run id a fresh run start named in its operator-instruction entry
+    /// when no run was started in the turn authority yet: the run loop
+    /// starts the run under it, so the entry names the run the agent runs.
+    /// The run loop takes it whenever it picks a run's id.
+    pub(crate) run_start_reserved_run_id: Option<crate::lifecycle::RunId>,
+    /// What the last fresh run start's operator-instruction entry changed,
+    /// and whether its run started and a checkpoint holds it, until the
+    /// session task concludes the run start
+    /// (`Agent::conclude_run_start_operator_instructions`).
+    pub(crate) unconcluded_run_start_instructions:
+        Option<Box<instruction_run_start::UnconcludedRunStartInstructions>>,
     /// Machine-terminal failure observed for the exact runtime run above.
     /// Kept separate from the public `AgentError` so direct session surfaces
     /// preserve their original typed errors while the runtime can commit a
@@ -6092,7 +6155,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6157,7 +6220,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6241,7 +6304,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )])
             .unwrap(),
         );
@@ -6302,7 +6365,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )])
             .unwrap(),
         );
@@ -6341,7 +6404,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6406,7 +6469,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6473,7 +6536,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6519,7 +6582,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6661,7 +6724,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6730,7 +6793,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6782,7 +6845,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6826,7 +6889,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -7276,7 +7339,7 @@ mod governed_operation_tests {
         let resolution = crate::ToolExecutionResolutionContext::new(
             crate::ToolDeadlineChain::new(vec![crate::ToolDeadlineContributor::finite(
                 crate::ToolDeadlineOwner::CoreToolDispatch,
-                std::time::Duration::from_secs(60),
+                std::time::Duration::from_mins(1),
             )])
             .unwrap(),
         );
@@ -7461,7 +7524,7 @@ mod governed_operation_tests {
                 tier,
                 0,
                 begin_after_checks,
-                std::time::Duration::from_secs(3600),
+                std::time::Duration::from_hours(1),
             )
         }
 

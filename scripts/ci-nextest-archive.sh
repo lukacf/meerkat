@@ -23,9 +23,15 @@ archive_file="${3:-}"
 profile=default
 status_level=none
 final_status_level=fail
+# Families over Core's whole workspace start from Core's package selection:
+# `--workspace` and an `--exclude` for every package of the other products
+# (scripts/core-workspace-args.mjs; Cargo unifies features across the packages
+# of one invocation). Only an archive build resolves packages, so only a build
+# derives it.
+CORE_WORKSPACE='<core-workspace>'
 case "$family" in
   unit)
-    cargo_args=(--workspace --lib)
+    cargo_args=("$CORE_WORKSPACE" --lib)
     profile=ci-unit
     ;;
   unit-mob)
@@ -55,7 +61,7 @@ case "$family" in
     ;;
   int-everything-else)
     cargo_args=(
-      --workspace
+      "$CORE_WORKSPACE"
       --exclude meerkat-integration-tests
       --exclude meerkat-mob
       --exclude meerkat-mob-adaptive
@@ -112,6 +118,22 @@ fi
 case "${1:-}" in
   build)
     mkdir -p "$(dirname "$archive_file")"
+    if [[ " ${cargo_args[*]} " == *" ${CORE_WORKSPACE} "* ]]; then
+      core_selection="$(CARGO="$CARGO" node "${ROOT}/scripts/core-workspace-args.mjs")" || {
+        echo "error: cannot derive Core's package selection" >&2
+        exit 1
+      }
+      mapfile -t core_workspace <<<"$core_selection"
+      expanded=()
+      for arg in "${cargo_args[@]}"; do
+        if [[ "$arg" == "$CORE_WORKSPACE" ]]; then
+          expanded+=("${core_workspace[@]}")
+        else
+          expanded+=("$arg")
+        fi
+      done
+      cargo_args=("${expanded[@]}")
+    fi
     # Tests of crates that dev-depend on mcp-test-server need its binary;
     # built into the target directory, it rides in the archive
     # (archive.include, .config/nextest.toml).

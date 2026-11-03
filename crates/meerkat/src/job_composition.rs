@@ -266,18 +266,15 @@ impl JobTerminalEvidenceProjector {
             return Ok(JobTerminalEvidenceProjection::WorkGraphDisabled);
         };
         let evidence_kind = JobTerminalEvidenceKind::from_terminal(terminal);
-        let evidence = WorkEvidenceRef {
-            kind: evidence_kind.evidence_kind().into(),
-            id: format!("detached_job:{}:terminal", link.job.job_id()),
-            label: Some(format!("Detached job {}", link.job.job_id())),
-            summary: Some(
-                serde_json::to_string(terminal)
-                    .map_err(|error| JobCompositionError::Encode(error.to_string()))?,
-            ),
-            confirmation_kind: None,
-            confirming_owner_key: None,
-            execution_binding_id: None,
-        };
+        let evidence = WorkEvidenceRef::new(
+            evidence_kind.evidence_kind(),
+            format!("detached_job:{}:terminal", link.job.job_id()),
+        )
+        .with_label(format!("Detached job {}", link.job.job_id()))
+        .with_summary(
+            serde_json::to_string(terminal)
+                .map_err(|error| JobCompositionError::Encode(error.to_string()))?,
+        );
 
         loop {
             let item = workgraph

@@ -1113,6 +1113,27 @@ async fn read_resumed_member_view(
     ))
 }
 
+/// The role `session_id` was last built under, from its persisted metadata,
+/// read as its resumed build reads it (its mob member binding's role, or
+/// its comms name's role segment for a session that records no binding):
+/// what a build of it under another role declares
+/// (`MemberLaunchMode::Resume::resume_from_role`). `None` when the session
+/// records neither. A failed read is a typed error.
+pub(crate) async fn stored_member_role(
+    session_service: &dyn super::session_service::MobSessionService,
+    session_id: &SessionId,
+) -> Result<Option<crate::ids::ProfileName>, MobError> {
+    let metadata = session_service
+        .load_persisted_session_metadata(session_id)
+        .await
+        .map_err(MobError::SessionError)?;
+    Ok(metadata
+        .and_then(|view| view.session_metadata)
+        .and_then(|metadata| {
+            crate::build::stored_member_role_name(&metadata).map(crate::ids::ProfileName::from)
+        }))
+}
+
 /// The provider-params override the customizer gives `entry`'s rebuild on a
 /// successor session, asked again with the successor's `durable` view after a
 /// restore or explicit resume moved the member off its absent bound session.
@@ -1226,6 +1247,7 @@ pub(crate) fn member_resume_spec(
     spec.model_override = entry.effective_model_override.clone();
     spec.spawned_by = entry.spawned_by.clone();
     spec.fork_job = entry.fork_job.clone();
+    spec.definition_wiring = entry.definition_wiring;
     spec
 }
 
@@ -1512,6 +1534,7 @@ mod tests {
             fork_job: None,
             fork_source,
             fork_overlay: ForkOverlayOrigin::Source,
+            definition_wiring: crate::DefinitionWiring::Applies,
         });
         roster.get(&identity).cloned().expect("the entry is seated")
     }

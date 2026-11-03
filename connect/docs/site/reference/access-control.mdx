@@ -1,0 +1,70 @@
+---
+title: "Access and audience control"
+description: "Enforce actual operation, resource, conversation and destination permissions with their existing owners."
+icon: "shield-halved"
+---
+
+Compose integration access through the application's identity, policy and runtime services. Installation, account authentication, agent permission and output delivery are separate decisions.
+
+## Distinct decisions
+
+| Decision | What must be selected |
+| --- | --- |
+| Provisioning | Exact executable/configuration/policy changes and their permitted host effects |
+| Authentication | Actual account or service identity and credential audience |
+| Grant | Acting principal, operations, resources and lifetime |
+| Invocation approval | Exact business action and applicable recipient/content/resource choices |
+| Frontend exposure | Who can invoke, view or control which agent under which conversation policy |
+| Delivery | Permitted content projection and actual provider audience/destination |
+
+The optional setup tool's presence does not authorize installation, a public endpoint or a broader grant. Conversely, an existing authorized request and standing policy should not acquire a redundant ceremony merely because setup was involved.
+
+## Newly discovered tools and persistent permission
+
+The installed Connect source can include exact newly discovered tool names in the existing service
+approval. The setup agent proposes names observed from the installed integration; code checks the
+concrete selection and the original waiting agent. Metadata and a familiar name are not permission.
+
+The review covers the complete resulting member policy, including preserved permissions, **until
+superseded**. That ordinary permission is separate from the native service grant's task lifetime and
+still requires current native authority when invoked. Optional catalog approval allows the waiting
+original agent to find tools available in its original conversation, not only the new plugin. Its
+native catalog grant remains task-scoped. Helper grants are not transferred to the original agent.
+
+Default checked installed setup can obtain this broader approval through the existing human review
+and retain it for recovery without enabling standing automatic approval. New requests still require
+human review. Existing current approval can cover the service, complete member policy and catalog
+scope in one decision; narrower historical service consent cannot silently acquire those scopes.
+Application SDK adapters must use Python `authorize_tool_policy` or TypeScript `authorizeToolPolicy`
+with the request's exact broader-proposal digest. The older `authorize` remains service-only.
+
+Installed gateway Public-service review uses its configured Console; Account/software review can
+also use the inherited terminal. Plain `meerkat-connect` setup prepares later fresh realm use and
+does not retain or resume a one-turn `rkat` input. Native Rust and JSON-RPC with Python/TypeScript
+provide the application composition surfaces.
+
+## Delegation
+
+Work retains its authenticated requester or explicit service mandate, acting agent, tenant, selected account, audience and actual permissions across peers, forks and continuations. Each hop preserves or narrows the incoming authority and intersects it with local grants.
+
+An immediate sender, session ID, objective ID or signed piece of model prose does not replace that association. Missing or unverifiable context cannot fall back to the receiving agent owner's private access. Use the native authority APIs to preserve that association.
+
+## Resource boundaries
+
+The source or resource owner checks actual history, memory, context, file and service reads before release. A package label cannot confer trust. Broad search/list operations need an enforceable restriction strategy before snippets, counts or other metadata reach a model or output.
+
+Provider token scope and effective local grant scope remain separate facts. A checkbox cannot narrow a remote server's data-processing access. Where the promised resource boundary cannot be enforced, that operation is unsupported under the grant.
+
+## Audience boundaries
+
+Admission identifies the invoking audience. Conversation policy identifies the context-sharing scope. The provider's actual observation audience identifies who can see the delivered result. These may differ.
+
+Queued output revalidates current destination policy and membership/visibility evidence at the required freshness. A missing policy store or required association yields pending/denied delivery, not permission. Monitoring copies require their own destination authorization, projection and receipt.
+
+Frontend pause/removal and permission invalidation affect new admission and subscriptions according to their owners. There is no promise to recall bytes already released.
+
+## Enforcement points
+
+Validate the actual account, resource, operation and destination at their owners. Package provenance records where code came from; source authorization controls which data enters the agent context; destination authorization controls where output is sent.
+
+Use OS process isolation for executable confinement. SDK transports and in-process hooks run as trusted application code.

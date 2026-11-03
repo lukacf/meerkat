@@ -88,6 +88,34 @@ export type AgentErrorClass = "llm" | "operation_refused" | "store" | "tool" | "
 export type ContentFilteredStop = "refusal" | "content_filter";
 
 /**
+ * Why a build's scoped tool grant gate was refused: a gate no grant could
+ * honour. The agent factory answers it, and a session service surfaces it as
+ * [`crate::error::AgentError::ToolGrantGateRefused`], whose wire form is an
+ * invalid-params error carrying this refusal, tagged by `kind`.
+ */
+export type GrantGateRefusal = {
+  family: string;
+  kind: "unknown_family";
+} | {
+  family: string;
+  kind: "family_disabled";
+} | {
+  family: string;
+  kind: "family_not_mounted";
+} | {
+  kind: "tool_not_mounted";
+  tool: string;
+} | {
+  kind: "unknown_tool";
+  tool: string;
+} | {
+  kind: "policy_refused";
+  tool: string;
+} | {
+  kind: "no_grant_service";
+};
+
+/**
  * Typed reason a hook execution failed (engine-level fault, not a guardrail
  * denial).
  *
@@ -248,6 +276,9 @@ export type AgentErrorReason = {
   detail?: ProviderStopDetail | null;
   reason_type: "content_filtered";
   stop: ContentFilteredStop;
+} | {
+  reason_type: "tool_grant_gate_refused";
+  refusal: GrantGateRefusal;
 };
 
 export type AgentErrorReport = {

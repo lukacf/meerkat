@@ -93,7 +93,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let budget = BudgetLimits::unlimited()
         .with_max_tokens(2000) // Measured exhaustion threshold; a call can overshoot
         .with_max_tool_calls(10) // Max tool invocations
-        .with_max_duration(Duration::from_secs(60)); // Agent-lifetime wall-clock budget
+        .with_max_duration(Duration::from_mins(1)); // Agent-lifetime wall-clock budget
 
     let mut agent = AgentBuilder::new()
         .model("claude-sonnet-4-6")

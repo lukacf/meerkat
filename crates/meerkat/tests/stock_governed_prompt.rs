@@ -476,7 +476,7 @@ impl StockRealm {
                 .await
                 .expect("pinned controller")
         };
-        assert!(controller.selection() == &self.model.selection());
+        assert_eq!(controller.selection(), &self.model.selection());
         StockSession {
             session_id,
             controller,

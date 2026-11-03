@@ -3777,6 +3777,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl MobSessionService for BoundarySessionService {
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn subscribe_session_activity(
             &self,
             _session_id: &meerkat_core::SessionId,
@@ -4199,7 +4203,7 @@ mod tests {
             poll_lifetime_fixture(Some(log)).await;
         let mut poll = Box::pin(observation.poll_events(
             &session,
-            lifetime_poll_request(&expected, Duration::from_secs(3600)),
+            lifetime_poll_request(&expected, Duration::from_hours(1)),
         ));
         let wake = Arc::new(PollWake::default());
         let waker = std::task::Waker::from(Arc::clone(&wake));
@@ -4235,7 +4239,7 @@ mod tests {
                     poll_lifetime_fixture(empty_lifetime_log(durable)).await;
                 let mut poll = Box::pin(observation.poll_events(
                     &session,
-                    lifetime_poll_request(&expected, Duration::from_secs(3600)),
+                    lifetime_poll_request(&expected, Duration::from_hours(1)),
                 ));
                 let wake = Arc::new(PollWake::default());
                 let waker = std::task::Waker::from(Arc::clone(&wake));

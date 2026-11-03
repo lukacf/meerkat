@@ -62,7 +62,7 @@ fn web_search_composite(searches: &Arc<AtomicUsize>) -> CompositeDispatcher {
 fn deadlines() -> meerkat_core::ToolDeadlineChain {
     meerkat_core::ToolDeadlineChain::new(vec![meerkat_core::ToolDeadlineContributor::finite(
         meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
-        std::time::Duration::from_secs(600),
+        std::time::Duration::from_mins(10),
     )])
     .expect("deadline chain")
 }
@@ -664,7 +664,7 @@ async fn a_required_review_settles_web_search_as_local_feedback_per_tier() {
             std::time::Duration::from_secs(30),
         );
         Some(Arc::new(match route {
-            Some(route) => review.with_human_consent(route, std::time::Duration::from_secs(60)),
+            Some(route) => review.with_human_consent(route, std::time::Duration::from_mins(1)),
             None => review,
         }))
     };

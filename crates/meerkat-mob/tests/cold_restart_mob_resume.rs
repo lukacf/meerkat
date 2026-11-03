@@ -2156,7 +2156,7 @@ fn mob_destroy_session_children_within_production_stack_budget() {
                 .expect("production-sized destroy runtime");
             runtime.block_on(async {
                 tokio::time::timeout(
-                    Duration::from_secs(60),
+                    Duration::from_mins(1),
                     Box::pin(mob_destroy_session_children_stack_budget_scenario()),
                 )
                 .await
@@ -2720,6 +2720,9 @@ struct PowerCutRuntimeStore {
     /// store-owned durable-tail recovery holds every tail intact
     /// (`DurableTailRecoveryOutcome::Held`).
     hold_tail_recovery: std::sync::atomic::AtomicBool,
+    /// While set, every read of this runtime's machine lifecycle record
+    /// answers that the store cannot serve it now.
+    unavailable_lifecycle_reads: std::sync::Mutex<Option<meerkat_runtime::LogicalRuntimeId>>,
 }
 
 /// Where a held boundary commit is.
@@ -2784,7 +2787,28 @@ impl PowerCutRuntimeStore {
             boundary_hold: tokio::sync::watch::channel(BoundaryHold::Idle).0,
             forward_hosting: std::sync::atomic::AtomicBool::new(false),
             hold_tail_recovery: std::sync::atomic::AtomicBool::new(false),
+            unavailable_lifecycle_reads: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Answer every read of `runtime_id`'s machine lifecycle record with the
+    /// typed failure of a store that cannot serve it now, until
+    /// [`Self::serve_lifecycle_reads`].
+    #[cfg(feature = "test-support")]
+    fn fail_lifecycle_reads_of(&self, runtime_id: meerkat_runtime::LogicalRuntimeId) {
+        *self
+            .unavailable_lifecycle_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(runtime_id);
+    }
+
+    /// Serve every machine lifecycle read again.
+    #[cfg(feature = "test-support")]
+    fn serve_lifecycle_reads(&self) {
+        *self
+            .unavailable_lifecycle_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     /// Report the inner store's hosting capability from now on (see
@@ -3520,6 +3544,17 @@ impl meerkat_runtime::RuntimeStore for PowerCutRuntimeStore {
         &self,
         runtime_id: &meerkat_runtime::LogicalRuntimeId,
     ) -> Result<Option<Vec<u8>>, meerkat_runtime::RuntimeStoreError> {
+        if self
+            .unavailable_lifecycle_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            == Some(runtime_id)
+        {
+            return Err(meerkat_runtime::RuntimeStoreError::Unavailable(format!(
+                "injected: the store cannot serve the lifecycle of {runtime_id} now"
+            )));
+        }
         self.inner.load_machine_lifecycle_record(runtime_id).await
     }
 
@@ -6165,7 +6200,7 @@ async fn a_resume_spawn_of_a_session_another_owner_hosts_refuses_typed() {
     let physical_before = physical_head_token(&store, &session_id).await;
 
     let refused = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.spawn_spec(
             SpawnMemberSpec::new("worker", worker.clone())
                 .with_resume_bridge_session_id(session_id.clone()),
@@ -6316,7 +6351,7 @@ async fn a_mob_start_settles_the_durable_tail_of_a_member_whose_restore_failed()
         .refusing
         .store(false, std::sync::atomic::Ordering::SeqCst);
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(AgentIdentity::from("w-1"), None),
     )
     .await
@@ -6612,6 +6647,371 @@ async fn a_mob_start_defers_a_retiring_members_unprovable_durable_tail() {
     let _ = handle.shutdown().await;
 }
 
+/// A retiring member whose durable tail the start cannot settle because the
+/// session store fails still stops the start. The settle is a write: only a
+/// read of the member's state, a hosting refusal or an unprovable tail fails
+/// the cleanup restore before it had any effect, and only those defer the
+/// member. The tail stays as the crash left it.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mob_start_still_stops_when_a_retiring_members_tail_settle_fails_in_the_store() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let power_store = Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = power_store.clone();
+    let w1_sid =
+        retiring_member_after_a_crash(&paths, &power_store, true, "retiring-settle-fails").await;
+
+    let (service_2, store_2) = persistent_head_canonical_service(&paths, runtime_store.clone());
+    let head_before = store_2
+        .load_head(&w1_sid)
+        .await
+        .expect("load the physical head")
+        .expect("the physical head exists");
+    let persistent_owner: Arc<dyn MobSessionService> = service_2.clone();
+    let failing_settles = FailingOnceSessionService::new(persistent_owner, None, None, 0, false);
+    failing_settles.fail_durable_tail_settles_in_the_store();
+    let started = MobBuilder::for_resume(
+        MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage"),
+    )
+    .with_session_service(failing_settles.clone())
+    .with_default_llm_client(openai_test_client())
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await;
+    let status = match &started {
+        Ok(handle) => Some(handle.status().await),
+        Err(_) => None,
+    };
+    assert!(
+        failing_settles.durable_tail_settle_failed(),
+        "the start reached the retiring member's tail settle"
+    );
+    assert!(
+        !matches!(status, Some(Ok(meerkat_mob::MobState::Running))),
+        "a store failure while settling a retiring member's tail must still stop the start: \
+         {status:?}"
+    );
+    let head_after = store_2
+        .load_head(&w1_sid)
+        .await
+        .expect("load the physical head after the stopped start")
+        .expect("the physical head still exists");
+    assert_eq!(
+        meerkat_core::session_store::session_head_cas_token(&head_after).unwrap(),
+        meerkat_core::session_store::session_head_cas_token(&head_before).unwrap(),
+        "the stopped start leaves the tail as the crash left it"
+    );
+    if let Ok(handle) = started {
+        let _ = handle.shutdown().await;
+    }
+}
+
+/// A mob restarted over [`retiring_member_after_a_crash`] (no durable tail)
+/// whose session service answers every persisted read of the retiring
+/// member's session with `fault`.
+#[cfg(feature = "test-support")]
+struct RetiringMemberUnreadAtStart {
+    handle: MobHandle,
+    faulting: Arc<FailingOnceSessionService>,
+    session_id: meerkat_core::types::SessionId,
+    identity: AgentIdentity,
+}
+
+/// Start the mob while every read of its retiring member `w-1`'s session
+/// fails with `fault`. The start must run: the member's own failure defers
+/// its cleanup delivery custody instead of stopping the mob.
+#[cfg(feature = "test-support")]
+async fn start_with_a_retiring_members_session_unread(
+    temp: &Path,
+    paths: &Paths,
+    fault: support::SessionLoadFault,
+    label: &str,
+) -> RetiringMemberUnreadAtStart {
+    let _ = temp;
+    let power_store = Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = power_store.clone();
+    let session_id = retiring_member_after_a_crash(paths, &power_store, false, label).await;
+    let (service, _store) = persistent_head_canonical_service(paths, runtime_store);
+    let persistent_owner: Arc<dyn MobSessionService> = service;
+    let faulting = FailingOnceSessionService::new(persistent_owner, None, None, 0, false);
+    faulting.fail_session_loads(session_id.clone(), fault);
+    let handle = MobBuilder::for_resume(
+        MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage"),
+    )
+    .with_session_service(faulting.clone())
+    .with_default_llm_client(openai_test_client())
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await
+    .unwrap_or_else(|error| {
+        panic!("[{label}] a retiring member whose session cannot be read does not stop the mob: {error}")
+    });
+    let status = handle.status().await;
+    assert!(
+        matches!(status, Ok(meerkat_mob::MobState::Running)),
+        "[{label}] the start runs instead of fail-stopping before admission: {status:?}"
+    );
+    RetiringMemberUnreadAtStart {
+        handle,
+        faulting,
+        session_id,
+        identity: AgentIdentity::from("w-1"),
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl RetiringMemberUnreadAtStart {
+    /// The member stays rostered as Retiring next to the healthy lead, its
+    /// status shows its cleanup delivery deferred with `cause` (a wire token),
+    /// and the start read its session.
+    async fn assert_degraded(&self, cause: &str, label: &str) {
+        let members = self.handle.list_members_including_retiring().await;
+        assert!(
+            members
+                .iter()
+                .any(|entry| entry.agent_identity == self.identity
+                    && entry.status == MobMemberStatus::Retiring),
+            "[{label}] the degraded member stays Retiring: {members:?}"
+        );
+        assert!(
+            members.iter().any(|entry| entry.agent_identity == "lead-1"),
+            "[{label}] the healthy lead is still listed: {members:?}"
+        );
+        let status = self
+            .handle
+            .member_status(&self.identity)
+            .await
+            .unwrap_or_else(|error| panic!("[{label}] the degraded member's status: {error}"));
+        let deferral = status.custody_deferred.unwrap_or_else(|| {
+            panic!("[{label}] the member's status shows its deferred custody restore")
+        });
+        assert_eq!(
+            deferral.restore,
+            meerkat_mob::MemberCustodyRestore::CleanupDelivery,
+            "[{label}] the deferred restore"
+        );
+        assert_eq!(
+            deferral.cause.as_str(),
+            cause,
+            "[{label}] the deferral's cause"
+        );
+        assert!(
+            self.faulting.session_loads(&self.session_id) >= 1,
+            "[{label}] the start read the member's session"
+        );
+    }
+
+    /// A retire while the session still cannot be read refuses with the
+    /// typed deferral, whose cause is the store failure the read met.
+    async fn assert_retire_refused_typed(&self, label: &str) {
+        let error = self
+            .handle
+            .retire(self.identity.clone())
+            .await
+            .expect_err("a retire while the member's session still cannot be read refuses");
+        let deferral = match &error {
+            meerkat_mob::MobError::SharedRetirementFailure(shared) => shared.as_ref(),
+            other => other,
+        };
+        assert!(
+            matches!(
+                deferral,
+                meerkat_mob::MobError::MemberCustodyDeferred {
+                    member_id,
+                    session_id,
+                    restore: meerkat_mob::MemberCustodyRestore::CleanupDelivery,
+                    cause,
+                } if member_id == &self.identity
+                    && session_id == &self.session_id
+                    && matches!(
+                        cause.as_ref(),
+                        meerkat_mob::MobError::SessionError(
+                            meerkat_core::service::SessionError::Store(_)
+                        )
+                    )
+            ),
+            "[{label}] the retire refuses with the deferral carrying the store failure: {error:?}"
+        );
+    }
+
+    /// Once the store serves the session again, a retire restores the
+    /// member's custody and the retirement completes.
+    async fn assert_retire_completes_once_the_store_serves(&self, label: &str) {
+        self.faulting.serve_session_loads();
+        self.handle
+            .retire(self.identity.clone())
+            .await
+            .unwrap_or_else(|error| {
+                panic!("[{label}] once the store serves, the retire restores the custody and completes: {error}")
+            });
+        let members = self.handle.list_members_including_retiring().await;
+        assert!(
+            !members
+                .iter()
+                .any(|entry| entry.agent_identity == self.identity),
+            "[{label}] the member's retirement completed: {members:?}"
+        );
+    }
+}
+
+/// A retiring member whose session the start cannot read because the store
+/// could not serve now no longer stops the mob. The start defers the member's
+/// cleanup delivery custody (`store_unavailable`): the mob runs, the member
+/// stays Retiring next to the healthy lead and its status shows the deferral,
+/// and a retire while the store still cannot serve refuses with the typed
+/// deferral. Once the store serves again, the retire restores the custody and
+/// the retirement completes.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retiring_member_whose_session_store_cannot_serve_degrades_and_recovers() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(std::io::stderr)
+        .try_init();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let label = "store-unavailable";
+    let started = start_with_a_retiring_members_session_unread(
+        temp.path(),
+        &paths,
+        support::SessionLoadFault::Unavailable,
+        label,
+    )
+    .await;
+    started.assert_degraded("store_unavailable", label).await;
+    started.assert_retire_refused_typed(label).await;
+    started
+        .assert_retire_completes_once_the_store_serves(label)
+        .await;
+    let _ = started.handle.shutdown().await;
+}
+
+/// A retiring member whose stored session does not decode stays degraded,
+/// typed and visible (`store_unreadable`): the mob runs, the deferral survives
+/// the backoff wakes that re-attempt it, and every retire refuses typed until
+/// the state is repaired; after the repair the retire completes.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retiring_member_whose_session_does_not_decode_stays_degraded_and_visible() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(std::io::stderr)
+        .try_init();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let label = "store-unreadable";
+    let started = start_with_a_retiring_members_session_unread(
+        temp.path(),
+        &paths,
+        support::SessionLoadFault::Unreadable,
+        label,
+    )
+    .await;
+    started.assert_degraded("store_unreadable", label).await;
+    // Several backoff periods (250 ms, doubling) pass with the state still
+    // unreadable: the member stays degraded with the same cause.
+    sleep(Duration::from_millis(1_800)).await;
+    started.assert_degraded("store_unreadable", label).await;
+    started.assert_retire_refused_typed(label).await;
+    started
+        .assert_retire_completes_once_the_store_serves(label)
+        .await;
+    let _ = started.handle.shutdown().await;
+}
+
+/// A retiring member whose session the start finds gone (its archive ran)
+/// and whose runtime residue the store cannot read now no longer stops the
+/// mob: the residue read keeps its typed store failure, so the start defers
+/// the member's cleanup delivery custody (`store_unavailable`) as it defers
+/// a failed read of the member's session. The mob runs, and another member
+/// runs a turn. Once the stores serve the reads again, a retire of the member
+/// completes.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retiring_member_whose_runtime_residue_cannot_be_read_degrades_and_the_mob_runs() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(std::io::stderr)
+        .try_init();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let label = "residue-unavailable";
+    let power_store = Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = power_store.clone();
+    let session_id = retiring_member_after_a_crash(&paths, &power_store, false, label).await;
+    let (service, _store) = persistent_head_canonical_service(&paths, runtime_store);
+    let persistent_owner: Arc<dyn MobSessionService> = service.clone();
+    let faulting = FailingOnceSessionService::new(persistent_owner, None, None, 0, false);
+    // The member's archive ran: its session reads as gone...
+    faulting.fail_session_loads(session_id.clone(), support::SessionLoadFault::Absent);
+    // ...and the store cannot serve the read of its runtime residue now.
+    power_store
+        .fail_lifecycle_reads_of(meerkat_runtime::LogicalRuntimeId::for_session(&session_id));
+    let handle = MobBuilder::for_resume(
+        MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage"),
+    )
+    .with_session_service(faulting.clone())
+    .with_default_llm_client(openai_test_client())
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "[{label}] a member whose runtime residue cannot be read does not stop the mob: {error}"
+        )
+    });
+    let status = handle.status().await;
+    assert!(
+        matches!(status, Ok(meerkat_mob::MobState::Running)),
+        "[{label}] the start runs instead of fail-stopping before admission: {status:?}"
+    );
+    let identity = AgentIdentity::from("w-1");
+    let member = handle
+        .member_status(&identity)
+        .await
+        .unwrap_or_else(|error| panic!("[{label}] the degraded member's status: {error}"));
+    let deferral = member
+        .custody_deferred
+        .unwrap_or_else(|| panic!("[{label}] the member's status shows its deferred custody"));
+    assert_eq!(
+        deferral.restore,
+        meerkat_mob::MemberCustodyRestore::CleanupDelivery,
+        "[{label}] the deferred restore"
+    );
+    assert_eq!(
+        deferral.cause.as_str(),
+        "store_unavailable",
+        "[{label}] the residue read's typed store failure classes the deferral"
+    );
+    // Another member serves: the lead runs a turn.
+    send_and_wait(
+        &handle,
+        service.as_ref(),
+        "lead-1",
+        "AFTER_DEGRADED_START token-beta",
+        label,
+    )
+    .await;
+
+    // Once the stores serve the reads again, a retire of the member restores
+    // its custody and completes.
+    power_store.serve_lifecycle_reads();
+    faulting.serve_session_loads();
+    handle
+        .retire(identity.clone())
+        .await
+        .unwrap_or_else(|error| {
+            panic!("[{label}] once the store serves, the retire restores the custody and completes: {error}")
+        });
+    let members = handle.list_members_including_retiring().await;
+    assert!(
+        !members.iter().any(|entry| entry.agent_identity == identity),
+        "[{label}] the member's retirement completed: {members:?}"
+    );
+    let _ = handle.shutdown().await;
+}
+
 /// A retiring member whose durable tail its recovery withholds from resume
 /// (held for recovery, or refused by recovery) meets the settle's typed
 /// refusal at start, before any read of its session. That is the member's
@@ -6880,7 +7280,7 @@ async fn a_mob_start_defers_a_restore_failed_members_binding_restore_another_own
         .refusing
         .store(false, std::sync::atomic::Ordering::SeqCst);
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(identity.clone(), None),
     )
     .await
@@ -6896,7 +7296,7 @@ async fn a_mob_start_defers_a_restore_failed_members_binding_restore_another_own
 
     drop(other_owner_claim);
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(identity.clone(), None),
     )
     .await
@@ -6991,7 +7391,7 @@ async fn a_mob_start_defers_a_broken_members_binding_restore_while_its_tail_is_u
         .refusing
         .store(false, std::sync::atomic::Ordering::SeqCst);
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(identity.clone(), None),
     )
     .await
@@ -7003,7 +7403,7 @@ async fn a_mob_start_defers_a_broken_members_binding_restore_while_its_tail_is_u
         unprovable,
         "respawn",
     );
-    let retired = tokio::time::timeout(Duration::from_secs(60), handle.retire(identity.clone()))
+    let retired = tokio::time::timeout(Duration::from_mins(1), handle.retire(identity.clone()))
         .await
         .expect("the retire settles");
     assert_binding_restore_deferred(
@@ -7153,7 +7553,7 @@ async fn an_explicit_resume_keeps_a_deferred_binding_restore_open_while_it_canno
     .await;
     let identity = AgentIdentity::from("w-1");
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(identity.clone(), None),
     )
     .await
@@ -7212,7 +7612,7 @@ async fn a_mob_start_defers_the_binding_preparations_hosting_refusal_for_a_broke
         .store(false, std::sync::atomic::Ordering::SeqCst);
     let identity = AgentIdentity::from("w-1");
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(identity.clone(), None),
     )
     .await
@@ -7233,7 +7633,7 @@ async fn a_mob_start_defers_the_binding_preparations_hosting_refusal_for_a_broke
     );
     drop(other_owner_claim);
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(identity.clone(), None),
     )
     .await
@@ -7281,7 +7681,7 @@ async fn a_resume_spawn_onto_a_foreign_session_tail_refuses_typed() {
     let adopter = AgentIdentity::from("w-adopt");
     let tail_before = tail.durable_tail_snapshot(&store).await;
     let spawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.spawn_spec(
             SpawnMemberSpec::new("worker", adopter.clone())
                 .with_resume_bridge_session_id(tail.session_id.clone()),
@@ -7554,7 +7954,7 @@ async fn a_resume_spawn_onto_a_foreign_whole_blob_session_tail_refuses_typed() {
         "the crash left the run's WholeBlob provisional tail"
     );
     let spawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.spawn_spec(
             SpawnMemberSpec::new("worker", adopter.clone())
                 .with_resume_bridge_session_id(tail.session_id.clone()),
@@ -7757,7 +8157,7 @@ async fn a_member_whose_session_has_a_durable_tail_respawns() {
         ),
     }
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(identity.clone(), None),
     )
     .await
@@ -8035,7 +8435,7 @@ async fn a_mob_whose_member_retirement_cancelled_a_turn_at_its_boundary_restarts
     });
     sleep(Duration::from_millis(300)).await;
     client.release.notify_one();
-    let retired = tokio::time::timeout(Duration::from_secs(60), retire)
+    let retired = tokio::time::timeout(Duration::from_mins(1), retire)
         .await
         .expect("the retirement ends within its bound")
         .expect("the retirement task completes");
@@ -8188,7 +8588,7 @@ async fn a_member_retired_while_its_turn_reaches_the_boundary_retires() {
     // grace and reaches that boundary.
     sleep(Duration::from_millis(300)).await;
     client.release.notify_one();
-    let retired = tokio::time::timeout(Duration::from_secs(60), retire)
+    let retired = tokio::time::timeout(Duration::from_mins(1), retire)
         .await
         .expect("the retirement ends within its bound")
         .expect("the retirement task completes");
@@ -8884,7 +9284,7 @@ async fn a_member_retired_after_its_turn_stopped_before_its_boundary_commit_reti
     // The store-owned recovery may settle the tail from here on.
     stopped.power_store.hold_durable_tail_recovery(false);
     let retired = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         stopped.handle.retire(stopped.identity.clone()),
     )
     .await
@@ -9222,7 +9622,7 @@ async fn a_resume_spawn_onto_a_hosted_foreign_session_tail_refuses_typed() {
     stopped.power_store.hold_durable_tail_recovery(false);
     let tail_before = stopped.tail.durable_tail_snapshot(&stopped.store).await;
     let spawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         adopting.spawn_spec(
             SpawnMemberSpec::new("worker", adopter.clone())
                 .with_resume_bridge_session_id(session_id.clone()),
@@ -9382,7 +9782,7 @@ async fn a_sticky_fallback_after_a_deploy_stop_past_its_bound_acknowledges() {
     handle_1
         .shutdown_with_report(
             meerkat_mob::ShutdownOptions::default()
-                .with_deadline(meerkat_core::time_compat::Instant::now() + Duration::from_secs(60))
+                .with_deadline(meerkat_core::time_compat::Instant::now() + Duration::from_mins(1))
                 .with_queued_inputs(meerkat_mob::QueuedInputsOnShutdown::Requeue(
                     meerkat_mob::RequeueMaxAge::new(max_age).expect("an accepted requeue bound"),
                 )),
@@ -9548,7 +9948,7 @@ async fn a_retire_over_a_held_durable_tail_ends_typed_and_keeps_the_tail() {
     let stopped =
         a_member_whose_turn_stopped_before_its_boundary_commit(&paths, "held-tail-retire").await;
     let error = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         stopped.handle.retire(stopped.identity.clone()),
     )
     .await
@@ -9599,7 +9999,7 @@ async fn a_destroy_with_a_member_whose_turn_stopped_before_its_boundary_commit_c
             .await;
     // The store-owned recovery may settle the tail from here on.
     stopped.power_store.hold_durable_tail_recovery(false);
-    let report = match tokio::time::timeout(Duration::from_secs(60), stopped.handle.destroy())
+    let report = match tokio::time::timeout(Duration::from_mins(1), stopped.handle.destroy())
         .await
         .expect("the destroy ends within its bound")
     {
@@ -9812,7 +10212,7 @@ async fn a_member_retired_after_its_runtime_stopped_over_a_cancelled_turns_tail_
 
     // The archive's recovery may settle the tail from here on.
     power_store.hold_durable_tail_recovery(false);
-    let retired = tokio::time::timeout(Duration::from_secs(60), handle.retire(identity.clone()))
+    let retired = tokio::time::timeout(Duration::from_mins(1), handle.retire(identity.clone()))
         .await
         .expect("the retirement ends within its bound");
     assert!(
@@ -10018,7 +10418,7 @@ async fn an_archive_before_a_kept_run_registers_again_ends_the_work_it_kept() {
     // archived.
     let (service_2, store_2) = persistent_head_canonical_service(&paths, runtime_store.clone());
     let archived = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         service_2.archive_with_mob_lifecycle_authority(&w1_sid),
     )
     .await
@@ -10143,7 +10543,7 @@ async fn an_archive_of_a_kept_run_with_nothing_queued_consumes_its_input() {
     let (service, store) = persistent_head_canonical_service(&paths, crash.runtime_store.clone());
 
     let archived = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         service.archive_with_mob_lifecycle_authority(&crash.session_id),
     )
     .await
@@ -10265,7 +10665,7 @@ async fn an_archive_over_a_run_that_answered_before_its_boundary_consumes_its_in
     let (service, store) = persistent_head_canonical_service(&paths, tail.runtime_store.clone());
 
     let archived = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         service.archive_with_mob_lifecycle_authority(&tail.session_id),
     )
     .await
@@ -10689,7 +11089,7 @@ async fn settle_with_probe(lifetime: &FirstTurnLifetime, identity: &AgentIdentit
         .handle
         .wait_for_members_kickoff_complete(
             std::slice::from_ref(identity),
-            Some(Duration::from_secs(60)),
+            Some(Duration::from_mins(1)),
         )
         .await
         .expect("first turn settles");
@@ -11328,7 +11728,7 @@ async fn identity_convergence(
 /// `revision`.
 #[cfg(feature = "test-support")]
 async fn await_identity_converged(handle: &MobHandle, identity: &AgentIdentity, revision: u64) {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         let status = identity_convergence(handle, identity).await;
         if status.as_ref().is_some_and(|status| {
@@ -12179,13 +12579,10 @@ impl GatedRequestClient {
     /// Wait until the held request has been made, bounded.
     async fn wait_until_held(&self, context: &str) {
         let mut entered = self.entered.subscribe();
-        tokio::time::timeout(
-            Duration::from_secs(60),
-            entered.wait_for(|entered| *entered),
-        )
-        .await
-        .unwrap_or_else(|_| panic!("[{context}] the gated model request was never made"))
-        .expect("entered signal");
+        tokio::time::timeout(Duration::from_mins(1), entered.wait_for(|entered| *entered))
+            .await
+            .unwrap_or_else(|_| panic!("[{context}] the gated model request was never made"))
+            .expect("entered signal");
     }
 
     fn release(&self) {
@@ -12200,7 +12597,7 @@ impl GatedRequestClient {
     async fn wait_until_answered(&self, context: &str) {
         let mut answered = self.answered.subscribe();
         tokio::time::timeout(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             answered.wait_for(|answered| *answered),
         )
         .await
@@ -12466,11 +12863,11 @@ async fn a_lift_whose_resume_notification_turn_spawns_a_member_reaches_ready() {
     );
     client_2.arm(handle.clone());
 
-    let lifted = tokio::time::timeout(Duration::from_secs(120), handle.resume()).await;
+    let lifted = tokio::time::timeout(Duration::from_mins(2), handle.resume()).await;
     let spawns = match &lifted {
         // The notification turn runs under the mob's lifecycle owner, so it
         // may still be on its way when the lift answers.
-        Ok(Ok(())) => tokio::time::timeout(Duration::from_secs(60), async {
+        Ok(Ok(())) => tokio::time::timeout(Duration::from_mins(1), async {
             loop {
                 let spawns = client_2.spawns();
                 if !spawns.is_empty() {
@@ -12875,7 +13272,7 @@ async fn a_held_member_tail_is_refused_typed_at_the_members_wake() {
         "the start leaves the held tail as the shutdown left it"
     );
 
-    tokio::time::timeout(Duration::from_secs(60), handle.resume())
+    tokio::time::timeout(Duration::from_mins(1), handle.resume())
         .await
         .expect("the lift answers")
         .expect("the lift resumes the mob: the member's refused restore is its own outcome");

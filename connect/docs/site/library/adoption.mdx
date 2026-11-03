@@ -1,0 +1,54 @@
+---
+title: "Integration library"
+description: "Connect agents to communication, development, research, data and business services."
+icon: "boxes-stacked"
+---
+
+Connect includes more than 100 integrations. The setup agent selects a profile, reads its operations and account requirements, and prepares the configuration for your task.
+
+## Explore by task
+
+| Task | Examples |
+| --- | --- |
+| Read conversations and manage messages | Slack, Gmail, Discord, Microsoft Teams |
+| Work with repositories and issues | GitHub, GitLab, Bitbucket, Jira, Linear |
+| Find and read information | Hacker News, Wikipedia, arXiv, PubMed, Tavily, Exa |
+| Work with documents and records | Google Drive, Google Sheets, Notion, Airtable |
+| Coordinate work | ClickUp, Trello, Todoist, Zoom, Webex |
+| Connect business systems | Salesforce, HubSpot, Shopify, Zendesk |
+| Query data and infrastructure | PostgreSQL metadata, AWS Lambda |
+| Automate browser interaction | Playwright MCP on macOS |
+
+These are entry points into the library. Read the selected profile's operation list and configuration before setup.
+
+## Choose operations and an account
+
+Tell Connect the service, resources and result you need. For example:
+
+```text
+Connect our work Slack account so the research agent can read the launch
+channel. Give it read access for this task.
+```
+
+The setup review identifies the package, selected operations, account inputs and access duration. Credentials are entered through protected controls. The agent receives access through the host's grant policy.
+
+For direct host integration, `config-help --profile` describes a selected profile's configuration fields and prerequisites. `describe` provides its operation schemas. See [library installation](/library/local-install).
+
+## Connectors and frontends
+
+A service connector gives an agent operations such as reading Slack history. A frontend lets people talk to an agent through Slack or another interface. Configure each role for its intended account, participants and permissions. See [connectors and frontends](/concepts/roles).
+
+<CardGroup cols={2}>
+  <Card title="Slack and Gmail" icon="envelope" href="/library/slack-gmail">
+    Read conversations and messages, create drafts and send mail.
+  </Card>
+  <Card title="GitHub" icon="github" href="/library/github">
+    Read account information, commits and repository files.
+  </Card>
+  <Card title="Browser automation" icon="globe" href="/library/playwright">
+    Navigate pages and interact with forms through MCP.
+  </Card>
+  <Card title="Find another integration" icon="compass" href="/concepts/acquisition">
+    Research and prepare a package outside the library.
+  </Card>
+</CardGroup>

@@ -369,7 +369,7 @@ fn request(id: &str) -> ForkedParticipantRequest {
         prefix_message_count: Some(PREFIX_COUNT),
         scope: ForkedParticipantOperationScope::InvokeAndObserve,
         reuse: ForkedParticipantReusePolicy::OneShot,
-        ttl: Duration::from_secs(600),
+        ttl: Duration::from_mins(10),
     }
 }
 
@@ -933,7 +933,7 @@ async fn expiry_while_attached_waits_for_the_exact_release(harness: Harness) {
     let mut request = request("req-expiry");
     harness.register_source(&request);
     request.reuse = ForkedParticipantReusePolicy::BoundedReuse { max_uses: 3 };
-    request.ttl = Duration::from_secs(60);
+    request.ttl = Duration::from_mins(1);
     let created_at = now();
     let capability = harness
         .service

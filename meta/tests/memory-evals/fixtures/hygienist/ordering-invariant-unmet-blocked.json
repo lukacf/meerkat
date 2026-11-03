@@ -1,0 +1,24 @@
+{
+  "name": "ordering-invariant-unmet-blocked",
+  "transcript": [
+    {"role": "user", "text": "poll the deploy status"},
+    {"role": "assistant_tool_call", "tool_use_id": "call-1"},
+    {"role": "tool_results", "tool_use_id": "call-1", "text": "deploy pending"},
+    {"role": "assistant_tool_call", "tool_use_id": "call-2"},
+    {"role": "tool_results", "tool_use_id": "call-2", "text": "deploy pending"},
+    {"role": "assistant", "text": "Still pending; operator said to prefer the eu-west cluster next time."}
+  ],
+  "span_references": [],
+  "distilled_cursor": 3,
+  "sequenced_after_harvest": false,
+  "scripted_reply": {
+    "ops": [
+      {"op": "prune_tool_results", "range": [4, 5], "rationale": "stale poll"}
+    ]
+  },
+  "expected": {
+    "validator": "blocked: distillation cursor 3 has not covered the affected window (needs 5)",
+    "ops": {"prune_tool_results": 1}
+  },
+  "notes": "The §8.4 ordering invariant on the on-demand path: the distiller's cursor stands at 3, so message [4] (and the operator preference at [5] it contextualizes) has not been distilled yet — discarding material distillation never saw would lose the only harvestable copy. The same op sequenced after the harvest (sequenced_after_harvest=true) validates."
+}

@@ -56,7 +56,7 @@ impl AuthOwners {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let flows: Arc<dyn OAuthFlowAuthority> = Arc::new(
             RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-                Duration::from_secs(300),
+                Duration::from_mins(5),
                 lifecycle,
                 &store,
             ),
@@ -394,7 +394,7 @@ async fn same_server_account_replacement_never_returns_other_account() {
         owners
             .require_persisted_account(&target_a, provider::ACCOUNTS[0])
             .await;
-        assert!(strategy_a.observed.load(Ordering::SeqCst) == 1);
+        assert_eq!(strategy_a.observed.load(Ordering::SeqCst), 1);
         require_selected_use(&a, &target_a, &provider.base, provider::ACCOUNTS[0]).await;
 
         // Authorized B login uses the same server name/URL, file vault,
@@ -408,7 +408,7 @@ async fn same_server_account_replacement_never_returns_other_account() {
         owners
             .require_persisted_account(&target_b, provider::ACCOUNTS[1])
             .await;
-        assert!(strategy_b.observed.load(Ordering::SeqCst) == 1);
+        assert_eq!(strategy_b.observed.load(Ordering::SeqCst), 1);
         require_selected_use(&b, &target_b, &provider.base, provider::ACCOUNTS[1]).await;
 
         let a_observations = strategy_a.observed.load(Ordering::SeqCst);
@@ -446,8 +446,8 @@ async fn same_server_account_replacement_never_returns_other_account() {
         drop(reopened_a);
         drop(reopened_owners);
         // Observation cannot silently invoke another interactive login.
-        assert!(browser_a.opened.load(Ordering::SeqCst) == 1);
-        assert!(browser_b.opened.load(Ordering::SeqCst) == 1);
+        assert_eq!(browser_a.opened.load(Ordering::SeqCst), 1);
+        assert_eq!(browser_b.opened.load(Ordering::SeqCst), 1);
         Observation {
             refused,
             returned_account,

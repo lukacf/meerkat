@@ -1,0 +1,30 @@
+.cc-conversation-panel {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+}
+
+.cc-conversation-panel > .cc-conversation-pane {
+  flex: 1 1 auto;
+}
+
+.cc-conversation-panel__phase {
+  width: min(100%, var(--_cc-composer-width, 100%));
+  max-width: 100%;
+  min-width: 0;
+  margin: 0 auto 8px;
+  color: var(--_cc-foreground-muted, rgba(207, 214, 224, 0.76));
+  font-size: calc(12px * var(--_cc-window-scale, 1));
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cc-conversation-panel__phase-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--_cc-member-accent);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--_cc-member-accent) 60%, transparent);
+}

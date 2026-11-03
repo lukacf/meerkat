@@ -40,7 +40,7 @@ use meerkat_runtime::{
 };
 use meerkat_store_conformance::InMemoryHostStore;
 
-const ROW_STEP: Duration = Duration::from_secs(60);
+const ROW_STEP: Duration = Duration::from_mins(1);
 
 /// The members of the mob.
 const MEMBERS: usize = 2;

@@ -196,7 +196,7 @@ async fn e2e_scenario_25_rest_full_lifecycle() {
         .body(Body::from(serde_json::to_vec(&create_payload).unwrap()))
         .unwrap();
 
-    let resp = timeout(Duration::from_secs(120), app.clone().oneshot(req))
+    let resp = timeout(Duration::from_mins(2), app.clone().oneshot(req))
         .await
         .expect("create session timed out")
         .expect("create session request failed");
@@ -229,7 +229,7 @@ async fn e2e_scenario_25_rest_full_lifecycle() {
         .body(Body::from(serde_json::to_vec(&continue_payload).unwrap()))
         .unwrap();
 
-    let resp = timeout(Duration::from_secs(120), app.clone().oneshot(req))
+    let resp = timeout(Duration::from_mins(2), app.clone().oneshot(req))
         .await
         .expect("continue session timed out")
         .expect("continue session request failed");
@@ -261,7 +261,7 @@ async fn e2e_scenario_25_rest_full_lifecycle() {
         .body(Body::empty())
         .unwrap();
 
-    let resp = timeout(Duration::from_secs(120), app.clone().oneshot(req))
+    let resp = timeout(Duration::from_mins(2), app.clone().oneshot(req))
         .await
         .expect("get session timed out")
         .expect("get session request failed");
@@ -289,7 +289,7 @@ async fn e2e_scenario_25_rest_full_lifecycle() {
         .body(Body::empty())
         .unwrap();
 
-    let resp = timeout(Duration::from_secs(120), app.clone().oneshot(req))
+    let resp = timeout(Duration::from_mins(2), app.clone().oneshot(req))
         .await
         .expect("list sessions timed out")
         .expect("list sessions request failed");
@@ -316,7 +316,7 @@ async fn e2e_scenario_25_rest_full_lifecycle() {
         .body(Body::empty())
         .unwrap();
 
-    let resp = timeout(Duration::from_secs(120), app.clone().oneshot(req))
+    let resp = timeout(Duration::from_mins(2), app.clone().oneshot(req))
         .await
         .expect("delete session timed out")
         .expect("delete session request failed");
@@ -335,7 +335,7 @@ async fn e2e_scenario_25_rest_full_lifecycle() {
         .body(Body::empty())
         .unwrap();
 
-    let resp = timeout(Duration::from_secs(120), app.clone().oneshot(req))
+    let resp = timeout(Duration::from_mins(2), app.clone().oneshot(req))
         .await
         .expect("get archived session timed out")
         .expect("get archived session request failed");

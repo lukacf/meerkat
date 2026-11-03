@@ -268,7 +268,7 @@ content = "Implement Rust services, APIs, and data models."
         "Plan a small task: write a function that reverses a string in Rust. \
              Describe the plan in 2-3 sentences. Do NOT spawn workers or use any tools -- \
              just describe the plan in plain text.",
-        std::time::Duration::from_secs(60),
+        std::time::Duration::from_mins(1),
         &mut std::io::stdout(),
     )
     .await;

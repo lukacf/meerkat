@@ -1,0 +1,27 @@
+# Calibration profile — Selector stage, version 0.
+# Format: docs/design/agent-memory-architecture.md §11
+# {stage, prompt bundle, model, params, version}. Records and staged batches
+# carry the profile that produced them (CalibrationRef, §7.1).
+
+stage         = "selector"
+version       = "0"
+# Resolved through meerkat's model-client seam (§8.1). §8.3 calls for a
+# small fast tier; the calibration matrix refines the concrete id. Must stay
+# in sync with `SelectorProfile::embedded_default()`
+# (crates/meerkat-meta/src/memory/selector.rs) — a unit test enforces the prompt
+# half of that sync.
+model         = "claude-haiku-4-5"
+prompt_bundle = "prompts/selector-v0.md"
+
+[params]
+temperature      = 0.0
+# CC's eval-survived wording, adopted as the starting bar (§8.3).
+selection_bar    = "certain-to-be-helpful"
+# Manifest is position-shuffled per call as a bias guard; selection must be
+# stable under shuffle (§11 label-free invariant).
+shuffle_manifest = true
+# Working-set selection runs inside the bounded-recall budget (§8.3);
+# escalation never runs on the blocking path.
+recall_timeout_ms = 500
+# K for the WorkingSet manifest tier the per-turn side-query reads (§8.3).
+working_set_k    = 200

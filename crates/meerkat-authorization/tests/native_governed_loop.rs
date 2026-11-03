@@ -682,7 +682,7 @@ async fn generated_grant_denial_reaches_controller_and_permitted_tool_finishes_s
         .pin_controller_client_for_actor(&actor)
         .await
         .expect("actual immutable selected LlmClientAdapter");
-    assert!(pin.selection() == &selection());
+    assert_eq!(pin.selection(), &selection());
     // This scripted transport has no physical vault or external credential.
     // Native readiness still uses the actual machine's generated owner and the
     // exact credential identity pinned by the real adapter.
@@ -757,8 +757,11 @@ async fn generated_grant_denial_reaches_controller_and_permitted_tool_finishes_s
     for record in &audit {
         assert_eq!(record.contributors.len(), 1);
         assert_eq!(record.contributors[0].input_id, input_id);
-        assert!(record.contributors[0].requester == principal("requester"));
-        assert!(record.contributors[0].logical_executor == principal("executor"));
+        assert_eq!(record.contributors[0].requester, principal("requester"));
+        assert_eq!(
+            record.contributors[0].logical_executor,
+            principal("executor")
+        );
         assert!(record.contributors[0].represented_subject.is_none());
         assert_eq!(record.observation.run_id.as_ref(), Some(&run_id));
         assert!(

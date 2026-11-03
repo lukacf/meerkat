@@ -15,15 +15,25 @@ import {
   HOOK_SCRIPT,
   bindRowSteps,
   checkHookCoverage,
+  excludedTestsFilter,
   hookModel,
   featureClosure,
+  laneSelections,
   parseFilter,
   profileFilter,
   workspaceFeatures,
 } from "./ci-hook-coverage.mjs";
 import {
+  FEATURE_UNIT_SUITES,
+  TOOLKIT_MOBKIT_KNOWN_REDS,
+  TOOLKIT_MOBKIT_TEST_DEBT,
+  checkKnownRedsDoc,
+  featureSuiteFilters,
+  featureSuiteFlags,
   GOVERNANCE_DOC_PATTERNS,
   GUARD_LANE_INPUTS,
+  HOSTED_RUNNER_EXCLUDED_BINARIES,
+  HOSTED_RUNNER_EXCLUDED_TESTS,
   MOB_CHAIN_CLIPPY_HEADS,
   MOB_CHAIN_INVALIDATED,
   PARTITIONED_UNIT_PACKAGES,
@@ -42,6 +52,14 @@ import {
   touchesGuardLane,
 } from "./ci-cargo-lanes.mjs";
 import { readMetadata, workspacePackages } from "./rust-test-selector.mjs";
+import { CORE, loadProducts } from "./ci-products.mjs";
+
+const PRODUCTS = loadProducts();
+// The lane selections the plan's rows must use: Core's (`--workspace` and an
+// `--exclude` for every other product's package) and each product's (`-p`
+// each of its packages).
+const SELECTIONS = laneSelections(readMetadata(), { products: PRODUCTS });
+const selectionFlags = (product) => SELECTIONS.selections.get(product).flags;
 import { durationsOf, rowOf } from "./ci-row-durations.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -261,9 +279,16 @@ function assertUnitJobsMatch(workflow, label) {
     const allowed = UNIT_JOB_LINES_THAT_DIFFER.some((pattern) => pattern.test(line) && pattern.test(main[index]));
     assert.ok(allowed, `${label}: the unit and main-unit jobs differ in a line that is not a lane name: ${JSON.stringify(line)} / ${JSON.stringify(main[index])}`);
   });
+  // One run of the row, and the known-red ratchet (a row with known reds
+  // runs them alone after it, under their bounded profile).
   const nextest = unit.filter((line) => line.includes("nextest run"));
-  assert.equal(nextest.length, 1, `${label}: one nextest run in the unit job`);
-  assert.ok(main.includes(nextest[0]), `${label}: main-unit runs the unit job's nextest command`);
+  const row = nextest.filter((line) => line.includes("--profile ci-pr "));
+  assert.equal(row.length, 1, `${label}: one nextest run of the row in the unit job`);
+  assert.ok(main.includes(row[0]), `${label}: main-unit runs the unit job's nextest command`);
+  const ratchet = nextest.filter((line) => !row.includes(line));
+  assert.equal(ratchet.length, 1, `${label}: the unit job's only other nextest run is the known-red ratchet`);
+  assert.match(ratchet[0], /--profile ci-known-reds -E "\$\{KNOWN_REDS\}"/, `${label}: the ratchet runs the known reds alone`);
+  assert.ok(main.includes(ratchet[0]), `${label}: main-unit runs the unit job's ratchet`);
 }
 
 // What each event runs. The push runs every lane over every target; a pull
@@ -337,7 +362,10 @@ function assertEventSplit(plan, label) {
   }
   // The chain heads' whole Clippy waits for the push only when the change
   // invalidates meerkat-mob's build (always in workspace mode), and says so.
-  const heads = plan.packages.filter((name) => MOB_CHAIN_CLIPPY_HEADS.includes(name));
+  // A product's mob-chain packages are chain heads of their own.
+  const heads = plan.packages.filter(
+    (name) => MOB_CHAIN_CLIPPY_HEADS.includes(name) || (plan.package_model[name].product !== CORE && chain(name)),
+  );
   if (plan.mode === "workspace") {
     assert.deepEqual(deferred.clippy_packages, heads, `${label}: a workspace pull request leaves the chain heads' Clippy to the push`);
   }
@@ -403,14 +431,20 @@ function assertHookParity(plan, label) {
     assert.ok(row.binaries.length > 0, `${label}: ${row.name} names its binaries`);
     assert.ok(["ci-unit", "ci-integration"].includes(row.profile), `${label}: ${row.name} profile ${row.profile}`);
     assert.ok(["warn", "fail"].includes(row.no_tests), `${label}: ${row.name} no-tests policy`);
-    assert.equal(row.rust_min_stack, HOOK_STACK, `${label}: ${row.name} runs on the hook's stack`);
+    // Core's rows run on the hook's stack; a product's on its own test
+    // stack (ci/products.json test_stack) when it sets one.
+    const productStack = PRODUCTS.find((product) => product.name === row.product && product.name !== CORE)?.testStack;
+    assert.equal(row.rust_min_stack, productStack ?? HOOK_STACK, `${label}: ${row.name} runs on its product's test stack`);
     for (const feature of row.package_flags.match(/--features (\S+)/)?.[1]?.split(",") ?? []) {
       assert.match(feature, /^[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+$/, `${label}: ${row.name} names each feature's package`);
     }
-    // Every row but HeadCanonical selects the whole workspace, so Cargo
-    // resolves features exactly as the hook's workspace build does.
+    // Every Core row but HeadCanonical selects Core's whole workspace (the
+    // hook's own selection), so Cargo resolves features exactly as the
+    // hook's build does; a product's row selects exactly that product's
+    // packages. No row selects the bare workspace (it would mix products).
+    assert.notEqual(row.package_flags.trim(), "--workspace", `${label}: ${row.name} mixes the products`);
     if (row.lane !== "headcanonical") {
-      assert.equal(row.package_flags, "--workspace", `${label}: ${row.name} selects the whole workspace`);
+      assert.equal(row.package_flags, selectionFlags(row.product), `${label}: ${row.name} selects its product's lane selection`);
     }
     if (row.lane === "lib") {
       assert.equal(row.test_flags, "--lib", `${label}: ${row.name} runs lib tests`);
@@ -594,8 +628,97 @@ function assertArchivedLanes(plan, label) {
       /^ {10}if \[\[ -n "\$\{PARTITION\}" \]\]; then\n {12}partition_args=\(--partition "\$\{PARTITION\}"\)\n {10}fi$/m,
       `${job} passes a partition only for a row that sets one`,
     );
-    assert.match(text, /nextest run \$\{PACKAGES\} \$\{TARGETS\} --profile ci-pr "\$\{partition_args\[@\]\}" \\$/m, `${job} runs the row's partition`);
+    assert.match(
+      text,
+      /nextest run \$\{PACKAGES\} \$\{TARGETS\} --profile ci-pr "\$\{partition_args\[@\]\}" "\$\{filter_args\[@\]\}" \\$/m,
+      `${job} runs the row's partition and filter`,
+    );
   }
+}
+
+// A feature suite built with other packages, or with known reds: the
+// toolkit-mobkit[native-host] suite builds toolkit-mobkit with meerkat-connect
+// (which turns its native host on), runs toolkit-mobkit's tests only and
+// none of its known reds, then runs the known reds that fail every time and
+// needs each one to fail. Its known-red list and the crate's test-debt page
+// name the same tests under the same classes.
+{
+  const suite = FEATURE_UNIT_SUITES.find((candidate) => candidate.package === "toolkit-mobkit" && candidate.id === "native-host");
+  assert.ok(suite, "toolkit-mobkit has a native-host feature suite");
+  assert.deepEqual(suite.with, ["meerkat-connect"], "the native-host suite builds with meerkat-connect");
+  assert.equal(suite.pullRequest, false, "the native-host suite runs on the push only");
+  assert.equal(featureSuiteFlags(suite), "-p toolkit-mobkit -p meerkat-connect --features toolkit-mobkit/native-host");
+  const steady = TOOLKIT_MOBKIT_KNOWN_REDS.filter((entry) => !entry.intermittent);
+  const filters = featureSuiteFilters(suite);
+  assert.ok(filters.filter.startsWith("package(toolkit-mobkit) and not (test(="), "the suite runs its package's tests, without its known reds");
+  for (const entry of TOOLKIT_MOBKIT_KNOWN_REDS) {
+    assert.ok(filters.filter.includes(`test(=${entry.test})`), `the suite excludes ${entry.test}`);
+    assert.equal(filters.known_reds.includes(`test(=${entry.test})`), !entry.intermittent, `the ratchet runs ${entry.test} unless it is intermittent`);
+  }
+  assert.ok(filters.known_reds.startsWith("package(toolkit-mobkit) and (test(="), "the ratchet runs the package's steady known reds");
+  assert.equal(filters.known_red_count, steady.length, "the ratchet counts the steady known reds");
+  // A suite without companions or known reds keeps its plain flags and no filter.
+  const plain = FEATURE_UNIT_SUITES.find((candidate) => candidate.package === "meerkat-connect" && candidate.id === "console");
+  assert.equal(featureSuiteFlags(plain), "-p meerkat-connect --features console");
+  assert.deepEqual(featureSuiteFilters(plain), {});
+
+  // The page and the list agree, and every drift between them is refused.
+  const page = readFileSync(resolve(root, TOOLKIT_MOBKIT_TEST_DEBT), "utf8");
+  checkKnownRedsDoc(page, TOOLKIT_MOBKIT_KNOWN_REDS, TOOLKIT_MOBKIT_TEST_DEBT);
+  const doc = "# t\n\n## Class one\n\n- `a::b`\n\n## Class two\n\n| Test | Fix |\n|---|---|\n| `c::d` | x |\n";
+  const list = [{ test: "a::b", anchor: "class-one" }, { test: "c::d", anchor: "class-two" }];
+  checkKnownRedsDoc(doc, list, "doc");
+  assert.throws(() => checkKnownRedsDoc(doc, [list[0]], "doc"), /c::d \(#class-two\) is not a known red/, "a page-only test is refused");
+  assert.throws(() => checkKnownRedsDoc(doc, [...list, { test: "e::f", anchor: "class-one" }], "doc"), /e::f is not on doc/, "a list-only test is refused");
+  assert.throws(() => checkKnownRedsDoc(doc, [list[0], { test: "c::d", anchor: "class-one" }], "doc"), /names #class-one, but doc lists it under #class-two/, "a moved test is refused");
+  assert.throws(() => checkKnownRedsDoc(doc, [...list, list[0]], "doc"), /a::b is listed twice/, "a repeated entry is refused");
+  assert.throws(() => checkKnownRedsDoc(`${doc}- \`a::b\`\n`, list, "doc"), /a::b is listed twice/, "a test the page lists twice is refused");
+
+  // The push plan runs the suite as a main unit row; a pull request leaves it.
+  const path = "connect/crates/toolkit-mobkit/src/lib.rs";
+  const push = planFor([path], ["--event", "push"]);
+  const row = push.main_feature_unit_shards.find((candidate) => candidate.name === "toolkit-mobkit[native-host]");
+  assert.ok(row, "a toolkit-mobkit change runs the native-host suite on the push");
+  assert.equal(row.package_flags, featureSuiteFlags(suite));
+  assert.equal(row.filter, filters.filter);
+  assert.equal(row.known_reds, filters.known_reds);
+  assert.equal(row.known_red_count, filters.known_red_count);
+  const pr = planFor([path], ["--event", "pull_request"]);
+  assert.ok(!pr.unit_feature_shards.some((candidate) => candidate.name === "toolkit-mobkit[native-host]"), "a pull request leaves the native-host suite to the push");
+  const githubLinesFor = (args) =>
+    Object.fromEntries(run(["--format", "github", ...args]).stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
+  const pushLines = githubLinesFor(["--event", "push", "--", path]);
+  const matrixRow = bothWaves(pushLines, "main_unit_shard_matrix", "main_unit_rest_shard_matrix").find((candidate) => candidate.name === row.name);
+  assert.ok(matrixRow, "the native-host suite is a main unit matrix row");
+  assert.deepEqual(
+    [matrixRow.packages, matrixRow.filter, matrixRow.known_reds, matrixRow.known_red_count],
+    [row.package_flags, row.filter, row.known_reds, String(row.known_red_count)],
+    "the matrix row carries the suite's filter and known reds",
+  );
+
+  // The unit jobs read the row's filter and known reds; the ratchet runs the
+  // known reds alone under the bounded ci-known-reds profile and needs every
+  // one to fail.
+  const workflow = readFileSync(resolve(root, ".github/workflows/ci.yml"), "utf8");
+  for (const job of ["unit", "main-unit", "main-unit-rest"]) {
+    const text = jobLines(workflow, job).join("\n");
+    assert.match(text, /^ {10}FILTER: \$\{\{ matrix\.filter \}\}$/m, `${job} reads the row's filter`);
+    assert.match(text, /^ {10}KNOWN_REDS: \$\{\{ matrix\.known_reds \}\}$/m, `${job} reads the row's known reds`);
+    assert.match(text, /^ {10}KNOWN_RED_COUNT: \$\{\{ matrix\.known_red_count \}\}$/m, `${job} reads the row's known-red count`);
+    assert.match(
+      text,
+      /^ {10}if \[\[ -n "\$\{FILTER\}" \]\]; then\n {12}filter_args=\(-E "\$\{FILTER\}"\)\n {10}fi$/m,
+      `${job} passes a filter only for a row that sets one`,
+    );
+    assert.match(text, /--profile ci-known-reds -E "\$\{KNOWN_REDS\}"/, `${job} runs the known reds alone under the bounded profile`);
+    assert.match(
+      text,
+      /\$\{KNOWN_RED_COUNT\} tests\? run: 0 passed, \$\{KNOWN_RED_COUNT\} failed\(,\|\$\)/,
+      `${job} needs every known red to fail`,
+    );
+  }
+  const nextest = readFileSync(resolve(root, ".config/nextest.toml"), "utf8");
+  assert.match(nextest, /^\[profile\.ci-known-reds\]\n(?:#[^\n]*\n)*inherits = "fast"\nslow-timeout = \{ period = "30s", terminate-after = 2 \}$/m, "the ratchet profile bounds each test");
 }
 
 // Budget by construction: every package outside the chain models under the
@@ -609,7 +732,15 @@ function assertArchivedLanes(plan, label) {
     }
   }
   assert.deepEqual(plan.unit_deferred, plan.unit_deferred_chain, "workspace mode defers exactly the chain");
-  assert.ok(unitOf(plan).shards.length <= 11, `workspace unit rows stay near the shard cap: ${unitOf(plan).shards.length}`);
+  // Core's rows stay near the shard cap; each product packs apart, into at
+  // most one row per package outside the chain.
+  const coreUnitRows = unitOf(plan).shards.filter((shard) => (shard.product ?? CORE) === CORE);
+  assert.ok(coreUnitRows.length <= 11, `workspace unit rows stay near the shard cap: ${coreUnitRows.length}`);
+  for (const product of PRODUCTS.filter((candidate) => candidate.name !== CORE)) {
+    const rows = unitOf(plan).shards.filter((shard) => shard.product === product.name);
+    const packages = rows.flatMap((shard) => shard.packages);
+    assert.ok(rows.length <= Math.max(1, packages.length), `${product.name} unit rows: ${rows.length} for ${packages.length} packages`);
+  }
   // A package whose unit tests run long gets a lane of its own.
   for (const name of UNIT_SOLO_PACKAGES) {
     const lanes = unitOf(plan).shards.filter((shard) => shard.packages.includes(name));
@@ -623,7 +754,7 @@ function assertArchivedLanes(plan, label) {
   assert.deepEqual(canaryRows.map((row) => row.partition), ["count:1/3", "count:2/3", "count:3/3"], "one count partition per canary");
   for (const row of canaryRows) {
     assert.deepEqual(row.binaries, [`meerkat::${canaryTest}`]);
-    assert.equal(row.package_flags, "--workspace", "a canary row is a whole-workspace row");
+    assert.equal(row.package_flags, selectionFlags(CORE), "a canary row is a row over Core's whole workspace");
     assert.equal(row.no_tests, "fail", "an empty canary partition fails");
   }
   assert.ok(
@@ -906,7 +1037,16 @@ function assertArchivedLanes(plan, label) {
       `the workspace plan lints ${group.join(" ")} in a shard of its own`,
     );
   }
-  assert.equal(plan.shards.length, heads.length + 5, `head shards plus five packed (${plan.shards.length})`);
+  const coreShards = plan.shards.filter((shard) => shard.product === CORE);
+  assert.equal(coreShards.length, heads.length + 5, `head shards plus five packed (${coreShards.length})`);
+  // Each other product lints all of its packages in one shard of its own.
+  for (const product of PRODUCTS.filter((candidate) => candidate.name !== CORE)) {
+    const shards = plan.shards.filter((shard) => shard.product === product.name);
+    const members = Object.keys(plan.package_model).filter((name) => plan.package_model[name].product === product.name);
+    if (members.length === 0) continue;
+    assert.equal(shards.length, 1, `${product.name} lints in one shard (${shards.length})`);
+    assert.deepEqual(shards[0].packages, members.sort(), `${product.name}'s shard holds every ${product.name} package`);
+  }
   // Feature checks keep the weight-packed shards (--workspace-shards).
   assert.ok(new Set(plan.feature_check_jobs.map((job) => job.name.replace(/ (bazel set|matrix)$/, ""))).size <= 8);
   // Cost-balanced, not count-balanced: no shard carries more than a quarter
@@ -1046,7 +1186,15 @@ for (const path of [
   for (const name of MOB_CHAIN_CLIPPY_HEADS) {
     assert.equal(shardOf(name), undefined, `${name} lints on the push in a workspace-mode pull request`);
   }
-  assert.deepEqual(pr.deferred_to_push.clippy_packages, ["meerkat-integration-tests", "meerkat-rpc", "rkat"]);
+  assert.deepEqual(
+    pr.deferred_to_push.clippy_packages,
+    [
+      "meerkat-integration-tests",
+      "meerkat-rpc",
+      "rkat",
+      ...Object.keys(pr.package_model).filter((name) => pr.package_model[name].product !== CORE && pr.package_model[name].heavy_chain),
+    ].sort(),
+  );
   assert.equal(shardOf("meerkat").targets, "--all-targets", "the facade is not in the chain");
   assert.equal(shardOf("surface-build-fixtures").targets, "--all-targets", "a mixed head group splits");
   assert.ok(!shardOf("surface-build-fixtures").packages.includes("meerkat-integration-tests"));
@@ -1062,9 +1210,16 @@ for (const path of [
   assert.equal(lines.guard_lane_reasons, "{}", "no guard lane ran, so no reason");
   assert.equal(lines.closure_test_count, "0");
   assert.equal(lines.feature_check_count, "0");
-  assert.match(lines.deferred_to_push, /^17 closure-tests rows; the closure check; \d+ feature-combination jobs; /);
+  // Core's 17 hook-parity rows plus each product's own rows (a row never
+  // mixes products).
+  const pushRows = planFor(["Cargo.toml"], ["--event", "push"]).closure_test_rows;
+  assert.equal(pushRows.filter((row) => row.product === CORE).length, 17, "Core's closure-tests rows");
+  assert.match(lines.deferred_to_push, new RegExp(`^${pushRows.length} closure-tests rows; the closure check; \\d+ feature-combination jobs; `));
   assert.match(lines.deferred_to_push, /; the workspace rustdoc$/);
-  assert.match(lines.deferred_to_push, /; the Clippy of meerkat-integration-tests, meerkat-rpc, rkat \(mob chain invalidated\); /);
+  assert.match(
+    lines.deferred_to_push,
+    /; the Clippy of meerkat-connect, meerkat-integration-tests, meerkat-meta, meerkat-rpc, meta-store-conformance, rkat, toolkit-mobkit \(mob chain invalidated\); /,
+  );
   // A packages-mode pull request lints a chain head itself (lib and bin
   // targets) while meerkat-mob's build stays cached: a change to the heads,
   // or to crates above meerkat-mob, leaves it alone.
@@ -2021,9 +2176,9 @@ for (const path of [
     );
     assert.ok(
       jobLines(workflow, "wasm-timers").includes(
-        "    if: ${{ (github.event_name == 'push' && needs.changes.outputs.release_projection != 'true') || needs.changes.outputs.example_web_wasm == 'true' }}",
+        "    if: ${{ (github.event_name == 'push' && needs.changes.outputs.release_projection != 'true' && needs.changes.outputs.core_paths_changed == 'true') || needs.changes.outputs.example_web_wasm == 'true' }}",
       ),
-      "the WASM timer lane, which compiles the same closure, runs with the web wasm build",
+      "the WASM timer lane, which compiles the same closure, runs with the web wasm build (a push that changes only a product's tree runs neither)",
     );
   }
   // Every run checks the generated BUILD files against their inputs: the
@@ -2056,17 +2211,57 @@ for (const path of [
   }
 }
 
+// Format + governance ends with the Mintlify parse and link check of the docs
+// site (docs/) and of MobKit's source pages (meta/docs): Node.js 22, then the
+// mint version the MobKit mirror's publication pins, so an MDX error fails the
+// pull request rather than the publication after the merge. Each directory's
+// .mintignore keeps its internal records, which MDX cannot parse, out of it.
+{
+  const workflow = readFileSync(resolve(root, ".github/workflows/ci.yml"), "utf8");
+  const publish = readFileSync(resolve(root, ".github/workflows/publish-mobkit-docs.yml"), "utf8");
+  const pin = publish.match(/npx --yes (mint@[0-9.]+) broken-links/);
+  assert.ok(pin, "the MobKit docs publication pins its mint version");
+  const mint = pin[1].replaceAll(".", "\\.");
+  const expected = [
+    /^      - name: Setup Node\.js for the Mintlify docs parse$/,
+    /^        uses: actions\/setup-node@[0-9a-f]{40} # v\d+$/,
+    /^        with:$/,
+    /^          node-version: "22"$/,
+    /^      - name: Mintlify parse and links \(docs\)$/,
+    /^        working-directory: docs$/,
+    new RegExp(`^        run: npx --yes ${mint} broken-links$`),
+    /^      - name: Mintlify parse and links \(meta\/docs\)$/,
+    /^        working-directory: meta\/docs$/,
+    new RegExp(`^        run: npx --yes ${mint} broken-links$`),
+  ];
+  const tail = jobLines(workflow, "fmt-governance").slice(-expected.length);
+  tail.forEach((line, index) =>
+    assert.match(line, expected[index], `Format + governance ends with the Mintlify docs parse (line ${index + 1} of ${expected.length})`),
+  );
+  for (const dir of ["docs", "meta/docs"]) {
+    const ignored = readFileSync(resolve(root, dir, ".mintignore"), "utf8").split("\n");
+    assert.ok(ignored.includes("internal/"), `${dir}/.mintignore keeps the internal records out of the parse`);
+  }
+}
+
 // Feature-gated unit suites: the default-feature unit lanes cannot run a
 // test behind a non-default feature, so every Rust-relevant push to main
 // carries every suite as an extra main unit row, and a pull request carries
 // the suites of a changed package that runs its unit tests there.
 {
-  const featureFlags = /^-p (\S+) --features [a-z0-9-]+(,[a-z0-9-]+)*$/;
+  // A suite built `with` other packages names them after its own, and its
+  // features by package.
+  const featureFlags = /^-p (\S+)((?: -p \S+)*) --features ([a-z0-9-]+\/)?[a-z0-9-]+(,([a-z0-9-]+\/)?[a-z0-9-]+)*$/;
   const facade = planFor(["crates/meerkat/src/experimental_gpt_live.rs"]);
   assert.ok(facade.main_feature_unit_shards.length >= 2, "main carries the feature suites");
   for (const suite of facade.main_feature_unit_shards) {
     const match = featureFlags.exec(suite.package_flags);
     assert.ok(match, `feature suite ${suite.name} flags: ${suite.package_flags}`);
+    const features = suite.package_flags.split(" --features ")[1].split(",");
+    assert.ok(
+      features.every((feature) => (match[2] ? feature.startsWith(`${match[1]}/`) : !feature.includes("/"))),
+      `${suite.name} names its features by package exactly when it builds with other packages`,
+    );
     assert.deepEqual(suite.packages, [match[1]], `${suite.name} runs exactly its package`);
     assert.ok(suite.packages[0] in facade.package_model, `${suite.name} names a workspace package`);
   }
@@ -2133,6 +2328,38 @@ for (const path of [
   const mobLines = Object.fromEntries(mobGithub.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
   assert.equal(Number(mobLines.main_archive_build_count), JSON.parse(mobLines.main_archive_build_matrix).include.length);
   assert.equal(Number(mobLines.main_archive_run_count), JSON.parse(mobLines.main_archive_run_matrix).include.length);
+  // meerkat-connect builds meerkat-mob through toolkit-mobkit's native host,
+  // so a Connect change runs its Console suite on the push, never in the
+  // pull request.
+  const connectLib = "connect/crates/meerkat-connect/src/lib.rs";
+  const connectPr = planFor([connectLib], ["--event", "pull_request"]);
+  assert.ok(connectPr.package_model["meerkat-connect"].heavy_chain, "meerkat-connect's unit lane compiles meerkat-mob");
+  assert.deepEqual(connectPr.unit_feature_shards, [], "a Connect pull request runs no feature suite");
+  assert.ok(
+    planFor([connectLib]).main_feature_unit_shards.some((suite) => suite.package_flags === "-p meerkat-connect --features console"),
+    "a Connect push runs its Console suite",
+  );
+  // Its Console process controls (resources::local_round) run a synthetic
+  // protocol child under an explicitly selected Python and refuse to guess
+  // one, so every unit job selects it, whichever wave or event holds the row.
+  // The tests see it only when the shell that runs nextest exported it first:
+  // in that step, before the nextest command.
+  const unitJobs = readFileSync(resolve(root, ".github/workflows/ci.yml"), "utf8");
+  for (const job of ["unit", "main-unit", "main-unit-rest"]) {
+    const jobBody = jobLines(unitJobs, job);
+    assert.match(
+      jobBody.join("\n"),
+      /^ {10}TOOLKIT_SHARED_TEST_PYTHON="\$\(command -v python3\)"\n {10}export TOOLKIT_SHARED_TEST_PYTHON$/m,
+      `${job} selects the Python of Connect's Console process controls`,
+    );
+    const exportAt = jobBody.indexOf("          export TOOLKIT_SHARED_TEST_PYTHON");
+    const nextestAt = jobBody.findIndex((line) => line.includes("nextest run"));
+    assert.ok(exportAt >= 0 && exportAt < nextestAt, `${job} exports the Python before nextest runs`);
+    assert.ok(
+      !jobBody.slice(exportAt, nextestAt).some((line) => /^ {6}- /.test(line)),
+      `${job} exports the Python in the step that runs nextest`,
+    );
+  }
   // An unrelated leaf change carries no pull-request suite; docs carry none anywhere.
   assert.deepEqual(planFor(["crates/meerkat-sqlite/src/lib.rs"]).unit_feature_shards, []);
   const docs = planFor(["docs/index.mdx"]);
@@ -2464,10 +2691,12 @@ for (const path of [
   // shards, not the Clippy head split), and runs every Make feature-matrix
   // check row with the shard that holds its package.
   const workspace = planFor(["Cargo.toml"]);
+  // Core's packages only: the checks replay Core's Bazel feature sets, and
+  // no Bazel target builds a product's crates.
   assert.deepEqual(
     workspace.feature_check_shards.flatMap((shard) => shard.packages).sort(),
-    workspace.packages,
-    "feature-check shards partition the workspace",
+    workspace.packages.filter((name) => workspace.package_model[name].product === CORE),
+    "feature-check shards partition Core's packages",
   );
   assert.ok(workspace.feature_check_jobs.length <= 2 * workspace.feature_check_shards.length);
   for (const job of workspace.feature_check_jobs) {
@@ -2525,9 +2754,9 @@ for (const path of [
 }
 
 // Hook parity: workspace-unified features. meerkat-mcp's form_elicitation
-// and lifecycle_contract require test-support, which only the workspace's
-// feature unification enables (a package-scoped build has none), so their
-// row must carry it. Without a lib-row runner the lib tests of the scope run
+// and lifecycle_contract require test-support, which only the feature
+// unification of Core's whole workspace enables (a package-scoped build has
+// none), so their row must carry it. Without a lib-row runner the lib tests of the scope run
 // in the push-to-main unit lanes (and nightly under the workspace feature
 // set); with one, in the push's lib row.
 {
@@ -2536,7 +2765,7 @@ for (const path of [
   const row = plan.closure_test_rows.find((candidate) => candidate.binaries.includes("meerkat-mcp::form_elicitation"));
   assert.ok(row, "a row runs meerkat-mcp's form_elicitation");
   assert.ok(row.binaries.includes("meerkat-mcp::lifecycle_contract"), "and lifecycle_contract");
-  assert.equal(row.package_flags, "--workspace", "under the workspace's resolution, which enables test-support");
+  assert.equal(row.package_flags, selectionFlags(CORE), "under Core's whole-workspace resolution, which enables test-support");
   assert.equal(
     checkHookCoverage(plan).map["meerkat-mob::lib::meerkat_mob"],
     "unit lanes (main, nightly): workspace unit lane",
@@ -2572,7 +2801,7 @@ for (const path of [
     no_tests: "fail",
   });
   assert.deepEqual(pick("e2e-fast"), {
-    packages: "--workspace",
+    packages: selectionFlags(CORE),
     tests: "--test e2e_fast_lane",
     profile: "ci-unit",
     filter: "binary(e2e_fast_lane)",
@@ -2722,6 +2951,57 @@ for (const path of [
       assert.deepEqual([plan.mode, rowsOf(plan)], ["none", wholeCheckout], `${event}: ${doc}`);
     }
   }
+}
+
+// Core's whole-workspace lanes select Core's members only, each product's
+// lanes that product's packages: a bare `--workspace` row would compile
+// Core's crates with the products' feature requests, and a product's test
+// binary counts only in a row with its own product's selection.
+{
+  const plan = planFor(["crates/meerkat-mob-mcp/src/lib.rs"], ["--event", "push"]);
+  const baseline = checkHookCoverage(plan);
+  assert.deepEqual([baseline.missing, baseline.errors], [[], []], "the planned rows cover the hook and the products");
+  assert.ok(baseline.product_binaries > 0, "the push's scope reaches the products' test binaries");
+  for (const product of PRODUCTS.filter((entry) => entry.name !== CORE)) {
+    const rows = plan.closure_test_rows.filter((row) => row.product === product.name);
+    assert.ok(rows.length > 0, `${product.name}'s test binaries run in rows of their own`);
+    for (const row of rows) {
+      assert.equal(row.package_flags, selectionFlags(product.name), `${row.name} selects exactly ${product.name}'s packages`);
+    }
+  }
+  const mutate = (change) => {
+    const copy = JSON.parse(JSON.stringify(plan));
+    change(copy);
+    return checkHookCoverage(copy);
+  };
+  const coreRow = (copy) => copy.closure_test_rows.find((row) => row.product === CORE && row.lane === "tests");
+  const bare = mutate((copy) => {
+    coreRow(copy).package_flags = "--workspace";
+  });
+  assert.ok(
+    bare.errors.some((error) => error.includes("must exclude exactly the other products' packages")),
+    "a bare --workspace row is refused",
+  );
+  const partial = mutate((copy) => {
+    coreRow(copy).package_flags = selectionFlags(CORE).split(" --exclude ").slice(0, -1).join(" --exclude ");
+  });
+  assert.ok(
+    partial.errors.some((error) => error.includes("must exclude exactly the other products' packages")),
+    "a Core row that leaves one product package in is refused",
+  );
+  const metaRow = (copy) => copy.closure_test_rows.find((row) => row.product === "meta");
+  const metaKey = (() => {
+    const [binary] = metaRow(plan).binaries;
+    const [name, test] = binary.split("::");
+    return `${name}::test::${test}`;
+  })();
+  const borrowed = mutate((copy) => {
+    metaRow(copy).package_flags = selectionFlags(CORE);
+  });
+  assert.ok(
+    borrowed.missing.includes(metaKey) || borrowed.errors.some((error) => error.includes(metaRow(plan).name)),
+    "a product's binary does not count in a row with Core's selection",
+  );
 }
 
 // The coverage checker on mutated plans: each mutation is a way a row change
@@ -3101,8 +3381,226 @@ for (const path of [
       "a partitioned row still fails a profile-filtered test",
     );
     assert.equal(verify({ "p::a": suite({ t1: match }) }, ["--partition", "hash:1/2", "p::a"]).status, 2, "only count partitions");
+    // A test HOSTED_RUNNER_EXCLUDED_TESTS lists is left out of its binary's
+    // row by the row's filter: only such a test may be, and it must be.
+    const [{ binary, tests: listed }] = HOSTED_RUNNER_EXCLUDED_TESTS;
+    const [first] = listed;
+    const byExpression = { "filter-match": { status: "mismatch", reason: "expression" } };
+    const plannedOut = Object.fromEntries(listed.map((name) => [name, byExpression]));
+    const leftOut = verify({ [binary]: suite({ another_test: match, ...plannedOut }) }, [binary]);
+    assert.equal(leftOut.status, 0, leftOut.stderr);
+    assert.match(leftOut.stdout, new RegExp(`${listed.length} left out as HOSTED_RUNNER_EXCLUDED_TESTS lists`));
+    assert.equal(
+      verify({ [binary]: suite({ another_test: byExpression, ...plannedOut }) }, [binary]).status,
+      1,
+      "a test the list does not name may not be filtered out",
+    );
+    assert.equal(
+      verify({ [binary]: suite({ another_test: match, ...plannedOut, [first]: match }) }, [binary]).status,
+      1,
+      "a listed test that is still selected fails",
+    );
+    const { [first]: _gone, ...renamed } = plannedOut;
+    assert.equal(
+      verify({ [binary]: suite({ another_test: match, ...renamed }) }, [binary]).status,
+      1,
+      "a listed test its binary no longer has fails",
+    );
+    assert.equal(verify({ "p::a": suite({ t1: match, [first]: byExpression }) }, ["p::a"]).status, 1, "the list is per binary");
   } finally {
     rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+// Products (ci/products.json). A change inside a product's root plans that
+// product's rows and its dependents' and none of Core's: no Core package,
+// no Core guard lane, feature suite or whole-workspace unit sweep, no
+// whole-checkout reader. Rows never mix products. A product with a changed
+// package gets its published-floor check; a Core change reaching a product
+// only through the closure gives that product a downstream type-check row,
+// or leaves it to the push when meerkat-mob's build is invalidated.
+{
+  const productOf = (plan, name) => plan.package_model[name].product;
+  const productNames = PRODUCTS.map((product) => product.name).filter((name) => name !== CORE);
+  const members = (plan, product) => Object.keys(plan.package_model).filter((name) => productOf(plan, name) === product);
+  const assertNoCore = (plan, label) => {
+    for (const name of [...plan.packages, ...plan.closure, ...plan.test_scope]) {
+      assert.notEqual(productOf(plan, name), CORE, `${label}: ${name} is Core's`);
+    }
+    for (const shard of [...plan.shards, ...plan.main_unit_shards, ...plan.main_feature_unit_shards]) {
+      assert.notEqual(shard.product, CORE, `${label}: ${shard.name} is a Core row`);
+    }
+    assert.deepEqual(plan.main_archive_builds, [], `${label}: no Core archive build`);
+    assert.equal(plan.core_changed, false, `${label}: no Core lane`);
+    assert.equal(plan.governed_jsonl, false, `${label}: no governed JSONL`);
+    assert.equal(plan.mcp_confinement_positive, false, `${label}: no confinement lane`);
+    assert.deepEqual(plan.feature_check_jobs, [], `${label}: no Core feature check`);
+    assert.equal(plan.wasm, false, `${label}: no wasm check`);
+    assert.equal(plan.sdk_host, false, `${label}: no Core SDK suite`);
+  };
+  const assertRowsSingleProduct = (plan, label) => {
+    for (const row of [...plan.shards, ...plan.unit_shards, ...plan.main_unit_shards, ...plan.closure_test_rows]) {
+      const products = new Set(row.packages.map((name) => productOf(plan, name)));
+      assert.equal(products.size, 1, `${label}: ${row.name} mixes products ${[...products].join(", ")}`);
+      assert.equal(row.product, [...products][0], `${label}: ${row.name} names its product`);
+    }
+  };
+  const workspacePlan = planFor(["Cargo.toml"]);
+  for (const product of productNames) {
+    const owned = members(workspacePlan, product);
+    if (owned.length === 0) continue;
+    // The product's package with the widest build closure.
+    const [pkg] = [...owned].sort(
+      (a, b) => workspacePlan.package_model[b].dependency_closure - workspacePlan.package_model[a].dependency_closure || a.localeCompare(b),
+    );
+    const productRoot = PRODUCTS.find((entry) => entry.name === product).root;
+    const libPath = `${productRoot}/crates/${pkg}/src/lib.rs`;
+    const changed = existsSync(resolve(root, libPath)) ? libPath : `${productRoot}/crates/${pkg}/src/main.rs`;
+    for (const event of ["pull_request", "push"]) {
+      const plan = planFor([changed], ["--event", event]);
+      const label = `${product} ${event} (${changed})`;
+      assert.equal(plan.rust_changed, true, `${label}: a product Rust change is build-relevant`);
+      assert.equal(plan.mode, "packages", `${label}: never the whole workspace`);
+      assertNoCore(plan, label);
+      assertRowsSingleProduct(plan, label);
+      assert.deepEqual(plan.products.changed, [product], `${label}: the product is named`);
+      assert.ok(plan.products.floor_checks.includes(product), `${label}: the product's floor check runs`);
+      assert.deepEqual(plan.reader_rows, [], `${label}: no Core reader row`);
+      if (event === "push") {
+        assert.deepEqual(
+          unitLanesOf(plan.main_unit_shards, label).flatMap((shard) => shard.packages).sort(),
+          [...plan.closure].sort(),
+          `${label}: the main unit sweep covers the product's closure only`,
+        );
+        // The feature suites of the closure's packages, and only those, each
+        // on its product's test stack.
+        assert.deepEqual(
+          plan.main_feature_unit_shards.map((row) => row.package_flags).sort(),
+          FEATURE_UNIT_SUITES.filter((suite) => plan.closure.includes(suite.package))
+            .map((suite) => featureSuiteFlags(suite)).sort(),
+          `${label}: the feature suites of the product's closure`,
+        );
+        for (const row of plan.main_feature_unit_shards) {
+          const owner = productOf(plan, row.packages[0]);
+          assert.equal(row.product, owner, `${label}: ${row.name} names its product`);
+          const stack = PRODUCTS.find((entry) => entry.name === owner)?.testStack ?? null;
+          if (stack) assert.equal(row.rust_min_stack, stack, `${label}: ${row.name} runs on ${owner}'s test stack`);
+        }
+        // A binary no hosted runner can judge gets no row and is named.
+        for (const { binary } of HOSTED_RUNNER_EXCLUDED_BINARIES) {
+          const inScope = plan.test_scope.includes(binary.split("::")[0]);
+          assert.equal(
+            plan.hosted_runner_excluded.some((entry) => entry.binary === binary),
+            inScope,
+            `${label}: ${binary} is named exactly when its package is in the test scope`,
+          );
+          assert.ok(
+            !plan.closure_test_rows.some((row) => row.binaries.includes(binary)),
+            `${label}: no closure-tests row runs ${binary}`,
+          );
+        }
+        // A test no hosted runner can run is named with its reason, and the
+        // row that holds its binary runs the binary without it.
+        for (const entry of HOSTED_RUNNER_EXCLUDED_TESTS) {
+          const inScope = plan.test_scope.includes(entry.binary.split("::")[0]);
+          assert.equal(
+            plan.hosted_runner_excluded_tests.some((named) => named.binary === entry.binary && named.reason === entry.reason),
+            inScope,
+            `${label}: ${entry.binary}'s excluded tests are named exactly when its package is in the test scope`,
+          );
+          const holders = plan.closure_test_rows.filter((row) => row.binaries.includes(entry.binary));
+          assert.equal(holders.length, inScope ? 1 : 0, `${label}: one closure-tests row holds ${entry.binary}`);
+          for (const row of holders) {
+            assert.equal(
+              row.filter,
+              excludedTestsFilter(row.binaries, plan.hosted_runner_excluded_tests),
+              `${label}: ${row.name} leaves ${entry.binary}'s excluded tests out`,
+            );
+            for (const test of entry.tests) {
+              assert.ok(row.filter.includes(`binary_id(${entry.binary}) & (`) && row.filter.includes(`test(=${test})`), `${label}: ${row.name} leaves ${test} out`);
+            }
+          }
+        }
+        for (const row of plan.closure_test_rows) {
+          if (row.lane === "tests" && !row.binaries.some((binary) => HOSTED_RUNNER_EXCLUDED_TESTS.some((entry) => entry.binary === binary))) {
+            assert.equal(row.filter, undefined, `${label}: ${row.name} filters no test`);
+          }
+        }
+        assert.equal(plan.deferred_to_push, null);
+      } else {
+        assert.equal(plan.deferred_to_push.governed_jsonl, false, `${label}: leaves no Core guard lane to the push`);
+        assert.equal(plan.deferred_to_push.mcp_confinement_positive, false, `${label}: leaves no Core guard lane to the push`);
+      }
+    }
+  }
+  // An unowned Rust path inside a product root (an example outside the crate
+  // directories) selects that product's packages, not the whole workspace.
+  for (const product of PRODUCTS.filter((entry) => entry.name !== CORE)) {
+    const plan = planFor([`${product.root}/examples/unowned-selftest/main.rs`], ["--event", "pull_request"]);
+    const owned = members(plan, product.name);
+    if (owned.length === 0) continue;
+    assert.equal(plan.mode, "packages", `${product.name}: an unowned product Rust path stays inside the product`);
+    assert.deepEqual(plan.packages, owned.sort(), `${product.name}: every package of the product`);
+    assert.match(plan.products.escalations[product.name], /Rust path outside any /);
+    assertNoCore(plan, `${product.name} unowned path`);
+    // The product's own build configuration does the same.
+    const config = planFor([`${product.root}/clippy.toml`], ["--event", "pull_request"]);
+    assert.deepEqual(config.packages, owned.sort(), `${product.name}: its clippy.toml selects its packages`);
+    assertNoCore(config, `${product.name} clippy.toml`);
+  }
+  // A non-Rust product path plans no Rust lane; Connect's selects its checks.
+  for (const product of PRODUCTS.filter((entry) => entry.name !== CORE)) {
+    const plan = planFor([`${product.root}/docs/selftest-only.md`], ["--event", "pull_request"]);
+    assert.equal(plan.rust_changed, false, `${product.name} docs: no Rust lane`);
+    assert.deepEqual(plan.products.changed, [product.name]);
+    assert.deepEqual(plan.reader_packages, [], `${product.name} docs: the whole-checkout readers leave product roots alone`);
+    assert.deepEqual(plan.products.lanes, product.name === "connect" ? ["connect_checks"] : [], `${product.name} docs lanes`);
+    assert.deepEqual(plan.products.floor_checks, [], `${product.name} docs: no floor check`);
+  }
+  // A Core change outside meerkat-mob's build that reaches a product gives
+  // it one downstream type-check row (every target); one that invalidates
+  // meerkat-mob's build leaves it to the push; neither runs a floor check.
+  {
+    const outside = planFor(["crates/meerkat-mob-mcp/src/lib.rs"], ["--event", "pull_request"]);
+    const downstream = outside.shards.filter((shard) => shard.downstream);
+    const reached = productNames.filter((product) => outside.closure.some((name) => productOf(outside, name) === product));
+    assert.ok(reached.length > 0, "meerkat-mob-mcp reaches a product");
+    assert.deepEqual(downstream.map((shard) => shard.product).sort(), [...reached].sort(), "one downstream row per reached product");
+    for (const shard of downstream) {
+      assert.equal(shard.targets, "--all-targets", `${shard.name} lints every target`);
+      assert.match(shard.name, /^downstream /);
+    }
+    assert.deepEqual(outside.products.floor_checks, [], "published Core did not change: no floor check");
+    assertRowsSingleProduct(outside, "mob-mcp pull request");
+    const invalidating = planFor(["crates/meerkat-core/src/lib.rs"], ["--event", "pull_request"]);
+    assert.deepEqual(invalidating.shards.filter((shard) => shard.downstream), [], "no downstream row when meerkat-mob's build is invalidated");
+    assert.deepEqual(invalidating.deferred_to_push.downstream_type_check.sort(), [...reached].sort(), "the push type-checks them");
+    assert.match(
+      run(["--format", "github", "--event", "pull_request", "--", "crates/meerkat-core/src/lib.rs"]).stdout,
+      /^deferred_to_push=.*the downstream type-check of .* \(mob chain invalidated\)$/m,
+    );
+    const push = planFor(["crates/meerkat-core/src/lib.rs"], ["--event", "push"]);
+    assert.equal(push.core_changed, true);
+    for (const product of reached) {
+      assert.ok(push.closure.some((name) => productOf(push, name) === product), `the push's closure holds ${product}`);
+    }
+    assertRowsSingleProduct(push, "meerkat-core push");
+  }
+  // The root manifest and lock feed every floor check; a global path that
+  // changes no product's published dependencies (the Makefile) runs none.
+  {
+    const lock = planFor(["Cargo.toml"], ["--event", "pull_request"]);
+    assert.deepEqual(lock.products.floor_checks, productNames.filter((product) => members(lock, product).length > 0));
+    const make = planFor(["Makefile"], ["--event", "pull_request"]);
+    assert.equal(make.mode, "workspace");
+    assert.deepEqual(make.products.floor_checks, []);
+    const github = run(["--format", "github", "--event", "pull_request", "--", "Cargo.toml"]);
+    assert.equal(github.status, 0, github.stderr);
+    const out = Object.fromEntries(github.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
+    assert.equal(out.floor_check_count, String(lock.products.floor_checks.length));
+    assert.deepEqual(JSON.parse(out.floor_check_matrix).include.map((row) => row.product), lock.products.floor_checks);
+    assert.equal(out.core_changed, "true");
+    assert.match(out.rustdoc_flags, /^--workspace( --exclude \S+)+$/, "the rustdoc lane documents Core's members");
   }
 }
 

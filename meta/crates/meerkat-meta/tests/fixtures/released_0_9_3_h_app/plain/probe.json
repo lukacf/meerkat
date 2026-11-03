@@ -1,0 +1,4 @@
+{
+  "shutdown": "UnifiedRuntimeShutdownReport { drain: ShutdownDrainReport { drained_count: 2, timed_out: false, drain_duration_ms: 101 }, module_shutdown: RuntimeShutdownReport { terminated_modules: [], orphan_processes: 0, physical_cleanup: ModuleCleanupObservation { phase: Settled, outstanding: [], reaped: [] } }, mob_stop: Ok(()), identity_authority_release: NotConfigured, retired_supervisor_cleanup: NothingPending, mob_terminal_shutdown: Completed(MobShutdownReport { members: {}, runs: {}, run_starts: {} }), child_mob_stand_down: NotConfigured, member_mcp_settlement: NothingOwned }",
+  "started": true
+}

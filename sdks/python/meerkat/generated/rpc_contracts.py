@@ -56,6 +56,8 @@ from .types import (
     ForkSessionReplaceParams,
     GoalStatusRequest,
     GoalStatusResult,
+    GrantToolParams,
+    GrantToolResult,
     HelpRequest,
     HelpResponse,
     InjectSystemContextParams,
@@ -87,6 +89,8 @@ from .types import (
     ListSessionTranscriptRevisionsParams,
     ListSessionsParams,
     ListSessionsResult,
+    ListToolGrantsParams,
+    ListToolGrantsResult,
     LiveChannelParams,
     LiveCloseResult,
     LiveCommitInputParams,
@@ -193,6 +197,7 @@ from .types import (
     MobResolveIdentityConvergenceBlockResult,
     MobRespawnParams,
     MobRespawnResult,
+    MobRestoreRetryResult,
     MobRetireResult,
     MobRevokeHostParams,
     MobRevokeHostResult,
@@ -238,6 +243,8 @@ from .types import (
     ReadyWorkFilter,
     RealmIdParams,
     RestoreSessionTranscriptRevisionParams,
+    RevokeToolGrantParams,
+    RevokeToolGrantResult,
     RewriteSessionTranscriptParams,
     RuntimeAcceptResult,
     RuntimeHostCapabilities,
@@ -265,6 +272,8 @@ from .types import (
     StopRunParams,
     StopRunResult,
     SystemPromptUpdateResult,
+    ToolGrantAuditParams,
+    ToolGrantAuditResult,
     ToolsRegisterParams,
     ToolsRegisterResult,
     UpdateScheduleParams,
@@ -811,6 +820,38 @@ class RpcRequest(Protocol):
         params: HelpRequest,
         /,
     ) -> Awaitable[HelpResponse]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["tool_grants/grant"],
+        params: GrantToolParams,
+        /,
+    ) -> Awaitable[GrantToolResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["tool_grants/revoke"],
+        params: RevokeToolGrantParams,
+        /,
+    ) -> Awaitable[RevokeToolGrantResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["tool_grants/list"],
+        params: ListToolGrantsParams,
+        /,
+    ) -> Awaitable[ListToolGrantsResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["tool_grants/audit"],
+        params: ToolGrantAuditParams,
+        /,
+    ) -> Awaitable[ToolGrantAuditResult]: ...
 
     @overload
     def __call__(
@@ -1443,6 +1484,14 @@ class RpcRequest(Protocol):
         params: MobIdParams,
         /,
     ) -> Awaitable[MobRotateSupervisorResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/restore_retry"],
+        params: MobIdParams,
+        /,
+    ) -> Awaitable[MobRestoreRetryResult]: ...
 
     @overload
     def __call__(

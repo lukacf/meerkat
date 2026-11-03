@@ -1,6 +1,6 @@
 [package]
 name = "meerkat-machine-codegen"
-publish = false
+description = "Code generation of Meerkat machine kernels and authority modules from machine schemas"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,10 +11,22 @@ homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
+# Workspace-only test files: `cargo package` leaves them out and the
+# workspace still runs them. ci/standalone-workspace-only.toml lists the same
+# files with the same reasons; the PR guard fails when the two disagree.
+exclude = [
+    # reads meerkat-mob's and meerkat-runtime's production sources and calls meerkat-mob
+    "tests/render_contracts.rs",
+    # compares the generated alphabets with meerkat-runtime's and meerkat-mob's catalogs
+    "tests/runtime_alphabet_parity.rs",
+    # compares production schemas of meerkat-runtime, meerkat-mob, meerkat-schedule and
+    # meerkat-workgraph and embeds meerkat-machine-kernels' generated sources
+    "tests/runtime_schema_parity.rs",
+]
 
 [dependencies]
 meerkat-core = { workspace = true }
-meerkat-machine-schema = { path = "../meerkat-machine-schema" }
+meerkat-machine-schema = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

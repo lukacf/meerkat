@@ -338,7 +338,7 @@ async fn spawn_generated_image_comms_members(
                 ]),
         )
         .await?;
-    handle.wait_for_ready(Some(Duration::from_secs(60))).await?;
+    handle.wait_for_ready(Some(Duration::from_mins(1))).await?;
     Ok(())
 }
 
@@ -381,7 +381,7 @@ async fn spawn_image_relay_members(handle: &MobHandle) -> Result<(), Box<dyn std
                 ]),
         )
         .await?;
-    handle.wait_for_ready(Some(Duration::from_secs(60))).await?;
+    handle.wait_for_ready(Some(Duration::from_mins(1))).await?;
     Ok(())
 }
 
@@ -1009,7 +1009,7 @@ async fn e2e_smoke_mob_generated_image_comms_blob_request_response() {
         &handle,
         service.as_ref(),
         &["maker", "reviewer"],
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         Duration::from_secs(5),
     )
     .await
@@ -1036,14 +1036,10 @@ async fn e2e_smoke_mob_generated_image_comms_blob_request_response() {
         .await
         .expect("kick off maker image generation turn");
 
-    let maker_image = wait_for_first_generated_image(
-        &handle,
-        service.as_ref(),
-        "maker",
-        Duration::from_secs(120),
-    )
-    .await
-    .expect("maker should generate an image in turn 1");
+    let maker_image =
+        wait_for_first_generated_image(&handle, service.as_ref(), "maker", Duration::from_mins(2))
+            .await
+            .expect("maker should generate an image in turn 1");
 
     maker
         .send(
@@ -1063,7 +1059,7 @@ async fn e2e_smoke_mob_generated_image_comms_blob_request_response() {
         .await
         .expect("kick off maker generated-image comms send turn");
 
-    wait_for_generated_image_comms_success(&handle, service.as_ref(), Duration::from_secs(360))
+    wait_for_generated_image_comms_success(&handle, service.as_ref(), Duration::from_mins(6))
         .await
         .expect("generated image request/response comms loop should complete");
 
@@ -1113,7 +1109,7 @@ async fn e2e_smoke_s86_mob_provider_image_relay_readout() {
         &handle,
         service.as_ref(),
         &["maker", "relay", "reader"],
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         Duration::from_secs(5),
     )
     .await
@@ -1148,7 +1144,7 @@ async fn e2e_smoke_s86_mob_provider_image_relay_readout() {
         .expect("kick off image relay smoke");
 
     let relayed_blob =
-        wait_for_image_relay_readout_success(&handle, service.as_ref(), Duration::from_secs(420))
+        wait_for_image_relay_readout_success(&handle, service.as_ref(), Duration::from_mins(7))
             .await
             .expect("image relay readout should complete");
 

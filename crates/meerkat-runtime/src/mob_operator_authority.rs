@@ -147,7 +147,7 @@ pub struct MobOperatorAuthorityFacts {
 /// managed scope → `grant_spawn_profiles_in_mob` per entry →
 /// `with_caller_provenance` → `with_audit_invocation_id`. Every step is a
 /// generated MeerkatMachine input, so the output satisfies
-/// `is_generated_authority_context()` — no stored-context rehydration exists
+/// `is_generated_authority_context()`: no stored-context rehydration exists
 /// on this path.
 ///
 /// `holder_mob_id` and `holder_incarnation` name the mob whose store holds

@@ -35,11 +35,13 @@ impl<T: Clone + Default> OptionValueExt<T> for Option<&T> {
 pub mod approval_lifecycle;
 pub mod auth_machine;
 pub mod detached_job;
+pub mod durable_decision;
 pub mod forked_participant_lifecycle;
 pub mod grant_authority;
 pub mod meerkat_machine;
 pub mod mob_host_binding_authority;
 pub mod mob_machine;
+pub mod mob_store_restore_lifecycle;
 pub mod occurrence_lifecycle;
 pub mod runtime_delivery;
 pub mod schedule_lifecycle;
@@ -47,6 +49,7 @@ pub mod session_document;
 pub mod session_persistence_version_authority;
 pub mod session_turn_admission;
 pub mod temporary_council_lifecycle;
+pub mod tool_grant_lifecycle;
 pub mod work_attention_lifecycle;
 pub mod work_execution_lifecycle;
 pub mod work_item_admission;
@@ -173,14 +176,21 @@ pub const GRANT_AUTHORITY_PRODUCTION_RUST_MODULE: &str = "grants::dsl";
 pub const AUTH_MACHINE_PRODUCTION_RUST_MODULE: &str = "auth_machine::dsl";
 pub const APPROVAL_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
 pub const APPROVAL_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "generated::approval_lifecycle";
+pub const DURABLE_DECISION_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
+pub const DURABLE_DECISION_PRODUCTION_RUST_MODULE: &str = "decision::dsl";
 pub const DETACHED_JOB_PRODUCTION_RUST_CRATE: &str = "meerkat-jobs";
 pub const DETACHED_JOB_PRODUCTION_RUST_MODULE: &str = "machines::detached_job";
 pub const FORKED_PARTICIPANT_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
 pub const FORKED_PARTICIPANT_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
     "machines::forked_participant_lifecycle";
+pub const MOB_STORE_RESTORE_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
+pub const MOB_STORE_RESTORE_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
+    "machines::mob_store_restore_lifecycle";
 pub const TEMPORARY_COUNCIL_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
 pub const TEMPORARY_COUNCIL_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
     "machines::temporary_council_lifecycle";
+pub const TOOL_GRANT_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
+pub const TOOL_GRANT_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "tool_grant::dsl";
 pub const MEERKAT_MACHINE_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
 pub const MEERKAT_MACHINE_PRODUCTION_RUST_MODULE: &str = "meerkat_machine::dsl";
 pub const RUNTIME_DELIVERY_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
@@ -832,6 +842,10 @@ pub fn auth_machine_schema_metadata() -> MachineSchemaMetadata {
                 "RefreshFailureDisposition",
                 &["Transient", "ReauthRequired"],
             ),
+            NamedTypeBinding::string_enum(
+                "SourceCredentialPublicationDisposition",
+                &["Publish", "AlreadyPublished"],
+            ),
         ],
         vec![
             InputVariantId::from_trusted_catalog_literal("RestoreAuthoritySnapshot"),
@@ -842,6 +856,7 @@ pub fn auth_machine_schema_metadata() -> MachineSchemaMetadata {
             InputVariantId::from_trusted_catalog_literal("ResolveRefreshFailureDisposition"),
             InputVariantId::from_trusted_catalog_literal("ResolveCredentialUseAdmission"),
             InputVariantId::from_trusted_catalog_literal("ResolveOAuthLoginCredentialDisposition"),
+            InputVariantId::from_trusted_catalog_literal("ResolveSourceCredentialPublication"),
         ],
     )
     .with_ci_step_limit(3)
@@ -1071,8 +1086,114 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                 "SessionArchiveRuntimeObservation",
                 &["Absent", "RetirementRequired", "QuiescentTerminal"],
             ),
+            // Operator-instruction region typed vocabulary: the owner of a
+            // session's recorded target, a slot's effect, the run start and
+            // lowering a turn start observes, and the verdicts the shell
+            // mirrors.
+            NamedTypeBinding::string_enum("InstructionTargetOwner", &["Unowned", "Session", "Mob"]),
+            NamedTypeBinding::string_enum("InstructionEffect", &["Absent", "Active"]),
+            NamedTypeBinding::string_enum(
+                "InstructionRunStart",
+                &["FreshRun", "ResumeRun", "NoRun"],
+            ),
+            NamedTypeBinding::string_enum(
+                "InstructionLowering",
+                &["MidConversation", "LeadingPrefixOnly", "Unavailable"],
+            ),
+            NamedTypeBinding::string_enum("InstructionWriteOutcome", &["Recorded", "Duplicate"]),
+            NamedTypeBinding::string_enum(
+                "InstructionWriteRefusal",
+                &[
+                    "StaleRevision",
+                    "RevisionConflict",
+                    "OwnedByMob",
+                    "OwnedBySession",
+                    "SlotLimitExceeded",
+                    "UnknownSlot",
+                    "OwnedByOtherMob",
+                    "ActiveSetBudgetExceeded",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "InstructionDeferReason",
+                &["LeadingPrefixOnly", "LoweringUnavailable"],
+            ),
+            NamedTypeBinding::string_enum("InstructionFoldSource", &["Effective", "Target"]),
+            // Activation-body retirement region typed vocabulary: whether an
+            // activation key's newest row is the session's own.
+            NamedTypeBinding::string_enum("ActivationHeadOrigin", &["Own", "Copied"]),
         ],
         Vec::new(),
+    )
+    // CI bound of the TLC sweep (model checking only: the generated machine,
+    // the Deep profile and the audits' own arguments are unchanged). Every arm
+    // and every invariant works on one region of the state, so the sweep
+    // explores products of the regions' states within the step bound: the
+    // instruction region next to the live region's six-step chains took it
+    // from 18,936 states (249M generated) to about 487,000 (6.5G). These
+    // bounds bring it to about 24,700 states and 99M generated.
+    // - Step bound 5: TLC checks every successor, also one step past the
+    //   bound, so every first-turn, live and lifecycle state (the deepest is
+    //   six steps in) and every class of instruction state that a guard or an
+    //   invariant tells apart is still checked. The instruction boundary
+    //   audit, bound by this config, still reaches each witness and refuses
+    //   each mutant within 5 machine steps, in as many states as at 6.
+    // - Durable-tail counts {0}: the four stateless classification arms make
+    //   most of every state's successors; with both counts at zero each arm
+    //   still fires (Ambiguous through its other conditions), and the
+    //   durable-tail classification audit checks the arms over all of 0..2
+    //   with its own tuples.
+    // - Instruction samples, which keep every class of instruction state and
+    //   every arm's firing from each:
+    //   - target_generation {2}: a recovered mob target at the top of a mob
+    //     record's 0..2 input, so a record finds it already recorded; a
+    //     release or a rebind leaves generation 0, from which records advance
+    //     to 1 and 2.
+    //   - entry_sequence {0}: the effective recovery's guard and
+    //     instruction_entry_sequence_covers_effective tell only zero from at
+    //     least one, which a fold or an application reaches.
+    //   - generation {0}: no guard or invariant reads the generation in
+    //     effect.
+    //   - last_entry_sequence {0, 1}: both sides of its `>= 1` guard and of
+    //     the entry-sequence maximum.
+    //   - body_bytes {1}: an Active body's size counts only against the
+    //     1 MiB active budget, which no CI body nears; an Absent write, which
+    //     must carry 0, needs an empty digest, which the CI strings lack.
+    .with_ci_step_limit(5)
+    .with_input_field_domain(
+        input_variant_id("ClassifyDurableTail"),
+        crate::identity::FieldId::from_trusted_catalog_literal("dangling_tool_use_count"),
+        crate::InputFieldDomainKind::CiValues([0].into_iter().collect()),
+    )
+    .with_input_field_domain(
+        input_variant_id("ClassifyDurableTail"),
+        crate::identity::FieldId::from_trusted_catalog_literal("orphan_tool_result_count"),
+        crate::InputFieldDomainKind::CiValues([0].into_iter().collect()),
+    )
+    .with_input_field_domain(
+        input_variant_id("RecoverSessionInstructionState"),
+        crate::identity::FieldId::from_trusted_catalog_literal("target_generation"),
+        crate::InputFieldDomainKind::CiValues([2].into_iter().collect()),
+    )
+    .with_input_field_domain(
+        input_variant_id("RecoverSessionInstructionState"),
+        crate::identity::FieldId::from_trusted_catalog_literal("entry_sequence"),
+        crate::InputFieldDomainKind::CiValues([0].into_iter().collect()),
+    )
+    .with_input_field_domain(
+        input_variant_id("RecoverSessionInstructionEffective"),
+        crate::identity::FieldId::from_trusted_catalog_literal("generation"),
+        crate::InputFieldDomainKind::CiValues([0].into_iter().collect()),
+    )
+    .with_input_field_domain(
+        input_variant_id("RecoverSessionInstructionEffective"),
+        crate::identity::FieldId::from_trusted_catalog_literal("last_entry_sequence"),
+        crate::InputFieldDomainKind::CiValues([0, 1].into_iter().collect()),
+    )
+    .with_input_field_domain(
+        input_variant_id("SetSessionInstruction"),
+        crate::identity::FieldId::from_trusted_catalog_literal("body_bytes"),
+        crate::InputFieldDomainKind::CiValues([1].into_iter().collect()),
     )
 }
 
@@ -1910,7 +2031,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum("InputLane", &["Queue", "Steer"]),
-            NamedTypeBinding::string_enum("RunStartHoldReason", &["MobStop", "ToolsNotPublished"]),
+            NamedTypeBinding::string_enum(
+                "RunStartHoldReason",
+                &["MobStop", "ToolsNotPublished", "HostPreparation"],
+            ),
             NamedTypeBinding::string_enum("SessionResidencyOwner", &["Session", "Composition"]),
             NamedTypeBinding::string_enum(
                 "EmptyResumeRetirementVerdict",
@@ -3392,6 +3516,12 @@ runtime_internal_inputs!(
         // caller can ask for either.
         HoldInputController,
         ReleaseInputController,
+        // The scoped tool grant gate: the visibility owner installs each
+        // build's gate and applies the open set the grant service
+        // adjudicated at each model-request boundary. No caller can ask for
+        // either.
+        ReplaceToolGrantGate,
+        ApplyToolGrantOpenSet,
     ]
 );
 
@@ -3549,7 +3679,13 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             // verdict/fault/policy/capability/timeout classifiers owned by MobMachine.
             NamedTypeBinding::string_enum(
                 "MemberAdmissionVerdictKind",
-                &["Admitted", "DuplicateRejected"],
+                &[
+                    "Admitted",
+                    "DuplicateRejected",
+                    "IdentityMemberRejected",
+                    "IdentityMemberOfAnotherOrigin",
+                    "IdentityNameReserved",
+                ],
             ),
             NamedTypeBinding::string_enum("StepOutputFaultKind", &["MalformedJson"]),
             NamedTypeBinding::string_enum("StepFaultDispositionKind", &["Retry", "Terminal"]),
@@ -4109,6 +4245,20 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum(
+                "MemberCustodyRestoreKind",
+                &["StartupBinding", "CleanupDelivery"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberCustodyCauseKind",
+                &[
+                    "ServedElsewhere",
+                    "HostingUnavailable",
+                    "DurableTailUnprovable",
+                    "StoreUnavailable",
+                    "StoreUnreadable",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "MemberWakeAbandonKind",
                 &[
                     "NotCurrent",
@@ -4174,6 +4324,255 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "NotAMember",
                     "NotYetReleasable",
                     "PinnedByPlacedPeer",
+                    "Stale",
+                ],
+            ),
+            // Identity entries (0.9.9).
+            NamedTypeBinding::string_enum("IdentityEntryOrigin", &["Declared", "Created"]),
+            // Rotation targets (0.9.8): a new session, or the member's own.
+            NamedTypeBinding::string_enum("RotationTarget", &["FreshSession", "SameSession"]),
+            // Why the machine refuses a fresh-life respawn (0.9.8).
+            NamedTypeBinding::string_enum("RespawnRefusalReason", &["IdentityEntryKeepsSession"]),
+            // Operator instructions (0.9.9): a record's slot effect and
+            // target kind, why a member's delivery is blocked or deferred,
+            // and why a write is refused.
+            NamedTypeBinding::string_enum("InstructionEffect", &["Absent", "Active"]),
+            NamedTypeBinding::string_enum("InstructionTargetKind", &["Mob", "Profile", "Member"]),
+            NamedTypeBinding::string_enum(
+                "MemberInstructionBlock",
+                &[
+                    "MemberHostUnsupported",
+                    "SlotManagedByActivation",
+                    "DurabilityUnavailable",
+                    "OwnedBySession",
+                    "OwnedByOtherMob",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberInstructionDeferReason",
+                &[
+                    "NotOwed",
+                    "SessionUnborn",
+                    "SessionUnbound",
+                    "Retiring",
+                    "MobNotRunning",
+                    "SpawnInFlight",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "OperatorInstructionRefusal",
+                &[
+                    "StaleRevision",
+                    "RevisionConflict",
+                    "UnknownSlot",
+                    "SlotLimitExceeded",
+                    "BodyTooLarge",
+                    "ActiveSetBudgetExceeded",
+                    "MobTerminal",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LegacyIdentityEntryAdoptionKind",
+                &[
+                    "Adopted",
+                    "AlreadyAnEntry",
+                    "NameHeldByWorker",
+                    "NotAdoptable",
+                    "StaleObservation",
+                    "NotSeated",
+                    "NonAuthoritative",
+                    "MobNotRunning",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "AgentLaneMemberAdmissionKind",
+                &["Admitted", "IdentityMember"],
+            ),
+            // The declared apply (0.9.9): unseated causes, host preparation
+            // causes, declared placements, verdicts, the seal's verdict and
+            // why an archived session record is let go.
+            NamedTypeBinding::string_enum(
+                "UnseatedEntryCause",
+                &[
+                    "SeatOwed",
+                    "HostedOnFirstUse",
+                    "HeldCreation",
+                    "PreparationPending",
+                    "Archived",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "HostPreparationCause",
+                &[
+                    "FirstBootRow",
+                    "RoleMigrationUndeclared",
+                    "BuildPreparationRetry",
+                ],
+            ),
+            NamedTypeBinding::string_enum("EntryPlacementKind", &["Local", "Placed", "External"]),
+            NamedTypeBinding::string_enum(
+                "IdentityEntryVerdict",
+                &[
+                    "Kept",
+                    "SeatOwed",
+                    "HostedOnFirstUse",
+                    "AwaitHeldCreation",
+                    "PreparationPending",
+                    "RuntimeModeRestamp",
+                    "RoleMigrate",
+                    "RoleRotate",
+                    "RoleMigrationHeld",
+                    "LifecycleInFlight",
+                    "RefusedNameHeldByWorker",
+                    "RefusedHostAdopted",
+                    "RefusedNonAuthoritative",
+                    "MobNotRunning",
+                    "RefusedNameOwnedByCreated",
+                    "RefusedNameTombstoned",
+                    "RefusedNameUnreadable",
+                    "RecordOnly",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "DeclaredRosterSealVerdict",
+                &["Sealed", "NonAuthoritative", "MobNotRunning"],
+            ),
+            NamedTypeBinding::string_enum(
+                "ArchivedSessionForgetReason",
+                &["SessionAbsent", "FreshLifeRequested"],
+            ),
+            NamedTypeBinding::string_enum("FirstBootRequestKind", &["None", "Resume", "Fresh"]),
+            NamedTypeBinding::string_enum(
+                "DeclaredApplyOpenVerdict",
+                &["Opened", "Busy", "MobNotRunning"],
+            ),
+            // Created identity entries (0.9.9): the presence a created
+            // entry's row records, as the boot's scan read it.
+            NamedTypeBinding::string_enum(
+                "RecoveredPresence",
+                &[
+                    "Present",
+                    "PresentUnseated",
+                    "PendingConstruction",
+                    "Tombstone",
+                    "Unreadable",
+                    "Archived",
+                ],
+            ),
+            // Identity changes (0.9.9): a change's receipt and consent as its
+            // commit step observed them, its admission verdict, and the
+            // verdict of a new store-owned entry's record.
+            NamedTypeBinding::string_enum(
+                "IdentityChangeReceiptKind",
+                &["Absent", "Same", "Other"],
+            ),
+            NamedTypeBinding::string_enum(
+                "IdentityChangeConsentKind",
+                &["Policy", "Decided", "Imported"],
+            ),
+            NamedTypeBinding::string_enum(
+                "IdentityChangeAdmissionKind",
+                &[
+                    "Admitted",
+                    "Replayed",
+                    "OperationReused",
+                    "NonAuthoritative",
+                    "ChangesHeld",
+                    "DecisionUnbound",
+                    "DecisionExpired",
+                    "ImportedNotHostOperator",
+                    "GrantRevoked",
+                    "MobNotRunning",
+                    "StaleSpec",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "CreatedIdentityRecordVerdict",
+                &[
+                    "Recorded",
+                    "NameHeldByIdentity",
+                    "NameHeldByWorker",
+                    "NameTombstoned",
+                    "NameUnreadable",
+                    "NonAuthoritative",
+                    "ChangesHeld",
+                    "MobNotRunning",
+                ],
+            ),
+            // One identity's removal, archive or unarchive, and its verdict.
+            NamedTypeBinding::string_enum(
+                "IdentityEntryChangeKind",
+                &["Remove", "Archive", "Unarchive"],
+            ),
+            NamedTypeBinding::string_enum(
+                "IdentityEntryChangeVerdict",
+                &[
+                    "Retiring",
+                    "Removed",
+                    "AlreadyRemoved",
+                    "Archiving",
+                    "Archived",
+                    "AlreadyArchived",
+                    "Restored",
+                    "NotArchived",
+                    "OwnedByRoster",
+                    "Unknown",
+                    "InFlight",
+                    "NameUnreadable",
+                    "NonAuthoritative",
+                    "ChangesHeld",
+                    "MobNotRunning",
+                    "PreparationPending",
+                ],
+            ),
+            // Held constructions (0.9.9): the verdicts of a construction's
+            // start, of a settle and of an attempt's end, and how an attempt
+            // ended.
+            NamedTypeBinding::string_enum(
+                "PreparationConstructionVerdict",
+                &[
+                    "Held",
+                    "NotPending",
+                    "NotConstructed",
+                    "ConstructionOpen",
+                    "NonAuthoritative",
+                    "MobNotRunning",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "PreparationSettleVerdict",
+                &[
+                    "Seat",
+                    "ActivationAccepted",
+                    "NotPending",
+                    "ConstructionRequired",
+                    "ConstructionOpen",
+                    "StaleAttempt",
+                    "Expired",
+                    "Mismatch",
+                    "ActivationPending",
+                    "NonAuthoritative",
+                    "MobNotRunning",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "ConstructionEndKind",
+                &["Aborted", "Expired", "Refused", "PublicationFailed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "ConstructionEndVerdict",
+                &["Ended", "NotOpen", "ActivationPending"],
+            ),
+            // The one-entry unlist of a roster-owned identity (0.9.9).
+            NamedTypeBinding::string_enum(
+                "UnlistEntryVerdict",
+                &[
+                    "Retiring",
+                    "Removed",
+                    "Deferred",
+                    "NotADeclaredEntry",
+                    "NonAuthoritative",
+                    "MobNotRunning",
                 ],
             ),
             NamedTypeBinding::string("RuntimeEpochId"),
@@ -4428,6 +4827,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "Archived",
                     "RuntimeReleasedOnlyHostOwned",
                     "RuntimeReleasedOnlyNoDurableSessions",
+                    "KeptForSuccessor",
                 ],
             ),
             NamedTypeBinding::string_enum(
@@ -4813,6 +5213,41 @@ runtime_internal_inputs!(
         BeginMemberRotation,
         CommitMemberRotation,
         ClassifyMemberRelease,
+        // Identity entries: the handle's legacy adoption and the actor's
+        // agent-lane member admission. Neither is a surface command.
+        AdoptLegacyIdentityEntry,
+        ResolveAgentLaneMemberAdmission,
+        // The declared apply: the handle's verdict per declared identity, the
+        // seal of a complete roster, and the release of an archived session
+        // record before a fresh seat. None is a surface command.
+        DeclareIdentityEntry,
+        SealDeclaredRoster,
+        ForgetArchivedSession,
+        // The declared apply's open fact, opened and closed around each
+        // apply by the handle. Neither is a surface command.
+        OpenDeclaredApply,
+        CloseDeclaredApply,
+        // The reset's preflight admission, probed by the actor before the
+        // reset's retirement batch. Not a surface command.
+        AdmitReset,
+        // Identity changes: the actor's commit step decides a change's
+        // admission and records each new store-owned entry, and the handle
+        // holds or releases the mob's changes. None is a surface command.
+        AdmitIdentityChange,
+        RecordCreatedIdentityEntry,
+        SetIdentityChangesHeld,
+        RemoveIdentityEntry,
+        ArchiveIdentityEntry,
+        UnarchiveIdentityEntry,
+        // Host preparation: a held construction's start, a settle and an
+        // attempt's end, decided in the handle's and the actor's steps. None
+        // is a surface command.
+        BeginPreparationConstruction,
+        SettleHostPreparation,
+        EndPreparationConstruction,
+        // The one-entry unlist of a roster-owned identity, decided in the
+        // actor's step for the handle's unlist. Not a surface command.
+        UnlistIdentityEntry,
     ]
 );
 
@@ -5212,6 +5647,51 @@ pub fn dsl_temporary_council_lifecycle_machine() -> MachineSchema {
         .attach_to(temporary_council_lifecycle::TemporaryCouncilLifecycleMachineState::schema())
 }
 
+pub fn dsl_mob_store_restore_lifecycle_machine() -> MachineSchema {
+    mob_store_restore_lifecycle_schema_metadata()
+        .attach_to(mob_store_restore_lifecycle::MobStoreRestoreLifecycleMachineState::schema())
+}
+
+pub fn dsl_mob_store_restore_lifecycle_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_mob_store_restore_lifecycle_machine(),
+        MOB_STORE_RESTORE_LIFECYCLE_PRODUCTION_RUST_CRATE,
+        MOB_STORE_RESTORE_LIFECYCLE_PRODUCTION_RUST_MODULE,
+    )
+}
+
+/// Named-type bindings for the quarantined mob store record machine.
+pub fn mob_store_restore_lifecycle_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum(
+                "MobStoreRestoreLifecyclePhase",
+                &["Unclassified", "Quarantined", "Retrying", "Released"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MobQuarantineClass",
+                &["StoreUnavailable", "StoreUnreadable", "ResumeRefused"],
+            ),
+            NamedTypeBinding::string_enum("MobStoreRetryTrigger", &["Explicit", "OnDemand"]),
+            NamedTypeBinding::string_enum(
+                "MobStoreRestoreOutcome",
+                &["Managed", "Held", "Settled", "Failed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MobStoreRestoreRefusal",
+                &[
+                    "RetryInFlight",
+                    "NotQuarantined",
+                    "AlreadyClassified",
+                    "NotRetrying",
+                    "NotRetryable",
+                ],
+            ),
+        ],
+        vec![],
+    )
+}
+
 pub fn dsl_temporary_council_lifecycle_machine_production_schema() -> MachineSchema {
     with_production_rust_binding(
         dsl_temporary_council_lifecycle_machine(),
@@ -5268,6 +5748,64 @@ pub fn temporary_council_lifecycle_schema_metadata() -> MachineSchemaMetadata {
         ],
         vec![],
     )
+}
+
+/// Canonical ToolGrantLifecycleMachine: one scoped tool grant's issuance,
+/// expiry at a supplied clock, revocation and use admission. Record-scoped
+/// and clock-free.
+pub fn dsl_tool_grant_lifecycle_machine() -> MachineSchema {
+    tool_grant_lifecycle_schema_metadata()
+        .attach_to(tool_grant_lifecycle::ToolGrantLifecycleMachineState::schema())
+}
+
+pub fn dsl_tool_grant_lifecycle_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_tool_grant_lifecycle_machine(),
+        TOOL_GRANT_LIFECYCLE_PRODUCTION_RUST_CRATE,
+        TOOL_GRANT_LIFECYCLE_PRODUCTION_RUST_MODULE,
+    )
+}
+
+/// Named-type bindings for the scoped tool grant record machine: the end
+/// reason carried by the state and the two typed refusal vocabularies its
+/// verdict effects carry.
+pub fn tool_grant_lifecycle_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum("ToolGrantEndReason", &["Deadline", "Revoked"]),
+            NamedTypeBinding::string_enum("ToolGrantUseRefusal", &["Expired", "Revoked"]),
+            NamedTypeBinding::string_enum(
+                "ToolGrantIssueRefusal",
+                &["InvalidWindow", "AlreadyIssued"],
+            ),
+        ],
+        vec![],
+    )
+    .with_tlc_model(tool_grant_lifecycle_tlc_model())
+}
+
+/// The scoped tool grant machine's explicit TLC model. Every input carries
+/// unsigned times, which the generated model explores over the three values
+/// `0..2`: a grant issued at 0 or 1 with a deadline of 1 or 2 is observed
+/// before, at and after its deadline. Every arm is reached within four
+/// steps (issue, end, issue again), so the CI run requires each of them,
+/// the `IssueRefusedIssued*` arms of an ended grant included, to generate a
+/// state.
+fn tool_grant_lifecycle_tlc_model() -> crate::MachineTlcModel {
+    let no_samples = || crate::MachineTlcProfile {
+        named_values: std::collections::BTreeMap::new(),
+    };
+    crate::MachineTlcModel {
+        ci: no_samples(),
+        deep: no_samples(),
+        ci_limits: crate::MachineTlcStateLimits {
+            step_limit: 4,
+            seq_limit: 1,
+            set_limit: 1,
+            map_limit: 1,
+        },
+        require_ci_transition_coverage: true,
+    }
 }
 
 pub fn dsl_work_execution_lifecycle_machine() -> MachineSchema {
@@ -5525,4 +6063,108 @@ pub fn dsl_grant_authority_production_schema() -> MachineSchema {
         GRANT_AUTHORITY_PRODUCTION_RUST_CRATE,
         GRANT_AUTHORITY_PRODUCTION_RUST_MODULE,
     )
+}
+
+/// Canonical DurableDecisionMachine: one durable decision's hold, attested
+/// decision, execution permit and executed fact, expiry, withdrawal and owed
+/// requester notice. Record-scoped and clock-free.
+pub fn dsl_durable_decision_machine() -> MachineSchema {
+    durable_decision_schema_metadata()
+        .attach_to(durable_decision::DurableDecisionMachineState::schema())
+}
+
+pub fn dsl_durable_decision_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_durable_decision_machine(),
+        DURABLE_DECISION_PRODUCTION_RUST_CRATE,
+        DURABLE_DECISION_PRODUCTION_RUST_MODULE,
+    )
+}
+
+/// Named-type bindings for the durable decision record machine: its two
+/// opaque key types, its stage, notice and review verdict vocabularies, and
+/// the typed refusal its verdict effect carries.
+pub fn durable_decision_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string("DecisionParty"),
+            NamedTypeBinding::string("DecisionDigest"),
+            NamedTypeBinding::string_enum("DurableDecisionStage", &["Human", "Review"]),
+            NamedTypeBinding::string_enum(
+                "DurableDecisionNotice",
+                &["NotRequired", "NotDue", "Owed", "Delivered", "Failed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "DurableDecisionReviewVerdict",
+                &["Allow", "Deny", "Escalate"],
+            ),
+            NamedTypeBinding::string_enum(
+                "DurableDecisionRefusal",
+                &[
+                    "InvalidWindow",
+                    "SelfReview",
+                    "HoldConflict",
+                    "NotOpen",
+                    "Expired",
+                    "SubjectChanged",
+                    "PresentationIncomplete",
+                    "WrongAudience",
+                    "ReviewStage",
+                    "HumanStage",
+                    "EvidenceRequired",
+                    "NotEligible",
+                    "SelfApproval",
+                    "WrongReviewer",
+                    "NotRequester",
+                    "NotApproved",
+                    "BindingMismatch",
+                    "NotAuthorized",
+                    "SettlementOwed",
+                    "NotOwed",
+                    "DecidedBeforePresentation",
+                ],
+            ),
+        ],
+        vec![],
+    )
+    .with_tlc_model(durable_decision_tlc_model())
+}
+
+/// The durable decision machine's explicit TLC model. Every refusal that
+/// compares two keys (a changed subject, another approver, the requester as
+/// decider, another reviewer, another binding) needs two distinct keys, so
+/// both key types sample the two values `alpha` and `beta`; every input time
+/// ranges over `0..2`, which puts a hold's deadline before, at and after a
+/// later touch, and a presentation before, at and after a decision's
+/// observed time (a carried presentation's time is sampled as `1`). Every
+/// arm is reached within six steps (the deepest: hold, approve, authorize,
+/// record, settle the notice, settle it again), so the CI run requires each
+/// of them to generate a state.
+#[allow(clippy::expect_used)]
+fn durable_decision_tlc_model() -> crate::MachineTlcModel {
+    let two_keys = || crate::MachineTlcProfile {
+        named_values: ["DecisionParty", "DecisionDigest"]
+            .into_iter()
+            .map(|name| {
+                (
+                    crate::identity::NamedTypeId::parse(name).expect("valid named-type slug"),
+                    vec![
+                        crate::TlcValue::String("alpha".to_owned()),
+                        crate::TlcValue::String("beta".to_owned()),
+                    ],
+                )
+            })
+            .collect(),
+    };
+    crate::MachineTlcModel {
+        ci: two_keys(),
+        deep: two_keys(),
+        ci_limits: crate::MachineTlcStateLimits {
+            step_limit: 6,
+            seq_limit: 1,
+            set_limit: 1,
+            map_limit: 1,
+        },
+        require_ci_transition_coverage: true,
+    }
 }

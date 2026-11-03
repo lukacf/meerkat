@@ -194,8 +194,12 @@ fi
 
 # The real committed Cargo selector must use the dispatcher's exact push range,
 # rather than replaying previously accepted Web SDK edits since origin/main.
-mkdir -p "$TEST_ROOT/scripts" "$TEST_ROOT/crates/meerkat-runtime/src" "$TEST_ROOT/sdks/web/src"
+mkdir -p "$TEST_ROOT/scripts" "$TEST_ROOT/crates/meerkat-runtime/src" "$TEST_ROOT/sdks/web/src" "$TEST_ROOT/ci"
 cp "$REPO_ROOT/scripts/cargo-agent-gate" "$TEST_ROOT/scripts/cargo-agent-gate"
+# The gate's whole-workspace Clippy takes Core's package selection from the
+# real helper, which reads the product registry.
+cp "$REPO_ROOT/scripts/core-workspace-args.mjs" "$REPO_ROOT/scripts/ci-products.mjs" "$TEST_ROOT/scripts/"
+cp "$REPO_ROOT/ci/products.json" "$TEST_ROOT/ci/products.json"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$TEST_ROOT/scripts/machine-authority-changed"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$TEST_ROOT/scripts/generated-contract-ratchet-changed"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_ROOT/scripts/rust-embedded-inputs.mjs"

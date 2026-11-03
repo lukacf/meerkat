@@ -16,11 +16,15 @@ use meerkat_core::confinement::{
 // Applications, networking, or broad Mach/Unix socket grants.
 // The root directory itself is readable for loader startup, never its children.
 // Rust guard-page initialization also requires the exact compatibility page size.
+// Process information is denied explicitly: the default deny does not cover
+// every process-info read on every macOS version (such as another process's
+// arguments and environment). The later same-sandbox allow wins over it.
 const BASELINE: &str = r#"(version 1)
 (deny default)
 (allow process-exec)
 (allow process-fork)
 (allow signal (target same-sandbox))
+(deny process-info*)
 (allow process-info* (target same-sandbox))
 (allow sysctl-read
   (sysctl-name "hw.ncpu") (sysctl-name "hw.memsize")
@@ -265,4 +269,37 @@ pub(super) fn lower(
         policy.push_str("(deny system-fcntl (fcntl-command 80 110))\n");
     }
     Ok(policy)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use meerkat_core::confinement::{ConfinementSpec, PlatformBaseline};
+
+    /// A rendered profile denies process information, then allows it for the
+    /// child's own sandbox. The later matching rule wins, so a process outside
+    /// the sandbox stays denied whatever the default deny covers.
+    #[test]
+    fn profile_denies_process_info_before_allowing_the_same_sandbox() {
+        let requirement = ExecutionConfinement::try_from(ConfinementSpec {
+            baseline: PlatformBaseline::CommandRuntimeV1,
+            read: FilesystemAccess::Paths(Vec::new()),
+            write: FilesystemAccess::Paths(Vec::new()),
+            deny_read: Vec::new(),
+            deny_write: Vec::new(),
+            network: IpNetworkAccess::Denied,
+            unix_connect: Vec::new(),
+            require_descendant_termination: false,
+        })
+        .unwrap();
+        let policy = lower(&requirement, &[]).unwrap();
+        let deny = policy.find("\n(deny process-info*)\n");
+        let allow = policy.find("\n(allow process-info* (target same-sandbox))\n");
+        assert!(
+            matches!((deny, allow), (Some(deny), Some(allow)) if deny < allow),
+            "{policy}"
+        );
+        assert_eq!(policy.matches("(allow process-info").count(), 1, "{policy}");
+    }
 }

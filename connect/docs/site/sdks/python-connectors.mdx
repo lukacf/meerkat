@@ -1,0 +1,96 @@
+---
+title: "Python service operations"
+description: "Current operations for Home Assistant, Gmail, Calendar, Drive and Slack."
+icon: "plug"
+---
+
+**Current local source.** Every HTTPX client here is host-selected and [prepared before use](/sdks/python#prepare-the-client-once). These are operation libraries, not automatic tool registration or account setup.
+
+For configured standard MCP use without writing a provider client, the separate
+[Slack/Gmail component](/library/slack-gmail) packages selected operations from
+these same modules. The libraries below remain available for direct embedding.
+
+## Imports and selection
+
+| Import from `meerkat_toolkit.connectors` | Class | Required selection beyond the client |
+| --- | --- | --- |
+| `.home_assistant` | `HomeAssistantOperations` | Explicit instance base and authorized entity/service |
+| `.gmail` | `GmailOperations` | `user_id` such as the explicitly selected `me` route |
+| `.google_calendar` | `GoogleCalendarOperations` | `calendar_id` |
+| `.google_drive` | `GoogleDriveOperations` | Exact file/query/media choices per call |
+| `.slack` | `SlackOperations` | Exact conversation IDs and timestamp strings per call |
+
+Use imports such as `from meerkat_toolkit.connectors.gmail import GmailOperations`. The host supplies the API base and authentication. An account route string does not verify that a credential belongs to the intended account.
+
+## Home Assistant
+
+`get_state(entity_id)`, `list_states()`, `get_camera_image(entity_id)` and `list_services()` provide explicit reads. `call_service(domain, service, ...)` sends the selected operation once.
+
+Entity IDs use `domain.object_id`; the returned state must match the selected entity. State and service metadata remain provider data. Camera results are bounded bytes with media metadata. A service receipt is not proof that a physical device reached the requested state.
+
+The REST strategy is an explicit choice. It is not an automatic fallback from Assist MCP, whose permission surface differs.
+
+## Gmail
+
+| Method | Behavior |
+| --- | --- |
+| `list_messages_page(...)` | One page; preserves order, repeated entries and continuation |
+| `get_message(message_id, ...)` | Exact message in `full`, `metadata`, `minimal` or `raw` format |
+| `send_raw(mime, thread_id=None)` | One send of exact immutable MIME bytes |
+| `create_draft_raw(mime, thread_id=None)` | Create a draft without sending |
+| `modify_message(message_id, ...)` | Exact label additions/removals |
+| `get_attachment(message_id, attachment_id)` | One bounded attachment body response |
+
+Optional parameters shown here are keyword arguments. `list_messages_page` accepts explicit query, labels, page token, result limit and spam/trash selection. It does not traverse pages. An estimated result size is not a complete count.
+
+The host authorizes the complete MIME bytes and all To/Cc/Bcc recipients. `send_raw` does not add headers, choose a recipient, repair threading or supply idempotency. A Message-ID is not a provider idempotency key.
+
+The separate stdlib-only `.gmail_message` module exposes `decode_message`, `validate_reply_selection`, `reply_linkage` and `compose_message`. It preserves ordered headers and part identity, distinguishes incomplete body data from a complete empty body, and does not render HTML or fetch attachments.
+
+## Google Calendar
+
+`list_events_page`, `get_event`, `insert_event`, `patch_event` and `delete_event` operate on the selected calendar. List parameters support explicit time/query/page choices; there is no automatic paging or time inference.
+
+```python
+from meerkat_toolkit.connectors.google_calendar import GoogleCalendarOperations
+
+async def read_window(prepared_client, calendar_id, time_min, time_max):
+    calendar = GoogleCalendarOperations(prepared_client, calendar_id=calendar_id)
+    return await calendar.list_events_page(
+        time_min=time_min,
+        time_max=time_max,
+        single_events=True,
+        order_by="startTime",
+        max_results=250,
+    )
+```
+
+Patch/delete can take one exact quoted `expected_etag`. Omitting it is an explicitly unconditional operation. A precondition failure does not fetch a new ETag and retry. Bodies preserve omission, null, false and empty values. Other Calendar APIs, sync, notification options and arbitrary REST parameters are outside this profile.
+
+## Google Drive
+
+`list_files_page`, `get_file`, `download_file`, `export_file`, `create_file`, `update_file`, `create_permission` and `delete_file` cover the current explicit profile. There is no TypeScript Drive equivalent.
+
+Fields, query text and opaque page tokens remain explicit. Media downloads/exports stage complete bytes and atomically replace the selected destination after validation and cleanup. A cancellation racing publication may leave a complete new file; inspect the destination before recovery.
+
+Uploads use a retained file handle and streamed multipart body. The host authorizes local paths and concurrent file changes. This is not an immutable content snapshot or resumable-upload implementation. JSON limits do not imply the same media limit.
+
+## Slack
+
+`auth_test`, `list_conversations_page`, `get_conversation`, `get_user`, `history_page` and `replies_page` each issue one request. The account observation must be compared with the host's independent selection. Conversation metadata does not attest current audience permission.
+
+`get_user(user, include_locale=False)` reads one exact user ID with separately
+authorized `users:read` access. It preserves optional profile fields and requires
+the returned ID to match. Names may be missing or shared; the agent keeps IDs
+with any displayed names. Channel limits do not constrain this independent
+metadata operation. It performs no automatic enrichment or email lookup.
+
+`read_interval(channel, *, start, end, root_oldest, max_requests, max_messages, ...)` composes those page owners with fixed bounds and explicit budgets. It returns selected occurrences, chain outcomes and coverage gaps. It performs no natural-language resolution, timestamp floating-point conversion, deduplication or automatic retry. See [the interval example](/examples/slack-summary).
+
+## Error and effect outcomes
+
+Connector errors carry bounded categories and selected status/retry metadata. They omit raw provider bodies, credentials and arbitrary host exception text. Returned provider content can still be private.
+
+For connectors with write outcomes, reads use not-applicable; Slack has read-only error categories. Local validation can refuse before entry. Once a write enters the HTTP owner, a failed result conservatively remains unknown, including timeout, cancellation and malformed success. Drive additionally exposes typed `NOT_ATTEMPTED` local failures. Retry metadata is an observation, not permission to repeat an operation.
+
+Exact signatures and detailed profiles are in the corresponding `sdk/python/*.md` and `sdk/python/src/meerkat_toolkit/connectors/*.py` files.

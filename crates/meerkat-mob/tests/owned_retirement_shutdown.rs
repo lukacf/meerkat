@@ -22,7 +22,7 @@ use meerkat_mob::{
 
 /// Bound for test steps that must happen promptly; it only turns a hang into
 /// a failure.
-const STEP: Duration = Duration::from_secs(60);
+const STEP: Duration = Duration::from_mins(1);
 const BUSY_PROMPT: &str = "OPS-BUSY";
 
 /// The busy prompt's provider call never answers (its turn is held across

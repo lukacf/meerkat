@@ -41,10 +41,15 @@ pub const KERNEL_NATIVE_HELPERS: &[(&str, usize)] = &[
     ("mob_machine_next_minted_generation", 3),
     ("mob_machine_u64_is_exact_successor", 2),
     ("mob_machine_optional_u64_is_exact_successor", 2),
-    ("mob_machine_members_to_spawn", 2),
-    ("mob_machine_members_to_retire", 3),
+    ("mob_machine_members_to_spawn", 5),
+    ("mob_machine_members_to_retire", 5),
+    ("mob_machine_fresh_rotation_sessions", 2),
     ("mob_machine_placed_cleanup_absent_for_identity", 2),
     ("mob_machine_placed_cleanup_obligation", 7),
+    ("session_document_instruction_slot_after_set", 3),
+    ("session_document_instruction_active_bytes", 2),
+    ("session_document_instruction_active_slots", 2),
+    ("session_document_activation_retired_after", 2),
 ];
 
 const PLACED_CUSTODY_GAP: &str = "placed-member custody predicate on runtime-internal inputs and \
@@ -1700,14 +1705,160 @@ impl GeneratedMachineKernel {
             "mob_machine_members_to_retire" => {
                 self.eval_mob_machine_members_to_retire(args, transition_name)
             }
+            "mob_machine_fresh_rotation_sessions" => {
+                self.eval_mob_machine_fresh_rotation_sessions(args, transition_name)
+            }
             "mob_machine_placed_cleanup_absent_for_identity" => {
                 self.eval_mob_machine_placed_cleanup_absent_for_identity(args, transition_name)
             }
             "mob_machine_placed_cleanup_obligation" => {
                 self.eval_mob_machine_placed_cleanup_obligation(args, transition_name)
             }
+            "session_document_instruction_slot_after_set" => {
+                self.eval_session_document_instruction_slot_after_set(args, transition_name)
+            }
+            "session_document_instruction_active_bytes" => {
+                self.eval_session_document_instruction_active_bytes(args, transition_name)
+            }
+            "session_document_instruction_active_slots" => {
+                self.eval_session_document_instruction_active_slots(args, transition_name)
+            }
+            "session_document_activation_retired_after" => {
+                self.eval_session_document_activation_retired_after(args, transition_name)
+            }
             _ => Err(self.eval_error(transition_name, format!("unknown helper `{helper}`"))),
         }
+    }
+
+    /// One session's slot map with one slot set: `current` with `slot`
+    /// mapped to `value`.
+    fn eval_session_document_instruction_slot_after_set(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [current, slot, value]: [KernelValue; 3] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "session_document_instruction_slot_after_set expects three args",
+            )
+        })?;
+        let mut current = current
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        current.insert(slot, value);
+        Ok(KernelValue::Map(current))
+    }
+
+    /// The body bytes of one slot set's Active slots: the sum over `effect`'s
+    /// Active slots of their `bytes` entry, a slot `bytes` does not name
+    /// counting nothing.
+    fn eval_session_document_instruction_active_bytes(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [effect, bytes]: [KernelValue; 2] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "session_document_instruction_active_bytes expects two args",
+            )
+        })?;
+        let effect = effect
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let bytes = bytes
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let mut total = 0_u64;
+        for (slot, slot_effect) in &effect {
+            let active = slot_effect
+                .as_named_variant("InstructionEffect")
+                .map_err(|error| self.eval_error(transition_name, error))?
+                == "Active";
+            if active {
+                let slot_bytes = match bytes.get(slot) {
+                    Some(value) => value
+                        .as_u64()
+                        .map_err(|error| self.eval_error(transition_name, error))?,
+                    None => 0,
+                };
+                total = total.saturating_add(slot_bytes);
+            }
+        }
+        Ok(KernelValue::U64(total))
+    }
+
+    /// The entries of a slot map whose slot is Active in `effect`: what an
+    /// application puts in effect. A slot `effect` holds Absent, or does not
+    /// name, is left out.
+    fn eval_session_document_instruction_active_slots(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [effect, values]: [KernelValue; 2] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "session_document_instruction_active_slots expects two args",
+            )
+        })?;
+        let effect = effect
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let values = values
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let mut active_slots = BTreeMap::new();
+        for (slot, value) in values {
+            let Some(slot_effect) = effect.get(&slot) else {
+                continue;
+            };
+            let active = slot_effect
+                .as_named_variant("InstructionEffect")
+                .map_err(|error| self.eval_error(transition_name, error))?
+                == "Active";
+            if active {
+                active_slots.insert(slot, value);
+            }
+        }
+        Ok(KernelValue::Map(active_slots))
+    }
+
+    /// Per activation key of `rows`, the rows a retirement leaves retired:
+    /// every row but the newest, or the recovered `retired` count when that
+    /// is more. A key `retired` does not name counts none retired.
+    fn eval_session_document_activation_retired_after(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [rows, retired]: [KernelValue; 2] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "session_document_activation_retired_after expects two args",
+            )
+        })?;
+        let rows = rows
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let retired = retired
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let mut retired_after = BTreeMap::new();
+        for (key, count) in rows {
+            let count = count
+                .as_u64()
+                .map_err(|error| self.eval_error(transition_name, error))?;
+            let already = match retired.get(&key) {
+                Some(value) => value
+                    .as_u64()
+                    .map_err(|error| self.eval_error(transition_name, error))?,
+                None => 0,
+            };
+            retired_after.insert(key, KernelValue::U64(already.max(count.saturating_sub(1))));
+        }
+        Ok(KernelValue::Map(retired_after))
     }
 
     fn eval_meerkat_machine_session_id_matches_string(
@@ -2020,14 +2171,29 @@ impl GeneratedMachineKernel {
         args: Vec<KernelValue>,
         transition_name: &TransitionId,
     ) -> Result<KernelValue, TransitionRefusal> {
-        let [identity_to_runtime, desired]: [KernelValue; 2] = args.try_into().map_err(|_| {
+        let [
+            identity_to_runtime,
+            identity_entry_origins,
+            identity_entry_tombstones,
+            identity_entry_unreadable,
+            desired,
+        ]: [KernelValue; 5] = args.try_into().map_err(|_| {
             self.eval_error(
                 transition_name,
-                "mob_machine_members_to_spawn expects two args",
+                "mob_machine_members_to_spawn expects five args",
             )
         })?;
         let identity_to_runtime = identity_to_runtime
             .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let identity_entry_origins = identity_entry_origins
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let identity_entry_tombstones = identity_entry_tombstones
+            .into_set()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let identity_entry_unreadable = identity_entry_unreadable
+            .into_set()
             .map_err(|error| self.eval_error(transition_name, error))?;
         let desired = desired
             .into_set()
@@ -2035,7 +2201,12 @@ impl GeneratedMachineKernel {
         Ok(KernelValue::Set(
             desired
                 .into_iter()
-                .filter(|identity| !identity_to_runtime.contains_key(identity))
+                .filter(|identity| {
+                    !identity_to_runtime.contains_key(identity)
+                        && !identity_entry_origins.contains_key(identity)
+                        && !identity_entry_tombstones.contains(identity)
+                        && !identity_entry_unreadable.contains(identity)
+                })
                 .collect(),
         ))
     }
@@ -2045,15 +2216,26 @@ impl GeneratedMachineKernel {
         args: Vec<KernelValue>,
         transition_name: &TransitionId,
     ) -> Result<KernelValue, TransitionRefusal> {
-        let [identity_to_runtime, desired, retire_stale]: [KernelValue; 3] =
-            args.try_into().map_err(|_| {
-                self.eval_error(
-                    transition_name,
-                    "mob_machine_members_to_retire expects three args",
-                )
-            })?;
+        let [
+            identity_to_runtime,
+            identity_entry_origins,
+            identity_entry_unreadable,
+            desired,
+            retire_stale,
+        ]: [KernelValue; 5] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "mob_machine_members_to_retire expects five args",
+            )
+        })?;
         let identity_to_runtime = identity_to_runtime
             .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let identity_entry_origins = identity_entry_origins
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let identity_entry_unreadable = identity_entry_unreadable
+            .into_set()
             .map_err(|error| self.eval_error(transition_name, error))?;
         let desired = desired
             .into_set()
@@ -2067,7 +2249,49 @@ impl GeneratedMachineKernel {
         Ok(KernelValue::Set(
             identity_to_runtime
                 .into_keys()
-                .filter(|identity| !desired.contains(identity))
+                .filter(|identity| {
+                    !desired.contains(identity)
+                        && !identity_entry_origins.contains_key(identity)
+                        && !identity_entry_unreadable.contains(identity)
+                })
+                .collect(),
+        ))
+    }
+
+    /// The next sessions of the pending FreshSession rotations, which a
+    /// destroy's admission abandons: the rotation sessions of every identity
+    /// whose rotation target is not SameSession (a same-session rotation
+    /// names its member's own session).
+    fn eval_mob_machine_fresh_rotation_sessions(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [rotation_session_ids, rotation_targets]: [KernelValue; 2] =
+            args.try_into().map_err(|_| {
+                self.eval_error(
+                    transition_name,
+                    "mob_machine_fresh_rotation_sessions expects two args",
+                )
+            })?;
+        let rotation_session_ids = rotation_session_ids
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let rotation_targets = rotation_targets
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let target_enum = EnumTypeId::parse("RotationTarget")
+            .map_err(|error| self.eval_error(transition_name, error.to_string()))?;
+        let same_session = EnumVariantId::parse("SameSession")
+            .map_err(|error| self.eval_error(transition_name, error.to_string()))?;
+        Ok(KernelValue::Map(
+            rotation_session_ids
+                .into_iter()
+                .filter(|(identity, _)| {
+                    !rotation_targets.get(identity).is_some_and(|target| {
+                        kernel_value_enum_variant_matches(target, &target_enum, &same_session)
+                    })
+                })
                 .collect(),
         ))
     }
@@ -4630,6 +4854,8 @@ mod tests {
                             field_id("effective_model_override_present"),
                             KernelValue::Bool(false),
                         ),
+                        (field_id("entry_custody"), KernelValue::Bool(false)),
+                        (field_id("created_custody"), KernelValue::Bool(false)),
                     ]),
                 },
             )
@@ -4680,6 +4906,10 @@ mod tests {
                         (field_id("ack_engine_version"), KernelValue::None),
                         (field_id("placed_spawn_id"), KernelValue::None),
                         (field_id("provision_operation_id"), KernelValue::None),
+                        (
+                            field_id("definition_wiring_exempt"),
+                            KernelValue::Bool(false),
+                        ),
                     ]),
                 },
             )
@@ -5105,11 +5335,19 @@ mod tests {
         );
 
         let identity_to_runtime = KernelValue::Map(BTreeMap::from([(agent_a.clone(), runtime_a)]));
+        let no_entries = KernelValue::Map(BTreeMap::new());
+        let no_names = KernelValue::Set(BTreeSet::new());
         let desired = KernelValue::Set(BTreeSet::from([agent_a.clone(), agent_b.clone()]));
         let members_to_spawn = kernel
             .eval_native_helper(
                 "mob_machine_members_to_spawn",
-                vec![identity_to_runtime.clone(), desired.clone()],
+                vec![
+                    identity_to_runtime.clone(),
+                    no_entries.clone(),
+                    no_names.clone(),
+                    no_names.clone(),
+                    desired.clone(),
+                ],
                 &transition,
             )
             .expect("members to spawn");
@@ -5122,6 +5360,8 @@ mod tests {
                 "mob_machine_members_to_retire",
                 vec![
                     identity_to_runtime.clone(),
+                    no_entries.clone(),
+                    no_names.clone(),
                     KernelValue::Set(BTreeSet::from([agent_b.clone()])),
                     KernelValue::Bool(true),
                 ],
@@ -5135,11 +5375,132 @@ mod tests {
         let retirement_disabled = kernel
             .eval_native_helper(
                 "mob_machine_members_to_retire",
-                vec![identity_to_runtime, desired, KernelValue::Bool(false)],
+                vec![
+                    identity_to_runtime.clone(),
+                    no_entries.clone(),
+                    no_names.clone(),
+                    desired.clone(),
+                    KernelValue::Bool(false),
+                ],
                 &transition,
             )
             .expect("retirement disabled");
         assert_eq!(retirement_disabled, KernelValue::Set(BTreeSet::new()));
+        // An identity entry is never spawned or retired by a worker
+        // reconcile: agent.a, bound and an entry, is spared from retirement,
+        // and agent.b, desired and an entry, is not spawned.
+        let declared = KernelValue::NamedVariant {
+            enum_name: enum_type_id("IdentityEntryOrigin"),
+            variant: enum_variant_id("Declared"),
+        };
+        let entries = KernelValue::Map(BTreeMap::from([
+            (agent_a.clone(), declared.clone()),
+            (agent_b.clone(), declared),
+        ]));
+        let entries_spawned = kernel
+            .eval_native_helper(
+                "mob_machine_members_to_spawn",
+                vec![
+                    identity_to_runtime.clone(),
+                    entries.clone(),
+                    no_names.clone(),
+                    no_names.clone(),
+                    desired.clone(),
+                ],
+                &transition,
+            )
+            .expect("members to spawn over entries");
+        assert_eq!(entries_spawned, KernelValue::Set(BTreeSet::new()));
+        let entries_retired = kernel
+            .eval_native_helper(
+                "mob_machine_members_to_retire",
+                vec![
+                    identity_to_runtime.clone(),
+                    entries,
+                    no_names.clone(),
+                    KernelValue::Set(BTreeSet::new()),
+                    KernelValue::Bool(true),
+                ],
+                &transition,
+            )
+            .expect("members to retire over entries");
+        assert_eq!(entries_retired, KernelValue::Set(BTreeSet::new()));
+        // Nor a reserved name: agent.b, desired and removed (its tombstone)
+        // or unreadable, is not spawned, and agent.a, bound and unreadable,
+        // is not retired.
+        let only_b = KernelValue::Set(BTreeSet::from([agent_b.clone()]));
+        let tombstone_spawned = kernel
+            .eval_native_helper(
+                "mob_machine_members_to_spawn",
+                vec![
+                    identity_to_runtime.clone(),
+                    no_entries.clone(),
+                    only_b.clone(),
+                    no_names.clone(),
+                    desired.clone(),
+                ],
+                &transition,
+            )
+            .expect("members to spawn over a tombstone");
+        assert_eq!(tombstone_spawned, KernelValue::Set(BTreeSet::new()));
+        let unreadable_spawned = kernel
+            .eval_native_helper(
+                "mob_machine_members_to_spawn",
+                vec![
+                    identity_to_runtime.clone(),
+                    no_entries.clone(),
+                    no_names.clone(),
+                    only_b,
+                    desired,
+                ],
+                &transition,
+            )
+            .expect("members to spawn over an unreadable name");
+        assert_eq!(unreadable_spawned, KernelValue::Set(BTreeSet::new()));
+        let unreadable_retired = kernel
+            .eval_native_helper(
+                "mob_machine_members_to_retire",
+                vec![
+                    identity_to_runtime,
+                    no_entries,
+                    KernelValue::Set(BTreeSet::from([agent_a.clone()])),
+                    no_names,
+                    KernelValue::Bool(true),
+                ],
+                &transition,
+            )
+            .expect("members to retire over an unreadable name");
+        assert_eq!(unreadable_retired, KernelValue::Set(BTreeSet::new()));
+
+        // A destroy abandons the next sessions of the FreshSession rotations
+        // only: agent.b's same-session rotation names its own session.
+        let rotation_target = |variant: &str| KernelValue::NamedVariant {
+            enum_name: enum_type_id("RotationTarget"),
+            variant: enum_variant_id(variant),
+        };
+        let abandoned = kernel
+            .eval_native_helper(
+                "mob_machine_fresh_rotation_sessions",
+                vec![
+                    KernelValue::Map(BTreeMap::from([
+                        (agent_a.clone(), named_string("SessionId", "session.next")),
+                        (agent_b.clone(), named_string("SessionId", "session.own")),
+                    ])),
+                    KernelValue::Map(BTreeMap::from([
+                        (agent_a.clone(), rotation_target("FreshSession")),
+                        (agent_b.clone(), rotation_target("SameSession")),
+                    ])),
+                ],
+                &transition,
+            )
+            .expect("fresh rotation sessions");
+        assert_eq!(
+            abandoned,
+            KernelValue::Map(BTreeMap::from([(
+                agent_a.clone(),
+                named_string("SessionId", "session.next")
+            )]))
+        );
 
         let obligation = kernel
             .eval_native_helper(

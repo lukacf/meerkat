@@ -1,0 +1,191 @@
+---
+title: "Troubleshooting"
+description: "Recover from installation, restart, account and tool-attachment problems and prepare a useful support report."
+icon: "wrench"
+---
+
+Start with the exact [supported archive and runtime profile](/library/local-install#choose-a-supported-host).
+Source fixes and older artifacts can have different behavior. Record which
+archive and command failed before changing either.
+
+## A Connect conversation turn fails
+
+In `meerkat-connect`, a confirmed failed turn can
+return to the `You: ` prompt. Enter a new question there to continue the same
+conversation. Connect does not automatically retry the failed request.
+
+If Connect reports an uncertain effect, follow its restriction to status checks
+for that exact request. A new question does not authorize repeating the effect.
+If the CLI closes instead, starting it again creates a new conversation; it does
+not resume or replay the old request.
+
+In the current standalone CLI source, an unresolved or uncertain finalization
+makes the invocation exit with a nonzero status, even if a later setup succeeds
+or you leave with `/quit`, EOF or Ctrl-C. Review the displayed result and any
+retained setup artifacts as observations, not permission to repeat the action.
+Connect does not automatically retry it. Confirmed cancellation with no effect
+retains its existing exit behavior.
+
+During finalization, Ctrl-C stops the next Connect operation from starting.
+Connect waits for an operation already started and reports its actual result.
+For example, a saved public-service configuration can remain without an agent
+grant. An account finalizer already started can finish its internal steps before
+Connect exits. Read the reported configuration, account and access results;
+cancellation does not roll back completed work.
+
+## Bootstrap failed or was interrupted
+
+Do not rerun bootstrap into the same client, output or workspace. It preserves
+partial directories; a timeout or lost response can occur after an owner has
+written valid receipts. A receipt's presence alone does not establish that the
+whole bootstrap completed.
+
+1. Preserve the selected archive, command, fixed error code and partial outputs.
+   Check that the bootstrap/installer process has settled before further work.
+2. Inspect the exact client `installed.json`, host `prepared.json` and available
+   step logs. Compare them with the original inputs. Bootstrap normally verifies
+   the client through the installer's `--verify-existing`; do not replace that
+   check with a directory-exists test.
+3. If the host validates a complete existing client, use `prepare_host.py` with
+   its exact interpreter/hash and fresh output/workspace paths. Otherwise use
+   a new bootstrap client, configuration and workspace. Preserve the previous
+   attempt for inspection.
+
+The timeout starts cancellation and waits for cleanup; it is not a strict
+whole-command wall-clock limit. A late cancellation can leave completed owner
+outputs with an unconfirmed caller result. No automatic cleanup, retry or
+credential repair follows from that outcome.
+
+## Preparation refuses paths or runtimes
+
+| Symptom | Next step |
+| --- | --- |
+| Archive/tree/hash mismatch | Check the exact platform archive and its trusted hash. Extract a verified copy into a new location; do not edit retained files or bypass verification. |
+| Unsupported Python, Node, npm or libc | Use the [declared versions](/library/local-install#choose-a-supported-host). Changing `--target` does not make a runtime compatible. |
+| `output_or_workspace_exists` or an existing client directory | Choose fresh disjoint paths with existing parents. Preserve the earlier attempt. |
+| `overlapping_directories` | Separate release, staging, output, workspace, client and relevant historical/recipe paths. Avoid names differing only by case or Unicode spelling. |
+
+## The setup MCP worked once and refuses to restart
+
+Its generated command creates one fresh workspace. It is not a restartable
+server command for that same directory. Keep one setup process alive for the
+original task, or use [saved-work readback](/guides/manage-connections#read-saved-work-after-process-loss)
+with new configuration/workspace paths after the old workers settle.
+Do not delete the old workspace to make the original command run again.
+
+## A saved setup file does not resume installation
+
+That file selects retained requests. Use `--recover-manifest` for readback or
+`--prior-manifest` plus an exact request ID for a new configuration proposal.
+These are [different workflows](/guides/manage-connections). Recovery restores
+no install or retry tools. `matched` is a current file observation; the old
+outcome can remain `unconfirmed`. Missing acquired files remain unresolved.
+
+If preparation rejects a saved file, verify its exact hash, original workspace,
+request anchors and original host bindings. Keep configured-install and
+acquisition-only requirements distinct. Do not rewrite hashes, discard a
+selected request or substitute a newer library to bypass the refusal.
+
+## The connector installed but no tools appear
+
+For the standalone CLI, check that Connect reported successful finalization,
+including the intended agent's access. After it returns to `You:`, enter `/quit`
+and wait for normal exit. Start a fresh ordinary `rkat` session from the same
+project directory and realm, using the command in the
+[quickstart](/quickstart#standalone-cli). If you chose custom roots or a different
+model binding, repeat the [matching settings](/guides/request-an-integration).
+An already open session can retain its earlier configuration or access.
+
+If access is missing or expired, return to `meerkat-connect` in that realm and
+[ask to finish or change the agent's access](/guides/request-an-integration#finish-or-change-an-agents-access).
+Read the configuration, credential and grant outcomes separately. Preserve any
+uncertain result; do not repeat an action whose effect is unresolved.
+
+In an integrated Console, read the setup result and the original agent's
+continuation. If setup reports unavailable or incomplete, keep that result for
+the application maintainer. Installation alone does not prove the original
+agent can use the service.
+
+For advanced library and custom-host integrations, an emitted launch still
+requires host approval and registration through the
+[native MCP mapping and attachment guide](/guides/native-mcp). A `staged` result
+can precede a missing executable or connection failure. Inspect catalog loading
+and an actual operation; use the host's explicit naming map for colliding tool
+names.
+
+## Report a setup problem
+
+Send the relevant host or release maintainer a bounded report containing:
+
+- Archive filename/SHA-256 and platform, architecture, libc and runtime versions.
+- The selected family/profile and exact command flags, with private values removed.
+- Which step failed, its fixed error code, job/request identifiers and whether
+  the process settled or the result is unconfirmed.
+- The relevant receipt/check result and the smallest useful log excerpt.
+
+Keep tokens, passwords, authorization URLs, callback material, private account
+content and whole saved-request files out of public reports. Use your application's support route or the [Connect issue tracker](https://github.com/lukacf/meerkat-connect/issues).
+
+## find_and_install returns unavailable
+
+In a Connect-enabled application, keep the reported request identifier and
+setup outcome for the application maintainer. `Unavailable` alone does not
+identify the cause or prove that no work started. If an effect is uncertain,
+use the existing request's status instead of repeating that effect.
+
+For host authors, check that the application has bound its installed setup
+owner and that the native runtime is active. The call also needs the original
+session and current work authorization; missing authority is an access denial,
+not a reason to bypass these checks. Constructing the dispatcher alone does not
+enable setup execution. Store failures or an admission timeout can also return
+unavailable. See [host composition](/guides/host-composition).
+
+## A recipe exists but discovery cannot find it
+
+Check the compiled include list in `crates/toolkit-package/src/library.rs`. Drive `0.1.0` and Slack `0.3.0` files currently exist outside that registered inventory. Also confirm whether the host chose the metadata-only catalog or the versioned library. A stale paging snapshot requires a fresh listing.
+
+## A read fails with a digest or unknown-field error
+
+Use the exact identity, package digest and listed library digest. Do not substitute a newer version, normalize a publisher/name or omit required joined-recipe identity. The tools reject unknown fields and a guidance-only strategy cannot be promoted by adding made-up execution data.
+
+## Python refuses an unprepared client
+
+Call `prepare_httpx_client` once at the host construction site before sharing the client. Keep its response hook first throughout borrowed use. `require_prepared_httpx_client` checks without mutating. Do not reorder hooks during active operations or patch around the refusal in each call.
+
+## An SDK call succeeded but the agent cannot use the tool
+
+The SDK operation and the agent's runtime binding are separate. Observe `identity_resolved_tools` for the actual member and perform a real dispatch through that surface. Check profile selection, package/grant revisions and the current target incarnation.
+
+Check the application's restoration, helper and spawn configuration when a tool is available in one member but missing in another.
+
+## Startup shows progress but never reports ready
+
+Inspect the native startup result and the configured startup budgets. A timeout or lost reply calls for reconciliation through the startup owner before another attempt. See [native application lifecycle](/guides/host-composition#native-application-lifecycle).
+
+## Authentication completed but access is denied
+
+Check actual account identity, requested operations/resources, host grant and provider scope separately. Developer registration or administrator installation may still be missing. A saved connection is not a grant, and a broad provider credential does not establish the intended local restriction.
+
+## A write timed out or returned an HTTP error
+
+Inspect the typed effect outcome. Once entered, a write can remain unknown even on an error response. Preserve the original business invocation and reconcile according to that provider/domain contract. Retry-After is not permission to replay; a Gmail Message-ID search is not proof that an earlier send did not happen.
+
+## Slack retrieval finished but the summary is incomplete
+
+Inspect interval `coverage_gaps`, chain states and budgets. Older roots, hidden/deleted content, retention, permission and concurrent changes can limit results. `finished` only means the collector exhausted queued work. One page, a short page or an exhausted visible chain is not a global completeness proof.
+
+## A frontend receives events but cannot safely reply
+
+Provider authenticity does not establish application admission or destination audience. Check the selected principal/conversation, reply route, current audience evidence and egress state. A queued retry cannot widen the audience or choose a different destination.
+
+## Shutdown exceeds an operation deadline
+
+The deadline starts cancellation; retained cleanup is still awaited. Host hooks, Fetch, worker threads or native transport cleanup can be slow or noncooperative. Do not discard custody and claim a clean shutdown. Follow the selected lifecycle owner's uncertainty/fencing contract.
+
+## A database has the expected version but fails to open
+
+Preserve the database and exact dependency versions. Use the storage owner's migration procedure and inspect the schema error before changing state.
+
+## The UI action shows uncertain acknowledgment
+
+Read a fresh authenticated owner projection. A callback rejection or lost acknowledgment does not prove that the command failed. The renderer intentionally does not retry or invent a new action. Recovery controls must come from the owner.

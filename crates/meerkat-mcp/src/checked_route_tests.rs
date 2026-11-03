@@ -363,7 +363,7 @@ fn resolution() -> ToolExecutionResolutionContext {
     ToolExecutionResolutionContext::new(
         ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
             ToolDeadlineOwner::CoreToolDispatch,
-            Duration::from_secs(600),
+            Duration::from_mins(10),
         )])
         .unwrap(),
     )

@@ -1,0 +1,18 @@
+{
+  "name": "distiller-relative-date-conversion",
+  "transcript": [
+    { "role": "system notice", "text": "Session started 2026-06-30 14:02 UTC." },
+    { "role": "user", "text": "heads up — the staging database gets wiped tomorrow as part of the quarterly cleanup. Anything you leave there is gone." },
+    { "role": "assistant", "text": "Noted — I'll keep durable artifacts out of staging from now on." }
+  ],
+  "existing_manifest": [],
+  "tombstones": [],
+  "taint": { "session_tainted": false },
+  "expected": {
+    "proposals": {
+      "must_contain": ["2026-07-01", "staging"],
+      "must_not_contain": []
+    }
+  },
+  "notes": "Fact-time discipline: 'tomorrow' is meaningless to the future session that recalls this record. The transcript anchors the session date (2026-06-30), and the assistant never states the converted date, so scoring must_contain 2026-07-01 requires the distiller to resolve the relative date itself. Deliberately no must_not_contain 'tomorrow': quoting the operator near-verbatim (doctrine rule 4) may legitimately carry the word, as long as the absolute date is recorded alongside it."
+}

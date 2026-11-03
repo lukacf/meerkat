@@ -23,6 +23,7 @@ pub mod runtime_host;
 pub mod schedule;
 pub mod session;
 pub mod skills;
+pub mod tool_grants;
 pub mod turn;
 pub mod workgraph;
 

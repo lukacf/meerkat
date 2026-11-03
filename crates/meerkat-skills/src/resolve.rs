@@ -260,7 +260,7 @@ pub async fn resolve_repositories_with_roots_trusting(
                         SourceNode::External(ExternalSkillSource::new_with_source_uuid(
                             client,
                             repo.source_uuid.clone(),
-                            Duration::from_secs(300),
+                            Duration::from_mins(5),
                             config.health_thresholds,
                         )),
                     ));

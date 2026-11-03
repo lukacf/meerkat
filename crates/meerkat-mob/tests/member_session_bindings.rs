@@ -108,6 +108,8 @@ fn begin_spawn_input(
         placed_operation_owner_session_id: None,
         effective_profile_override_present: false,
         effective_model_override_present: false,
+        entry_custody: false,
+        created_custody: false,
     }
 }
 
@@ -132,12 +134,14 @@ fn commit_membership_input(
         ack_engine_version: None,
         placed_spawn_id: None,
         provision_operation_id: None,
+        definition_wiring_exempt: false,
     }
 }
 
 /// Drive the full machine-driven spawn ladder (`BeginSpawnExec` →
 /// `CommitSpawnMembership` → `CommitSpawnActivation`) the way the actor's
-/// `finalize_spawn_admit`/`finalize_spawn_activate` do, and return the
+/// `start_spawn_activation_from_pending`, `finalize_spawn_admit` and
+/// `finalize_spawn_activate` do, and return the
 /// membership-commit transition (which carries the `MemberSessionBindingChanged`
 /// effect). `CommitSpawnActivation` settles the per-identity spawn-exec phase so
 /// a later respawn of the same identity can open a fresh window. A rejected

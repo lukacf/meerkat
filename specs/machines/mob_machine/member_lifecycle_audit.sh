@@ -15,8 +15,8 @@
 # their whole space with TLC coverage:
 # - the lifecycle run (AuditSpec) with its four action properties and the two
 #   invariants that check the reasons of its not-covered list;
-# - the scope run (AuditScopeSpec) with its two RetireAtScope invariants and
-#   the two destroy action properties.
+# - the scope run (AuditScopeSpec) with its two RetireAtScope invariants, its
+#   RetireAbsent invariant and the two destroy action properties.
 # Each run must finish without an error, reach at least its floor of distinct
 # states (so a guard that silently disables arms fails the lane instead of
 # shrinking the space), and fire every action of its covered list (TLC
@@ -24,7 +24,7 @@
 # space once per reachability witness, with that witness's negation as an
 # extra invariant (a state goal) or action property (a step goal), and
 # requires TLC to report exactly that violation, so the properties are not
-# vacuous. With --mutants it then seeds ten defects into a copy of the
+# vacuous. With --mutants it then seeds twelve defects into a copy of the
 # generated model and requires TLC to refuse each: a progress arm without its
 # observation_monotonic guard (AuditObservationMonotonic); the same guard
 # rendered as a plain `<=` between option records, which TLC cannot evaluate
@@ -43,7 +43,10 @@
 # predecessor's execution-health entries (AuditMintClearsExecutionHealth);
 # a runtime destroy observation that ends the mob, one that leaves its
 # runtime live, and one that resets the mob's run count
-# (AuditRuntimeDestroyedRemovesOnlyItsRuntime).
+# (AuditRuntimeDestroyedRemovesOnlyItsRuntime); a completed mob without its
+# RetireAbsent arm, which leaves the retire of an absent identity to the
+# shell, and that arm without its identity_absent guard, which answers it
+# for a mapped identity (AuditRetireAbsentAnsweredInEveryPhase).
 # An anchor this script
 # expects but cannot find fails the run. Each TLC run is held to the
 # canonical lane's per-run cap (tlc_run_cap.sh) and fails closed as TLC
@@ -125,8 +128,9 @@ covered_actions=(
 
 # Every RetireAtScope verdict arm, the completion and destruction arms that
 # reach the not-running verdict, the runtime destroy observation of a
-# completed mob, and the destroy admission with a runtime destroy
-# observation after it; each must fire in the scope run.
+# completed mob, the destroy admission with a runtime destroy observation
+# after it, and the RetireAbsent arms of a completed and a destroyed mob;
+# each must fire in the scope run.
 scope_covered_actions=(
   BeginPlacedCompletionLifecycleQuiesceFresh
   MarkCompleted
@@ -134,6 +138,8 @@ scope_covered_actions=(
   AdmitDestroyCleanup
   ObserveRuntimeDestroyed
   DestroyMob
+  RetireAbsentCompleted
+  RetireAbsentDestroyed
   RetireAtScopeCurrentRunning
   RetireAtScopeCurrentStopped
   RetireAtScopeNoCurrentIncarnationRunning
@@ -211,7 +217,8 @@ epoch_index="${view_positions#* }"
 
 # usage: write_cfg <run> <file> <extra invariant lines> <extra property lines>
 # where <run> is lifecycle (AuditSpec and its action properties) or scope
-# (AuditScopeSpec, its two invariants and the two destroy action properties).
+# (AuditScopeSpec, its three invariants and the two destroy action
+# properties).
 write_cfg() {
   local run="$1" cfg="$2" invariants="$3" properties="$4"
   cp "${ci_cfg}" "${cfg}"
@@ -245,7 +252,8 @@ INVARIANTS
   AuditDestroyedOnlyThroughAnAdmittedDestroy
 INVARIANTS
   AuditRetireAtScopeCoherent
-  AuditRetireAtScopeExactlyOne${invariants}" "${cfg}"
+  AuditRetireAtScopeExactlyOne
+  AuditRetireAbsentAnsweredInEveryPhase${invariants}" "${cfg}"
       if [[ -n "${properties}" ]]; then
         echo "error: the scope run takes no action properties" >&2
         exit 1
@@ -581,6 +589,39 @@ body = body.replace(
     "    /\\ active_run_count' = 0\n    /\\ UNCHANGED << " + kept + " >>",
 )
 text = text[: block.start()] + body + text[block.end():]
+open(path, "w").write(text)
+PY
+
+  # A completed mob without its RetireAbsent arm, which leaves the retire of
+  # an absent identity unanswered by the machine (the shell answered it),
+  # and that arm without its identity_absent guard, which answers it for an
+  # identity the machine still maps.
+  mutate scope retire_absent_completed_missing "Error: Invariant AuditRetireAbsentAnsweredInEveryPhase is violated" "$@" <<'PY'
+import os, re
+path = os.environ["MODEL"]
+text = open(path).read()
+block = re.search(r"^RetireAbsentCompleted\(.*?\n\n", text, re.S | re.M)
+assert block, "RetireAbsentCompleted not found"
+lines = block.group(0).split("\n")
+phase = [i for i, line in enumerate(lines) if line == '    /\\ phase = "Completed"']
+assert len(phase) == 1, "expected one Completed phase guard in RetireAbsentCompleted"
+lines[phase[0]] = "    /\\ FALSE"
+text = text[: block.start()] + "\n".join(lines) + text[block.end():]
+open(path, "w").write(text)
+PY
+
+  mutate scope retire_absent_completed_unguarded "Error: Invariant AuditRetireAbsentAnsweredInEveryPhase is violated" "$@" <<'PY'
+import os, re
+path = os.environ["MODEL"]
+text = open(path).read()
+block = re.search(r"^RetireAbsentCompleted\(.*?\n\n", text, re.S | re.M)
+assert block, "RetireAbsentCompleted not found"
+lines = block.group(0).split("\n")
+guard = [i for i, line in enumerate(lines)
+         if line == "    /\\ ((agent_identity \\in DOMAIN identity_to_runtime) = FALSE)"]
+assert len(guard) == 1, "expected one identity_absent guard in RetireAbsentCompleted"
+del lines[guard[0]]
+text = text[: block.start()] + "\n".join(lines) + text[block.end():]
 open(path, "w").write(text)
 PY
 fi

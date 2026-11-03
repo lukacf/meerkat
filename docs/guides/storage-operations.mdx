@@ -23,7 +23,10 @@ These commands never read, move, or report credential stores. A persistent
 `rkat-rpc` host also keeps approval records in `approvals.json` under its
 resolved persistence store path. That RPC-owned sidecar is not an eighth
 `StorageProvider` domain, and the current storage doctor, migration, and prune
-commands do not inventory, migrate, or delete it.
+commands do not inventory, migrate, or delete it. The durable decisions beside
+it, in `approval_decisions.sqlite3` (created by the first hold), are part of
+the realm's database inventory: the doctor reports the file and its
+`approval-decisions` ledger domain, and migration fences it.
 
 ## Select Roots And Realms
 
@@ -80,6 +83,15 @@ The report covers:
 - orphaned lock, lease, index, and registered backup artifacts
 - the SQLite lock profile of the `rkat` binary itself (see
   [SQLite Lock Profile](/guides/deploying#sqlite-lock-profile))
+- what a rollback to a release before 0.9.9 would refuse, as informational
+  findings: the sessions written at session envelope 5
+  (`operator-instruction-envelope`: their documents hold operator-instruction
+  facts, a retired instruction activation body, or a rewrite record that
+  moved an instruction activation row), in SQLite realms and in the runtime
+  store of JSONL realms, and the per-mob databases that hold
+  operator-instruction events at mob event schema 10
+  (`operator-instruction-mob-events`). A host-store realm keeps its documents
+  and mob events in the host's store, which the disk sweep does not read
 
 Exit status is `0` when there are no error-severity findings and `1` when
 errors are present. Warnings and informational findings alone do not make the

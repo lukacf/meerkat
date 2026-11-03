@@ -430,7 +430,7 @@ mod tests {
             .await
             .map_err(|error| format!("accept_input failed: {error}"))?;
         let handle = handle.ok_or_else(|| "missing completion handle".to_string())?;
-        match tokio::time::timeout(Duration::from_secs(60), handle.wait()).await {
+        match tokio::time::timeout(Duration::from_mins(1), handle.wait()).await {
             Err(_) => Err("prompt timed out".to_string()),
             Ok(Err(error)) => Err(format!("completion waiter failed: {error:?}")),
             Ok(Ok(outcome)) => Ok(outcome),

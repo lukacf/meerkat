@@ -656,6 +656,48 @@ async fn mob_host_bindings_follow_the_sqlite_store() {
 
 // Unrun until the candidate's validation.
 #[tokio::test]
+async fn tool_grant_rows_follow_the_sqlite_store_and_survive_a_reopen() {
+    let host = Arc::new(TestHost::new());
+    let opened = open(&host).await;
+    crate::store::tool_grant_store_tests::tool_grant_rows_conform(&opened.1).await;
+    let reopened = reopen(&host, opened).await;
+    let store = &reopened.1;
+    assert_eq!(
+        store.load_tool_grant("g1").await.unwrap(),
+        Some(b"next".to_vec())
+    );
+    assert_eq!(
+        store.list_tool_grants("s:a").await.unwrap(),
+        vec![
+            ("g1".to_string(), b"next".to_vec()),
+            ("g2".to_string(), b"two".to_vec()),
+        ]
+    );
+    // The audit log loads on its first use after the reopen, and an append
+    // continues after its rows.
+    store
+        .append_tool_grant_audit("s:a", &[b"after-reopen".to_vec()])
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .read_tool_grant_audit("s:a", Some(4), 10)
+            .await
+            .unwrap(),
+        vec![(5, b"after-reopen".to_vec())]
+    );
+    assert_eq!(
+        store
+            .read_tool_grant_audit("s:a", None, 10)
+            .await
+            .unwrap()
+            .len(),
+        6
+    );
+}
+
+// Unrun until the candidate's validation.
+#[tokio::test]
 async fn controller_custody_refuses_while_a_commit_is_in_flight() {
     let host = Arc::new(TestHost::new());
     let (_realm, store) = open(&host).await;
@@ -922,7 +964,7 @@ async fn a_writer_that_stopped_never_resumes_on_a_later_renew() {
     // The old writer's next tick re-acquires, meets the new holder, and
     // poisons itself; it never wrote again.
     let before = host.commit_count();
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(!old_realm.lease_is_live());
     let refused = old_store
         .persist_input_state(
@@ -946,7 +988,7 @@ async fn a_stopped_writer_reacquires_and_resumes_when_nothing_changed() {
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert!(!realm.lease_is_live());
     // The next tick re-acquires over its own still-recorded lease.
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(realm.lease_is_live());
     assert!(realm.fence() > first, "a fresh token");
     store
@@ -981,7 +1023,7 @@ async fn a_stopped_writer_finds_a_foreign_write_and_stays_down() {
         drop(other_realm);
     }
     host.expire_lease();
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(
         old_realm.realm_poisoned().is_some(),
         "a foreign batch since the stop keeps the old writer down"
@@ -1271,7 +1313,7 @@ async fn a_dispatch_waits_no_longer_than_its_bound() {
     {
         let mut faults = host.faults.lock().unwrap();
         faults.renew_hang = 1;
-        faults.list_delay = Some(Duration::from_secs(60));
+        faults.list_delay = Some(Duration::from_mins(1));
     }
     tokio::time::sleep(Duration::from_millis(2100)).await;
     assert!(
@@ -1286,7 +1328,7 @@ async fn a_dispatch_waits_no_longer_than_its_bound() {
         waited >= Duration::from_secs(13) && waited < Duration::from_millis(13_100),
         "the dispatch waited its bound: {waited:?}"
     );
-    tokio::time::sleep(Duration::from_secs(60)).await;
+    tokio::time::sleep(Duration::from_mins(1)).await;
     assert!(
         realm.lease_is_live(),
         "the re-acquire resumed the writer once its listing answered"
@@ -1332,7 +1374,7 @@ async fn a_dispatch_waits_out_a_reacquire_whose_two_acquires_are_slow() {
     );
     assert!(realm.fence() > first, "under the takeover's token");
     assert!(
-        waited >= Duration::from_millis(11_000) && waited < realm.dispatch_wait_bound(),
+        waited >= Duration::from_secs(11) && waited < realm.dispatch_wait_bound(),
         "the dispatch waited out both acquires and the listing: {waited:?}"
     );
     assert!(realm.realm_poisoned().is_none());
@@ -2670,7 +2712,7 @@ async fn reacquire_recording(host: &TestHost, realm: &SpiRealm) -> Vec<HostCall>
         "the failed renew stopped the writer"
     );
     host.take_calls();
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(
         realm.lease_is_live() && realm.fence() > first,
         "the writer acquired again and resumed: {:?}",
@@ -3117,4 +3159,34 @@ async fn a_failed_recovery_load_fails_the_open_and_installs_nothing() {
             "the next open serves {runtime:?} as it was"
         );
     }
+}
+
+/// A read error keeps whether the host store could not serve now or holds
+/// data that cannot be served as it is: a reader tells an outage a later
+/// read may get past from state that needs a repair. Any other adapter
+/// failure stays a plain read failure.
+#[test]
+fn a_read_error_keeps_unavailable_and_corrupt_typed() {
+    use meerkat_core::host_store::HostStoreError;
+
+    assert!(matches!(
+        SpiError::Host(HostStoreError::Unavailable("down".to_string())).into_read(),
+        RuntimeStoreError::Unavailable(_)
+    ));
+    assert!(matches!(
+        SpiError::Host(HostStoreError::Corrupt("checksum".to_string())).into_read(),
+        RuntimeStoreError::Corrupt(_)
+    ));
+    assert!(matches!(
+        SpiError::Corrupt("does not decode".to_string()).into_read(),
+        RuntimeStoreError::Corrupt(_)
+    ));
+    assert!(matches!(
+        SpiError::LeaseLapsed("renew failed".to_string()).into_read(),
+        RuntimeStoreError::ReadFailed(_)
+    ));
+    assert!(matches!(
+        SpiError::Host(HostStoreError::Unavailable("down".to_string())).into_write(),
+        RuntimeStoreError::WriteFailed(_)
+    ));
 }

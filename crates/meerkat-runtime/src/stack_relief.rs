@@ -122,7 +122,7 @@ mod tests {
         let caller = tokio::spawn(async move {
             relieve_caller_stack(move || async move {
                 entered_clone.store(true, Ordering::SeqCst);
-                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                tokio::time::sleep(std::time::Duration::from_mins(5)).await;
                 finished_clone.store(true, Ordering::SeqCst);
             })
             .await;

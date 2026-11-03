@@ -59,7 +59,7 @@ async fn http_source_uses_configured_uuid_and_quarantines_entry_mismatch() {
             name: "x-api-key".to_string(),
             value: "secret".to_string(),
         }),
-        Duration::from_secs(300),
+        Duration::from_mins(5),
         Duration::from_secs(5),
     );
 
@@ -203,7 +203,7 @@ JSON
     let source = ExternalSkillSource::new_with_source_uuid(
         client,
         source_uuid.clone(),
-        Duration::from_secs(300),
+        Duration::from_mins(5),
         Default::default(),
     );
 
@@ -233,7 +233,7 @@ async fn git_source_uses_configured_uuid_and_loads_skill_documents() {
         git_ref: GitRef::Branch("main".to_string()),
         cache_dir: tmp.path().join("cache"),
         skills_root: Some("skills".to_string()),
-        refresh_interval: Duration::from_secs(300),
+        refresh_interval: Duration::from_mins(5),
         auth: None,
         depth: Some(1),
         source_uuid: source_uuid.clone(),
@@ -324,7 +324,7 @@ async fn a_git_skill_ssh_key_path_runs_no_smuggled_command() {
         git_ref: GitRef::Branch("main".to_string()),
         cache_dir: tmp.path().join("cache"),
         skills_root: None,
-        refresh_interval: Duration::from_secs(300),
+        refresh_interval: Duration::from_mins(5),
         auth: Some(meerkat_skills::source::git::GitSkillAuth::SshKey(crafted)),
         depth: Some(1),
         source_uuid: source_uuid("c0ffee00-0000-4000-8000-000000000001"),
@@ -365,7 +365,7 @@ async fn a_git_skill_ref_that_looks_like_an_option_runs_no_command() {
         git_ref: GitRef::Branch(crafted),
         cache_dir: tmp.path().join("cache"),
         skills_root: None,
-        refresh_interval: Duration::from_secs(300),
+        refresh_interval: Duration::from_mins(5),
         auth: None,
         depth: None,
         source_uuid: source_uuid("c0ffee00-0000-4000-8000-000000000002"),
@@ -391,7 +391,7 @@ async fn a_git_skill_remote_helper_url_is_refused() {
         git_ref: GitRef::Branch("main".to_string()),
         cache_dir: tmp.path().join("cache"),
         skills_root: None,
-        refresh_interval: Duration::from_secs(300),
+        refresh_interval: Duration::from_mins(5),
         auth: None,
         depth: None,
         source_uuid: source_uuid("c0ffee00-0000-4000-8000-000000000003"),
@@ -432,7 +432,7 @@ async fn a_git_skill_local_repository_in_a_write_grant_is_refused() {
         git_ref: GitRef::Branch("main".to_string()),
         cache_dir: tmp.path().join("cache"),
         skills_root: None,
-        refresh_interval: Duration::from_secs(300),
+        refresh_interval: Duration::from_mins(5),
         auth: None,
         depth: None,
         source_uuid: source_uuid("c0ffee00-0000-4000-8000-000000000004"),
@@ -463,7 +463,7 @@ async fn a_real_ssh_key_with_metacharacters_runs_no_command() {
         git_ref: GitRef::Branch("main".to_string()),
         cache_dir: tmp.path().join("cache"),
         skills_root: None,
-        refresh_interval: Duration::from_secs(300),
+        refresh_interval: Duration::from_mins(5),
         auth: Some(meerkat_skills::source::git::GitSkillAuth::SshKey(
             key.to_string_lossy().to_string(),
         )),

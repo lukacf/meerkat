@@ -1,0 +1,22 @@
+scenario_id: mdm-console-local
+default_operator: local-operator
+console_expected_title: MDM Console
+targets:
+  - id: target-a
+    name: lab-mac-a
+    site: lab
+    platform: darwin-local
+    labels:
+      ring: canary
+      owner: platform
+  - id: target-b
+    name: lab-linux-b
+    site: lab
+    platform: linux-gcp-vm
+    labels:
+      ring: stable
+      owner: infra
+links:
+  - [hive, target-a]
+  - [hive, target-b]
+  - [target-a, target-b]

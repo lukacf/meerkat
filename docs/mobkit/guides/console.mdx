@@ -4,7 +4,7 @@ description: "Embedded Meta console with configurable branding, grouped roster, 
 icon: "desktop"
 ---
 
-*Mirrored from MobKit main at [56139755207a](https://github.com/lukacf/meerkat-meta/commit/56139755207a5dc2b2fa39ae873ae8f3ea058a6f) on 2026-11-03; MobKit workspace version 0.9.7 at that commit.*
+*Mirrored from MobKit main at [022e8f75aa71](https://github.com/lukacf/meerkat/commit/022e8f75aa7181edf5c6698c077a8d68addd8431) on 2026-11-02; MobKit version 0.9.7 at that commit.*
 
 Meta ships a web-based operator console through its HTTP composition. The
 console/admin `meta_gateway` serves it directly. A persistent, SDK-driven
@@ -308,9 +308,57 @@ Operator panels depend on a few host constraints:
 - A page served with `frame-ancestors 'none'`, such as a secret-entry page, cannot be framed and must not be configured as a panel.
 
 Each agent row shows:
-- Agent display name and member ID
-- Status badge (active, running, idle)
-- Pin action; pinned agents persist in local storage after the first user interaction
+- The agent's display name or, for an agent without one, its identity in words
+  (`router:main` reads "Router main"; a generated id reads as the agent's kind
+  and the id's last six characters, such as "Reviewer 4e5f60")
+- A second line with what the agent is (its role, else its group) and what it
+  is doing in words, or how long ago it was last active, for example
+  `Router · working` or `Router · active 3 min ago`
+- A pin action on hover, and beside it, when you point at the pin or reach the
+  row with the keyboard, a copy action: pinned agents move to a Pinned section
+  at the top, and the copy action copies the agent's identity, which the row's
+  tooltip also shows
+
+#### Ordering and grouping the roster
+
+Two controls under the search box set how the roster lists agents:
+
+- **Group**: *Category* lists agents under their categories and subgroups (the
+  `[agent_list]` grouping above); *None* lists every agent in one list. Either
+  way, Pinned stays on top and an agent spawned by another, or a side chat,
+  stays nested under it.
+- **Sort**: *Manual* keeps your own order; *Name* sorts by display name, with
+  numbers in order (`Agent 2` before `Agent 10`); *Last activity* lists the
+  most recently active agents first and agents with no known activity last.
+
+In *Manual*, drag an agent by the grip that appears at its left edge on hover,
+or focus the agent and press <kbd>Alt</kbd>+<kbd>↑</kbd> or
+<kbd>Alt</kbd>+<kbd>↓</kbd>; a screen reader hears each move. An agent moves
+among the agents that share its place: its category and subgroup, or the agent
+it is nested under, and its nested agents move with it. One order serves every
+view: it orders each category, the flat list, and Pinned. Until you move an
+agent, each category keeps its default order and the flat list follows the
+categories in their order; the first move keeps that order for every agent,
+and a move changes only where the moved agent stands, in either view. A new
+agent appears at the end of its place, and a renamed agent keeps its place,
+since the order is kept by identity. Agents do not move while you sort by name or last activity, or while
+a search or an activity filter is on. Categories and subgroups reorder the same
+way: drag a header, or focus it and press <kbd>Alt</kbd>+<kbd>↑</kbd> or
+<kbd>Alt</kbd>+<kbd>↓</kbd>.
+
+Last activity is the newest time the console's frame log recorded the agent
+acting (a live runtime event, a message sent to it or a tool application),
+which `/console/experience` reports as `last_activity_ms`, or a newer event the
+console has since seen. History the console rebuilds, lifecycle records
+(respawn, retire, reset, delete), interaction failures and memory events do not
+count. Reading it wakes no agent.
+
+The browser keeps these preferences in local storage, per signed-in user and
+console: the manual order, the Group and Sort choices and the pins follow the
+user and are kept when the `[agent_list]` configuration changes. The order of
+categories and subgroups and which of them are collapsed belong to that
+configuration and start over when it changes. Pins an earlier console kept
+carry over once.
 
 Non-addressable agents (e.g., Gate, Health Monitor) appear dimmed and cannot be messaged.
 
@@ -341,8 +389,11 @@ reload it. Read-only consoles cannot submit decisions.
 | Audit | Read-only records with the requesting actor, event, decision, approver, and outcome when supplied. |
 | Policies | A placeholder; policy details and editing are not available in this console. |
 
-Audit tiers display the recorded `r0`, `r1`, `r2`, or `r3`; missing or unrecognized
-tiers display as unknown. The current Meta R2 path normally allows with audit.
+Risk tiers display in words with their code: R0 Minimal, R1 Low, R2 Elevated and
+R3 High. A request's chip reads "High risk", with the tier code in its tooltip, and
+an audit row reads "Risk: High (R3)". A missing tier reads "Unknown"; an
+unrecognized one reads "Unknown" followed by the recorded value. The current Meta
+R2 path normally allows with audit.
 It does not run the proposed native model reviewer. An approval record does not
 confirm execution: the caller remains responsible for enforcing the returned
 outcome and carrying out any permitted action. See [Gating](/mobkit/concepts/gating) for
@@ -371,6 +422,113 @@ The center area is a multi-panel tabbed workspace. Each panel contains a `Conver
 - Textarea with `Message {agent}...` placeholder
 - Send button (↑) — also supports Enter to send, Shift+Enter for newline
 - Footer shows: target agent, member ID, profile, and status
+
+### Side chats
+
+**Fork to side chat** in a conversation's header branches the agent's
+conversation into a side chat: a new member that starts from the agent's
+committed transcript and opens in a pane beside the agent. You continue the
+side chat on its own; the agent's session, transcript and queued work stay
+as they were.
+
+- The side chat runs with the agent's role, profile and model overrides and
+  tools, and inherits the agent's labels.
+- Its audience is exactly the agent's: every agent check on a side chat is
+  the agent's, so whoever may see the agent, send to it or retire it may do
+  the same with its side chats, a deny on the agent hides them, and a grant
+  on the side chat's own name grants nothing (see
+  [Side chats](/mobkit/concepts/access-control#side-chats)).
+- It is never wired to a peer, whatever the agent's role: no other agent can
+  address it, and none lists it as a peer. The runtime seats it exempt from
+  the mob definition's wiring rules (`auto_wire_orchestrator`,
+  `role_wiring`), so no agent seated after it is wired to it either, and the
+  definition-wiring reconcile and the topology's declared edges leave it
+  out, as they leave out every member exempt from those rules. A host's own
+  edge discovery policy is never handed one either.
+- It is listed under its agent in the sidebar, marked **Side chat**, and is
+  kept until you close it: across a console reload and a gateway restart. It
+  never idle-retires. **Close side chat** in its pane retires it, which, as
+  every check on a side chat, needs `agent.retire` on its agent; the agent
+  is not touched. `meta/reset_all` retires side chats with the other members
+  that have no registered identity. A host that reconciles the whole mob
+  against a declared roster (`UnifiedRuntime::reconcile`, without
+  identity-first authority) retires them too, since no declared roster names
+  them; the stock gateway does not.
+- A side chat is never respawned or reset: its pane offers neither, and
+  `meta/respawn`, `meta/respawn_member` and `meta/reset` refuse it
+  (`side_chat_restart_refused`), since its successor would be no fork of the
+  agent. An agent's `mob_respawn` tool refuses it too, and `meta/reset_all`
+  reports it as a member it could not reset where a host declares a
+  baseline member under its name. Close it and fork the agent again.
+- A side chat is never adopted as an identity:
+  `mob/adopt_member_identity_declaration` refuses it
+  (`side_chat_adoption_refused`), since an adopted identity is rebuilt from
+  its declaration, which no fork made.
+- The action is offered only to a viewer who may spawn members
+  (`agent.spawn`) and send to the agent (`agent.send`), and only where the
+  gateway's sessions persist or its composition did not record whether they
+  do. It is disabled while the agent works and enabled when it is idle. An
+  agent seated and never woken has no conversation to fork: the fork is
+  refused, and the agent is not woken for it. An agent the console's
+  visibility policy hides cannot be forked, nor can an agent whose lineage
+  already fills the access rules' walk (the agent and seven ancestors), by
+  any viewer, an admin included.
+- Under `runtime_options.member_auth_binding`, an agent whose session
+  records another binding or none (one created before the launch named the
+  binding) cannot be forked: the runtime would seat the side chat off the
+  binding. A side chat forked before a launch named the binding is refused
+  at its rebuild under that launch; close it and fork again.
+- Instructions the agent activated (`meta/member_activate_instruction`) are
+  inherited when they are in effect in the agent at the fork. Any other
+  inherited instruction stays inactive, and the side chat's pane names it:
+  the side chat cannot answer until a host activates it.
+
+The fork takes the agent's conversation as it is now. Side chats are
+`meta/fork_member` on the console RPC.
+
+### Schedules
+
+An agent's details pane (**Details** in the roster, or **Inspect agent** in
+its conversation's header) lists the agent's **schedules**: messages the
+Console sends to the agent later, as the person who defined them. A viewer
+who may message the agent adds one with **New schedule**: the message, an
+optional name, and when to send it, either once at a date and time,
+repeating every so many minutes, hours or days (the first send one interval
+from now unless you set a start), or daily at a time of day, on the
+weekdays you pick, in a named time zone. Each schedule shows when it sends,
+its next send while it is active and, to a viewer who may message the agent,
+who it sends as, with **Edit**, **Pause** or **Resume**, and **Delete**,
+which asks you to confirm. An edit keeps the timing unless you change it.
+
+- Each send is a Console send by the schedule's sender, judged when it goes
+  out: the Console must still admit the sender as it would admit them then
+  (sign-in where it is required, the allowlist, the trusted issuer, and no
+  sessions revoked since the schedule was defined), and the send needs what
+  a message sent then would need, `agent.send` on the agent under the access
+  policy at that time, a writable console, and an agent that takes console
+  messages. A refused send fails that time only; the schedule keeps its
+  later times.
+- Creating, editing or resuming a schedule makes you its sender. On a
+  console without sign-in the sender is the console's shared account, as it
+  is for a message you send there; once the console requires sign-in, such
+  schedules stop sending until someone signed in edits them.
+- A change that races another change of the same schedule is refused and
+  the list is read again: check the schedule and repeat the change.
+- A schedule repeats at most once a minute.
+- Viewers who may see the agent but not message it see its schedules
+  read-only, and so does everyone on a read-only console or on a gateway
+  that does not offer schedule changes; the pane says why.
+- An agent whose input is governed takes no schedule (a governed send needs
+  its human present, and a scheduled send has none), and an agent that
+  takes no console messages cannot be scheduled.
+- The pane lists the schedules defined in the Console only. The agent's own
+  schedules (its schedule tools) are not listed, and the agent's tools
+  neither see nor change the Console's.
+
+The section appears where the gateway keeps console schedules. A gateway
+that sends none of them (a candidate launch, for one) lists them read-only.
+Schedules are the `meta/schedule/*` methods on the console RPC (see
+[Console schedules](/mobkit/api/rpc#console-schedules-console)).
 
 ### Local action feedback
 
@@ -922,8 +1080,10 @@ Primary RPC methods on `/console/rpc`:
   `agent.respawn` action.
 - `meta/retire`, `meta/respawn`, `meta/reset`, and `meta/reset_all` -
   operator lifecycle actions. `meta/retire` releases the member, which stays
-  seated on its session at its generation. `reset_all` resets every identity
-  the identity runtime knows, whatever its state (generation advance, one
+  seated on its session at its generation. A member that no identity holds
+  and no host adopted, such as a side chat, is retired by Core instead: it
+  leaves the roster with the members it spawned. `reset_all` resets every
+  identity the identity runtime knows, whatever its state (generation advance, one
   `identity_reset` lifecycle frame each, listed under `reset`): each reset is
   Core's rotation, which seats a `dormant` identity Core holds no member for
   on a fresh session too, and starts a `broken` one over. It retires only
@@ -935,6 +1095,15 @@ Primary RPC methods on `/console/rpc`:
   identities beside it are still reset, and the call answers `-32000` with
   the full body in `error.data`
 - `meta/send_message` - legacy member-addressed send path
+- `meta/fork_member` - forks an agent's conversation into a side chat (see
+  [Side chats](#side-chats)); gated by `agent.spawn` for the side chat and
+  `agent.view` and `agent.send` for the agent, and offered where sessions
+  persist or the composition did not record whether they do
+- `meta/schedule/list`, `meta/schedule/create`, `meta/schedule/update`,
+  `meta/schedule/pause`, `meta/schedule/resume` and `meta/schedule/delete` -
+  an agent's console schedules (see [Schedules](#schedules)); the list is
+  gated by `agent.view` and the writes by `agent.send` for the agent, and
+  each send is a Console send by the schedule's sender
 - `meta/topology/query`, `meta/topology/plan`, `meta/topology/apply`,
   `meta/topology/operation/get`, and `meta/topology/audit/query` - optional,
   revisioned connection management and separately permissioned durable audit

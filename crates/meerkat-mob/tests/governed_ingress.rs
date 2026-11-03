@@ -854,7 +854,7 @@ async fn a_persistent_actor_pins_its_controller_under_the_held_boundary() {
     .expect("pinned without reacquiring the held boundary")
     .expect("the exact actor's controller");
     drop(boundary);
-    assert!(pinned.selection() == &selection());
+    assert_eq!(pinned.selection(), &selection());
 
     MobSessionService::discard_live_session(&*service, &session_id)
         .await
@@ -905,7 +905,7 @@ async fn an_ephemeral_actor_pins_its_controller_under_the_held_boundary() {
     .expect("pinned without reacquiring the held boundary")
     .expect("the exact actor's controller");
     drop(boundary);
-    assert!(pinned.selection() == &selection());
+    assert_eq!(pinned.selection(), &selection());
     assert!(provider.requests().is_empty(), "no model was called");
 }
 
@@ -960,7 +960,7 @@ async fn a_member_attachment_owner_pins_its_actor_under_the_member_boundary() {
         .await
         .expect("pinned without reacquiring the boundary")
         .expect("the member actor's controller");
-    assert!(pinned.selection() == &selection());
+    assert_eq!(pinned.selection(), &selection());
     drop(held);
     drop(
         tokio::time::timeout(WAIT, waiting)

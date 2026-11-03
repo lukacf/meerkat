@@ -292,7 +292,7 @@ async fn fenced_call(
     let resolution = crate::ToolExecutionResolutionContext::new(
         crate::ToolDeadlineChain::new(vec![crate::ToolDeadlineContributor::finite(
             crate::ToolDeadlineOwner::CoreToolDispatch,
-            std::time::Duration::from_secs(60),
+            std::time::Duration::from_mins(1),
         )])
         .expect("deadline chain"),
     );

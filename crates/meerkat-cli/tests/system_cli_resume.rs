@@ -122,7 +122,7 @@ async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>>
 
     let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
     let output = timeout(
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         Command::new(&rkat)
             .current_dir(&project_dir)
             .env("RKAT_TEST_CLIENT", "1")
@@ -217,7 +217,7 @@ async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>>
     tokio::fs::write(project_dir.join(".rkat/config.toml"), config_toml).await?;
 
     let output = timeout(
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         Command::new(&rkat)
             .current_dir(&project_dir)
             .env("RKAT_TEST_CLIENT", "1")
@@ -256,7 +256,7 @@ async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(metadata.tooling.comms, original_tooling.comms);
 
     let output = timeout(
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         Command::new(&rkat)
             .current_dir(&project_dir)
             .env("RKAT_TEST_CLIENT", "1")

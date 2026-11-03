@@ -1,0 +1,39 @@
+{
+  "name": "open-loop-resumption",
+  "manifest": [
+    {
+      "id": "mem-090",
+      "kind": "OpenLoop",
+      "title": "Half-finished migration of configs to TOML",
+      "description": "Matters when anyone touches service configs: the YAML-to-TOML migration stopped halfway (services A-M done, N-Z pending); mixing formats breaks the loader.",
+      "age_days": 9,
+      "rank": 8
+    },
+    {
+      "id": "mem-091",
+      "kind": "Fact",
+      "title": "Config loader lives in core/config.rs",
+      "description": "Matters when asked where configuration parsing is implemented.",
+      "age_days": 60,
+      "rank": 5
+    },
+    {
+      "id": "mem-092",
+      "kind": "Gotcha",
+      "title": "Never commit .env files",
+      "description": "Matters when staging files for commit: .env files carry secrets and must stay untracked.",
+      "age_days": 90,
+      "rank": 6
+    }
+  ],
+  "turn_text": "Update the config for service-quokka to add the new retry knob.",
+  "expected": {
+    "must_select": [
+      "mem-090"
+    ],
+    "must_not_select": [
+      "mem-092"
+    ]
+  },
+  "notes": "Open-loop resumption: service-quokka is in the unmigrated N-Z range; touching its config without knowing about the half-done migration produces a wrong-format edit. Tests kind sensitivity beyond Gotcha/Reference."
+}

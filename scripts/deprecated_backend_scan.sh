@@ -59,6 +59,7 @@ matches=$(cd "$ROOT_DIR" && rg -n -H -e "$PATTERN" \
   --glob '!target_*/**' \
   --glob '!target-*/**' \
   --glob '!**/node_modules/**' \
+  --glob '!**/.venv/**' \
   --glob '!scripts/deprecated_backend_scan.sh' \
   --glob '!crates/xtask/tests/buildbuddy_static_lanes.rs' \
   --glob '!nohup.out' \

@@ -314,7 +314,7 @@ impl CapabilityHarness {
         request_id: &str,
         reuse: ForkedParticipantReusePolicy,
     ) -> CapabilityFixture {
-        self.mint_with_ttl(request_id, reuse, Duration::from_secs(600))
+        self.mint_with_ttl(request_id, reuse, Duration::from_mins(10))
             .await
     }
 
@@ -1584,7 +1584,7 @@ async fn a_capability_release_failure_retains_only_its_own_association() {
         .mint_with_ttl(
             "req-multi-stuck",
             ForkedParticipantReusePolicy::OneShot,
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         )
         .await;
     // A much longer TTL keeps this capability clear of the expiry observation
@@ -1593,7 +1593,7 @@ async fn a_capability_release_failure_retains_only_its_own_association() {
         .mint_with_ttl(
             "req-multi-healthy",
             ForkedParticipantReusePolicy::OneShot,
-            Duration::from_secs(12 * 60 * 60),
+            Duration::from_hours(12),
         )
         .await;
     let stuck_association = stuck.association("attach-stuck");
@@ -2114,7 +2114,7 @@ async fn a_reserved_but_unactivated_fork_session_admits_nothing() {
         prefix_message_count: Some(PREFIX_COUNT),
         scope: ForkedParticipantOperationScope::InvokeAndObserve,
         reuse: ForkedParticipantReusePolicy::OneShot,
-        ttl: Duration::from_secs(600),
+        ttl: Duration::from_mins(10),
     };
     let reservation = capabilities
         .service

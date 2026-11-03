@@ -421,7 +421,7 @@ impl ParentMob {
             )
             .await
             .expect("turn admitted");
-        tokio::time::timeout(Duration::from_secs(120), turn.wait())
+        tokio::time::timeout(Duration::from_mins(2), turn.wait())
             .await
             .expect("the turn completes")
             .map(|_| ())
@@ -469,7 +469,7 @@ impl ParentMob {
             )
             .await
             .expect("start a worker turn");
-        tokio::time::timeout(Duration::from_secs(120), work.wait_bounded(spec))
+        tokio::time::timeout(Duration::from_mins(2), work.wait_bounded(spec))
             .await
             .expect("the worker turn completes")
             .expect("a refused call does not fail the worker's turn");

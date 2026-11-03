@@ -3,6 +3,11 @@ use super::*;
 mod before_activation;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod boot_obligation_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod created_identity_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod declared_apply_rows;
+mod ensure_convergence_rows;
 #[cfg(feature = "openai-live")]
 mod existing_live_delegation;
 mod historical_metadata;
@@ -10,7 +15,11 @@ mod host_human_input;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod host_store_boot_reads;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod identity_entry_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod lazy_boot;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod lifecycle_journal_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod lift_binding_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
@@ -27,6 +36,8 @@ mod parallel_resume_restore;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod retryable_restore_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod rotation_intent_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod seat_build_inputs;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod seat_comms_key;
@@ -34,6 +45,8 @@ mod seat_comms_key;
 mod seat_declared_wiring;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod startup_binding_release;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod store_owned_identity_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod unborn_seat_wake;
 use crate::definition::{
@@ -1782,7 +1795,17 @@ struct CreateSessionRecord {
     tool_dispatch_admission: bool,
     /// The build's shell environment.
     shell_env: Option<std::collections::HashMap<String, String>>,
+    /// The witness of the mob runtime performing the build, as the build
+    /// carries it to a host's member build hook.
+    mob_incarnation: Option<meerkat_core::service::LiveMobIncarnation>,
+    /// The build's mob operator authority, once the member build hook has
+    /// run.
+    mob_tool_authority_context: Option<meerkat_core::service::MobToolAuthorityContext>,
 }
+
+/// A host's member build hook: it edits a create request before the session
+/// service builds anything, as a host's session hook does.
+type MemberBuildHook = Arc<dyn Fn(&mut CreateSessionRequest) + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RuntimeBoundaryAcknowledgement {
@@ -2069,8 +2092,33 @@ impl PersistedSessionReadRefusal {
     }
 }
 
+/// How the mock answers one mob release of a member session's target.
+#[derive(Clone, Copy, Debug)]
+enum InstructionReleaseFault {
+    /// A store that did not take the write.
+    Failed,
+    /// A session whose operator-instruction state does not read.
+    Unreadable,
+}
+
 struct MockSessionService {
     sessions: RwLock<HashMap<SessionId, Arc<MockCommsRuntime>>>,
+    /// Every mob operator-instruction delivery this mock answered, in order:
+    /// the session, the snapshot's generation, and whether it wrote the
+    /// session's document (an already recorded generation writes nothing).
+    instruction_records: std::sync::Mutex<Vec<(SessionId, u64, bool)>>,
+    /// Deliveries in flight now, and the most at once.
+    instruction_records_in_flight: AtomicU64,
+    instruction_records_max_in_flight: AtomicU64,
+    /// When set, every delivery takes a permit here before it writes: a row
+    /// holds deliveries in flight and lets them through.
+    instruction_record_gate: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    /// Faults the next mob releases of member session targets answer, one
+    /// each in order; a faulted release writes nothing.
+    instruction_release_faults: std::sync::Mutex<VecDeque<InstructionReleaseFault>>,
+    /// How many member sessions each operator-instruction read asked for,
+    /// one entry per read call.
+    member_instruction_reads: std::sync::Mutex<Vec<usize>>,
     /// The spawner restrictions handed to the build of each session this
     /// mock created, as a session owner records them.
     tool_restrictions: std::sync::Mutex<
@@ -2103,6 +2151,10 @@ struct MockSessionService {
     /// from its key pair there, as the agent factory keys it, unless a seed
     /// above overrides it.
     member_comms_identity_root: std::sync::Mutex<Option<PathBuf>>,
+    /// A root this service reports in place of the one it keys sessions
+    /// from ([`Self::report_comms_identity_root`]): a service whose report is
+    /// not where its builds keep the keys.
+    reported_comms_identity_root: std::sync::Mutex<Option<meerkat_core::SessionCommsIdentityRoot>>,
     runtime_adapter: Mutex<Option<Arc<meerkat_runtime::MeerkatMachine>>>,
     session_counter: AtomicU64,
     /// Records (session_id, prompt) for each create_session call.
@@ -2116,7 +2168,12 @@ struct MockSessionService {
     /// transient store error, with how many are left.
     resume_authority_observe_failures_for: std::sync::Mutex<HashMap<SessionId, u64>>,
     create_requests: RwLock<Vec<CreateSessionRecord>>,
-    /// Records whether each create_session had external_tools configured.
+    /// The host's member build hook, run on each create request first.
+    member_build_hook: std::sync::Mutex<Option<MemberBuildHook>>,
+    /// Records whether each create_session's external tools list any tool.
+    /// Presence alone says nothing: every member build carries its external
+    /// tools inside the mob runtime's authority receiver, which lists none
+    /// of its own.
     create_with_external_tools: RwLock<Vec<bool>>,
     /// Records the exact host curator carried by each create_session request.
     create_with_compaction_curators: RwLock<Vec<Option<Arc<dyn meerkat_core::CompactionCurator>>>>,
@@ -2277,6 +2334,9 @@ struct MockSessionService {
     /// #1250 seam: per-read delay for the metadata-only durable read, and
     /// per-session metadata read counts (proves a single realm scan).
     load_persisted_session_metadata_delay_ms: AtomicU64,
+    /// Whether every metadata-only read waits, once counted, until the
+    /// hold is released.
+    persisted_session_metadata_reads_held: tokio::sync::watch::Sender<bool>,
     metadata_reads_for: std::sync::Mutex<HashMap<SessionId, u64>>,
     /// Per-session durable reads (`load_persisted_session`,
     /// `observe_session_resume_authority`,
@@ -2406,6 +2466,107 @@ struct MockSessionService {
 }
 
 impl MockSessionService {
+    /// The mob deliveries this mock answered, in order: (session,
+    /// generation, wrote).
+    fn instruction_records(&self) -> Vec<(SessionId, u64, bool)> {
+        self.instruction_records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The most deliveries this mock held in flight at once.
+    fn instruction_records_max_in_flight(&self) -> u64 {
+        self.instruction_records_max_in_flight
+            .load(Ordering::SeqCst)
+    }
+
+    /// Fail the next mob release of a member session's target.
+    fn fail_next_instruction_release(&self) {
+        self.fail_next_instruction_releases(1);
+    }
+
+    /// Fail the next `count` mob releases of member session targets (a store
+    /// that did not take the write).
+    fn fail_next_instruction_releases(&self, count: usize) {
+        let mut faults = self
+            .instruction_release_faults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for _ in 0..count {
+            faults.push_back(InstructionReleaseFault::Failed);
+        }
+    }
+
+    /// Answer the next mob release of a member session's target as a session
+    /// whose operator-instruction state does not read.
+    fn next_instruction_release_unreadable(&self) {
+        self.instruction_release_faults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(InstructionReleaseFault::Unreadable);
+    }
+
+    /// How many member sessions each operator-instruction read asked for.
+    fn member_instruction_reads(&self) -> Vec<usize> {
+        self.member_instruction_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// One member session's committed operator-instruction state, as the
+    /// persistent owner reads it, never materializing the session.
+    async fn read_one_member_instructions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        meerkat_core::service::SessionInstructionRead,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let session = self
+            .persisted_sessions
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| SessionError::NotFound {
+                id: session_id.clone(),
+            })?;
+        let target = session.instruction_target_state()?;
+        let effective =
+            meerkat_core::effective_operator_instructions(session.id(), session.messages())
+                .map_err(meerkat_core::InstructionStateError::MalformedHistory)?;
+        Ok(meerkat_core::service::SessionInstructionRead {
+            target,
+            effective,
+            lowering: None,
+        })
+    }
+
+    /// Hold every later delivery until the returned gate lets it through.
+    fn hold_instruction_records(&self) -> Arc<tokio::sync::Semaphore> {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        *self
+            .instruction_record_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&gate));
+        gate
+    }
+
+    /// A session's committed operator-instruction target, as this mock's
+    /// store holds it.
+    async fn committed_instruction_target(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<meerkat_core::SessionInstructionState> {
+        self.persisted_sessions
+            .read()
+            .await
+            .get(session_id)
+            .and_then(|session| session.instruction_target_state().ok().flatten())
+    }
+
     /// Drop this owner's record of a session's spawner restrictions, as a
     /// session whose evidence is missing or unknown.
     fn forget_tool_restrictions(&self, session_id: &SessionId) {
@@ -2418,6 +2579,12 @@ impl MockSessionService {
     fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            instruction_records: std::sync::Mutex::new(Vec::new()),
+            instruction_records_in_flight: AtomicU64::new(0),
+            instruction_records_max_in_flight: AtomicU64::new(0),
+            instruction_record_gate: std::sync::Mutex::new(None),
+            instruction_release_faults: std::sync::Mutex::new(VecDeque::new()),
+            member_instruction_reads: std::sync::Mutex::new(Vec::new()),
             actor_registry: meerkat_session::LiveSessionActorRegistry::default(),
             live_session_data: RwLock::new(HashMap::new()),
             tool_restrictions: std::sync::Mutex::new(HashMap::new()),
@@ -2432,6 +2599,7 @@ impl MockSessionService {
             session_comms_names: RwLock::new(HashMap::new()),
             comms_identity_seeds: RwLock::new(HashMap::new()),
             member_comms_identity_root: std::sync::Mutex::new(None),
+            reported_comms_identity_root: std::sync::Mutex::new(None),
             runtime_adapter: Mutex::new(None),
             session_counter: AtomicU64::new(0),
             prompts: RwLock::new(Vec::new()),
@@ -2442,6 +2610,7 @@ impl MockSessionService {
             resume_authority_absent_remaining: AtomicU64::new(0),
             resume_authority_observe_failures_for: std::sync::Mutex::new(HashMap::new()),
             create_requests: RwLock::new(Vec::new()),
+            member_build_hook: std::sync::Mutex::new(None),
             create_with_external_tools: RwLock::new(Vec::new()),
             create_with_compaction_curators: RwLock::new(Vec::new()),
             mcp_server_names: RwLock::new(Vec::new()),
@@ -2529,6 +2698,7 @@ impl MockSessionService {
             load_persisted_session_calls: AtomicU64::new(0),
             load_persisted_session_metadata_calls: AtomicU64::new(0),
             load_persisted_session_metadata_delay_ms: AtomicU64::new(0),
+            persisted_session_metadata_reads_held: tokio::sync::watch::Sender::new(false),
             metadata_reads_for: Default::default(),
             durable_reads_for: Default::default(),
             durable_head_status_views: AtomicBool::new(false),
@@ -2725,6 +2895,17 @@ impl MockSessionService {
             .member_comms_identity_root
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = member_comms_identity_root;
+        // The restarted service is composed as this one was: it reports the
+        // same root.
+        let reported_comms_identity_root = self
+            .reported_comms_identity_root
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        *restarted
+            .reported_comms_identity_root
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = reported_comms_identity_root;
         let _authority_guard = self.resume_authority_gate.lock().await;
         let persisted_sessions = self.persisted_sessions.read().await.clone();
         let persisted_ids = persisted_sessions.keys().cloned().collect::<HashSet<_>>();
@@ -3637,6 +3818,19 @@ impl MockSessionService {
             .store(delay_ms, Ordering::Relaxed);
     }
 
+    /// Hold every metadata-only read, once counted, until
+    /// [`Self::release_persisted_session_metadata_reads`].
+    fn hold_persisted_session_metadata_reads(&self) {
+        self.persisted_session_metadata_reads_held
+            .send_modify(|held| *held = true);
+    }
+
+    /// Let every held metadata-only read go on.
+    fn release_persisted_session_metadata_reads(&self) {
+        self.persisted_session_metadata_reads_held
+            .send_modify(|held| *held = false);
+    }
+
     fn fail_persisted_session_metadata_reads_for(&self, session_id: SessionId) {
         self.metadata_read_failures_for
             .lock()
@@ -3968,6 +4162,19 @@ impl MockSessionService {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(answer);
     }
 
+    /// Run `hook` on each create request before anything else, as a host's
+    /// session hook runs before its inner session service.
+    #[cfg_attr(
+        any(not(feature = "runtime-adapter"), target_arch = "wasm32"),
+        allow(dead_code)
+    )]
+    fn set_member_build_hook(&self, hook: MemberBuildHook) {
+        *self
+            .member_build_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
     /// Decide each created session's prepared surface through the gate its
     /// runtime bindings carry, as the real factory does.
     fn decide_tool_surface_at_create(&self) {
@@ -3977,9 +4184,17 @@ impl MockSessionService {
 
     async fn create_session_with_actor_witness_slot(
         &self,
-        req: CreateSessionRequest,
+        mut req: CreateSessionRequest,
         actor_witness_slot: Option<&meerkat_session::LiveSessionActorWitnessSlot>,
     ) -> Result<RunResult, SessionError> {
+        let member_build_hook = self
+            .member_build_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(hook) = member_build_hook {
+            hook(&mut req);
+        }
         if self.decide_tool_surface_at_create.load(Ordering::SeqCst)
             && let Some(meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings)) =
                 req.build.as_ref().map(|build| &build.runtime_build_mode)
@@ -4203,7 +4418,11 @@ impl MockSessionService {
             .await
             .entry(session_id.clone())
             .or_insert_with(|| tokio::sync::watch::channel(0).0);
-        if let Some(system_prompt) = req.system_prompt.as_set_prompt() {
+        // As the real builder does: a resume whose prompt is already the
+        // newest prompt row appends nothing.
+        if let Some(system_prompt) = req.system_prompt.as_set_prompt()
+            && !session.newest_prompt_row_is(system_prompt)
+        {
             session.append_system_message(system_prompt.to_string());
         }
         if session.session_metadata().is_none() {
@@ -4258,6 +4477,7 @@ impl MockSessionService {
                         .map(|b| b.application_tool_policy.clone())
                         .unwrap_or(meerkat_core::ApplicationToolPolicyBinding::Unmanaged),
                     active_skills: build.and_then(|b| b.preload_skills.clone()),
+                    grant_gated: Default::default(),
                 },
                 keep_alive: build.map(|b| b.keep_alive).unwrap_or(false),
                 comms_name: build.and_then(|b| b.comms_name.clone()),
@@ -4272,6 +4492,22 @@ impl MockSessionService {
                 // mob members exactly as production does.
                 mob_member_binding: build.and_then(|b| b.mob_member_binding.clone()),
             };
+            session
+                .set_session_metadata(metadata)
+                .expect("mock session metadata should serialize");
+        } else if let Some(binding) = req
+            .build
+            .as_ref()
+            .and_then(|build| build.mob_member_binding.clone())
+        {
+            // Mirror the factory, which stamps a mob build's member binding on
+            // every build, a resumed session's included: a session a mob
+            // seats over an existing one (an attach) is a member's from then
+            // on.
+            let mut metadata = session
+                .session_metadata()
+                .expect("a resumed mock session carries metadata");
+            metadata.mob_member_binding = Some(binding);
             session
                 .set_session_metadata(metadata)
                 .expect("mock session metadata should serialize");
@@ -4509,6 +4745,11 @@ impl MockSessionService {
                     .as_ref()
                     .is_some_and(|build| build.tool_dispatch_admission.is_some()),
                 shell_env: req.build.as_ref().and_then(|build| build.shell_env.clone()),
+                mob_incarnation: req.build.as_ref().and_then(|build| build.mob_incarnation),
+                mob_tool_authority_context: req
+                    .build
+                    .as_ref()
+                    .and_then(|build| build.mob_tool_authority_context.clone()),
             });
 
         let mcp_server_names: Vec<String> = req
@@ -4537,10 +4778,11 @@ impl MockSessionService {
             .as_ref()
             .and_then(|b| b.external_tools.as_ref())
             .cloned();
-        self.create_with_external_tools
-            .write()
-            .await
-            .push(external_tools.is_some());
+        self.create_with_external_tools.write().await.push(
+            external_tools
+                .as_ref()
+                .is_some_and(|tools| !tools.tools().is_empty()),
+        );
         self.create_with_compaction_curators.write().await.push(
             req.build
                 .as_ref()
@@ -4550,7 +4792,8 @@ impl MockSessionService {
         if let Some(dispatcher) = external_tools {
             // A session service that builds its agent through the agent
             // factory binds the member's tools to the session's mob operator
-            // authority; this mock builds no agent, so it binds the request's.
+            // authority; this mock builds no agent, so it binds the request's
+            // as the factory does: none with mob tools disabled.
             let authority = req
                 .build
                 .as_ref()
@@ -4838,7 +5081,7 @@ impl SessionService for MockSessionService {
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 }
                 if never_terminal {
-                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    tokio::time::sleep(std::time::Duration::from_mins(1)).await;
                     return;
                 }
                 if fail_flow_turn_global || fail_flow_turn_session {
@@ -5220,7 +5463,7 @@ impl SubscribableInjector for CountingInjector {
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             }
             if never_terminal {
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                tokio::time::sleep(std::time::Duration::from_mins(1)).await;
                 return;
             }
             let event = if fail {
@@ -5438,6 +5681,8 @@ impl MockSessionService {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entry(session_id.clone())
             .or_default() += 1;
+        let mut held = self.persisted_session_metadata_reads_held.subscribe();
+        let _ = held.wait_for(|held| !*held).await;
         let delay_ms = self
             .load_persisted_session_metadata_delay_ms
             .load(Ordering::Relaxed);
@@ -5483,15 +5728,240 @@ impl MockSessionService {
                 )))
             })
     }
+
+    /// Key this service's member sessions from their key pairs under
+    /// `root`, as an agent factory whose comms identity root is `root` does,
+    /// with no mob declaring the root: the service reports it.
+    fn keep_member_comms_identities_under(&self, root: &std::path::Path) {
+        *self
+            .member_comms_identity_root
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(root.to_path_buf());
+    }
+
+    /// Report `root` as the root this service's builds keep the members'
+    /// comms identities under, whatever root it keys its sessions from.
+    fn report_comms_identity_root(&self, root: meerkat_core::SessionCommsIdentityRoot) {
+        *self
+            .reported_comms_identity_root
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(root);
+    }
 }
 
 #[async_trait]
 impl MobSessionService for MockSessionService {
+    /// Records the snapshot in the session's committed document (and in its
+    /// live copy, when it has one), as the persistent owner does. It never
+    /// creates or materializes a session.
+    async fn record_member_instruction_target(
+        self: Arc<Self>,
+        delivery: crate::MemberInstructionDelivery,
+    ) -> Result<
+        meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let in_flight = self
+            .instruction_records_in_flight
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        self.instruction_records_max_in_flight
+            .fetch_max(in_flight, Ordering::SeqCst);
+        let gate = self
+            .instruction_record_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(gate) = gate {
+            // One permit admits exactly one delivery.
+            gate.acquire_owned()
+                .await
+                .expect("instruction record gate open")
+                .forget();
+        }
+        let result = async {
+            let (session_id, record) = delivery.into_parts();
+            let generation = record.generation;
+            let _authority_guard = self.resume_authority_gate.lock().await;
+            let mut committed = self
+                .persisted_sessions
+                .read()
+                .await
+                .get(&session_id)
+                .cloned()
+                .ok_or_else(|| SessionError::NotFound {
+                    id: session_id.clone(),
+                })?;
+            let receipt = committed.record_instruction_target(record.clone())?;
+            let wrote = receipt.disposition == meerkat_core::InstructionRecordDisposition::Recorded;
+            if wrote {
+                if let Some(live) = self.live_session_data.write().await.get_mut(&session_id) {
+                    let _ = live.record_instruction_target(record);
+                }
+                self.persisted_sessions
+                    .write()
+                    .await
+                    .insert(session_id.clone(), committed);
+            }
+            self.instruction_records
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((session_id, generation, wrote));
+            Ok::<_, meerkat_core::service::SessionInstructionError>(receipt)
+        }
+        .await;
+        self.instruction_records_in_flight
+            .fetch_sub(1, Ordering::SeqCst);
+        result
+    }
+
+    async fn release_member_instruction_target(
+        self: Arc<Self>,
+        release: crate::MemberInstructionRelease,
+    ) -> Result<
+        meerkat_core::InstructionReleaseDisposition,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let fault = self
+            .instruction_release_faults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front();
+        match fault {
+            Some(InstructionReleaseFault::Failed) => {
+                return Err(
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                        "fault-injected operator instruction release failure".to_string(),
+                    ))
+                    .into(),
+                );
+            }
+            Some(InstructionReleaseFault::Unreadable) => {
+                return Err(meerkat_core::service::SessionInstructionError::Refused(
+                    meerkat_core::InstructionWriteError::Malformed(
+                        meerkat_core::InstructionStateError::MalformedState(
+                            "fault-injected unreadable operator instruction state".to_string(),
+                        ),
+                    ),
+                ));
+            }
+            None => {}
+        }
+        let _authority_guard = self.resume_authority_gate.lock().await;
+        let session_id = release.session_id().clone();
+        let mut committed = self
+            .persisted_sessions
+            .read()
+            .await
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| SessionError::NotFound {
+                id: session_id.clone(),
+            })?;
+        let disposition = committed.release_instruction_target(release.mob_id().as_str())?;
+        if disposition == meerkat_core::InstructionReleaseDisposition::Released {
+            if let Some(live) = self.live_session_data.write().await.get_mut(&session_id) {
+                let _ = live.release_instruction_target(release.mob_id().as_str());
+            }
+            self.persisted_sessions
+                .write()
+                .await
+                .insert(session_id, committed);
+        }
+        Ok(disposition)
+    }
+
+    async fn read_member_instructions(
+        &self,
+        session_ids: &[SessionId],
+    ) -> Vec<
+        Result<
+            meerkat_core::service::SessionInstructionRead,
+            meerkat_core::service::SessionInstructionError,
+        >,
+    > {
+        self.member_instruction_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(session_ids.len());
+        let mut reads = Vec::with_capacity(session_ids.len());
+        for session_id in session_ids {
+            reads.push(self.read_one_member_instructions(session_id).await);
+        }
+        reads
+    }
+
+    /// Stamps the binding the stored session's comms name implies, store-only,
+    /// as the persistent owner does: only on a session that names no binding
+    /// and whose comms name is this member's, and never on a live one.
+    async fn bind_seated_member_session(
+        &self,
+        session_id: &SessionId,
+        mob_id: &str,
+        member: &str,
+    ) -> Result<(), SessionError> {
+        if self.has_live_session(session_id).await? {
+            return Err(SessionError::Busy {
+                id: session_id.clone(),
+            });
+        }
+        let _authority_guard = self.resume_authority_gate.lock().await;
+        let mut persisted = self.persisted_sessions.write().await;
+        let session = persisted
+            .get_mut(session_id)
+            .ok_or_else(|| SessionError::NotFound {
+                id: session_id.clone(),
+            })?;
+        let Some(mut metadata) = session.session_metadata() else {
+            return Ok(());
+        };
+        if metadata.mob_member_binding.is_some() {
+            return Ok(());
+        }
+        let Some(name) = metadata
+            .comms_name
+            .as_deref()
+            .and_then(|name| name.parse::<meerkat_core::MemberCommsName>().ok())
+        else {
+            return Ok(());
+        };
+        if name.mob_id() != mob_id || name.member() != member {
+            return Ok(());
+        }
+        metadata.mob_member_binding = Some(name.to_member_binding());
+        session
+            .set_session_metadata(metadata)
+            .expect("mock session metadata should serialize");
+        Ok(())
+    }
+
     fn bind_member_comms_identity_root_for_test(&self, identity_root: &std::path::Path) {
         *self
             .member_comms_identity_root
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(identity_root.to_path_buf());
+    }
+
+    /// The root it keys its sessions' comms runtimes from, as the agent
+    /// factory reports its own, unless a test set another report. Without a
+    /// root it keys them from their comms names: no durable key pair.
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        if let Some(reported) = self
+            .reported_comms_identity_root
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            return reported;
+        }
+        self.member_comms_identity_root
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .map_or(
+                meerkat_core::SessionCommsIdentityRoot::NotKept,
+                meerkat_core::SessionCommsIdentityRoot::Durable,
+            )
     }
 
     async fn recorded_auth_binding(
@@ -6827,6 +7297,12 @@ impl FaultInjectedMobEventStore {
         self.fail_after_append_on_kind.write().await.insert(kind);
     }
 
+    /// Acknowledge the appends of `kind` again (undo
+    /// [`Self::fail_after_append_for`]).
+    async fn acknowledge_appends_for(&self, kind: &'static str) {
+        self.fail_after_append_on_kind.write().await.remove(kind);
+    }
+
     fn fail_clear(&self) {
         self.fail_clear.store(true, Ordering::Relaxed);
     }
@@ -6956,6 +7432,8 @@ impl FaultInjectedMobEventStore {
                 "OrchestratorResumeNotificationFailed"
             }
             MobEventKind::OperatorActionRecorded { .. } => "OperatorActionRecorded",
+            MobEventKind::OperatorInstructionCommitted(_) => "OperatorInstructionCommitted",
+            MobEventKind::MemberInstructionTargetsRecorded(_) => "MemberInstructionTargetsRecorded",
         }
     }
 }
@@ -9485,7 +9963,7 @@ async fn wait_for_run_terminal(
     run_id: &RunId,
     timeout: Duration,
 ) -> crate::run::MobRun {
-    let timeout = timeout.max(Duration::from_secs(60));
+    let timeout = timeout.max(Duration::from_mins(1));
     let deadline = Instant::now() + timeout;
     loop {
         let run = handle
@@ -11318,7 +11796,7 @@ async fn spawn_live_external_peer_with_transport(
                         let interaction_id = candidate.interaction.id;
                         reply_tasks.spawn(async move {
                             let send_deadline =
-                                tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+                                tokio::time::Instant::now() + std::time::Duration::from_mins(1);
                             loop {
                                 match reply_runtime
                                     .send(CommsCommand::PeerResponse {
@@ -12604,6 +13082,8 @@ async fn seed_operator_execution_residency(handle: &MobHandle, member_session_id
             )),
             effective_profile_override_present: false,
             effective_model_override_present: false,
+            entry_custody: false,
+            created_custody: false,
         },
     )
     .await;
@@ -12629,6 +13109,7 @@ async fn seed_operator_execution_residency(handle: &MobHandle, member_session_id
             ack_engine_version: Some("operator-race-host".to_string()),
             placed_spawn_id: Some(spawn_id),
             provision_operation_id: Some("operator-race-provision".to_string()),
+            definition_wiring_exempt: false,
         },
     )
     .await;
@@ -14776,6 +15257,10 @@ struct PersistentMockBuilder;
 impl SessionAgentBuilder for PersistentMockBuilder {
     type Agent = PersistentMockAgent;
 
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_core::SessionCommsIdentityRoot::NotKept
+    }
+
     async fn build_agent(
         &self,
         req: &CreateSessionRequest,
@@ -14960,6 +15445,10 @@ impl SessionServiceControlExt for PersistedListingSessionService {
 
 #[async_trait]
 impl MobSessionService for PersistedListingSessionService {
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        MobSessionService::session_comms_identity_root(self.inner.as_ref())
+    }
+
     async fn predecessor_tool_restrictions(
         &self,
         session_id: &SessionId,
@@ -15418,6 +15907,10 @@ impl SessionServiceControlExt for InactiveReadSessionService {
 
 #[async_trait]
 impl MobSessionService for InactiveReadSessionService {
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        MobSessionService::session_comms_identity_root(self.inner.as_ref())
+    }
+
     async fn predecessor_tool_restrictions(
         &self,
         session_id: &SessionId,
@@ -16242,6 +16735,10 @@ struct OverlayProbeSessionAgentBuilder {
 impl SessionAgentBuilder for OverlayProbeSessionAgentBuilder {
     type Agent = OverlayProbeSessionAgent;
 
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_core::SessionCommsIdentityRoot::NotKept
+    }
+
     async fn build_agent(
         &self,
         req: &CreateSessionRequest,
@@ -16276,6 +16773,10 @@ struct GatedOverlayProbeSessionAgentBuilder {
 #[async_trait]
 impl SessionAgentBuilder for GatedOverlayProbeSessionAgentBuilder {
     type Agent = OverlayProbeSessionAgent;
+
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        self.inner.session_comms_identity_root()
+    }
 
     async fn build_agent(
         &self,
@@ -17837,6 +18338,10 @@ struct ToolRecordingBuilder {
 #[async_trait]
 impl SessionAgentBuilder for ToolRecordingBuilder {
     type Agent = PersistentMockAgent;
+
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_core::SessionCommsIdentityRoot::NotKept
+    }
 
     async fn build_agent(
         &self,
@@ -20906,6 +21411,8 @@ impl RetirementStartedAnchorCrash {
                     session_id: Some(bridge_session_id.clone()),
                     retiring_peer_endpoint: Some(retiring_peer_endpoint),
                     preserve_machine_topology: true,
+                    rotation: None,
+                    cause: None,
                 },
             })
             .await
@@ -21174,6 +21681,8 @@ async fn test_shutdown_joins_recovered_retirement_worker_before_reply() {
                 session_id: Some(bridge_session_id.clone()),
                 retiring_peer_endpoint: None,
                 preserve_machine_topology: false,
+                rotation: None,
+                cause: None,
             },
         })
         .await
@@ -27496,7 +28005,9 @@ fn test_lifecycle_command_admission_arms_do_not_shadow_mob_machine_guards() {
         ("Stop", "Stop"),
         ("ResumeLifecycle", "Resume"),
         ("Complete", "Complete"),
-        ("Reset", "Reset"),
+        // The reset's admission is its pure preflight input: `ResetToRunning`
+        // itself needs the empty roster its retirement batch leaves.
+        ("Reset", "AdmitReset"),
     ] {
         let arm = mob_command_arm_source(source, command);
         for disallowed in [
@@ -27524,6 +28035,16 @@ fn test_lifecycle_command_admission_arms_do_not_shadow_mob_machine_guards() {
             assert!(
                 arm.contains(&format!("MobMachineInput::{input}")),
                 "MobCommand::{command} must submit MobMachineInput::{input} for command admission before shell mechanics"
+            );
+        }
+        if command == "Reset" {
+            let retirement = include_str!("actor/retirement_io.rs");
+            assert!(
+                arm.contains("self.begin_retirement_batch(")
+                    && retirement.contains("self.handle_reset(")
+                    && source
+                        .contains("prepare_dsl_input_transition(mob_dsl::MobMachineInput::Reset,"),
+                "MobCommand::Reset must commit through MobMachineInput::Reset after member retirement mechanics"
             );
         }
     }
@@ -29701,7 +30222,7 @@ async fn retire_cascade_catches_a_child_forked_while_the_subtree_retires() {
         .outcome()
         .await
         .expect("e outcome");
-    tokio::time::timeout(std::time::Duration::from_secs(60), retiring)
+    tokio::time::timeout(std::time::Duration::from_mins(1), retiring)
         .await
         .expect("retirement finishes")
         .expect("retire task")
@@ -32604,7 +33125,7 @@ async fn spawn_completes_while_a_member_turn_runs_with_a_command_parked_on_it() 
     let mut worker_spec = SpawnMemberSpec::new(ProfileName::from("worker"), worker.clone());
     worker_spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
     tokio::time::timeout(
-        std::time::Duration::from_secs(60),
+        std::time::Duration::from_mins(1),
         handle.spawn_spec(worker_spec),
     )
     .await
@@ -41771,6 +42292,8 @@ async fn test_retire_after_snapshotless_member_head_recovery_removes_old_and_new
                 session_id: Some(replacement.session_id.clone()),
                 retiring_peer_endpoint: Some(replacement_peer_endpoint),
                 preserve_machine_topology: false,
+                rotation: None,
+                cause: None,
             },
         })
         .await
@@ -43462,6 +43985,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                     meerkat_core::skills::SkillName::parse("mob-communication")
                         .expect("valid skill name"),
                 )]),
+                grant_gated: Default::default(),
             },
             keep_alive: false,
             comms_name: Some(test_comms_name("worker", "w-1")),
@@ -49280,7 +49804,7 @@ async fn test_wire_members_batch_materializes_300_by_150_dense_topology_in_secon
     // BuildBuddy lane (observed at roughly 239s versus 145s). Keep the test
     // isolated through nextest and enforce a portable budget that still catches
     // a greater-than-2x regression from the isolated baseline.
-    let max_wire_elapsed = std::time::Duration::from_secs(300);
+    let max_wire_elapsed = std::time::Duration::from_mins(5);
     let wire_started = std::time::Instant::now();
     let report = tokio::time::timeout(max_wire_elapsed, handle.wire_members_batch(edges))
         .await
@@ -61225,7 +61749,7 @@ async fn test_branch_winner_is_selected_only_after_success_allowing_fallback() {
     // authority log inline on the actor, so a 20 ms poll starved the flow's
     // own commits and pushed this run past 60 s on a loaded host. The
     // deadline only bounds a broken run.
-    let outcome = tokio::time::timeout(Duration::from_secs(120), flow.wait_bounded())
+    let outcome = tokio::time::timeout(Duration::from_mins(2), flow.wait_bounded())
         .await
         .expect("branch fallback run reaches terminalization");
     assert!(
@@ -65128,6 +65652,184 @@ async fn test_turn_driven_without_adapter_accepted_at_build_time() {
     assert!(result.is_ok(), "TurnDriven without adapter must succeed");
 }
 
+/// A session spawn in a mob with no runtime is refused typed before anything
+/// of it exists. The mob is created (its profiles are TurnDriven), and the
+/// spawn of a local session member answers `MissingMemberCapability`
+/// (`OutboundCommsRuntime`), the refusal a resume answers for a running mob
+/// that holds one. Nothing was installed: no roster entry, no pending spawn
+/// (whose staging authorizes the member's generated operation owner), no
+/// binding and no profile authority in MobMachine, no session, no journal
+/// row, and the mob keeps running.
+///
+/// RED: drop the guard (`refuse_local_session_member_without_runtime` in the
+/// spawn's preparation): the spawn stages, creates the member's session and
+/// answers Internal ("mob provisioner received generated operation owner
+/// authority without prepared generated bindings").
+#[tokio::test]
+async fn test_turn_driven_without_adapter_refuses_a_session_spawn_typed() {
+    let mut def = sample_definition();
+    for profile in def.profiles.values_mut().filter_map(|b| b.as_inline_mut()) {
+        profile.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    }
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(def, storage.clone())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("a TurnDriven mob with no runtime is created");
+    let journal_before = storage
+        .events
+        .poll(0, usize::MAX)
+        .await
+        .expect("read the journal")
+        .len();
+
+    let refused = tokio::time::timeout(
+        Duration::from_secs(30),
+        handle.spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-no-runtime"),
+            None,
+        ),
+    )
+    .await
+    .expect("the spawn answers");
+    assert!(
+        matches!(
+            &refused,
+            Err(MobError::MissingMemberCapability {
+                member_id,
+                capability: crate::error::MobMemberCapability::OutboundCommsRuntime,
+                ..
+            }) if member_id.as_str() == "w-no-runtime"
+        ),
+        "the spawn is refused typed: {refused:?}"
+    );
+
+    assert!(
+        handle
+            .get_member(&AgentIdentity::from("w-no-runtime"))
+            .await
+            .expect("roster read")
+            .is_none(),
+        "no roster entry"
+    );
+    let state = handle
+        .query_machine_state()
+        .await
+        .expect("machine state after the refusal");
+    let dsl_identity = crate::machines::mob_machine::AgentIdentity::from("w-no-runtime");
+    assert!(
+        !state.pending_spawn_sessions.contains_key(&dsl_identity) && state.pending_spawn_count == 0,
+        "no pending spawn, so no generated operation owner"
+    );
+    assert!(
+        !state.identity_to_runtime.contains_key(&dsl_identity)
+            && !state.member_session_bindings.contains_key(&dsl_identity)
+            && !state
+                .spawn_profile_authority_profile_names
+                .contains_key(&dsl_identity),
+        "no binding and no profile authority"
+    );
+    assert_eq!(service.active_session_count().await, 0, "no session");
+    assert_eq!(
+        storage
+            .events
+            .poll(0, usize::MAX)
+            .await
+            .expect("read the journal")
+            .len(),
+        journal_before,
+        "no journal row"
+    );
+    assert_eq!(
+        handle.status().await.expect("the mob answers"),
+        MobState::Running,
+        "the mob keeps running"
+    );
+}
+
+/// A spawn policy's auto-spawn of a local session member in a mob with no
+/// runtime is refused typed before anything of it exists, as a spawn is. The
+/// mob is created (its profiles are TurnDriven, its worker externally
+/// addressable so that the work's admission does not refuse first), and work
+/// submitted to an identity the policy resolves to a worker answers
+/// `MissingMemberCapability` (`OutboundCommsRuntime`). Nothing was
+/// installed: no roster entry, no pending spawn, no binding and no profile
+/// authority in MobMachine, and no session.
+///
+/// RED: drop the guard from `stage_policy_spawn`: the auto-spawn stages and
+/// provisions, and the provisioner answers Internal.
+#[tokio::test]
+async fn test_turn_driven_without_adapter_refuses_a_policy_auto_spawn_typed() {
+    let mut def = sample_definition();
+    for profile in def.profiles.values_mut().filter_map(|b| b.as_inline_mut()) {
+        profile.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+        profile.external_addressable = true;
+    }
+    let service = Arc::new(MockSessionService::new());
+    let handle = MobBuilder::new(def, MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("a TurnDriven mob with no runtime is created");
+    handle
+        .set_spawn_policy(Some(Arc::new(StaticWorkerSpawnPolicy)))
+        .await
+        .expect("set spawn policy");
+
+    let target = AgentIdentity::from("policy-no-runtime");
+    let refused = tokio::time::timeout(
+        Duration::from_secs(30),
+        handle.submit_work(
+            AgentRuntimeId::initial(target.clone()),
+            FenceToken::new(0),
+            WorkRef::new(),
+            WorkSpec::new(
+                "queued for a policy spawn with no runtime".to_string(),
+                WorkOrigin::External,
+            ),
+        ),
+    )
+    .await
+    .expect("the submission answers");
+    assert!(
+        matches!(
+            &refused,
+            Err(MobError::MissingMemberCapability {
+                member_id,
+                capability: crate::error::MobMemberCapability::OutboundCommsRuntime,
+                ..
+            }) if member_id == &target
+        ),
+        "the policy auto-spawn is refused typed: {refused:?}"
+    );
+    assert!(
+        handle
+            .get_member(&target)
+            .await
+            .expect("roster read")
+            .is_none(),
+        "no roster entry"
+    );
+    let state = handle
+        .query_machine_state()
+        .await
+        .expect("machine state after the refusal");
+    let dsl_identity = crate::machines::mob_machine::AgentIdentity::from("policy-no-runtime");
+    assert!(
+        state.pending_spawn_count == 0
+            && !state.identity_to_runtime.contains_key(&dsl_identity)
+            && !state.member_session_bindings.contains_key(&dsl_identity)
+            && !state
+                .spawn_profile_authority_profile_names
+                .contains_key(&dsl_identity),
+        "no pending spawn, no binding and no profile authority"
+    );
+    assert_eq!(service.active_session_count().await, 0, "no session");
+}
+
 async fn wait_for_start_turn_call_count(
     service: &MockSessionService,
     expected: u64,
@@ -67936,7 +68638,7 @@ async fn no_op_machine_input_does_not_publish_machine_state() {
         !watch.has_changed().expect("watch sender alive"),
         "no-op inputs must not publish a machine-state projection"
     );
-    assert!(*watch.borrow() == before);
+    assert_eq!(*watch.borrow(), before);
 
     handle
         .apply_machine_input_effects(
@@ -69496,7 +70198,11 @@ impl RealCommsSessionService {
             .await
             .insert(session_id.clone(), comms_name.clone());
 
-        if let Some(system_prompt) = req.system_prompt.as_set_prompt() {
+        // As the real builder does: a resume whose prompt is already the
+        // newest prompt row appends nothing.
+        if let Some(system_prompt) = req.system_prompt.as_set_prompt()
+            && !session.newest_prompt_row_is(system_prompt)
+        {
             session.append_system_message(system_prompt.to_string());
         }
         if session.session_metadata().is_none() {
@@ -69550,6 +70256,7 @@ impl RealCommsSessionService {
                             .map(|options| options.application_tool_policy.clone())
                             .unwrap_or(meerkat_core::ApplicationToolPolicyBinding::Unmanaged),
                         active_skills: build.and_then(|options| options.preload_skills.clone()),
+                        grant_gated: Default::default(),
                     },
                     keep_alive: build.map(|options| options.keep_alive).unwrap_or(false),
                     comms_name: build.and_then(|options| options.comms_name.clone()),
@@ -69812,6 +70519,10 @@ impl SessionServiceControlExt for RealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RealCommsSessionService {
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_core::SessionCommsIdentityRoot::NotKept
+    }
+
     async fn predecessor_tool_restrictions(
         &self,
         session_id: &SessionId,
@@ -71262,6 +71973,10 @@ impl SessionServiceControlExt for RuntimeBackedRealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RuntimeBackedRealCommsSessionService {
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_core::SessionCommsIdentityRoot::NotKept
+    }
+
     async fn predecessor_tool_restrictions(
         &self,
         session_id: &SessionId,
@@ -74943,7 +75658,7 @@ async fn test_member_reads_bypass_saturated_actor_command_queue() {
         .try_send(super::scope_gate::RoutedMobCommand::internal(
             super::state::MobCommand::Retire {
                 agent_identity: queued_identity.clone(),
-                redrive: false,
+                redrive: super::state::RetirementRedrive::Plain,
                 target: super::state::RetireTarget::Exact(super::state::RetireMemberIncarnation {
                     agent_identity: queued_identity.clone(),
                     agent_runtime_id: AgentRuntimeId::new(queued_identity, queued_generation),
@@ -75063,7 +75778,7 @@ async fn test_retire_saturated_actor_queue_reports_not_admitted_without_authorit
         .try_send(super::scope_gate::RoutedMobCommand::internal(
             super::state::MobCommand::Retire {
                 agent_identity: queued_identity.clone(),
-                redrive: false,
+                redrive: super::state::RetirementRedrive::Plain,
                 target: super::state::RetireTarget::Exact(super::state::RetireMemberIncarnation {
                     agent_identity: queued_identity.clone(),
                     agent_runtime_id: AgentRuntimeId::new(queued_identity, queued_generation),
@@ -75224,7 +75939,7 @@ async fn test_shutdown_releases_the_supervisor_name_for_a_same_id_successor() {
 /// the operations under test succeed whatever the host load. This bound only
 /// turns a parked actor (an operation waiting behind the held turn) into a
 /// failure instead of a hang.
-const ACTOR_DEADLOCK_BOUND: Duration = Duration::from_secs(60);
+const ACTOR_DEADLOCK_BOUND: Duration = Duration::from_mins(1);
 
 /// The lead's turn is held by the mock executor's typed hold. A steer sent
 /// mid-turn is admitted (its delivery receipt returns) while the turn is
@@ -76840,6 +77555,8 @@ async fn test_stale_external_peer_trust_obligation_cannot_readd_trust_when_machi
             placed_operation_owner_session_id: None,
             effective_profile_override_present: false,
             effective_model_override_present: false,
+            entry_custody: false,
+            created_custody: false,
         },
     )
     .expect("begin spawn exec for stale local member");
@@ -76864,6 +77581,7 @@ async fn test_stale_external_peer_trust_obligation_cannot_readd_trust_when_machi
             ack_engine_version: None,
             placed_spawn_id: None,
             provision_operation_id: None,
+            definition_wiring_exempt: false,
         },
     )
     .expect("spawn stale local member");
@@ -82047,7 +82765,7 @@ fn hybrid_execution_resolution_context() -> meerkat_core::ToolExecutionResolutio
     meerkat_core::ToolExecutionResolutionContext::new(
         meerkat_core::ToolDeadlineChain::new(vec![meerkat_core::ToolDeadlineContributor::finite(
             meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
-            Duration::from_secs(600),
+            Duration::from_mins(10),
         )])
         .expect("valid test deadline chain"),
     )
@@ -88364,11 +89082,26 @@ struct MobRuntimeParitySnapshotSummary {
     identity_runtime_fence_tokens: BTreeMap<String, u64>,
     identity_generation_highwater: BTreeMap<String, u64>,
     identity_generation_highwater_sealed: bool,
+    // Created identity entries: the reserved names and the created custody,
+    // read from the runtime's formal state.
+    identity_entry_tombstones: BTreeSet<String>,
+    identity_entry_unreadable: BTreeSet<String>,
+    spawn_exec_created_custody: BTreeSet<String>,
+    // Identity changes: whether the host holds them, the entries whose
+    // removal or archive retires their member, and each identity's held or
+    // activating construction attempt, read from the runtime's formal state.
+    identity_changes_held: bool,
+    identity_entry_removing: BTreeSet<String>,
+    identity_entry_archiving: BTreeSet<String>,
+    identity_entry_constructions_held: BTreeMap<String, u64>,
+    identity_entry_constructions_activating: BTreeMap<String, u64>,
     member_peer_ids: BTreeMap<String, String>,
     member_peer_endpoints: BTreeMap<String, String>,
     member_prior_peer_endpoints: BTreeMap<String, BTreeSet<String>>,
     member_restore_failures: BTreeMap<String, String>,
     member_restore_failure_codes: BTreeMap<String, String>,
+    member_custody_unrestored: BTreeMap<String, String>,
+    member_custody_unrestored_causes: BTreeMap<String, String>,
     runtime_retire_refusal_codes: BTreeMap<String, String>,
     runtime_retire_refusal_reasons: BTreeMap<String, String>,
     runtime_retire_pending_sessions: BTreeMap<String, String>,
@@ -88424,6 +89157,19 @@ struct MobRuntimeParitySnapshotSummary {
     spawn_profile_authority_provider_params_digests: BTreeMap<String, String>,
     spawn_profile_authority_output_schema_digests: BTreeMap<String, String>,
     spawn_profile_authority_external_addressable: BTreeMap<String, bool>,
+    // Operator instructions: the mob's records and its members' delivery,
+    // read from the runtime's formal state.
+    operator_instruction_revision: BTreeMap<String, u64>,
+    operator_instruction_effect: BTreeMap<String, String>,
+    operator_instruction_digest: BTreeMap<String, String>,
+    operator_instruction_body_bytes: BTreeMap<String, u64>,
+    operator_instruction_target_kind: BTreeMap<String, String>,
+    operator_instruction_target_profile: BTreeMap<String, String>,
+    operator_instruction_target_member: BTreeMap<String, String>,
+    operator_instruction_generation: u64,
+    member_instruction_owed: BTreeMap<String, u64>,
+    member_instruction_recorded: BTreeMap<String, u64>,
+    member_instruction_blocked: BTreeMap<String, String>,
     // Row #320 / #293 / #314 / #351: machine-owned state folded into MobMachine.
     orphan_budget: u64,
     topology_default_policy: String,
@@ -89372,6 +90118,46 @@ async fn mob_runtime_parity_snapshot_summary(
                         .collect::<BTreeMap<_, _>>(),
                 ),
             ),
+            (
+                "member_custody_unrestored",
+                serde_json::to_value(
+                    dsl.member_custody_unrestored
+                        .iter()
+                        .map(|(key, value)| (format!("{key:?}"), format!("{value:?}")))
+                        .collect::<BTreeMap<_, _>>(),
+                ),
+            ),
+            (
+                "member_custody_unrestored_causes",
+                serde_json::to_value(
+                    dsl.member_custody_unrestored_causes
+                        .iter()
+                        .map(|(key, value)| (format!("{key:?}"), format!("{value:?}")))
+                        .collect::<BTreeMap<_, _>>(),
+                ),
+            ),
+            // Identity changes, from the runtime's formal state (the machine
+            // state the actor publishes), keyed by the plain identity.
+            (
+                "identity_changes_held",
+                serde_json::to_value(resume.identity_changes_held),
+            ),
+            (
+                "identity_entry_removing",
+                serde_json::to_value(&resume.identity_entry_removing),
+            ),
+            (
+                "identity_entry_archiving",
+                serde_json::to_value(&resume.identity_entry_archiving),
+            ),
+            (
+                "identity_entry_constructions_held",
+                serde_json::to_value(&resume.identity_entry_constructions_held),
+            ),
+            (
+                "identity_entry_constructions_activating",
+                serde_json::to_value(&resume.identity_entry_constructions_activating),
+            ),
         ] {
             formal_available_fields.insert(
                 name.to_string(),
@@ -89398,6 +90184,24 @@ async fn mob_runtime_parity_snapshot_summary(
             snap.member_restore_failure_codes
                 .iter()
                 .map(|(key, value)| (format!("{key:?}"), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let member_custody_unrestored = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.member_custody_unrestored
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), format!("{value:?}")))
+                .collect()
+        })
+        .unwrap_or_default();
+    let member_custody_unrestored_causes = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.member_custody_unrestored_causes
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), format!("{value:?}")))
                 .collect()
         })
         .unwrap_or_default();
@@ -89577,6 +90381,63 @@ async fn mob_runtime_parity_snapshot_summary(
     let identity_generation_highwater_sealed = dsl_t2
         .as_ref()
         .is_some_and(|snap| snap.identity_generation_highwater_sealed);
+    // Created identity entries, read from the runtime's formal state (the
+    // machine state the actor publishes), as the explicit resume fields are.
+    let (identity_entry_tombstones, identity_entry_unreadable, spawn_exec_created_custody) = {
+        let state = handle.machine_state_watch_rx.borrow();
+        (
+            state
+                .identity_entry_tombstones
+                .iter()
+                .map(|identity| format!("{identity:?}"))
+                .collect::<BTreeSet<_>>(),
+            state
+                .identity_entry_unreadable
+                .iter()
+                .map(|identity| format!("{identity:?}"))
+                .collect::<BTreeSet<_>>(),
+            state
+                .spawn_exec_created_custody
+                .iter()
+                .map(|identity| format!("{identity:?}"))
+                .collect::<BTreeSet<_>>(),
+        )
+    };
+    // Identity changes, read from the runtime's formal state as the created
+    // identity entries are: the hold, the removal and archive marks, and the
+    // held and activating construction attempts with their attempt numbers.
+    let (
+        identity_changes_held,
+        identity_entry_removing,
+        identity_entry_archiving,
+        identity_entry_constructions_held,
+        identity_entry_constructions_activating,
+    ) = {
+        let state = handle.machine_state_watch_rx.borrow();
+        (
+            state.identity_changes_held,
+            state
+                .identity_entry_removing
+                .iter()
+                .map(|identity| format!("{identity:?}"))
+                .collect::<BTreeSet<_>>(),
+            state
+                .identity_entry_archiving
+                .iter()
+                .map(|identity| format!("{identity:?}"))
+                .collect::<BTreeSet<_>>(),
+            state
+                .identity_entry_constructions_held
+                .iter()
+                .map(|(identity, attempt)| (format!("{identity:?}"), *attempt))
+                .collect::<BTreeMap<_, _>>(),
+            state
+                .identity_entry_constructions_activating
+                .iter()
+                .map(|(identity, attempt)| (format!("{identity:?}"), *attempt))
+                .collect::<BTreeMap<_, _>>(),
+        )
+    };
     let host_binding_generation_highwater = dsl_t2
         .as_ref()
         .map(|snap| {
@@ -90063,6 +90924,45 @@ async fn mob_runtime_parity_snapshot_summary(
                 BTreeSet::new(),
             )
         });
+    // Operator instructions, read from the runtime's formal state (the
+    // machine state the actor publishes), as the explicit resume fields are.
+    let formal_state = handle.machine_state_watch_rx.borrow().clone();
+    let operator_instruction_revision = formal_state.operator_instruction_revision.clone();
+    let operator_instruction_effect = formal_state
+        .operator_instruction_effect
+        .iter()
+        .map(|(key, effect)| (key.clone(), format!("{effect:?}")))
+        .collect::<BTreeMap<_, _>>();
+    let operator_instruction_digest = formal_state.operator_instruction_digest.clone();
+    let operator_instruction_body_bytes = formal_state.operator_instruction_body_bytes.clone();
+    let operator_instruction_target_kind = formal_state
+        .operator_instruction_target_kind
+        .iter()
+        .map(|(key, kind)| (key.clone(), format!("{kind:?}")))
+        .collect::<BTreeMap<_, _>>();
+    let operator_instruction_target_profile =
+        formal_state.operator_instruction_target_profile.clone();
+    let operator_instruction_target_member = formal_state
+        .operator_instruction_target_member
+        .iter()
+        .map(|(key, member)| (key.clone(), format!("{member:?}")))
+        .collect::<BTreeMap<_, _>>();
+    let operator_instruction_generation = formal_state.operator_instruction_generation;
+    let member_instruction_owed = formal_state
+        .member_instruction_owed
+        .iter()
+        .map(|(identity, generation)| (format!("{identity:?}"), *generation))
+        .collect::<BTreeMap<_, _>>();
+    let member_instruction_recorded = formal_state
+        .member_instruction_recorded
+        .iter()
+        .map(|(identity, generation)| (format!("{identity:?}"), *generation))
+        .collect::<BTreeMap<_, _>>();
+    let member_instruction_blocked = formal_state
+        .member_instruction_blocked
+        .iter()
+        .map(|(identity, block)| (format!("{identity:?}"), format!("{block:?}")))
+        .collect::<BTreeMap<_, _>>();
 
     Some(MobRuntimeParitySnapshotSummary {
         phase: phase.as_str().to_string(),
@@ -90109,6 +91009,8 @@ async fn mob_runtime_parity_snapshot_summary(
         member_prior_peer_endpoints,
         member_restore_failures,
         member_restore_failure_codes,
+        member_custody_unrestored,
+        member_custody_unrestored_causes,
         runtime_retire_refusal_codes,
         runtime_retire_refusal_reasons,
         runtime_retire_pending_sessions,
@@ -90133,6 +91035,14 @@ async fn mob_runtime_parity_snapshot_summary(
         host_binding_generation_highwater,
         identity_generation_highwater,
         identity_generation_highwater_sealed,
+        identity_entry_tombstones,
+        identity_entry_unreadable,
+        spawn_exec_created_custody,
+        identity_changes_held,
+        identity_entry_removing,
+        identity_entry_archiving,
+        identity_entry_constructions_held,
+        identity_entry_constructions_activating,
         confirmed_host_binding_revocations,
         replacement_host_bind_endpoints,
         replacement_host_binding_generations,
@@ -90157,6 +91067,17 @@ async fn mob_runtime_parity_snapshot_summary(
         spawn_profile_authority_provider_params_digests,
         spawn_profile_authority_output_schema_digests,
         spawn_profile_authority_external_addressable,
+        operator_instruction_revision,
+        operator_instruction_effect,
+        operator_instruction_digest,
+        operator_instruction_body_bytes,
+        operator_instruction_target_kind,
+        operator_instruction_target_profile,
+        operator_instruction_target_member,
+        operator_instruction_generation,
+        member_instruction_owed,
+        member_instruction_recorded,
+        member_instruction_blocked,
         orphan_budget,
         topology_default_policy,
         external_member_rebind_capability,
@@ -90322,6 +91243,20 @@ fn mob_runtime_parity_field_value(
                 .map(|k| (k.clone(), 0u64))
                 .collect(),
         )),
+        "member_custody_unrestored" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_custody_unrestored
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "member_custody_unrestored_causes" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_custody_unrestored_causes
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
         "runtime_retire_refusal_codes" => Some(MobRuntimeParityExprValue::Map(
             snapshot
                 .runtime_retire_refusal_codes
@@ -90359,23 +91294,60 @@ fn mob_runtime_parity_field_value(
         "member_wake_attempts" => Some(MobRuntimeParityExprValue::Map(
             snapshot.member_wake_attempts.clone(),
         )),
-        // Residency bookkeeping the parity snapshot does not project yet:
-        // the parity probes never read it.
+        // Residency and definition-wiring bookkeeping the parity snapshot
+        // does not project yet: the parity probes never read it.
         "member_wake_bound"
-        | "member_host_preparation_pending"
         | "runtime_retire_archive_only"
         | "owed_edge_repairs"
         | "owed_external_edge_repairs"
         | "member_seat_session_unborn"
-        | "unborn_seat_sessions" => Some(MobRuntimeParityExprValue::Set(BTreeSet::new())),
+        | "unborn_seat_sessions"
+        | "member_definition_wiring_exempt"
+        // Identity entries: the parity probes declare none.
+        | "spawn_exec_entry_custody"
+        | "identity_entry_retiring" => Some(MobRuntimeParityExprValue::Set(BTreeSet::new())),
+        // Created identity entries, from the runtime's formal state.
+        "identity_entry_tombstones" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.identity_entry_tombstones.clone(),
+        )),
+        "identity_entry_unreadable" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.identity_entry_unreadable.clone(),
+        )),
+        "spawn_exec_created_custody" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.spawn_exec_created_custody.clone(),
+        )),
+        // Identity changes, from the runtime's formal state.
+        "identity_changes_held" => Some(MobRuntimeParityExprValue::Bool(
+            snapshot.identity_changes_held,
+        )),
+        "identity_entry_removing" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.identity_entry_removing.clone(),
+        )),
+        "identity_entry_archiving" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.identity_entry_archiving.clone(),
+        )),
+        "identity_entry_constructions_held" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.identity_entry_constructions_held.clone(),
+        )),
+        "identity_entry_constructions_activating" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.identity_entry_constructions_activating.clone(),
+        )),
         "member_materialization_epoch"
         | "member_boot_obligation_owed"
+        | "member_host_preparation_causes"
         | "member_rotation_session_ids"
-        | "member_rotation_peer_endpoints" => Some(MobRuntimeParityExprValue::Map(BTreeMap::new())),
+        | "member_rotation_peer_endpoints"
+        | "member_rotation_targets"
+        | "member_rotation_profile_names"
+        | "identity_entry_origins"
+        | "identity_entry_unseated"
+        | "identity_entry_archived_sessions" => Some(MobRuntimeParityExprValue::Map(BTreeMap::new())),
         "member_wake_attempt_sequence" | "member_materialization_drift_count" => {
             Some(MobRuntimeParityExprValue::U64(0))
         }
-        "boot_plan_sealed" => Some(MobRuntimeParityExprValue::Bool(false)),
+        "boot_plan_sealed"
+        // The declared apply's open fact: the parity probes open no apply.
+        | "declared_apply_open" => Some(MobRuntimeParityExprValue::Bool(false)),
         "member_restore_policy" => Some(MobRuntimeParityExprValue::String("OnDemand".to_string())),
         "composition_authority" => Some(MobRuntimeParityExprValue::String(
             "Authoritative".to_string(),
@@ -90651,6 +91623,64 @@ fn mob_runtime_parity_field_value(
                 .spawn_profile_authority_external_addressable
                 .keys()
                 .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        // Operator instructions, from the runtime's formal state.
+        "operator_instruction_revision" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.operator_instruction_revision.clone(),
+        )),
+        "operator_instruction_effect" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .operator_instruction_effect
+                .keys()
+                .map(|key| (key.clone(), 0))
+                .collect(),
+        )),
+        "operator_instruction_digest" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .operator_instruction_digest
+                .keys()
+                .map(|key| (key.clone(), 0))
+                .collect(),
+        )),
+        "operator_instruction_body_bytes" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.operator_instruction_body_bytes.clone(),
+        )),
+        "operator_instruction_target_kind" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .operator_instruction_target_kind
+                .keys()
+                .map(|key| (key.clone(), 0))
+                .collect(),
+        )),
+        "operator_instruction_target_profile" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .operator_instruction_target_profile
+                .keys()
+                .map(|key| (key.clone(), 0))
+                .collect(),
+        )),
+        "operator_instruction_target_member" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .operator_instruction_target_member
+                .keys()
+                .map(|key| (key.clone(), 0))
+                .collect(),
+        )),
+        "operator_instruction_generation" => Some(MobRuntimeParityExprValue::U64(
+            snapshot.operator_instruction_generation,
+        )),
+        "member_instruction_owed" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.member_instruction_owed.clone(),
+        )),
+        "member_instruction_recorded" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.member_instruction_recorded.clone(),
+        )),
+        "member_instruction_blocked" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_instruction_blocked
+                .keys()
+                .map(|key| (key.clone(), 0))
                 .collect(),
         )),
         "externally_addressable_runtime_ids" => Some(MobRuntimeParityExprValue::Set(
@@ -91106,6 +92136,11 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
             format!("session_unavailable_for_resume:{reason:?}")
         }
         MobError::MemberAlreadyExists(_) => "meerkat_already_exists".to_string(),
+        MobError::IdentityMember { .. } => "identity_member".to_string(),
+        MobError::IdentityChangeRefused { refusal } => {
+            format!("identity_change_refused:{}", refusal.kind())
+        }
+        MobError::IdentityArchived { .. } => "identity_archived".to_string(),
         MobError::SpawnCanceled { .. } => "spawn_canceled".to_string(),
         MobError::ResumeProviderParamsRequireResume { .. } => {
             "resume_provider_params_require_resume".to_string()
@@ -91208,6 +92243,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
             "member_durable_tail_unprovable".to_string()
         }
         MobError::MemberCustodyDeferred { .. } => "member_custody_deferred".to_string(),
+        MobError::MobQuarantined { class, .. } => format!("mob_quarantined:{class}"),
         MobError::SpawnMemberAdmissionDenied { .. } => "spawn_member_admission_denied".to_string(),
         MobError::BridgeRequestTimedOut { .. } => "bridge_request_timed_out".to_string(),
         MobError::ForkSourceUnavailable { .. } => "fork_source_unavailable".to_string(),
@@ -93405,6 +94441,7 @@ fn mob_modeled_probe_arguments(
             }
         }
         MobRuntimeParityProbeInput::Respawn => {
+            pinned.insert("agent_identity", mob_modeled_identity(MOB_PARITY_WORKER)?);
             if let Some(member) = mob_modeled_live_member(before, MOB_PARITY_WORKER) {
                 pinned.insert(
                     "agent_runtime_id",
@@ -94214,17 +95251,21 @@ const MOB_PARITY_RETIRE_GAP: &str = "projection gap: every arm needs identity_to
      and the probe's releasing and session_id, which keep their typed defaults with mob_id: with \
      identity and generations projected alone, the kernel would take the no-binding arm where the \
      runtime takes a binding arm";
-const MOB_PARITY_RETIRE_LIVENESS_GAP: &str = "Running and Stopped: every arm needs \
-     identity_to_runtime and identity_runtime_generations, then the binding arms need \
-     member_session_bindings and the defaulted releasing and session_id (see the Retire accepted \
-     differences). Completed: the target is absent, so the row asks RetireAbsent, which has no \
-     Completed arm until the pending MobMachine fix";
-const MOB_PARITY_RETIRE_ABSENT_DEFECT: &str = "defect, machine fix pending: the handle answers the \
-     retire of an absent member outside the machine (handle.rs, `Retirement is idempotent`), and \
-     RetireAbsent, the input the actor submits for an absent member, has no Completed arm. The \
-     fix, a machine-owned RetireAbsent arm from Completed with the handle's absent case routed \
-     through it, is pending in a MobMachine slice; once it lands this row fires that arm and the \
-     entry turns stale";
+const MOB_PARITY_RESPAWN_GAP: &str = "projection gap: RespawnRunning's identity_matches guard \
+     needs identity_to_runtime, which the snapshot does not project; its other guards pass on the \
+     projected pre-state (not_an_identity_entry reads identity_entry_origins, which keeps its \
+     typed default, no entry). The RespawnIdentityEntryRefused twin is blocked on the same \
+     identity_matches and, behind it, on an_identity_entry, which the probed worker, not an \
+     identity entry, fails";
+const MOB_PARITY_RESPAWN_REFUSED_GAP: &str = "refusal on blocked arms: outside Running the only \
+     arm is the RespawnIdentityEntryRefused twin, blocked on identity_matches (identity_to_runtime \
+     is not projected) and, behind it, on an_identity_entry, which the probed worker, not an \
+     identity entry, fails. The runtime refuses the respawn; arms the kernel finds blocked never \
+     count as agreement with a refusal";
+const MOB_PARITY_RESPAWN_LIVENESS_GAP: &str = "Running: RespawnRunning's identity_matches guard \
+     needs identity_to_runtime, which the snapshot does not project (see the Respawn accepted \
+     differences). Stopped and Completed: the only arm is the identity-entry refusal twin, which a \
+     worker's respawn never fires";
 const MOB_PARITY_ADAPTIVE_ONLY_GAP: &str = "kernel gap: every arm's adaptive_lifecycle_drained \
      guard calls mob_machine_adaptive_lifecycle_drained, which the test oracle does not implement \
      (KERNEL_UNIMPLEMENTED_NATIVE_HELPERS); no other guard blocks the projected pre-state";
@@ -94368,24 +95409,25 @@ const ACCEPTED_MOB_PARITY_DIFFERENCES: &[AcceptedMobParityDifference] = &[
         reason: MOB_PARITY_RETIRE_GAP,
     },
     AcceptedMobParityDifference {
-        phase: MobRuntimeParityPhase::Completed,
-        input: SchemaMobMachineInputVariant::Retire,
-        runtime: MobRuntimeParityOutcomeKind::Ok,
-        kernel: AcceptedMobKernelOutcome::NoArm(SchemaMobMachineInputVariant::RetireAbsent),
-        reason: MOB_PARITY_RETIRE_ABSENT_DEFECT,
-    },
-    AcceptedMobParityDifference {
         phase: MobRuntimeParityPhase::Running,
         input: SchemaMobMachineInputVariant::Respawn,
         runtime: MobRuntimeParityOutcomeKind::Ok,
-        kernel: AcceptedMobKernelOutcome::Transition {
-            transition: "RespawnRunning",
-            differing_keys: MOB_PARITY_SPAWN_LADDER_KEYS,
-        },
-        reason: "single-input row: RespawnRunning only exposes the pending spawn; the runtime then \
-                 retires the member and spawns its next generation through inputs the row does not \
-                 replay. To confirm at validation: the differing keys, read from the 2026-10-30 \
-                 reports",
+        kernel: AcceptedMobKernelOutcome::ArmsBlocked,
+        reason: MOB_PARITY_RESPAWN_GAP,
+    },
+    AcceptedMobParityDifference {
+        phase: MobRuntimeParityPhase::Stopped,
+        input: SchemaMobMachineInputVariant::Respawn,
+        runtime: MobRuntimeParityOutcomeKind::Err,
+        kernel: AcceptedMobKernelOutcome::ArmsBlocked,
+        reason: MOB_PARITY_RESPAWN_REFUSED_GAP,
+    },
+    AcceptedMobParityDifference {
+        phase: MobRuntimeParityPhase::Completed,
+        input: SchemaMobMachineInputVariant::Respawn,
+        runtime: MobRuntimeParityOutcomeKind::Err,
+        kernel: AcceptedMobKernelOutcome::ArmsBlocked,
+        reason: MOB_PARITY_RESPAWN_REFUSED_GAP,
     },
     AcceptedMobParityDifference {
         phase: MobRuntimeParityPhase::Running,
@@ -94694,8 +95736,8 @@ const MOB_PARITY_KERNEL_LIVENESS_GAPS: &[(SchemaMobMachineInputVariant, &str)] =
         MOB_PARITY_CANCEL_FLOW_GAP,
     ),
     (
-        SchemaMobMachineInputVariant::Retire,
-        MOB_PARITY_RETIRE_LIVENESS_GAP,
+        SchemaMobMachineInputVariant::Respawn,
+        MOB_PARITY_RESPAWN_LIVENESS_GAP,
     ),
     (
         SchemaMobMachineInputVariant::RetireAll,
@@ -95215,6 +96257,8 @@ async fn test_ensure_member_retain_converges_before_roster_projection() {
                 placed_operation_owner_session_id: None,
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
+                entry_custody: false,
+                created_custody: false,
             },
         )
         .await
@@ -95236,6 +96280,7 @@ async fn test_ensure_member_retain_converges_before_roster_projection() {
                 ack_engine_version: None,
                 placed_spawn_id: None,
                 provision_operation_id: None,
+                definition_wiring_exempt: false,
             },
         )
         .await
@@ -96498,8 +97543,7 @@ async fn spawn_host_daemon_stub(label: &str, live_endpoint: Option<String>) -> H
                     })
                     .expect("serialize unsupported rejection"),
                 };
-                let send_deadline =
-                    tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+                let send_deadline = tokio::time::Instant::now() + std::time::Duration::from_mins(1);
                 loop {
                     match responder_runtime
                         .send(CommsCommand::PeerResponse {
@@ -99212,6 +100256,10 @@ struct StopBoundaryProbeAgent {
 impl SessionAgentBuilder for StopBoundaryProbeBuilder {
     type Agent = StopBoundaryProbeAgent;
 
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        self.inner.session_comms_identity_root()
+    }
+
     async fn build_agent(
         &self,
         req: &CreateSessionRequest,
@@ -99861,8 +100909,8 @@ async fn test_head_canonical_same_member_queue_admissions_serialize_committed_bo
     );
     assert_eq!(
         u32::try_from(session_revision).expect("canonical session version fits u32"),
-        durable.version(),
-        "materialized durable session must retain the canonical head schema version"
+        durable.persisted_envelope_version(),
+        "the canonical head carries the envelope the materialized durable session persists with"
     );
     assert_eq!(
         usize::try_from(message_count).expect("non-negative canonical message count"),
@@ -100575,8 +101623,7 @@ async fn a_placed_peer_drops_a_migrated_members_old_endpoint_after_the_member_tr
     // runs during the row, so it reads what the wake's own repair left.
     let controlling =
         placement_support::create_controlling_mob_with_builder("placed-history", |builder| {
-            builder
-                .with_member_wake_retry_backoff(Duration::from_secs(600), Duration::from_secs(600))
+            builder.with_member_wake_retry_backoff(Duration::from_mins(10), Duration::from_mins(10))
         })
         .await;
     let report = controlling.bind_scripted(&host).await;
@@ -100793,6 +101840,14 @@ mod member_history;
 /// stores (restored member, keyed duplicate, mid-turn refusal).
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod member_instruction_gates;
+/// Operator-instruction target records on a dormant member's session over a
+/// host-store realm: recorded store-only, without a wake.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod operator_instruction_host_store;
+/// Operator instructions on a mob: records, targets, delivery to live,
+/// dormant and unborn members, retire, reset, restart and refusals.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod operator_instruction_rows;
 /// #1390: stop and shutdown await interrupted members' end of turn as typed
 /// signals, concurrently and off the actor loop.
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
@@ -100802,6 +101857,10 @@ mod owned_retirement;
 mod provisional_tail_check;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod resume_bind_custody;
+/// The retire of an identity with no roster incarnation is MobMachine's
+/// answer (`RetireAbsent`) in every phase, never the handle's own.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod retire_absent;
 /// `MobHandle::retire_at_scope` retires the incarnation its delivery scope
 /// names, admitted in every step's own actor command, or nothing.
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]

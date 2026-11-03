@@ -1,0 +1,9 @@
+{
+  "name": "@toolkit-fixtures/source-addon",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.cjs",
+  "scripts": {
+    "install": "node should-not-run.cjs"
+  }
+}

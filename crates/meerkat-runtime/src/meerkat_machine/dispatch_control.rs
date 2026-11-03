@@ -1630,9 +1630,20 @@ impl MeerkatMachine {
                 session_id,
                 request,
             } => crate::stack_relief::box_in_own_frame(|| async move {
+                let target_carries_transcript = self
+                    .switch_target_carries_session_transcript(
+                        &session_id,
+                        request.intent.target_model.as_str(),
+                    )
+                    .await
+                    .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?;
                 Ok(MeerkatMachineCommandResult::SwitchTurnControlResult(
-                    self.apply_switch_turn_request(&session_id, *request)
-                        .await?,
+                    self.apply_switch_turn_request(
+                        &session_id,
+                        *request,
+                        target_carries_transcript,
+                    )
+                    .await?,
                 ))
             }),
             MeerkatMachineCommand::AdmitModelRoutingAssistantTurn { session_id } => {
@@ -2067,10 +2078,16 @@ impl MeerkatMachine {
     /// calls it directly. Extracting it was the point: a second copy of this
     /// sequence would be a second place for the until-changed reconfigure
     /// ordering to drift.
+    ///
+    /// `target_carries_transcript` is the host's fact that the target can
+    /// carry the session's transcript as it stands
+    /// ([`SessionLlmReconfigureHost::switch_target_carries_session_transcript`]);
+    /// generated authority denies a switch onto a target that cannot.
     async fn apply_switch_turn_request(
         &self,
         session_id: &SessionId,
         request: crate::meerkat_machine_types::SwitchTurnRequest,
+        target_carries_transcript: bool,
     ) -> Result<meerkat_core::image_generation::SwitchTurnControlResult, RuntimeControlPlaneError>
     {
         let mut _mutation_guard = Some(
@@ -2103,6 +2120,7 @@ impl MeerkatMachine {
                             .approval_reason
                             .map(routing_switch_approval_reason),
                         realtime_detach_allowed: request.target_realtime.allow_realtime_detach,
+                        target_carries_transcript,
                     },
                     "RequestSwitchTurn",
                 )
@@ -2133,6 +2151,7 @@ impl MeerkatMachine {
                                 .approval_reason
                                 .map(routing_switch_approval_reason),
                             realtime_detach_allowed: request.target_realtime.allow_realtime_detach,
+                            target_carries_transcript,
                         },
                         "RequestSwitchTurn",
                     )
@@ -2670,7 +2689,31 @@ impl MeerkatMachine {
         };
 
         let target_already_applied = hydrated.current_identity == resolved.target_identity;
+        // Whether the target can carry the session's transcript is a
+        // permanent fact, decided before any client for the target is built.
+        // A target that cannot is denied by generated authority below; only
+        // a target that can is proven buildable now, and a failure there is
+        // a retriable hold.
+        let target_carries_transcript = if target_already_applied {
+            true
+        } else {
+            let carries = self
+                .switch_target_carries_session_transcript(session_id, target_model.as_str())
+                .await;
+            match carries {
+                Ok(carries) => carries,
+                Err(error) => {
+                    return Ok(ModelRoutingHandoffRealization::Held {
+                        reason: ModelRoutingHandoffHoldReason::TargetUnresolvable {
+                            target_model,
+                            detail: error.to_string(),
+                        },
+                    });
+                }
+            }
+        };
         if !target_already_applied
+            && target_carries_transcript
             && let Err(error) = host
                 .preflight_target_session_llm_identity(session_id, &resolved.target_identity)
                 .await
@@ -2708,6 +2751,7 @@ impl MeerkatMachine {
                             crate::meerkat_machine_types::ModelRoutingApprovalDisposition::NotRequired,
                         approval_reason: None,
                     },
+                    target_carries_transcript,
                 )
                 .await
             {
@@ -2765,6 +2809,15 @@ impl MeerkatMachine {
                 })
             }
             meerkat_core::image_generation::SwitchTurnControlResult::Denied { reason, .. } => {
+                // A denied request ends here; the session keeps serving on
+                // its current model. `CapabilityPolicy` covers a target that
+                // cannot carry the session's transcript.
+                tracing::warn!(
+                    session_id = %session_id,
+                    target_model = %target_model,
+                    reason = ?reason,
+                    "a committed model-routing request was denied; the session keeps its current model"
+                );
                 let record = meerkat_core::session::model_routing_control::SessionModelRoutingControlRecord::ModelRoutingIntentDenied {
                     request_id: handoff.request_id,
                     originating_run_id: handoff.originating_run_id,
@@ -2836,6 +2889,30 @@ impl MeerkatMachine {
         host.commit_session_model_routing_control_record_durable_first(session_id, record)
             .await
             .map_err(|error| RuntimeControlPlaneError::StoreError(error.to_string()))
+    }
+
+    /// Whether a switch onto `target_model` can carry `session_id`'s
+    /// transcript as it stands, as the reconfigure host decides it
+    /// ([`SessionLlmReconfigureHost::switch_target_carries_session_transcript`])
+    /// before any client for the target is built. A runtime without a
+    /// reconfigure host has no host transcript to judge.
+    async fn switch_target_carries_session_transcript(
+        &self,
+        session_id: &SessionId,
+        target_model: &str,
+    ) -> Result<bool, RuntimeDriverError> {
+        let host = self
+            .llm_reconfigure_host
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match host {
+            Some(host) => {
+                host.switch_target_carries_session_transcript(session_id, target_model)
+                    .await
+            }
+            None => Ok(true),
+        }
     }
 
     async fn current_session_llm_identity(

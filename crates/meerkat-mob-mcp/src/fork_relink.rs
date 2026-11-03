@@ -342,7 +342,7 @@ const WATCH_INTERVAL: Duration = Duration::from_millis(500);
 /// reading that shows the child running again restarts the wait; a status
 /// read that did not observe the child does not. [`relink_child_within`]
 /// takes the ceiling explicitly.
-pub const COMMIT_PENDING_CEILING: Duration = Duration::from_secs(300);
+pub const COMMIT_PENDING_CEILING: Duration = Duration::from_mins(5);
 
 /// Upper bound on one read of a child's run inputs. The read waits for the
 /// child's session driver, which a boundary commit in progress holds; a read
@@ -2643,7 +2643,7 @@ mod tests {
     /// when that reading is machine evidence.
     #[test]
     fn commit_watch_names_commit_never_landed_only_on_machine_evidence() {
-        let ceiling = Duration::from_secs(300);
+        let ceiling = Duration::from_mins(5);
         let start = meerkat_core::time_compat::Instant::now();
         let at = |secs| start + Duration::from_secs(secs);
 
@@ -2702,7 +2702,7 @@ mod tests {
     #[test]
     fn an_in_flight_job_input_is_watched_not_settled() {
         use meerkat_runtime::InputLifecycleState;
-        let ceiling = Duration::from_secs(300);
+        let ceiling = Duration::from_mins(5);
         let start = meerkat_core::time_compat::Instant::now();
         let at = |secs| start + Duration::from_secs(secs);
         let idle = ChildObservation::Settled;

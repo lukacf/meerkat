@@ -17,7 +17,9 @@ mod native;
 mod native_child;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod native_stdio;
-#[cfg(target_os = "macos")]
+// Profile rendering is portable text, so test builds check it on every target.
+#[cfg(any(target_os = "macos", test))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod seatbelt;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use native_child::{NativeChild, SpawnIo, StdioMode};

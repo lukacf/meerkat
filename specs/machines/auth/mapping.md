@@ -8,7 +8,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthMachine`
 
 ### Code Anchors
-- `auth_lease_handle` (machine `AuthMachine`): `crates/meerkat-runtime/src/handles/auth_lease.rs` — per-binding AuthMachine registry; AuthLeaseHandle trait impl drives acquire, observe credential freshness, expiring, expired, refresh, reauth, release, lifecycle event, and wake loop DSL transitions through it
+- `auth_lease_handle` (machine `AuthMachine`): `crates/meerkat-runtime/src/handles/auth_lease.rs` — per-binding AuthMachine registry; AuthLeaseHandle trait impl drives acquire, observe credential freshness, expiring, expired, refresh, reauth, publication refusal, release, source-credential publication, lifecycle event, and wake loop DSL transitions through it
 - `oauth_flow_handle` (machine `AuthMachine`): `crates/meerkat-runtime/src/handles/oauth_flow.rs` — per-binding AuthMachine-owned OAuth browser and device flow lifecycle authority for admit, verify, begin poll, finish poll, consume, expire, valid, expiring, expired, refreshing, and reauth required phases
 
 ### Scenarios
@@ -16,11 +16,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `reauth_release_and_publication` — reauth required from valid/expiring/expired/refreshing, observe credential freshness for released state, release lease, emit lifecycle event, and wake refresh loop publication
 - `oauth_browser_flow_lifecycle` — OAuth browser flow admit, verify, consume, and expire operations stay under the per-binding AuthMachine lifecycle authority
 - `oauth_device_flow_lifecycle` — OAuth device flow admit, verify, begin poll, finish poll, consume, and expire operations stay under the per-binding AuthMachine lifecycle authority
+- `publication_refusal` — a consumer's refusal names the publication it refuses by credential generation and recorded fingerprint: it withdraws the lease to reauth required only while the lease carries that publication, and a late refusal of an earlier or another value, or of a lease already refused or released, changes nothing
+- `source_credential_publication` — a publisher that re-reads its credential value from a source asks for the publication verdict with the value's fingerprint and acquires only on publish: a new value publishes, the recorded value publishes again only when its declared freshness window ran out, and a refused or logged-out value is never published again
 
 ### Transitions
 - `Acquire`
   - anchors: `auth_lease_handle`
-  - scenarios: `acquire_expire_refresh_complete`
+  - scenarios: `acquire_expire_refresh_complete`, `source_credential_publication`
 - `MarkExpiring`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -537,11 +539,83 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReleased`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveSourceCredentialPublicationNewMaterialValid`
+  - anchors: `auth_lease_handle`
+  - scenarios: `source_credential_publication`
+- `ResolveSourceCredentialPublicationNewMaterialExpiring`
+  - anchors: `auth_lease_handle`
+  - scenarios: `source_credential_publication`
+- `ResolveSourceCredentialPublicationNewMaterialExpired`
+  - anchors: `auth_lease_handle`
+  - scenarios: `source_credential_publication`
+- `ResolveSourceCredentialPublicationNewMaterialRefreshing`
+  - anchors: `auth_lease_handle`
+  - scenarios: `source_credential_publication`
+- `ResolveSourceCredentialPublicationNewMaterialReauthRequired`
+  - anchors: `auth_lease_handle`
+  - scenarios: `source_credential_publication`
+- `ResolveSourceCredentialPublicationNewMaterialReleased`
+  - anchors: `auth_lease_handle`
+  - scenarios: `source_credential_publication`
+- `ResolveSourceCredentialPublicationRenewalExpiring`
+  - anchors: `auth_lease_handle`
+  - scenarios: `source_credential_publication`
+- `ResolveSourceCredentialPublicationRenewalExpired`
+  - anchors: `auth_lease_handle`
+  - scenarios: `source_credential_publication`
+- `ResolveSourceCredentialPublicationAlreadyPublishedValid`
+  - anchors: `auth_lease_handle`
+  - scenarios: `source_credential_publication`
+- `ResolveSourceCredentialPublicationAlreadyPublishedRefreshing`
+  - anchors: `auth_lease_handle`
+  - scenarios: `source_credential_publication`
+- `ResolveSourceCredentialPublicationAlreadyPublishedReauthRequired`
+  - anchors: `auth_lease_handle`
+  - scenarios: `source_credential_publication`
+- `ResolveSourceCredentialPublicationAlreadyPublishedReleased`
+  - anchors: `auth_lease_handle`
+  - scenarios: `source_credential_publication`
+- `AcquireFromExpiring`
+  - anchors: `auth_lease_handle`
+  - scenarios: `source_credential_publication`
+- `AcquireFromExpired`
+  - anchors: `auth_lease_handle`
+  - scenarios: `source_credential_publication`
+- `MarkPublicationRefusedFromValid`
+  - anchors: `auth_lease_handle`
+  - scenarios: `publication_refusal`
+- `MarkPublicationRefusedFromExpiring`
+  - anchors: `auth_lease_handle`
+  - scenarios: `publication_refusal`
+- `MarkPublicationRefusedFromExpired`
+  - anchors: `auth_lease_handle`
+  - scenarios: `publication_refusal`
+- `MarkPublicationRefusedFromRefreshing`
+  - anchors: `auth_lease_handle`
+  - scenarios: `publication_refusal`
+- `MarkPublicationRefusedSupersededValid`
+  - anchors: `auth_lease_handle`
+  - scenarios: `publication_refusal`
+- `MarkPublicationRefusedSupersededExpiring`
+  - anchors: `auth_lease_handle`
+  - scenarios: `publication_refusal`
+- `MarkPublicationRefusedSupersededExpired`
+  - anchors: `auth_lease_handle`
+  - scenarios: `publication_refusal`
+- `MarkPublicationRefusedSupersededRefreshing`
+  - anchors: `auth_lease_handle`
+  - scenarios: `publication_refusal`
+- `MarkPublicationRefusedWithdrawnReauthRequired`
+  - anchors: `auth_lease_handle`
+  - scenarios: `publication_refusal`
+- `MarkPublicationRefusedWithdrawnReleased`
+  - anchors: `auth_lease_handle`
+  - scenarios: `publication_refusal`
 
 ### Effects
 - `EmitLifecycleEvent`
   - anchors: (unclaimed)
-  - scenarios: `reauth_release_and_publication`
+  - scenarios: `reauth_release_and_publication`, `publication_refusal`
 - `WakeRefreshLoop`
   - anchors: `auth_lease_handle`
   - scenarios: `reauth_release_and_publication`
@@ -554,6 +628,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CancelOAuthFlowsForRelease`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `SourceCredentialPublicationResolved`
+  - anchors: `auth_lease_handle`
+  - scenarios: `source_credential_publication`
 
 ### Invariants
 - `oauth_flow_membership_consistent`

@@ -1,0 +1,44 @@
+---
+title: "Integration catalogs"
+description: "Inspect recipes, select exact versions and read operation metadata."
+icon: "books"
+---
+
+Connect exposes library profiles and research recipes through read-only discovery APIs. Agents use these descriptions to choose an integration before installation.
+
+## Catalog APIs
+
+| API | Contents |
+| --- | --- |
+| `bundled_adopted_catalog()` | The packaged integration profiles and their operation/configuration metadata |
+| `bundled_recipe_catalog()` | The combined library and discovery records used by the CLI |
+| `bundled_integration_library()` | Versioned recipe bundles with package, server and strategy data |
+| `bundled_discovery_catalog()` | Metadata for integration research |
+
+Use `DiscoveryTools::new` with a public catalog or `DiscoveryTools::from_library` with versioned bundles. The host selects which agents receive the dispatcher.
+
+## Read a recipe
+
+List recipes with `list_integration_recipes`, then pass a returned identity and digest to `read_integration_recipe`. Include `library_digest` when the listing supplies it.
+
+A package identity contains `publisher`, `name` and `version`. Preserve the complete tuple and returned digests. Several versions or strategies can describe the same service.
+
+The combined catalog contains 111 metadata records: 101 library entries and 10 discovery entries. Discovery records provide research starting points. For the service list, see [integration library](/library/adoption).
+
+## Bundle contents
+
+An `IntegrationBundle` joins `plugin.json`, optional `mcp.json` and typed `recipes.json` inputs. It includes source provenance, configuration requirements, account prerequisites, strategies and selected operations.
+
+A strategy may describe a local package, a remote endpoint or setup guidance. The agent makes the concrete selection. Code validates that selection against the package and host contracts before activation.
+
+## Identity and updates
+
+Package metadata, executable artifacts and source revisions have distinct identities. A metadata change produces a new content-derived version. Retain the exact version and digest used for a selection so it can be inspected or migrated later.
+
+Library registration comes from `crates/toolkit-package/src/library.rs`; packaged profile metadata is in `crates/toolkit-package/catalog/adopted.json`. Use the catalog APIs to inspect the registered inventory.
+
+## Runtime tools
+
+After connection, use MCP `tools/list` or Meerkat's tool catalog to inspect the actual operation names and schemas. Apply the selected agent's permissions through the native runtime.
+
+See [discovery API](/api/discovery), [package contracts](/reference/packages) and [native MCP integration](/guides/native-mcp).

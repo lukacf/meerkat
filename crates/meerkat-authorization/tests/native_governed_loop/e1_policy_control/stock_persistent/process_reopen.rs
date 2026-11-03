@@ -254,7 +254,7 @@ async fn read_and_run_fresh_turn(root: &std::path::Path, cleanup: &CleanupSlot, 
             .await
             .unwrap()
     };
-    assert!(pin.selection() == &selected);
+    assert_eq!(pin.selection(), &selected);
     assert!(server.receiver.bodies.lock().unwrap().is_empty());
     assert!(tools.0.lock().unwrap().is_empty());
     let recovered_original = machine
@@ -716,7 +716,7 @@ async fn run_reader(root: &std::path::Path) {
     .await;
     let cleanup = CleanupSlot::new(None);
     let outcome = std::panic::AssertUnwindSafe(tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         read_and_run_fresh_turn(root, &cleanup, &server),
     ))
     .catch_unwind()

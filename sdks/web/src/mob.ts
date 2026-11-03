@@ -838,6 +838,8 @@ const WIRE_MEMBER_CUSTODY_DEFERRAL_CAUSE_VALUES: readonly WireMemberCustodyDefer
   'served_elsewhere',
   'hosting_unavailable',
   'durable_tail_unprovable',
+  'store_unavailable',
+  'store_unreadable',
 ];
 
 /**

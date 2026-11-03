@@ -37,7 +37,9 @@ set -euo pipefail
 
 args=" $* "
 if [[ "${1:-}" == "metadata" ]]; then
-  printf '{}\n'
+  # One Core member and one package under another product's root
+  # (ci/products.json): the gate's build must leave the product out.
+  printf '%s\n' '{"workspace_root": "/ws", "workspace_members": ["c", "m"], "workspace_default_members": ["c"], "packages": [{"id": "c", "name": "meerkat", "manifest_path": "/ws/crates/meerkat/Cargo.toml"}, {"id": "m", "name": "meerkat-meta", "manifest_path": "/ws/meta/crates/meerkat-meta/Cargo.toml"}]}'
   exit 0
 elif [[ "${1:-}" == "build" && "$args" == *" -p mcp-test-server "* ]]; then
   # The fixture artifact must be an existing executable; reuse this script.
@@ -48,6 +50,8 @@ elif [[ "$args" == *" nextest list "* && "$args" == *" --test cold_restart_mob_r
   lane="headcanonical-build"
 elif [[ "$args" == *" nextest list "* && "$args" == *" --workspace "* ]]; then
   [[ "$args" == *" -E kind(lib) or kind(test) "* ]] || exit 98
+  # Core's members only: every other product's package is excluded.
+  [[ "$args" == *" --workspace --exclude meerkat-meta "* ]] || exit 94
   lane="workspace-build"
 elif [[ "$args" == *" --binaries-metadata "* && "$args" == *" -E kind(lib) "* ]]; then
   lane="unit"

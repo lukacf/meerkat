@@ -137,10 +137,44 @@ release plus the `lease_expired` fact.
 | `confirmation_kind` | `self_attest | host_confirmation | principal_confirmation | supervisor_confirmation | reviewer_confirmation`? | Typed completion-policy evidence classification |
 | `confirming_owner_key` | `WorkOwnerKey?` | Distinct confirming owner for supervisor/reviewer policy |
 | `execution_binding_id` | `WorkExecutionBindingId?` | Typed provenance reserved to the execution bridge |
+| `withdraws` | `string[]` | Ids of earlier evidence on the same item that this ref withdraws; omitted when empty |
 
 Evidence refs are pointers. WorkGraph does not own the artifact content.
 Reserved confirmation classifications cannot be minted by generic
 `workgraph_add_evidence` calls.
+
+### Withdrawing Evidence
+
+Evidence is append-only: nothing edits or removes a ref. To withdraw earlier
+evidence, add a new ref whose `withdraws` lists the ids of earlier refs on the
+same item. A ref is withdrawn when a later ref on the item lists its id. It
+stays in `evidence_refs`, so a reader marks it rather than dropping it; Rust
+hosts read the relation with `WorkItem::is_evidence_withdrawn`.
+
+- A withdrawal names only refs that come before it: earlier in
+  `evidence_refs`, or earlier in the same create request. It never names its
+  own id or another withdrawal. When several earlier refs share the id, it
+  withdraws all of them. A ref added later with that id is not withdrawn, so
+  adding evidence again reinstates it. Withdrawing an id again is allowed.
+- Confirmation evidence (a reserved confirmation kind or classification) and
+  execution evidence (`execution_binding_id` set) cannot be withdrawn, and a
+  withdrawing ref carries neither. A withdrawal therefore changes no
+  completion-policy accounting and no execution binding: added to an item, it
+  counts as one more evidence addition (refs given at creation are not
+  counted).
+- Withdrawal needs no permission of its own. Whoever may add evidence to an
+  item (on an attention-scoped surface, a projection with `can_add_evidence`)
+  may withdraw its ordinary evidence, including evidence a host or another
+  agent added. Refs carry no author, so a withdrawal records that a later ref
+  declares the evidence withdrawn, not that its author retracted it.
+- A refused withdrawal is an invalid-input error and writes nothing.
+- A ref without withdrawals keeps the encoding it had before the field
+  existed. A release before 0.9.9 reads items with withdrawals but ignores the
+  field, and drops it when it rewrites the item (any mutation of the item,
+  including a host sweep such as a lease-expiry observation); the withdrawing
+  refs then remain as ordinary evidence. The
+  [upgrade guide](/guides/upgrading) lists the effects on keyed-create
+  replays and attention continuation keys.
 
 ## Events And Durable Facts
 
@@ -296,9 +330,10 @@ turns with active attention, not public RPC methods.
 | `POST` | `/workgraph/attention/list` | List attention bindings |
 
 The `GET` routes use query parameters such as `realm_id`, `namespace`,
-`all_namespaces`, `statuses`, `labels`, `include_terminal`, `limit`, and
-`after_seq` for events. The `POST /workgraph/goal/status` and
-`POST /workgraph/attention/list` routes accept JSON request bodies.
+`all_namespaces`, `statuses`, `labels`, `include_terminal`, `limit`, `cursor`
+for items, ready and snapshot, and `after_seq` for events. The
+`POST /workgraph/goal/status` and `POST /workgraph/attention/list` routes
+accept JSON request bodies.
 
 `all_namespaces` remains present in generic filter wire shapes and CLI syntax,
 but the standard public services hold one namespace grant and reject it. A
@@ -317,30 +352,65 @@ same everywhere:
 | `statuses` | list, snapshot | Keep items whose status is in the list. Checked before the terminality rule, so it does not by itself reveal terminal items |
 | `include_terminal` | list, snapshot | Default `false`: `completed`, `cancelled`, and `failed` items are dropped even when `statuses` names them, and a snapshot omits edges that touch them. `ready` has no such flag because a terminal item is never ready |
 | `labels` | list, ready, snapshot | Conjunction: an item must carry every listed label. Filter on one label to widen the result |
-| `limit` | list, ready, snapshot, events | Default 100, maximum 1,000; a larger value is `INVALID_PARAMS` before the store is read. Ready results are sorted by priority, then creation time, then id before the cut |
-| `after_seq` | events | Only events with `seq` strictly greater than the value; page forward from the last `seq` seen or a snapshot's `event_high_water_mark` |
+| `limit` | list, ready, snapshot, events | Default 100, maximum 1,000; a larger value is `INVALID_PARAMS` before the store is read. List and snapshot results are sorted most recently updated first (`updated_at`, then `id`, both descending) before the cut, so a cut keeps the most recently updated items; ready results are sorted by priority, then creation time, then id |
+| `cursor` | list, ready, snapshot | The `next_cursor` of the previous page of the same read: the page holds the items strictly after it in that read's order. Opaque and versioned, valid with any filter of the same read. A cursor that does not decode, has another version, or names another read is refused (`invalid_arguments`, `INVALID_PARAMS`, HTTP 400). It is not authority: the grant scopes every page |
+| `after_seq` | events | Only events with `seq` strictly greater than the value; page forward from a page's `next_after_seq`, the last `seq` seen, or a snapshot's `event_high_water_mark` |
 | `realm_id`, `namespace` | all | Default to the granted realm and namespace; any other value is rejected |
 | `all_namespaces` | list, snapshot, events | Present on the wire, rejected by the standard single-grant services |
 
-**Atomic evaluation capacity is separate from the response limit.** `ready`
-and `snapshot` fail when the namespace holds more than 1,000 live
-(non-terminal) items. `snapshot` additionally rejects a namespace with more
-than 1,000 edges that touch a live item, or more than 1,000 attention bindings.
-These checks happen before labels, status filters, or output truncation:
-`limit: 1` does not bypass them. They are evaluation ceilings, not
-write/storage maxima.
+**Results report their cut.** The list, ready, and snapshot results of the
+tools, RPC methods, REST routes, and `rkat workgraph` with `--json` carry
+`total_items`, the items that matched before the cursor and `limit` cut them
+(for ready, the ready items), and `truncated`, true when matching items exist
+after the last one returned. A page that ended early names a `next_cursor`
+(present exactly when `truncated` is true, except on a `limit: 0` page) to
+pass back as `cursor`. Every page also reports `anchor_event_seq`, the event
+ledger's high-water mark when the walk began (read before the first page's
+rows; a snapshot uses its own `event_high_water_mark`), and
+`changed_since_anchor`, true when the ledger has moved past it. Events
+results carry `truncated`, `next_after_seq` (the last returned `seq`, present
+exactly when `truncated` is true) and the ledger's `event_high_water_mark`. A
+result without these fields comes from an older server and may still have
+been cut.
 
-Terminal items (`completed`, `cancelled`, `failed`) and edges between two
-terminal items do not count: a terminal item is never ready again, and such an
-edge can no longer change any item's readiness. Both are still read, still
-resolve blockers and child joins, and are still returned with
-`include_terminal`. Closing finished work therefore frees capacity, so a
-long-lived namespace stays usable as its history grows.
+**Walking every page.** A continuation returns the rows strictly after the
+cursor's order key, so rows never shift between pages:
 
-Plan capacity for the live working set across deliberately scoped realms or
-namespaces issued by an embedding Rust host. A caller-supplied namespace string
-cannot widen the service's grant; there is no item-delete, namespace-rename, or
-graph-compaction API.
+- An item that does not change during the walk is on exactly one page.
+- An item that changes during the walk is on at most one list or snapshot
+  page: a write moves it ahead of the cursor. It can repeat only when a write
+  gives it an `updated_at` older than the one it had (the store clock moved
+  back). In ready, an item whose priority changes can cross the cursor either
+  way, and one whose readiness changes during the walk can be missing. A
+  reader that dedupes by `id` and keeps the higher `revision` is safe.
+- An item changed or created after the anchor can be missing from later
+  pages. Those pages say `changed_since_anchor: true`, and events with
+  `after_seq` set to `anchor_event_seq` name every such item.
+  Execution-binding events also move the ledger, so the flag can be true with
+  no public change. The flag covers writes only: readiness that arrives by
+  time passing (`not_before`, `snoozed_until`) writes no event and is not
+  flagged.
+- A first snapshot page holds the edges between its own items; a continuation
+  adds the edges from its items to the items at or before the cursor, so a
+  walk sees every edge between the items it returned once.
+
+`ready` and `snapshot` read one observation of the whole namespace and classify
+readiness against all of it, however many items, edges, and attention bindings
+it holds: an item a snapshot returns is not ready while a blocker the cut left
+out is unresolved. Terminal items (`completed`, `cancelled`, `failed`) are
+never ready again; they still resolve blockers and child joins, and are
+returned with `include_terminal`.
+
+Every list, ready, and snapshot call reads the whole namespace, closed history
+included, so its cost grows with the namespace, and a walk of several pages
+reads it once per page. A trusted in-process Rust caller that needs the whole
+selection in one consistent read, such as live delegation scheduling, uses
+`WorkGraphService::snapshot_uncut`: one observation with every item a snapshot
+filter selects, with no `limit` cut and no cursor (it ignores both). No tool,
+RPC method, REST route or CLI command offers it; they keep the bounded pages. Scope long-lived work across deliberately scoped
+realms or namespaces issued by an embedding Rust host. A caller-supplied
+namespace string cannot widen the service's grant; there is no item-delete,
+namespace-rename, or graph-compaction API.
 
 Items and edges are never deleted. No tool, RPC method, REST route, or CLI
 command unlinks an edge or removes an item; only the trusted attention prune
@@ -351,10 +421,10 @@ superseded item (`to_id`).
 ## CLI
 
 ```bash
-rkat workgraph list [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--json]
+rkat workgraph list [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--cursor <CURSOR>] [--json]
 rkat workgraph show <ID> [--namespace <NS>] [--json]
-rkat workgraph ready [--namespace <NS>] [--label <LABEL>] [--limit <N>] [--json]
-rkat workgraph snapshot [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--json]
+rkat workgraph ready [--namespace <NS>] [--label <LABEL>] [--limit <N>] [--cursor <CURSOR>] [--json]
+rkat workgraph snapshot [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--cursor <CURSOR>] [--json]
 rkat workgraph events [--namespace <NS>] [--all-namespaces] [--after-seq <N>] [--limit <N>] [--json]
 rkat workgraph goal-create <SESSION_ID> <TITLE> [--namespace <NS>] [--description <TEXT>] [--mode <MODE>] [--completion-policy self-attest|host-confirmed] [--json]
 rkat workgraph goal-status <BINDING_ID> [--namespace <NS>] [--json]

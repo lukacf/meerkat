@@ -1,0 +1,57 @@
+---
+title: "Operate an integration"
+description: "Observe the relevant owner, preserve uncertain effects and verify the actual execution surface."
+icon: "gauge"
+---
+
+Use this runbook to activate, observe and recover integrations in your application.
+
+## Before activation
+
+Record the selected package/version/strategy and manifest digest, current configuration/policy references, actual artifact or remote contract identity, host compatibility and missing prerequisites. Confirm the chosen credential owner and account, role intent and current grant.
+
+For a frontend, additionally establish principal admission, conversation mapping, allowed output, current audience and durable inbox/egress. For a device, use its domain-owned validation and safety contract.
+
+## Observe readiness at the owner
+
+Inspect the intended runtime identity and resolved operations, then invoke the selected operation under its policy. Check the same binding after any supported restoration or spawn path.
+
+For a frontend, send a message from an admitted identity and confirm that the permitted reply reaches the selected destination.
+
+## Health projection
+
+| Layer | Useful observation |
+| --- | --- |
+| Package/deployment | Selected versus realized digest, executor identity, pending rollout |
+| Connection | Observed account, auth state and last verification time |
+| Grant/binding | Effective operations/resources, current revisions and stale receipts |
+| Service events | Consumer lag, replay cursor, backpressure and known gaps |
+| Frontend | Admission, conversation and output availability independently |
+| Delivery | Queued, accepted, failed or unknown per part |
+
+Include observation time and failure scope. A healthy process can coexist with pending or uncertain delivery.
+
+## Recovery procedure
+
+<Steps>
+  <Step title="Find the canonical operation">
+    Use the actual owner's exact operation/output key and authorized scope. Preserve the original payload association and last known receipt.
+  </Step>
+  <Step title="Observe before retrying">
+    Determine whether admission, provider entry, acknowledgment or reconciliation committed. A missing client response does not prove rollback.
+  </Step>
+  <Step title="Apply the domain recovery contract">
+    Reconcile an uncertain write. Recover an existing delivery. Revalidate a restored runtime binding. Replace an expired auth challenge only when that ceremony allows it.
+  </Step>
+  <Step title="Report the remaining fact">
+    Separate known failure, pending owner action and unknown external outcome. State which independent work can continue.
+  </Step>
+</Steps>
+
+## Revoke, pause or upgrade
+
+Revoke stops new use at the grant owner without waiting for prompt/catalog refresh. Pause applies frontend admission/observation/control policy. Upgrade validates exact replacement inputs, migrations and current bindings. In-flight effects follow their own drain/cancel/reconciliation contract.
+
+Keep supported diagnostic data bounded and audience-filtered. Tokens, authentication pages, raw provider errors and unrestricted request content do not belong in routine logs.
+
+See [troubleshooting](/operations/troubleshooting) for common symptoms.

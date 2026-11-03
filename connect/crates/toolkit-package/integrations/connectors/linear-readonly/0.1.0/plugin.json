@@ -1,0 +1,69 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "linear-readonly",
+  "version": "0.1.0",
+  "description": "Retained remote MCP recipe with explicit source observations and newcomer prerequisites.",
+  "author": {
+    "name": "Meerkat Toolkit"
+  },
+  "license": "MIT OR Apache-2.0",
+  "extensions": {
+    "ai.rkat.toolkit": {
+      "schema_version": 1,
+      "identity": {
+        "publisher": "meerkat-toolkit",
+        "name": "linear-readonly",
+        "version": "0.1.0"
+      },
+      "display_name": "Linear read-only MCP",
+      "description": "Retained remote MCP recipe with explicit source observations and newcomer prerequisites.",
+      "provenance": {
+        "source": "https://linear.app/docs/mcp",
+        "source_revision": "sha256:6bb73a4cb7951bb333ad81458a0efbb9408cbd85862334fe95d4d0e43c10c4e3",
+        "license": "MIT OR Apache-2.0 for Toolkit-authored recipe metadata only. Provider documentation and hosted service retain their own terms. No implementation is copied.",
+        "notices": [
+          "This package is authored by Meerkat Toolkit, not by the provider.",
+          "No upstream implementation is vendored. Hosted endpoints are mutable services, not pinned executable artifacts.",
+          "Offline recipe validation does not establish installation, authentication, readiness or supported live operations."
+        ],
+        "local_patches": []
+      },
+      "strategies": [
+        {
+          "id": "hosted",
+          "kind": "remote_mcp",
+          "instructions": "Connect to the retained read-only endpoint. The official server supports OAuth 2.1 with dynamic client registration; a permitted API key or bearer token is another route. Select the intended workspace explicitly. Verify current operation schemas, pagination and resource grants before binding.",
+          "sources": [
+            "https://linear.app/docs/mcp"
+          ],
+          "known_requirements": [],
+          "unresolved_details": [
+            "Current endpoint schema, account identity, effective grants and owner verification must be supplied at selection time."
+          ]
+        }
+      ],
+      "known_exports": [
+        {
+          "id": "linear-readonly.service",
+          "role": "service_connector",
+          "description": "Linear read-only MCP; only individually selected and owner-verified capabilities may be bound."
+        }
+      ],
+      "assessments": [
+        {
+          "status": "experimental",
+          "scope": "Retained recipe and source inspection only. Live operation and deployment conformance are unverified.",
+          "source_revision": "sha256:6bb73a4cb7951bb333ad81458a0efbb9408cbd85862334fe95d4d0e43c10c4e3",
+          "assessed_at_unix_ms": 1790772920187,
+          "evidence": [
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "linear",
+              "revision": "sha256:6bb73a4cb7951bb333ad81458a0efbb9408cbd85862334fe95d4d0e43c10c4e3"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

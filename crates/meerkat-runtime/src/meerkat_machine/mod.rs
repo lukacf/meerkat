@@ -1105,7 +1105,7 @@ fn persistent_auth_authorities_for_key(
     let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
     let oauth_flows = Arc::new(
         crate::handles::RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            std::time::Duration::from_secs(10 * 60),
+            std::time::Duration::from_mins(10),
             Arc::clone(&auth_lease),
             store,
         ),
@@ -1256,6 +1256,7 @@ mod predecessor_settlement;
 mod session_management;
 mod session_mutation_gate;
 mod terminal_receipt;
+mod tool_grants;
 mod traits;
 mod visibility;
 
@@ -2489,6 +2490,9 @@ pub enum RunStartHoldReason {
     MobStop,
     /// A restored member waits until its host has published its tools.
     ToolsNotPublished,
+    /// A mob member whose host preparation is owed (a role move its mob
+    /// holds) starts no run until its mob releases it.
+    HostPreparation,
 }
 
 impl RunStartHoldReason {
@@ -2496,6 +2500,7 @@ impl RunStartHoldReason {
         match self {
             Self::MobStop => dsl::RunStartHoldReason::MobStop,
             Self::ToolsNotPublished => dsl::RunStartHoldReason::ToolsNotPublished,
+            Self::HostPreparation => dsl::RunStartHoldReason::HostPreparation,
         }
     }
 }
@@ -3981,7 +3986,7 @@ impl std::fmt::Debug for PendingRuntimeExecutorAttachment {
 /// run's carriers and retrying its terminal while its attachment comes to
 /// serve: one deadline for the whole detached task.
 const SETTLED_RUN_TERMINAL_PUBLICATION_BOUND: std::time::Duration =
-    std::time::Duration::from_secs(60);
+    std::time::Duration::from_mins(1);
 
 /// The runtime-termination reason a kept run settled past its stop's max age
 /// carries to its interaction terminals.
@@ -11486,6 +11491,13 @@ pub struct MeerkatMachineShared {
     execution_custody: Option<Arc<crate::store::RuntimeStoreExecutionClaim>>,
     /// Blob store used by persistent drivers for durable input externalization.
     blob_store: Option<Arc<dyn BlobStore>>,
+    /// The scoped tool grant service over this machine's store (a
+    /// process-local in-memory store when it has none). Shell composition,
+    /// NOT machine state: each grant's lifecycle is its own
+    /// `ToolGrantLifecycleMachine` row.
+    tool_grant_service: Arc<crate::tool_grant::ToolGrantService>,
+    /// The deadline driver of this machine's served sessions' grants.
+    tool_grant_deadlines: crate::tool_grant::ToolGrantDeadlines,
     /// Runtime-owned shell seam for live session LLM reconfiguration I/O.
     llm_reconfigure_host: StdRwLock<Option<Arc<dyn SessionLlmReconfigureHost>>>,
     /// Shared readiness flag mirroring `llm_reconfigure_host.is_some()`.
@@ -13603,10 +13615,16 @@ impl MeerkatMachine {
 
     /// Create an ephemeral adapter (all sessions use EphemeralRuntimeDriver).
     pub fn ephemeral() -> Self {
+        // Without a store, scoped tool grants last for the process.
+        let tool_grant_service = Arc::new(crate::tool_grant::ToolGrantService::new(Arc::new(
+            crate::store::InMemoryRuntimeStore::new(),
+        )));
+        let tool_grant_deadlines =
+            crate::tool_grant::ToolGrantDeadlines::new(Arc::clone(&tool_grant_service));
         let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
         #[cfg(not(target_arch = "wasm32"))]
         let oauth_flows = Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
-            std::time::Duration::from_secs(10 * 60),
+            std::time::Duration::from_mins(10),
             Arc::clone(&auth_lease),
         ));
         let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
@@ -13631,6 +13649,8 @@ impl MeerkatMachine {
                 store: None,
                 execution_custody: None,
                 blob_store: None,
+                tool_grant_service,
+                tool_grant_deadlines,
                 llm_reconfigure_host: StdRwLock::new(None),
                 reconfigure_host_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 member_observation_host: StdRwLock::new(None),
@@ -13866,6 +13886,10 @@ impl MeerkatMachine {
                 .with_execution_custody(execution_custody.clone()),
         );
         let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
+        let tool_grant_service =
+            Arc::new(crate::tool_grant::ToolGrantService::new(Arc::clone(&store)));
+        let tool_grant_deadlines =
+            crate::tool_grant::ToolGrantDeadlines::new(Arc::clone(&tool_grant_service));
         Ok(Self {
             shared: Arc::new(MeerkatMachineShared {
                 native_work_authorization_host: Arc::new(std::sync::OnceLock::new()),
@@ -13884,6 +13908,8 @@ impl MeerkatMachine {
                 pending_session_archive_lease_preparations: StdMutex::new(HashMap::new()),
                 pending_predecessor_settlements: StdMutex::new(HashMap::new()),
                 pending_direct_member_bind_admissions: StdMutex::new(HashMap::new()),
+                tool_grant_service,
+                tool_grant_deadlines,
                 store: Some(store),
                 execution_custody,
                 blob_store: Some(blob_store.unwrap_or_else(|| Arc::new(UnavailableBlobStore))),
@@ -14180,7 +14206,7 @@ impl MeerkatMachine {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 *oauth_slot =
                     Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
-                        std::time::Duration::from_secs(10 * 60),
+                        std::time::Duration::from_mins(10),
                         handle.clone(),
                     ));
                 *auth_slot = generated_runtime_auth_lease_handle(handle.clone());
@@ -14925,6 +14951,8 @@ impl Drop for MeerkatMachineShared {
             entry.tool_surface_gate.retire();
             entry.mcp_observation.retire();
         }
+        // No session of this owner is served any longer.
+        self.tool_grant_deadlines.close();
     }
 }
 

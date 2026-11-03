@@ -201,7 +201,7 @@ async fn member_tools_of(
         )
         .await
         .expect("start a turn");
-    tokio::time::timeout(Duration::from_secs(60), work.wait_bounded(spec))
+    tokio::time::timeout(Duration::from_mins(1), work.wait_bounded(spec))
         .await
         .expect("turn completes within the failure bound")
         .expect("turn succeeds");
@@ -344,7 +344,7 @@ async fn resuming_a_child_after_the_host_withdraws_its_bundle_refuses_typed() {
                 spec.clone(),
             )
             .await?;
-        tokio::time::timeout(Duration::from_secs(60), work.wait_bounded(spec))
+        tokio::time::timeout(Duration::from_mins(1), work.wait_bounded(spec))
             .await
             .map_err(|error| meerkat_mob::MobError::Internal(error.to_string()))?
             .map(|_| ())
@@ -623,7 +623,7 @@ async fn resumed_turn(state: &MobMcpState, mob_id: &str) {
         )
         .await
         .expect("start a turn on the restored member");
-    tokio::time::timeout(Duration::from_secs(60), work.wait_bounded(spec))
+    tokio::time::timeout(Duration::from_mins(1), work.wait_bounded(spec))
         .await
         .expect("turn completes within the failure bound")
         .expect("the restored member builds and runs");
@@ -771,7 +771,7 @@ async fn opted_member_calls(
         )
         .await
         .expect("start a turn");
-    tokio::time::timeout(Duration::from_secs(60), work.wait_bounded(spec))
+    tokio::time::timeout(Duration::from_mins(1), work.wait_bounded(spec))
         .await
         .expect("turn completes within the failure bound")
         .expect("turn succeeds");

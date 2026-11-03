@@ -4702,6 +4702,7 @@ async fn handle_meerkat_run_with_help_tools(
                 config_generation: current_generation,
                 auth_binding: model_resolution.auth_binding,
                 mob_member_binding: None,
+                mob_incarnation: None,
                 keep_alive,
                 checkpointer: None,
                 silent_comms_intents: Vec::new(),
@@ -4739,6 +4740,7 @@ async fn handle_meerkat_run_with_help_tools(
                 },
                 blob_store_override: None,
                 mob_tools: None,
+                grant_gated_tools: None,
             };
             build.apply_generated_create_only_mob_operator_access(
                 ToolCategoryOverride::from_override(input.enable_mob),
@@ -5203,6 +5205,7 @@ async fn handle_meerkat_resume(
             config_generation: current_generation,
             auth_binding: None,
             mob_member_binding: stored_metadata.mob_member_binding.clone(),
+            mob_incarnation: None,
             keep_alive,
             checkpointer: None,
             silent_comms_intents: Vec::new(),
@@ -5241,6 +5244,7 @@ async fn handle_meerkat_resume(
             },
             blob_store_override: None,
             mob_tools: None,
+            grant_gated_tools: None,
         };
         build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::from_override(
             input.enable_mob,
@@ -7455,7 +7459,7 @@ mod tests {
     /// is, which is a different question - at three seconds these failed under
     /// a full-workspace run on a machine that was also compiling, and passed
     /// in 0.13s standalone, which says nothing about locking either way.
-    const NO_DEADLOCK_BOUND: Duration = Duration::from_secs(60);
+    const NO_DEADLOCK_BOUND: Duration = Duration::from_mins(1);
 
     fn bounded_resume_input(session_id: String, tools: Vec<McpToolDef>) -> MeerkatResumeInput {
         MeerkatResumeInput {

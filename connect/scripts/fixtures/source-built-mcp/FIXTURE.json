@@ -1,0 +1,25 @@
+{
+  "files": {
+    "operation.schema.json": {
+      "bytes": 260,
+      "sha256": "4d5eb3040869f7ba6659019eb7e7ad9c327ffb6b93b1e95a6d54707bc0823005"
+    },
+    "package.json": {
+      "bytes": 173,
+      "sha256": "0778a827904911d080090001863031b2c6cdfa96995c4fb756cc3fe8bf33bacb"
+    },
+    "server.cjs": {
+      "bytes": 4003,
+      "sha256": "0083ea5a4e812014792a4b9fa6d928ae6d726e44197003f983b4b036eef246ad"
+    },
+    "should-not-run.cjs": {
+      "bytes": 327,
+      "sha256": "9cefd8d5af8255ebf637aab91e25adc3a45cb5536692d429141dc45d42de1946"
+    },
+    "src/add.c": {
+      "bytes": 1013,
+      "sha256": "e962f17ad20aab939d28deb9e68bc02f946abeb9fe478a94a0c5d35252037446"
+    }
+  },
+  "schema_version": 1
+}

@@ -78,7 +78,7 @@ const DEFERRED_TURN_EVENT_CHANNEL_CAPACITY: usize = 1024;
 /// during the period but is idle at the check, with this input still queued,
 /// counts as parked: an idle session is not working the input.
 #[cfg(all(feature = "runtime-adapter", not(test)))]
-const RETRIED_INPUT_PROGRESS_BOUND: Duration = Duration::from_secs(120);
+const RETRIED_INPUT_PROGRESS_BOUND: Duration = Duration::from_mins(2);
 
 #[cfg(all(feature = "runtime-adapter", test))]
 const RETRIED_INPUT_PROGRESS_BOUND: Duration = Duration::from_secs(2);
@@ -681,11 +681,11 @@ async fn authorized_machine_prepare_lifecycle_transition(
 /// session create + preflight; the send holds the bridge single-flight lock
 /// for its whole duration (relaxation is phase 6). The ADJ-4 single resend
 /// gives an effective 120s ceiling.
-pub(crate) const MATERIALIZE_BRIDGE_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const MATERIALIZE_BRIDGE_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// DEC-R4: the `ReleaseMember` bridge budget (remote quiesce + drain +
 /// commit-first archive; the BindHost 60s precedent).
-pub(crate) const HOST_RELEASE_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const HOST_RELEASE_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// DEC-P6E-8: per-attempt `HardCancelMember` bridge budget. The receiver
 /// withholds ACK until the exact expected run is unbound/terminal, while a
@@ -697,7 +697,7 @@ pub(crate) const HARD_CANCEL_BRIDGE_TIMEOUT: Duration = Duration::from_secs(5);
 /// budget bounds one transport attempt, never the stop: on timeout the
 /// controller resends the same `operation_id`, which the host joins to the
 /// in-flight stop, so the caller always receives the one typed receipt.
-pub(crate) const STOP_MEMBER_RUN_BRIDGE_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const STOP_MEMBER_RUN_BRIDGE_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Exact tracked-input cancellation waits for the member host to durably
 /// fence and, when necessary, quiesce a racing admission. Its transport
@@ -2213,6 +2213,16 @@ pub trait MobProvisioner: Send + Sync {
         None
     }
 
+    /// The live mob operator authority of every member session this
+    /// provisioner built in a local session, which the runtime's read of a
+    /// member session's spawn grant reads (see `MemberSessionAuthorities`). A
+    /// provisioner that builds no local member session has none.
+    fn member_session_authorities(
+        &self,
+    ) -> Option<Arc<super::member_session_authority::MemberSessionAuthorities>> {
+        None
+    }
+
     /// Settle the adapter-local operation binding of the session an explicit
     /// resume just repointed a member away from (its snapshot was lost and a
     /// persisted successor session was selected).
@@ -2429,6 +2439,10 @@ pub struct SessionBackend {
     // the backend binds it on the exact registration of each durable worker
     // it provisions (a host's placed-member materialization binds none).
     durable_resume: Option<super::durable_resume::DurableResumeBinding>,
+    // The live mob operator authority of every member session this backend
+    // provisions, shared by its clones: each member build carries a receiver
+    // for its session (see `provision_member_until_created`).
+    member_session_authorities: Arc<super::member_session_authority::MemberSessionAuthorities>,
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -3404,14 +3418,18 @@ impl MemberSessionDisposalArc {
                 ..
             }) => Ok(MemberSessionDisposalVerdict::RuntimeReleasedOnlyHostOwned),
             // The archive walk never reports the non-persistent-backend
-            // disposal (that is `release_runtime_only`'s arm); reaching it
-            // here is an invariant fault, surfaced typed.
+            // disposal (that is `release_runtime_only`'s arm) nor a
+            // same-session rotation's kept session (that is
+            // `retirement_release_kept_session`'s); reaching either here is
+            // an invariant fault, surfaced typed with the reported disposal.
             Ok(ArchiveDisposalOutcome {
-                disposal: crate::machines::mob_machine::MemberSessionDisposal::RuntimeReleasedOnlyNoDurableSessions,
+                disposal:
+                    disposal @ (crate::machines::mob_machine::MemberSessionDisposal::RuntimeReleasedOnlyNoDurableSessions
+                    | crate::machines::mob_machine::MemberSessionDisposal::KeptForSuccessor),
                 ..
             }) => Err(Self::runtime_archive_error(format!(
-                "member session disposal for {session_id} reported a non-persistent-backend \
-                 verdict from the durable archive walk"
+                "member session disposal for {session_id} reported {disposal:?} \
+                 from the durable archive walk"
             ))),
             Err(SessionError::NotFound { .. }) => Ok(MemberSessionDisposalVerdict::AlreadyArchived),
             Err(error) => Err(error),
@@ -6428,6 +6446,7 @@ impl SessionBackend {
             member_runtime_registration_hook: None,
             member_surface_gate_routes: Default::default(),
             durable_resume: None,
+            member_session_authorities: Arc::default(),
         }
     }
 
@@ -11679,6 +11698,10 @@ mod tests {
 
             #[async_trait::async_trait]
             impl crate::runtime::session_service::MobSessionService for StubService {
+                fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+                    meerkat_core::SessionCommsIdentityRoot::NotKept
+                }
+
                 async fn subscribe_session_activity(
                     &self,
                     _session_id: &CoreSessionId,
@@ -14032,6 +14055,26 @@ impl SessionBackend {
                 workgraph.clone(),
             )));
         }
+        // Every member build carries its external tools inside this runtime's
+        // receiver for its session, whatever the member's mob tools: the
+        // agent factory binds the session's live mob operator authority to
+        // the session's external tools, and the runtime's read of a member
+        // session's spawn grant reads only what the receiver recorded
+        // (`MemberSessionAuthorities`).
+        // The receiver forwards everything else to the tools it wraps; one
+        // that wraps none only observes, and the factory composes the build
+        // as one with no external tools.
+        if let Some(build) = req.create_session.build.as_mut()
+            && let Some(session_id) = build
+                .resume_session
+                .as_ref()
+                .map(|session| session.id().clone())
+        {
+            let receiver = backend
+                .member_session_authorities
+                .receiver(session_id, build.external_tools.take());
+            build.external_tools = Some(Arc::new(receiver));
+        }
         let session_origin = req.session_origin;
         let mut requested_materialization = match session_origin {
             ProvisionSessionOrigin::Fresh => {
@@ -15165,6 +15208,11 @@ impl MobProvisioner for SessionBackend {
         &self,
     ) -> Option<meerkat_runtime::meerkat_machine::MeerkatCompositionSignalDispatcher> {
         self.composition_signal_dispatcher.clone()
+    }
+    fn member_session_authorities(
+        &self,
+    ) -> Option<Arc<super::member_session_authority::MemberSessionAuthorities>> {
+        Some(Arc::clone(&self.member_session_authorities))
     }
     async fn record_reload_publication(
         &self,
@@ -17195,7 +17243,7 @@ impl MultiBackendProvisioner {
         // of seconds; in real deployments it propagates in milliseconds.
         let value = match self
             .supervisor_bridge
-            .send_bridge_command(peer, &command, Duration::from_secs(60))
+            .send_bridge_command(peer, &command, Duration::from_mins(1))
             .await
         {
             Ok(value) => value,
@@ -17730,7 +17778,7 @@ impl MultiBackendProvisioner {
             address,
             bootstrap_token,
             direct_member_incarnation,
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             true,
         )
         .await
@@ -18440,6 +18488,11 @@ impl MobProvisioner for MultiBackendProvisioner {
         &self,
     ) -> Option<meerkat_runtime::meerkat_machine::MeerkatCompositionSignalDispatcher> {
         self.session.composition_signal_dispatcher.clone()
+    }
+    fn member_session_authorities(
+        &self,
+    ) -> Option<Arc<super::member_session_authority::MemberSessionAuthorities>> {
+        Some(Arc::clone(&self.session.member_session_authorities))
     }
     async fn record_reload_publication(
         &self,

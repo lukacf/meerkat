@@ -3568,7 +3568,7 @@ mod tests {
             Duration::from_secs(30),
         );
         Arc::new(if routed {
-            review.with_human_consent(Arc::new(NoConsentRoute), Duration::from_secs(60))
+            review.with_human_consent(Arc::new(NoConsentRoute), Duration::from_mins(1))
         } else {
             review
         })
@@ -5443,6 +5443,10 @@ mod tests {
         #[async_trait::async_trait]
         impl SessionAgentBuilder for DrainBuilder {
             type Agent = DrainAgent;
+
+            fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+                meerkat_core::SessionCommsIdentityRoot::NotKept
+            }
 
             async fn build_agent(
                 &self,

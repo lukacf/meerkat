@@ -329,7 +329,7 @@ async fn member_creation_some_origin_authority_matrix() {
 
     let (retired, retired_session) = spawn("matrix-retired").await;
     tokio::time::timeout(
-        std::time::Duration::from_secs(120),
+        std::time::Duration::from_mins(2),
         super::retire_to_terminal(&handle, &retired),
     )
     .await

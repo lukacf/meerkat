@@ -1,0 +1,179 @@
+---
+title: "Delivery"
+description: "Trusted route resolution and MCP-backed delivery with optional bounded idempotency and fixed-window rate limits."
+icon: "paper-plane"
+---
+
+Meta separates route selection from message dispatch. The runtime owns trusted routing resolutions, rate limiting, bounded delivery history, and optional idempotency. The `router` and `delivery` modules provide the external MCP boundaries.
+
+## Delivery flow
+
+<Steps>
+  <Step title="Resolve">
+    Call `meta/routing/resolve` with a recipient and optional channel, retry, backoff, and rate-limit values. The runtime calls the router module's `routing.resolve` MCP tool, applies any matching runtime-route override, mints a `route_id`, and retains the resulting `RoutingResolution` as trusted state.
+  </Step>
+  <Step title="Send">
+    Call `meta/delivery/send` with the complete trusted `resolution`, a JSON `payload`, and an optional `idempotency_key`.
+  </Step>
+  <Step title="Replay or validate">
+    With the delivery module loaded and a valid key, the runtime first checks for a retained idempotent replay. A matching payload and canonical resolution return the existing record without dispatch. Otherwise, a new send requires the supplied resolution to equal the retained issued resolution for its `route_id`; unknown or modified resolutions are rejected before dispatch.
+  </Step>
+  <Step title="Dispatch and record">
+    For a new send, the runtime applies the resolved rate limit, invokes the delivery module's `delivery.send` MCP tool once, and appends a `DeliveryRecord` to bounded history after a successful boundary call.
+  </Step>
+</Steps>
+
+## Routing contracts
+
+A mutable route override and a resolved route are different types:
+
+```rust
+pub struct RuntimeRoute {
+    pub route_key: String,
+    pub recipient: String,
+    pub channel: Option<String>,
+    pub sink: String,
+    pub target_module: String,
+    pub retry_max: Option<u32>,
+    pub backoff_ms: Option<u64>,
+    pub rate_limit_per_minute: Option<u32>,
+}
+
+pub struct RoutingResolution {
+    pub route_id: String,
+    pub recipient: String,
+    pub channel: String,
+    pub sink: String,
+    pub target_module: String,
+    pub retry_max: u32,
+    pub backoff_ms: u64,
+    pub rate_limit_per_minute: u32,
+}
+```
+
+The request defaults are `channel = "notification"`, `retry_max = 1`, `backoff_ms = 250`, and `rate_limit_per_minute = 2`. Before module and runtime-route overrides, the runtime infers `email` for recipients containing `@`, `sms` for recipients starting with `+`, and `webhook` otherwise.
+
+<Warning>
+`retry_max` and `backoff_ms` currently shape synthetic attempt records; they
+do not cause Meta to retry the MCP call or wait between attempts. A
+non-replayed send that reaches dispatch invokes `delivery.send` once.
+Implement any required real retry/backoff in the application delivery module
+or host policy. See [Delivery records and adapters](#delivery-records-and-adapters).
+</Warning>
+
+These sink strings are routing defaults, not a promise that Meta ships an SMTP, SMS, or webhook adapter. The router module can override the sink and return a `target_module`; a matching runtime route can override both again. The current `meta/delivery/send` contract dispatches only a trusted resolution whose `target_module` is exactly `delivery`. Any other target is rejected before the delivery MCP boundary call, so alternate target values are representable for routing inspection but are not dispatchable. The `delivery` module owns actual dispatch.
+
+Runtime routes can be listed, added, and deleted through:
+
+- `meta/routing/routes/list`
+- `meta/routing/routes/add`
+- `meta/routing/routes/delete`
+
+Runtime routes may use `*` recipient and channel matches. A matching route is applied after the router MCP response.
+
+### Mob-member routes
+
+When the unified runtime reconciles its active roster and the router module is loaded, it manages one route per member:
+
+```rust
+RuntimeRoute {
+    route_key: format!("mob.member.{member_id}"),
+    recipient: member_id,
+    channel: Some("notification".to_string()),
+    sink: "mob_member".to_string(),
+    target_module: "delivery".to_string(),
+    retry_max: None,
+    backoff_ms: None,
+    rate_limit_per_minute: None,
+}
+```
+
+The route key has no channel suffix.
+
+## Optional idempotency
+
+`DeliverySendRequest.idempotency_key` is `Option<String>`:
+
+```rust
+DeliverySendRequest {
+    resolution,
+    payload: serde_json::json!({
+        "subject": "Update",
+        "body": "The work is complete"
+    }),
+    idempotency_key: Some("customer-update-42".to_string()),
+}
+```
+
+When a non-empty key is present, the runtime scopes it as `{route_id}:{idempotency_key}`. A repeat with the same payload and canonical resolution returns the existing `DeliveryRecord` without another boundary call. Reusing the scoped key with a different payload is rejected.
+
+Issued resolutions have a separate cache of at most 512 entries. A new
+dispatch on an evicted route must resolve again. A matching keyed replay can
+outlive route-cache eviction because its idempotency entry retains the
+canonical resolution, but only while the corresponding delivery/idempotency
+record remains retained and the delivery module remains loaded. Modified
+resolutions are rejected on both replay and new-dispatch paths.
+
+This protection is conditional and bounded:
+
+- No key means no idempotency lookup.
+- The index is local to the runtime instance.
+- Delivery history retains at most 200 records.
+- Evicting a record also removes its idempotency entries, so a later retry can
+  dispatch again if its issued route is still retained; otherwise it must
+  resolve again.
+
+Idempotency therefore protects a keyed retry only while the corresponding record remains in the current runtime's bounded history.
+
+## Rate limiting
+
+Each resolution carries `rate_limit_per_minute`. The implementation uses fixed 60-second windows keyed by:
+
+- `route_id`
+- `recipient`
+- `sink`
+- the window start timestamp
+
+The runtime retains counters for the current and previous window. It charges the counter only after the MCP boundary call succeeds. A request at the limit is rejected with `DeliverySendError::RateLimited`.
+
+## Delivery records and adapters
+
+`DeliveryRecord` contains the delivery and route IDs, recipient, sink, target module, original payload, status, attempt records, first and final attempt timestamps, optional idempotency key, and optional `sink_adapter`.
+
+After the single MCP boundary call succeeds, Meta synthesizes
+`retry_max + 1` attempt rows: nonfinal rows are labeled `transient_failure`,
+and the final row carries the record's status. `final_attempt_ms` is computed
+from `first_attempt_ms + backoff_ms * retry_max` (with saturating arithmetic),
+not measured after repeated sends. These rows are not evidence of actual
+retry attempts, observed transient failures, or elapsed backoff. A boundary
+error returns immediately instead of entering a retry loop.
+
+The `sink` comes from routing. The optional `sink_adapter` is recorded only when the delivery module returns a non-empty `adapter` string. Meta does not maintain a fixed built-in adapter inventory in this contract.
+
+Delivery dispatch emits a unified module event with:
+
+- `module: "delivery"`
+- `event_type: "send"`
+- payload fields `delivery_id`, `route_id`, `recipient`, `sink`, `status`, and `attempts`
+
+Query bounded history with `meta/delivery/history`. The request supports optional `recipient` and `sink` filters plus a capped `limit`.
+
+## Clock ordering
+
+Routing and delivery timestamps use a runtime-relative monotonic floor.
+Resolving a route also advances the delivery clock to at least the latest
+merged-event timestamp; subsequent deliveries advance that clock, including
+the synthetic attempt-time calculation above.
+
+`send_delivery` does not independently incorporate timestamps from live
+events appended after route resolution. A send using a retained route can
+therefore receive a timestamp earlier than an event already merged since
+that resolution. Do not infer insertion order across all event sources from
+these timestamps.
+
+## See also
+
+- [Gating](/concepts/gating) - evaluate policy before dispatch
+- [Modules](/concepts/modules) - router and delivery MCP boundaries
+- [Events](/concepts/events) - exact `resolved` and `send` event names
+- [JSON-RPC API](/api/rpc) - routing and delivery methods

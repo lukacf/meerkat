@@ -11,7 +11,7 @@ use super::*;
 use crate::machines::mob_machine as dsl;
 use crate::runtime::{DormantSeatOutcome, MemberRestorePolicy};
 
-const STEP: Duration = Duration::from_secs(60);
+const STEP: Duration = Duration::from_mins(1);
 
 /// A mob over stored member keys with one fresh turn-driven member seated
 /// Dormant: its seat built nothing.

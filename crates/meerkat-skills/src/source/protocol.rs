@@ -230,7 +230,7 @@ impl<C> ExternalSkillSource<C> {
         Self::new_with_source_uuid(
             client,
             SourceUuid::builtin(),
-            Duration::from_secs(300),
+            Duration::from_mins(5),
             SourceHealthThresholds::default(),
         )
     }

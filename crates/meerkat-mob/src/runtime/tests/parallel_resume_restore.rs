@@ -18,7 +18,7 @@ use crate::runtime::builder::restore_pass_probe::{self, RestorePassEvent};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Bound for one step; it only turns a hang into a failure.
-const STEP: Duration = Duration::from_secs(60);
+const STEP: Duration = Duration::from_mins(1);
 
 const MEMBERS: usize = 8;
 
@@ -161,6 +161,10 @@ struct HeldRestoreBuilder {
 #[async_trait]
 impl SessionAgentBuilder for HeldRestoreBuilder {
     type Agent = PersistentMockAgent;
+
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        PersistentMockBuilder.session_comms_identity_root()
+    }
 
     async fn build_agent(
         &self,

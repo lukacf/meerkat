@@ -14,8 +14,8 @@ use crate::types::{
     ObserveLeaseExpiryRequest, ObserveReadinessRequest, PolicyEscalateRequest,
     ProjectedAttentionAuthority, ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkAdmissionKey,
     WorkAttentionBinding, WorkAttentionMode, WorkAttentionStatus, WorkClaim, WorkCompletionPolicy,
-    WorkEdge, WorkEdgeKind, WorkGraphEvent, WorkGraphEventKind, WorkGraphMachineState, WorkItem,
-    WorkItemAdmissionState, WorkItemId, WorkNamespace, WorkStatus,
+    WorkEdge, WorkEdgeKind, WorkEvidenceRef, WorkGraphEvent, WorkGraphEventKind,
+    WorkGraphMachineState, WorkItem, WorkItemAdmissionState, WorkItemId, WorkNamespace, WorkStatus,
 };
 
 /// Machine-owned public error classification surfaced to REST/RPC callers.
@@ -801,6 +801,9 @@ impl WorkGraphMachine {
         let admission_request_digest =
             admission.map(|(_, digest)| wg_dsl::WorkAdmissionDigestRef::from(digest));
         let title = validate_title(request.title)?;
+        for (position, evidence) in request.evidence_refs.iter().enumerate() {
+            validate_evidence_withdrawals(&request.evidence_refs[..position], evidence)?;
+        }
         let status = request.status.unwrap_or_default();
         // The creation policy "a new work item may only start open or blocked"
         // is owned by WorkGraphLifecycleMachine, not this shell. We extract the
@@ -1246,11 +1249,18 @@ impl WorkGraphMachine {
         Ok((item, event))
     }
 
+    /// Append one evidence ref to the item.
+    ///
+    /// A ref that withdraws earlier evidence is checked against the item's
+    /// current refs before anything changes. The check sees the ref as its
+    /// producer stamped it, so goal-confirm evidence is checked with its
+    /// confirmation classification.
     pub fn add_evidence(
         mut item: WorkItem,
         request: AddEvidenceRequest,
         now: DateTime<Utc>,
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
+        validate_evidence_withdrawals(&item.evidence_refs, &request.evidence)?;
         let evidence_kind = request
             .evidence
             .confirmation_kind
@@ -1515,6 +1525,78 @@ fn normalize_labels(labels: BTreeSet<String>) -> Result<BTreeSet<String>, WorkGr
         normalized.insert(label.to_string());
     }
     Ok(normalized)
+}
+
+/// Admission rules of a typed evidence withdrawal, checked against `prior`,
+/// the evidence that precedes `evidence` on its item: the item's refs for an
+/// addition, the earlier refs of the request for a create.
+///
+/// A ref withdraws earlier evidence by listing ids in `withdraws`, and a ref
+/// is withdrawn when a later ref on the item lists its id. Every listed id
+/// must name at least one earlier ref and never the withdrawing ref's own
+/// id; every earlier ref with that id must be ordinary evidence that itself
+/// withdraws nothing (a withdrawal covers every earlier ref with the id).
+/// Withdrawing an id again is allowed.
+///
+/// Confirmation evidence and execution evidence cannot be withdrawn, and a
+/// withdrawing ref carries neither classification. These two rules keep a
+/// withdrawal out of every machine decision: completion-policy accounting
+/// and the execution bridge never read a withdrawn ref, so "withdrawn" stays
+/// derived data over append-only refs, not a lifecycle fact. Withdrawing
+/// confirmation or execution evidence would be a lifecycle change and
+/// belongs to the machines.
+fn validate_evidence_withdrawals(
+    prior: &[WorkEvidenceRef],
+    evidence: &WorkEvidenceRef,
+) -> Result<(), WorkGraphError> {
+    if evidence.withdraws.is_empty() {
+        return Ok(());
+    }
+    if evidence.confirmation_classification().is_some() {
+        return Err(WorkGraphError::InvalidInput(format!(
+            "evidence {} withdraws earlier evidence, so it cannot carry a confirmation classification",
+            evidence.id
+        )));
+    }
+    if evidence.execution_binding_id.is_some() {
+        return Err(WorkGraphError::InvalidInput(format!(
+            "evidence {} withdraws earlier evidence, so it cannot carry execution provenance",
+            evidence.id
+        )));
+    }
+    for target in &evidence.withdraws {
+        if *target == evidence.id {
+            return Err(WorkGraphError::InvalidInput(format!(
+                "evidence {target} cannot withdraw itself"
+            )));
+        }
+        let mut named = false;
+        for earlier in prior.iter().filter(|earlier| earlier.id == *target) {
+            named = true;
+            if earlier.confirmation_classification().is_some() {
+                return Err(WorkGraphError::InvalidInput(format!(
+                    "evidence {target} is confirmation evidence and cannot be withdrawn"
+                )));
+            }
+            if earlier.execution_binding_id.is_some() {
+                return Err(WorkGraphError::InvalidInput(format!(
+                    "evidence {target} is execution evidence and cannot be withdrawn"
+                )));
+            }
+            if !earlier.withdraws.is_empty() {
+                return Err(WorkGraphError::InvalidInput(format!(
+                    "evidence {target} is itself a withdrawal and cannot be withdrawn"
+                )));
+            }
+        }
+        if !named {
+            return Err(WorkGraphError::InvalidInput(format!(
+                "evidence {} withdraws {target}, but no earlier evidence on this item has that id",
+                evidence.id
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Apply a create input and return the new lifecycle state together with the
@@ -2642,6 +2724,7 @@ mod tests {
                     confirmation_kind: Some(WorkEvidenceKind::HostConfirmation),
                     confirming_owner_key: None,
                     execution_binding_id: None,
+                    withdraws: BTreeSet::new(),
                 },
             },
             now,
@@ -2682,6 +2765,7 @@ mod tests {
                 WorkOwnerKey::principal(reviewer).expect("reviewer principal"),
             ),
             execution_binding_id: None,
+            withdraws: BTreeSet::new(),
         };
 
         // One distinct reviewer is short of the quorum: machine refuses close.
@@ -2943,5 +3027,373 @@ mod tests {
             matches!(&err, WorkGraphError::Store(message) if message.contains("revision projection")),
             "rejection must cite the revision projection drift, got: {err:?}"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Evidence withdrawal. These rows build evidence from its wire form, so
+    // they also compile against a `WorkEvidenceRef` without `withdraws`
+    // (serde then drops the relation and every withdrawal is admitted).
+    // ------------------------------------------------------------------
+
+    fn wire_evidence(value: serde_json::Value) -> WorkEvidenceRef {
+        serde_json::from_value(value).expect("evidence ref from its wire form")
+    }
+
+    fn wire_refs(item: &WorkItem) -> serde_json::Value {
+        serde_json::to_value(&item.evidence_refs).expect("evidence refs serialize")
+    }
+
+    fn add_wire_evidence(
+        item: WorkItem,
+        evidence: serde_json::Value,
+        now: DateTime<Utc>,
+    ) -> Result<WorkItem, WorkGraphError> {
+        let expected_revision = item.revision;
+        WorkGraphMachine::add_evidence(
+            item,
+            AddEvidenceRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision,
+                evidence: wire_evidence(evidence),
+            },
+            now,
+        )
+        .map(|(item, _)| item)
+    }
+
+    /// Add each ref of the JSON array `evidence`, in order.
+    fn with_wire_evidence(
+        item: WorkItem,
+        evidence: serde_json::Value,
+        now: DateTime<Utc>,
+    ) -> WorkItem {
+        let serde_json::Value::Array(evidence) = evidence else {
+            panic!("evidence must be a JSON array");
+        };
+        evidence.into_iter().fold(item, |item, evidence| {
+            add_wire_evidence(item, evidence, now).expect("evidence is admitted")
+        })
+    }
+
+    /// The message of the invalid-input refusal of adding `evidence`.
+    fn refused_withdrawal(
+        item: WorkItem,
+        evidence: serde_json::Value,
+        now: DateTime<Utc>,
+    ) -> String {
+        match add_wire_evidence(item, evidence, now) {
+            Err(WorkGraphError::InvalidInput(message)) => message,
+            other => panic!("expected an invalid-input refusal, got {other:?}"),
+        }
+    }
+
+    fn create_with_wire_evidence(
+        evidence_refs: serde_json::Value,
+        now: DateTime<Utc>,
+    ) -> Result<WorkItem, WorkGraphError> {
+        WorkGraphMachine::create_item(
+            CreateWorkItemRequest {
+                title: "create-time withdrawal".to_string(),
+                evidence_refs: serde_json::from_value(evidence_refs)
+                    .expect("evidence refs from their wire form"),
+                ..Default::default()
+            },
+            "realm".to_string(),
+            WorkNamespace::default(),
+            now,
+        )
+        .map(|(item, _)| item)
+    }
+
+    #[test]
+    fn a_withdrawal_is_recorded_on_the_withdrawing_ref() {
+        let now = Utc::now();
+        let item = with_wire_evidence(
+            create("withdrawal", now),
+            serde_json::json!([
+                { "kind": "finding", "id": "e1" },
+                { "kind": "finding", "id": "e2", "withdraws": ["e1"] },
+                // Withdrawing the same id again is admitted too.
+                { "kind": "finding", "id": "e3", "withdraws": ["e1"] }
+            ]),
+            now,
+        );
+        let refs = wire_refs(&item);
+        assert_eq!(refs[1]["withdraws"], serde_json::json!(["e1"]), "{refs}");
+        assert_eq!(refs[2]["withdraws"], serde_json::json!(["e1"]), "{refs}");
+        assert_eq!(
+            refs[0],
+            serde_json::json!({ "kind": "finding", "id": "e1" }),
+            "the withdrawn ref itself is unchanged"
+        );
+    }
+
+    #[test]
+    fn a_withdrawal_of_an_unknown_id_is_refused() {
+        let now = Utc::now();
+        let item = with_wire_evidence(
+            create("unknown target", now),
+            serde_json::json!([{ "kind": "finding", "id": "e1" }]),
+            now,
+        );
+        let message = refused_withdrawal(
+            item,
+            serde_json::json!({ "kind": "finding", "id": "e2", "withdraws": ["e9"] }),
+            now,
+        );
+        assert!(message.contains("no earlier evidence"), "{message}");
+    }
+
+    #[test]
+    fn a_withdrawal_of_its_own_id_is_refused() {
+        // `e1` also names earlier evidence, so only the self rule refuses it.
+        let now = Utc::now();
+        let item = with_wire_evidence(
+            create("self target", now),
+            serde_json::json!([{ "kind": "finding", "id": "e1" }]),
+            now,
+        );
+        let message = refused_withdrawal(
+            item,
+            serde_json::json!({ "kind": "finding", "id": "e1", "withdraws": ["e1"] }),
+            now,
+        );
+        assert!(message.contains("cannot withdraw itself"), "{message}");
+    }
+
+    #[test]
+    fn a_withdrawal_of_a_withdrawal_is_refused() {
+        let now = Utc::now();
+        let item = with_wire_evidence(
+            create("nested target", now),
+            serde_json::json!([
+                { "kind": "finding", "id": "e1" },
+                { "kind": "finding", "id": "e2", "withdraws": ["e1"] }
+            ]),
+            now,
+        );
+        let message = refused_withdrawal(
+            item,
+            serde_json::json!({ "kind": "finding", "id": "e3", "withdraws": ["e2"] }),
+            now,
+        );
+        assert!(message.contains("is itself a withdrawal"), "{message}");
+    }
+
+    #[test]
+    fn a_withdrawal_of_confirmation_evidence_is_refused() {
+        // Both carriers classify a confirmation: the typed field and the
+        // reserved `kind` literal. An id shared by ordinary evidence and a
+        // confirmation still names the confirmation.
+        let now = Utc::now();
+        for earlier in [
+            serde_json::json!([
+                { "kind": "acceptance", "id": "c1", "confirmation_kind": "host_confirmation" }
+            ]),
+            serde_json::json!([{ "kind": "host_confirmation", "id": "c1" }]),
+            serde_json::json!([
+                { "kind": "finding", "id": "c1" },
+                { "kind": "host_confirmation", "id": "c1" }
+            ]),
+        ] {
+            let item = with_wire_evidence(
+                create_with_policy(
+                    "confirmation target",
+                    WorkCompletionPolicy::HostConfirmed,
+                    now,
+                ),
+                earlier,
+                now,
+            );
+            let message = refused_withdrawal(
+                item,
+                serde_json::json!({ "kind": "finding", "id": "e2", "withdraws": ["c1"] }),
+                now,
+            );
+            assert!(message.contains("is confirmation evidence"), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_withdrawal_of_execution_evidence_is_refused() {
+        let now = Utc::now();
+        let item = with_wire_evidence(
+            create("execution target", now),
+            serde_json::json!([{
+                "kind": "mob_flow_run_completed",
+                "id": "x1",
+                "execution_binding_id": "binding-1"
+            }]),
+            now,
+        );
+        let message = refused_withdrawal(
+            item,
+            serde_json::json!({ "kind": "finding", "id": "e2", "withdraws": ["x1"] }),
+            now,
+        );
+        assert!(message.contains("is execution evidence"), "{message}");
+    }
+
+    #[test]
+    fn a_withdrawing_ref_cannot_carry_a_confirmation_classification() {
+        let now = Utc::now();
+        for withdrawal in [
+            serde_json::json!({
+                "kind": "acceptance",
+                "id": "c1",
+                "confirmation_kind": "host_confirmation",
+                "withdraws": ["e1"]
+            }),
+            serde_json::json!({ "kind": "host_confirmation", "id": "c1", "withdraws": ["e1"] }),
+        ] {
+            let item = with_wire_evidence(
+                create_with_policy(
+                    "confirming withdrawal",
+                    WorkCompletionPolicy::HostConfirmed,
+                    now,
+                ),
+                serde_json::json!([{ "kind": "finding", "id": "e1" }]),
+                now,
+            );
+            let message = refused_withdrawal(item, withdrawal, now);
+            assert!(
+                message.contains("cannot carry a confirmation classification"),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_withdrawing_ref_cannot_carry_execution_provenance() {
+        let now = Utc::now();
+        let item = with_wire_evidence(
+            create("executing withdrawal", now),
+            serde_json::json!([{ "kind": "finding", "id": "e1" }]),
+            now,
+        );
+        let message = refused_withdrawal(
+            item,
+            serde_json::json!({
+                "kind": "mob_flow_run_completed",
+                "id": "x1",
+                "execution_binding_id": "binding-1",
+                "withdraws": ["e1"]
+            }),
+            now,
+        );
+        assert!(
+            message.contains("cannot carry execution provenance"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_create_admits_only_withdrawals_of_earlier_refs_in_the_request() {
+        let now = Utc::now();
+        match create_with_wire_evidence(
+            serde_json::json!([
+                { "kind": "finding", "id": "e2", "withdraws": ["e1"] },
+                { "kind": "finding", "id": "e1" }
+            ]),
+            now,
+        ) {
+            Err(WorkGraphError::InvalidInput(message)) => {
+                assert!(message.contains("no earlier evidence"), "{message}");
+            }
+            other => panic!("a withdrawal of a later ref must be refused, got {other:?}"),
+        }
+        let created = create_with_wire_evidence(
+            serde_json::json!([
+                { "kind": "finding", "id": "e1" },
+                { "kind": "finding", "id": "e2", "withdraws": ["e1"] }
+            ]),
+            now,
+        )
+        .expect("a withdrawal of an earlier ref in the request is admitted");
+        assert_eq!(
+            wire_refs(&created)[1]["withdraws"],
+            serde_json::json!(["e1"])
+        );
+    }
+
+    /// Guard: "withdrawn" is derived data. An accepted withdrawal moves the
+    /// machine state exactly as any evidence addition does (revision and
+    /// evidence count) and nothing else: no lifecycle phase, terminal fact or
+    /// confirmation accounting.
+    #[test]
+    fn an_accepted_withdrawal_moves_only_the_revision_and_the_evidence_count() {
+        let now = Utc::now();
+        let assert_counted_only = |before: &WorkItem, after: &WorkItem| {
+            let mut expected = before.machine_state.clone();
+            expected.revision += 1;
+            expected.evidence_count += 1;
+            assert_eq!(after.machine_state, expected);
+            assert_eq!(after.status, before.status);
+            assert_eq!(after.terminal_at, before.terminal_at);
+        };
+
+        // A completed item accepts a withdrawal and stays completed.
+        let item = with_wire_evidence(
+            create("withdrawal after close", now),
+            serde_json::json!([{ "kind": "finding", "id": "e1" }]),
+            now,
+        );
+        let (closed, _) = WorkGraphMachine::close_item(
+            item.clone(),
+            CloseWorkItemRequest {
+                id: item.id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: item.revision,
+                status: WorkStatus::Completed,
+            },
+            now,
+        )
+        .expect("close completed");
+        let withdrawn = add_wire_evidence(
+            closed.clone(),
+            serde_json::json!({ "kind": "finding", "id": "e2", "withdraws": ["e1"] }),
+            now,
+        )
+        .expect("a withdrawal after close is admitted");
+        assert_counted_only(&closed, &withdrawn);
+        assert_eq!(withdrawn.status, WorkStatus::Completed);
+
+        // A host-confirmed item keeps its confirmation through an unrelated
+        // withdrawal and still closes completed.
+        let item = with_wire_evidence(
+            create_with_policy(
+                "withdrawal beside a confirmation",
+                WorkCompletionPolicy::HostConfirmed,
+                now,
+            ),
+            serde_json::json!([
+                { "kind": "acceptance", "id": "c1", "confirmation_kind": "host_confirmation" },
+                { "kind": "finding", "id": "e1" }
+            ]),
+            now,
+        );
+        let withdrawn = add_wire_evidence(
+            item.clone(),
+            serde_json::json!({ "kind": "finding", "id": "e2", "withdraws": ["e1"] }),
+            now,
+        )
+        .expect("an unrelated withdrawal is admitted");
+        assert_counted_only(&item, &withdrawn);
+        let (closed, _) = WorkGraphMachine::close_item(
+            withdrawn.clone(),
+            CloseWorkItemRequest {
+                id: withdrawn.id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: withdrawn.revision,
+                status: WorkStatus::Completed,
+            },
+            now,
+        )
+        .expect("the confirmation still satisfies the completion policy");
+        assert_eq!(closed.status, WorkStatus::Completed);
     }
 }

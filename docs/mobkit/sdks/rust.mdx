@@ -4,7 +4,7 @@ description: "Use Meta as a Rust library: bootstrap runtimes, route module calls
 icon: "code"
 ---
 
-*Mirrored from MobKit main at [56139755207a](https://github.com/lukacf/meerkat-meta/commit/56139755207a5dc2b2fa39ae873ae8f3ea058a6f) on 2026-11-03; MobKit workspace version 0.9.7 at that commit.*
+*Mirrored from MobKit main at [022e8f75aa71](https://github.com/lukacf/meerkat/commit/022e8f75aa7181edf5c6698c077a8d68addd8431) on 2026-11-02; MobKit version 0.9.7 at that commit.*
 
 The Rust crate `meerkat-meta` is the primary interface for Meta. All other interfaces (JSON-RPC, SDKs, console) are built on top of it.
 
@@ -362,7 +362,7 @@ calls them at these points:
   also runs at every build of the member (each wake Core makes), right
   before the build. A start over identities Core already holds calls it for
   none of them until they are built.
-- `after_create` is called once after each seat, fresh life or migration that
+- `after_create` is called after each seat, fresh life or migration that
   ran `customize_build`, with the session the identity is bound to, as at an
   identity's creation. A wake's build never calls it.
 
@@ -379,14 +379,39 @@ its seat's, then its first build's. A respawn of a member that was never
 built does the same: its seat calls `customize_build`, and its build calls
 it again.
 
-`after_create` is best-effort: an error is logged and the seat or build
-stands. The gateway calls it with no lock of the identity held, so once the
-init has settled an `after_create` can call back into the gateway for the
-same identity; during the roster bootstrap the gateway still answers
-`init_in_progress`. The call can come after the operation that seated the
-identity has answered. The context's `model` is the build's model, else the
-model of the profile when the mob definition declares it inline; it is empty
-for a realm-bound profile the build sets no model for.
+`after_create` is best-effort: the seat or build stands whatever it answers.
+The gateway calls it once Core's journal records the seat, with no lock of
+the identity held, so once the init has settled an `after_create` can call
+back into the gateway for the same identity; during the roster bootstrap the
+gateway still answers `init_in_progress`. The call can come after the
+operation that seated the identity has answered; the roster bootstrap's own
+seats are normally told before the init settles (a bootstrap whose journal
+reads fail answers anyway, and the calls follow). Calls for different
+identities run concurrently, up to 16 at once, in no order across
+identities. Calls for one identity keep the journal's order, also across a
+restart: what a stopped gateway still owed an identity (its retirement hook,
+say) comes before the calls this gateway's own steps owe it, which then
+follow the init in the background: the init never waits for what a stopped
+gateway owed. A seat whose incarnation has ended by the time the gateway
+reaches it (the identity was retired, reset or moved since) is not told: its
+retirement is handed to the retirement hook instead.
+
+Each call has a deadline of 30 seconds. A call that has not answered by then
+is made again, at most three times in all; an error it answers is final. A
+call that failed is recorded, reported to the error hook as
+`lifecycle_effect_failed` (effect `after_create`), and not made again; one
+that never answers delays later side effects by at most its bound. Calls are
+attempted at least once: a gateway stopped between the seat and the call
+(killed, or a shutdown whose share of the drain window closed first) makes
+it at its next start when its metadata store is durable (`rpc_gateway` over
+a state directory or a host store realm; `meta_gateway` keeps it in memory,
+so there it holds within the process only), and one stopped during the call
+may make it again, so key what it does by the session. The context's `model`
+is the build's model, else the model of the profile when the mob definition
+declares it inline; it is empty for a realm-bound profile the build sets no
+model for. A call made at a later start reports the identity's roster labels
+and no `system_prompt`: the build that made the seat ended with the stopped
+process.
 `AgentCustomizer::after_create` has a no-op default, so a wrapper that
 overrides only `customize_build` silently drops the SDK's `after_create`
 callback.
@@ -424,6 +449,53 @@ identity bootstrap instead of starting members without their surface. The
 init failure (`-32603`) carries the variant's text, which tells the operator
 to configure the SDK agent customizer and that a pass-through is enough.
 
+### Agent customizer on a legacy constructor
+
+A runtime from a legacy constructor (`UnifiedRuntime::bootstrap` and the
+`bootstrap_with_*` family) prepares its members' builds as the builder and the
+gateways do. Declare the agent customizer on the spec to cover every build:
+
+```rust
+let spec = spec.with_agent_customizer(customizer.clone());
+let mut runtime = UnifiedRuntime::bootstrap(spec, meta_config, timeout).await?;
+// ... compose the identity runtime and its context ...
+runtime
+    .install_and_bootstrap_identity_first_context(context, &roster)
+    .await?;
+```
+
+With the declaration the mob's member builds are wired when the mob is built,
+before it restores anything. A mob a killed process left running restores the
+members that owe work as it starts, before the identity bootstrap: each is
+held until that bootstrap's roster pass publishes its customizer tools, with
+one `customize_build`, and its run continues only with them. From then on
+`customize_build` runs right before each build of an identity's member, and
+the build carries the tools it published. A build made at the mob's lift,
+before the roster pass, is held the same way and customized after it.
+
+The identity bootstrap (`install_and_bootstrap_identity_first_context`, or
+`bootstrap_installed_identity_first_context` and its held variants) installs
+the declared customizer as the identity runtime's own. The identity runtime
+and the `IdentityFirstRuntimeContext` carry that same customizer or none:
+another one is refused there. The context is installed by then, but the
+customizer, its tool registry and the build preparer are not, and the runtime
+shuts down. Declare a customizer only for a runtime that bootstraps an
+identity context: until that bootstrap, an identity member the mob builds is
+held. `activate_without_identity_context` refuses a declaring runtime
+(`InvalidConfig`), and `MobRuntime::bootstrap` refuses a declaring spec, since
+neither would ever release those members.
+`UnifiedRuntimeBuilder` composes its own (`agent_customizer`) and refuses a
+`mob_spec` that declares one.
+
+Without a declaration the identity bootstrap takes the customizer installed on
+the identity runtime (`IdentityRuntime::set_agent_customizer`), else the one
+the context carries, which becomes the runtime's own. That covers the builds
+from the mob's lift on, so a clean restart (the mob stays stopped until the
+identity bootstrap lifts it) is covered, but a crash resume is not: the
+members a killed process left owing work are built at the start, before the
+identity bootstrap, without their tools until their next build. Without any
+customizer the identity bootstrap changes nothing.
+
 ### Member restore
 
 Every roster identity is a member of the mob from ready, and is materialized
@@ -444,6 +516,29 @@ let runtime = UnifiedRuntime::builder()
 Unset, `MemberRestore::OnDemand` applies. The builder also applies it to a
 supplied `mob_spec(...)`; a spec you build yourself takes
 `MobBootstrapSpec::with_member_restore`.
+
+### Members' comms identity root
+
+A member on in-process comms has a key pair of its own, which its agent
+factory keeps under `<root>/.rkat/session_comms_identity`, where `<root>` is
+the factory's `AgentFactory::user_config_root` (the builder's
+`session_identity_config_root(root)` sets it), or under the platform's
+per-user default when the factory has none. The mob seats each dormant member
+under the root its session service reports for its agent builds
+(`MobSessionService::session_comms_identity_root`), so the member's first
+materialization loads the key its seat recorded. A host that builds its own
+spec over a session service on its own factory declares nothing: the service
+reports the factory's root.
+
+`MobBootstrapSpec::with_session_identity_config_root(root)` overrides that
+report, for a service whose report is not where its builds keep the key
+pairs. A declared root that differs from the reported one wins, and the
+bootstrap logs a warning naming both: a member whose first build loads its
+key pair from elsewhere is refused at its first materialization. A session
+service that reports no durable root has every seat refused until a root is
+declared. A session service or agent builder that wraps another forwards
+`session_comms_identity_root` to it; the method has no default, so a wrapper
+without it does not compile.
 
 ### Fork instruction policy
 

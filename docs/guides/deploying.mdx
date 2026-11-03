@@ -37,10 +37,10 @@ release recipe.
 
 Toolchain and native requirements:
 
-- The repository pins Rust `1.94.1` in `rust-toolchain.toml`;
+- The repository pins Rust `1.97.0` in `rust-toolchain.toml`;
   `make install-build-deps` installs exactly that toolchain into a checkout.
-  The published crates declare `rust-version = "1.94.0"`, so
-  `cargo install rkat` needs Rust 1.94 or newer.
+  The published crates declare `rust-version = "1.97.0"`, so
+  `cargo install rkat` needs Rust 1.97 or newer.
 - The default feature set needs a C compiler and libc headers (bundled SQLite
   and a few other C sources compile through the `cc` crate) and nothing else.
   TLS is `rustls`; no OpenSSL development package is required and the release
@@ -310,7 +310,13 @@ more inputs are refused instead of waiting: a governed input, and an input to a
 help session, which is never rebuilt from storage and is refused with
 `help_session_not_resumable`. A turn whose task
 panicked, or whose session the service retired, fails with its error, as does
-a turn its caller drives directly. When `RKAT_WORKER_STACK_BYTES` is unset the
+a turn its caller drives directly. The registration such a stop leaves waiting
+for its reload stays in its machine until that machine reloads it, at the
+session's next registration there, or the process exits. With realm
+persistence, whose hosting claims are file locks, it keeps the session's lock
+until then, so any other machine, in this process or in another, is refused
+the session (`ServedElsewhere`); the stopped host's session service and
+machine also stay in the process until it exits. When `RKAT_WORKER_STACK_BYTES` is unset the
 two process runtimes' threads take 16 MiB, twice the budget, or
 `RUST_MIN_STACK` when that asks for more. They follow the same variable as the
 host: `RKAT_WORKER_STACK_BYTES` sets their thread stack exactly, below 16 MiB
@@ -412,7 +418,7 @@ stages, so the builder's glibc is the runtime's glibc:
 # build stage is the glibc present in the runtime stage.
 ARG DEBIAN_RELEASE=bookworm
 
-FROM rust:1.94-${DEBIAN_RELEASE} AS build
+FROM rust:1.97-${DEBIAN_RELEASE} AS build
 ARG RKAT_VERSION=0.8.32
 # Low-memory defaults for a 16 GB builder; remove both on a large build host.
 # Under 16 GB, also add: --config 'profile.release.package.meerkat-mob.opt-level=0'
@@ -435,7 +441,7 @@ Notes on that file:
 
 - `ARG DEBIAN_RELEASE` is declared before the first `FROM` and used in both
   `FROM` lines, so the two stages cannot drift apart when someone bumps one of
-  them. `rust:1.94-bookworm` matches the pinned toolchain family.
+  them. `rust:1.97-bookworm` matches the pinned toolchain family.
 - `--locked` builds with the `Cargo.lock` shipped inside the `rkat` crate, so
   the container compiles the dependency set the release was tested with.
 - To build from a checkout instead of crates.io (unreleased commits, local
@@ -445,7 +451,7 @@ Notes on that file:
   without that line the checkout lands in `/`). The repository's own
   [`examples/035-mdm-tux-rs/Dockerfile`](https://github.com/lukacf/meerkat/blob/main/examples/035-mdm-tux-rs/Dockerfile)
   does exactly that for the example's binaries, with the same
-  `rust:1.94-bookworm` build stage and `debian:bookworm-slim` runtime stage.
+  `rust:1.97-bookworm` build stage and `debian:bookworm-slim` runtime stage.
 - The companion surfaces are separate crates with the same shape:
   `cargo install meerkat-rpc` (binary `rkat-rpc`), `meerkat-rest`
   (`rkat-rest`), and `meerkat-mcp-server` (`rkat-mcp`).

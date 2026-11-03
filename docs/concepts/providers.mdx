@@ -254,7 +254,7 @@ OpenAI has separate backend/auth pairs:
 | `openai_api` | `api_key`, `static_bearer`, or host authorizer | Public OpenAI API organization/project |
 | `chatgpt_backend` | `managed_chatgpt_oauth` or host-supplied ChatGPT tokens | ChatGPT/Codex subscription and workspace |
 | `azure_openai` | `azure_api_key` | Azure deployment |
-| `copilot` | `github_copilot_oauth` | GitHub Copilot account |
+| `copilot` | `github_copilot_oauth` or `github_copilot_token` | GitHub Copilot account, through the device sign-in or an operator GitHub token |
 
 These are not interchangeable credential paths. A model ID available to an API
 organization may be unavailable to a ChatGPT workspace, and vice versa.
@@ -293,11 +293,11 @@ Rust applications can select only the provider adapters they use:
 <CodeGroup>
 
 ```toml Anthropic-only feature selection
-meerkat = { version = "=0.9.8", default-features = false, features = ["anthropic", "jsonl-store"] }
+meerkat = { version = "=0.9.9", default-features = false, features = ["anthropic", "jsonl-store"] }
 ```
 
 ```toml All providers
-meerkat = { version = "=0.9.8", features = ["all-providers", "jsonl-store"] }
+meerkat = { version = "=0.9.9", features = ["all-providers", "jsonl-store"] }
 ```
 
 </CodeGroup>
@@ -595,7 +595,7 @@ current REST router does not expose a blob-byte fetch route. See
 
 ```toml
 # Exactly pin the pre-1.0 Meerkat crate family.
-meerkat = { version = "=0.9.8", features = ["sqlite-store", "session-store"] }
+meerkat = { version = "=0.9.9", features = ["sqlite-store", "session-store"] }
 ```
 
 The `meerkat` facade enables `anthropic`, `openai`, and `gemini` by

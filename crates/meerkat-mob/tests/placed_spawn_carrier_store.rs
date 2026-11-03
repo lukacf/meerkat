@@ -399,6 +399,8 @@ fn attempt_witnesses(
             )),
             effective_profile_override_present,
             effective_model_override_present,
+            entry_custody: false,
+            created_custody: false,
         },
     )?;
     let pending_write =
@@ -433,6 +435,7 @@ fn attempt_witnesses(
             ack_engine_version: Some(HOST_ENGINE_VERSION.to_string()),
             placed_spawn_id: Some(machine_spawn_id(&spawn_id)),
             provision_operation_id: Some(provision_operation_id.to_string()),
+            definition_wiring_exempt: false,
         },
     )?;
     let commit_write =

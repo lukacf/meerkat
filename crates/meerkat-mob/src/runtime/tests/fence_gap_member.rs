@@ -23,7 +23,7 @@ use meerkat_runtime::store::InputStateRow;
 use meerkat_runtime::store::spi::{SpiRealm, SpiRealmConfig, SpiRuntimeStore};
 
 /// Bound on one step of the row: it only turns a hang into a failure.
-const WAIT: Duration = Duration::from_secs(60);
+const WAIT: Duration = Duration::from_mins(1);
 
 /// How long every acquire fails from the stop on: longer than the agent's
 /// retry backoff plus the realm's 5 s dispatch wait bound (a 2 s self-fence

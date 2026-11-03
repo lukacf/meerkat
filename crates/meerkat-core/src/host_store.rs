@@ -218,7 +218,7 @@ impl FenceTiming {
     pub const MIN_RENEW_INTERVAL: Duration = Duration::from_secs(1);
 
     /// The longest lease a host may choose. A takeover may wait this long.
-    pub const MAX_LEASE: Duration = Duration::from_secs(60 * 60);
+    pub const MAX_LEASE: Duration = Duration::from_hours(1);
 
     /// A timing that renews every `renew_interval` and keeps a holder live
     /// for `lease` after its last acquire or renew. The interval is at least
@@ -905,6 +905,13 @@ pub enum HostStoreError {
         holder: FenceToken,
         remaining: Duration,
     },
+    /// The stored data cannot be served as it is: it does not decode, or it
+    /// fails the store's own integrity check. Nothing was applied, and a
+    /// re-read answers the same until the data is repaired. Core reads it as
+    /// unreadable state (a mob whose restore meets it is quarantined as
+    /// `store_unreadable`), never as an outage that a retry may get past.
+    #[error("corrupt: {0}")]
+    Corrupt(String),
 }
 
 /// The storage interface a host implements for one realm. Core is the only

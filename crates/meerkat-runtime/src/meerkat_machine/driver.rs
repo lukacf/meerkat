@@ -5732,11 +5732,17 @@ impl DriverEntry {
                 error,
             ));
         }
+        // The apply failure's typed reason (a refused scoped tool grant gate)
+        // rides on the staged error, as the live completion paths give it.
+        let mut terminal_error_metadata =
+            meerkat_core::TurnErrorMetadata::runtime_apply_failure(terminal_error.clone());
+        terminal_error_metadata.reason = runtime_apply_failure
+            .as_ref()
+            .and_then(CoreApplyFailureCause::reason)
+            .cloned();
         let terminal_candidate =
             crate::input_state::InteractionTerminalCandidate::MachineTerminalFailure {
-                error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(
-                    terminal_error.clone(),
-                ),
+                error: terminal_error_metadata,
             };
         let completion_batch = if terminal_input_ids.is_empty() {
             None
@@ -13505,19 +13511,15 @@ mod recovery_tests {
         driver
             .mark_interaction_terminal_outboxes_published(&input_id, &receipts)
             .await
-            .map_or_else(
-                |error| match error {
-                    // The seeded row never received a machine-owned terminal
-                    // seed, so post-publication archiving classifies it as
-                    // non-quiescent. The publication CAS itself has already
-                    // committed, which is the delivery step under test.
-                    RuntimeDriverError::Internal(ref reason)
-                        if reason.contains("terminal-obligation inputs were durably quiescent") => {
-                    }
-                    other => panic!("repaired batch must publish: {other}"),
-                },
-                |()| (),
-            );
+            .unwrap_or_else(|error| match error {
+                // The seeded row never received a machine-owned terminal
+                // seed, so post-publication archiving classifies it as
+                // non-quiescent. The publication CAS itself has already
+                // committed, which is the delivery step under test.
+                RuntimeDriverError::Internal(ref reason)
+                    if reason.contains("terminal-obligation inputs were durably quiescent") => {}
+                other => panic!("repaired batch must publish: {other}"),
+            });
         let durable_published = store
             .load_input_states_strict(&runtime_id)
             .await

@@ -1,0 +1,87 @@
+---
+title: "Reusable management UI"
+description: "Render host-owned connection, frontend, package and setup state without adding another lifecycle owner."
+icon: "window-maximize"
+---
+
+`@rkat/toolkit/ui` provides framework-free DOM components for connection management. Import its browser entrypoint separately from the Node service connectors.
+
+Your application supplies authenticated state, command handlers and protected sign-in controls. For an integrated setup conversation, keep the view connected to the application's native setup session.
+
+```ts
+import { mountToolkitView } from "@rkat/toolkit/ui";
+import type { ControlRequest, ToolkitSnapshot } from "@rkat/toolkit/ui";
+import "@rkat/toolkit/ui/style.css";
+
+// Application-supplied functions, not Toolkit RPC methods.
+declare const viewerScope: string;
+declare const readProjection: () => Promise<ToolkitSnapshot>;
+declare const submitControl: (request: ControlRequest) => Promise<void>;
+
+const root = document.querySelector<HTMLElement>("#connections");
+if (!root) throw new Error("Missing connection panel");
+
+const view = mountToolkitView(root, {
+  scope: viewerScope,
+  dispatch: submitControl,
+});
+view.update(await readProjection());
+// Call view.dispose() when the route is removed.
+```
+
+## Projection contract
+
+Each `ToolkitSnapshot` is a complete projection for one authenticated scope with a strictly increasing safe-integer presentation revision. Old or equal revisions are ignored; a different scope is refused. Dispose and remount when the authenticated viewer changes.
+
+The host authenticates and filters all returned state. Scope and revision checks prevent accidental mixing; they are not authentication. Status text and tone are host observations. A `ready` presentation tone does not calculate readiness.
+
+The renderer clones and validates the snapshot, stages the next view and advances its accepted revision only after a complete render. A malformed projection keeps the previous accepted view and does not dispatch or relabel work as failed.
+
+## Package exports and account instances
+
+A package export describes a capability. Its `id` is distinct from the IDs of
+connections or frontends created from it. Hosts supply the relationship explicitly:
+
+```ts
+const serviceExport = {
+  kind: "service" as const,
+  id: "mail",
+  label: "Mail access",
+  status: { tone: "ready" as const, text: "Package active" },
+  instanceIds: ["work-mail", "personal-mail"],
+};
+```
+
+Each service reference must identify a connection in the same package and
+snapshot; each frontend reference must identify a frontend. One export can
+reference multiple instances. This presentation contract assigns an instance to
+at most one export of its role. Remove references and filtered-out instances in
+the same update. Invalid references reject the complete update and preserve the
+previous accepted view.
+
+Package navigation displays the target account, or frontend endpoint and audience.
+It changes focus only and submits no owner action. Existing projections can omit
+`instanceIds`, but then show no package-to-instance links. There is no ID-based
+fallback; hosts must add explicit references to retain those links.
+
+## Owner-bound controls
+
+Only supplied `OwnerControl` entries become buttons. Each includes its owner reference/revision and offered action correlation. The callback receives the exact displayed control and snapshot revision. The host must authenticate the current actor and revalidate permission, target, attempt and effect at the owner.
+
+The UI submits an offer once per mount and disables duplicate occurrences. Callback acknowledgment means submission only. A throw or rejection shows uncertain acknowledgment, does not retry, and cannot prove the effect failed. Only a new owner projection can report the outcome or offer a permitted recovery action.
+
+The host provides durable replay protection across remounts. Disposing the view does not cancel work, revoke access or retire a human-authentication attempt.
+
+## Sign-in handoff
+
+A user-action card may show `authorizationOrigin` and `requestedAccountLabel` as inert context. The origin must be a canonical HTTP(S) origin without a path, query, fragment or user information. The projection rejects unknown fields, including the former `authorizationUrl`; control requests carry no URL. Hosts remain responsible for excluding secrets from permitted display strings.
+
+The **Review sign-in** control dispatches only the exact owner/action reference. The host must provide a protected human-only presenter for the full destination and consent, or omit the control. The shared panel does not open a browser, handle a callback or own an authentication attempt. Its disposal and acknowledgment do not cancel or complete native authentication.
+
+## Catalog and accessibility
+
+Hosts can provide inert service/frontend descriptions, literal text search, categories and a navigation-only manual-setup callback. Literal catalog filtering is a user browsing feature, not agent intent resolution or automatic package choice.
+
+The UI maintains contextual headings and control labels, preserves relevant keyboard focus, and uses host-supplied concise announcements in a polite live region. Status remains visible text without relying on animation, color or popups.
+
+There is no polling, cookie, local-storage or network owner inside the renderer. Hosts feed authenticated events or bounded reads into `update`. The canonical source contracts are `sdk/typescript/UI.md` and `sdk/typescript/src/ui/model.ts`.

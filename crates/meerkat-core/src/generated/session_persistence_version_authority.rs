@@ -3,9 +3,10 @@
 
 use std::fmt;
 
-pub const SESSION_VERSION: u32 = 4;
+pub const SESSION_VERSION: u32 = 5;
 pub const STORED_INPUT_STATE_VERSION: u32 = 8;
 pub const SESSION_METADATA_SCHEMA_VERSION: u32 = 2;
+pub const SESSION_ENVELOPE_BASELINE_VERSION: u32 = 4;
 pub const STORED_INPUT_STATE_BASELINE_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +70,17 @@ pub fn session_metadata_schema_version() -> u32 {
 /// The version one row is written with: the current version when it
 /// carries a fact only the current version can read, the baseline otherwise.
 #[must_use]
+pub fn session_envelope_version_for_document(carries_current_only_facts: bool) -> u32 {
+    if carries_current_only_facts {
+        SESSION_VERSION
+    } else {
+        SESSION_ENVELOPE_BASELINE_VERSION
+    }
+}
+
+/// The version one row is written with: the current version when it
+/// carries a fact only the current version can read, the baseline otherwise.
+#[must_use]
 pub fn stored_input_state_version_for_row(carries_current_only_facts: bool) -> u32 {
     if carries_current_only_facts {
         STORED_INPUT_STATE_VERSION
@@ -84,7 +96,7 @@ pub fn restore_session_envelope_version(
         SessionPersistenceVersionField::SessionEnvelope,
         observed,
         SESSION_VERSION,
-        &[3, 4],
+        &[3, 4, 5],
     )
 }
 

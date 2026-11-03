@@ -593,7 +593,7 @@ async fn exercise_a2(server: &Server, order: Order) {
         .pin_controller_client_for_actor(&actor)
         .await
         .unwrap();
-    assert!(pin.selection() == &selected);
+    assert_eq!(pin.selection(), &selected);
     let vault = Arc::new(meerkat_auth_core::EphemeralTokenStore::new());
     meerkat_auth_core::save_tokens_and_publish_lifecycle(
         meerkat_core::auth::ProviderAuthPersistence::new(
@@ -655,8 +655,11 @@ async fn exercise_a2(server: &Server, order: Order) {
     for record in &audit {
         assert_eq!(record.contributors.len(), 1);
         assert_eq!(record.contributors[0].input_id, input_id);
-        assert!(record.contributors[0].requester == principal("requester"));
-        assert!(record.contributors[0].logical_executor == principal("executor"));
+        assert_eq!(record.contributors[0].requester, principal("requester"));
+        assert_eq!(
+            record.contributors[0].logical_executor,
+            principal("executor")
+        );
         assert!(record.contributors[0].represented_subject.is_none());
         assert_eq!(record.observation.run_id.as_ref(), Some(&run_id));
         assert!(
@@ -848,7 +851,7 @@ async fn exercise_a2(server: &Server, order: Order) {
 async fn run_a2(order: Order) {
     let mut server = start_server(order).await;
     let outcome = std::panic::AssertUnwindSafe(tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         exercise_a2(&server, order),
     ))
     .catch_unwind()

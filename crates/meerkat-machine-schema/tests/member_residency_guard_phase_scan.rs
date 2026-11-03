@@ -8,11 +8,11 @@
 //! stronger or weaker than production, and TLC checks the wrong arm.
 //!
 //! The member-residency arms (Dormant, Waking and Live, the wake, release,
-//! seat, seat session replay, rotation, boot-plan and wiring-wake arms, and
-//! the existing arms they rewrote) are written one arm per lifecycle phase
-//! instead. This scan reads the `MobMachine` DSL source and fails when any of
-//! those arms has a guard, or a call inside one, that mentions
-//! `lifecycle_phase` beyond the plain source predicate
+//! seat, seat session replay, rotation and its replayed intent, boot-plan
+//! and wiring-wake arms, and the existing arms they rewrote) are written one
+//! arm per lifecycle phase instead. This scan reads the `MobMachine` DSL
+//! source and fails when any of those arms has a guard, or a call inside
+//! one, that mentions `lifecycle_phase` beyond the plain source predicate
 //! `guard { self.lifecycle_phase == Phase::X }` (or a disjunction of such
 //! comparisons only), and when a residency helper takes or reads the
 //! lifecycle phase. It also fails when an expected arm family is missing, so
@@ -49,6 +49,7 @@ const RESIDENCY_ARM_PREFIXES: &[&str] = &[
     "UnwireExternalPeerDormant",
     "WireMembers",
     "RecoverMemberSeatSession",
+    "RecoverMemberRotationIntent",
 ];
 
 /// Families that must each name at least one arm, so the scan is not vacuous.
@@ -74,6 +75,86 @@ const REQUIRED_ARM_FAMILIES: &[&str] = &[
     "WireMembersWithTrustPlacedPeerWake",
     "ResolveMemberRevivalSessionCreated",
     "RecoverMemberSeatSession",
+    // The same-session rotation (0.9.8), the replay of a rotation's intent
+    // and the scoped release's stale verdict.
+    "BeginMemberRotationSameSession",
+    "CommitMemberRotationSameSession",
+    "CommitMemberRotationSameSessionKickoff",
+    "RecoverMemberRotationIntentFreshSession",
+    "RecoverMemberRotationIntentSameSession",
+    "RecoverMemberRotationIntentDestroying",
+    "ClassifyMemberReleaseStale",
+];
+
+/// Transition-name prefixes of the identity-entry arms: the admission probe,
+/// the spawn ladder that carries entry custody and the commits that consume
+/// it, the worker reconcile and ensure, the replay of an entry's row and of
+/// an unlisted retirement, the legacy adoption, the agent lane's member
+/// admission, the declared apply (its verdicts, its seal and the release of
+/// an archived session record), the recovery of a created entry's row, and
+/// the identity changes (a change's admission, the record of a new
+/// store-owned entry, the host's changes hold, a removal, an archive and an
+/// unarchive), a held construction's start, a settle and an attempt's end,
+/// and the one-entry unlist. They are written one arm per lifecycle phase as
+/// the residency arms are.
+const IDENTITY_ENTRY_ARM_PREFIXES: &[&str] = &[
+    "ProbeMemberAdmission",
+    "BeginSpawnExec",
+    "CommitSpawnMembership",
+    "AbortSpawnExec",
+    "CommitDormantSeat",
+    "ReconcileRunning",
+    "EnsureMember",
+    "RecoverIdentityEntry",
+    "AdoptLegacyIdentityEntry",
+    "ResolveAgentLaneMemberAdmission",
+    "DeclareIdentityEntry",
+    "SealDeclaredRoster",
+    "ForgetArchivedSession",
+    "RecoverCreatedIdentityEntry",
+    "AdmitIdentityChange",
+    "RecordCreatedIdentityEntry",
+    "SetIdentityChangesHeld",
+    "RemoveIdentityEntry",
+    "ArchiveIdentityEntry",
+    "UnarchiveIdentityEntry",
+    "BeginPreparationConstruction",
+    "SettleHostPreparation",
+    "EndPreparationConstruction",
+    "UnlistIdentityEntry",
+];
+
+/// Identity-entry families that must each name at least one arm.
+const REQUIRED_IDENTITY_ENTRY_ARM_FAMILIES: &[&str] = &[
+    "ProbeMemberAdmissionIdentityMember",
+    "BeginSpawnExecFresh",
+    "ReconcileRunning",
+    "RecoverIdentityEntrySeated",
+    "AdoptLegacyIdentityEntryAdopted",
+    "AdoptLegacyIdentityEntryMobNotRunning",
+    "ResolveAgentLaneMemberAdmissionIdentityMember",
+    "DeclareIdentityEntrySeatOwed",
+    "DeclareIdentityEntryRoleMigrationHeld",
+    "DeclareIdentityEntryMobNotRunning",
+    "SealDeclaredRosterSealed",
+    "SealDeclaredRosterMobNotRunning",
+    "RecoverIdentityEntryRetiringMarked",
+    "ForgetArchivedSession",
+    "ProbeMemberAdmissionIdentityNameReserved",
+    "DeclareIdentityEntryRefusedNameUnreadable",
+    "RecoverCreatedIdentityEntryRetired",
+    "RecoverCreatedIdentityEntryUnreadable",
+    "AdmitIdentityChangeAdmitted",
+    "AdmitIdentityChangeMobNotRunning",
+    "RecordCreatedIdentityEntryRecorded",
+    "RecordCreatedIdentityEntryMobNotRunning",
+    "SetIdentityChangesHeld",
+    "RemoveIdentityEntryRetiring",
+    "RemoveIdentityEntryRemoved",
+    "ArchiveIdentityEntryArchiving",
+    "UnarchiveIdentityEntryRestored",
+    "RecoverCreatedIdentityEntryRemoving",
+    "RecoverCreatedIdentityEntryArchived",
 ];
 
 /// Transition-name prefixes of the `MeerkatMachine` arms that serve member
@@ -95,14 +176,15 @@ const MEERKAT_CONTROLLER_HOLD_ARM_PREFIXES: &[&str] = &[
     "ResumeRun",
 ];
 
-/// Helper-name prefixes of the residency helpers: they take member facts
-/// only, never the lifecycle phase.
+/// Helper-name prefixes of the residency helpers, and the declared apply's
+/// verdict helper: they take member facts only, never the lifecycle phase.
 const RESIDENCY_HELPER_PREFIXES: &[&str] = &[
     "member_wake",
     "member_boot",
     "peer_notice",
     "member_release",
     "member_registration",
+    "identity_entry_verdict",
 ];
 
 fn dsl_source(file: &str) -> String {
@@ -363,6 +445,40 @@ fn residency_arm_guards_never_mix_the_lifecycle_phase() {
     assert!(
         missing.is_empty(),
         "expected member-residency arm families are missing from the DSL: {missing:?}"
+    );
+}
+
+/// The identity-entry arms follow the same rule: no guard of theirs reads the
+/// lifecycle phase beyond the plain source predicate, so the lowered model
+/// TLC checks is the production machine.
+#[test]
+fn identity_entry_arm_guards_never_mix_the_lifecycle_phase() {
+    let source = without_line_comments(&mob_machine_dsl_source());
+    let transitions = scanned_transitions(&source);
+    let is_identity_entry_arm = |name: &str| {
+        IDENTITY_ENTRY_ARM_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+    };
+    let violations = phase_mixing_guards(&transitions, is_identity_entry_arm);
+    assert!(
+        violations.is_empty(),
+        "identity-entry arms must split per lifecycle phase instead of reading it in a guard or \
+         a guard call (schema lowering strips those):\n{}",
+        violations.join("\n")
+    );
+    let missing: Vec<&str> = REQUIRED_IDENTITY_ENTRY_ARM_FAMILIES
+        .iter()
+        .copied()
+        .filter(|family| {
+            !transitions
+                .iter()
+                .any(|transition| transition.name.starts_with(family))
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "expected identity-entry arm families are missing from the DSL: {missing:?}"
     );
 }
 

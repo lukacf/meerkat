@@ -1,0 +1,277 @@
+{
+  "schema_version": 1,
+  "description": "Prepublication public Connect commit identities mapped to published identities. Only author and committer email metadata and the corresponding parent object references changed. Every mapped tree is identical.",
+  "scope": "The 24 public-export commits before publication; private Toolkit checkpoints are outside this mapping.",
+  "prepublication_head": "a67df304871ea5ac4d47a25e8aa6490633c3ed22",
+  "rewritten_head": "e8d3d5194c4757b67be64e189ac8a59caeb17353",
+  "commit_count": 24,
+  "preserved": [
+    "tree objects and file bytes",
+    "author and committer names and dates",
+    "commit messages",
+    "parent order and ancestry",
+    "selected binary, SDK and resource artifact bytes"
+  ],
+  "commits": [
+    {
+      "prepublication_commit": "4a4f371f4b3ca578770d244c3650abb3e80ccfb0",
+      "published_commit": "8e65b0511a9220bc8950d2e75ed5528c45922d1f",
+      "tree": "b465220eaa56ff18487456b591dfd9e742003616",
+      "prepublication_parents": [],
+      "published_parents": []
+    },
+    {
+      "prepublication_commit": "10fbec40da17c96c61dd5c4045df605a0639993d",
+      "published_commit": "e88e771413a1426fe1a5d70958062da4fe901766",
+      "tree": "db17808e8f25a87440f3896da4b35fd233d246ec",
+      "prepublication_parents": [
+        "4a4f371f4b3ca578770d244c3650abb3e80ccfb0"
+      ],
+      "published_parents": [
+        "8e65b0511a9220bc8950d2e75ed5528c45922d1f"
+      ]
+    },
+    {
+      "prepublication_commit": "c3be3e1d3c87a93f73cf643f03a812f5642c74b3",
+      "published_commit": "e88294f9d29ea41161e61d8817eef6bbcd571249",
+      "tree": "09fbe94ac0fc6f38bca35cee6ae8adba4cae1efa",
+      "prepublication_parents": [
+        "10fbec40da17c96c61dd5c4045df605a0639993d"
+      ],
+      "published_parents": [
+        "e88e771413a1426fe1a5d70958062da4fe901766"
+      ]
+    },
+    {
+      "prepublication_commit": "9855309b7e218c1026fedcd3eba70667a22972e4",
+      "published_commit": "7b94be69514287d491d7393f0a7cd40cdf2dd031",
+      "tree": "538174f7212aaa45dfaf58be56ba71d25b20fd02",
+      "prepublication_parents": [
+        "c3be3e1d3c87a93f73cf643f03a812f5642c74b3"
+      ],
+      "published_parents": [
+        "e88294f9d29ea41161e61d8817eef6bbcd571249"
+      ]
+    },
+    {
+      "prepublication_commit": "ebbd8e44113d43128250e0801d35139f0a19323b",
+      "published_commit": "ac548a0f0eb0692ea7f1d6100774a321663d23ac",
+      "tree": "a9d2e63d7c41328d4f0438455404269ec8323ea1",
+      "prepublication_parents": [
+        "9855309b7e218c1026fedcd3eba70667a22972e4"
+      ],
+      "published_parents": [
+        "7b94be69514287d491d7393f0a7cd40cdf2dd031"
+      ]
+    },
+    {
+      "prepublication_commit": "ea3e0f5c23e495e5d81e46de77bca360c97354ae",
+      "published_commit": "ec2c4be37146ee79767dd3fc684d56f7dcfb6ff8",
+      "tree": "7a7952c0ed271e2e4762a49098c66a0a010495c7",
+      "prepublication_parents": [
+        "ebbd8e44113d43128250e0801d35139f0a19323b"
+      ],
+      "published_parents": [
+        "ac548a0f0eb0692ea7f1d6100774a321663d23ac"
+      ]
+    },
+    {
+      "prepublication_commit": "f1f2c487e6f78f0fc8509b2c1880a3e1e1c785e2",
+      "published_commit": "945e09ead8f249eed1e82e77c50317d0cac39893",
+      "tree": "a9028571803502120da7d0dcb8f1d2521b38be96",
+      "prepublication_parents": [
+        "ea3e0f5c23e495e5d81e46de77bca360c97354ae"
+      ],
+      "published_parents": [
+        "ec2c4be37146ee79767dd3fc684d56f7dcfb6ff8"
+      ]
+    },
+    {
+      "prepublication_commit": "07a29bfe79246c1face7393dfaa4bbfdf2bcaa88",
+      "published_commit": "5a13a1ad5f4989529eb77daceaf55ce32619f400",
+      "tree": "581332958390a0622409638dda2482a9b7ecab5d",
+      "prepublication_parents": [
+        "f1f2c487e6f78f0fc8509b2c1880a3e1e1c785e2"
+      ],
+      "published_parents": [
+        "945e09ead8f249eed1e82e77c50317d0cac39893"
+      ]
+    },
+    {
+      "prepublication_commit": "60b2751493887a8936f777033f8f93bb1073a70e",
+      "published_commit": "c3d244ce016ee4ec716a88d6c978d92330eb0ae0",
+      "tree": "3aecddadd92d4375f1c7924209d3727920a73a30",
+      "prepublication_parents": [
+        "07a29bfe79246c1face7393dfaa4bbfdf2bcaa88"
+      ],
+      "published_parents": [
+        "5a13a1ad5f4989529eb77daceaf55ce32619f400"
+      ]
+    },
+    {
+      "prepublication_commit": "51a76961c7ff4fcf586f55c220304db1734661b8",
+      "published_commit": "cb40d97fd9813f4d07fcff8a2dca6f828acb5e98",
+      "tree": "3e3485b41068a68bb81ae61527a46e2948a06d31",
+      "prepublication_parents": [
+        "60b2751493887a8936f777033f8f93bb1073a70e"
+      ],
+      "published_parents": [
+        "c3d244ce016ee4ec716a88d6c978d92330eb0ae0"
+      ]
+    },
+    {
+      "prepublication_commit": "ecd46fad0331d9494532e2d5c4a31ce9ca4b01c9",
+      "published_commit": "a33205c2580199112d479578f23113a7c5479996",
+      "tree": "50cff746160e00439240cfdc26fe9f7cc27ee351",
+      "prepublication_parents": [
+        "51a76961c7ff4fcf586f55c220304db1734661b8"
+      ],
+      "published_parents": [
+        "cb40d97fd9813f4d07fcff8a2dca6f828acb5e98"
+      ]
+    },
+    {
+      "prepublication_commit": "449dd740252021d235620683a3be30eb9b972085",
+      "published_commit": "e4f17c03ce7d001427c48ef5597f655a15269508",
+      "tree": "efe3571d96b0c741fd184d24e7e2216988277fa0",
+      "prepublication_parents": [
+        "ecd46fad0331d9494532e2d5c4a31ce9ca4b01c9"
+      ],
+      "published_parents": [
+        "a33205c2580199112d479578f23113a7c5479996"
+      ]
+    },
+    {
+      "prepublication_commit": "4656574ce247002944567b693a3cb2591ab185e3",
+      "published_commit": "0b11571adcf4d05be8f86007c6a4ebf16d8350c6",
+      "tree": "84a30e015542af2ca20bb0ac92dc0371ffdd680d",
+      "prepublication_parents": [
+        "449dd740252021d235620683a3be30eb9b972085"
+      ],
+      "published_parents": [
+        "e4f17c03ce7d001427c48ef5597f655a15269508"
+      ]
+    },
+    {
+      "prepublication_commit": "5a9470cefde994245be9bb2b51bf1fcc3282a802",
+      "published_commit": "f42b7dd9eac4351559d0a8d744b3cd3b51dca229",
+      "tree": "9daddb8d5a11afa96470e2bd768f06686ad11758",
+      "prepublication_parents": [
+        "4656574ce247002944567b693a3cb2591ab185e3"
+      ],
+      "published_parents": [
+        "0b11571adcf4d05be8f86007c6a4ebf16d8350c6"
+      ]
+    },
+    {
+      "prepublication_commit": "7cd9956966460ae5ef5ed942a9701d4cac3ef71c",
+      "published_commit": "5948de3e66576b60d2c5cf89e0e9b6bdceaa12a5",
+      "tree": "1792f420275d33b77f115e863d501335ae3b3baa",
+      "prepublication_parents": [
+        "5a9470cefde994245be9bb2b51bf1fcc3282a802"
+      ],
+      "published_parents": [
+        "f42b7dd9eac4351559d0a8d744b3cd3b51dca229"
+      ]
+    },
+    {
+      "prepublication_commit": "55093b2ddda5616667e9d74672ca34c8e92b3647",
+      "published_commit": "7966f5862d71c3a089bfda1c57a4709757b1a117",
+      "tree": "860ca1cb6f8b813b019cde92b43e97a62ac36fc3",
+      "prepublication_parents": [
+        "7cd9956966460ae5ef5ed942a9701d4cac3ef71c"
+      ],
+      "published_parents": [
+        "5948de3e66576b60d2c5cf89e0e9b6bdceaa12a5"
+      ]
+    },
+    {
+      "prepublication_commit": "bdd87cb1bd20d9a73e9e88bc80e66267c45a85c6",
+      "published_commit": "9732e4452f44713b11a45772d94b9e1964b0c9d2",
+      "tree": "55ce1a64a17e5e8c1a2c53ef77304cfe544757d5",
+      "prepublication_parents": [
+        "55093b2ddda5616667e9d74672ca34c8e92b3647"
+      ],
+      "published_parents": [
+        "7966f5862d71c3a089bfda1c57a4709757b1a117"
+      ]
+    },
+    {
+      "prepublication_commit": "2f87a1322ac858521acefc4202af055bc2daffe9",
+      "published_commit": "b4a6295633e969d20aea21fb9cf60cf6d44fd2c8",
+      "tree": "8dc2ca80ab3ce307f7cf3d3cd85e81cfa925800f",
+      "prepublication_parents": [
+        "bdd87cb1bd20d9a73e9e88bc80e66267c45a85c6"
+      ],
+      "published_parents": [
+        "9732e4452f44713b11a45772d94b9e1964b0c9d2"
+      ]
+    },
+    {
+      "prepublication_commit": "e1ca2eed039a751a97f368a46306eefcb88d21e5",
+      "published_commit": "1a11d7e6310f93f4fa630c544f89d25540b685ff",
+      "tree": "d6a033e2a4f9b6f09a672587c702bd2694f2745b",
+      "prepublication_parents": [
+        "2f87a1322ac858521acefc4202af055bc2daffe9"
+      ],
+      "published_parents": [
+        "b4a6295633e969d20aea21fb9cf60cf6d44fd2c8"
+      ]
+    },
+    {
+      "prepublication_commit": "2656d6777acb0ee1fcdb344fd9e7507aab3ec07b",
+      "published_commit": "abef7657041d0e235ba34f3809387921d012cc3c",
+      "tree": "e4845b9b9caa284a0dcca08f86125bd9934a1020",
+      "prepublication_parents": [
+        "e1ca2eed039a751a97f368a46306eefcb88d21e5"
+      ],
+      "published_parents": [
+        "1a11d7e6310f93f4fa630c544f89d25540b685ff"
+      ]
+    },
+    {
+      "prepublication_commit": "1bb3c234640ee3c59347c48dbae3ae34a41fbb3c",
+      "published_commit": "a67ec1920ad1afab07e792cc44b8f8eb964cb22a",
+      "tree": "06a885eafe0878c8bf580da59c5533f2814649a2",
+      "prepublication_parents": [
+        "2656d6777acb0ee1fcdb344fd9e7507aab3ec07b"
+      ],
+      "published_parents": [
+        "abef7657041d0e235ba34f3809387921d012cc3c"
+      ]
+    },
+    {
+      "prepublication_commit": "52768b64c8e08e576d33f1d893f9401c8eb152ea",
+      "published_commit": "5d470c1baa02095ec9fcd573227e9105cb40b18f",
+      "tree": "bd80d63176c13be99bffa3510153fac32c67fb04",
+      "prepublication_parents": [
+        "1bb3c234640ee3c59347c48dbae3ae34a41fbb3c"
+      ],
+      "published_parents": [
+        "a67ec1920ad1afab07e792cc44b8f8eb964cb22a"
+      ]
+    },
+    {
+      "prepublication_commit": "cd5a479e25059df0a1317b938c91d99dcd4b1d06",
+      "published_commit": "b60221b8870108817b300a627e271ebccab638fa",
+      "tree": "cdd0a1cadf3555a8d12e64ef420b2611a11f124f",
+      "prepublication_parents": [
+        "52768b64c8e08e576d33f1d893f9401c8eb152ea"
+      ],
+      "published_parents": [
+        "5d470c1baa02095ec9fcd573227e9105cb40b18f"
+      ]
+    },
+    {
+      "prepublication_commit": "a67df304871ea5ac4d47a25e8aa6490633c3ed22",
+      "published_commit": "e8d3d5194c4757b67be64e189ac8a59caeb17353",
+      "tree": "79c8972b478df487c6c4d36b870634b572afc8d8",
+      "prepublication_parents": [
+        "cd5a479e25059df0a1317b938c91d99dcd4b1d06"
+      ],
+      "published_parents": [
+        "b60221b8870108817b300a627e271ebccab638fa"
+      ]
+    }
+  ]
+}

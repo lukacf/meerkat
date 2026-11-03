@@ -1,0 +1,29 @@
+import { createAction } from '@activepieces/pieces-framework';
+
+import { webflowAuth } from '../..';
+import { webflowProps } from '../common/props';
+import { WebflowApiClient } from '../common/client';
+
+export const webflowGetCollectionItem = createAction({
+	auth: webflowAuth,
+	name: 'get_collection_item',
+	classification: 'READ',
+	description: 'Get collection item in a collection by ID',
+	displayName: 'Get a Collection Item by ID',
+	audience: 'both',
+	aiMetadata: { description: 'Retrieves a single Webflow CMS collection item by its collection ID and item ID. Use when the agent already knows the item ID and needs its full field data; if the ID is unknown, find it first with Find a Collection Item by Field. Read-only and idempotent.', idempotent: true },
+	props: {
+		site_id: webflowProps.site_id,
+		collection_id: webflowProps.collection_id,
+		collection_item_id: webflowProps.collection_item_id,
+	},
+
+	async run(context) {
+		const collectionId = context.propsValue.collection_id;
+		const collectionItemId = context.propsValue.collection_item_id;
+
+		const client = new WebflowApiClient(context.auth.access_token);
+
+		return await client.getCollectionItem(collectionId, collectionItemId);
+	},
+});

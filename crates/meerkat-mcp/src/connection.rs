@@ -130,7 +130,7 @@ pub struct McpStdioCloseBoundsError {
 
 impl McpStdioCloseBounds {
     /// The largest grace either bound accepts.
-    pub const MAX_GRACE: Duration = Duration::from_secs(60);
+    pub const MAX_GRACE: Duration = Duration::from_mins(1);
     /// No grace: escalation starts as soon as the close does.
     pub const IMMEDIATE: Self = Self {
         eof_grace: Duration::ZERO,

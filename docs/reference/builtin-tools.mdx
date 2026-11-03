@@ -58,7 +58,7 @@ may apply explicit presets of their own.
 | `mob_retire_member` | Mob | Yes | `mob` + mob scope, or ownership of the member | Retire a member and archive its session |
 | `mob_check_member` | Mob | Yes | `mob` + mob scope, or ownership of the member | Read member execution status and output |
 | `mob_list_members` | Mob | Yes | `mob` + mob scope; without it, only the members the caller owns | List a mob's members |
-| `mob_list` | Mob | Yes | `mob` + generated authority | List managed mobs |
+| `mob_list` | Mob | Yes | `mob` + generated authority | List the managed mobs the caller may manage |
 | `mob_wire` | Mob | Yes | `mob` + mob scope | Wire a member to a local or external peer |
 | `mob_unwire` | Mob | Yes | `mob` + mob scope | Remove a member wiring relationship |
 | `mob_profile_create` | Mob profile | Conditional | realm profile store | Create a reusable realm profile |
@@ -325,6 +325,12 @@ also adds `mob_profile_list_sources`. Admission is then checked again at each
 dispatch against the current typed mob, spawn, profile-mutation, or objective
 scope. See [Mob tools](/guides/mobs#agent-tools-vs-host-apis) for argument shapes
 and workflows.
+
+`mob_list` lists a mob only when its actor admits that the caller may manage
+it. A persisted mob whose store did not restore is quarantined and has no
+actor, so `mob_list` never lists it: the check fails closed. Hosts list
+quarantined mobs through `mob/list` and the MCP `meerkat_mob_list` tool (see
+[Quarantined mobs and degraded members](/guides/mobs#quarantined-mobs-and-degraded-members)).
 
 ### `fork_off` and `council` delivery
 

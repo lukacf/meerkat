@@ -180,3 +180,138 @@ impl Driver {
 ",
     );
 }
+
+#[test]
+fn planted_mob_only_session_call_outside_the_mob_runtime_fails() {
+    let findings = findings_for(
+        "crates/meerkat-rpc/src/forwarding.rs",
+        r"
+async fn forward(service: &Service, id: &SessionId, record: Record) {
+    let _ = service.record_mob_instruction_target(id, record).await;
+}
+",
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("record_mob_instruction_target")),
+        "a call outside the mob runtime's session service must fail, got {findings:#?}"
+    );
+}
+
+#[test]
+fn the_mob_session_service_and_test_code_may_call_the_mob_only_entry_points() {
+    let findings = findings_for_files(&[
+        (
+            "crates/meerkat-mob/src/runtime/session_service.rs",
+            r"
+async fn record(service: &Service, id: &SessionId, record: Record) {
+    let _ = service.record_mob_instruction_target(id, record).await;
+}
+",
+        ),
+        (
+            "crates/meerkat-rpc/src/lib.rs",
+            r#"
+#[cfg(test)]
+mod tests {
+    async fn release(service: &Service, id: &SessionId) {
+        let _ = service.release_mob_instruction_target(id, "mob").await;
+    }
+}
+"#,
+        ),
+    ]);
+    assert!(
+        findings.is_empty(),
+        "the mob runtime's session service and test code must pass, got {findings:#?}"
+    );
+}
+
+#[test]
+fn a_path_form_mob_only_session_call_fails() {
+    let findings = findings_for(
+        "crates/meerkat-rpc/src/forwarding.rs",
+        r"
+async fn forward(service: &Service, id: &SessionId, record: Record) {
+    let _ = PersistentSessionService::record_mob_instruction_target(service, id, record).await;
+}
+
+fn release_entry() {
+    let release = PersistentSessionService::release_mob_instruction_target;
+    drop(release);
+}
+",
+    );
+    for method in [
+        "record_mob_instruction_target",
+        "release_mob_instruction_target",
+    ] {
+        assert!(
+            findings.iter().any(|finding| finding.contains(method)),
+            "a path naming `{method}` outside the mob runtime's session service must fail, \
+             got {findings:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_mob_only_session_call_inside_a_macro_body_fails() {
+    let findings = findings_for(
+        "meta/crates/meerkat-meta/src/forwarding.rs",
+        r#"
+async fn race(service: &Service, id: &SessionId) {
+    tokio::select! {
+        _ = service.release_mob_instruction_target(id, "mob") => {}
+        _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+    }
+}
+"#,
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("release_mob_instruction_target")),
+        "a call inside a macro body must fail, got {findings:#?}"
+    );
+}
+
+#[test]
+fn a_mob_only_session_call_in_an_example_fails() {
+    let call = r"
+async fn main_flow(service: &Service, id: &SessionId, record: Record) {
+    let _ = service.record_mob_instruction_target(id, record).await;
+}
+";
+    let examples = [
+        "examples/099-instructions-rs/src/main.rs",
+        "crates/meerkat/examples/instructions.rs",
+    ];
+    let findings = findings_for_files(&[(examples[0], call), (examples[1], call)]);
+    for example in examples {
+        assert!(
+            findings.iter().any(|finding| finding.starts_with(example)),
+            "a call in {example} must fail, got {findings:#?}"
+        );
+    }
+}
+
+#[test]
+fn mob_only_names_in_comments_and_strings_pass() {
+    let findings = findings_for(
+        "crates/meerkat-rpc/src/forwarding.rs",
+        r#"
+// record_mob_instruction_target belongs to the mob runtime alone.
+/// So does release_mob_instruction_target.
+fn describe() -> &'static str {
+    tracing::info!("record_mob_instruction_target is sealed");
+    /* release_mob_instruction_target(id) */
+    "release_mob_instruction_target"
+}
+"#,
+    );
+    assert!(
+        findings.is_empty(),
+        "a name in a comment or a string names no entry point, got {findings:#?}"
+    );
+}

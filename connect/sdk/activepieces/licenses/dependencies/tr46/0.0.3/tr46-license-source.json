@@ -1,0 +1,7 @@
+{
+  "url": "https://raw.githubusercontent.com/jsdom/tr46/3a6f29721e7063b9ffd421e461a54beae6170001/LICENSE.md",
+  "upstream_license_addition_commit": "3a6f29721e7063b9ffd421e461a54beae6170001",
+  "package_git_head": "a8009f9ce80ff5dbe71dd71e203afe4e4c878d28",
+  "note": "The pinned 0.0.3 tarball and its source commit declare MIT but omit the license file. This retains the exact first upstream MIT license addition, not a claimed file from the tarball.",
+  "sha256": "eeed1ca176eebad5c73870e233cfff03981fecd319c969475dfa3633036c336b"
+}

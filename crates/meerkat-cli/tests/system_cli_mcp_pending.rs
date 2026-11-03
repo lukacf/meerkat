@@ -175,7 +175,7 @@ async fn inner_test_cli_mcp_pending_resume_journey() -> Result<(), Box<dyn std::
 
     // --- Turn one: `rkat run -m <model> hello` beside the pending server ---
     let output = timeout(
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         Command::new(&rkat)
             .current_dir(&project_dir)
             .env("RKAT_TEST_CLIENT", "1")
@@ -257,7 +257,7 @@ async fn inner_test_cli_mcp_pending_resume_journey() -> Result<(), Box<dyn std::
     // this re-materialized the committed notice differently and wedged the
     // intra-turn checkpoint after the turn completed. ---
     let output = timeout(
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         Command::new(&rkat)
             .current_dir(&project_dir)
             .env("RKAT_TEST_CLIENT", "1")
@@ -291,7 +291,7 @@ async fn inner_test_cli_mcp_pending_resume_journey() -> Result<(), Box<dyn std::
     // of the original repro). ---
     tokio::fs::remove_file(project_dir.join(".rkat/mcp.toml")).await?;
     let output = timeout(
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         Command::new(&rkat)
             .current_dir(&project_dir)
             .env("RKAT_TEST_CLIENT", "1")

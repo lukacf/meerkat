@@ -1,0 +1,243 @@
+/* Two starting routes share one editor and optional context conversation. */
+.setup-shell .forge-starting-conversation {
+  margin: 16px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.forge-starting-conversation__invitation,
+.forge-starting-conversation__header,
+.forge-starting-conversation__answered {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  flex-wrap: wrap;
+  color: #777164;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.setup-shell .forge-starting-conversation button {
+  min-height: 44px;
+  padding: 10px 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #994523;
+  font-size: 14px;
+  line-height: 1.4;
+}
+.forge-starting-conversation__invitation {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 0;
+  margin-bottom: 16px;
+  padding: 0;
+  border-top: 1px solid #e8e4da;
+  border-bottom: 1px solid #e8e4da;
+}
+.setup-shell .forge-starting-conversation__lead { margin: 0 0 9px; color: #777164; font-size: 12px; line-height: 1.5; }
+.setup-shell .forge-starting-conversation__invitation button {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 5px;
+  min-width: 0;
+  min-height: 44px;
+  padding: 14px 16px 16px;
+  border-radius: 0;
+  color: #625e54;
+  text-align: left;
+}
+.setup-shell .forge-starting-conversation__invitation button:first-child { padding-left: 0; }
+.setup-shell .forge-starting-conversation__invitation button + button { border-left: 1px solid #e8e4da; }
+.forge-starting-conversation__route-label { color: #777164; font-size: 10px; font-weight: 500; letter-spacing: .12em; line-height: 1.4; text-transform: uppercase; }
+.forge-starting-conversation__invitation button strong { color: #34342d; font-family: Newsreader, Georgia, serif; font-size: 24px; font-weight: 400; line-height: 1.15; letter-spacing: -.02em; }
+.forge-starting-conversation__invitation button small { color: #726d61; font-size: 12px; line-height: 1.45; }
+.forge-starting-conversation__invitation button::after { position: absolute; inset: auto 0 -1px; height: 2px; background: transparent; content: ""; }
+.forge-starting-conversation__invitation button[aria-pressed="true"]::after { background: #ad5735; }
+.forge-starting-conversation__invitation button[aria-pressed="true"] .forge-starting-conversation__route-label { color: #994523; }
+.forge-starting-conversation[data-review="true"] .forge-starting-conversation__lead { display: none; }
+.setup-shell .forge-starting-conversation[data-review="true"] .forge-starting-conversation__invitation button {
+  gap: 3px;
+  padding-top: 10px;
+  padding-bottom: 12px;
+}
+.forge-starting-conversation[data-review="true"] .forge-starting-conversation__invitation button strong { font-size: 21px; }
+.forge-starting-conversation[data-review="true"] .forge-starting-conversation__route-label { display: none; }
+.forge-starting-conversation[data-review="true"] .forge-starting-conversation__invitation button small { font-size: 11px; }
+.forge-starting-conversation[data-review="true"] .forge-starting-conversation__invitation button:first-child small { display: none; }
+.forge-starting-conversation[data-open="true"] .forge-starting-conversation__invitation { display: none; }
+.setup-shell .forge-starting-conversation[data-open="true"] .forge-starting-conversation__lead { display: none; }
+.setup-shell .forge-starting-conversation[data-open="true"] .forge-starting-conversation__invitation button { gap: 3px; padding-top: 10px; padding-bottom: 12px; }
+.forge-starting-conversation[data-open="true"] .forge-starting-conversation__invitation button strong { font-size: 21px; }
+.forge-starting-conversation[data-open="true"] .forge-starting-conversation__invitation button small { display: none; }
+.setup-shell .forge-starting-conversation__invitation button:hover:not(:disabled) { background: #f8f5ed; }
+.setup-shell .forge-starting-conversation button:hover:not(:disabled) { color: #713319; }
+.forge-starting-conversation__content:not([hidden]) {
+  padding: 2px 0 8px;
+  border-top: 1px solid #e8e4da;
+}
+.forge-starting-conversation__header { min-height: 44px; }
+.forge-starting-conversation__draft { margin: 4px 0 12px; padding: 10px 12px; border-radius: 6px; background: #f5f3ed; }
+.forge-starting-conversation__draft > span { color: #777164; font-size: 11px; line-height: 1.5; }
+.setup-shell .forge-starting-conversation__draft > p {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  max-height: 4.5em;
+  margin: 4px 0 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  color: #454239;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.forge-starting-conversation__progress { display: inline-flex; align-items: center; gap: 10px; }
+.forge-starting-conversation__progress-marks { display: inline-flex; gap: 4px; }
+.forge-starting-conversation__progress-marks i { width: 14px; height: 3px; border-radius: 2px; background: #e4dfd3; }
+.forge-starting-conversation__progress-marks i[data-current="true"] { background: #b67555; }
+.setup-shell .forge-starting-conversation__header button,
+.setup-shell .forge-starting-conversation__answered button { color: #777164; font-size: 12px; }
+.forge-starting-conversation__answered { justify-content: flex-start; margin: 0 0 5px; }
+.forge-starting-conversation__answered strong { padding-left: 5px; color: #454239; font-weight: 500; }
+.setup-shell .forge-starting-conversation__content h3 {
+  margin: 5px 0 15px;
+  font-family: Newsreader, Georgia, serif;
+  color: #34342d;
+  font-size: 28px;
+  font-weight: 400;
+  line-height: 1.25;
+  letter-spacing: -.02em;
+  scroll-margin-block: 16px;
+}
+.setup-shell .forge-starting-conversation__content h3:focus { outline: none; }
+.forge-starting-conversation__choices { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; border-top: 1px solid #e8e4da; }
+.setup-shell .forge-starting-conversation__choices button {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  min-height: 64px;
+  padding: 12px 0;
+  border-bottom: 1px solid #e8e4da;
+  border-radius: 0;
+  background: transparent;
+  color: #454239;
+  text-align: left;
+  font-size: 14px;
+}
+.forge-starting-conversation__choice-marker { display: grid; place-items: center; width: 18px; height: 18px; box-sizing: border-box; border: 1px solid #cfc9ba; border-radius: 50%; }
+.forge-starting-conversation__choice-marker::after { width: 6px; height: 6px; border-radius: 50%; background: transparent; content: ""; }
+.forge-starting-conversation__choice-copy { display: grid; gap: 3px; min-width: 0; }
+.forge-starting-conversation__choice-arrow { color: #8c8170; font-size: 16px; }
+.forge-starting-conversation__choices button strong { font-size: 14px; font-weight: 500; line-height: 1.4; }
+.forge-starting-conversation__choices button small { color: #777164; font-size: 12px; line-height: 1.45; }
+.setup-shell .forge-starting-conversation__choices button:hover:not(:disabled) {
+  background: #f8f5ed;
+}
+.setup-shell .forge-starting-conversation__choices button[aria-pressed="true"] {
+  background: #f8f3eb;
+  color: #8c3e21;
+}
+.forge-starting-conversation__choices button[aria-pressed="true"] .forge-starting-conversation__choice-marker { border-color: #ad5735; }
+.forge-starting-conversation__choices button[aria-pressed="true"] .forge-starting-conversation__choice-marker::after { background: #ad5735; }
+.forge-starting-conversation__hint { margin: 11px 0 0; color: #777164; font-size: 12px; line-height: 1.6; }
+.forge-starting-example { margin: 0 0 12px; color: #777164; font-size: 13px; line-height: 1.6; }
+.forge-starting-example__label { color: #625e54; font-weight: 500; margin-right: 4px; }
+.forge-welcome-input-heading[data-context="true"] > label { font-family: inherit; font-size: 14px; font-weight: 500; line-height: 1.5; letter-spacing: 0; }
+.forge-starting-context { margin: 4px 0 12px; }
+.forge-starting-context__heading { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 6px; color: #777164; font-size: 11px; line-height: 1.5; }
+.forge-starting-context__label { display: block; }
+.forge-starting-context__answers { display: flex; align-items: flex-start; gap: 10px; }
+.setup-shell .forge-starting-context__sentence { flex: 1; min-width: 0; margin: 0; font-family: Newsreader, Georgia, serif; font-size: clamp(28px, 2.8vw, 36px); font-weight: 400; line-height: 1.35; letter-spacing: -.025em; color: #454239; text-wrap: pretty; }
+.forge-starting-context__sentence:focus { outline: none; }
+.forge-starting-context__sentence:focus-visible { outline: 2px solid #a54e2d; outline-offset: 6px; }
+.setup-shell .forge-starting-context__answers button {
+  display: inline-block;
+  min-height: 44px;
+  max-width: 100%;
+  padding: 2px 0;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: #994523;
+  font: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: #c3a38e;
+  text-underline-offset: 5px;
+  text-decoration-thickness: 1px;
+}
+.setup-shell .forge-starting-context__answers button:hover:not(:disabled) { color: #713319; text-decoration-color: currentColor; }
+.setup-shell .forge-starting-context__answers .forge-starting-context__remove {
+  flex: 0 0 auto;
+  padding: 12px 2px;
+  border-radius: 4px;
+  color: #777164;
+  font-family: inherit;
+  font-size: 12px;
+  letter-spacing: 0;
+  line-height: 1.5;
+  text-decoration: none;
+}
+.setup-shell .forge-starting-context__hint { margin: 5px 0 0; color: #777164; font-size: 12px; line-height: 1.5; }
+.forge-starting-conversation button:focus-visible,
+.forge-starting-context button:focus-visible { outline: 2px solid #a54e2d; outline-offset: 3px; }
+.setup-shell.setup-welcome .setup-conversation:has(.forge-starting-conversation[data-open="true"], .forge-starting-context) .setup-welcome-intro h1 {
+  margin: 8px 0 0;
+  max-width: none;
+  font-size: 24px !important;
+  line-height: 1.25 !important;
+  color: #625e54;
+}
+.setup-welcome .setup-conversation:has(.forge-starting-conversation[data-open="true"], .forge-starting-context) .setup-welcome-intro > p,
+.setup-welcome .setup-conversation:has(.forge-starting-conversation[data-open="true"], .forge-starting-context) .forge-welcome-purpose,
+.setup-welcome .setup-composer-area:has(.forge-starting-conversation[data-open="true"]) > .cc-composer,
+.setup-welcome .setup-composer-area:has(.forge-starting-conversation[data-open="true"]) > .forge-welcome-input-heading,
+.setup-welcome .setup-composer-area:has(.forge-starting-conversation[data-open="true"]) > .forge-starting-context,
+.setup-welcome .setup-composer-area:has(.forge-starting-conversation[data-open="true"]) > .forge-starting-example,
+.setup-welcome .setup-composer-area:has(.forge-starting-conversation[data-open="true"]) > .forge-welcome-shortcuts,
+.setup-welcome .setup-conversation:has(.forge-starting-conversation[data-open="true"]) .forge-welcome-next,
+.setup-welcome .setup-conversation:has(.forge-starting-conversation[data-open="true"]) .forge-welcome-resume,
+.setup-welcome .setup-conversation:has(.forge-starting-conversation[data-open="true"]) .forge-example-disclosure { display: none; }
+/* The current question or editable review sentence is the only visual heading. */
+.setup-shell.setup-welcome .setup-conversation:has(.forge-starting-conversation[data-open="true"], .forge-starting-context) .setup-welcome-intro h1 {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.setup-shell .forge-starting-conversation[data-open="true"] { margin-top: 0; }
+.setup-shell.setup-welcome .setup-conversation:has(.forge-starting-context) .forge-welcome-resume,
+.setup-shell.setup-welcome .setup-conversation:has(.forge-starting-context) .forge-example-disclosure,
+.setup-shell.setup-welcome .setup-conversation:has(.forge-starting-context) .forge-welcome-shortcuts { display: none; }
+.setup-shell.setup-welcome .setup-conversation:has(.forge-starting-context) .forge-welcome-next { max-width: none; font-size: 12px; }
+.setup-shell.setup-welcome .forge-starting-context__heading { display: none; }
+.setup-shell.setup-welcome .forge-starting-context { margin: 26px 0 24px; }
+@media (max-width: 760px) {
+  .setup-shell .forge-starting-conversation__content h3 { font-size: 26px; margin-bottom: 12px; }
+  .setup-shell .forge-starting-conversation__invitation button { padding: 12px 10px 14px; min-height: 44px; }
+  .setup-shell .forge-starting-conversation__invitation button:first-child { padding-left: 0; }
+  .forge-starting-conversation__invitation button strong { font-size: 21px; }
+  .forge-starting-conversation__invitation button small { font-size: 11px; }
+  .setup-shell .forge-starting-conversation__choices button { min-height: 64px; }
+  .setup-shell.setup-welcome .setup-conversation:has(.forge-starting-conversation[data-open="true"], .forge-starting-context) .setup-welcome-intro h1 { font-size: 22px !important; }
+  .forge-starting-context { margin-bottom: 10px; }
+  .setup-shell .forge-starting-context__sentence { font-size: 28px; }
+  .setup-welcome .setup-conversation:has(.forge-starting-conversation[data-open="true"], .forge-starting-context) .forge-welcome-mobile-art { gap: 12px; margin-bottom: 0; padding: 4px 0; }
+  .setup-shell.setup-welcome .setup-conversation:has(.forge-starting-conversation[data-open="true"], .forge-starting-context) .forge-welcome-preview-button { flex-basis: 48px; width: 48px; gap: 0; }
+  .setup-welcome .setup-conversation:has(.forge-starting-conversation[data-open="true"], .forge-starting-context) .forge-welcome-preview-button > span:first-child { width: 48px; height: 48px; }
+  .setup-welcome .setup-conversation:has(.forge-starting-conversation[data-open="true"], .forge-starting-context) .forge-welcome-preview-button > span:last-child { display: none; }
+}

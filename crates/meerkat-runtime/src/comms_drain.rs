@@ -80,7 +80,7 @@ use crate::tokio::sync::mpsc;
 use crate::traits::RuntimeControlPlane;
 
 /// Default idle timeout for session-backed comms drains.
-pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_mins(5);
 const SUPERVISOR_RESPONSE_ROUTE_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Spawn a background task that drains the comms inbox and routes
@@ -3073,7 +3073,7 @@ async fn stage_correlated_reply_endpoint(
 
 /// Upper bound on a held rotation observation, whatever the supervisor
 /// requests: a hang guard for the waiter, never a retry trigger.
-const MAX_ROTATION_OBSERVE_HOLD: Duration = Duration::from_secs(60);
+const MAX_ROTATION_OBSERVE_HOLD: Duration = Duration::from_mins(1);
 
 /// One observation of a supervisor rotation as `observer`, projected to its
 /// bridge reply, and whether it is settled (completed or rejected).
@@ -10203,7 +10203,7 @@ mod tests {
             adapter.clone(),
             session_id.clone(),
             runtime.clone(),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         )
         .await;
 
@@ -10233,7 +10233,7 @@ mod tests {
             adapter.clone(),
             session_id.clone(),
             runtime.clone(),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         )
         .await;
 
@@ -10404,7 +10404,7 @@ mod tests {
             adapter.clone(),
             session_id.clone(),
             runtime_dyn.clone(),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         )
         .await;
         tokio::time::timeout(Duration::from_secs(2), paused_rx)
@@ -16035,7 +16035,7 @@ mod tests {
         /// The held reply; the outer bound is a hang guard past the hold.
         async fn held_reply(&self) -> BridgeSupervisorRotationObservation {
             let (status, reply) = tokio::time::timeout(
-                std::time::Duration::from_secs(120),
+                std::time::Duration::from_mins(2),
                 await_first_bridge_reply(&self.sent_commands, &self.sent_notify),
             )
             .await

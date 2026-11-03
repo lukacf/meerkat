@@ -245,6 +245,8 @@ fn begin_spawn_multi_host_fields() -> Vec<(FieldId, KernelValue)> {
             field("effective_model_override_present"),
             KernelValue::Bool(false),
         ),
+        (field("entry_custody"), KernelValue::Bool(false)),
+        (field("created_custody"), KernelValue::Bool(false)),
     ])
     .collect()
 }
@@ -257,6 +259,7 @@ fn commit_membership_ack_fields() -> Vec<(FieldId, KernelValue)> {
         (field("ack_engine_version"), KernelValue::None),
         (field("placed_spawn_id"), KernelValue::None),
         (field("provision_operation_id"), KernelValue::None),
+        (field("definition_wiring_exempt"), KernelValue::Bool(false)),
     ]
 }
 
@@ -788,6 +791,7 @@ mod auth_freshness_boundary {
                     fields: BTreeMap::from([
                         (field("expires_at_ts"), option_some(KernelValue::U64(1_000))),
                         (field("credential_published_at_millis"), KernelValue::U64(1)),
+                        (field("credential_material_fingerprint"), KernelValue::None),
                     ]),
                 },
             )

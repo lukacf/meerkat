@@ -1,0 +1,314 @@
+{
+  "committed_sessions": {
+    "01a167e8-2337-7b90-88ab-901e669434d1": {
+      "blob_sha256": "row-sha256:755a6005c7f3d94e360ba16221b36d641124b15e77fc68157b321bcfe7720930",
+      "compacted_markers": 0,
+      "compaction_cadence": {
+        "session_boundary_index": 1
+      },
+      "continuity_head": true,
+      "messages": 3,
+      "messages_sha256": "869ca08e5a8070e1147c85f193789e4f6afe7c00920998f26c299501259acf79",
+      "record_identity": "agent:hl-01",
+      "rewrite_prefix_authority": null,
+      "runtime_id": "rt:session:01a167e8-2337-7b90-88ab-901e669434d1",
+      "snapshot_messages": 1,
+      "snapshot_messages_sha256": "8ee5fa0704372902874941bf2c030666239587fa0b314a6b4cb28b0b40454f8f",
+      "store_revision": 3,
+      "strand_messages": 3,
+      "transcript_history": null
+    },
+    "01a167e8-2441-7ed0-9a7b-fc84990a474a": {
+      "blob_sha256": "row-sha256:28adefe0923639f5dd8bb84806864b6c7220000296f49b31fa5897e8011427bc",
+      "compacted_markers": 0,
+      "compaction_cadence": {
+        "session_boundary_index": 2
+      },
+      "continuity_head": false,
+      "messages": 5,
+      "messages_sha256": "4c5a7c8bc606a40eb86c862e6ee94cf265bf1aef85da00437bd3440b12ce260f",
+      "record_identity": null,
+      "rewrite_prefix_authority": null,
+      "runtime_id": "rt:session:01a167e8-2441-7ed0-9a7b-fc84990a474a",
+      "snapshot_messages": null,
+      "snapshot_messages_sha256": null,
+      "store_revision": 4,
+      "strand_messages": 0,
+      "transcript_history": null
+    }
+  },
+  "corpus": "meta-0.9.3 H-local production-shaped state directory (native census)",
+  "direct_member": {
+    "continuity_head": false,
+    "continuity_record": false,
+    "how": "meta/ensure_member at both boots (the gateway's raw mob path), one turn per boot through meta/send_message",
+    "labels": {
+      "team": "direct"
+    },
+    "member_id": "hl-direct",
+    "messages": 5,
+    "runtime_only": true,
+    "session_id": "01a167e8-2441-7ed0-9a7b-fc84990a474a",
+    "sessions_seen": [
+      "01a167e8-2441-7ed0-9a7b-fc84990a474a"
+    ],
+    "snapshot_messages": null,
+    "store_revision": 4,
+    "strand_messages": 0
+  },
+  "empty_dirs": [
+    "blobs"
+  ],
+  "files": {
+    "state": [
+      {
+        "bytes": 4096,
+        "path": "continuity.sqlite3",
+        "sha256": "edbee11a2e909b4413b8e2265b665c0f156aaba120e5c715a11d8fc30ba789d7"
+      },
+      {
+        "bytes": 32768,
+        "path": "continuity.sqlite3-shm",
+        "sha256": "39f3910d83cd01591cca2401a5956738e6f0af6289defdca13c1c95b52c58838"
+      },
+      {
+        "bytes": 156592,
+        "path": "continuity.sqlite3-wal",
+        "sha256": "c73115495b100cdf08b5c881390ed0c9e3f04a4ffde9b481a8b8d1df410502d9"
+      },
+      {
+        "bytes": 0,
+        "path": "continuity.sqlite3.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 286720,
+        "path": "council.sqlite3",
+        "sha256": "119af1c8aea8c495d6856cd6667bbd7e890744ff6bdbbb66f19f7156866485e8"
+      },
+      {
+        "bytes": 0,
+        "path": "council.sqlite3.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 286720,
+        "path": "event_log.sqlite3",
+        "sha256": "1280328949757b8f8890b17d16bb0b3fad15b8110565f6c779041064d1033170"
+      },
+      {
+        "bytes": 32768,
+        "path": "event_log.sqlite3-shm",
+        "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb"
+      },
+      {
+        "bytes": 0,
+        "path": "event_log.sqlite3-wal",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 1530,
+        "path": "event_log.sqlite3.composition.json",
+        "sha256": "772aa9eee5fc380fd6f19f3e7a1416a889df109384e065608760c10dfc6197b9"
+      },
+      {
+        "bytes": 0,
+        "path": "event_log.sqlite3.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 4096,
+        "path": "meta_console.sqlite3",
+        "sha256": "edbee11a2e909b4413b8e2265b665c0f156aaba120e5c715a11d8fc30ba789d7"
+      },
+      {
+        "bytes": 32768,
+        "path": "meta_console.sqlite3-shm",
+        "sha256": "46bcfbac078f1a4b930922de8634de1e7c73a25ec88c1282a916626d1d2d1a6a"
+      },
+      {
+        "bytes": 1095952,
+        "path": "meta_console.sqlite3-wal",
+        "sha256": "82fcc62f9b8b37dbe0f41ae25d9827c2e06161c81dfe4c6955daa9d5dace08cc"
+      },
+      {
+        "bytes": 0,
+        "path": "meta_console.sqlite3.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 20480,
+        "path": "meta_metadata.sqlite3",
+        "sha256": "35fe9ff8c2f9f58cf5cbf68ade126d18ed1f6f106c84861bc9e6bf2a1c16e104"
+      },
+      {
+        "bytes": 32768,
+        "path": "meta_metadata.sqlite3-shm",
+        "sha256": "44a8f1ea31980d26330f255b15505ae8739d6d39109db2091a543aee2e4c044d"
+      },
+      {
+        "bytes": 53592,
+        "path": "meta_metadata.sqlite3-wal",
+        "sha256": "5ad733bf359b44f32442ddf328b7bf7be59f45858764b21722a74974bf20e2ca"
+      },
+      {
+        "bytes": 0,
+        "path": "meta_metadata.sqlite3.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 323584,
+        "path": "runtime.sqlite",
+        "sha256": "25c6829238519d263334715def1b7319182a592861c0e662ea37bcc7ef79d63e"
+      },
+      {
+        "bytes": 0,
+        "path": "runtime.sqlite.execution-custody",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 0,
+        "path": "runtime.sqlite.execution-custody-admission",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 0,
+        "path": "runtime.sqlite.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 77824,
+        "path": "schedule.sqlite",
+        "sha256": "580c32b94c7c44592c1448ab08d1e79970ded68a5a650dfd65d2892be1ba108c"
+      },
+      {
+        "bytes": 0,
+        "path": "schedule.sqlite.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 118784,
+        "path": "workgraph.sqlite3",
+        "sha256": "b877952a5a1ef5debd35fbdbef3d63e43204f30d13bf5c8c3f7e891e70bbef15"
+      },
+      {
+        "bytes": 32768,
+        "path": "workgraph.sqlite3-shm",
+        "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb"
+      },
+      {
+        "bytes": 0,
+        "path": "workgraph.sqlite3-wal",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 0,
+        "path": "workgraph.sqlite3.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 40960,
+        "path": "meta/jobs.sqlite3",
+        "sha256": "337b748a2b398ae229c8c3e9b4c0cf009e1c03afce5d294160252778217d2fbb"
+      },
+      {
+        "bytes": 0,
+        "path": "meta/jobs.sqlite3.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 0,
+        "path": "mobs/child-mobs.lock",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 286720,
+        "path": "mobs/realm_profiles.db",
+        "sha256": "119af1c8aea8c495d6856cd6667bbd7e890744ff6bdbbb66f19f7156866485e8"
+      },
+      {
+        "bytes": 0,
+        "path": "mobs/realm_profiles.db.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ]
+  },
+  "generated_at": "2026-10-23T08:37:17Z",
+  "identities": {
+    "agent:hl-01": {
+      "final_status": {
+        "agent_runtime_id": "rt:agent:hl-01:0",
+        "boot": 2,
+        "generation": 0,
+        "session_id": "01a167e8-2337-7b90-88ab-901e669434d1",
+        "state": "active"
+      },
+      "sessions_seen": [
+        "01a167e8-2337-7b90-88ab-901e669434d1"
+      ]
+    }
+  },
+  "mob_id": "hl-corpus-mob",
+  "omitted_from_state": {
+    "peer_key.ed25519": "gateway peer key (key material); an installation without host pairings mints a new one on boot"
+  },
+  "packed": [
+    {
+      "bytes": 1095952,
+      "path": "meta_console.sqlite3-wal",
+      "sha256": "82fcc62f9b8b37dbe0f41ae25d9827c2e06161c81dfe4c6955daa9d5dace08cc",
+      "stored_as": "meta_console.sqlite3-wal.gz",
+      "stored_bytes": 35836,
+      "stored_sha256": "fa12caaef086c0cf712fe5e13a4290cd802173dcea948f2ca122224e25d07b08"
+    }
+  ],
+  "producer": {
+    "binary": "rpc_gateway",
+    "binary_sha256": "757519ed1210d16d865e2e37de3fba098a1cca6ccba6a7e1dc646963fb04a335",
+    "compaction": {
+      "auto_compact_threshold": 50000,
+      "not_overridden_093_defaults": {
+        "history_retained_rewrites": 4,
+        "min_turns_between_compactions": 3
+      },
+      "recent_turn_budget": 1,
+      "reported_prompt_tokens": 60000,
+      "trigger": "a user message carrying [ct:<key>] reports a cost above the threshold once"
+    },
+    "driver": "mint_released_0_9_3_h_local_direct_member.py",
+    "driver_sha256": "c9457f352e84cd626786ee32602d34bce2ed0a957053d41ed2bf4391c8d0bc28",
+    "model": "loopback chat-completions fake; reply 'corpus reply N'",
+    "release_asset": "meta-rpc-gateway-0.9.3-x86_64-unknown-linux-gnu.tar.gz",
+    "release_asset_sha256": "b416df1ba5648ca3ed849dec2692f664c37b0e7277232a6d2421ac53961a18b0"
+  },
+  "profile": "specialist",
+  "refusals": [],
+  "restart_probe_093": {
+    "started": true
+  },
+  "rosters": {
+    "1": [
+      "agent:hl-01"
+    ],
+    "2": [
+      "agent:hl-01"
+    ]
+  },
+  "shutdowns": {
+    "1": {
+      "killed": false,
+      "result": {
+        "runtime_cleanup_completed": true,
+        "shutdown": true
+      }
+    },
+    "2": {
+      "killed": false,
+      "result": {
+        "runtime_cleanup_completed": true,
+        "shutdown": true
+      }
+    }
+  },
+  "variant": "direct-member"
+}

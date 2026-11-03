@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Generated wire types for Meerkat SDK.
 
-Contract version: 0.9.8
+Contract version: 0.9.9
 """
 
 import sys
@@ -17,7 +17,7 @@ else:
 from .errors import MeerkatError
 
 
-CONTRACT_VERSION = "0.9.8"
+CONTRACT_VERSION = "0.9.9"
 
 
 Value = Any
@@ -638,6 +638,9 @@ class ToolsRegisterResult:
 class WorkEventsResult:
     """Result envelope for work-event list reads (`workgraph/events`)."""
     events: list[Any]
+    event_high_water_mark: Optional[int] = None
+    next_after_seq: Optional[int] = None
+    truncated: Optional[bool] = None
 
     @classmethod
     def from_wire(cls, value: Any) -> "WorkEventsResult":
@@ -646,7 +649,10 @@ class WorkEventsResult:
         """
         data = _expect_wire_object(value, 'WorkEventsResult')
         return cls(
+            event_high_water_mark=(_expect_wire_int(data['event_high_water_mark'], 'WorkEventsResult.event_high_water_mark') if data.get('event_high_water_mark') is not None else None),
             events=list(_expect_wire_list(_require_wire_field(data, 'events', 'WorkEventsResult'), 'WorkEventsResult.events')),
+            next_after_seq=(_expect_wire_int(data['next_after_seq'], 'WorkEventsResult.next_after_seq') if data.get('next_after_seq') is not None else None),
+            truncated=(_expect_wire_bool(data['truncated'], 'WorkEventsResult.truncated') if data.get('truncated') is not None else None),
         )
 
 
@@ -654,6 +660,11 @@ class WorkEventsResult:
 class WorkItemsResult:
     """Result envelope for work-item list reads (`workgraph/list`, `workgraph/ready`)."""
     items: list[Any]
+    anchor_event_seq: Optional[int] = None
+    changed_since_anchor: Optional[bool] = None
+    next_cursor: Optional[str] = None
+    total_items: Optional[int] = None
+    truncated: Optional[bool] = None
 
     @classmethod
     def from_wire(cls, value: Any) -> "WorkItemsResult":
@@ -662,7 +673,12 @@ class WorkItemsResult:
         """
         data = _expect_wire_object(value, 'WorkItemsResult')
         return cls(
+            anchor_event_seq=(_expect_wire_int(data['anchor_event_seq'], 'WorkItemsResult.anchor_event_seq') if data.get('anchor_event_seq') is not None else None),
+            changed_since_anchor=(_expect_wire_bool(data['changed_since_anchor'], 'WorkItemsResult.changed_since_anchor') if data.get('changed_since_anchor') is not None else None),
             items=list(_expect_wire_list(_require_wire_field(data, 'items', 'WorkItemsResult'), 'WorkItemsResult.items')),
+            next_cursor=(_expect_wire_str(data['next_cursor'], 'WorkItemsResult.next_cursor') if data.get('next_cursor') is not None else None),
+            total_items=(_expect_wire_int(data['total_items'], 'WorkItemsResult.total_items') if data.get('total_items') is not None else None),
+            truncated=(_expect_wire_bool(data['truncated'], 'WorkItemsResult.truncated') if data.get('truncated') is not None else None),
         )
 
 
@@ -1079,6 +1095,124 @@ class WireLoginCancelledConnectorSlotTarget(TypedDict, total=False):
     connector: Required[WireConnectorSlot]
 
 WireLoginCancelled = WireLoginCancelledMcpLoginTarget | WireLoginCancelledConnectorSlotTarget
+
+# The subject a request names: whose grants it writes or reads. Closed: a
+# kind or a field this version does not know is refused, never ignored.
+class ToolGrantSubjectSession(TypedDict, total=False):
+    kind: Required[Literal['session']]
+    session_id: Required[str]
+
+class ToolGrantSubjectIdentity(TypedDict, total=False):
+    identity: Required[str]
+    kind: Required[Literal['identity']]
+    mob_id: Required[str]
+
+ToolGrantSubjectRequest = ToolGrantSubjectSession | ToolGrantSubjectIdentity
+
+# The target a grant request names: one tool name, or a built-in tool
+# family, whose names the server takes at grant time. Closed: a kind or a
+# field this version does not know is refused, never ignored, so a request
+# is never read as wider than it asked.
+class ToolGrantTargetTool(TypedDict, total=False):
+    kind: Required[Literal['tool']]
+    name: Required[str]
+
+class ToolGrantTargetFamily(TypedDict, total=False):
+    family: Required[str]
+    kind: Required[Literal['family']]
+
+ToolGrantTargetRequest = ToolGrantTargetTool | ToolGrantTargetFamily
+
+# Whose grant a record names: a session, or (in a later version) a mob
+# member's identity.
+class WireToolGrantSubjectSession(TypedDict, total=False):
+    kind: Required[Literal['session']]
+    session_id: Required[str]
+
+class WireToolGrantSubjectIdentity(TypedDict, total=False):
+    identity: Required[str]
+    kind: Required[Literal['identity']]
+    mob_id: Required[str]
+
+class WireToolGrantSubjectUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+WireToolGrantSubject = WireToolGrantSubjectSession | WireToolGrantSubjectIdentity | WireToolGrantSubjectUnknown
+
+# What a grant record opens: one tool name, or a built-in tool family with
+# the names the server took for it at grant time.
+class WireToolGrantTargetTool(TypedDict, total=False):
+    kind: Required[Literal['tool']]
+    name: Required[str]
+
+class WireToolGrantTargetFamily(TypedDict, total=False):
+    family: Required[str]
+    kind: Required[Literal['family']]
+    names: NotRequired[list[str]]
+
+class WireToolGrantTargetUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+WireToolGrantTarget = WireToolGrantTargetTool | WireToolGrantTargetFamily | WireToolGrantTargetUnknown
+
+# Who issued a grant.
+class WireToolGrantIssuerOperator(TypedDict, total=False):
+    caller: NotRequired[Optional[str]]
+    kind: Required[Literal['operator']]
+
+class WireToolGrantIssuerApproval(TypedDict, total=False):
+    approval_id: Required[str]
+    kind: Required[Literal['approval']]
+
+class WireToolGrantIssuerUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+WireToolGrantIssuer = WireToolGrantIssuerOperator | WireToolGrantIssuerApproval | WireToolGrantIssuerUnknown
+
+# A grant's status.
+WireToolGrantStatus = Literal['active', 'expired', 'revoked', 'requested', 'declined', 'unknown']
+
+# Which driver observed a grant's expiry.
+WireToolGrantExpiryDriver = Literal['timer', 'boundary', 'dispatch', 'read', 'revoke'] | Literal['unknown']
+
+# Why a gated call was refused.
+WireToolGrantRefusalKind = Literal['required', 'expired', 'revoked', 'unavailable'] | Literal['unknown']
+
+# One audit event of a subject's grants.
+class WireToolGrantAuditEventGranted(TypedDict, total=False):
+    expires_at_ms: Required[int]
+    grant_id: Required[str]
+    issuer: Required[WireToolGrantIssuer]
+    kind: Required[Literal['granted']]
+    reason: NotRequired[Optional[str]]
+    target: Required[WireToolGrantTarget]
+
+class WireToolGrantAuditEventExpired(TypedDict, total=False):
+    driver: Required[WireToolGrantExpiryDriver]
+    expires_at_ms: Required[int]
+    grant_id: Required[str]
+    kind: Required[Literal['expired']]
+    observed_at_ms: Required[int]
+
+class WireToolGrantAuditEventRevoked(TypedDict, total=False):
+    actor: NotRequired[Optional[str]]
+    grant_id: Required[str]
+    kind: Required[Literal['revoked']]
+    observed_at_ms: Required[int]
+    reason: NotRequired[Optional[str]]
+
+class WireToolGrantAuditEventRefused(TypedDict, total=False):
+    call_id: Required[str]
+    grant_id: NotRequired[Optional[str]]
+    kind: Required[Literal['refused']]
+    reason: Required[WireToolGrantRefusalKind]
+    run_id: NotRequired[Optional[str]]
+    tool: Required[str]
+
+class WireToolGrantAuditEventUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventUnknown
 
 @dataclass
 class ActivateInstructionParams:
@@ -1848,6 +1982,108 @@ format."""
     head_revision: str
 
 
+@dataclass
+class WireToolGrant:
+    """One scoped tool grant."""
+    expires_at_ms: int
+    grant_id: str
+    issued_at_ms: int
+    issuer: WireToolGrantIssuer
+    status: WireToolGrantStatus
+    subject: WireToolGrantSubject
+    target: WireToolGrantTarget
+    ended_at_ms: Optional[int] = None
+    reason: Optional[str] = None
+
+
+@dataclass
+class WireUnreadableToolGrant:
+    """A stored grant row the server cannot read (written by a newer version,
+or damaged). It opens nothing."""
+    detail: str
+    grant_id: str
+
+
+@dataclass
+class WireToolGrantAuditRow:
+    """One audit row: its place in the subject's log, when it was recorded, and
+its event."""
+    at_ms: int
+    event: WireToolGrantAuditEvent
+    sequence: int
+
+
+@dataclass
+class WireUnreadableToolGrantAuditRow:
+    """An audit row of the page the server cannot read (written by a newer
+version, or damaged): its place in the subject's log."""
+    detail: str
+    sequence: int
+
+
+@dataclass
+class GrantToolParams:
+    """`tool_grants/grant` parameters. Exactly one of `expires_at_ms` and
+`duration_ms` bounds the grant, at most the host's maximum lifetime."""
+    subject: ToolGrantSubjectRequest
+    target: ToolGrantTargetRequest
+    duration_ms: Optional[int] = None
+    expires_at_ms: Optional[int] = None
+    reason: Optional[str] = None
+
+
+@dataclass
+class GrantToolResult:
+    """`tool_grants/grant` result."""
+    grant: WireToolGrant
+
+
+@dataclass
+class RevokeToolGrantParams:
+    """`tool_grants/revoke` parameters."""
+    grant_id: str
+    reason: Optional[str] = None
+
+
+@dataclass
+class RevokeToolGrantResult:
+    """`tool_grants/revoke` result. A revoke is idempotent: `changed` says
+whether this revoke ended the grant."""
+    changed: bool
+    grant: WireToolGrant
+
+
+@dataclass
+class ListToolGrantsParams:
+    """`tool_grants/list` parameters."""
+    subject: ToolGrantSubjectRequest
+    include_ended: Optional[bool] = None
+
+
+@dataclass
+class ListToolGrantsResult:
+    """`tool_grants/list` result. Due grants are settled as expired first."""
+    grants: list[WireToolGrant]
+    unreadable: Optional[list[WireUnreadableToolGrant]] = None
+
+
+@dataclass
+class ToolGrantAuditParams:
+    """`tool_grants/audit` parameters: a page of the subject's audit log."""
+    subject: ToolGrantSubjectRequest
+    after_sequence: Optional[int] = None
+    limit: Optional[int] = None
+
+
+@dataclass
+class ToolGrantAuditResult:
+    """`tool_grants/audit` result. `next_sequence` is the `after_sequence` of
+the next page while more rows may follow."""
+    rows: list[WireToolGrantAuditRow]
+    next_sequence: Optional[int] = None
+    unreadable: Optional[list[WireUnreadableToolGrantAuditRow]] = None
+
+
 # Private host/gateway execution declaration for a callback tool.
 class CallbackToolExecutionFast(TypedDict, total=False):
     mode: Required[Literal['fast']]
@@ -2242,9 +2478,26 @@ class MobCreateResult:
 
 
 @dataclass
+class WireQuarantinedMob:
+    """One quarantined persisted mob on `mob/list`: its store did not restore
+and is kept exactly as found, with no actor. A lookup of its id answers
+the `mob_quarantined` refusal this row carries (`message`, `code`,
+`structured_data`); `mob/restore_retry` re-attempts its restore."""
+    class_: WireMobQuarantineClass
+    message: str
+    mob_id: str
+    retryable: bool
+    attempts: Optional[int] = None
+    code: Optional[Literal['SESSION_NOT_FOUND', 'SCHEDULE_NOT_FOUND', 'SESSION_BUSY', 'SESSION_NOT_RUNNING', 'REQUEST_CANCELLED', 'PROVIDER_ERROR', 'BUDGET_EXHAUSTED', 'HOOK_DENIED', 'AGENT_ERROR', 'CAPABILITY_UNAVAILABLE', 'SKILL_NOT_FOUND', 'SKILL_RESOLUTION_FAILED', 'INVALID_PARAMS', 'INTERNAL_ERROR', 'DUPLICATE_INPUT', 'SUPERVISOR_ROTATION_INCOMPLETE'] | Literal['SCOPE_DENIED'] | Literal['HOST_UNAVAILABLE'] | Literal['STALE_CURSOR'] | Literal['STALE_FENCE'] | Literal['MEMBER_RELOAD_REQUIRED'] | Literal['INPUT_REFUSED'] | Literal['INPUT_NOT_READY'] | Literal['SESSION_RUNTIME_UNAVAILABLE'] | Literal['APPROVAL_STORE_UNAVAILABLE'] | Literal['APPROVAL_CONFLICT'] | Literal['APPROVAL_COMMIT_UNKNOWN'] | Literal['STALE_DELIVERY_SCOPE'] | Literal['FORK_INSTRUCTION_REFUSED']] = None
+    retrying: Optional[bool] = None
+    structured_data: Optional[Any] = None
+
+
+@dataclass
 class MobListResult:
     """Response payload for `mob/list`."""
     mobs: list[dict[str, Any]]
+    quarantined: Optional[list[WireQuarantinedMob]] = None
 
 
 @dataclass
@@ -3090,6 +3343,13 @@ class MobRotateSupervisorResult:
     mob_id: str
     ok: bool
     report: SupervisorRotationReportWire
+
+
+@dataclass
+class MobRestoreRetryResult:
+    """Response payload for `mob/restore_retry`."""
+    mob_id: str
+    outcome: WireMobRestoreRetryOutcome
 
 
 @dataclass
@@ -4174,6 +4434,7 @@ class GoalStatusResult:
 @dataclass
 class ReadyWorkFilter:
     """Request payload for ReadyWorkFilter."""
+    cursor: Optional[str] = None
     labels: Optional[list[str]] = None
     limit: Optional[int] = None
     namespace: Optional[str] = None
@@ -4228,6 +4489,9 @@ class WorkGraphEventFilter:
 class WorkGraphEventsResponse:
     """Wire payload for WorkGraphEventsResponse."""
     events: list[WorkGraphEvent]
+    event_high_water_mark: Optional[int] = None
+    next_after_seq: Optional[int] = None
+    truncated: Optional[bool] = None
 
     @classmethod
     def from_wire(cls, value: Any) -> "WorkGraphEventsResponse":
@@ -4236,7 +4500,10 @@ class WorkGraphEventsResponse:
         """
         data = _expect_wire_object(value, 'WorkGraphEventsResponse')
         return cls(
+            event_high_water_mark=(_expect_wire_int(data['event_high_water_mark'], 'WorkGraphEventsResponse.event_high_water_mark') if data.get('event_high_water_mark') is not None else None),
             events=[WorkGraphEvent.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'events', 'WorkGraphEventsResponse'), 'WorkGraphEventsResponse.events')],
+            next_after_seq=(_expect_wire_int(data['next_after_seq'], 'WorkGraphEventsResponse.next_after_seq') if data.get('next_after_seq') is not None else None),
+            truncated=(_expect_wire_bool(data['truncated'], 'WorkGraphEventsResponse.truncated') if data.get('truncated') is not None else None),
         )
 
 
@@ -4251,8 +4518,14 @@ realm/namespace scope (`workgraph/get`)."""
 
 @dataclass
 class WorkGraphItemsResponse:
-    """Wire payload for WorkGraphItemsResponse."""
+    """One page of work items: `list` (most recently updated first) or `ready`
+(priority, then creation time, then id)."""
     items: list[WorkItem]
+    anchor_event_seq: Optional[int] = None
+    changed_since_anchor: Optional[bool] = None
+    next_cursor: Optional[str] = None
+    total_items: Optional[int] = None
+    truncated: Optional[bool] = None
 
     @classmethod
     def from_wire(cls, value: Any) -> "WorkGraphItemsResponse":
@@ -4261,7 +4534,12 @@ class WorkGraphItemsResponse:
         """
         data = _expect_wire_object(value, 'WorkGraphItemsResponse')
         return cls(
+            anchor_event_seq=(_expect_wire_int(data['anchor_event_seq'], 'WorkGraphItemsResponse.anchor_event_seq') if data.get('anchor_event_seq') is not None else None),
+            changed_since_anchor=(_expect_wire_bool(data['changed_since_anchor'], 'WorkGraphItemsResponse.changed_since_anchor') if data.get('changed_since_anchor') is not None else None),
             items=[WorkItem.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'items', 'WorkGraphItemsResponse'), 'WorkGraphItemsResponse.items')],
+            next_cursor=(_expect_wire_str(data['next_cursor'], 'WorkGraphItemsResponse.next_cursor') if data.get('next_cursor') is not None else None),
+            total_items=(_expect_wire_int(data['total_items'], 'WorkGraphItemsResponse.total_items') if data.get('total_items') is not None else None),
+            truncated=(_expect_wire_bool(data['truncated'], 'WorkGraphItemsResponse.truncated') if data.get('truncated') is not None else None),
         )
 
 
@@ -4274,9 +4552,14 @@ class WorkGraphSnapshot:
     items: list[WorkItem]
     ready_item_ids: list[str]
     realm_id: str
+    anchor_event_seq: Optional[int] = None
     attention: Optional[list[WorkAttentionBinding]] = None
+    changed_since_anchor: Optional[bool] = None
     event_high_water_mark: Optional[int] = None
     namespace: Optional[str] = None
+    next_cursor: Optional[str] = None
+    total_items: Optional[int] = None
+    truncated: Optional[bool] = None
 
     @classmethod
     def from_wire(cls, value: Any) -> "WorkGraphSnapshot":
@@ -4286,14 +4569,19 @@ class WorkGraphSnapshot:
         data = _expect_wire_object(value, 'WorkGraphSnapshot')
         return cls(
             all_namespaces=_expect_wire_bool(_require_wire_field(data, 'all_namespaces', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.all_namespaces'),
+            anchor_event_seq=(_expect_wire_int(data['anchor_event_seq'], 'WorkGraphSnapshot.anchor_event_seq') if data.get('anchor_event_seq') is not None else None),
             attention=([WorkAttentionBinding.from_wire(_item) for _item in _expect_wire_list(data['attention'], 'WorkGraphSnapshot.attention')] if data.get('attention') is not None else None),
             captured_at=_expect_wire_str(_require_wire_field(data, 'captured_at', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.captured_at'),
+            changed_since_anchor=(_expect_wire_bool(data['changed_since_anchor'], 'WorkGraphSnapshot.changed_since_anchor') if data.get('changed_since_anchor') is not None else None),
             edges=[WorkEdge.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'edges', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.edges')],
             event_high_water_mark=(_expect_wire_int(data['event_high_water_mark'], 'WorkGraphSnapshot.event_high_water_mark') if data.get('event_high_water_mark') is not None else None),
             items=[WorkItem.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'items', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.items')],
             namespace=(_expect_wire_str(data['namespace'], 'WorkGraphSnapshot.namespace') if data.get('namespace') is not None else None),
+            next_cursor=(_expect_wire_str(data['next_cursor'], 'WorkGraphSnapshot.next_cursor') if data.get('next_cursor') is not None else None),
             ready_item_ids=[_expect_wire_str(_item, 'WorkGraphSnapshot.ready_item_ids[]') for _item in _expect_wire_list(_require_wire_field(data, 'ready_item_ids', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.ready_item_ids')],
             realm_id=_expect_wire_str(_require_wire_field(data, 'realm_id', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.realm_id'),
+            total_items=(_expect_wire_int(data['total_items'], 'WorkGraphSnapshot.total_items') if data.get('total_items') is not None else None),
+            truncated=(_expect_wire_bool(data['truncated'], 'WorkGraphSnapshot.truncated') if data.get('truncated') is not None else None),
         )
 
 
@@ -4301,6 +4589,7 @@ class WorkGraphSnapshot:
 class WorkGraphSnapshotFilter:
     """Request payload for WorkGraphSnapshotFilter."""
     all_namespaces: Optional[bool] = None
+    cursor: Optional[str] = None
     include_terminal: Optional[bool] = None
     labels: Optional[list[str]] = None
     limit: Optional[int] = None
@@ -4373,6 +4662,7 @@ class WorkItem:
 class WorkItemFilter:
     """Request payload for WorkItemFilter."""
     all_namespaces: Optional[bool] = None
+    cursor: Optional[str] = None
     include_terminal: Optional[bool] = None
     labels: Optional[list[str]] = None
     limit: Optional[int] = None
@@ -4429,7 +4719,9 @@ class WorkEdge:
 
 @dataclass
 class WorkEvidenceRef:
-    """Wire payload for WorkEvidenceRef."""
+    """A typed pointer to evidence for a work item. Evidence is append-only:
+nothing edits or removes a ref, and a later ref can withdraw earlier ones
+by listing their ids in `withdraws`."""
     id: str
     kind: str
     confirmation_kind: Optional[WorkEvidenceKind] = None
@@ -4437,6 +4729,7 @@ class WorkEvidenceRef:
     execution_binding_id: Optional[str] = None
     label: Optional[str] = None
     summary: Optional[str] = None
+    withdraws: Optional[list[str]] = None
 
     @classmethod
     def from_wire(cls, value: Any) -> "WorkEvidenceRef":
@@ -4452,6 +4745,7 @@ class WorkEvidenceRef:
             kind=_expect_wire_str(_require_wire_field(data, 'kind', 'WorkEvidenceRef'), 'WorkEvidenceRef.kind'),
             label=(_expect_wire_str(data['label'], 'WorkEvidenceRef.label') if data.get('label') is not None else None),
             summary=(_expect_wire_str(data['summary'], 'WorkEvidenceRef.summary') if data.get('summary') is not None else None),
+            withdraws=([_expect_wire_str(_item, 'WorkEvidenceRef.withdraws[]') for _item in _expect_wire_list(data['withdraws'], 'WorkEvidenceRef.withdraws')] if data.get('withdraws') is not None else None),
         )
 
 
@@ -5071,7 +5365,10 @@ class ForkInstructionRefusalCauseActivation(TypedDict, total=False):
 class ForkInstructionRefusalCauseMemberHostUnsupported(TypedDict, total=False):
     kind: Required[Literal['member_host_unsupported']]
 
-ForkInstructionRefusalCause = ForkInstructionRefusalCausePolicyRefuses | ForkInstructionRefusalCauseNotEffectiveInSource | ForkInstructionRefusalCauseLineageBodyBudgetExceeded | ForkInstructionRefusalCauseActivation | ForkInstructionRefusalCauseMemberHostUnsupported
+class ForkInstructionRefusalCauseHeadBodyRetired(TypedDict, total=False):
+    kind: Required[Literal['head_body_retired']]
+
+ForkInstructionRefusalCause = ForkInstructionRefusalCausePolicyRefuses | ForkInstructionRefusalCauseNotEffectiveInSource | ForkInstructionRefusalCauseLineageBodyBudgetExceeded | ForkInstructionRefusalCauseActivation | ForkInstructionRefusalCauseMemberHostUnsupported | ForkInstructionRefusalCauseHeadBodyRetired
 
 @dataclass
 class ForkInstructionRefusal:
@@ -7092,7 +7389,15 @@ WireMemberCustodyRestore = Literal['startup_binding', 'cleanup_delivery']
 # The cause a deferred member custody restore last met. The vocabulary
 # may grow: a reader surfaces a cause it does not know instead of
 # refusing it.
-WireMemberCustodyDeferralCause = Literal['served_elsewhere', 'hosting_unavailable', 'durable_tail_unprovable']
+WireMemberCustodyDeferralCause = Literal['served_elsewhere', 'hosting_unavailable', 'durable_tail_unprovable', 'store_unavailable', 'store_unreadable']
+
+# Why a persisted mob store is quarantined. The vocabulary may grow: a
+# reader surfaces a class it does not know instead of refusing it.
+WireMobQuarantineClass = Literal['store_unavailable', 'store_unreadable', 'resume_refused']
+
+# How a `mob/restore_retry` ended. A re-attempt that fails answers the
+# `mob_quarantined` refusal instead.
+WireMobRestoreRetryOutcome = Literal['restored', 'held', 'settled', 'not_quarantined']
 
 # Lifecycle status of a flow run on the wire. Mirrors
 # `meerkat_mob::MobRunStatus` so consumers branch on a closed type rather than
@@ -9662,7 +9967,9 @@ class WireSessionMessageSystem(TypedDict, total=False):
     created_at: Required[str]
     identity: NotRequired[Optional[dict[str, Any]]]
     instruction_activation: NotRequired[Optional[InstructionActivationIdentity]]
+    instruction_entry: NotRequired[Optional[dict[str, Any] | Any]]
     prompt_version: NotRequired[Optional[SystemPromptVersionIdentity]]
+    retired_instruction_body: NotRequired[Optional[dict[str, Any] | Any]]
     role: Required[Literal['system']]
 
 class WireSessionMessageSystemNotice(TypedDict, total=False):

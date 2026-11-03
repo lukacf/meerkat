@@ -181,17 +181,21 @@
 // (closure_test_rows, the closure-tests job) for the test scope: the
 // reverse-dependency closure of the changed packages, every member when a
 // global input changed. A pull request runs none of them (deferred_to_push).
-// Every row but HeadCanonical
-// selects the whole workspace (`--workspace`) and names only its targets, so
-// Cargo resolves every crate's features exactly as the hook's single
-// workspace build does and builds only those targets' graphs: the row
-// compiles the hook's own units (cargo's unit graph: identical for
-// `--workspace --test ...` and `--workspace --lib`; a package-scoped row
-// compiled 31-39 dependency units with fewer features, and so does
-// `--workspace --exclude`). The rows are
-//   lib        one `--workspace --lib` row: it builds every member's lib
-//              test (nothing narrower keeps the resolution) and runs the
-//              scope's through a package() filter. Only with
+// Every Core row but HeadCanonical
+// selects Core's whole workspace (`--workspace` and an `--exclude` for every
+// other product's package: the hook's own selection, from
+// scripts/core-workspace-args.mjs) and names only its targets, so Cargo
+// resolves every crate's features exactly as the hook's single build does
+// and builds only those targets' graphs: the row compiles the hook's own
+// units (cargo's unit graph: identical for `--workspace --test ...` and
+// `--workspace --lib`; a package-scoped row compiled 31-39 dependency units
+// with fewer features). A product's test binaries are out of the hook: their
+// rows select exactly that product's packages (`-p` each), the product's own
+// workspace resolution, and the coverage check credits them only there. The
+// rows are
+//   lib        one Core `--workspace --lib` row: it builds every Core
+//              member's lib test (nothing narrower keeps the resolution) and
+//              runs the scope's through a package() filter. Only with
 //              --lib-row-runner, on that runner: a hosted 4-vCPU runner
 //              needs about 64 min to build it (nightly's workspace unit
 //              lane: 4940 s, 1071 s of it running the tests). Without one
@@ -267,12 +271,14 @@ import { pathToFileURL } from "node:url";
 import {
   HOOK_SCRIPT,
   checkHookCoverage,
+  excludedTestsFilter,
   hookModel,
+  laneSelections,
   parseFilter,
   profileFilter,
-  workspaceFeatures,
 } from "./ci-hook-coverage.mjs";
 import { loadNonRustReaders, readerPackagesFor, readerSelectionsFor, WHOLE_CHECKOUT } from "./ci-non-rust-readers.mjs";
+import { CORE, PRODUCTS_PATH, defaultMembersProblem, loadProducts, productOfPath, productRootPrefixes } from "./ci-products.mjs";
 import {
   REUSE_CLASSIFIER,
   RELEASE_PROJECTION_MODE,
@@ -342,6 +348,63 @@ export const CLOSURE_TESTS_PER_ROW = 12;
 // test, and the coverage check credits the binary only when every partition
 // is planned.
 export const CANARY_TEST_GROUP = "downstream-cargo-canary";
+// Test binaries no hosted runner can judge, keyed package::test-target: their
+// assertion is calibrated on real hardware, so they run outside CI (the
+// owning product's local lanes and release protocol). The plan gives them no
+// closure-tests row and names them, with the reason, in
+// `hosted_runner_excluded`, which the hook coverage check accepts in place
+// of a row.
+export const HOSTED_RUNNER_EXCLUDED_BINARIES = [
+  {
+    binary: "meerkat-meta::idle_cpu_gate",
+    reason:
+      "an absolute per-30-second CPU budget calibrated on real hardware: shared hosted runners read 3-4 s " +
+      "where real machines read 0.5-2 s, even scheduled alone (Meta's own CI left it out the same way; " +
+      "its release-gate protocol runs it)",
+  },
+];
+// Tests no hosted runner can run, in a binary whose other tests run: each
+// needs an environment only its product's own lane provides. Keyed by the
+// binary (package::test-target) and listed by exact name, with the reason.
+// The closure-tests row that holds the binary runs it without them (the
+// row's `filter`, ci-hook-coverage's excludedTestsFilter), the plan names them with the reason
+// in `hosted_runner_excluded_tests`, and scripts/ci-verify-row-binaries.mjs
+// accepts exactly these as filtered out of their binary. A renamed or
+// removed test fails that check, so the list follows the binary.
+export const HOSTED_RUNNER_EXCLUDED_TESTS = [
+  {
+    binary: "meerkat-connect::cli_paired_host",
+    reason:
+      "needs the assembled pin-built synthetic resource prefix (CONNECT_LAZY_SERVICES_FIXTURE_PREFIX), " +
+      "which only Connect's native lane provides",
+    tests: [
+      "actual_cli_combined_roles_preserve_inspection_choice_and_exact_approval",
+      "actual_cli_configured_browser_login_precedes_pairing_and_uses_same_native_session",
+      "actual_cli_configured_managed_api_key_is_hidden_and_reaches_native_model",
+      "actual_cli_default_frontend_uses_the_pinned_reviewed_setup_helper",
+      "actual_cli_denied_setup_helper_review_leaves_native_realm_unmaterialized",
+      "actual_cli_denied_setup_model_review_retains_only_helper_effects_and_no_input",
+      "actual_cli_device_cancel_before_start_sends_no_auth_request",
+      "actual_cli_device_cancel_during_interval_stops_without_polling_or_pairing",
+      "actual_cli_device_cancel_during_ready_poll_joins_storage_without_pairing",
+      "actual_cli_device_login_paces_polls_persists_native_account_then_reaches_pairing",
+      "actual_cli_explicit_memory_pairing_can_exit_after_retained_setup_before_request",
+      "actual_cli_failed_read_turn_accepts_only_explicit_followup_in_same_session",
+      "actual_cli_failed_uncertain_submission_allows_only_explicit_exact_status_turn",
+      "actual_cli_names_new_realm_with_existing_inventory_and_preserves_old_realm",
+      "actual_cli_new_realm_invalid_name_quit_eof_and_interrupt_leave_realms_unchanged",
+      "actual_cli_pairs_without_os_store_and_submits_exact_review_after_supplied_setup",
+      "actual_cli_provider_callback_cancel_joins_without_pairing_or_exchange",
+      "actual_cli_provider_exchange_cancel_waits_for_native_settlement_without_pairing",
+      "actual_cli_provider_exchange_failure_redacts_and_never_retries",
+      "actual_cli_reads_service_recipes_without_resources_in_original_session",
+      "actual_cli_refuses_private_document_and_keeps_original_conversation",
+      "actual_cli_secret_intent_approval_hands_entry_only_to_terminal_and_reads_host_status",
+      "actual_cli_startup_cancel_joins_native_refresh_and_closes_without_input",
+      "actual_cli_startup_cancel_preserves_native_refresh_failure_without_input",
+    ],
+  },
+];
 const CLOSURE_TEST_PROFILE = "ci-integration";
 const CLOSURE_LIB_PROFILE = "ci-unit";
 // Compile and link of one tests/*.rs binary, in cost units. Uncalibrated:
@@ -371,6 +434,53 @@ const LIB_TARGET_KINDS = new Set(["lib", "rlib", "dylib", "cdylib", "staticlib"]
 // and 900 s on run 38859112297 (798 s and 621 s of it building), against
 // 293 s for its default-feature row, which the pull request keeps.
 const GPT_LIVE_TEST_STACK = 32 * 1024 * 1024;
+// The known reds of the toolkit-mobkit[native-host] suite below. Each names
+// its class: a heading anchor of the crate's test-debt page, which says what
+// fails, why, and the fix. The plan checks this list and the page both ways
+// (checkKnownRedsDoc), so neither can name a test the other does not. The
+// suite runs without them, then runs the ones that fail every time and fails
+// unless every one still fails, each within a minute (the ci-known-reds
+// nextest profile): a fixed test leaves the list and the page in the same
+// change. An intermittent one stays out of both runs.
+export const TOOLKIT_MOBKIT_TEST_DEBT = "connect/crates/toolkit-mobkit/NATIVE-HOST-TEST-DEBT.md";
+const COLD_RESTORE = "cold-restore-refusals";
+const TOOL_RESULT = "tool-result-payload";
+const STALE = "stale-expectations";
+const INTERMITTENT = "intermittent-races";
+export const TOOLKIT_MOBKIT_KNOWN_REDS = [
+  ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_first_and_pending_continuation_recover_without_resubmitting_a", COLD_RESTORE],
+  ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_historical_custody_cannot_validate_another_run_or_submission", COLD_RESTORE],
+  ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_targeted_selection_restores_its_exact_operation_projection", COLD_RESTORE],
+  ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::durable_owner_reopen_drains_same_pending_completion_after_source_recovery", COLD_RESTORE],
+  ["private_originals::governed_submit::tests::first_input_tests::approved_fixture::custody_recovery_helper_cold_tests::cold_pending_helper_settles_retired_input_without_resubmission", COLD_RESTORE],
+  ["private_originals::governed_submit::tests::first_input_tests::approved_fixture::custody_recovery_helper_cold_tests::cold_promoted_helper_restores_exact_input_and_refuses_tampered_or_legacy_bytes", COLD_RESTORE],
+  ["private_originals::service_approved_input::admission_tests::cold_service_tests::cold_b_restores_actual_admission_and_phase_without_replay_or_new_issuer", COLD_RESTORE],
+  ["private_originals::governed_submit::tests::first_input_tests::acquisition_denial::controller_only_original_denies_enrolled_acquisition_in_its_real_turn", TOOL_RESULT],
+  ["private_originals::governed_submit::tests::first_input_tests::helper_report::warm_reacquisition::admitted_b_setup_revoke_preserves_b_service_and_refuses_another_helper", TOOL_RESULT],
+  ["private_originals::governed_submit::tests::first_input_tests::helper_report::warm_reacquisition::warm_helper_reacquisition_uses_fresh_c_grants_and_independent_native_targets", TOOL_RESULT],
+  ["private_originals::service_approved_input::attachment::tests::native::batch::admitted_batch_target_independence_and_settled_cold_restore_after_alpha_revoke", TOOL_RESULT],
+  ["installed_host::acquisition::enrollment::tests::production_leaves_reach_actual_bound_owner_but_not_missing_native_continuation", "interaction-lineage"],
+  ["installed_host::tests::direct_rust_access_is_fenced_by_owner_close_or_selection_replacement", STALE],
+  ["installed_host::tests::direct_rust_original_cancellation_is_fenced_and_does_not_revoke_standing_access", STALE],
+  ["installed_host::tests::gateway_identity::native_no_identity_path_refuses_toolkit_ready_before_input_or_publication", STALE],
+  ["installed_host::operator_setup::tests::owner_tests::captured_answer_loss_during_child_admission_prevents_native_child_write", STALE],
+  ["private_originals::service_approved_input::admission_tests::live_attachment_preparation_reopens_cancelled_task_and_never_submits_b", STALE],
+  ["private_originals::service_approved_input::admission_tests::cold_service_tests::cold_b_requires_complete_reserved_selection_and_retained_input", STALE],
+  ["private_originals::service_approved_input::admission_tests::source_status_tests::unrelated_publication_is_readable_but_terminal_bound_association_mismatch_refuses", STALE],
+  ["private_originals::service_grants::mcp::tests::application_policy_pending_record_keeps_exact_provenance_without_reissue", STALE],
+  ["private_originals::service_approved_input::admission_tests::application_policy_tests::application_task_cancellation_before_issue_keeps_only_native_a", STALE],
+  ["private_originals::service_approved_input::admission_tests::application_policy_tests::invalidated_application_policy_keeps_only_native_a", STALE],
+  ["private_originals::service_approved_input::admission_tests::service_recovery_tests::operator_recovery_preserves_new_publication_and_other_approval_child", STALE],
+  ["private_originals::service_grants::mcp::tests::whole_set_replays_without_reissue_and_matches_only_its_access_bound_source", STALE],
+  ["private_originals::governed_submit::tests::first_input_tests::acquisition_approved::reviewed_original_runs_enrolled_acquisition_and_one_controller_only_helper", STALE],
+  ["original_ingress::tests::native_original_disposition_waits_for_held_collection_before_reading_open_row", STALE],
+  ["private_host::tests::service_parent_controls::service_result_and_retire_cannot_supply_an_authorization_answer", "decision-source-unknown-field"],
+  ["installed_host::operator_setup::tests::target_tests::explicit_correlated_targets_use_one_review_source_and_real_first_input", "double-model-request"],
+  ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::custody_recovery_wake_tests::terminal_census_wakes_existing_completion_after_native_source_restore", "census-wake-timeout"],
+  ["private_originals::service_approved_input::attachment::tests::native::actual_public_attachment_loads_catalog_calls_mapped_read_and_completes_exact_b_once_with_cancellation", INTERMITTENT, { intermittent: true }],
+  ["private_originals::governed_submit::tests::first_input_tests::helper_entry_native::fresh_helper_reset_catalog_calls_require_explicit_successor_parent", INTERMITTENT, { intermittent: true }],
+].map(([test, anchor, flags]) => ({ test, anchor, intermittent: flags?.intermittent === true }));
+
 export const FEATURE_UNIT_SUITES = [
   // The shipping public GPT Live path (experimental_gpt_live::tests,
   // session_runtime::live_summary, service_factory) plus the realtime
@@ -398,6 +508,34 @@ export const FEATURE_UNIT_SUITES = [
   // hand-built MeerkatMachine inputs broke silently when RegisterSession
   // gained initial_run_start_holds, because no lane enabled the feature.
   { package: "meerkat-machine-kernels", id: "test-oracle", features: ["test-oracle"] },
+  // Meta (meta/): the openai-live and extension-state code its default
+  // features compile out, which Meta's own CI tested in jobs of their own.
+  // Its rows carry Meta's test stack (ci/products.json).
+  { package: "meerkat-meta", id: "openai-live", features: ["openai-live"] },
+  { package: "meerkat-meta", id: "extension-state", features: ["extension-state", "announcement-test-faults", "console-test-faults"] },
+  // Connect (connect/): the Console code its default features compile out
+  // (the application gateway, the installed account, public service and
+  // credential requests and their presenters). meerkat-connect builds
+  // meerkat-mob through toolkit-mobkit's native host, so like its default
+  // unit lane this suite runs on the push only. Its process controls
+  // (resources::local_round) run under TOOLKIT_SHARED_TEST_PYTHON, which
+  // the unit jobs export.
+  { package: "meerkat-connect", id: "console", features: ["console"] },
+  // toolkit-mobkit's native host (its installed host, private originals,
+  // private host and original ingress) compiles only under `native-host`,
+  // which meerkat-connect turns on, so the package's own unit lane runs a
+  // few dozen of its tests. This suite builds it with meerkat-connect (`with`),
+  // the form those tests were written for, and runs toolkit-mobkit's tests
+  // only, without its known reds (TOOLKIT_MOBKIT_KNOWN_REDS). Push only, like
+  // meerkat-connect's own lanes.
+  {
+    package: "toolkit-mobkit",
+    id: "native-host",
+    features: ["native-host"],
+    with: ["meerkat-connect"],
+    knownReds: { doc: TOOLKIT_MOBKIT_TEST_DEBT, tests: TOOLKIT_MOBKIT_KNOWN_REDS },
+    pullRequest: false,
+  },
 ];
 
 // Integration-test suites. Every unit lane runs `--lib --bins`, so a crate's
@@ -676,6 +814,10 @@ export const CLIPPY_HEAD_SHARDS = [
 export const MOB_CHAIN_CLIPPY_HEADS = ["rkat", "meerkat-integration-tests", "meerkat-rpc"];
 export const MOB_CHAIN_INVALIDATED = "mob chain invalidated";
 export const CLIPPY_PACKED_SHARDS = 5;
+// The main unit rows of a product other than Core: its packages pack into at
+// most this many rows (a product's integration tests are closure-tests rows
+// of their own, CLOSURE_TESTS_PER_ROW targets each).
+export const PRODUCT_MAIN_UNIT_SHARDS = 2;
 
 // The inputs of the two exact-profile lanes, which select exact lists of
 // tests (the governed JSONL step in ci.yml, the CONFINEMENT_* filters and
@@ -1329,7 +1471,9 @@ function isLaneDefinitionPath(path) {
     path === "scripts/ci-push-plan-base.mjs" ||
     path === "scripts/ci-push-base-selftest.mjs" ||
     path === "scripts/release-projection-only.mjs" ||
-    path === "scripts/release-version-pins.mjs"
+    path === "scripts/release-version-pins.mjs" ||
+    path === PRODUCTS_PATH ||
+    path === "scripts/ci-products.mjs"
   );
 }
 
@@ -1391,10 +1535,11 @@ function isExampleWebPath(path) {
 }
 
 // The typed governance gates (effect-authority, ownership-ledger, strict
-// RMAT, strict seam inventory, runtime authority bypass, machine-authority
-// docs) run on the agent gate's governance paths (scripts/cargo-agent-gate,
-// is_governance_path): the machine-authority paths and these dogma
-// documents. The self-test keeps the two lists equal.
+// RMAT, strict seam inventory, machine-authority docs) run on the agent
+// gate's governance paths (scripts/cargo-agent-gate, is_governance_path):
+// the machine-authority paths and these dogma documents; the runtime
+// authority bypass audit runs on them too, and on every Rust change. The
+// self-test keeps the two lists equal.
 export const GOVERNANCE_DOC_PATTERNS = [
   ".claude/skills/meerkat-dogma-inquisition/*",
   "docs/architecture/meerkat-dogma.md",
@@ -1434,7 +1579,9 @@ function isGlobalPath(path) {
     path === "scripts/rust-test-selector.mjs" ||
     path === "scripts/ci-pin-rust-toolchain-env" ||
     path === "scripts/ci-clippy-sccache-wrapper" ||
-    path === ".github/workflows/ci.yml"
+    path === ".github/workflows/ci.yml" ||
+    path === PRODUCTS_PATH ||
+    path === "scripts/ci-products.mjs"
   ) {
     return true;
   }
@@ -1442,6 +1589,18 @@ function isGlobalPath(path) {
     path.startsWith(".cargo/") ||
     path.startsWith("scripts/cargo-") ||
     path.startsWith(".github/actions/setup-rust-ci/")
+  );
+}
+
+// A product's own build configuration: the files at its root that Clippy,
+// rustfmt, Cargo or rustup read for a build of its crates (they read the
+// file nearest to the crate or the working directory).
+const PRODUCT_BUILD_CONFIG_FILES = ["clippy.toml", ".clippy.toml", "rustfmt.toml", ".rustfmt.toml", "rust-toolchain.toml", "rust-toolchain"];
+function isProductBuildConfigPath(path, products) {
+  return products.some(
+    (product) =>
+      product.name !== CORE &&
+      (PRODUCT_BUILD_CONFIG_FILES.some((file) => path === `${product.root}/${file}`) || path.startsWith(`${product.root}/.cargo/`)),
   );
 }
 
@@ -1493,6 +1652,68 @@ function rustLineCount(dir) {
 
 function shortName(name) {
   return name.startsWith("meerkat-") ? name.slice("meerkat-".length) : name;
+}
+
+// A feature suite's package flags: its package with its features, or, for a
+// suite built `with` other packages, all of them and its features named by
+// package (`--features <package>/<feature>`).
+export function featureSuiteFlags(suite) {
+  const companions = suite.with ?? [];
+  if (companions.length === 0) return `-p ${suite.package} --features ${suite.features.join(",")}`;
+  const packages = [suite.package, ...companions].map((name) => `-p ${name}`).join(" ");
+  return `${packages} --features ${suite.features.map((feature) => `${suite.package}/${feature}`).join(",")}`;
+}
+
+// A feature suite's nextest filters: a suite built `with` other packages runs
+// its own package's tests only, and a suite with known reds runs without
+// them (`filter`), then runs the ones that are not intermittent on their own
+// (`known_reds`), all of which must fail (`known_red_count` of them).
+export function featureSuiteFilters(suite) {
+  const scope = suite.with?.length ? `package(${suite.package})` : null;
+  const tests = suite.knownReds?.tests ?? [];
+  if (!scope && tests.length === 0) return {};
+  const any = (entries) => entries.map((entry) => `test(=${entry.test})`).join(" | ");
+  const within = (expression) => (scope ? `${scope} and ${expression}` : expression);
+  if (tests.length === 0) return { filter: scope };
+  const steady = tests.filter((entry) => !entry.intermittent);
+  return {
+    filter: within(`not (${any(tests)})`),
+    ...(steady.length ? { known_reds: within(`(${any(steady)})`), known_red_count: steady.length } : {}),
+  };
+}
+
+// A known-red list against its test-debt page: every entry names a test
+// once, under a class heading of the page (its anchor), and every test the
+// page lists (a bullet or a table row that opens with the test's path in
+// backticks) is an entry under the same anchor. Throws on the first drift.
+export function checkKnownRedsDoc(text, tests, docPath) {
+  const listed = new Map();
+  let anchor = null;
+  for (const line of text.split("\n")) {
+    const heading = /^## (.+)$/.exec(line);
+    if (heading) {
+      anchor = heading[1].trim().toLowerCase().replaceAll(/[^a-z0-9 -]/g, "").replaceAll(" ", "-");
+      continue;
+    }
+    const named = /^(?:- |\| )`([a-z0-9_]+(?:::[a-z0-9_]+)+)`/.exec(line);
+    if (!named) continue;
+    if (anchor === null) throw new Error(`${docPath}: ${named[1]} is listed outside a class heading`);
+    if (listed.has(named[1])) throw new Error(`${docPath}: ${named[1]} is listed twice`);
+    listed.set(named[1], anchor);
+  }
+  const seen = new Set();
+  for (const entry of tests) {
+    if (seen.has(entry.test)) throw new Error(`known reds: ${entry.test} is listed twice`);
+    seen.add(entry.test);
+    const at = listed.get(entry.test);
+    if (at === undefined) throw new Error(`known reds: ${entry.test} is not on ${docPath}`);
+    if (at !== entry.anchor) {
+      throw new Error(`known reds: ${entry.test} names #${entry.anchor}, but ${docPath} lists it under #${at}`);
+    }
+  }
+  for (const [test, at] of listed) {
+    if (!seen.has(test)) throw new Error(`${docPath}: ${test} (#${at}) is not a known red of its suite`);
+  }
 }
 
 // In-crate documentation a crate compiles in (see the header): a reader of
@@ -1756,41 +1977,52 @@ function countCanaryTests(source, prefix) {
   return (source.match(pattern) ?? []).length;
 }
 
-// The hook-parity rows for the test scope (see the header). Every row but
-// HeadCanonical selects the whole workspace (`--workspace`) and names only
-// its own targets: Cargo then resolves features exactly as the hook's single
-// workspace build does, and builds only those targets' graphs, so a row's
-// compilation units are the hook's own. Measured with cargo's unit graph on
-// b45c8e60: `--workspace --test ...` rows 472/472 and 380/380 units identical
-// to the hook's, `--workspace --lib` 572/572; package-scoped rows differed in
-// 31-39 units (dependency features), and so does `--workspace --exclude`.
-function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestText, hook, libRowRunner }) {
+// The hook-parity rows for the test scope (see the header). Every Core row
+// but HeadCanonical selects Core's whole workspace (`--workspace` and an
+// `--exclude` for every other product's package, the hook's own selection)
+// and names only its own targets: Cargo then resolves features exactly as
+// the hook's single build does, and builds only those targets' graphs, so a
+// row's compilation units are the hook's own. Measured with cargo's unit
+// graph on b45c8e60 (Core alone): `--workspace --test ...` rows 472/472 and
+// 380/380 units identical to the hook's, `--workspace --lib` 572/572;
+// package-scoped rows differed in 31-39 units (dependency features). A
+// product's rows select exactly that product's packages (`-p` each), its own
+// workspace's resolution. `laneFeatures` holds each member's features under
+// its own product's selection; `selections` the selections' flags.
+function hookParityRows({ scope, byName, laneFeatures, selections, model, maxTestRows, nextestText, hook, libRowRunner, productOf = () => "core", productStack = () => null, excluded = new Set(), excludedTests = [] }) {
   const rows = [];
+  const flagsOf = (product) => {
+    const selection = selections.selections.get(product);
+    if (!selection) throw new Error(`no lane selection for product ${product}`);
+    return selection.flags;
+  };
   const testTargets = (name) =>
     byName.get(name).targets.filter((target) => target.kind.length === 1 && target.kind[0] === "test");
   const hookBuilt = (name, target) =>
-    target.test !== false && (target["required-features"] ?? []).every((feature) => unified.get(name).has(feature));
+    target.test !== false && (target["required-features"] ?? []).every((feature) => laneFeatures.get(name)?.has(feature));
   const hasLib = (name) =>
     byName.get(name).targets.some((target) => target.test !== false && target.kind.some((kind) => LIB_TARGET_KINDS.has(kind)));
 
   // Lib tests: one row, on the runner that can build it in time (none
-  // given: the plan leaves the kind(lib) lane to the unit lanes). `--workspace --lib` builds
-  // every member's lib test; no stable selection builds fewer under the
-  // same resolution, so the scope narrows what runs, not what builds. The
-  // filter keeps the hook's own kind(lib) (proc-macro crates' tests are not
-  // in it) and the scope's packages.
-  const libPackages = libRowRunner ? scope.filter(hasLib) : [];
+  // given: the plan leaves the kind(lib) lane to the unit lanes). Core's
+  // `--workspace --lib` builds every Core member's lib test; no stable
+  // selection builds fewer under the same resolution, so the scope narrows
+  // what runs, not what builds. The filter keeps the hook's own kind(lib)
+  // (proc-macro crates' tests are not in it) and the scope's packages. The
+  // products' lib tests run in the main unit lane's product rows.
+  const libPackages = libRowRunner ? scope.filter((name) => productOf(name) === "core" && hasLib(name)) : [];
   if (libPackages.length > 0) {
-    const everyLib = [...byName.keys()].filter(hasLib);
+    const everyLib = [...byName.keys()].filter((name) => productOf(name) === "core" && hasLib(name));
     const filter = libPackages.length === everyLib.length
       ? "kind(lib)"
       : `kind(lib) & (${libPackages.map((name) => `package(${name})`).join(" | ")})`;
     rows.push({
       name: "lib",
       lane: "lib",
+      product: "core",
       runner: libRowRunner,
       packages: libPackages,
-      package_flags: "--workspace",
+      package_flags: flagsOf("core"),
       test_flags: "--lib",
       profile: CLOSURE_LIB_PROFILE,
       filter,
@@ -1810,17 +2042,28 @@ function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestTex
   for (const name of scope) {
     for (const target of testTargets(name)) {
       if (!hookBuilt(name, target) || !keep({ kind: "test", binary: target.name, package: name })) continue;
+      // A binary no hosted runner can judge gets no row (the plan names it).
+      if (excluded.has(`${name}::${target.name}`)) continue;
       if (!home.has(target.name)) home.set(target.name, name);
     }
   }
-  const binariesOf = (test) => allNames.filter((name) => {
-    const target = testTargets(name).find((candidate) => candidate.name === test);
-    if (!target) return false;
-    if (!hookBuilt(name, target)) {
-      throw new Error(`test target name ${test} is hook-built in ${home.get(test)} but not in ${name}; --test ${test} would make Cargo refuse the row`);
+  const binariesOf = (test) => {
+    const owners = allNames.filter((name) => {
+      const target = testTargets(name).find((candidate) => candidate.name === test);
+      if (!target) return false;
+      if (!hookBuilt(name, target)) {
+        throw new Error(`test target name ${test} is hook-built in ${home.get(test)} but not in ${name}; --test ${test} would make Cargo refuse the row`);
+      }
+      return true;
+    });
+    // `--workspace --test NAME` runs every member's target of that name, so
+    // a name two products share would put both in one row.
+    const owningProducts = [...new Set(owners.map(productOf))];
+    if (owningProducts.length > 1) {
+      throw new Error(`test target name ${test} belongs to ${owningProducts.join(" and ")} (${owners.join(", ")}); one row would run both products' binaries, so rename one`);
     }
-    return true;
-  }).map((name) => `${name}::${test}`);
+    return owners.map((name) => `${name}::${test}`);
+  };
   const byHome = new Map();
   for (const [test, name] of home) byHome.set(name, [...(byHome.get(name) ?? []), test]);
   // The nested-Cargo canaries' binary (CANARY_TEST_GROUP) leaves the packed
@@ -1849,6 +2092,7 @@ function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestTex
       );
       units.push({
         package: name,
+        product: productOf(name),
         part: parts > 1 ? ` ${index + 1}/${parts}` : "",
         tests: slice,
         weight: model.lines.get(name) + LINK_COST_PER_DEP * model.closures.get(name).size + TEST_TARGET_COST * slice.length,
@@ -1858,12 +2102,15 @@ function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestTex
   // Two parts of one package never share a row, or the split would not
   // parallelize; a target name lives in exactly one unit.
   units.sort((a, b) => b.weight - a.weight || a.package.localeCompare(b.package) || a.part.localeCompare(b.part));
+  // A row never mixes products, and each product packs into at most
+  // maxTestRows rows of its own.
   const bins = [];
   for (const unit of units) {
-    const open = bins.filter((bin) => !bin.units.some((other) => other.package === unit.package));
+    const mine = bins.filter((bin) => bin.product === unit.product);
+    const open = mine.filter((bin) => !bin.units.some((other) => other.package === unit.package));
     let bin;
-    if (bins.length < maxTestRows || open.length === 0) {
-      bin = { units: [], weight: 0 };
+    if (mine.length < maxTestRows || open.length === 0) {
+      bin = { units: [], weight: 0, product: unit.product };
       bins.push(bin);
     } else {
       bin = open.sort((a, b) => a.weight - b.weight || a.units.length - b.units.length)[0];
@@ -1883,16 +2130,20 @@ function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestTex
     }
     // Label by the heaviest part, which the packing placed first.
     const [heaviest] = bin.units;
+    // A binary with planned test exclusions runs without them.
+    const filter = excludedTestsFilter(binaries, excludedTests);
     rows.push({
       name: `tests ${shortName(heaviest.package)}${heaviest.part}${bin.units.length > 1 ? `+${bin.units.length - 1}` : ""}`,
       lane: "tests",
+      product: bin.product,
       packages,
-      package_flags: "--workspace",
+      package_flags: flagsOf(bin.product),
       test_flags: tests.map((test) => `--test ${test}`).join(" "),
       profile: CLOSURE_TEST_PROFILE,
+      ...(filter ? { filter } : {}),
       binaries,
       no_tests: "warn",
-      rust_min_stack: HOOK_TEST_STACK,
+      rust_min_stack: productStack(bin.product) ?? HOOK_TEST_STACK,
       estimated_minutes: estimatedMinutes(lines + LINK_COST_PER_DEP * union.size + TEST_TARGET_COST * binaries.length),
     });
   }
@@ -1909,8 +2160,9 @@ function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestTex
       rows.push({
         name: `tests ${shortName(canaryRows.owner)} canaries ${index}/${canaryRows.count}`,
         lane: "tests",
+        product: productOf(canaryRows.owner),
         packages,
-        package_flags: "--workspace",
+        package_flags: flagsOf(productOf(canaryRows.owner)),
         test_flags: `--test ${canaryRows.test}`,
         profile: CLOSURE_TEST_PROFILE,
         binaries,
@@ -1935,6 +2187,7 @@ function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestTex
     rows.push({
       name: "HeadCanonical",
       lane: "headcanonical",
+      product: productOf(headCanonical.package),
       packages: [headCanonical.package],
       package_flags: `-p ${headCanonical.package} --features ${headCanonical.features.map((feature) => `${headCanonical.package}/${feature}`).join(",")}`,
       test_flags: `--test ${headCanonical.test}`,
@@ -1953,8 +2206,9 @@ function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestTex
     rows.push({
       name: "e2e-fast",
       lane: "e2e-fast",
+      product: productOf(e2eOwners[0]),
       packages: [e2eOwners[0]],
-      package_flags: "--workspace",
+      package_flags: flagsOf(productOf(e2eOwners[0])),
       test_flags: `--test ${hook.e2eFast.binary}`,
       profile: CLOSURE_LIB_PROFILE,
       filter: `binary(${hook.e2eFast.binary})`,
@@ -2016,6 +2270,35 @@ function plan(args) {
   const byId = new Map(packages.map((pkg) => [pkg.id, pkg]));
   const dirs = packageDirs(packages);
   const allNames = packages.map((pkg) => pkg.name).sort();
+  // Each package's product (ci/products.json): Core, or the product whose
+  // root holds its manifest. No row below mixes products.
+  const products = loadProducts();
+  const productOf = new Map(packages.map((pkg) => [pkg.name, productOfPath(packageDir(pkg), products)]));
+  const productPackages = (product) => allNames.filter((name) => productOf.get(name) === product);
+  // The lane selections (scripts/ci-hook-coverage.mjs laneSelections): Core's
+  // whole-workspace rows select `--workspace` with an `--exclude` for every
+  // other product's package, each product's rows `-p` each of its packages,
+  // and each member is compiled with the features of its own product's
+  // selection. A bare cargo command and the workspace aliases build the
+  // default members, so they must be exactly Core's.
+  const selections = laneSelections(metadata, { products });
+  const defaultsProblem = defaultMembersProblem(metadata, selections.byProduct);
+  if (defaultsProblem) throw new Error(defaultsProblem);
+  const laneFeatures = new Map();
+  for (const selection of selections.selections.values()) {
+    for (const [name, features] of selection.features) laneFeatures.set(name, features);
+  }
+  // Names grouped by product, Core first, then the registry's order.
+  const byProduct = (names) =>
+    products
+      .map((product) => [product.name, names.filter((name) => productOf.get(name) === product.name)])
+      .filter(([, group]) => group.length > 0);
+  // A row of one product, with that product's test-thread stack when it
+  // sets one (ci/products.json test_stack; Core's is .cargo/config.toml's).
+  const withProduct = (row, product) => {
+    const stack = products.find((candidate) => candidate.name === product)?.testStack;
+    return { ...row, product, ...(stack && !row.rust_min_stack ? { rust_min_stack: stack } : {}) };
+  };
 
   const reverse = new Map(packages.map((pkg) => [pkg.id, new Set()]));
   for (const pkg of packages) {
@@ -2057,7 +2340,14 @@ function plan(args) {
     example_web_wasm: false,
     docs_only: false,
     release_projection: releaseProjection,
+    // Per product (see productPlan): the products whose roots hold changed
+    // paths, the changed packages per product, a product-wide selection for
+    // an unowned Rust path or a product's own build configuration, the
+    // published-floor checks, the downstream type-check rows and the
+    // products' non-Rust lanes.
+    products: null,
   };
+  const productEscalations = {};
 
   let workspaceReason = "";
   const seeds = new Set();
@@ -2096,6 +2386,16 @@ function plan(args) {
         }`;
         continue;
       }
+      // A product's own build configuration (its clippy.toml, rustfmt.toml,
+      // Cargo configuration or toolchain file) changes what every package of
+      // that product compiles or lints, and nothing of Core's: the product's
+      // packages, never the whole workspace.
+      const owner = productOfPath(path, products);
+      if (owner !== CORE && isProductBuildConfigPath(path, products)) {
+        productEscalations[owner] ||= `${owner} build configuration changed: ${path}`;
+        for (const name of productPackages(owner)) seeds.add(name);
+        continue;
+      }
       if (!isRustSourcePath(path)) {
         // Non-Rust paths can still select a package: fixtures, SQL, TOML,
         // JSON and snapshot data a crate reads at test time, and the
@@ -2116,6 +2416,13 @@ function plan(args) {
       const pathPackages = packagesForFile(path, dirs);
       if (pathPackages.length > 0) {
         for (const pkg of pathPackages) seeds.add(pkg.name);
+      } else if (owner !== CORE) {
+        // A Rust path inside a product's root that no package owns (an
+        // example or fixture source outside the crate directories) selects
+        // that product's packages: the fail-closed escalation stays inside
+        // the product and never reaches Core's lanes.
+        productEscalations[owner] ||= `Rust path outside any ${owner} package: ${path}`;
+        for (const name of productPackages(owner)) seeds.add(name);
       } else {
         result.unmapped_rust_paths.push(path);
       }
@@ -2224,6 +2531,7 @@ function plan(args) {
       dependency_closure: closures.get(name).size,
       estimated_minutes: estimatedMinutes(weights.get(name)),
       heavy_chain: heavyChain.has(name),
+      product: productOf.get(name),
     }]),
   );
   result.pr_unit_budget_minutes = PR_UNIT_BUDGET_MINUTES;
@@ -2235,15 +2543,26 @@ function plan(args) {
         throw new Error(`feature unit suite ${suite.package}[${suite.id}] names unknown feature ${feature}`);
       }
     }
-    return {
+    for (const companion of suite.with ?? []) {
+      if (!byName.has(companion)) {
+        throw new Error(`feature unit suite ${suite.package}[${suite.id}] builds with unknown package ${companion}`);
+      }
+    }
+    if (suite.knownReds) {
+      checkKnownRedsDoc(readFileSync(suite.knownReds.doc, "utf8"), suite.knownReds.tests, suite.knownReds.doc);
+    }
+    const row = {
       name: `${shortName(suite.package)}[${suite.id}]`,
       packages: [suite.package],
       features: [...suite.features],
-      package_flags: `-p ${suite.package} --features ${suite.features.join(",")}`,
+      package_flags: featureSuiteFlags(suite),
       estimated_minutes: estimatedMinutes(weights.get(suite.package)),
       pull_request: suite.pullRequest !== false,
       ...(suite.rustMinStack ? { rust_min_stack: suite.rustMinStack } : {}),
+      ...featureSuiteFilters(suite),
     };
+    // A suite names its product; a product's suite runs on its test stack.
+    return withProduct(row, productOf.get(suite.package) ?? CORE);
   });
   // What a pull-request plan leaves to the push (see the header); the push
   // itself runs everything, and a release projection keeps its own plan.
@@ -2262,7 +2581,9 @@ function plan(args) {
     mcp_confinement_positive: false,
     reader_rows: [],
     example_web_wasm: false,
+    downstream_type_check: [],
   };
+  const downstreamRows = [];
   result.reader_not_run = [];
 
   const archivedPackages = new Map(
@@ -2328,6 +2649,18 @@ function plan(args) {
       (path) => /^(docs\/|docs\/internal\/|CHANGELOG\.md|README\.md|AGENTS\.md|CLAUDE\.md|.*\.mdx?$)/.test(path),
     );
   }
+  // Core's own lanes (its whole-workspace unit sweep and feature suites, the
+  // exact-profile guard lanes, the wasm and SDK lanes of a push) run when the
+  // plan reaches a Core package: a Core package changed, by path or through
+  // the lock, or the plan is the whole workspace. Core depends on no
+  // product, so a change inside a product's root reaches that product and
+  // its dependents only, and plans none of them.
+  result.core_changed =
+    result.rust_changed && (result.mode === "workspace" || result.packages.some((name) => productOf.get(name) === CORE));
+  // A changed path in Core's tree (outside every product root), or an
+  // unknown diff: the push's path-selected Core lanes (the example web
+  // suites and WASM timers, which every Core push runs) need one.
+  result.core_paths_changed = changed === null || changed.some((path) => productOfPath(path, products) === CORE);
 
   // The browser examples and WASM timer tests execute this runtime. The push
   // selects them for any changed package that reaches it through the same
@@ -2385,20 +2718,62 @@ function plan(args) {
       }
     }
     const mobInvalidated = result.mode === "workspace" || result.packages.some((name) => mobBuild.has(name));
+    // A product's packages in the meerkat-mob chain (their library compiles
+    // meerkat-mob) are chain heads of their own: a pull request that
+    // invalidates meerkat-mob's build leaves their Clippy to the push too, or
+    // their lane would compile the whole chain uncached first.
     deferred.clippy_packages = deferToPush && mobInvalidated
-      ? result.packages.filter((name) => MOB_CHAIN_CLIPPY_HEADS.includes(name))
+      ? result.packages.filter(
+        (name) => MOB_CHAIN_CLIPPY_HEADS.includes(name) || (productOf.get(name) !== CORE && heavyChain.has(name)),
+      )
       : [];
     deferred.clippy_packages_reason = deferred.clippy_packages.length > 0 ? MOB_CHAIN_INVALIDATED : "";
     const clippyPackages = result.packages.filter((name) => !deferred.clippy_packages.includes(name));
-    result.shards = clippyShards(
-      clippyPackages,
-      weights,
-      result.mode,
-      shardCap,
-      byName,
-      deferToPush ? heavyChain : null,
-    );
+    // Per product: Core's packages pack with Core's head groups up to the
+    // shard cap; each other product lints its packages in one shard (its
+    // crates build on each other, so one invocation checks the shared
+    // dependencies once), or two in a pull request that splits the mob
+    // chain's lib and bin targets from the rest.
+    result.shards = byProduct(clippyPackages)
+      .flatMap(([product, names]) =>
+        clippyShards(
+          names,
+          weights,
+          product === CORE ? result.mode : "packages",
+          product === CORE ? shardCap : 1,
+          byName,
+          deferToPush ? heavyChain : null,
+        ).map((shard) => ({ ...shard, product })),
+      )
+      .sort((a, b) => b.estimated_cost - a.estimated_cost || a.name.localeCompare(b.name));
     deferred.clippy_test_targets = deferToPush ? clippyPackages.filter((name) => heavyChain.has(name)) : [];
+    // Downstream type-check rows (pull requests). A product whose packages
+    // the change reaches only through another product's or Core's packages
+    // (the reverse-dependency closure) gets one Clippy row over those
+    // packages, every target, so an API break fails the pull request that
+    // causes it rather than the product's next build. When the change
+    // invalidates meerkat-mob's build, a product package in the mob chain
+    // would compile the whole chain uncached first, as the chain heads
+    // would: that product's row is left to the push (deferred_to_push),
+    // whose closure check and closure tests compile it. A push needs no such
+    // row for the same reason.
+    if (deferToPush) {
+      const changedProducts = new Set(result.packages.map((name) => productOf.get(name)));
+      const downstream = byProduct(
+        result.closure.filter((name) => productOf.get(name) !== CORE && !changedProducts.has(productOf.get(name))),
+      );
+      for (const [product, names] of downstream) {
+        if (mobInvalidated && names.some((name) => heavyChain.has(name))) {
+          deferred.downstream_type_check.push(product);
+          continue;
+        }
+        for (const shard of clippyShards(names, weights, "packages", 1, byName, null)) {
+          result.shards.push({ ...shard, name: `downstream ${shard.name}`, product, downstream: true });
+        }
+        downstreamRows.push({ product, packages: names });
+      }
+      result.shards.sort((a, b) => b.estimated_cost - a.estimated_cost || a.name.localeCompare(b.name));
+    }
     if (result.shards.length === 0) {
       throw new Error("internal error: Rust-relevant change produced no lanes");
     }
@@ -2417,13 +2792,12 @@ function plan(args) {
       (name) => UNIT_SOLO_PACKAGES.includes(name) || partitionedUnits.has(name),
     );
     result.unit_shards = [
-      ...packWithinBudget(
-        result.unit_packages.filter((name) => !soloUnits.includes(name)),
-        weights,
-        Math.max(1, shardCap - soloUnits.length),
-        model,
+      ...byProduct(result.unit_packages.filter((name) => !soloUnits.includes(name))).flatMap(([product, names]) =>
+        packWithinBudget(names, weights, Math.max(1, shardCap - soloUnits.length), model).map((shard) => withProduct(shard, product)),
       ),
-      ...soloUnits.flatMap((name) => partitionRows(packShards([name], weights, 1, model)[0], partitionedUnits.get(name))),
+      ...soloUnits.flatMap((name) =>
+        partitionRows(withProduct(packShards([name], weights, 1, model)[0], productOf.get(name)), partitionedUnits.get(name)),
+      ),
     ];
     for (const shard of result.unit_shards) {
       if (shard.estimated_minutes > PR_UNIT_BUDGET_MINUTES) {
@@ -2438,24 +2812,28 @@ function plan(args) {
     // workspace around them (see the header).
     const unitOnMain = !deferToPush;
     const unitOnMainPackages = new Set(unitOnMain ? result.unit_packages : []);
+    // The main unit sweep covers the whole workspace when the plan reaches
+    // Core, and only the changed products' closure otherwise.
+    const mainUnitScope = result.core_changed ? allNames : result.closure;
     result.main_unit_shards = [
       ...(unitOnMain ? result.unit_shards : []),
-      ...packShards(
-        allNames.filter((name) => !archivedPackages.has(name) && !unitOnMainPackages.has(name)),
-        weights,
-        args.workspaceShards,
-        model,
+      ...byProduct(mainUnitScope.filter((name) => !archivedPackages.has(name) && !unitOnMainPackages.has(name))).flatMap(
+        ([product, names]) =>
+          packShards(names, weights, product === CORE ? args.workspaceShards : Math.min(PRODUCT_MAIN_UNIT_SHARDS, names.length), model)
+            .map((shard) => withProduct(shard, product)),
       ),
     ];
-    const archived = archivedLanes(archivedPackages, featureSuites);
+    const archived = result.core_changed ? archivedLanes(archivedPackages, featureSuites) : { builds: [], runs: [] };
     result.main_archive_builds = archived.builds;
     result.main_archive_runs = archived.runs;
     // Feature-gated suites: all of them on main (an archived package's
     // suites run as archived lanes); with the unit lanes, those of a changed
     // package outside the heavy chain, but in a pull request only the suites
     // not marked `pullRequest: false`.
+    // Without a Core change, the suites of the changed products' closure.
+    const mainUnitScopeSet = new Set(mainUnitScope);
     result.main_feature_unit_shards = featureSuites.filter(
-      (suite) => !archivedPackages.has(suite.packages[0]),
+      (suite) => !archivedPackages.has(suite.packages[0]) && mainUnitScopeSet.has(suite.packages[0]),
     );
     const changedSuites = featureSuites.filter(
       (suite) => result.unit_packages.includes(suite.packages[0]) && !heavyChain.has(suite.packages[0]),
@@ -2492,7 +2870,9 @@ function plan(args) {
     // Feature checks keep the weight-packed shards: they compile one Bazel
     // set and a few matrix rows per shard, and the head split would only
     // multiply their jobs. A pull request leaves them to the push.
-    result.feature_check_shards = packShards(result.packages, weights, shardCap);
+    // Core's packages only: the checks replay the feature sets Core's Bazel
+    // graph builds, and no Bazel target builds a product's crates.
+    result.feature_check_shards = packShards(result.packages.filter((name) => productOf.get(name) === CORE), weights, shardCap);
     const featureJobs = featureChecks(result.feature_check_shards, byName);
     result.feature_check_jobs = deferToPush ? [] : featureJobs;
     deferred.feature_check_jobs = featureJobs.length - result.feature_check_jobs.length;
@@ -2549,7 +2929,13 @@ function plan(args) {
     .filter((suite) => !result.integration_suites.includes(suite))
     .map((suite) => suite.name);
 
-  result.closure_flags = result.closure.map((name) => `-p ${name}`).join(" ");
+  // The closure check compiles each product's part of the closure in an
+  // invocation of its own (` ; ` separates them, Core's first): one cargo
+  // invocation unifies features across its packages, and a product's feature
+  // requests must not change what Core's crates compile.
+  result.closure_flags = byProduct(result.closure)
+    .map(([, names]) => names.map((name) => `-p ${name}`).join(" "))
+    .join(" ; ");
   result.closure_beyond_packages = result.closure.filter((name) => !result.packages.includes(name));
   // The compile-only checks of the closure, and the two exact-profile lanes
   // (governed JSONL compiles meerkat-rpc's lib test, the confinement lane
@@ -2578,6 +2964,7 @@ function plan(args) {
   // that plan carries no other reason.
   const guardReasons = (lane) => {
     if (!result.rust_changed) return [];
+    if (!result.core_changed) return [];
     if (!deferToPush) return ["every_rust_change"];
     if (changed === null) return ["diff_unknown"];
     return [
@@ -2595,12 +2982,20 @@ function plan(args) {
   // Every crate's documentation, with rustdoc's lints denied: the push
   // runs it on a Rust change, like the closure check.
   result.rustdoc = result.rust_changed && !deferToPush;
+  // What the rustdoc lane documents: Core's members (every workspace member
+  // but the products') when the plan reaches Core, the changed products'
+  // packages otherwise. Products keep their own rustdoc rules.
+  result.rustdoc_flags = result.core_changed
+    ? selections.selections.get(CORE).flags
+    : result.packages.map((name) => `-p ${name}`).join(" ");
   result.governed_jsonl = guardRuns("governed_jsonl");
   result.mcp_confinement_positive = guardRuns("mcp_confinement_positive");
   deferred.closure_check = result.rust_changed && deferToPush;
   deferred.rustdoc = result.rust_changed && deferToPush;
-  deferred.governed_jsonl = result.rust_changed && !result.governed_jsonl;
-  deferred.mcp_confinement_positive = result.rust_changed && !result.mcp_confinement_positive;
+  // The guard lanes are Core's: a plan that does not reach Core leaves
+  // nothing of theirs to the push.
+  deferred.governed_jsonl = result.core_changed && !result.governed_jsonl;
+  deferred.mcp_confinement_positive = result.core_changed && !result.mcp_confinement_positive;
 
   // Hook-parity rows for the test scope. scripts/ci-hook-coverage.mjs checks
   // them against the hook's own selection; a gap fails the plan.
@@ -2608,7 +3003,8 @@ function plan(args) {
   const hookText = readFileSync(resolve(root, HOOK_SCRIPT), "utf8");
   // A release projection keeps the readers of its changed files, as any
   // plan does: their tests ran on the parent's bytes, not these.
-  result.reader_packages = changed === null ? [] : readerPackagesFor(changed, readerInventory);
+  const readerOptions = { excludedRoots: productRootPrefixes(products) };
+  result.reader_packages = changed === null ? [] : readerPackagesFor(changed, readerInventory, readerOptions);
   for (const name of result.reader_packages) {
     if (!byName.has(name)) throw new Error(`the non-Rust reader inventory names unknown package ${name}`);
   }
@@ -2625,15 +3021,34 @@ function plan(args) {
   }
   result.test_scope = [...new Set([...result.closure, ...result.reader_packages])].sort();
   result.reader_rows = readerRows({
-    selections: changed === null ? [] : readerSelectionsFor(changed, readerInventory),
+    selections: changed === null ? [] : readerSelectionsFor(changed, readerInventory, readerOptions),
     result,
     byName,
     heavyChain,
     deferToPush,
     deferred,
     compiledInDocs,
-    unified: workspaceFeatures(metadata, packages),
+    unified: laneFeatures,
     canary: canaryGroup(nextestText),
+  });
+  // A product's published-floor check runs when its own packages changed
+  // (by path, by a scoped lock entry or by its build configuration), or
+  // when an input of every floor check changed: the root manifest or lock
+  // (its declared and locked dependencies), the toolchain, the floor
+  // script, or the plan's definition. A workspace-mode plan for any other
+  // global path changes no product's published dependencies.
+  const floorAll = changed === null || changed.some((path) => FLOOR_CHECK_INPUTS.includes(path) || isLaneDefinitionPath(path));
+  result.products = productPlan({
+    products,
+    changed,
+    packages: result.packages,
+    productOf,
+    escalations: productEscalations,
+    downstream: downstreamRows,
+    floor: products
+      .map((product) => product.name)
+      .filter((name) => name !== CORE && productPackages(name).length > 0)
+      .filter((name) => floorAll || [...seeds].some((pkg) => productOf.get(pkg) === name)),
   });
   const hook = hookModel(hookText);
   // The `--workspace --lib` row runs only on a runner that can build it in
@@ -2641,20 +3056,47 @@ function plan(args) {
   // the main and nightly unit lanes.
   result.lib_row_runner = args.libRowRunner || null;
   result.hook_retained_lanes = result.lib_row_runner ? [] : [hookLibLane(hook).label];
+  result.hosted_runner_excluded = HOSTED_RUNNER_EXCLUDED_BINARIES.filter(({ binary }) => {
+    const [name, test] = binary.split("::");
+    if (!byName.has(name)) throw new Error(`hosted-runner exclusion names unknown package ${name}`);
+    if (!byName.get(name).targets.some((target) => target.kind.includes("test") && target.name === test)) {
+      throw new Error(`hosted-runner exclusion names unknown test target ${binary}`);
+    }
+    return result.test_scope.includes(name);
+  });
+  result.hosted_runner_excluded_tests = HOSTED_RUNNER_EXCLUDED_TESTS.filter(({ binary, tests }) => {
+    const [name, test] = binary.split("::");
+    if (!byName.has(name)) throw new Error(`hosted-runner test exclusion names unknown package ${name}`);
+    if (!byName.get(name).targets.some((target) => target.kind.includes("test") && target.name === test)) {
+      throw new Error(`hosted-runner test exclusion names unknown test target ${binary}`);
+    }
+    if (tests.length === 0 || new Set(tests).size !== tests.length) {
+      throw new Error(`hosted-runner test exclusion of ${binary} lists no test or a test twice`);
+    }
+    if (HOSTED_RUNNER_EXCLUDED_BINARIES.some((entry) => entry.binary === binary)) {
+      throw new Error(`${binary} is excluded both whole and by test`);
+    }
+    return result.test_scope.includes(name);
+  });
   const rows = result.test_scope.length > 0
     ? hookParityRows({
       scope: result.test_scope,
       byName,
-      unified: workspaceFeatures(metadata, packages),
+      laneFeatures,
+      selections,
       model,
       maxTestRows: args.closureTestRows,
       nextestText,
       hook,
       libRowRunner: result.lib_row_runner,
+      productOf: (name) => productOf.get(name) ?? CORE,
+      productStack: (product) => products.find((candidate) => candidate.name === product)?.testStack ?? null,
+      excluded: new Set(result.hosted_runner_excluded.map(({ binary }) => binary)),
+      excludedTests: result.hosted_runner_excluded_tests,
     })
     : [];
   // A pull-request plan is checked against the rows its push runs.
-  const coverage = checkHookCoverage({ ...result, closure_test_rows: rows }, { metadata, nextestText, hookText });
+  const coverage = checkHookCoverage({ ...result, closure_test_rows: rows }, { metadata, nextestText, hookText, products });
   result.closure_test_rows = deferToPush ? [] : rows;
   deferred.closure_test_rows = rows.length - result.closure_test_rows.length;
   result.deferred_to_push = deferToPush ? deferred : null;
@@ -2662,6 +3104,7 @@ function plan(args) {
     scope_packages: coverage.scope_packages,
     hook_binaries: coverage.hook_binaries,
     hook_retained: coverage.hook_retained,
+    product_binaries: coverage.product_binaries,
     by_lane: coverage.by_lane,
     missing: coverage.missing,
     errors: coverage.errors,
@@ -2691,6 +3134,50 @@ function plan(args) {
     feature_check: waveOf("feature-check", result.feature_check_jobs, durations),
   };
   return result;
+}
+
+// Non-Rust lanes of the products (ported from their own workflows): a
+// changed path under one of `paths` selects the lane. Connect's checks are
+// its packaging unit tests, its docs check and the embedded Console panel's
+// Node test (connect/.github/workflows/checks.yml before the import); every
+// Connect path selects them, since the docs check reads the whole tree.
+// Meta's console, Flow Editor and SDK lanes keep Meta's own classifier
+// (meta/scripts/ci-changes.py) in the transition workflow meta-ci.yml.
+export const PRODUCT_LANES = [{ product: "connect", lane: "connect_checks", paths: ["connect/"] }];
+
+// The plan's product section (see the header of ci-products.mjs):
+//   changed       the products whose roots hold a changed path (every
+//                 product when the diff is unknown);
+//   packages      the plan's changed packages, by product;
+//   escalations   why a product's packages were all selected (an unowned
+//                 Rust path or the product's own build configuration);
+//   floor_checks  the products whose published-floor check runs: their
+//                 crates built against crates.io at the versions they declare
+//                 (scripts/published_crates_standalone.py floor), when their
+//                 own packages or an input of every floor check changed.
+//                 Core changes need none: published Core did not change.
+//                 Advisory on pull requests and main pushes, required on a
+//                 product's release branch;
+//   downstream    the downstream type-check rows the plan added;
+//   lanes         the product non-Rust lanes the changed paths select.
+export const FLOOR_CHECK_INPUTS = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "scripts/published_crates_standalone.py"];
+export function productPlan({ products, changed, packages, productOf, escalations, downstream, floor }) {
+  const names = products.map((product) => product.name);
+  const touched = changed === null ? names : [...new Set(changed.map((path) => productOfPath(path, products)))];
+  const byProductNames = Object.fromEntries(
+    names.map((name) => [name, packages.filter((pkg) => (productOf.get(pkg) ?? CORE) === name)]).filter(([, group]) => group.length > 0),
+  );
+  const allLanes = changed === null || changed.some(isLaneDefinitionPath);
+  return {
+    changed: names.filter((name) => touched.includes(name)),
+    packages: byProductNames,
+    escalations: { ...escalations },
+    floor_checks: floor,
+    downstream,
+    lanes: PRODUCT_LANES.filter(
+      (lane) => allLanes || (changed ?? []).some((path) => lane.paths.some((prefix) => path.startsWith(prefix))),
+    ).map((lane) => lane.lane),
+  };
 }
 
 // The package whose lib tests every release-projection plan runs: it owns
@@ -2836,6 +3323,8 @@ function matrixOf(shards, { placeholder = true } = {}) {
     ...(shard.test_flags ? { tests: shard.test_flags } : {}),
     ...(shard.rust_min_stack ? { rust_min_stack: String(shard.rust_min_stack) } : {}),
     ...(shard.partition ? { partition: shard.partition } : {}),
+    ...(shard.filter ? { filter: shard.filter } : {}),
+    ...(shard.known_reds ? { known_reds: shard.known_reds, known_red_count: String(shard.known_red_count) } : {}),
   }));
   if (include.length === 0 && placeholder) include.push({ name: "none", packages: "" });
   return JSON.stringify({ include });
@@ -2879,6 +3368,9 @@ function deferredSummary(deferred) {
   if (deferred.mcp_confinement_positive) parts.push("MCP confinement positive");
   if (deferred.example_web_wasm) parts.push("the web wasm build and browser suites");
   if (deferred.rustdoc) parts.push("the workspace rustdoc");
+  if (deferred.downstream_type_check?.length > 0) {
+    parts.push(`the downstream type-check of ${deferred.downstream_type_check.join(", ")} (${MOB_CHAIN_INVALIDATED})`);
+  }
   return parts.join("; ");
 }
 
@@ -2911,6 +3403,9 @@ function githubOutput(result) {
   scalar("closure_flags", result.closure_flags);
   scalar("closure_check", String(result.closure_check));
   scalar("rustdoc", String(result.rustdoc));
+  scalar("rustdoc_flags", result.rustdoc_flags ?? "");
+  scalar("core_changed", String(result.core_changed));
+  scalar("core_paths_changed", String(result.core_paths_changed));
   scalar("governed_jsonl", String(result.governed_jsonl));
   scalar("mcp_confinement_positive", String(result.mcp_confinement_positive));
   scalar("guard_lane_reasons", JSON.stringify(result.guard_lane_reasons));
@@ -2978,6 +3473,21 @@ function githubOutput(result) {
   scalar("feature_check_rest_count", String(featureRest.length));
   scalar("feature_check_matrix", featureMatrixOf(featureFirst));
   scalar("feature_check_rest_matrix", featureMatrixOf(featureRest));
+  // Products (ci/products.json): the published-floor checks, one row per
+  // product, and the products' non-Rust lanes.
+  const productSection = result.products ?? { changed: [], floor_checks: [], lanes: [], downstream: [] };
+  scalar("products_changed", productSection.changed.join(" "));
+  scalar("floor_check_count", String(productSection.floor_checks.length));
+  scalar(
+    "floor_check_matrix",
+    JSON.stringify({
+      include: productSection.floor_checks.length > 0
+        ? productSection.floor_checks.map((product) => ({ product }))
+        : [{ product: "none" }],
+    }),
+  );
+  scalar("downstream_products", productSection.downstream.map((row) => row.product).join(" "));
+  scalar("connect_checks", String(productSection.lanes.includes("connect_checks")));
   return `${lines.join("\n")}\n`;
 }
 
@@ -3005,7 +3515,7 @@ function main() {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   }
   process.stderr.write(
-    `ci-cargo-lanes: event=${result.event} mode=${result.mode} release_projection=${result.release_projection !== null} packages=${result.packages.length} closure=${result.closure.length} clippy_shards=${result.shards.length} unit_shards=${result.unit_shards.length} feature_suites=${result.unit_feature_shards.length}/${result.main_feature_unit_shards.length} unit_deferred=${result.unit_deferred.length} unit_rows_on_main=${result.unit_rows_on_main.length} integration=${result.integration_suites.length} reader_rows=${result.reader_rows.length} reader_not_run=${result.reader_not_run.length} feature_check_jobs=${result.feature_check_jobs.length} test_scope=${result.test_scope.length} closure_tests=${result.closure_test_rows.length} first_wave=${Object.values(result.waves).reduce((sum, wave) => sum + wave.first.length, 0)} rest_wave=${Object.values(result.waves).reduce((sum, wave) => sum + wave.rest.length, 0)} hook_binaries=${result.hook_coverage.hook_binaries} hook_retained=${result.hook_coverage.hook_retained} deferred_to_push=[${deferredSummary(result.deferred_to_push)}] (${result.reason})\n`,
+    `ci-cargo-lanes: event=${result.event} mode=${result.mode} release_projection=${result.release_projection !== null} packages=${result.packages.length} closure=${result.closure.length} clippy_shards=${result.shards.length} unit_shards=${result.unit_shards.length} feature_suites=${result.unit_feature_shards.length}/${result.main_feature_unit_shards.length} unit_deferred=${result.unit_deferred.length} unit_rows_on_main=${result.unit_rows_on_main.length} integration=${result.integration_suites.length} reader_rows=${result.reader_rows.length} reader_not_run=${result.reader_not_run.length} feature_check_jobs=${result.feature_check_jobs.length} test_scope=${result.test_scope.length} closure_tests=${result.closure_test_rows.length} first_wave=${Object.values(result.waves).reduce((sum, wave) => sum + wave.first.length, 0)} rest_wave=${Object.values(result.waves).reduce((sum, wave) => sum + wave.rest.length, 0)} hook_binaries=${result.hook_coverage.hook_binaries} hook_retained=${result.hook_coverage.hook_retained} products=[${result.products?.changed.join(",") ?? ""}] floor_checks=[${result.products?.floor_checks.join(",") ?? ""}] downstream=[${result.products?.downstream.map((row) => row.product).join(",") ?? ""}] product_lanes=[${result.products?.lanes.join(",") ?? ""}] deferred_to_push=[${deferredSummary(result.deferred_to_push)}] (${result.reason})\n`,
   );
 }
 

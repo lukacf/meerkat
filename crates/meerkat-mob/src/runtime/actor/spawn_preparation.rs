@@ -99,6 +99,18 @@ pub(super) struct SpawnPreparationCarry {
     pub(super) fork_job: Option<crate::runtime::ForkJobRecord>,
     pub(super) fork_source: Option<meerkat_core::ForkBuildSource>,
     pub(super) fork_overlay: super::super::ForkOverlayOrigin,
+    pub(super) definition_wiring: crate::DefinitionWiring,
+    /// Whether the spawn acts for the identity entry of its name.
+    pub(super) entry_custody: bool,
+    /// Whether the spawn acts for the store-owned entry of its name.
+    pub(super) created_custody: bool,
+    /// The notice a fresh seat embodied after the loss of the identity's
+    /// archived session carries: the spawn's row records it.
+    pub(super) history_unavailable: Option<crate::runtime::HistoryUnavailable>,
+    /// Whether the spawn embodies `rotate_member`'s fresh life of an identity
+    /// no member held: its row names the incarnation it follows, read from
+    /// the machine state before its membership step.
+    pub(super) fresh_life: bool,
     pub(super) owner_bridge_session_id: Option<SessionId>,
     pub(super) ops_registry: Option<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
     /// Held spawn request, handed to the provisioning task.

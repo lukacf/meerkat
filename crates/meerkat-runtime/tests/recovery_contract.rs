@@ -82,7 +82,7 @@ async fn shared_sqlite_resume_observation_does_not_wait_for_an_unrelated_writer(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "explicit 136MB held-writer WholeBlob read; requires the exclusive native validation slot"]
 async fn shared_sqlite_large_whole_blob_read_under_held_writer() {
-    shared_sqlite_held_writer_read_probe(135_790_000, std::time::Duration::from_secs(60)).await;
+    shared_sqlite_held_writer_read_probe(135_790_000, std::time::Duration::from_mins(1)).await;
 }
 
 #[cfg(feature = "sqlite-store")]
@@ -319,7 +319,7 @@ async fn shared_sqlite_cold_resume_probe(
         });
     }
     let mut resumed = tokio::time::timeout(
-        Duration::from_secs(60).saturating_sub(cold_started.elapsed()),
+        Duration::from_mins(1).saturating_sub(cold_started.elapsed()),
         async {
             let mut resumed = Vec::new();
             while let Some(result) = tasks.join_next().await {
@@ -332,7 +332,7 @@ async fn shared_sqlite_cold_resume_probe(
     .expect("all cold materializations and registrations must complete within 60 seconds");
     let cold_elapsed = cold_started.elapsed();
     assert_eq!(resumed.len(), payload_bytes.len());
-    assert!(cold_elapsed < Duration::from_secs(60), "{cold_elapsed:?}");
+    assert!(cold_elapsed < Duration::from_mins(1), "{cold_elapsed:?}");
     resumed.sort_by_key(|(_, _, measurement)| measurement.index);
     if require_largest_load_overlap {
         assert!(payload_bytes[0] >= payload_bytes[1]);
@@ -346,7 +346,7 @@ async fn shared_sqlite_cold_resume_probe(
     assert!(
         resumed
             .iter()
-            .all(|(_, _, measurement)| measurement.registered < Duration::from_secs(60))
+            .all(|(_, _, measurement)| measurement.registered < Duration::from_mins(1))
     );
     eprintln!(
         "sqlite probe cold stage: registered={}, elapsed={cold_elapsed:?}, setup_excluded={fixture_elapsed:?}",
@@ -399,7 +399,7 @@ async fn shared_sqlite_cold_resume_probe(
         });
     }
     let settled = tokio::time::timeout(
-        Duration::from_secs(60).saturating_sub(post_started.elapsed()),
+        Duration::from_mins(1).saturating_sub(post_started.elapsed()),
         async {
             let mut settled = Vec::new();
             while let Some(result) = tasks.join_next().await {
@@ -422,7 +422,7 @@ async fn shared_sqlite_cold_resume_probe(
             1,
         );
     }
-    assert!(post_started.elapsed() < Duration::from_secs(60));
+    assert!(post_started.elapsed() < Duration::from_mins(1));
     eprintln!(
         "sqlite probe post stage: writes_per_session={writes_per_session}, elapsed={:?}; cold_resume_elapsed={cold_elapsed:?}",
         post_started.elapsed(),

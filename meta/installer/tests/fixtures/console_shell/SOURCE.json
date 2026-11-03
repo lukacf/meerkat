@@ -1,0 +1,6 @@
+{
+  "source": "forge-console-scope-retirement-20261008/toolkit-shell/native-console.html",
+  "sha256": "6ba5c7a5f6f1786a7fcc2e01060b5adc5cc4a561e016c0238ccdbe77d65d4a21",
+  "scope": "Exact historical public Console HTML shell only. No runtime or credentials.",
+  "toolkit": "Use the shipping templates_v2/toolkit-ui tree rather than private intake artifacts."
+}

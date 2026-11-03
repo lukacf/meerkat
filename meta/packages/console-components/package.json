@@ -1,0 +1,26 @@
+{
+  "name": "@console-components",
+  "private": true,
+  "version": "0.0.0",
+  "exports": {
+    ".": "./src/index.ts",
+    "./conversation/console-conversation-panel": "./src/conversation/console-conversation-panel.tsx",
+    "./pending/console-pending-stack": "./src/pending/console-pending-stack.tsx",
+    "./topology/topology-panel": "./src/topology/topology-panel.tsx",
+    "./topology/types": "./src/topology/types.ts",
+    "./styles": "./src/styles/index.ts"
+  },
+  "peerDependencies": {
+    "@console-core": "0.0.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "dependencies": {
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
+    "@modelcontextprotocol/ext-apps": "2.0.3",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/core": "2.0.0",
+    "zod": "4.3.6"
+  }
+}

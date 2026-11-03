@@ -35,7 +35,7 @@ use super::*;
 const CONSENTED_TOOL: &str = "write_record";
 const SIBLING_TOOL: &str = "read_record";
 /// Host-chosen validity of one consent request.
-const VALIDITY: Duration = Duration::from_secs(4 * 60 * 60);
+const VALIDITY: Duration = Duration::from_hours(4);
 
 /// R3 is never model-reviewed; counts every review it is asked for.
 #[derive(Default)]
@@ -388,7 +388,7 @@ impl ConsentWorld {
                 meerkat_core::ToolDeadlineChain::new(vec![
                     meerkat_core::ToolDeadlineContributor::finite(
                         meerkat_core::ToolDeadlineOwner::DirectCaller,
-                        Duration::from_secs(600),
+                        Duration::from_mins(10),
                     ),
                 ])
                 .expect("finite caller deadline"),
@@ -642,7 +642,7 @@ async fn r3_work_owner_without_the_context_read_fails_closed_before_any_approval
             meerkat_core::ToolDeadlineChain::new(vec![
                 meerkat_core::ToolDeadlineContributor::finite(
                     meerkat_core::ToolDeadlineOwner::DirectCaller,
-                    Duration::from_secs(600),
+                    Duration::from_mins(10),
                 ),
             ])
             .expect("finite caller deadline"),
@@ -686,7 +686,7 @@ async fn r3_work_owner_without_the_context_read_fails_closed_before_any_approval
             meerkat_core::ToolDeadlineChain::new(vec![
                 meerkat_core::ToolDeadlineContributor::finite(
                     meerkat_core::ToolDeadlineOwner::DirectCaller,
-                    Duration::from_secs(600),
+                    Duration::from_mins(10),
                 ),
             ])
             .expect("finite caller deadline"),
@@ -1298,7 +1298,7 @@ fn consent_withdrawal(
 #[tokio::test]
 async fn a_sliding_owner_window_never_counts_as_a_change() {
     let w = ConsentWorld::new();
-    w.work.slide_allowance(Duration::from_secs(60));
+    w.work.slide_allowance(Duration::from_mins(1));
     let approval_id = w.request("consented").await;
 
     // Reads.
@@ -1355,7 +1355,7 @@ async fn a_fixed_owner_deadline_withdraws_where_a_sliding_window_keeps() {
     for sliding in [false, true] {
         let w = ConsentWorld::new();
         if sliding {
-            w.work.slide_allowance(Duration::from_secs(60));
+            w.work.slide_allowance(Duration::from_mins(1));
         }
         let approval_id = w.request("consented").await;
         // Past the fixed deadline and past the first sliding window, with
@@ -1405,7 +1405,7 @@ async fn a_fixed_owner_deadline_withdraws_where_a_sliding_window_keeps() {
 #[tokio::test]
 async fn a_consent_outlives_its_decision_window() {
     let w = ConsentWorld::new();
-    w.work.slide_allowance(Duration::from_secs(60));
+    w.work.slide_allowance(Duration::from_mins(1));
     let approval_id = w.request("consented").await;
     w.work.advance_clock(Duration::from_secs(90));
     let approved = w.approve(&approval_id);
@@ -1425,7 +1425,7 @@ async fn a_consent_outlives_its_decision_window() {
 
     // A relevant change found after the window.
     let w = ConsentWorld::new();
-    w.work.slide_allowance(Duration::from_secs(60));
+    w.work.slide_allowance(Duration::from_mins(1));
     w.work.set_review_material(ReviewMaterial::Held {
         account: "account-a".to_owned(),
         mandate: "mandate-a".to_owned(),

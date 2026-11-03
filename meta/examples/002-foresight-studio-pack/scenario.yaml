@@ -1,0 +1,219 @@
+scenario_id: foresight-studio
+mission: >
+  Decide whether fictional company Borealis Robotics should launch a field-service
+  copiloting product for industrial maintenance teams in Q3.
+default_prompt: >
+  Run a board-readiness pass for the Borealis field-service copilot launch. First
+  scan the signal lake, then ask at least two relevant peers for a challenge or
+  evidence card, score the launch thesis, and finish with a concise board memo
+  recommendation. Call out the strongest evidence, the largest unresolved risk,
+  and the next validation sprint.
+
+agents:
+  - identity: studio-director
+    profile: director
+    display_name: Studio Director
+    console_group: Studio Leads
+    org: Strategy Office
+    lane: conductor
+    confidence: high
+    artifact: board memo
+    addressability: addressable
+    watched: true
+    alert_level: critical
+    tool_role: conductor
+    focus_tags: [market, finance, risk, narrative]
+    prompts:
+      - label: Board memo
+        value: >
+          Run the full board-readiness pass. Consult signal-cartographer,
+          financial-modeler, and risk-red-team before finalizing.
+      - label: Fast decision
+        value: >
+          In five bullets, say whether Borealis should launch the fictional
+          field-service copilot in Q3 and why.
+  - identity: signal-cartographer
+    profile: signal_cartographer
+    display_name: Signal Cartographer
+    console_group: Signal Pods
+    org: Market Intel
+    lane: evidence
+    confidence: medium
+    artifact: signal map
+    addressability: addressable
+    watched: true
+    alert_level: elevated
+    tool_role: evidence
+    focus_tags: [market, competitive, customer]
+  - identity: customer-ethnographer
+    profile: customer_ethnographer
+    display_name: Customer Ethnographer
+    console_group: Signal Pods
+    org: Field Ops
+    lane: qualitative
+    confidence: medium
+    artifact: friction map
+    addressability: addressable
+    tool_role: qualitative
+    focus_tags: [customer, adoption, workflow]
+  - identity: financial-modeler
+    profile: financial_modeler
+    display_name: Financial Modeler
+    console_group: Analysis Pods
+    org: Finance
+    lane: unit economics
+    confidence: medium
+    artifact: launch score
+    addressability: addressable
+    watched: true
+    tool_role: finance
+    focus_tags: [finance, pricing, capacity]
+  - identity: experiment-planner
+    profile: experiment_planner
+    display_name: Experiment Planner
+    console_group: Analysis Pods
+    org: Product
+    lane: validation
+    confidence: medium
+    artifact: sprint plan
+    addressability: addressable
+    tool_role: experiments
+    focus_tags: [experiment, adoption, risk]
+  - identity: risk-red-team
+    profile: risk_red_team
+    display_name: Risk Red Team
+    console_group: Review Board
+    org: Risk
+    lane: challenge
+    confidence: low
+    artifact: objection log
+    addressability: addressable
+    watched: true
+    alert_level: critical
+    tool_role: challenger
+    focus_tags: [risk, legal, trust]
+  - identity: launch-narrator
+    profile: launch_narrator
+    display_name: Launch Narrator
+    console_group: Synthesis
+    org: Comms
+    lane: narrative
+    confidence: medium
+    artifact: launch story
+    addressability: addressable
+    tool_role: narrative
+    focus_tags: [narrative, customer, competitive]
+  - identity: board-scribe
+    profile: board_scribe
+    display_name: Board Scribe
+    console_group: Studio Leads
+    org: PMO
+    lane: memory
+    confidence: high
+    artifact: decision log
+    addressability: addressable
+    tool_role: scribe
+    focus_tags: [memory, decision, evidence]
+
+links:
+  - [studio-director, signal-cartographer]
+  - [studio-director, financial-modeler]
+  - [studio-director, risk-red-team]
+  - [studio-director, launch-narrator]
+  - [studio-director, board-scribe]
+  - [signal-cartographer, customer-ethnographer]
+  - [financial-modeler, experiment-planner]
+  - [risk-red-team, experiment-planner]
+  - [launch-narrator, customer-ethnographer]
+  - [board-scribe, signal-cartographer]
+  - [board-scribe, financial-modeler]
+  - [board-scribe, risk-red-team]
+
+signals:
+  - id: sig-001
+    title: Maintenance managers are drowning in tribal repair notes
+    confidence: 0.82
+    tags: [customer, workflow, market]
+    body: >
+      Twelve synthetic customer interviews describe technicians losing 20-35
+      minutes per job reconstructing previous repairs and machine-specific caveats.
+    implication: >
+      Strong workflow pull if the copilot can summarize history and recommend a safe next action.
+  - id: sig-002
+    title: Competitive suites are broad but weak in field context
+    confidence: 0.68
+    tags: [competitive, market, narrative]
+    body: >
+      Two incumbents bundle generic assistant features, but neither exposes technician-grade
+      asset history, parts substitution reasoning, or warranty caveat recall.
+    implication: >
+      Borealis can differentiate on deep field context rather than generic assistant breadth.
+  - id: sig-003
+    title: Deployment capacity is the launch bottleneck
+    confidence: 0.74
+    tags: [finance, capacity, risk]
+    body: >
+      Synthetic services data shows each enterprise launch needs about 18 implementation
+      hours unless connectors are preconfigured; current team capacity supports six lighthouse accounts.
+    implication: >
+      Launch scope should be a controlled lighthouse motion, not a broad self-serve release.
+  - id: sig-004
+    title: Trust risk concentrates around unsafe repair suggestions
+    confidence: 0.77
+    tags: [risk, legal, trust]
+    body: >
+      The highest-severity red-team finding is unsupported repair guidance when asset manuals
+      conflict with technician notes. Operators demand explicit source trails and escalation.
+    implication: >
+      Board approval should require citation UX, refusal behavior, and a technician override audit.
+  - id: sig-005
+    title: Willingness to pay clears hurdle only with downtime metrics
+    confidence: 0.63
+    tags: [finance, pricing, customer]
+    body: >
+      Buyers accept premium pricing when Borealis can tie copiloting to avoided downtime, but
+      not when positioned as a generic productivity assistant.
+    implication: >
+      The board memo should anchor the offer on downtime reduction and measured avoided revisits.
+
+scorecard:
+  market_pull:
+    score: 8
+    rationale: Clear pain from repair context switching and downtime pressure.
+  differentiation:
+    score: 7
+    rationale: Deep asset-history context can beat generic suite assistants.
+  unit_economics:
+    score: 6
+    rationale: Lighthouse launch works; broad rollout is capacity-constrained.
+  trust_readiness:
+    score: 5
+    rationale: Citation and refusal behavior need one more validation sprint.
+  narrative_clarity:
+    score: 7
+    rationale: Downtime-reduction story is board-legible and customer-specific.
+
+red_team:
+  - risk: Unsafe recommendation without source trail
+    severity: high
+    mitigation: Ship citation-first answers, manual conflict detection, and escalation-to-human guardrails.
+  - risk: Services team overload
+    severity: medium
+    mitigation: Cap Q3 to six lighthouse accounts and require connector readiness before signup.
+  - risk: Generic AI positioning
+    severity: medium
+    mitigation: Name the product around field reliability and avoided downtime, not productivity.
+
+experiments:
+  - name: Citation UX kill-switch sprint
+    owner: Risk
+    window: 10 days
+    success_metric: 95% of sampled answers expose cited source trails or refuse safely.
+  - name: Lighthouse downtime proof
+    owner: Product
+    window: 21 days
+    success_metric: Three accounts show at least 8% fewer repeat visits on eligible assets.
+  - name: Connector implementation rehearsal
+    owner: Field Ops
+    window: 7 days
+    success_metric: Median enterprise setup effort falls below 12 services hours.

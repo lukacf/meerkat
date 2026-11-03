@@ -9,6 +9,13 @@ XTASK_TREE_KEY := $(shell printf '%s' "$(CURDIR)" | shasum | cut -c1-12)
 XTASK_TARGET_DIR ?= /tmp/meerkat-xtask-target-$(XTASK_TREE_KEY)
 XTASK_BIN := $(XTASK_TARGET_DIR)/debug/xtask
 CARGO ?= ./scripts/repo-cargo
+# Core's whole-workspace lanes select Core's members only: `--workspace` and an
+# `--exclude` for every package of the other products (Meta, Connect), derived
+# on each use by scripts/core-workspace-args.mjs from ci/products.json and cargo
+# metadata. Cargo unifies features across the packages of one invocation, so a
+# bare `--workspace` would compile Core's crates with the products' features.
+# Each product's own lanes select its packages (`--product NAME`).
+CORE_WORKSPACE = $(shell node scripts/core-workspace-args.mjs)
 # Python >= 3.11 for the repo's scripts and SDK tooling (tomllib,
 # hashlib.file_digest). scripts/require-python prefers python3.13..3.11 over a
 # PATH python3 (macOS can put Apple's 3.9 first). If none qualifies, any target
@@ -27,7 +34,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all install-build-deps build test test-unit test-mob-dense-topology test-mcp-confinement-positive test-int e2e-fast e2e-build e2e-system e2e-live e2e-copilot-live e2e-smoke e2e-auth test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-web test-sdk-suites wasm-check lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-lock-update buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-e2e-smoke-turbo-s buildbuddy-e2e-auth buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-doctor release-preflight release-preflight-smoke release-workflow release-assets release-packages release-web-sdk release-prebuild publish-dry-run publish-dry-run-python publish-dry-run-typescript publish-dry-run-web release-dry-run release-dry-run-smoke clean doc docs-check docs-only-contract-gate docs-sync-mobkit release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage verify-fixture-mint-generator check-rust-release-config check-crate-license-files check-published-crates-standalone-guard published-crates-standalone-selftest published-crates-standalone-census check-rust-release-packaging check-rust-release-packaging-contract verify-lock-consistency verify-bazel-locks verify-bazel-locks-strict verify-bazel-module-lock-inputs verify-bazel-release-features release-test-code-guards-selftest check-published-facade-link bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-verify-deep-compositions machine-verify-full machine-check-drift machine-authority-docs-gate mobpack-docs-contract-gate runtime-authority-bypass storage-ambient-gate seam-inventory rmat-audit audit-generated-headers semver-breaks protocol-codegen protocol-check-drift semver-breaks-selftest path-classifier-selftest stack-budget-release turbo-s-oracle-gate
+.PHONY: all install-build-deps build test test-unit test-mob-dense-topology test-mcp-confinement-positive test-int e2e-fast e2e-build e2e-system e2e-live e2e-copilot-live e2e-smoke e2e-auth test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-web test-sdk-suites wasm-check lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-lock-update buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-e2e-smoke-turbo-s buildbuddy-e2e-auth buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-doctor release-preflight release-preflight-smoke release-workflow release-assets release-packages release-web-sdk release-prebuild publish-dry-run publish-dry-run-python publish-dry-run-typescript publish-dry-run-web release-dry-run release-dry-run-smoke clean doc docs-check docs-only-contract-gate docs-sync-mobkit release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage verify-fixture-mint-generator check-rust-release-config check-crate-license-files check-published-crates-standalone-guard published-crates-standalone-selftest published-crates-standalone-census check-rust-release-packaging check-rust-release-packaging-contract verify-lock-consistency verify-bazel-locks verify-bazel-locks-strict verify-bazel-module-lock-inputs verify-bazel-release-features release-test-code-guards-selftest check-published-facade-link bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-verify-deep-compositions machine-verify-full machine-check-drift machine-authority-docs-gate mobpack-docs-contract-gate runtime-authority-bypass storage-ambient-gate seam-inventory rmat-audit rmat-audit-effect-authority rmat-audit-ownership-ledger rmat-audit-strict audit-generated-headers semver-breaks semver-breaks-meta protocol-codegen protocol-check-drift semver-breaks-selftest path-classifier-selftest stack-budget-release turbo-s-oracle-gate
 
 # Default target
 all: ci
@@ -44,7 +51,7 @@ build:
 # Build release version
 release:
 	@echo "$(GREEN)Building release version...$(NC)"
-	$(CARGO) build --workspace --release
+	$(CARGO) build $(CORE_WORKSPACE) --release
 
 # Fast test suite (unit + integration-fast, skips doctests and ignored)
 test:
@@ -202,11 +209,14 @@ test-sdk-web:
 		npm test && \
 		npm run test:packed)
 
-# WASM runtime compile and lint gate
+# WASM runtime compile and lint gate. `cargo clippy` checks every crate
+# `cargo check` does (clippy-driver runs the compiler's checks before its
+# lints), so a separate `cargo check` of the same targets compiled the web
+# runtime's closure twice: 5m20s-7m18s of the CI lane on pull request runs
+# 40399556131, 40402047748 and 40411814108, whose changes missed the cache.
 wasm-check:
 	@echo "$(GREEN)Running WASM runtime check...$(NC)"
 	@rustup target add wasm32-unknown-unknown
-	RUSTFLAGS='--cfg getrandom_backend="wasm_js"' $(CARGO) check -p meerkat-web-runtime --target wasm32-unknown-unknown --all-targets
 	RUSTFLAGS='--cfg getrandom_backend="wasm_js"' $(CARGO) clippy -p meerkat-web-runtime --target wasm32-unknown-unknown --all-targets -- -D warnings
 
 # Combined SDK test suites
@@ -620,10 +630,25 @@ storage-ambient-gate:
 
 # RMAT structural seam audit: protocol coverage, feedback constraints,
 # terminal mapping, ownership-ledger drift, and structural authority hygiene checks.
+# The three audits each read the tree on one thread and write nothing, so
+# once xtask is built they run concurrently, each one's output printed whole
+# when it ends: on a hosted 4-vCPU runner (run 40434437174) they took 50 s
+# (effect-authority), 112 s (ownership-ledger) and 270 s (rmat-audit) one
+# after another. The target fails when any of them fails.
+RMAT_AUDIT_PARTS := rmat-audit-effect-authority rmat-audit-ownership-ledger rmat-audit-strict
+
 rmat-audit:
 	@echo "$(GREEN)Running RMAT structural seam audit...$(NC)"
+	$(CARGO) build -p xtask
+	@$(MAKE) --no-print-directory -j3 --output-sync=target $(RMAT_AUDIT_PARTS)
+
+rmat-audit-effect-authority:
 	$(CARGO) run -p xtask -- effect-authority
+
+rmat-audit-ownership-ledger:
 	$(CARGO) run -p xtask -- ownership-ledger --check-drift
+
+rmat-audit-strict:
 	bash -lc 'ulimit -s unlimited 2>/dev/null || ulimit -s 65520; exec "$$@"' _ $(CARGO) run -p xtask -- rmat-audit --strict
 
 # Seam inventory (strict): every Local/External effect must have an
@@ -643,7 +668,7 @@ audit-generated-headers:
 # Generate documentation
 doc:
 	@echo "$(GREEN)Generating documentation...$(NC)"
-	$(CARGO) doc --workspace --no-deps --all-features
+	$(CARGO) doc $(CORE_WORKSPACE) --no-deps --all-features
 
 docs-check:
 	@echo "$(GREEN)Checking Mintlify docs...$(NC)"
@@ -655,10 +680,11 @@ docs-check:
 	@$(PYTHON) scripts/test_check_mobkit_docs_lag.py
 	@$(PYTHON) scripts/test_usage_accounting_docs.py
 
-MOBKIT_REPO ?= ../meerkat-mobkit
+# MobKit's docs source: meta/ in this repository (a standalone meerkat-meta
+# checkout still works). The mirror tracks main; no release tag is involved.
+MOBKIT_REPO ?= meta
 MOBKIT_REF ?= main
 
-# The MobKit docs mirror tracks MobKit main; no release tag is involved.
 docs-sync-mobkit:
 	@echo "$(GREEN)Syncing MobKit docs from $(MOBKIT_REPO) ($(MOBKIT_REF))...$(NC)"
 	@$(PYTHON) scripts/sync-mobkit-docs.py "$(MOBKIT_REPO)" --source-ref "$(MOBKIT_REF)" --require-clean
@@ -666,12 +692,12 @@ docs-sync-mobkit:
 # Open documentation in browser
 doc-open:
 	@echo "$(GREEN)Opening documentation...$(NC)"
-	$(CARGO) doc --workspace --no-deps --all-features --open
+	$(CARGO) doc $(CORE_WORKSPACE) --no-deps --all-features --open
 
 # Test coverage using cargo-tarpaulin
 coverage:
 	@echo "$(GREEN)Generating test coverage...$(NC)"
-	$(CARGO) tarpaulin --workspace --all-features --timeout 120 --out Html
+	$(CARGO) tarpaulin $(CORE_WORKSPACE) --all-features --timeout 120 --out Html
 
 # Clean build artifacts
 clean:
@@ -716,7 +742,7 @@ outdated:
 # Run benchmarks (if you have benches/)
 bench:
 	@echo "$(GREEN)Running benchmarks...$(NC)"
-	$(CARGO) bench --workspace
+	$(CARGO) bench $(CORE_WORKSPACE)
 
 # ── Version parity & release targets ────────────────────────────────────────
 
@@ -888,6 +914,14 @@ semver-breaks:
 	@echo "$(GREEN)Checking public-API breaks vs published baselines...$(NC)"
 	@scripts/check-semver-breaks.sh
 
+# The same gate for Meta's release line: meta-extension-state and
+# meerkat-meta (scripts/release-meta-crates.sh) against Meta's newest
+# crates.io release, with the breaks named in meta/CHANGELOG.md and the
+# baseline tag meta-v<version>.
+semver-breaks-meta:
+	@echo "$(GREEN)Checking Meta public-API breaks vs published Meta baselines...$(NC)"
+	@MEERKAT_SEMVER_PRODUCT=meta scripts/check-semver-breaks.sh
+
 # The analyser and immutable-tag recovery verifier, unit-tested without the
 # cargo-semver-checks tool so they can run on every PR. A parser that has
 # drifted from the report grammar reports "no breaks" for the same reason a
@@ -1057,7 +1091,7 @@ publish-dry-run:
 verify-version:
 	@echo "$(GREEN)Verifying version...$(NC)"
 	@VERSION=$$($(CARGO) metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "meerkat") | .version'); \
-	TAG=$$(git describe --tags --exact-match 2>/dev/null | sed 's/^v//'); \
+	TAG=$$(git describe --tags --exact-match --match 'v[0-9]*' 2>/dev/null | sed 's/^v//'); \
 	if [ -z "$$TAG" ]; then \
 		echo "$(YELLOW)No tag found on current commit$(NC)"; \
 	elif [ "$$VERSION" != "$$TAG" ]; then \
@@ -1129,7 +1163,7 @@ help:
 	@echo "  $(GREEN)check$(NC)         - Quick compilation check"
 	@echo "  $(GREEN)doc$(NC)           - Generate documentation"
 	@echo "  $(GREEN)docs-check$(NC)    - Validate Mintlify docs navigation and links"
-	@echo "  $(GREEN)docs-sync-mobkit$(NC) - Refresh docs.rkat.ai from a clean MobKit main checkout"
+	@echo "  $(GREEN)docs-sync-mobkit$(NC) - Refresh docs.rkat.ai's MobKit mirror from a clean meta/docs"
 	@echo "  $(GREEN)coverage$(NC)      - Generate test coverage report"
 	@echo "  $(GREEN)clean$(NC)         - Remove build artifacts"
 	@echo "  $(GREEN)install-hooks$(NC) - Install git hooks"

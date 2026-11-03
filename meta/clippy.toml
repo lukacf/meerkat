@@ -1,0 +1,7 @@
+# Meta never mints a mob incarnation witness: it takes one from
+# `MobHandle::live_incarnation`, the only call Meerkat Core ships. Core
+# disallows the constructor the same way, so a Meta call would hand a mob
+# operator grant an incarnation no runtime of this process runs at.
+disallowed-methods = [
+    { path = "meerkat_core::service::LiveMobIncarnation::witnessed", reason = "witnesses a running mob incarnation: take one from MobHandle::live_incarnation", allow-invalid = true },
+]

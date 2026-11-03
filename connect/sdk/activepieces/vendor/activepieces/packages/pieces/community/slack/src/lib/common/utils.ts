@@ -1,0 +1,218 @@
+import { ApFile } from '@activepieces/pieces-framework';
+import { Block, ConversationsRepliesResponse, KnownBlock, WebClient, WebClientOptions } from '@slack/web-api';
+
+const SLACK_SECTION_TEXT_MAX_LENGTH = 3000;
+
+export function textToSectionBlocks(text: string): (KnownBlock | Block)[] {
+  if (text.length <= SLACK_SECTION_TEXT_MAX_LENGTH) {
+    return [{ type: 'section', text: { type: 'mrkdwn', text } }];
+  }
+
+  const blocks: (KnownBlock | Block)[] = [];
+  let remaining = text;
+
+  while (remaining.length > 0) {
+    if (remaining.length <= SLACK_SECTION_TEXT_MAX_LENGTH) {
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: remaining } });
+      break;
+    }
+
+    let splitIndex = remaining.lastIndexOf('\n', SLACK_SECTION_TEXT_MAX_LENGTH);
+    if (splitIndex <= 0) {
+      splitIndex = remaining.lastIndexOf(' ', SLACK_SECTION_TEXT_MAX_LENGTH);
+    }
+    if (splitIndex <= 0) {
+      splitIndex = SLACK_SECTION_TEXT_MAX_LENGTH;
+    }
+
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: remaining.substring(0, splitIndex) } });
+    remaining = remaining.substring(splitIndex).trimStart();
+  }
+
+  return blocks;
+}
+
+export function buildFlowOriginContextBlock(context: {
+  server: { publicUrl: string };
+  project: { id: string };
+  flows: { current: { id: string } };
+}): KnownBlock {
+  return {
+    type: 'context',
+    elements: [
+      {
+        type: 'mrkdwn',
+        text: `Message sent by <${new URL(context.server.publicUrl).origin}/projects/${context.project.id}/flows/${context.flows.current.id}|this flow>.`
+      }
+    ]
+  };
+}
+
+export const slackSendMessage = async ({
+  text,
+  conversationId,
+  username,
+  profilePicture,
+  iconEmoji,
+  blocks,
+  threadTs,
+  token,
+  file,
+  replyBroadcast,
+  unfurlLinks,
+  clientOptions,
+}: SlackSendMessageParams) => {
+  const client = new WebClient(token, clientOptions);
+
+  if (file) {
+    return await client.files.uploadV2({
+      channel_id: conversationId,
+      initial_comment: text,
+      thread_ts: threadTs,
+      file_uploads: [
+        {
+          file: file.data,
+          filename: file.filename,
+        },
+      ],
+    });
+  } else {
+    const messageParams: any = {
+      text,
+      channel: conversationId,
+      username,
+      icon_url: profilePicture,
+      icon_emoji: iconEmoji,
+      blocks: blocks as Block[],
+      thread_ts: threadTs,
+    };
+
+    if (replyBroadcast) {
+      messageParams.reply_broadcast = replyBroadcast;
+    }
+
+    if (unfurlLinks === false) {
+      messageParams.unfurl_links = false;
+    }
+
+    return await client.chat.postMessage(messageParams);
+  }
+};
+
+type SlackSendMessageParams = {
+  token: string;
+  conversationId: string;
+  username?: string;
+  profilePicture?: string;
+  iconEmoji?: string;
+  blocks?: unknown[] | Record<string, any>;
+  text?: string;
+  file?: ApFile;
+  threadTs?: string;
+  replyBroadcast?: boolean;
+  unfurlLinks?: boolean;
+  clientOptions?: WebClientOptions;
+};
+
+export function processMessageTimestamp(input: string) {
+  // Regular expression to match a URL containing the timestamp
+  const urlRegex = /\/p(\d+)(\d{6})$/;
+  // Check if the input is a URL
+  const urlMatch = input.match(urlRegex);
+  if (urlMatch) {
+    const timestamp = `${urlMatch[1]}.${urlMatch[2]}`;
+    return timestamp;
+  }
+
+  // Check if the input is already in the desired format
+  const timestampRegex = /^(\d+)\.(\d{6})$/;
+  const timestampMatch = input.match(timestampRegex);
+  if (timestampMatch) {
+    return input;
+  }
+
+  return undefined;
+}
+
+export function getFirstFiveOrAll(array: unknown[]) {
+  if (array.length <= 5) {
+    return array;
+  } else {
+    return array.slice(0, 5);
+  }
+}
+
+/**
+* Parse a message text to extract command and arguments
+*/
+export function parseCommand(
+ text: string,
+ botUserId: string,
+ validCommands: string[]
+): { command: string; args: string[] } | null {
+ if (!botUserId) {
+   return null;
+ }
+
+ // Check if the message mentions the bot
+ const mentionRegex = new RegExp(`<@${botUserId}>\\s+(.+)`, 's');
+ const mentionMatch = text.match(mentionRegex);
+
+ if (!mentionMatch) {
+   return null;
+ }
+
+ // Extract the text after the mention
+ const commandText = mentionMatch[1].trim();
+
+ // Split into command and arguments (first word is command, rest are args)
+ const parts = commandText.split(/\s+/);
+ const command = parts[0].toLowerCase();
+ const args = parts.slice(1);
+
+ // Check if it's a valid command
+ if (!validCommands.includes(command)) {
+   return null;
+ }
+
+ return {
+   command,
+   args,
+ };
+}
+
+const THREAD_REPLIES_PAGE_SIZE = 200;
+const THREAD_REPLIES_MAX_PAGES = 50;
+
+export async function fetchAllThreadReplies({ client, channel, ts, cursor: startCursor }: { client: WebClient; channel: string; ts: string; cursor?: string }): Promise<ConversationsRepliesResponse> {
+  const firstPage = await client.conversations.replies({ channel, ts, limit: THREAD_REPLIES_PAGE_SIZE, ...(startCursor ? { cursor: startCursor } : {}) });
+  const seen = new Set<string>();
+  const messages: NonNullable<ConversationsRepliesResponse['messages']> = [];
+  const append = (page: ConversationsRepliesResponse) => {
+    for (const message of page.messages ?? []) {
+      const key = message.ts ?? '';
+      if (key && seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      messages.push(message);
+    }
+  };
+  append(firstPage);
+  let cursor = firstPage.response_metadata?.next_cursor;
+  const usedCursors = new Set<string>(startCursor ? [startCursor] : []);
+  let pages = 1;
+  while (cursor && !usedCursors.has(cursor) && pages < THREAD_REPLIES_MAX_PAGES) {
+    usedCursors.add(cursor);
+    const page = await client.conversations.replies({ channel, ts, limit: THREAD_REPLIES_PAGE_SIZE, cursor });
+    append(page);
+    cursor = page.response_metadata?.next_cursor;
+    pages += 1;
+  }
+  return {
+    ...firstPage,
+    messages,
+    has_more: Boolean(cursor),
+    response_metadata: { ...firstPage.response_metadata, next_cursor: cursor ?? '' },
+  };
+}

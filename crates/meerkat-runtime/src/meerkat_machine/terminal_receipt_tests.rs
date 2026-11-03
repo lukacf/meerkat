@@ -262,7 +262,7 @@ fn completed_text(outcome: &CompletionOutcome) -> &str {
 }
 
 fn sorted(mut ids: Vec<InputId>) -> Vec<InputId> {
-    ids.sort_by(|a, b| a.0.cmp(&b.0));
+    ids.sort_by_key(|a| a.0);
     ids
 }
 

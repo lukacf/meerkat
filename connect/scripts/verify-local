@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""Verify one Cargo workspace and retain its resolved local source identity."""
+
+import argparse
+import datetime
+import hashlib
+import json
+import os
+import pathlib
+import platform
+import subprocess
+import sys
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def name_of(path):
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def walk_error(error):
+    raise error
+
+
+def workspace_identity(metadata):
+    packages = {package["id"]: package for package in metadata["packages"]}
+    members = [packages[identity] for identity in metadata["workspace_members"]]
+    if not members:
+        raise ValueError("The selected Cargo workspace has no members.")
+    local = [package for package in packages.values() if package["source"] is None]
+    return {
+        "workspace_root": metadata["workspace_root"],
+        "members": [{key: package[key] for key in ("id", "name", "manifest_path")}
+                    for package in members],
+        "local_packages": [{key: package[key] for key in ("id", "name", "manifest_path")}
+                           for package in local],
+        "features": "all",
+    }
+
+
+def describe_scope(identity):
+    workspace = pathlib.Path(identity["workspace_root"]).resolve()
+    members = {member["name"] for member in identity["members"]}
+    listed = ", ".join(sorted(members))
+    if workspace == ROOT and members == {"toolkit-package", "toolkit-store"}:
+        kind = "portable_package_store"
+        scope = "Portable package/store Rust workspace only, with all features. The separate native candidate is not validated."
+    elif workspace == ROOT / "native-candidate":
+        kind = "native_candidate"
+        scope = f"Explicit native candidate Rust workspace ({listed}), with all features. This checks the recorded local prerequisites, not a released native integration."
+    else:
+        kind = "other_selected_workspace"
+        scope = f"Selected Rust workspace ({listed}), with all features. This package selection does not by itself establish native integration support."
+    return kind, scope + " No live provider, deployment, frontend audience or hardware validation."
+
+
+def source_identity(metadata, manifest, cargo_home):
+    workspace = pathlib.Path(metadata["workspace_root"]).resolve(strict=True)
+    target = pathlib.Path(metadata["target_directory"]).resolve()
+    required = {
+        manifest, workspace / "Cargo.toml", workspace / "Cargo.lock",
+        ROOT / "AGENTS.md", ROOT / "scripts/verify-local", ROOT / "scripts/repo-cargo",
+        ROOT / "docs/spec/meerkat-toolkit-capability-acquisition.md",
+    }
+    ancestors = {ROOT, *ROOT.parents, workspace, *workspace.parents}
+    for package in metadata["packages"]:
+        if package["source"] is not None:
+            continue
+        package_manifest = pathlib.Path(package["manifest_path"]).resolve(strict=True)
+        required.add(package_manifest)
+        base = package_manifest.parent
+        ancestors.update((base, *base.parents))
+        # Cargo reports target entry files explicitly. Missing source is an
+        # identity failure, even if an otherwise empty directory can be walked.
+        for entry in package["targets"]:
+            source = pathlib.Path(entry["src_path"]).resolve(strict=True)
+            if not source.is_relative_to(base):
+                raise ValueError(f"Cannot bound source inventory for target outside package: {source}")
+            required.add(source)
+        for directory, dirs, files in os.walk(base, onerror=walk_error):
+            current = pathlib.Path(directory)
+            dirs[:] = [part for part in dirs
+                       if part not in (".git", "__pycache__") and (current / part).resolve() != target]
+            for part in dirs:
+                if (current / part).is_symlink():
+                    raise ValueError(f"Cannot inventory a symlinked source directory: {current / part}")
+            for part in files:
+                path = current / part
+                if path.is_symlink():
+                    raise ValueError(f"Cannot inventory a symlinked source file: {path}")
+                required.add(path)
+    # Workspace inheritance and ancestor Cargo configuration can affect local
+    # dependencies even when they belong to a different workspace. Read only
+    # these files, not the surrounding upstream monorepositories.
+    for ancestor in ancestors:
+        for relative in ("Cargo.toml", "Cargo.lock", ".cargo/config", ".cargo/config.toml",
+                         "rust-toolchain", "rust-toolchain.toml"):
+            path = ancestor / relative
+            if path.exists() or path.is_symlink():
+                required.add(path)
+    for relative in ("config", "config.toml"):
+        path = cargo_home / relative
+        if path.exists() or path.is_symlink():
+            required.add(path)
+    return {name_of(path): digest(path) for path in sorted(required)}
+
+
+def run(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--manifest-path", type=pathlib.Path, default=ROOT / "Cargo.toml",
+                        help="Explicit Cargo workspace or member manifest; defaults to the portable root workspace.")
+    args = parser.parse_args(argv)
+    manifest = args.manifest_path.resolve()
+    started = datetime.datetime.now(datetime.timezone.utc)
+    directory = ROOT / "docs/verification" / started.strftime("%Y%m%dT%H%M%S.%fZ")
+    directory.mkdir(parents=True, exist_ok=False)
+    result = {
+        "schema_version": 2,
+        "scope": "Selected local Rust workspace with all features. No live provider, deployment, frontend audience or hardware validation; a portable workspace pass does not validate the separate native candidate.",
+        "manifest_path": str(manifest),
+        "started_at": started.isoformat(),
+        "host": {"system": platform.system(), "release": platform.release(), "machine": platform.machine()},
+        "commands": [],
+        "result": "failed",
+    }
+
+    def execute(label, arguments):
+        command = ["./scripts/repo-cargo", *arguments]
+        output_path = directory / f"{len(result['commands']) + 1:02d}-{label}.log"
+        error_path = output_path.with_suffix(".stderr")
+        record = {"argv": command, "exit_code": None,
+                  "output": output_path.name, "stderr": error_path.name}
+        result["commands"].append(record)
+        print("Running " + " ".join(command), flush=True)
+        try:
+            with output_path.open("wb") as output, error_path.open("wb") as error:
+                process = subprocess.run(command, cwd=ROOT, stdout=output, stderr=error, check=False)
+            record["exit_code"] = process.returncode
+        finally:
+            for key, path in (("output", output_path), ("stderr", error_path)):
+                if path.exists():
+                    record[key + "_sha256"] = digest(path)
+        if process.returncode != 0:
+            raise RuntimeError(f"{label} exited {process.returncode}; see {error_path.name} and {output_path.name}")
+        return output_path.read_text()
+
+    try:
+        # Preserve a failed receipt even if an explicit candidate or required
+        # source path is absent, before any compilation can start.
+        if not manifest.is_file():
+            raise FileNotFoundError(f"Cargo manifest does not exist: {manifest}")
+        context = dict(line.split("=", 1) for line in execute("cargo-context", ["--print-env"]).splitlines())
+        result["cargo_context"] = context
+        cargo_home = pathlib.Path(context["CARGO_HOME"]).resolve()
+        selection = ["--manifest-path", str(manifest)]
+        metadata_args = ["metadata", *selection, "--locked", "--all-features", "--format-version", "1"]
+        before_metadata = json.loads(execute("metadata-before", metadata_args))
+        before_workspace = workspace_identity(before_metadata)
+        result["workspace"] = before_workspace
+        result["workspace_kind"], result["scope"] = describe_scope(before_workspace)
+        before = source_identity(before_metadata, manifest, cargo_home)
+        result["source_sha256"] = before
+        members = [part for member in before_workspace["members"] for part in ("-p", member["name"])]
+        commands = [
+            ("fmt", ["fmt", *selection, *members, "--", "--check"]),
+            ("test", ["test", *selection, "--workspace", "--all-features", "--locked"]),
+            ("clippy", ["clippy", *selection, "--workspace", "--all-features", "--all-targets", "--locked", "--", "-D", "warnings"]),
+        ]
+        try:
+            for label, command in commands:
+                execute(label, command)
+        finally:
+            after_metadata = json.loads(execute("metadata-after", metadata_args))
+            after_workspace = workspace_identity(after_metadata)
+            after = source_identity(after_metadata, manifest, cargo_home)
+            unchanged = before_workspace == after_workspace and before == after
+            result["source_unchanged"] = unchanged
+            if not unchanged:
+                result["workspace_after"] = after_workspace
+                result["source_after_sha256"] = after
+                raise RuntimeError("Selected workspace or local source identity changed during verification.")
+        result["result"] = "passed"
+    except Exception as error:
+        result["failure"] = {"type": type(error).__name__, "message": str(error)}
+    result["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    receipt = directory / "run.json"
+    receipt.write_text(json.dumps(result, indent=2) + "\n")
+    print(str(receipt), flush=True)
+    return 0 if result["result"] == "passed" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(run())

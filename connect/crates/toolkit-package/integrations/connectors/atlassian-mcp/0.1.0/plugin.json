@@ -1,0 +1,69 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "atlassian-mcp",
+  "version": "0.1.0",
+  "description": "Retained remote MCP recipe with explicit source observations and newcomer prerequisites.",
+  "author": {
+    "name": "Meerkat Toolkit"
+  },
+  "license": "MIT OR Apache-2.0",
+  "extensions": {
+    "ai.rkat.toolkit": {
+      "schema_version": 1,
+      "identity": {
+        "publisher": "meerkat-toolkit",
+        "name": "atlassian-mcp",
+        "version": "0.1.0"
+      },
+      "display_name": "Atlassian Rovo MCP v2",
+      "description": "Retained remote MCP recipe with explicit source observations and newcomer prerequisites.",
+      "provenance": {
+        "source": "https://developer.atlassian.com/cloud/rovo-mcp/",
+        "source_revision": "sha256:1ca25b2ad2304b8ad2e2ef0c64da35442a49185972d8342c442eacf4cf6dcc0d",
+        "license": "MIT OR Apache-2.0 for Toolkit-authored recipe metadata only. Provider documentation and hosted service retain their own terms. No implementation is copied.",
+        "notices": [
+          "This package is authored by Meerkat Toolkit, not by the provider.",
+          "No upstream implementation is vendored. Hosted endpoints are mutable services, not pinned executable artifacts.",
+          "Offline recipe validation does not establish installation, authentication, readiness or supported live operations."
+        ],
+        "local_patches": []
+      },
+      "strategies": [
+        {
+          "id": "hosted",
+          "kind": "remote_mcp",
+          "instructions": "Use the documented v2 endpoint with OAuth 2.1 or the separately configured API-token route. Discover the current tool catalog, including dynamically exposed tools, before selecting operations. Record the intended Cloud site and product permissions. Check applicable Rovo credit limits before invoking metered operations.",
+          "sources": [
+            "https://developer.atlassian.com/cloud/rovo-mcp/"
+          ],
+          "known_requirements": [],
+          "unresolved_details": [
+            "Current endpoint schema, account identity, effective grants and owner verification must be supplied at selection time."
+          ]
+        }
+      ],
+      "known_exports": [
+        {
+          "id": "atlassian-mcp.service",
+          "role": "service_connector",
+          "description": "Atlassian Rovo MCP v2; only individually selected and owner-verified capabilities may be bound."
+        }
+      ],
+      "assessments": [
+        {
+          "status": "experimental",
+          "scope": "Retained recipe and source inspection only. Live operation and deployment conformance are unverified.",
+          "source_revision": "sha256:1ca25b2ad2304b8ad2e2ef0c64da35442a49185972d8342c442eacf4cf6dcc0d",
+          "assessed_at_unix_ms": 1790773043743,
+          "evidence": [
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "atlassian",
+              "revision": "sha256:1ca25b2ad2304b8ad2e2ef0c64da35442a49185972d8342c442eacf4cf6dcc0d"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -105,6 +105,9 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobMemberParams",
     "MobCreateParams",
     "MobCreateResult",
+    # The quarantined row, listed before the list result that carries it;
+    # its class vocabulary is an alias (MOB_RPC_CONTRACT_ALIAS_TYPES).
+    "WireQuarantinedMob",
     "MobListResult",
     "WireMobLifecycleFailure",
     "MobStatusResult",
@@ -198,6 +201,7 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobDestroyResult",
     "SupervisorRotationReportWire",
     "MobRotateSupervisorResult",
+    "MobRestoreRetryResult",
     "MobClaimCallbackRouteParams",
     "MobClaimCallbackRouteResult",
     "MobSubmitWorkParams",
@@ -459,6 +463,20 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "WireProvisionApiKeyResult",
     "WireSessionTranscriptRevision",
     "WireSessionTranscriptRevisionList",
+    # Scoped tool grants (`tool_grants/*`). The records precede the params and
+    # results that carry them, so those reference them by name.
+    "WireToolGrant",
+    "WireUnreadableToolGrant",
+    "WireToolGrantAuditRow",
+    "WireUnreadableToolGrantAuditRow",
+    "GrantToolParams",
+    "GrantToolResult",
+    "RevokeToolGrantParams",
+    "RevokeToolGrantResult",
+    "ListToolGrantsParams",
+    "ListToolGrantsResult",
+    "ToolGrantAuditParams",
+    "ToolGrantAuditResult",
 ]
 
 PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
@@ -484,16 +502,30 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "WireAuthLogoutResult",
     "WireAuthStatusResult",
     "WireLoginCancelled",
+    # Scoped tool grant vocabulary. Every alias the audit event union names
+    # precedes it: the generated Python aliases evaluate in roster order. The
+    # request subject and target are closed; the result ones are tolerant.
+    "ToolGrantSubjectRequest",
+    "ToolGrantTargetRequest",
+    "WireToolGrantSubject",
+    "WireToolGrantTarget",
+    "WireToolGrantIssuer",
+    "WireToolGrantStatus",
+    "WireToolGrantExpiryDriver",
+    "WireToolGrantRefusalKind",
+    "WireToolGrantAuditEvent",
 ]
 
-# Request unions (serde-untagged, flattened targets) whose schemas live in the
-# params roster rather than the wire roster.
+# Request unions whose schemas live in the params roster rather than the wire
+# roster: the auth ones are serde-untagged with flattened targets.
 PARAMS_UNION_ALIAS_TYPES = {
     "AuthLogoutParams",
     "AuthStatusParams",
     "LoginCancelParams",
     "LoginCompleteParams",
     "LoginStartParams",
+    "ToolGrantSubjectRequest",
+    "ToolGrantTargetRequest",
 }
 
 MCP_LIVE_CONTRACT_TYPES = [
@@ -601,6 +633,10 @@ MOB_RPC_CONTRACT_ALIAS_TYPES = [
     "WireContinuationStatus",
     "WireMemberCustodyRestore",
     "WireMemberCustodyDeferralCause",
+    # Why a persisted mob store is quarantined (a tolerant vocabulary) and
+    # how a restore retry ended.
+    "WireMobQuarantineClass",
+    "WireMobRestoreRetryOutcome",
     "WireMobRunStatus",
     # Closed usage-attribution vocabulary on the run-result accounting block.
     # An alias, not a contract type: the object emitter would turn a
@@ -7332,8 +7368,11 @@ def generate_web_mob_types(schemas: dict, output_dir: Path) -> None:
     append_interface("WireMemberLifecycleCapabilities")
     append_interface("WireMobLifecycleFailure")
     append_interface("MobStatusResult")
+    append_alias("WireMobQuarantineClass")
+    append_interface("WireQuarantinedMob")
     lines.append("export interface MobListResult {")
     lines.append("  mobs: MobStatusResult[];")
+    lines.append("  quarantined?: WireQuarantinedMob[];")
     lines.append("}")
     lines.append("")
     emitted.add("MobListResult")

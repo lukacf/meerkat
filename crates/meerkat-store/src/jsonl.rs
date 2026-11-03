@@ -25,7 +25,7 @@ use tokio::task::spawn_blocking;
 /// only guards against a LIVE holder that never releases, and it is deliberately
 /// generous. Every hold is a full rewrite plus `sync_all`, and the realm write
 /// admission above this lock already bounds how many writers can queue.
-const SESSION_WRITE_LOCK_TIMEOUT: Duration = Duration::from_secs(60);
+const SESSION_WRITE_LOCK_TIMEOUT: Duration = Duration::from_mins(1);
 const PROJECTION_READ_VERIFICATION_ATTEMPTS: usize = 3;
 
 struct SessionWriteLock {

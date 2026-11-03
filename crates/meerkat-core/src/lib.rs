@@ -157,6 +157,7 @@ pub mod tool_catalog;
 pub mod tool_consequence_policy;
 pub mod tool_execution;
 pub mod tool_execution_policy;
+pub mod tool_grant;
 pub mod tool_process;
 pub mod tool_scope;
 pub mod transcript_replay;
@@ -231,8 +232,8 @@ pub use budget::{
 pub use comms::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
     PeerDirectorySource, PeerName, PeerRoute, SUPERVISOR_BRIDGE_INTENT, SendAndStreamError,
-    SendError, SendReceipt, SendTaintOverride, SenderContentTaint, SessionEventCursor,
-    SessionEventCursorRejection, SessionEventEpoch, SessionEventReplayLimits,
+    SendError, SendReceipt, SendTaintOverride, SenderContentTaint, SessionCommsIdentityRoot,
+    SessionEventCursor, SessionEventCursorRejection, SessionEventEpoch, SessionEventReplayLimits,
     SessionEventSubscription, StreamError, StreamScope, encoded_envelope_len,
 };
 pub use compact::{
@@ -521,10 +522,10 @@ pub use service::{
     SessionTranscriptRevisionListQuery, SessionTranscriptRevisionPage,
     SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
     SessionTranscriptRewriteResult, SessionUsage, SessionView, StageToolResultsDisposition,
-    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest, TranscriptEditError,
-    TranscriptEditRunningBehavior, TranscriptReplacement, TranscriptRewriteReason,
-    TranscriptRewriteSelection, TranscriptRewriteSemantic, TurnToolOverlay,
-    WorkGraphNamespaceGrant,
+    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest, SystemRowPruneRequest,
+    SystemRowPruneResult, TranscriptEditError, TranscriptEditRunningBehavior,
+    TranscriptReplacement, TranscriptRewriteReason, TranscriptRewriteSelection,
+    TranscriptRewriteSemantic, TurnToolOverlay, WorkGraphNamespaceGrant,
 };
 pub use session::{
     AUDITED_ENDPOINT_WRITE_REFUSAL_PREFIX, ActivationWindow, AuditedEndpointDivergence,
@@ -543,10 +544,11 @@ pub use session::{
     MAX_INSTRUCTION_ACTIVATION_LINEAGE_BYTES, MAX_INSTRUCTION_BODY_BYTES,
     ModelBoundaryProjectionError, PendingDeferredPrompt, PendingToolResultsMessage,
     PersistedSessionMetadataView, PredecessorRestrictionsError, PredecessorToolRestrictions,
-    PreparedTransientTurnContextBoundary, ProviderNativeToolPolicy, Released0810ImportError,
-    Released0810ImportEvidence, Released0810ImportReceipt, RetainedTranscriptRevisionRows,
-    RetiredTranscriptGraphBase, RetiredTranscriptPrefix, RoundPendingOperation, RunLoopCarryOver,
-    RunResumePoint, RunUsageCarryOver, SESSION_BUILD_STATE_KEY, SESSION_DEFERRED_TURN_STATE_KEY,
+    PreparedTransientTurnContextBoundary, ProviderNativeToolPolicy,
+    RETIRED_INSTRUCTION_RENDER_VERSION_V1, Released0810ImportError, Released0810ImportEvidence,
+    Released0810ImportReceipt, RetainedTranscriptRevisionRows, RetiredTranscriptGraphBase,
+    RetiredTranscriptPrefix, RoundPendingOperation, RunLoopCarryOver, RunResumePoint,
+    RunUsageCarryOver, SESSION_BUILD_STATE_KEY, SESSION_DEFERRED_TURN_STATE_KEY,
     SESSION_LIFECYCLE_TERMINAL_KEY, SESSION_METADATA_SCHEMA_VERSION, SESSION_RUN_CURSOR_KEY,
     SESSION_TOOL_VISIBILITY_STATE_KEY, SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
     SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY, SESSION_VERSION, SerializedSessionArtifact,
@@ -575,6 +577,23 @@ pub use session::{
     transcript_rewrite_prefix_digest, try_lifecycle_terminal_from_map,
     try_session_metadata_from_map, try_tool_visibility_state_from_map,
     validate_current_persisted_transcript_history_slice,
+};
+pub use session::{
+    EffectiveInstructionSlot, EffectiveOperatorInstructions, INSTRUCTION_ENTRY_RENDER_VERSION_V1,
+    InstructionActiveRef, InstructionChange, InstructionDeferReason, InstructionEffect,
+    InstructionEntryIdentity, InstructionEntryKind, InstructionEntryLoweringRefusal,
+    InstructionEntryPlacement, InstructionLowering, InstructionRecordDisposition,
+    InstructionRecordReceipt, InstructionReleaseDisposition, InstructionRevision,
+    InstructionRunStart, InstructionSetErrorCode, InstructionSlot, InstructionStateError,
+    InstructionTargetOwner, InstructionTargetRecord, InstructionTargetRecordSlot,
+    InstructionTargetSlot, InstructionWriteDisposition, InstructionWriteError,
+    InvalidInstructionRevision, MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES,
+    MAX_OPERATOR_INSTRUCTION_SLOTS, OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION,
+    RunStartInstructionApplication, RunStartInstructionOutcome, SESSION_ENVELOPE_BASELINE_VERSION,
+    SESSION_INSTRUCTION_STATE_KEY, SYSTEM_ROW_PRUNE_REASON_KIND, SessionInstructionChange,
+    SessionInstructionReceipt, SessionInstructionState, SessionInstructionWrite,
+    SystemRowPruneCommit, SystemRowPruneRefusal, SystemRowRef, effective_operator_instructions,
+    materialize_operator_instruction_messages, validate_operator_instruction_messages,
 };
 pub use session_component_sidecar::{
     ComponentEventDigest, ComponentEventPrefixAuthority, ComponentEventPrefixDigest,
@@ -657,6 +676,12 @@ pub use tool_execution_policy::{
     ExecutionPolicyGatedDispatcher, ToolDispatchAdmission, ToolExecutionPolicy,
     ToolExecutionPolicyError, ToolMutationClass,
 };
+pub use tool_grant::{
+    GatedToolTable, GrantGateRefusal, GrantGatedTools, SessionToolGrants, TOOL_GRANT_EXPIRED_CODE,
+    TOOL_GRANT_REQUIRED_CODE, TOOL_GRANT_REVOKED_CODE, TOOL_GRANT_UNAVAILABLE_CODE, ToolGrantCall,
+    ToolGrantGate, ToolGrantId, ToolGrantIdError, ToolGrantIssuer, ToolGrantRecord,
+    ToolGrantRefusal, ToolGrantSubject, ToolGrantSubjectKey, ToolGrantTarget,
+};
 pub use tool_scope::{
     ComposedToolFilter, EXTERNAL_TOOL_FILTER_METADATA_KEY, ExternalToolSurfaceBaseState,
     ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase,
@@ -695,19 +720,20 @@ pub use types::{
     InstructionRevisionId, InstructionRevisionRef, InvalidInstructionContentDigest,
     InvalidInstructionIdentifier, LiveContextObservationId, MemoryIndexExclusion,
     MemoryIndexableContent, Message, OutputSchema, PROVIDER_STOP_DETAIL_TEXT_CAP,
-    PROVIDER_STOP_DETAIL_TRUNCATION_MARKER, ProviderMeta, ProviderStopDetail, RunInput, RunResult,
-    SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, ServerToolKind, SessionId, StopReason,
-    SystemMessage, SystemMessageIdentity, SystemNoticeBlock, SystemNoticeDirection,
-    SystemNoticeKind, SystemNoticeMessage, SystemNoticePeer, SystemNoticeRecord, SystemPromptKey,
-    SystemPromptVersion, SystemPromptVersionIdentity, TOOL_ARTIFACT_REF_PART_MAX_BYTES,
-    ToolArtifactRef, ToolArtifactRefError, ToolArtifactRefPart, ToolArtifactRefusal, ToolAudience,
-    ToolCall, ToolCallIter, ToolCallView, ToolDef, ToolIdentity, ToolName, ToolNameSet,
-    ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind, TranscriptMessageIdentity,
-    TranscriptSource, TranscriptUserRole, TurnUsage, TurnUsageAccountingMissing, Usage,
-    UserMessage, VideoData, assistant_blocks_have_visible_or_actionable_output, has_images,
-    has_non_text_content, has_video, is_supported_video_media_type,
-    materialize_latest_system_prompt_versions, superseded_system_prompt_offsets,
-    validate_inline_video_blocks, validate_system_prompt_version_order,
+    PROVIDER_STOP_DETAIL_TRUNCATION_MARKER, ProviderMeta, ProviderStopDetail,
+    RetiredInstructionBody, RunInput, RunResult, SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode,
+    ServerToolKind, SessionId, StopReason, SystemMessage, SystemMessageIdentity, SystemNoticeBlock,
+    SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage, SystemNoticePeer,
+    SystemNoticeRecord, SystemPromptKey, SystemPromptVersion, SystemPromptVersionIdentity,
+    TOOL_ARTIFACT_REF_PART_MAX_BYTES, ToolArtifactRef, ToolArtifactRefError, ToolArtifactRefPart,
+    ToolArtifactRefusal, ToolAudience, ToolCall, ToolCallIter, ToolCallView, ToolDef, ToolIdentity,
+    ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind,
+    TranscriptMessageIdentity, TranscriptSource, TranscriptUserRole, TurnUsage,
+    TurnUsageAccountingMissing, Usage, UserMessage, VideoData,
+    assistant_blocks_have_visible_or_actionable_output, has_images, has_non_text_content,
+    has_video, is_supported_video_media_type, materialize_latest_system_prompt_versions,
+    superseded_system_prompt_offsets, validate_inline_video_blocks,
+    validate_system_prompt_version_order,
 };
 pub use web_search::*;
 

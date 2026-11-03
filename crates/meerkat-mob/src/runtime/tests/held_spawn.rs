@@ -33,7 +33,7 @@ const STILL_PENDING: Duration = Duration::from_millis(200);
 /// destination gate, each destination selection parks there until the gate
 /// is released.
 #[derive(Default)]
-struct SelectingHost {
+pub(super) struct SelectingHost {
     destination_gate: Option<Arc<TestRuntimeControlBarrier>>,
 }
 
@@ -101,7 +101,7 @@ impl crate::MemberRuntimeRegistrationHook for SelectingHost {
 
 /// The machine's governed work host: a scoped member destination needs one.
 /// It admits no governed input, which these tests never submit.
-struct AdmitsNothing;
+pub(super) struct AdmitsNothing;
 
 impl meerkat_runtime::input_authority::NativeWorkAuthorizationHost for AdmitsNothing {
     fn authenticate_association(
@@ -707,7 +707,7 @@ async fn a_caller_lost_during_the_route_query_settles_the_awaited_abort() {
         Duration::from_millis(200),
         handle.spawn_held_within(
             worker_spec("held-worker"),
-            deadline_in(Duration::from_secs(600)),
+            deadline_in(Duration::from_mins(10)),
         ),
     )
     .await;
@@ -978,11 +978,7 @@ async fn a_caller_lost_while_a_host_hook_runs_stops_before_the_actor_is_created(
         SelectingHost::parking_destinations(Arc::clone(&destination)),
     )
     .await;
-    let start = start_held(
-        &handle,
-        "held-worker",
-        deadline_in(Duration::from_secs(600)),
-    );
+    let start = start_held(&handle, "held-worker", deadline_in(Duration::from_mins(10)));
     tokio::time::timeout(STEP, destination.boundary_entered.notified())
         .await
         .expect("the host's destination selection parks");
@@ -1106,7 +1102,7 @@ async fn a_caller_dropped_after_its_activation_was_accepted_does_not_abort_the_m
         STEP,
         handle.spawn_held_until(
             worker_spec("held-worker"),
-            deadline_in(Duration::from_secs(600)),
+            deadline_in(Duration::from_mins(10)),
         ),
     )
     .await
@@ -1656,7 +1652,7 @@ async fn a_caller_lost_during_the_registration_witness_wait_starts_no_host_callb
         &handle,
         &service,
         "held-witness-caller",
-        deadline_in(Duration::from_secs(600)),
+        deadline_in(Duration::from_mins(10)),
     )
     .await;
     start.lose_caller();
@@ -1721,7 +1717,7 @@ async fn a_delivery_refused_by_a_lost_caller_before_the_deadline_stays_an_abort(
     let mut start = start_held_raw(
         &handle,
         "held-refused-caller",
-        deadline_in(Duration::from_secs(600)),
+        deadline_in(Duration::from_mins(10)),
     )
     .await;
     tokio::time::timeout(STEP, entered)

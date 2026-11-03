@@ -1,0 +1,415 @@
+---
+title: "Authentication"
+description: "JWT validation, OIDC discovery, provider configuration, and email allowlist enforcement."
+icon: "lock"
+---
+
+Meta authenticates protected console, REST, JSON-RPC, Flow Editor, and SSE
+requests with JWTs. Signature and claim validation establishes a principal;
+`AuthPolicy` then applies provider matching and an exact principal allowlist.
+The reference HTTP router deliberately leaves only its shells, static assets,
+and health endpoint public.
+
+## Auth providers
+
+| Provider | Description |
+|----------|-------------|
+| `GoogleOAuth` | Google user-token policy classification (default) |
+| `GitHubOAuth` | GitHub user-token policy classification |
+| `GenericOidc` | Generic OIDC user-token policy classification |
+| `ServiceIdentity` | Machine-to-machine principals (prefix: `svc:`) |
+| `TestProvider` | Testing classification -- rejected by protected policy |
+
+These values classify an already validated token; Meta does not run the
+provider's browser OAuth login flow. An absent or unrecognized `provider`
+claim maps to `GenericOidc`. A token with `actor_type = "service"`, or a
+principal beginning with `svc:`, maps to `ServiceIdentity`.
+
+## Auth policy
+
+`AuthPolicy` selects one default user identity provider. Service identities use
+their own path and do not need to match that default:
+
+```rust
+AuthPolicy {
+    default_provider: AuthProvider::GoogleOAuth,
+    email_allowlist: vec![
+        "admin@example.com".to_string(),
+        "svc:ci-pipeline".to_string(),
+    ],
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `default_provider` | `AuthProvider` | `GoogleOAuth` | Which user-provider classification protected policy expects |
+| `email_allowlist` | `Vec<String>` | `[]` | Allowed email addresses or service identities |
+
+## JWT validation
+
+Meta's low-level JWT implementation supports `HS256`, `RS256`, and `ES256`
+with P-256 keys. For a token backed by a parsed JWKS document, use the helpers
+in this order:
+
+<Steps>
+  <Step title="Header inspection">
+    Parse the JWT header to extract the signing algorithm (`alg`) and key ID (`kid`):
+
+    ```rust
+    let header: JwtHeaderView = inspect_jwt_header(&token)?;
+    ```
+
+    The header parser does not validate the signature. It only returns `alg`
+    and optional `kid` for the next steps.
+  </Step>
+  <Step title="Key selection">
+    Select a key by the token's optional `kid` and algorithm:
+
+    ```rust
+    let jwk: &Jwk = select_jwk_for_token(
+        &jwks_document,
+        header.kid.as_deref(),
+        &header.alg,
+    )?;
+    ```
+  </Step>
+  <Step title="Signature verification">
+    Build the algorithm-specific verification key, then validate the signature,
+    issuer, audience, expiry, and not-before claims:
+
+    ```rust
+    let verification_key =
+        meerkat_meta::auth::build_jwt_verification_key(jwk, &header.alg)?;
+    let validated: ValidatedJwt =
+        meerkat_meta::auth::validate_jwt_with_verification_key(
+            &token,
+            &verification_key,
+            &meerkat_meta::auth::JwtClaimsValidationConfig {
+                issuer: Some(expected_issuer),
+                audience: Some(expected_audience),
+                now_epoch_seconds,
+                leeway_seconds: 30,
+            },
+        )?;
+    ```
+
+    The validated JWT contains the claims (subject, email, issuer, expiration).
+  </Step>
+</Steps>
+
+`validate_jwt_locally` is the narrower HS256 convenience helper. It always
+builds an HMAC key from `JwtValidationConfig.shared_secret`; it is not the
+general RS256 or ES256 entry point.
+
+### `auth_config` with an external issuer (`provider: "oidc"`)
+
+`parse_console_auth_config` builds a `RuntimeDecisionState` with
+`require_app_auth: true` from a small JSON object. `provider: "jwt"` trusts an
+HS256 shared secret (the gateway binaries' development shape). `provider:
+"oidc"` trusts an external issuer's published RS256/ES256 keys, which is the
+right shape for a console fronted by Google sign-in:
+
+```json
+{
+  "provider": "oidc",
+  "issuer": "https://accounts.google.com",
+  "audience": "<your OAuth client id>.apps.googleusercontent.com",
+  "jwks_uri": "https://www.googleapis.com/oauth2/v3/certs",
+  "email_allowlist": ["alice@example.com"]
+}
+```
+
+`issuer` must equal the token's `iss` exactly and `audience` its `aud`
+(Google issues ID tokens with `aud` set to the OAuth client id).
+`email_allowlist` is required and must name at least one address: console
+access is allowlist-gated, so trusting a public issuer without one would
+configure a console that admits nobody. Supply exactly one of `jwks_uri` (fetched once while parsing, over HTTPS, with a 10 second
+bound; any error fails configuration closed) or `jwks_json` (the JWKS document
+inline, as an object or a string). Symmetric (`oct`) keys are refused under
+`provider: "oidc"`; use `provider: "jwt"` for a shared secret.
+
+Under `provider: "oidc"` the console admits a token only when its
+`email_verified` claim is the boolean `true` (a missing claim counts as
+unverified, refused as `email_not_verified`) and never lets `sub` stand in
+for a missing `email`: a public issuer mints tokens for unverified addresses
+too, and the allowlist compares addresses. The `jwt` development path keeps
+its historical behaviour. The recorded discovery document names the real key
+source (the fetched `jwks_uri`, or `inline` for `jwks_json`), so a public
+issuer's host can never read as the HS256 development host.
+
+The result is the fixed trusted snapshot described next: the console does not
+refetch the JWKS, so an issuer key rotation needs a restart of the host (or a
+refreshable `JwksCache` on the host's own front, see below). Google rotates its
+signing keys on the order of days and keeps the previous key valid during the
+overlap, so a host that restarts on deploys is usually current; a long-lived
+host should schedule a restart or front the console with a refreshing cache.
+
+### Fixed trusted OIDC snapshot
+
+The reference console auth path reads a fixed, host-trusted snapshot from
+`RuntimeDecisionState.trusted_oidc`:
+
+```rust
+TrustedOidcRuntimeConfig {
+    discovery_json: discovery_json_text,
+    jwks_json: jwks_json_text,
+    audience: "meerkat-console".to_string(),
+    require_verified_email: false,
+}
+```
+
+This path parses the issuer and JWKS URI from `discovery_json`, selects a key
+from the supplied `jwks_json`, and requires the configured audience. It does
+not fetch the JWKS URI, cache remote keys, or refresh on an unknown `kid`.
+Rotate keys by replacing the trusted snapshot through the host's configuration
+path. Caller-supplied discovery, JWKS, and audience query parameters are
+ignored.
+
+### Refreshable `JwksCache`
+
+`JwksCache` is a separate helper for hosts that wrap an Axum router with
+`with_auth_layer`:
+
+```rust
+let cache = JwksCache::new(
+    JwksCacheConfig::new(
+        "https://id.example/.well-known/openid-configuration".to_string(),
+    )
+    .with_issuer("https://id.example")
+    .with_audience("meerkat-console"),
+);
+
+let protected_router = with_auth_layer(router, cache);
+```
+
+The cache fetches discovery and JWKS documents on first use, refreshes at its
+configured interval, and forces one refresh when no key matches the token. It
+fails closed unless an audience is configured. Expected issuer checking is
+optional and comes from `JwksCacheConfig`; it is not implicitly copied from
+the discovery document. This middleware accepts only an `Authorization:
+Bearer <token>` header. It does not implement the console router's
+`auth_token` query parameter.
+
+### HS256 shared secrets
+
+For an explicitly trusted HMAC JWK, the extraction helper takes that JWK and
+returns the decoded secret:
+
+```rust
+let secret: String = extract_hs256_shared_secret(jwk)?;
+```
+
+<Warning>
+The fixed `trusted_oidc` console path accepts HS256 only when both the issuer
+and JWKS URI use a development host (`localhost`, loopback, or a
+`.localhost` name). `JwksCache` rejects HS256 by default unless the host calls
+`.allow_hs256(true)`. Prefer RS256 or ES256 for production OIDC.
+</Warning>
+
+## Console access enforcement
+
+After JWT validation, the provider and allowlist step is enforced by
+`enforce_console_route_access`. This function evaluates policy; it does not
+verify the JWT itself:
+
+```rust
+enforce_console_route_access(
+    &auth_policy,
+    &console_policy,
+    &ConsoleAccessRequest {
+        provider: AuthProvider::GoogleOAuth,
+        email: "admin@example.com".to_string(),
+    },
+)?;
+```
+
+### Enforcement rules
+
+1. If `console_policy.require_app_auth` is `false`, this provider/allowlist
+   check allows the request; read-only policy and optional ABAC remain separate
+2. `ServiceIdentity` uses its prefix and allowlist checks without matching the
+   default user provider
+3. Every other request provider must match `auth_policy.default_provider`
+4. `TestProvider` is rejected even when it is the configured default
+5. The principal must appear exactly in `auth_policy.email_allowlist`
+
+Console HTTP routes are designed for explicit bearer-token authentication. If a
+deployment puts cookie-based auth in front of the console, the deployment must
+also enforce CSRF/origin checks for mutation routes.
+
+### HTTP surface boundary
+
+In the reference app router, these surfaces remain public even when
+`require_app_auth` is `true`:
+
+- `/`, `/favicon.ico`, and `/healthz`
+- `/console`, `/console/`, and `/console/assets/*`
+- `/flow-editor`, `/flow-editor/`, and `/flow-editor/assets/*`
+
+Console JSON, JSON-RPC, timeline, blob, Flow Editor RPC, and all Meta SSE
+surfaces honor `require_app_auth`. When enabled, they accept either
+`Authorization: Bearer <token>` or an exact `auth_token` query parameter.
+Query values are percent-decoded, so callers must URL-encode reserved
+characters. Prefer the header except where a browser or SSE bootstrap requires
+a query token.
+
+### Service identity
+
+Service accounts use the `ServiceIdentity` provider with emails prefixed by `svc:`:
+
+```rust
+ConsoleAccessRequest {
+    provider: AuthProvider::ServiceIdentity,
+    email: "svc:ci-pipeline".to_string(),
+}
+```
+
+Service identities are validated separately:
+- The email must start with `svc:` and have content after the prefix
+- The full `svc:` identity must appear in the allowlist
+
+## Token lifetime and revocation
+
+The Console accepts a token until 30 seconds after its `exp`. Issue every
+Console token with an `exp` (and an `iat`): the tokens the bundled installer
+mints expire two minutes after they are issued. A token without `exp` is
+still accepted, but it never expires; the Console records its principal and
+lists it, by the principal and a non-expiring flag only, in `meta/status`
+(`non_expiring_console_principals`) and in the storage doctor
+(`console-non-expiring-principal`).
+
+To revoke every session of a principal, call `meta/console/revoke_sessions`
+with the principal (the email, or the `sub` when the token carries no
+email), on the runtime's RPC surface or on the console's `/console/rpc`. On
+the console route an access admin may revoke when an access controller is
+installed, enforced or not; without an access controller, any authenticated
+console caller may revoke sessions, as with other console actions. The
+principal is matched exactly as the token names it, case included, as the
+allowlist compares it: a revocation for another spelling answers success and
+fences nothing.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"meta/console/revoke_sessions","params":{"principal":"alice@example.com"}}
+```
+
+From then on the Console refuses with 401 each token of that principal whose
+`iat` is earlier than the revocation plus 30 seconds, or that has no `iat`,
+on every route the runtime serves, and it ends every event stream, gating
+stream and console voice session such a token opened, with or without access
+control and with or without `exp`. The 30 seconds are the verifier's clock
+leeway: a token minted just before the revocation by an issuer whose clock
+runs ahead is refused, and so is a sign-in within 30 seconds after the
+revocation; sign in again after that. An issuer whose clock runs behind
+mints tokens that stay refused for as much longer.
+
+The revocations live in `console-session-fences.json` in the gateway's
+state directory, a file of their own beside the access configuration. A
+binary without revocation neither reads nor rewrites that file: it does not
+enforce the revocations while it runs, and they apply again after the
+upgrade. A gateway
+without a durable state directory refuses `meta/console/revoke_sessions`
+(`-32004`) rather than keep a revocation a restart would lose. Revocations
+are kept for as long as the file exists.
+
+A candidate launch (`runtime_options.mob_composition.authority =
+"candidate"`) reads that file when it starts, so it refuses the sessions
+revoked before it. It writes nothing to the file: it refuses
+`meta/console/revoke_sessions` (revoke on the authoritative launch), and it
+lists a principal whose token has no `exp` in its own `meta/status` only.
+
+A revocation is written to that file before it takes effect. On Unix the
+state directory is synced after the file is replaced; when that sync fails,
+the revocation still takes effect, but the call answers `-32603`
+(`ConsoleSessionFencesError::DurabilityUnconfirmed` in Rust) because it may
+not survive a power loss: revoke again. On other platforms the replaced file
+is as durable as the platform makes it.
+
+The routers a `UnifiedRuntime` builds, and both bundled gateways, apply
+revocations. The standalone router constructors, the
+`handle_console_rest_json_route*` functions and `validate_console_token`
+apply no session fence; use the runtime's routers, or
+`validate_console_token_under_session_fences` for a host's own token check.
+
+Non-human callers are revoked the same way when they sign in with a token:
+revoke the service identity's principal (`svc:...`). A credential that is
+part of the Console's configuration itself (an HS256 shared secret in
+`auth_config`, or a key in the trusted JWKS) is revoked by replacing it and
+restarting the gateway. Removing a principal's access grants, or adding a
+deny rule, is an access change: it applies to open streams at once, but it
+does not refuse the token.
+
+### Human consent decisions by Console humans
+
+A host that routes Meerkat's human consent (R3) to Console humans checks,
+when a decision commits, that the human who decided is still accepted. In
+its `HumanConsentRoute::eligibility`, observe the human under the Console's
+session fence record:
+
+```rust
+let console = resolver
+    .session_fences()
+    .observe_current_human(&human)
+    .map_err(|_| ConsentIneligible)?;
+```
+
+`observe_current_human` verifies the human's token again by the rule
+`AuthenticatedConsoleHuman::current` applies (signature, issuer, audience,
+`exp` and `nbf` within the 30 second leeway, the route policy it was
+accepted with, and the principal's revocation), writes nothing, and returns
+`CurrentConsoleHumanEvidence`, a Meerkat `ConsentEligibility`. At the commit
+its check samples the wall clock once and passes only when that sampled
+second lies in the window the verifier accepts the token in
+(`accepted_from_epoch_seconds` to `refused_from_epoch_seconds`, that is
+`nbf - 30` through `exp + 30`) and, read last, no revocation of the record
+began or committed since the observation. It says nothing about any instant
+after the sample. Any revocation of the record refuses every evidence
+observed under it, whichever principal it fences. A token without `exp`
+has no refusal second: only a revocation ends its evidence.
+
+The evidence proves only that the Console still accepts the human's token
+under that record, never the live access policy, the host's own eligibility
+policy or that the host's login is still live. Return it only in a
+conjunction with the host's own evidence of those: its eligibility
+policy's publication (`PublishedConsentEligibility`) and its own login
+checks. Bind the approver to the observed human in the same step: the
+approver's principal must equal `evidence.human().principal()`, and its
+`HostAuthenticationScope` must name the exact token or login the host
+authenticated the event with (`token_digest()`, `login_scope()`).
+
+Take the record from the `ConsoleViewerResolver` the gateway passes to
+`GatewayHostComposition::host_app_routes` (or
+`host_app_routes_with_send_precheck`), built after the gateway installs its
+durable record, and require `is_durable()`: a record without a file never
+revokes. Never take the record from the runtime in `bind_runtime`: there the
+runtime still holds its default record, which the gateway replaces, and
+every human the Console accepts later is refused under it.
+
+The evidence is bound to the record instance and the verifier decisions the
+human was accepted with. A record opened again over the same file is
+another record: it refuses humans accepted under the first one, so a human
+is never carried over to it, but it does not invalidate evidence already
+observed under the first one, and that record keeps checking its own
+fences. Replacing the record is therefore a restart or a replacement while
+no consent decision is in flight, never a live migration. A host that can
+replace the record, the verifier configuration or a login while decisions
+are pending invalidates its own eligibility publication before the
+replacement becomes visible, and binds the selected record and the exact
+issuer, subject and login or token in the same observation. If a
+revocation panics while it publishes, every evidence of that record is
+refused until a restart; revocation and verification keep working.
+
+## Validation errors
+
+| Error | Cause |
+|-------|-------|
+| `AuthProviderMismatch` | Request provider differs from configured default |
+| `AuthProviderNotSupported` | TestProvider used in production |
+| `EmailNotAllowlisted` | Email not in the allowlist |
+| `InvalidServiceIdentity` | Service identity missing `svc:` prefix or empty |
+| `ServiceIdentityNotAllowlisted` | Service identity not in the allowlist |
+
+## See also
+
+- [Console](/guides/console) -- how auth protects console access
+- [Decisions](/reference/decisions) -- policy enforcement
+- [Configuration](/reference/configuration) -- auth policy settings

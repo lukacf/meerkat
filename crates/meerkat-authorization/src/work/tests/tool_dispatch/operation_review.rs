@@ -454,7 +454,7 @@ async fn fenced<T: AgentToolDispatcher + ?Sized + 'static>(
     call: &Call,
     context: &ToolDispatchContext,
 ) -> Result<ToolDispatchOutcome, ToolError> {
-    fenced_within(dispatcher, call, context, Duration::from_secs(600)).await
+    fenced_within(dispatcher, call, context, Duration::from_mins(10)).await
 }
 
 /// [`fenced`] under the direct caller deadline `caller_deadline`.
@@ -2325,7 +2325,7 @@ async fn no_second_review_without_tool_time_for_a_whole_review() {
     // needs the whole 30 s review deadline.
     for (caller_deadline, reviewed_again) in [
         (Duration::from_secs(40), false),
-        (Duration::from_secs(60), true),
+        (Duration::from_mins(1), true),
     ] {
         let work = reviewed_work(OperationReviewTier::R2);
         let mut reviewer = PausedReviewer::new(ReviewVerdict::Allow);

@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "scope": "Synthetic source-built MCP package for one installed Original task; controlled model schedule is not autonomous discovery",
+  "request": "Install the supplied source-built MCP fixture for this task using its retained source archive and the separately reviewed compile plan. Once access is ready, the Original must call source_add exactly once with left 19 and right 23, then report the actual returned sum. The setup helper must not call the service or answer on the Original's behalf.",
+  "component": "source-built-mcp",
+  "service": "arithmetic",
+  "mcp_name": "source-built-mcp",
+  "raw_tool": "source_add",
+  "operation_id": "add",
+  "arguments": {"left": 19, "right": 23},
+  "expected_tool_value": {"sum": 42},
+  "maximum_business_calls": 1,
+  "entrypoint": {"executable": "server.cjs", "arguments": []},
+  "generated_output": "node_modules/@toolkit-fixtures/source-built-mcp/build/Release/addon.node",
+  "lifecycle_marker": "node_modules/@toolkit-fixtures/source-built-mcp/LIFECYCLE-RAN",
+  "acceptance": [
+    "Matching emitted product carries the exact selected installer, setup tools and build profile; the separately supplied user-package fixture is independently pinned",
+    "Actual helper observes available node_build planning and actual package/schema inspection before check",
+    "Software approval retains the actual checked build commands, profile, source hashes and output mapping",
+    "Installed result and inert readback match the original installer reply, exact generated addon and launch command",
+    "Separate access approval selects only source_add for the Original through existing native owners",
+    "Original's native catalog and call/result events join its actual session and continuation run",
+    "Native call arguments equal the fixture arguments and native result contains the exact compiled tool value",
+    "The same Original run completes after that native result; a model-only answer is insufficient",
+    "Existing exact revoke, login retirement, native shutdown and process-owner cleanup remain required"
+  ],
+  "excluded": [
+    "Registry acquisition or autonomous package selection",
+    "A general MCP server implementation or arbitrary native npm package support",
+    "Prebuilt addon use or repetition of the V40 database business case",
+    "Full toolchain hermeticity, reproducibility, filesystem sandbox or general descendant absence",
+    "D5 shared preparation, helper reset, publication-poison integration or a new dependency graph"
+  ]
+}

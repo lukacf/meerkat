@@ -61,6 +61,52 @@ pub(crate) fn resolve_profile_mob_operator_access(
     )
 }
 
+/// The default spawn grant a `tools.mob` member's build composes over
+/// `authority_context`: every profile of the mob, bound to the incarnation
+/// the member is built in.
+fn default_spawn_grant(
+    definition: &MobDefinition,
+    mob_id: &crate::ids::MobId,
+    mob_incarnation: meerkat_core::service::LiveMobIncarnation,
+    authority_context: &MobToolAuthorityContext,
+) -> Result<MobToolAuthorityContext, MobError> {
+    let profile_names = definition
+        .profiles
+        .keys()
+        .map(|profile| profile.as_str().to_string())
+        .collect::<Vec<_>>();
+    meerkat_runtime::mob_operator_authority::grant_spawn_profiles_in_mob(
+        authority_context,
+        mob_id.as_str(),
+        mob_incarnation,
+        profile_names,
+    )
+    .map_err(|error| {
+        MobError::Internal(format!(
+            "generated mob operator authority rejected default spawn profiles: {error}"
+        ))
+    })
+}
+
+/// The mob operator authority the runtime composes for a member of a
+/// profile with mob tools, before a host's member build hook runs: what a
+/// build with no persisted authority carries (every profile of the mob,
+/// bound to `mob_incarnation`). The reads of an identity's current grant
+/// that build nothing take it from here, so they and the build never part.
+pub(crate) fn default_member_mob_operator_authority(
+    definition: &MobDefinition,
+    mob_id: &crate::ids::MobId,
+    mob_incarnation: meerkat_core::service::LiveMobIncarnation,
+) -> Result<Option<MobToolAuthorityContext>, MobError> {
+    let (_, authority) = meerkat_runtime::mob_operator_authority::resolve_mob_operator_access(
+        ToolCategoryOverride::Enable,
+        None,
+    );
+    authority
+        .map(|authority| default_spawn_grant(definition, mob_id, mob_incarnation, &authority))
+        .transpose()
+}
+
 /// Keys of the standard mob member labels.
 ///
 /// A member's build stamps each of these from the member's own typed
@@ -156,8 +202,10 @@ pub struct BuildAgentConfigParams<'a> {
     pub mob_tool_authority_context: Option<MobToolAuthorityContext>,
     /// The incarnation of the mob the member is built in, when this process
     /// runs it. The default spawn-profile scope a `tools.mob` profile gets is
-    /// bound to it. `None` (a placed member compiled on its host) grants no
-    /// default scope: that host does not run the mob.
+    /// bound to it, and the build carries it to a host's member build hook
+    /// (`SessionBuildOptions::mob_incarnation`). `None` (a placed member
+    /// compiled on its host) grants no default scope and carries none: that
+    /// host does not run the mob.
     pub mob_incarnation: Option<meerkat_core::service::LiveMobIncarnation>,
     /// Pre-resolved inherited tool filter from spawn tooling.
     ///
@@ -328,27 +376,19 @@ pub async fn build_agent_config(
         && let Some(mob_incarnation) = mob_incarnation
         && let Some(authority_context) = authority.take()
     {
-        let profile_names = definition
-            .profiles
-            .keys()
-            .map(|profile| profile.as_str().to_string())
-            .collect::<Vec<_>>();
-        authority = Some(
-            meerkat_runtime::mob_operator_authority::grant_spawn_profiles_in_mob(
-                &authority_context,
-                mob_id.as_str(),
-                mob_incarnation,
-                profile_names,
-            )
-            .map_err(|error| {
-                MobError::Internal(format!(
-                    "generated mob operator authority rejected default spawn profiles: {error}"
-                ))
-            })?,
-        );
+        authority = Some(default_spawn_grant(
+            definition,
+            mob_id,
+            mob_incarnation,
+            &authority_context,
+        )?);
     }
     config.override_mob = override_mob;
     config.mob_tool_authority_context = authority;
+    // This runtime's own witness, for a host's member build hook: the hook
+    // mints the member's scope for the mob as it runs in every build, fresh,
+    // restore or wake, without holding the mob's handle.
+    config.mob_incarnation = mob_incarnation;
 
     // External tools (mob tools, task tools, rust bundles composed externally)
     config.external_tools = external_tools;
@@ -1041,6 +1081,21 @@ fn split_member_comms_name(value: &str) -> Option<(&str, &str, &str)> {
     Some((mob_id, role, member))
 }
 
+/// The role a member session was last built under, read as a resumed
+/// build reads it (`admit_resumed_member_identity`): its mob member
+/// binding's role, or, for a session that records no binding, the role
+/// segment of its comms name. `None` when it records neither.
+pub(crate) fn stored_member_role_name(metadata: &SessionMetadata) -> Option<&str> {
+    match metadata.mob_member_binding.as_ref() {
+        Some(binding) => Some(binding.role.as_str()),
+        None => metadata
+            .comms_name
+            .as_deref()
+            .and_then(split_member_comms_name)
+            .map(|(_, role, _)| role),
+    }
+}
+
 pub(crate) fn legacy_raw_alias_comms_name(current: &str) -> Option<String> {
     let (mob_id, role, member) = split_member_comms_name(current)?;
     let legacy_member = member
@@ -1515,6 +1570,7 @@ mod tests {
                     spawn_tool_access_policy: None,
                     application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                     active_skills: None,
+                    grant_gated: Default::default(),
                 },
                 keep_alive: false,
                 comms_name: Some("test-mob/lead/lead-1".to_string()),

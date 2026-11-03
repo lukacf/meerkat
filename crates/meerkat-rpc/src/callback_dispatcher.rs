@@ -38,7 +38,7 @@ const CALLBACK_REQUEST_ENVELOPE_BYTES: usize = 4 * 1024;
 const CALLBACK_REQUEST_MAX_TOOL_USE_ID_BYTES: usize = 1024;
 const CALLBACK_REQUEST_MAX_TOOL_NAME_BYTES: usize = 256;
 pub(crate) const CALLBACK_PROCESS_MAX_PENDING: usize = 64;
-const CALLBACK_JOB_INITIAL_LEASE: std::time::Duration = std::time::Duration::from_secs(120);
+const CALLBACK_JOB_INITIAL_LEASE: std::time::Duration = std::time::Duration::from_mins(2);
 
 #[derive(Clone)]
 struct DetachedCallbackJobRuntime {
@@ -175,7 +175,7 @@ impl CallbackRequestEnvelope {
 /// Timeout for waiting on a client tool response.
 /// Public callback deadline. Hosts and transports add their own bounded
 /// handoff margins (125s and 130s respectively).
-const CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(2);
 
 #[derive(Clone)]
 struct RegisteredCallbackTool {
@@ -2571,7 +2571,7 @@ mod tests {
         let deadlines = meerkat_core::ToolDeadlineChain::new(vec![
             meerkat_core::ToolDeadlineContributor::finite(
                 meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
-                std::time::Duration::from_secs(600),
+                std::time::Duration::from_mins(10),
             ),
         ])
         .unwrap();
@@ -4466,7 +4466,7 @@ mod tests {
             meerkat_core::ToolDeadlineChain::new(vec![
                 meerkat_core::ToolDeadlineContributor::finite(
                     meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
-                    std::time::Duration::from_secs(600),
+                    std::time::Duration::from_mins(10),
                 ),
             ])
             .unwrap(),

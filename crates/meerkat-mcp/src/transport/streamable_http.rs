@@ -1102,7 +1102,7 @@ mod tests {
     async fn a_call_slower_than_any_credential_bound_still_completes()
     -> Result<(), Box<dyn std::error::Error>> {
         const SLOWER_THAN_ANY_CREDENTIAL_BOUND: std::time::Duration =
-            std::time::Duration::from_secs(120);
+            std::time::Duration::from_mins(2);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let uri = format!("http://{}/mcp", listener.local_addr()?);
         tokio::spawn(async move {

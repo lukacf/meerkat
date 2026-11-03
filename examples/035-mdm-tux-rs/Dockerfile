@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM rust:1.94-bookworm AS build
+FROM rust:1.97-bookworm AS build
 
 ARG CARGO_PROFILE=debug
 

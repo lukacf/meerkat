@@ -43,9 +43,9 @@ icon: "bolt"
 
     ```toml
     [dependencies]
-    meerkat = { version = "=0.9.8", features = ["sqlite-store", "session-store"] }
-    meerkat-store = "=0.9.8"
-    meerkat-tools = "=0.9.8"
+    meerkat = { version = "=0.9.9", features = ["sqlite-store", "session-store"] }
+    meerkat-store = "=0.9.9"
+    meerkat-tools = "=0.9.9"
     tokio = { version = "1", features = ["full"] }
     ```
 
@@ -57,7 +57,7 @@ icon: "bolt"
     cargo install rkat
     ```
 
-    This builds from source and installs `rkat` only. It needs Rust 1.94 or
+    This builds from source and installs `rkat` only. It needs Rust 1.97 or
     later, a C compiler and libc headers (for bundled SQLite and aws-lc-sys),
     and several GiB of RAM; see [Building and deploying](/guides/deploying).
     The other binaries come from their own crates: `cargo install

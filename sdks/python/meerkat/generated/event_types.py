@@ -81,6 +81,68 @@ AgentErrorClass = Literal['llm', 'operation_refused', 'store', 'tool', 'policy_i
 ContentFilteredStop = Literal['refusal', 'content_filter']
 
 
+class GrantGateRefusalUnknownFamily(TypedDict, total=False):
+    """A gated family is not a built-in tool family.
+    """
+    family: Required[str]
+    kind: Required[Literal['unknown_family']]
+
+
+class GrantGateRefusalFamilyDisabled(TypedDict, total=False):
+    """A gated family is disabled by this build; a gated family is mounted
+    closed, never disabled.
+    """
+    family: Required[str]
+    kind: Required[Literal['family_disabled']]
+
+
+class GrantGateRefusalFamilyNotMounted(TypedDict, total=False):
+    """A gated family none of whose names this build's final dispatcher
+    mounts: no grant could ever open it.
+    """
+    family: Required[str]
+    kind: Required[Literal['family_not_mounted']]
+
+
+class GrantGateRefusalToolNotMounted(TypedDict, total=False):
+    """A gated name a known tool source can provide, that this build's final
+    dispatcher does not mount and no pending source could provide once it
+    connects.
+    """
+    kind: Required[Literal['tool_not_mounted']]
+    tool: Required[str]
+
+
+class GrantGateRefusalUnknownTool(TypedDict, total=False):
+    """A gated tool name that no tool source of this build provides, and no
+    pending source could provide once it connects.
+    """
+    kind: Required[Literal['unknown_tool']]
+    tool: Required[str]
+
+
+class GrantGateRefusalPolicyRefused(TypedDict, total=False):
+    """The build's tool policy refuses a gated name, so no grant could ever
+    open it.
+    """
+    kind: Required[Literal['policy_refused']]
+    tool: Required[str]
+
+
+class GrantGateRefusalNoGrantService(TypedDict, total=False):
+    """The build has no grant service: a gate needs the runtime's, carried
+    on the session's runtime bindings.
+    """
+    kind: Required[Literal['no_grant_service']]
+
+
+# Why a build's scoped tool grant gate was refused: a gate no grant could
+# honour. The agent factory answers it, and a session service surfaces it as
+# [`crate::error::AgentError::ToolGrantGateRefused`], whose wire form is an
+# invalid-params error carrying this refusal, tagged by `kind`.
+GrantGateRefusal = GrantGateRefusalUnknownFamily | GrantGateRefusalFamilyDisabled | GrantGateRefusalFamilyNotMounted | GrantGateRefusalToolNotMounted | GrantGateRefusalUnknownTool | GrantGateRefusalPolicyRefused | GrantGateRefusalNoGrantService
+
+
 class HookFailureReasonTimeout(TypedDict, total=False):
     """The hook runtime did not complete within its configured timeout.
     """
@@ -312,7 +374,17 @@ class AgentErrorReasonContentFiltered(TypedDict, total=False):
     stop: Required[ContentFilteredStop]
 
 
-AgentErrorReason = AgentErrorReasonLlmRateLimited | AgentErrorReasonLlmContextExceeded | AgentErrorReasonLlmAuthError | AgentErrorReasonLlmInvalidModel | AgentErrorReasonLlmProviderError | AgentErrorReasonLlmNetworkTimeout | AgentErrorReasonLlmCallTimeout | AgentErrorReasonHookDenied | AgentErrorReasonHookTimeout | AgentErrorReasonHookExecutionFailed | AgentErrorReasonHookConfigInvalid | AgentErrorReasonStructuredOutputValidationFailed | AgentErrorReasonInvalidOutputSchema | AgentErrorReasonAuthReauthRequired | AgentErrorReasonCallbackPending | AgentErrorReasonTurnTerminalCause | AgentErrorReasonModelFallbackResumeHeld | AgentErrorReasonHookLaunchRefused | AgentErrorReasonContentFiltered
+class AgentErrorReasonToolGrantGateRefused(TypedDict, total=False):
+    """The session's build refused its scoped tool grant gate
+    ([`AgentError::ToolGrantGateRefused`]): no grant could honour it. A
+    turn whose build was refused carries it, so a surface answers the
+    turn with the refusal it answers the session error with.
+    """
+    reason_type: Required[Literal['tool_grant_gate_refused']]
+    refusal: Required[GrantGateRefusal]
+
+
+AgentErrorReason = AgentErrorReasonLlmRateLimited | AgentErrorReasonLlmContextExceeded | AgentErrorReasonLlmAuthError | AgentErrorReasonLlmInvalidModel | AgentErrorReasonLlmProviderError | AgentErrorReasonLlmNetworkTimeout | AgentErrorReasonLlmCallTimeout | AgentErrorReasonHookDenied | AgentErrorReasonHookTimeout | AgentErrorReasonHookExecutionFailed | AgentErrorReasonHookConfigInvalid | AgentErrorReasonStructuredOutputValidationFailed | AgentErrorReasonInvalidOutputSchema | AgentErrorReasonAuthReauthRequired | AgentErrorReasonCallbackPending | AgentErrorReasonTurnTerminalCause | AgentErrorReasonModelFallbackResumeHeld | AgentErrorReasonHookLaunchRefused | AgentErrorReasonContentFiltered | AgentErrorReasonToolGrantGateRefused
 
 
 class AgentErrorReport(TypedDict, total=False):

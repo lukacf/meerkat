@@ -1,0 +1,9 @@
+{
+  "name": "@toolkit-fixtures/source-built-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "install": "node should-not-run.cjs"
+  }
+}

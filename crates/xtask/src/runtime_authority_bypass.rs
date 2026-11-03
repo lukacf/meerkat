@@ -30,6 +30,7 @@ pub fn run_runtime_authority_bypass() -> Result<()> {
 pub fn collect_runtime_authority_bypass_findings(root: &Path) -> Result<Vec<String>> {
     let mut findings = Vec::new();
     audit_public_runtime_queue_surface(root, &mut findings)?;
+    audit_mob_only_session_callers(root, &mut findings)?;
     for file in runtime_source_files(root)? {
         let source = fs::read_to_string(&file.abs).with_context(|| format!("read {}", file.rel))?;
         let parsed = syn::parse_file(&source)
@@ -284,5 +285,187 @@ fn is_queue_projection_receiver(expr: &syn::Expr) -> bool {
         syn::Expr::Paren(paren) => is_queue_projection_receiver(&paren.expr),
         syn::Expr::Group(group) => is_queue_projection_receiver(&group.expr),
         _ => false,
+    }
+}
+
+/// The persistent session service's mob-only operator-instruction entry
+/// points. It records and releases a mob member's session target only for
+/// the mob runtime's sealed member delivery and release
+/// (`meerkat_mob::MobSessionService`), so outside meerkat-session, which
+/// defines them, the one production caller is meerkat-mob's mob session
+/// service. Rust cannot restrict a `pub` method of one crate to one other
+/// crate, so this gate does.
+const MOB_ONLY_SESSION_METHODS: [&str; 2] = [
+    "record_mob_instruction_target",
+    "release_mob_instruction_target",
+];
+
+/// Where the mob-only entry points may be called: their own crate, and the
+/// mob session service of the mob runtime.
+const MOB_ONLY_SESSION_CALLERS: [&str; 2] = [
+    "crates/meerkat-session/src/",
+    "crates/meerkat-mob/src/runtime/session_service.rs",
+];
+
+/// The workspace roots whose production sources the mob-only caller audit
+/// reads.
+const WORKSPACE_SOURCE_ROOTS: [&str; 5] = ["crates", "meta", "connect", "tests", "examples"];
+
+fn audit_mob_only_session_callers(root: &Path, findings: &mut Vec<String>) -> Result<()> {
+    for file in workspace_production_sources(root)? {
+        if MOB_ONLY_SESSION_CALLERS
+            .iter()
+            .any(|allowed| file.rel.starts_with(allowed))
+        {
+            continue;
+        }
+        let source = fs::read_to_string(&file.abs).with_context(|| format!("read {}", file.rel))?;
+        if !MOB_ONLY_SESSION_METHODS
+            .iter()
+            .any(|method| source.contains(method))
+        {
+            continue;
+        }
+        let parsed = syn::parse_file(&source)
+            .with_context(|| format!("parse {} for the mob-only session caller audit", file.rel))?;
+        let mut visitor = MobOnlySessionCallVisitor {
+            rel: &file.rel,
+            findings: &mut *findings,
+            fn_stack: Vec::new(),
+            skip_test_depth: 0,
+        };
+        visitor.visit_file(&parsed);
+    }
+    Ok(())
+}
+
+/// Every `.rs` file under a `src` or `examples` directory of the workspace
+/// roots (the root `examples` included), except test sources (`tests.rs`,
+/// `*_tests.rs` and files under a `tests` directory) and build output.
+fn workspace_production_sources(root: &Path) -> Result<Vec<SourceFile>> {
+    let mut files = Vec::new();
+    let mut stack = WORKSPACE_SOURCE_ROOTS
+        .iter()
+        .map(|dir| root.join(dir))
+        .filter(|dir| dir.is_dir())
+        .collect::<Vec<_>>();
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).with_context(|| format!("read dir {}", dir.display()))? {
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if path.is_dir() {
+                if name.starts_with('.') || name == "target" || name == "node_modules" {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|ext| ext != "rs") {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let in_src = rel.contains("/src/");
+            let in_examples = rel.starts_with("examples/") || rel.contains("/examples/");
+            let test_source =
+                rel.contains("/tests/") || name == "tests.rs" || name.ends_with("_tests.rs");
+            if (in_src || in_examples) && !test_source {
+                files.push(SourceFile { rel, abs: path });
+            }
+        }
+    }
+    Ok(files)
+}
+
+struct MobOnlySessionCallVisitor<'a> {
+    rel: &'a str,
+    findings: &'a mut Vec<String>,
+    fn_stack: Vec<String>,
+    skip_test_depth: usize,
+}
+
+impl<'ast> Visit<'ast> for MobOnlySessionCallVisitor<'_> {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        let test_only = attrs_are_test_only(&node.attrs);
+        self.skip_test_depth += usize::from(test_only);
+        syn::visit::visit_item_mod(self, node);
+        self.skip_test_depth -= usize::from(test_only);
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        let test_only = attrs_are_test_only(&node.attrs);
+        self.fn_stack.push(node.sig.ident.to_string());
+        self.skip_test_depth += usize::from(test_only);
+        syn::visit::visit_item_fn(self, node);
+        self.skip_test_depth -= usize::from(test_only);
+        self.fn_stack.pop();
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        let test_only = attrs_are_test_only(&node.attrs);
+        self.fn_stack.push(node.sig.ident.to_string());
+        self.skip_test_depth += usize::from(test_only);
+        syn::visit::visit_impl_item_fn(self, node);
+        self.skip_test_depth -= usize::from(test_only);
+        self.fn_stack.pop();
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        self.flag(&node.method.to_string(), "called");
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    /// A path naming an entry point: a `Type::method(..)` call, or the
+    /// method taken as a value.
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if let Some(segment) = node.path.segments.last() {
+            self.flag(&segment.ident.to_string(), "named by path");
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+
+    /// syn keeps a macro's input (`tokio::select!`, `futures::join!`) as
+    /// unparsed tokens, so an entry point named there is found by its
+    /// identifier token. Comments are not tokens, and a string is one
+    /// literal token, so neither names an entry point.
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        let mut idents = Vec::new();
+        token_idents(node.tokens.clone(), &mut idents);
+        for ident in idents {
+            self.flag(&ident, "named in a macro body");
+        }
+        syn::visit::visit_macro(self, node);
+    }
+}
+
+impl MobOnlySessionCallVisitor<'_> {
+    /// Record a finding when `name` is a mob-only entry point outside test
+    /// code.
+    fn flag(&mut self, name: &str, how: &str) {
+        if self.skip_test_depth == 0 && MOB_ONLY_SESSION_METHODS.contains(&name) {
+            self.findings.push(format!(
+                "{}: mob-only session entry point `{name}` {how} in `{}` outside the mob \
+                 runtime's session service; it records or releases a mob member's target \
+                 only for MobSessionService's sealed delivery",
+                self.rel,
+                self.fn_stack.last().map_or("<root>", String::as_str)
+            ));
+        }
+    }
+}
+
+/// The identifier tokens of a token stream, nested groups included.
+fn token_idents(tokens: proc_macro2::TokenStream, idents: &mut Vec<String>) {
+    for tree in tokens {
+        match tree {
+            proc_macro2::TokenTree::Ident(ident) => idents.push(ident.to_string()),
+            proc_macro2::TokenTree::Group(group) => token_idents(group.stream(), idents),
+            proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => {}
+        }
     }
 }

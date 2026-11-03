@@ -1635,6 +1635,18 @@ impl IdentityIntentRecord {
     }
 }
 
+mod created;
+pub use created::{
+    CREATED_IDENTITY_SCHEMA_VERSION, CreatedIdentityObservation, CreatedIdentityPresence,
+    CreatedIdentityProvenance, CreatedIdentityRecord, CreatedIdentitySpec,
+    IDENTITY_CHANGE_BATCH_MAX, IDENTITY_CHANGE_RECEIPT_SCHEMA_VERSION, IdentityAddressability,
+    IdentityAdoptedFrom, IdentityChangeConsent, IdentityChangeEntryOutcome, IdentityChangeKind,
+    IdentityChangeReceipt, IdentityChangeReceiptEntry, IdentityChangeReceiptObservation,
+    IdentityChangeRequester, IdentityEntered, IdentityPolicyOutcome, IdentityPreparationMode,
+    IdentityRemovalRecord, IdentitySourceEvidence, OwnedIdentityEdge, PendingRoleMigration,
+    classify_created_identity_row,
+};
+
 /// Caller-chosen idempotency identity for one desired-member mutation.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -3489,6 +3501,8 @@ pub enum IdentityIntentError {
     CounterExhausted {
         counter: &'static str,
     },
+    /// A store-owned identity's row, or a part of it, is not coherent.
+    InvalidCreatedIdentity(String),
 }
 
 impl fmt::Display for IdentityIntentError {
@@ -3585,6 +3599,9 @@ impl fmt::Display for IdentityIntentError {
             ),
             Self::CounterExhausted { counter } => {
                 write!(formatter, "identity {counter} counter exhausted")
+            }
+            Self::InvalidCreatedIdentity(detail) => {
+                write!(formatter, "invalid store-owned identity row: {detail}")
             }
         }
     }

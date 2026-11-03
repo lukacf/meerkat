@@ -39,7 +39,9 @@ Meerkat validates the combination before constructing the provider client.
 Without `credential_account`, the binding itself remains the credential
 identity. With it, route selection still uses the binding while token storage,
 refresh locking, login state, status, and logout use the realm-scoped account.
-This is how the three GitHub Copilot provider-family routes share one sign-in.
+This is how the three GitHub Copilot provider-family routes share one sign-in,
+or one operator-supplied GitHub token (`github_copilot_token`); an account
+holds one of the two methods at a time.
 
 For self-hosted models, the backend profile can also identify the specific
 `self_hosted.servers.<id>` entry it authenticates. This prevents a credential

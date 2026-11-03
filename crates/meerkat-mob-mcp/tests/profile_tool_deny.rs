@@ -188,7 +188,7 @@ async fn probe_pilot_host_member(
         )
         .await
         .expect("probe turn admitted");
-    tokio::time::timeout(Duration::from_secs(60), turn.wait())
+    tokio::time::timeout(Duration::from_mins(1), turn.wait())
         .await
         .expect("the probe turn completes")
         .expect("gate denials do not fail the turn");
@@ -315,7 +315,7 @@ async fn probe_snapshot_member(
         )
         .await
         .expect("probe turn admitted");
-    tokio::time::timeout(Duration::from_secs(60), turn.wait())
+    tokio::time::timeout(Duration::from_mins(1), turn.wait())
         .await
         .expect("the probe turn completes")
         .expect("gate denials do not fail the turn");

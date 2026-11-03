@@ -1,0 +1,15 @@
+{
+  "name": "@console-core",
+  "private": true,
+  "version": "0.0.0",
+  "main": "./index.js",
+  "exports": {
+    ".": "./src/index.ts",
+    "./adapters": "./src/adapters.ts",
+    "./contract": "./src/contract.ts",
+    "./headless": "./src/headless.ts",
+    "./network": "./src/network.ts",
+    "./runtime-types": "./src/runtime-types.ts",
+    "./runtime": "./index.js"
+  }
+}

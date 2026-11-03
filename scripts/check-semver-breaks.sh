@@ -33,6 +33,10 @@
 #                                        JSON (manifest.json + <crate>.json)
 #                                        instead of downloading the release asset
 #   MEERKAT_SEMVER_REPORT_OUT            copy the tool report to this path
+#   MEERKAT_SEMVER_PRODUCT               core (default) or meta: which product's
+#                                        crates, CHANGELOG, tag prefix and version
+#                                        line the gate measures (independent
+#                                        release lines in one repository)
 set -euo pipefail
 # Bash >= 4.4 (see scripts/lib/require-bash.sh).
 . "$(dirname "${BASH_SOURCE[0]}")/lib/require-bash.sh"
@@ -77,18 +81,46 @@ if ! command -v cargo-semver-checks >/dev/null 2>&1; then
     exit 1
 fi
 
-workspace_version="$(
-    "$PYTHON" -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"])'
-)"
+# The product's release line. Core inherits [workspace.package].version; a
+# product's crates carry their own version, read from the crate that names
+# the line. Each product has its own CHANGELOG, tag prefix and crate list, so
+# a Meta measurement never reads Core's notes or tags, and the reverse.
+semver_product="${MEERKAT_SEMVER_PRODUCT:-core}"
+case "$semver_product" in
+    core)
+        semver_crate_list="$ROOT/scripts/release-rust-crates.sh"
+        semver_changelog="$ROOT/CHANGELOG.md"
+        semver_tag_prefix="v"
+        semver_reference_crate="meerkat-core"
+        semver_rustdoc_asset_prefix="semver-rustdoc"
+        workspace_version="$(
+            "$PYTHON" -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"])'
+        )"
+        ;;
+    meta)
+        semver_crate_list="$ROOT/scripts/release-meta-crates.sh"
+        semver_changelog="$ROOT/meta/CHANGELOG.md"
+        semver_tag_prefix="meta-v"
+        semver_reference_crate="meerkat-meta"
+        semver_rustdoc_asset_prefix="meta-semver-rustdoc"
+        workspace_version="$(
+            "$PYTHON" -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("meta/crates/meerkat-meta/Cargo.toml").read_text())["package"]["version"])'
+        )"
+        ;;
+    *)
+        echo "error: MEERKAT_SEMVER_PRODUCT must be core or meta, got ${semver_product}" >&2
+        exit 2
+        ;;
+esac
+echo "semver-breaks: product ${semver_product}, version ${workspace_version}, notes ${semver_changelog#"$ROOT"/}"
 
 # shellcheck source=scripts/semver-baseline.sh
 source "$ROOT/scripts/semver-baseline.sh"
 semver_analyser="$ROOT/scripts/check_semver_breaks.py"
-semver_changelog="$ROOT/CHANGELOG.md"
 baseline_version=""
 post_release=false
 resolve_semver_baseline || exit 1
-baseline_tag="v${baseline_version}"
+baseline_tag="${semver_tag_prefix}${baseline_version}"
 if [[ "$post_release" == true ]]; then
     echo "semver-breaks: baseline ${baseline_tag}, candidate the \`## [Unreleased]\` notes after ${workspace_version}"
 else
@@ -102,7 +134,7 @@ fi
 
 release_crates=()
 
-while IFS= read -r line; do release_crates+=("$line"); done < <("$ROOT/scripts/release-rust-crates.sh")
+while IFS= read -r line; do release_crates+=("$line"); done < <("$semver_crate_list")
 classify_args=()
 for crate in "${release_crates[@]}"; do
     [[ -n "$crate" ]] || continue
@@ -140,7 +172,7 @@ manifest_has_crate() {
     "$PYTHON" -c 'import json,sys; sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1]))["crates"] else 1)' "$1" "$2"
 }
 if [[ -z "$baseline_rustdoc_dir" && ${#changed_crates[@]} -gt 0 ]]; then
-    asset="semver-rustdoc-${baseline_version}.tar.zst"
+    asset="${semver_rustdoc_asset_prefix}-${baseline_version}.tar.zst"
     asset_url="https://github.com/lukacf/meerkat/releases/download/${baseline_tag}/${asset}"
     rustdoc_download_dir="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-semver-rustdoc.XXXXXX")"
     if curl -fsSL --retry 3 -o "$rustdoc_download_dir/$asset" "$asset_url" \
@@ -187,7 +219,13 @@ else
     # feature unification matches the published baseline's.
     current_rustdoc_dir="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-semver-current.XXXXXX")"
     echo "semver-breaks: generating candidate rustdoc JSON"
-    "$ROOT/scripts/semver-rustdoc-json.sh" --source-root "$ROOT" --out "$current_rustdoc_dir" >/dev/null
+    rustdoc_crate_args=(--version-crate "$semver_reference_crate")
+    for crate in "${release_crates[@]}"; do
+        [[ -n "$crate" ]] || continue
+        rustdoc_crate_args+=(--crate "$crate")
+    done
+    "$ROOT/scripts/semver-rustdoc-json.sh" --source-root "$ROOT" --out "$current_rustdoc_dir" \
+        "${rustdoc_crate_args[@]}" >/dev/null
 
     # Only library crates are measurable; the analyser already knows that
     # proc-macro and binary-only crates never appear in a report.
@@ -210,7 +248,16 @@ else
             fi
         done
     fi
-    if [[ -z "$baseline_rustdoc_dir" ]]; then
+    registry_baseline=false
+    if [[ -z "$baseline_rustdoc_dir" && "$semver_product" != core ]]; then
+        # A product's tags before its first monorepo release name commits of
+        # the product's own repository, whose layout this tree's generator
+        # cannot document. crates.io holds exactly what was published, so
+        # cargo-semver-checks builds that baseline from the registry.
+        registry_baseline=true
+        echo "semver-breaks: ${baseline_rustdoc_note}; measuring against the published ${baseline_version} crates on crates.io" >&2
+        echo "# ${baseline_rustdoc_note}; baseline: crates.io ${baseline_version}" >>"$report_file"
+    elif [[ -z "$baseline_rustdoc_dir" ]]; then
         echo "semver-breaks: warning: ${baseline_rustdoc_note}; generating the baseline from a ${baseline_tag} checkout" >&2
         echo "# ${baseline_rustdoc_note}; baseline generated from a ${baseline_tag} checkout" >>"$report_file"
         baseline_dir="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-semver-baseline.XXXXXX")"
@@ -223,9 +270,13 @@ else
 
     for crate in "${measured_crates[@]}"; do
         echo "semver-breaks: measuring ${crate}"
-        run_tool --package "$crate" \
-            --baseline-rustdoc "$baseline_rustdoc_dir/${crate}.json" \
-            --current-rustdoc "$current_rustdoc_dir/${crate}.json"
+        if [[ "$registry_baseline" == true ]]; then
+            run_tool --package "$crate" --baseline-version "$baseline_version"
+        else
+            run_tool --package "$crate" \
+                --baseline-rustdoc "$baseline_rustdoc_dir/${crate}.json" \
+                --current-rustdoc "$current_rustdoc_dir/${crate}.json"
+        fi
     done
 fi
 
@@ -249,8 +300,9 @@ fi
 analyser_exit=0
 "$PYTHON" "$ROOT/scripts/check_semver_breaks.py" \
     --report "$report_file" \
-    --changelog "$ROOT/CHANGELOG.md" \
+    --changelog "$semver_changelog" \
     --repo-root "$ROOT" \
+    --version "$workspace_version" \
     --baseline-tag "$baseline_tag" \
     --tool-exit-code "$tool_exit" \
     "${release_args[@]}" || analyser_exit=$?

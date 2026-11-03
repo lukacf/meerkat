@@ -148,6 +148,9 @@ docs/guides/auth.mdx	rkat run --provider anthropic "What's the weather like in 2
 docs/guides/auth.mdx	rkat auth login anthropic
 docs/guides/auth.mdx	rkat run --auth-binding global:default_openai "Summarize this change"
 docs/guides/auth.mdx	rkat auth login copilot
+docs/guides/auth.mdx	rkat auth login copilot --non-interactive --from-env
+docs/guides/auth.mdx	rkat run --auth-binding global:copilot_anthropic "Summarize this change"
+docs/guides/auth.mdx	rkat auth test copilot_openai
 docs/guides/comms.mdx	rkat run --comms-name mdm-target-1 --comms-listen-tcp 0.0.0.0:4200 --comms-advertise-tcp target.example.com:4200 --comms-pairing-password-env RKAT_PAIRING_PASSWORD --comms-binding-out ./target-binding.json --agent-description "Remote MDM target" --agent-label site=gcp --keep-alive "You are the remote target. Stay available for signed peer work."
 docs/guides/comms.mdx	rkat run --comms-name reviewer --agent-description "Reviews pull requests for style issues" --agent-label lang=rust --agent-label team=infra --keep-alive "You review code when asked."
 docs/guides/comms.mdx	rkat run --comms-name orchestrator --keep-alive "You are a project coordinator."

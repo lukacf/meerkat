@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 import re
 import subprocess
@@ -14,6 +15,39 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only on Python < 3.1
     import tomli as tomllib
 
 
+def load_products(root: pathlib.Path) -> list[dict]:
+    path = root / "ci" / "products.json"
+    if not path.exists():
+        return []
+    return json.loads(path.read_text()).get("products", [])
+
+
+PRODUCT_ROOTS: list[str] = []
+
+
+def product_publish_orders(root: pathlib.Path) -> dict[str, list[str]]:
+    """Each product other than Core (ci/products.json) and its publish order."""
+    orders: dict[str, list[str]] = {}
+    PRODUCT_ROOTS.clear()
+    for product in load_products(root):
+        if not product.get("root"):
+            continue
+        PRODUCT_ROOTS.append(product["root"])
+        order = product.get("publish_order")
+        orders[product["name"]] = list(order) if isinstance(order, list) else []
+    return orders
+
+
+def product_of(root: pathlib.Path, path: pathlib.Path, orders: dict[str, list[str]]) -> str | None:
+    """The product other than Core whose root holds `path`, or None (Core)."""
+    relative = path.resolve().relative_to(root.resolve()).as_posix()
+    for product in load_products(root):
+        product_root = product.get("root")
+        if product_root and (relative == product_root or relative.startswith(f"{product_root}/")):
+            return product["name"]
+    return None
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print("Usage: check_rust_release_packaging.py REPO_ROOT [CRATE ...]", file=sys.stderr)
@@ -23,6 +57,10 @@ def main() -> int:
     expected_order = sys.argv[2:]
     expected = set(expected_order)
     workspace = tomllib.loads((root / "Cargo.toml").read_text())
+    # The other products (ci/products.json) publish their own crates on their
+    # own version lines: their publishable members are checked against their
+    # own publish order, and their requirements against their own versions.
+    product_orders = product_publish_orders(root)
 
     paths: list[pathlib.Path] = []
     for member in workspace["workspace"]["members"]:
@@ -32,6 +70,7 @@ def main() -> int:
             paths.append(root / member)
 
     publishable = set()
+    product_publishable: dict[str, set[str]] = {}
     workspace_packages = {}
     member_dirs: dict[str, pathlib.Path] = {}
     metadata_errors = []
@@ -47,8 +86,12 @@ def main() -> int:
         member_dirs[name] = path.resolve()
         if package.get("publish", "default") is False:
             continue
-        publishable.add(name)
         workspace_packages[name] = data
+        product = product_of(root, path, product_orders)
+        if product is None:
+            publishable.add(name)
+        else:
+            product_publishable.setdefault(product, set()).add(name)
 
         for field in ("description", "license", "repository", "homepage", "documentation"):
             value = package.get(field)
@@ -62,7 +105,13 @@ def main() -> int:
     workspace_version = workspace["workspace"]["package"]["version"]
     missing = sorted(publishable - expected)
     unexpected = sorted(expected - publishable)
-    order_errors = dependency_order_errors(workspace_packages, expected_order)
+    for product, order in sorted(product_orders.items()):
+        listed = set(order)
+        members = product_publishable.get(product, set())
+        missing += [f"{name} (not in {product}'s publish_order, ci/products.json)" for name in sorted(members - listed)]
+        unexpected += [f"{name} ({product}'s publish_order names no publishable {product} member)" for name in sorted(listed - members)]
+    core_packages = {name: data for name, data in workspace_packages.items() if name in publishable}
+    order_errors = dependency_order_errors(core_packages, expected_order)
     requirement_errors = internal_dependency_requirement_errors(
         root, workspace, workspace_packages, member_dirs
     )
@@ -243,10 +292,16 @@ def internal_path_dependency_count(workspace: dict) -> int:
     """
 
     dependencies = workspace.get("workspace", {}).get("dependencies", {})
+    # Core's: an entry whose path lies under another product's root
+    # (ci/products.json) tracks that product's version line instead.
+    roots = tuple(f"{product_root}/" for product_root in PRODUCT_ROOTS)
     return sum(
         1
         for value in dependencies.values()
-        if isinstance(value, dict) and "version" in value and "path" in value
+        if isinstance(value, dict)
+        and "version" in value
+        and "path" in value
+        and not str(value["path"]).startswith(roots)
     )
 
 
@@ -460,11 +515,30 @@ def internal_dependency_requirement_errors(
     """
 
     version = workspace["workspace"]["package"]["version"]
-    exact = f"={version}"
     workspace_deps = workspace.get("workspace", {}).get("dependencies", {})
     member_names = set(member_dirs)
     member_paths = set(member_dirs.values())
     workspace_root = root.resolve()
+    # Each member's own version: Core's inherit the workspace's, a product's
+    # crates carry their product's (ci/products.json). A requirement on a
+    # member is exact on that member's version.
+    member_versions: dict[str, str] = {}
+    member_by_dir: dict[pathlib.Path, str] = {}
+    for name, directory in member_dirs.items():
+        package = tomllib.loads((directory / "Cargo.toml").read_text()).get("package", {})
+        declared = package.get("version")
+        member_versions[name] = declared if isinstance(declared, str) else version
+        member_by_dir[directory] = name
+
+    def exact_for(key: str, spec, declared_in: pathlib.Path) -> str:
+        if isinstance(spec, dict):
+            path = spec.get("path")
+            if isinstance(path, str) and (declared_in / path).resolve() in member_by_dir:
+                return f"={member_versions[member_by_dir[(declared_in / path).resolve()]]}"
+            name = str(spec.get("package", key))
+        else:
+            name = key
+        return f"={member_versions.get(name, version)}"
 
     def is_internal(key: str, spec, declared_in: pathlib.Path) -> bool:
         if not isinstance(spec, dict):
@@ -494,6 +568,7 @@ def internal_dependency_requirement_errors(
                 if resolved is None or not is_internal(key, resolved, declared_in):
                     continue
                 requirement = requirement_of(resolved)
+                exact = exact_for(key, resolved, declared_in)
                 if requirement is None and is_dev:
                     # cargo package strips a path-only dev-dependency.
                     continue
@@ -516,6 +591,7 @@ def internal_dependency_requirement_errors(
         if spec is None or not is_internal(key, spec, workspace_root):
             continue
         requirement = requirement_of(spec)
+        exact = exact_for(key, spec, workspace_root)
         users = publishers.get(key, [])
         if requirement is None and not users:
             # A path-only entry (used only as a dev-dependency) publishes

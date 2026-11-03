@@ -5185,7 +5185,13 @@ describe("Mob surface fail-closed status parsing (DOGMA Rule 6)", () => {
     });
 
     for (const restore of ["startup_binding", "cleanup_delivery"]) {
-      for (const cause of ["served_elsewhere", "hosting_unavailable", "durable_tail_unprovable"]) {
+      for (const cause of [
+        "served_elsewhere",
+        "hosting_unavailable",
+        "durable_tail_unprovable",
+        "store_unavailable",
+        "store_unreadable",
+      ]) {
         it(`surfaces custody_deferred ${restore}/${cause}`, async () => {
           const client = memberStatusClient(
             validResponse({ status: "broken", custody_deferred: { restore, cause } }),

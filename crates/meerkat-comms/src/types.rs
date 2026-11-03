@@ -600,7 +600,7 @@ mod tests {
             },
             sig: Signature::new([0u8; 64]),
         };
-        assert!(envelope.id != Uuid::nil());
+        assert_ne!(envelope.id, Uuid::nil());
         assert_eq!(envelope.from.as_bytes()[0], 1);
         assert_eq!(envelope.to.as_bytes()[0], 2);
     }

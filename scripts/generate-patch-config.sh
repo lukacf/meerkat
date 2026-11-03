@@ -12,18 +12,26 @@
 #
 # EXCLUDE_CRATE: omit this crate from the patch list (avoids lockfile
 # collision when cargo publish verifies the package being published).
+#
+# MEERKAT_RELEASE_CRATE_LIST names the product's crate list script (default
+# scripts/release-rust-crates.sh, Core's). A product's patch covers only its
+# own crates, so its other dependencies (Core, for Meta) resolve from
+# crates.io at the versions it declares, as its published-floor check proved.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="${1:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 EXCLUDE="${2:-}"
+CRATE_LIST="${MEERKAT_RELEASE_CRATE_LIST:-${SCRIPT_DIR}/release-rust-crates.sh}"
 
-# name<TAB>directory for every workspace member manifest (crates/*, tests/*). Only the [package]
+# name<TAB>directory for every workspace member manifest (crates/*, tests/*,
+# and the products' meta/crates/* and connect/crates/*). Only the [package]
 # section counts: several crates declare [[bin]] targets whose names collide
 # with other crates' package names.
 crate_table="$(
-  for manifest in "${ROOT}"/*/Cargo.toml "${ROOT}"/crates/*/Cargo.toml "${ROOT}"/tests/integration/Cargo.toml "${ROOT}"/tests/fixtures/*/Cargo.toml; do
+  for manifest in "${ROOT}"/*/Cargo.toml "${ROOT}"/crates/*/Cargo.toml "${ROOT}"/tests/integration/Cargo.toml "${ROOT}"/tests/fixtures/*/Cargo.toml \
+      "${ROOT}"/meta/crates/*/Cargo.toml "${ROOT}"/connect/crates/*/Cargo.toml; do
     [[ -f "${manifest}" ]] || continue
     awk -v dir="$(dirname "${manifest}")" '
       /^[[:space:]]*\[/ { in_package = ($0 ~ /^[[:space:]]*\[package\][[:space:]]*$/) }
@@ -49,4 +57,4 @@ while IFS= read -r crate; do
   if [[ "${crate}" != "${EXCLUDE}" ]]; then
     echo "${crate} = { path = \"${crate_dir}\" }"
   fi
-done < <("${SCRIPT_DIR}/release-rust-crates.sh")
+done < <("${CRATE_LIST}")

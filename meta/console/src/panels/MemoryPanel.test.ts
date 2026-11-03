@@ -1,0 +1,2115 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { MEMORY_TABS, __memoryTest } from "./MemoryPanel";
+import type {
+  MemoryDreamRun,
+  MemoryDreamRunSheet,
+  MemoryFullRecord,
+  MemoryLedgerEntry,
+  MemoryPanelRecord,
+  MemoryPanelRecordsResult,
+  MemoryQuarantineDecideResult,
+  MemoryReviewedRecordReceipt,
+  MemoryScopeOverview,
+} from "../types";
+import type { ConsoleFrame } from "../types";
+
+const {
+  scopeGroupKey,
+  scopeGroupLabel,
+  groupRecordsByScope,
+  trustLabel,
+  statusLabel,
+  relativeAge,
+  evidenceLabel,
+  authorLine,
+  dreamOpKindsSummary,
+  dreamTimeRange,
+  injectionLine,
+  memoryTabLabel,
+  resolveMemoryTabAlias,
+  buildRecordsQueryParams,
+  resolveRecordsSearchKey,
+  hasActiveFilter,
+  filtersEquivalent,
+  memorySectionOutcome,
+  buildRecordsListView,
+  createMemoryRecordsPager,
+  latticeFingerprint,
+  recordUtility,
+  sortRecordsByUtility,
+  utilityLine,
+  formatBytes,
+  latticeInvariants,
+  runLatticeWalk,
+  computeVerdictTiles,
+  verdictStatusLabel,
+  scopeOverviewRows,
+  filterForScope,
+  lineageLane,
+  dreamRunsTouching,
+  evidenceExcerptLines,
+  identityOptions,
+  knowledgeComposition,
+  dedupeFramesById,
+  countFramesBehind,
+  memoryFramePivot,
+  overviewScopeKey,
+  overviewScopeLabel,
+  filterForOverviewScope,
+  visibleOverviewScopes,
+  sortOverviewScopes,
+  storeFloorVerdict,
+  annotateInjectionDups,
+  dreamRunsNewestFirst,
+  formatDurationMs,
+  dreamRunDuration,
+  normalizeDreamRunDetail,
+  canDecideQuarantinedRecord,
+  quarantineRationaleProblem,
+  quarantineDecisionSummary,
+  quarantineDecisionErrorText,
+  verdictTone,
+  formatSize,
+  kindLabel,
+  trustDisplay,
+  trustChipTone,
+  statusWord,
+  statusTitle,
+  statusChipTone,
+  authorDisplay,
+  scopeKindLabel,
+  scopeKeyOf,
+  teamName,
+  scopeOwnerName,
+  scopeHeading,
+  overviewScopeName,
+  scopeCountsText,
+  targetName,
+  evidenceDisplay,
+  evidenceDetails,
+  injectionMoment,
+  utilityDisplay,
+  reviewVerdictLabel,
+  dreamVerdictChips,
+  dreamOpKindsDisplay,
+  partitionName,
+  knowledgeSegmentTitle,
+  needsGrantText,
+  grantTitle,
+  realmSpaceName,
+} = __memoryTest;
+
+function record(overrides: Partial<MemoryPanelRecord> & Pick<MemoryPanelRecord, "id" | "scope">): MemoryPanelRecord {
+  return {
+    kind: "fact",
+    title: overrides.id,
+    trust: "agent_observed",
+    status: { status: "active" },
+    ...overrides,
+  } as MemoryPanelRecord;
+}
+
+test("scope group keys separate identities but collapse mob/operator/realm", () => {
+  assert.equal(
+    scopeGroupKey({ scope: "identity", realm: "default", identity: "identity:luka" }),
+    "identity:default:identity:luka",
+  );
+  assert.equal(scopeGroupKey({ scope: "mob", realm: "default", mob: "main" }), "mob:default:main");
+  assert.equal(scopeGroupKey({ scope: "operator", realm: "default", operator: "op-1" }), "operator:default:op-1");
+  assert.equal(scopeGroupKey({ scope: "realm", realm: "default" }), "realm:default");
+});
+
+test("scope group labels are human readable", () => {
+  assert.equal(scopeGroupLabel({ scope: "identity", realm: "default", identity: "identity:luka" }), "identity:luka");
+  assert.equal(scopeGroupLabel({ scope: "mob", realm: "default", mob: "main" }), "Mob: main");
+  assert.equal(scopeGroupLabel({ scope: "operator", realm: "default", operator: "op-1" }), "Operator: op-1");
+  assert.equal(scopeGroupLabel({ scope: "realm", realm: "default" }), "Realm");
+});
+
+test("records group by scope with identity groups first, then mob/operator/realm", () => {
+  const groups = groupRecordsByScope([
+    record({ id: "r-realm", scope: { scope: "realm", realm: "default" } }),
+    record({ id: "l1", scope: { scope: "identity", realm: "default", identity: "identity:luka" } }),
+    record({ id: "m1", scope: { scope: "mob", realm: "default", mob: "main" } }),
+    record({ id: "l2", scope: { scope: "identity", realm: "default", identity: "identity:luka" } }),
+    record({ id: "o1", scope: { scope: "operator", realm: "default", operator: "op-1" } }),
+  ]);
+
+  assert.deepEqual(
+    groups.map((g) => g.label),
+    ["identity:luka", "Mob: main", "Operator: op-1", "Realm"],
+  );
+  // Both luka records land in the same identity group.
+  assert.equal(groups[0].records.length, 2);
+  assert.deepEqual(groups[0].records.map((r) => r.id), ["l1", "l2"]);
+});
+
+test("trust and status labels are readable", () => {
+  assert.equal(trustLabel("agent_verified"), "verified");
+  assert.equal(trustLabel("operator"), "operator");
+  assert.equal(statusLabel({ status: "active" }), "active");
+  assert.equal(statusLabel({ status: "superseded", by: "mem-9" }), "superseded → mem-9");
+  assert.equal(statusLabel({ status: "quarantined", reason: "conflict" }), "quarantined: conflict");
+  assert.equal(statusLabel({ status: "tombstoned" }), "tombstoned");
+});
+
+test("relative age formats coarse buckets and handles missing timestamps", () => {
+  const now = 1_000_000_000_000;
+  assert.equal(relativeAge(undefined, now), "-");
+  assert.equal(relativeAge(0, now), "-");
+  assert.equal(relativeAge(now - 3 * 24 * 60 * 60 * 1000, now), "3d ago");
+  assert.equal(relativeAge(now - 5 * 60 * 1000, now), "5m ago");
+  assert.equal(relativeAge(now - 500, now), "now");
+});
+
+test("evidence labels render session/gen/msg ranges without transcript fetch", () => {
+  assert.equal(
+    evidenceLabel({ session_id: "s", generation: 2, range: [1, 5] }),
+    "session s • gen 2 • msgs 1-5",
+  );
+  assert.equal(evidenceLabel({ revision: "r7" }), "rev r7");
+  assert.equal(evidenceLabel({}), "evidence");
+});
+
+test("author lines describe every author variant", () => {
+  assert.equal(authorLine({ author: "agent", identity: "identity:x" }), "agent identity:x");
+  assert.equal(authorLine({ author: "steward", run_id: "run-1" }), "steward run run-1");
+  assert.equal(authorLine({ author: "distiller", run_id: "run-2" }), "distiller run run-2");
+  assert.equal(authorLine({ author: "operator" }), "operator");
+  assert.equal(authorLine({ author: "application" }), "application");
+  assert.equal(authorLine(undefined), "unknown author");
+});
+
+test("dream op-kind summary sorts by count and skips zeroes", () => {
+  assert.equal(dreamOpKindsSummary({ create: 3, tombstone: 1, noop: 0 }), "3 create · 1 tombstone");
+  assert.equal(dreamOpKindsSummary({}), "");
+  assert.equal(dreamOpKindsSummary(undefined), "");
+});
+
+test("dream time range collapses identical endpoints", () => {
+  const now = 2_000_000_000_000;
+  const first = now - 2 * 60 * 60 * 1000;
+  const last = now - 30 * 60 * 1000;
+  assert.equal(dreamTimeRange({ first_op_at_ms: first, last_op_at_ms: last }, now), "2h ago → 30m ago");
+  assert.equal(dreamTimeRange({ first_op_at_ms: last, last_op_at_ms: last }, now), "30m ago");
+  assert.equal(dreamTimeRange({}, now), "-");
+});
+
+test("injection lines combine surface, identity, and relative time", () => {
+  const now = 3_000_000_000_000;
+  assert.equal(
+    injectionLine({ record_id: "m", identity: "identity:luka", surface: "build", at_ms: now - 60 * 60 * 1000 }, now),
+    "build • identity:luka • 1h ago",
+  );
+  assert.equal(
+    injectionLine({ record_id: "m", identity: "identity:luka", surface: "turn", at_ms: now - 5 * 1000 }, now),
+    "turn • identity:luka • 5s ago",
+  );
+});
+
+// ── Phase-1: tab restructure ───────────────────────────────────────────────
+
+test("tab union is holdings/records/knowledge/pipeline/dreams with labels", () => {
+  assert.deepEqual(MEMORY_TABS, ["holdings", "records", "knowledge", "pipeline", "dreams"]);
+  assert.equal(memoryTabLabel("holdings"), "Holdings");
+  assert.equal(memoryTabLabel("pipeline"), "Pipeline");
+});
+
+test("quarantine tab alias redirects to pipeline for one release (open Q6)", () => {
+  assert.equal(resolveMemoryTabAlias("quarantine"), "pipeline");
+  assert.equal(resolveMemoryTabAlias("records"), "records");
+  assert.equal(resolveMemoryTabAlias("bogus"), null);
+});
+
+// ── Phase-1: records filter bar param building ─────────────────────────────
+
+test("filter bar builds the server's scope/identity/scope_key/status params", () => {
+  assert.deepEqual(buildRecordsQueryParams({}), {});
+  assert.deepEqual(buildRecordsQueryParams({ key: "identity:ada" }), { identity: "identity:ada" });
+  assert.deepEqual(
+    buildRecordsQueryParams({ scope: "identity", key: "identity:ada", status: "active" }),
+    { identity: "identity:ada", status: "active" },
+  );
+  assert.deepEqual(buildRecordsQueryParams({ scope: "identity" }), { scope: "identity" });
+  assert.deepEqual(
+    buildRecordsQueryParams({ scope: "mob", key: "research" }),
+    { scope: "mob", scope_key: "research" },
+  );
+  assert.deepEqual(buildRecordsQueryParams({ scope: "realm" }), { scope: "realm" });
+  assert.deepEqual(
+    buildRecordsQueryParams({ status: "quarantined" }, { cursor: "123:m-1", limit: 200 }),
+    { status: "quarantined", limit: 200, cursor: "123:m-1" },
+  );
+  // Realm narrows the listing to one realm. An older server paged several
+  // realms only this way: its merged page carried no cursor.
+  assert.deepEqual(buildRecordsQueryParams({ realm: "example" }), { realm: "example" });
+  assert.deepEqual(
+    buildRecordsQueryParams({ scope: "mob", key: "research", realm: "example" }),
+    { scope: "mob", scope_key: "research", realm: "example" },
+  );
+  assert.equal(hasActiveFilter({}), false);
+  assert.equal(hasActiveFilter({ key: "  " }), false);
+  assert.equal(hasActiveFilter({ status: "active" }), true);
+  assert.equal(hasActiveFilter({ realm: "example" }), true);
+  assert.equal(filtersEquivalent({ realm: "example" }, { realm: " example " }), true);
+  assert.equal(filtersEquivalent({ realm: "example" }, {}), false);
+});
+
+test("memory section outcomes classify -32030 as denied and -32601 as unavailable", () => {
+  // Mirror the transport contract: network.ts annotates thrown errors with
+  // `rpcError` (code/message/data), the exact shape jsonRpcErrorCode reads.
+  const rpcError = (code: number): Error => {
+    const error = new Error(`RPC error ${code}`);
+    (error as Error & { rpcError?: { code?: unknown } }).rpcError = { code };
+    return error;
+  };
+  assert.equal(memorySectionOutcome(rpcError(-32030)), "denied");
+  assert.equal(memorySectionOutcome(rpcError(-32601)), "unavailable");
+  assert.equal(memorySectionOutcome(rpcError(-32000)), "error");
+  assert.equal(memorySectionOutcome(new Error("network down")), "error");
+  assert.equal(memorySectionOutcome(null), "error");
+  // A malformed annotation (non-numeric code) must not classify as denied.
+  const malformed = new Error("weird");
+  (malformed as Error & { rpcError?: unknown }).rpcError = { code: "-32030" };
+  assert.equal(memorySectionOutcome(malformed), "error");
+});
+
+test("a per-method capability miss classifies as denied (intersection under enforcement)", () => {
+  // Exact shape thrown by requireCapability (headless.ts): a plain Error,
+  // raised client-side before the RPC, with no rpcError annotation. Under an
+  // enforced view the server drops methods the principal cannot call from
+  // meta/capabilities (a scoped read grant loses panel/dreams, for example), so
+  // the miss is denial by intersection, not a fatal panel error.
+  assert.equal(
+    memorySectionOutcome(new Error("Meta capability missing for meta/memory/panel/dreams")),
+    "denied",
+  );
+  assert.equal(
+    memorySectionOutcome(
+      new Error("Meta capability missing for meta/memory/panel/quarantine"),
+    ),
+    "denied",
+  );
+  // The prefix must anchor at the start: mentions elsewhere are not misses.
+  assert.equal(
+    memorySectionOutcome(new Error("saw 'Meta capability missing for x' in logs")),
+    "error",
+  );
+  // Non-Error values with a matching-looking message do not classify.
+  assert.equal(
+    memorySectionOutcome("Meta capability missing for meta/memory/panel/dreams"),
+    "error",
+  );
+});
+
+// ── Phase-1: recall utility mode ───────────────────────────────────────────
+
+test("record utility flags dead weight and approximates bytes spent", () => {
+  const dead = recordUtility({
+    usage: { injected_count: 5, judged_useful_count: 0, explicit_recall_count: 0 },
+    body_bytes: 1024,
+  });
+  assert.equal(dead.dead, true);
+  assert.equal(dead.bytesSpent, 5 * 1024);
+  assert.equal(dead.ratio, 0);
+
+  const useful = recordUtility({
+    usage: { injected_count: 4, judged_useful_count: 2 },
+    body_bytes: 100,
+  });
+  assert.equal(useful.dead, false);
+  assert.equal(useful.ratio, 0.5);
+
+  const fresh = recordUtility({ usage: undefined, body_bytes: 100 });
+  assert.equal(fresh.dead, false);
+  assert.equal(fresh.ratio, null);
+});
+
+test("utility sort leads with dead weight, then ascending usefulness", () => {
+  const mk = (id: string, injected: number, useful: number, bytes: number) =>
+    record({
+      id,
+      scope: { scope: "realm", realm: "default" },
+      usage: { injected_count: injected, judged_useful_count: useful },
+      body_bytes: bytes,
+    });
+  const sorted = sortRecordsByUtility([
+    mk("useful", 4, 4, 10),
+    mk("dead-small", 3, 0, 10),
+    mk("dead-big", 6, 0, 1000),
+    mk("meh", 4, 1, 10),
+  ]);
+  assert.deepEqual(sorted.map((r) => r.id), ["dead-big", "dead-small", "meh", "useful"]);
+  assert.match(utilityLine(sorted[0]), /inj 6 .* useful 0 .* ratio 0\.00/);
+  assert.equal(formatBytes(6 * 1000), "5.9KB");
+});
+
+// ── Phase-1: lattice audit (invariants a + c) ──────────────────────────────
+
+test("lattice invariants catch LLM-authored records above the ceiling", () => {
+  const ok = record({
+    id: "ok",
+    scope: { scope: "realm", realm: "default" },
+    trust: "agent_observed",
+    provenance: { author: { author: "distiller", run_id: "d-1" } },
+  });
+  const violation = record({
+    id: "bad",
+    scope: { scope: "realm", realm: "default" },
+    trust: "agent_verified",
+    provenance: { author: { author: "agent", identity: "identity:ada" } },
+  });
+  const operatorRecord = record({
+    id: "op",
+    scope: { scope: "realm", realm: "default" },
+    trust: "operator",
+    provenance: { author: { author: "operator" } },
+  });
+  const result = latticeInvariants([ok, violation, operatorRecord], { complete: true });
+  assert.deepEqual(result.llmCeilingViolations, [{ id: "bad", realm: "default" }]);
+});
+
+test("lattice invariants catch supersede cycles; dangling only when complete", () => {
+  const a = record({ id: "a", scope: { scope: "realm", realm: "default" }, supersedes: "b" });
+  const b = record({ id: "b", scope: { scope: "realm", realm: "default" }, supersedes: "a" });
+  const dangling = record({
+    id: "c",
+    scope: { scope: "realm", realm: "default" },
+    supersedes: "missing",
+  });
+  const complete = latticeInvariants([a, b, dangling], { complete: true });
+  assert.deepEqual(
+    complete.chainViolations.map((ref) => ref.id).sort(),
+    ["a", "b", "c"],
+  );
+  assert.equal(complete.chainViolations[0].realm, "default");
+  const partial = latticeInvariants([dangling], { complete: false });
+  assert.deepEqual(partial.chainViolations, []);
+});
+
+test("lattice walk pages a single realm with the keyset cursor", async () => {
+  const pageA: MemoryPanelRecordsResult = {
+    records: [record({ id: "r1", scope: { scope: "realm", realm: "default" } })],
+    next_cursor: "cursor-2",
+    realms: ["default"],
+  };
+  const pageB: MemoryPanelRecordsResult = {
+    records: [record({ id: "r2", scope: { scope: "realm", realm: "default" } })],
+    next_cursor: null,
+    realms: ["default"],
+  };
+  const calls: Array<Record<string, unknown>> = [];
+  const walk = await runLatticeWalk(
+    async (params) => {
+      calls.push(params);
+      return params.cursor ? pageB : pageA;
+    },
+    { realms: ["default"] },
+  );
+  assert.equal(calls.length, 2);
+  // Single-realm gateways use the unscoped listing (already single-realm).
+  assert.equal(calls[0].realm, undefined);
+  assert.equal(calls[1].cursor, "cursor-2");
+  assert.equal(walk?.checked, 2);
+  assert.equal(walk?.complete, true);
+
+  // Access denial propagates as null → the tile renders "no access".
+  const denied = await runLatticeWalk(async () => null, { realms: ["default"] });
+  assert.equal(denied, null);
+});
+
+test("lattice walk on multi-realm gateways walks each realm to exhaustion", async () => {
+  // An older server's shapes: an unscoped multi-realm merge carries no
+  // cursor; realm-scoped pages do. The current server gives the merge a
+  // cursor too, but the walk reads realm by realm for both, so it must never
+  // call unscoped here.
+  const realmPages: Record<string, MemoryPanelRecordsResult[]> = {
+    alpha: [
+      {
+        records: [record({ id: "a-1", scope: { scope: "realm", realm: "alpha" } })],
+        next_cursor: "alpha-2",
+        realms: ["alpha"],
+      },
+      {
+        records: [record({ id: "a-2", scope: { scope: "realm", realm: "alpha" } })],
+        next_cursor: null,
+        realms: ["alpha"],
+      },
+    ],
+    beta: [
+      {
+        records: [record({ id: "b-1", scope: { scope: "realm", realm: "beta" } })],
+        next_cursor: null,
+        realms: ["beta"],
+      },
+    ],
+  };
+  const calls: Array<Record<string, unknown>> = [];
+  const served: Record<string, number> = { alpha: 0, beta: 0 };
+  const walk = await runLatticeWalk(
+    async (params) => {
+      calls.push(params);
+      const realm = String(params.realm);
+      return realmPages[realm][served[realm]++];
+    },
+    { realms: ["alpha", "beta"] },
+  );
+  assert.deepEqual(
+    calls.map((call) => call.realm),
+    ["alpha", "alpha", "beta"],
+  );
+  assert.equal(calls[1].cursor, "alpha-2");
+  assert.equal(walk?.checked, 3);
+  // Every realm's cursor ran out under the cap → honestly complete.
+  assert.equal(walk?.complete, true);
+});
+
+test("lattice walk cap and cancellation keep the partial header honest", async () => {
+  const endless: MemoryPanelRecordsResult = {
+    records: Array.from({ length: 3 }, (_, index) =>
+      record({ id: `r-${index}`, scope: { scope: "realm", realm: "alpha" } }),
+    ),
+    next_cursor: "more",
+    realms: ["alpha"],
+  };
+  // Cap hit mid-realm with a live cursor → complete=false.
+  const capped = await runLatticeWalk(async () => endless, {
+    realms: ["alpha", "beta"],
+    maxRecords: 5,
+  });
+  assert.equal(capped?.checked, 5);
+  assert.equal(capped?.complete, false);
+
+  // A cancelled walk stops issuing page fetches instead of finishing.
+  let fetches = 0;
+  let cancelled = false;
+  const result = await runLatticeWalk(
+    async () => {
+      fetches += 1;
+      cancelled = true; // cancel after the first page lands
+      return endless;
+    },
+    { realms: ["alpha"], isCancelled: () => cancelled },
+  );
+  assert.equal(fetches, 1);
+  assert.equal(result, null);
+});
+
+// ── Phase-1: verdict tiles ─────────────────────────────────────────────────
+
+const emptyVerdictInputs = {
+  records: [] as MemoryPanelRecord[],
+  recordsDenied: false,
+  dreams: [] as MemoryDreamRun[],
+  dreamsDenied: false,
+  lattice: null,
+};
+
+test("records search can resolve a typed display name to the key the server matches", () => {
+  const resolveKey = (text: string) => (text.trim().toLowerCase() === "support triage" ? "identity:support-triage" : text);
+  assert.deepEqual(buildRecordsQueryParams({ key: "Support Triage" }, { resolveKey }), { identity: "identity:support-triage" });
+  assert.deepEqual(buildRecordsQueryParams({ scope: "identity", key: "support triage" }, { resolveKey }), { identity: "identity:support-triage" });
+  // Without a resolver the typed text is sent as it is.
+  assert.deepEqual(buildRecordsQueryParams({ key: "Support Triage" }), { identity: "Support Triage" });
+});
+
+test("records search turns a display name into its agent's scope key", () => {
+  const candidates = [
+    { key: "identity:support-triage", name: "Support Triage" },
+    { key: "identity:research", name: "Research Analyst" },
+    { key: "identity:research-two", name: "Analyst" },
+    { key: "identity:research-three", name: "Analyst" },
+    { key: "router", name: "router" },
+  ];
+  assert.equal(resolveRecordsSearchKey("Support Triage", candidates), "identity:support-triage");
+  assert.equal(resolveRecordsSearchKey("  support triage ", candidates), "identity:support-triage");
+  // Partial and shared names and unknown text are sent as typed; a typed
+  // key stays as it is.
+  assert.equal(resolveRecordsSearchKey("Supp", candidates), "Supp");
+  assert.equal(resolveRecordsSearchKey("Analyst", candidates), "Analyst");
+  assert.equal(resolveRecordsSearchKey("ops-team", candidates), "ops-team");
+  assert.equal(resolveRecordsSearchKey("identity:research", candidates), "identity:research");
+  assert.equal(resolveRecordsSearchKey("router", candidates), "router");
+});
+
+test("verdict strip mounts six tiles; checks this console cannot run say so", () => {
+  const tiles = computeVerdictTiles(emptyVerdictInputs);
+  assert.deepEqual(
+    tiles.map((tile) => tile.id),
+    ["echo-safety", "taint-wall", "lattice", "recall", "dreams", "store-floor"],
+  );
+  const byId = new Map(tiles.map((tile) => [tile.id, tile]));
+  assert.equal(byId.get("echo-safety")?.status, "unverifiable");
+  assert.equal(byId.get("echo-safety")?.summary, "Not checked automatically");
+  assert.match(
+    byId.get("echo-safety")?.lines.join(" ") || "",
+    /On the Knowledge tab, the list of memory given to agents marks repeats/,
+  );
+  assert.equal(byId.get("taint-wall")?.status, "unverifiable");
+  assert.equal(byId.get("taint-wall")?.summary, "Not checked automatically");
+  assert.match(
+    byId.get("taint-wall")?.lines.join(" ") || "",
+    /Pipeline tab marks proposals from untrusted sessions/,
+  );
+  assert.equal(byId.get("store-floor")?.status, "unverifiable");
+  assert.equal(byId.get("store-floor")?.summary, "Store totals are not available");
+  assert.equal(verdictStatusLabel("unverifiable"), "UNVERIFIABLE");
+  // Tile copy is plain words: no method names, surfaces, invariants or
+  // page-walk talk, no store terms (injection history, tainted), and no
+  // dash used as punctuation.
+  for (const tile of tiles) {
+    const copy = [tile.label, tile.summary, ...tile.lines].join(" ");
+    assert.doesNotMatch(copy, /panel\/|surface \d|invariant|page-walk|\u2014|\u2013/, `${tile.id}: ${copy}`);
+    assert.doesNotMatch(copy, /injection history|tainted/i, `${tile.id}: ${copy}`);
+  }
+});
+
+test("check tiles lead with plain names; the internal check name is only in the tooltip", () => {
+  const tiles = computeVerdictTiles({
+    ...emptyVerdictInputs,
+    lattice: { checked: 3, complete: true, llmCeilingViolations: [], chainViolations: [] },
+  });
+  assert.deepEqual(
+    tiles.map((tile) => tile.label),
+    ["Repeated memory", "Untrusted sessions", "Trust rules", "Usefulness", "Dream runs", "Storage limits"],
+  );
+  const internal: Record<string, string> = {
+    "echo-safety": "Echo safety",
+    "taint-wall": "Taint wall",
+    lattice: "Lattice",
+    recall: "Recall",
+    dreams: "Dreams",
+    "store-floor": "Store floor",
+  };
+  for (const tile of tiles) {
+    const name = internal[tile.id];
+    assert.ok(name, tile.id);
+    assert.doesNotMatch(`${tile.label} ${tile.summary}`, /lattice|recall|store floor|echo safety|taint wall/i, tile.id);
+    // The plain explanation leads the tooltip, without an internal-name prefix.
+    assert.ok(!tile.lines[0]?.startsWith(`${name}:`), `${tile.id}: ${tile.lines[0]}`);
+    assert.equal(tile.lines.at(-1), `Internal name: ${name}`, tile.id);
+  }
+});
+
+test("tiles whose evidence the principal cannot read render no-grant, never green", () => {
+  const tiles = computeVerdictTiles({
+    ...emptyVerdictInputs,
+    recordsDenied: true,
+    dreamsDenied: true,
+  });
+  const byId = new Map(tiles.map((tile) => [tile.id, tile]));
+  assert.equal(byId.get("lattice")?.status, "no-grant");
+  assert.equal(byId.get("lattice")?.summary, "No access to records");
+  assert.equal(byId.get("recall")?.status, "no-grant");
+  assert.equal(byId.get("dreams")?.status, "no-grant");
+  assert.equal(byId.get("dreams")?.summary, "No access to the dream history");
+  assert.equal(byId.get("taint-wall")?.status, "no-grant");
+  assert.equal(verdictStatusLabel("no-grant"), "NO ACCESS");
+  // A check that cannot run is never green.
+  assert.equal(verdictTone("no-grant"), "locked");
+  assert.equal(verdictTone("unverifiable"), "locked");
+  assert.equal(verdictTone("holding"), "ok");
+  assert.equal(verdictTone("degraded"), "warn");
+  assert.equal(verdictTone("violated"), "crit");
+});
+
+test("lattice tile reports violations and a partial walk honestly", () => {
+  const holding = computeVerdictTiles({
+    ...emptyVerdictInputs,
+    lattice: { checked: 3, complete: true, llmCeilingViolations: [], chainViolations: [] },
+  }).find((tile) => tile.id === "lattice");
+  assert.equal(holding?.status, "holding");
+  assert.equal(holding?.summary, "No record breaks the trust rules");
+  assert.ok(holding?.lines.includes("0 violations"), JSON.stringify(holding?.lines));
+  assert.ok(holding?.lines.includes("Checked 3 of 3 records."), JSON.stringify(holding?.lines));
+  assert.deepEqual(holding?.evidence, []);
+
+  const capped = computeVerdictTiles({
+    ...emptyVerdictInputs,
+    lattice: {
+      checked: 2000,
+      complete: false,
+      llmCeilingViolations: [{ id: "x", realm: "default" }],
+      chainViolations: [],
+    },
+  }).find((tile) => tile.id === "lattice");
+  assert.equal(capped?.status, "violated");
+  assert.equal(capped?.summary, "1 record breaks the trust rules in the first 2000");
+  assert.ok(
+    capped?.lines.includes("Checked the first 2000 records; the check stops at 2000."),
+    JSON.stringify(capped?.lines),
+  );
+});
+
+test("violated lattice tile carries its evidence refs, capped with a +N more line", () => {
+  const violations = Array.from({ length: 7 }, (_, index) => ({
+    id: `bad-${index}`,
+    realm: "default",
+  }));
+  const tile = computeVerdictTiles({
+    ...emptyVerdictInputs,
+    lattice: {
+      checked: 100,
+      complete: true,
+      llmCeilingViolations: violations.slice(0, 4),
+      chainViolations: violations.slice(4),
+    },
+  }).find((candidate) => candidate.id === "lattice");
+  assert.equal(tile?.status, "violated");
+  assert.equal(tile?.summary, "7 records break the trust rules");
+  assert.equal(tile?.evidence?.length, 5);
+  assert.deepEqual(tile?.evidence?.[0], { id: "bad-0", realm: "default" });
+  assert.equal(tile?.evidenceMore, 2);
+  assert.ok(tile?.lines.some((line) => line === "+2 more violations"));
+});
+
+test("a settled lattice verdict is retained (with a re-check marker) during re-runs", () => {
+  const settled = {
+    checked: 10,
+    complete: true,
+    llmCeilingViolations: [],
+    chainViolations: [],
+  };
+  const idle = computeVerdictTiles({
+    ...emptyVerdictInputs,
+    lattice: settled,
+    latticeRunning: false,
+  }).find((candidate) => candidate.id === "lattice");
+  const tile = computeVerdictTiles({
+    ...emptyVerdictInputs,
+    lattice: settled,
+    latticeRunning: true,
+  }).find((candidate) => candidate.id === "lattice");
+  // No flicker to UNVERIFIABLE while the debounced refresh re-walks.
+  assert.equal(tile?.status, "holding");
+  assert.equal(tile?.rechecking, true);
+  assert.equal(idle?.rechecking, false);
+  // The re-check renders over the tile, so it changes none of the tile's
+  // text: the tile row keeps its height and the tiles around it stay put.
+  assert.deepEqual(tile?.lines, idle?.lines);
+  assert.equal(tile?.summary, idle?.summary);
+  // A settled tile never reads as running (the browser layout proofs wait
+  // for exactly that).
+  assert.doesNotMatch([tile?.summary, ...(tile?.lines || [])].join(" "), /running|re-checking/);
+
+  const cold = computeVerdictTiles({
+    ...emptyVerdictInputs,
+    lattice: null,
+    latticeRunning: true,
+  }).find((candidate) => candidate.id === "lattice");
+  assert.equal(cold?.status, "unverifiable");
+  assert.equal(cold?.summary, "Checking the records");
+  const never = computeVerdictTiles(emptyVerdictInputs).find((candidate) => candidate.id === "lattice");
+  assert.equal(never?.summary, "Not checked yet");
+});
+
+test("lattice fingerprint is stable across content-identical refreshes", () => {
+  const rows = [
+    record({ id: "a", scope: { scope: "realm", realm: "default" }, updated_at_ms: 5 }),
+  ];
+  const again = [
+    record({ id: "a", scope: { scope: "realm", realm: "default" }, updated_at_ms: 5 }),
+  ];
+  assert.equal(
+    latticeFingerprint(rows, ["default"], "c-1"),
+    latticeFingerprint(again, ["default"], "c-1"),
+  );
+  assert.notEqual(
+    latticeFingerprint(rows, ["default"], "c-1"),
+    latticeFingerprint(rows, ["default"], "c-2"),
+  );
+  const changed = [{ ...rows[0], trust: "operator" as const }];
+  assert.notEqual(
+    latticeFingerprint(rows, ["default"], "c-1"),
+    latticeFingerprint(changed, ["default"], "c-1"),
+  );
+});
+
+test("recall and dreams tiles compute from loaded usage and dream recency", () => {
+  const now = 4_000_000_000_000;
+  const tiles = computeVerdictTiles({
+    records: [
+      record({
+        id: "dead",
+        scope: { scope: "realm", realm: "default" },
+        usage: { injected_count: 9, judged_useful_count: 0 },
+        body_bytes: 100,
+      }),
+      record({ id: "fine", scope: { scope: "realm", realm: "default" } }),
+    ],
+    recordsDenied: false,
+    dreams: [
+      {
+        realm: "default",
+        run_id: "run-88",
+        last_op_at_ms: now - 2 * 60 * 60 * 1000,
+        quarantined_ops: 1,
+      },
+    ],
+    dreamsDenied: false,
+    lattice: null,
+    now,
+  });
+  const byId = new Map(tiles.map((tile) => [tile.id, tile]));
+  assert.equal(byId.get("recall")?.status, "degraded");
+  assert.equal(byId.get("recall")?.summary, "1 of 2 records never helps");
+  assert.ok(
+    byId.get("recall")?.lines.includes("1 of 2 loaded records is never useful."),
+    JSON.stringify(byId.get("recall")?.lines),
+  );
+  // Nine injections of a 100-byte record.
+  assert.ok(
+    byId.get("recall")?.lines.includes("About 900 B spent giving them to agents."),
+    JSON.stringify(byId.get("recall")?.lines),
+  );
+  assert.equal(byId.get("dreams")?.status, "holding");
+  assert.equal(byId.get("dreams")?.summary, "Last run 2h ago, 1 change quarantined");
+  assert.ok(byId.get("dreams")?.lines.includes("1 change quarantined."));
+
+  const healthy = computeVerdictTiles({
+    ...emptyVerdictInputs,
+    records: [record({ id: "fine", scope: { scope: "realm", realm: "default" } })],
+  }).find((tile) => tile.id === "recall");
+  assert.equal(healthy?.status, "holding");
+  assert.equal(healthy?.summary, "No record is given to agents without helping");
+});
+
+// ── Phase-1: holdings scope overview ───────────────────────────────────────
+
+test("scope overview rows count statuses, bytes, and trust mix per scope", () => {
+  const rows = scopeOverviewRows([
+    record({
+      id: "a1",
+      scope: { scope: "identity", realm: "default", identity: "identity:ada" },
+      status: { status: "active" },
+      body_bytes: 100,
+    }),
+    record({
+      id: "a2",
+      scope: { scope: "identity", realm: "default", identity: "identity:ada" },
+      status: { status: "quarantined", reason: "taint" },
+      trust: "untrusted",
+      body_bytes: 50,
+    }),
+    record({ id: "r1", scope: { scope: "realm", realm: "default" } }),
+  ]);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].label, "identity:ada");
+  assert.equal(rows[0].active, 1);
+  assert.equal(rows[0].quarantined, 1);
+  assert.equal(rows[0].bytes, 150);
+  assert.match(rows[0].trustMix, /1 observed/);
+  assert.match(rows[0].trustMix, /1 untrusted/);
+});
+
+test("scope rows pivot into the records filter that reproduces them", () => {
+  assert.deepEqual(
+    filterForScope({ scope: "identity", realm: "default", identity: "identity:ada" }),
+    { scope: "identity", key: "identity:ada" },
+  );
+  assert.deepEqual(
+    filterForScope({ scope: "mob", realm: "default", mob: "research" }),
+    { scope: "mob", key: "research" },
+  );
+  assert.deepEqual(filterForScope({ scope: "realm", realm: "default" }), { scope: "realm" });
+});
+
+// ── Phase-1: biography sections ────────────────────────────────────────────
+
+test("version history reads oldest to newest, so replacing versions follow the open record", () => {
+  const chain = [
+    record({ id: "oldest", scope: { scope: "realm", realm: "default" } }),
+    record({ id: "middle", scope: { scope: "realm", realm: "default" } }),
+    record({ id: "current", scope: { scope: "realm", realm: "default" } }),
+  ];
+  const tip = lineageLane(chain, "current");
+  assert.deepEqual(tip.map((entry) => entry.record.id), ["oldest", "middle", "current"]);
+  assert.deepEqual(tip.map((entry) => entry.current), [false, false, true]);
+  // Opening an older version: the version that replaced it renders below
+  // it, never above as if it came first.
+  const older = lineageLane(chain, "middle");
+  assert.deepEqual(older.map((entry) => entry.record.id), ["oldest", "middle", "current"]);
+  assert.deepEqual(older.map((entry) => entry.current), [false, true, false]);
+});
+
+test("biography dreams section joins through the lossy memory_ids sample", () => {
+  const dreams: MemoryDreamRun[] = [
+    { realm: "default", run_id: "run-1", memory_ids: ["m-1", "m-2"] },
+    { realm: "default", run_id: "run-2", memory_ids: ["m-3"] },
+    { realm: "default", run_id: "run-3" },
+  ];
+  assert.deepEqual(dreamRunsTouching(dreams, "m-1").map((run) => run.run_id), ["run-1"]);
+  assert.deepEqual(dreamRunsTouching(dreams, "m-9"), []);
+});
+
+test("evidence excerpts slice the message window and skip non-text entries", () => {
+  const entries = [
+    { kind: "message", id: "e0", identity: { id: "u", label: "You", role: "user" }, text: "zero" },
+    { kind: "message", id: "e1", identity: { id: "a", label: "Ada", role: "assistant" }, text: "one" },
+    { kind: "message", id: "e2", identity: { id: "a", label: "Ada", role: "assistant" }, text: "" },
+    { kind: "message", id: "e3", identity: { id: "u", label: "You", role: "user" }, text: "three" },
+  ] as never[];
+  const all = evidenceExcerptLines(entries);
+  assert.deepEqual(all.map((line) => line.text), ["zero", "one", "three"]);
+  const windowed = evidenceExcerptLines(entries, [1, 3]);
+  assert.deepEqual(windowed.map((line) => line.text), ["one", "three"]);
+  assert.equal(windowed[0].speaker, "Ada");
+});
+
+// ── Phase-1: knowledge lens composition ────────────────────────────────────
+
+test("knowledge lens lists identities and composes the scope union", () => {
+  const records = [
+    record({ id: "a", scope: { scope: "identity", realm: "default", identity: "identity:ada" } }),
+    record({ id: "b", scope: { scope: "identity", realm: "default", identity: "identity:bob" } }),
+    record({ id: "m", scope: { scope: "mob", realm: "default", mob: "research" } }),
+    record({ id: "r", scope: { scope: "realm", realm: "default" } }),
+  ];
+  assert.deepEqual(identityOptions(records), ["identity:ada", "identity:bob"]);
+  const segments = knowledgeComposition(records, "identity:ada");
+  assert.equal(segments[0].count, 1);
+  assert.equal(segments[0].approximate, false);
+  assert.equal(segments[1].count, 1); // all mob-scope rows, flagged approximate
+  assert.equal(segments[1].approximate, true);
+  assert.equal(segments[3].count, 1);
+});
+
+// ── Phase-1: live strip + pivots ───────────────────────────────────────────
+
+function frame(overrides: Partial<ConsoleFrame> & Pick<ConsoleFrame, "id" | "event">): ConsoleFrame {
+  return { data: {}, ...overrides } as ConsoleFrame;
+}
+
+test("live strip dedupes snapshot replays by frame id and counts frames behind", () => {
+  const a = frame({ id: "f-1", event: "memory.dream.completed" });
+  const replay = frame({ id: "f-1", event: "memory.dream.completed" });
+  const b = frame({ id: "f-2", event: "memory.record.promoted" });
+  const deduped = dedupeFramesById([a, replay, b]);
+  assert.deepEqual(deduped.map((f) => f.id), ["f-1", "f-2"]);
+  assert.equal(countFramesBehind(deduped, [a]), 1);
+  assert.equal(countFramesBehind(deduped, deduped), 0);
+});
+
+test("memory frames pivot to the record their payload names", () => {
+  assert.deepEqual(
+    memoryFramePivot(
+      frame({
+        id: "f-1",
+        event: "memory.record.promoted",
+        data: { record_id: "m-7", realm: "example" },
+      }),
+    ),
+    { recordId: "m-7", realm: "example" },
+  );
+  assert.equal(
+    memoryFramePivot(frame({ id: "f-2", event: "memory.dream.started", data: {} })),
+    null,
+  );
+  assert.equal(
+    memoryFramePivot(frame({ id: "f-3", event: "interaction_complete", data: { record_id: "x" } })),
+    null,
+  );
+});
+
+// ── Fix round: e2e-surfaced defects (regression net) ──────────────────────
+
+function pagerHarness() {
+  const state: {
+    paged: { records: MemoryPanelRecord[]; nextCursor: string | null } | null;
+    loading: boolean;
+    queries: Array<Record<string, unknown>>;
+  } = { paged: null, loading: false, queries: [] };
+  const pending: Array<(result: MemoryPanelRecordsResult | null) => void> = [];
+  const pager = createMemoryRecordsPager({
+    query: (params) => {
+      state.queries.push(params);
+      return new Promise((resolve) => pending.push(resolve));
+    },
+    setPaged: (paged) => {
+      state.paged = paged;
+    },
+    setLoading: (loading) => {
+      state.loading = loading;
+    },
+  });
+  const page = (ids: string[], nextCursor: string | null): MemoryPanelRecordsResult => ({
+    records: ids.map((id) => record({ id, scope: { scope: "realm", realm: "default" } })),
+    next_cursor: nextCursor,
+    realms: ["default"],
+  });
+  return { state, pending, pager, page };
+}
+
+test("bug 1: a stale filter response never clobbers a newer query (issue-order wins)", async () => {
+  const { state, pending, pager, page } = pagerHarness();
+
+  const broad = pager.applyFilter({ scope: "mob" }); // resolves LAST
+  const narrow = pager.applyFilter({ scope: "mob", key: "research" });
+  assert.equal(pending.length, 2);
+
+  // Newer (narrow) resolves first and applies…
+  pending[1](page(["narrow-1"], null));
+  await narrow;
+  assert.deepEqual(state.paged?.records.map((r) => r.id), ["narrow-1"]);
+
+  // …then the older broad response arrives and must be dropped.
+  pending[0](page(["broad-1", "broad-2"], "cursor-x"));
+  await broad;
+  assert.deepEqual(state.paged?.records.map((r) => r.id), ["narrow-1"]);
+  assert.equal(state.paged?.nextCursor, null);
+  assert.equal(state.loading, false);
+});
+
+test("bug 1: clearing the filter invalidates an in-flight fetch", async () => {
+  const { state, pending, pager, page } = pagerHarness();
+
+  const filtered = pager.applyFilter({ status: "active" });
+  await pager.applyFilter({}); // clear: synchronous reset, bumps the sequence
+  assert.equal(state.paged, null);
+
+  pending[0](page(["stale-1"], null));
+  await filtered;
+  assert.equal(state.paged, null, "stale filtered page must not resurrect after clear");
+  assert.equal(state.loading, false);
+});
+
+test("bug 2: blur re-apply is a no-op unless the filter value actually changed", async () => {
+  const { state, pending, pager, page } = pagerHarness();
+
+  await Promise.all([
+    pager.applyFilter({ scope: "mob", key: "research" }),
+    (async () => {
+      // resolve the initial apply
+      while (pending.length === 0) await Promise.resolve();
+      pending[0](page(["m-1"], "cursor-1"));
+    })(),
+  ]);
+  assert.equal(state.queries.length, 1);
+
+  // Unchanged (incl. whitespace-only difference) → no new query.
+  await pager.applyFilterIfChanged({ scope: "mob", key: "research" });
+  await pager.applyFilterIfChanged({ scope: "mob", key: " research " });
+  assert.equal(state.queries.length, 1);
+
+  // Real change → re-queries.
+  const changed = pager.applyFilterIfChanged({ scope: "mob", key: "ops" });
+  assert.equal(state.queries.length, 2);
+  pending[1](page(["m-2"], null));
+  await changed;
+  assert.deepEqual(state.paged?.records.map((r) => r.id), ["m-2"]);
+
+  assert.equal(filtersEquivalent({}, { key: "  " }), true);
+  assert.equal(filtersEquivalent({ scope: "mob" }, { scope: "mob", key: "x" }), false);
+});
+
+test("bug 2: an unchanged blur during load-more cannot reset the appended page", async () => {
+  const { state, pending, pager, page } = pagerHarness();
+  const base = [record({ id: "base-1", scope: { scope: "realm", realm: "default" } })];
+
+  const more = pager.loadMore({
+    filter: {},
+    paged: null,
+    baseRecords: base,
+    baseCursor: "cursor-1",
+  });
+  // Blur fired by the load-more click: filter is unchanged ({}), so this
+  // must not issue a query or bump the sequence.
+  await pager.applyFilterIfChanged({});
+  assert.equal(state.queries.length, 1);
+
+  pending[0](page(["more-1"], null));
+  await more;
+  assert.deepEqual(state.paged?.records.map((r) => r.id), ["base-1", "more-1"]);
+});
+
+test("bug 3: unfiltered load-more rows render; the grouped view reads the accumulated page", () => {
+  const base = [
+    record({ id: "a1", scope: { scope: "identity", realm: "default", identity: "identity:ada" } }),
+  ];
+  const appended = [
+    ...base,
+    record({ id: "a2", scope: { scope: "identity", realm: "default", identity: "identity:ada" } }),
+  ];
+
+  const view = buildRecordsListView({
+    records: base,
+    paged: { records: appended, nextCursor: "cursor-2" },
+    baseCursor: null,
+    filter: {},
+    sortMode: "recency",
+  });
+  assert.equal(view.mode, "grouped");
+  assert.deepEqual(
+    view.groups.flatMap((group) => group.records.map((r) => r.id)),
+    ["a1", "a2"],
+  );
+  assert.equal(view.cursor, "cursor-2");
+
+  // Without paged state the base page + cursor drive the view.
+  const baseView = buildRecordsListView({
+    records: base,
+    paged: null,
+    baseCursor: "cursor-1",
+    filter: {},
+    sortMode: "recency",
+  });
+  assert.equal(baseView.mode, "grouped");
+  assert.equal(baseView.cursor, "cursor-1");
+
+  // Filter or utility sort flips to the flat list over the same source.
+  const flat = buildRecordsListView({
+    records: base,
+    paged: { records: appended, nextCursor: null },
+    baseCursor: null,
+    filter: { status: "active" },
+    sortMode: "recency",
+  });
+  assert.equal(flat.mode, "flat");
+  assert.deepEqual(flat.records.map((r) => r.id), ["a1", "a2"]);
+});
+
+// ── Gate fix round: denied propagation through the pager and list view ─────
+
+test("a denied filtered query renders no-grant, never an empty store", async () => {
+  const { state, pending, pager } = pagerHarness();
+
+  const filtered = pager.applyFilter({ scope: "operator" });
+  pending[0](null); // -32030 → the query callback resolves null
+  await filtered;
+  assert.deepEqual(state.paged, { records: [], nextCursor: null, denied: true });
+
+  const view = buildRecordsListView({
+    records: [],
+    paged: state.paged,
+    baseCursor: null,
+    filter: { scope: "operator" },
+    sortMode: "recency",
+  });
+  assert.equal(view.denied, true);
+  assert.equal(view.records.length, 0);
+
+  // Clearing the filter resets the denial.
+  await pager.applyFilter({});
+  assert.equal(state.paged, null);
+});
+
+test("a denied load-more continuation keeps the shown rows and flags the denial", async () => {
+  const { state, pending, pager } = pagerHarness();
+  const base = [record({ id: "base-1", scope: { scope: "realm", realm: "default" } })];
+
+  const more = pager.loadMore({
+    filter: {},
+    paged: null,
+    baseRecords: base,
+    baseCursor: "cursor-1",
+  });
+  pending[0](null);
+  await more;
+  assert.deepEqual(state.paged?.records.map((r) => r.id), ["base-1"]);
+  assert.equal(state.paged?.nextCursor, null);
+  assert.equal(state.paged?.denied, true);
+});
+
+// ── Phase-2: overview scopes + STORE FLOOR tile ────────────────────────────
+
+function overviewScope(
+  overrides: Partial<MemoryScopeOverview> & Pick<MemoryScopeOverview, "scope_kind" | "scope_key">,
+): MemoryScopeOverview {
+  return { realm: "default", active: 1, body_bytes: 100, floor_pressure: false, ...overrides };
+}
+
+test("overview scope keys and labels match the loaded-records grouping scheme", () => {
+  const identity = overviewScope({ scope_kind: "identity", scope_key: "router" });
+  const mob = overviewScope({ scope_kind: "mob", scope_key: "research" });
+  const operator = overviewScope({ scope_kind: "operator", scope_key: "op-1" });
+  const realm = overviewScope({ scope_kind: "realm", scope_key: "" });
+  // Parity with scopeGroupKey/scopeGroupLabel keeps testids and pivots
+  // stable when Holdings flips from loaded rows to store totals.
+  assert.equal(
+    overviewScopeKey(identity),
+    scopeGroupKey({ scope: "identity", realm: "default", identity: "router" }),
+  );
+  assert.equal(
+    overviewScopeKey(mob),
+    scopeGroupKey({ scope: "mob", realm: "default", mob: "research" }),
+  );
+  assert.equal(
+    overviewScopeKey(realm),
+    scopeGroupKey({ scope: "realm", realm: "default" }),
+  );
+  assert.equal(
+    overviewScopeLabel(identity),
+    scopeGroupLabel({ scope: "identity", realm: "default", identity: "router" }),
+  );
+  assert.equal(
+    overviewScopeLabel(operator),
+    scopeGroupLabel({ scope: "operator", realm: "default", operator: "op-1" }),
+  );
+  assert.equal(overviewScopeLabel(realm), "Realm");
+  assert.deepEqual(filterForOverviewScope(identity), { scope: "identity", key: "router" });
+  assert.deepEqual(filterForOverviewScope(mob), { scope: "mob", key: "research" });
+  assert.deepEqual(filterForOverviewScope(realm), { scope: "realm" });
+});
+
+test("denied scope kinds vanish from the overview table (the denied row renders instead)", () => {
+  const scopes = [
+    overviewScope({ scope_kind: "identity", scope_key: "router" }),
+    overviewScope({ scope_kind: "mob", scope_key: "research" }),
+    overviewScope({ scope_kind: "operator", scope_key: "op-1" }),
+  ];
+  const visible = visibleOverviewScopes(scopes, { operatorScopeDenied: true });
+  assert.deepEqual(
+    visible.map((scope) => scope.scope_kind),
+    ["identity", "mob"],
+  );
+  const both = visibleOverviewScopes(scopes, {
+    operatorScopeDenied: true,
+    mobScopeDenied: true,
+  });
+  assert.deepEqual(both.map((scope) => scope.scope_kind), ["identity"]);
+});
+
+test("overview rows sort identities first, then mob/operator/realm", () => {
+  const sorted = sortOverviewScopes([
+    overviewScope({ scope_kind: "realm", scope_key: "" }),
+    overviewScope({ scope_kind: "operator", scope_key: "op-1" }),
+    overviewScope({ scope_kind: "identity", scope_key: "router" }),
+    overviewScope({ scope_kind: "mob", scope_key: "research" }),
+    overviewScope({ scope_kind: "identity", scope_key: "delivery" }),
+  ]);
+  assert.deepEqual(
+    sorted.map((scope) => overviewScopeLabel(scope)),
+    ["delivery", "router", "Mob: research", "Operator: op-1", "Realm"],
+  );
+});
+
+test("store floor verdict is OK with no pressure, PRESSURE otherwise", () => {
+  const calm = storeFloorVerdict([
+    overviewScope({ scope_kind: "identity", scope_key: "router" }),
+    overviewScope({ scope_kind: "realm", scope_key: "" }),
+  ]);
+  assert.equal(calm.status, "ok");
+  assert.deepEqual(calm.pressured, []);
+
+  const pressured = storeFloorVerdict([
+    overviewScope({ scope_kind: "identity", scope_key: "router", floor_pressure: true }),
+    overviewScope({ scope_kind: "realm", scope_key: "" }),
+  ]);
+  assert.equal(pressured.status, "pressure");
+  assert.equal(pressured.pressured.length, 1);
+  assert.equal(pressured.pressured[0].scope_key, "router");
+});
+
+test("store-floor tile flips from unverifiable to a data-driven verdict", () => {
+  const tileById = (tiles: ReturnType<typeof computeVerdictTiles>) =>
+    new Map(tiles.map((tile) => [tile.id, tile]));
+
+  // No overview yet: the tile says the totals are not available.
+  const booted = tileById(computeVerdictTiles(emptyVerdictInputs)).get("store-floor");
+  assert.equal(booted?.status, "unverifiable");
+  assert.equal(booted?.summary, "Store totals are not available");
+
+  // Denied: no-grant, never green.
+  const denied = tileById(
+    computeVerdictTiles({ ...emptyVerdictInputs, overviewDenied: true }),
+  ).get("store-floor");
+  assert.equal(denied?.status, "no-grant");
+  assert.equal(denied?.summary, "No access to store totals");
+
+  // Calm store: holding, with the limits echoed in the help.
+  const calm = tileById(
+    computeVerdictTiles({
+      ...emptyVerdictInputs,
+      overview: {
+        scopes: [overviewScope({ scope_kind: "identity", scope_key: "router" })],
+        floors: { records: 4000, bytes: 32 * 1024 * 1024 },
+      },
+    }),
+  ).get("store-floor");
+  assert.equal(calm?.status, "holding");
+  assert.equal(calm?.summary, "No scope is near its limit");
+  assert.ok(calm?.lines.includes("No scope is near its limit (1 scope checked)."), JSON.stringify(calm?.lines));
+  assert.ok(calm?.lines.includes("Limit per scope: 4000 records or 32.0 MB."), JSON.stringify(calm?.lines));
+
+  // Pressure: degraded, naming the pressured scopes.
+  const pressuredInputs = {
+    ...emptyVerdictInputs,
+    overview: {
+      scopes: [
+        overviewScope({ scope_kind: "identity", scope_key: "router", floor_pressure: true }),
+        overviewScope({ scope_kind: "mob", scope_key: "research" }),
+      ],
+      floors: { records: 4000, bytes: 32 * 1024 * 1024 },
+    },
+  };
+  const pressure = tileById(computeVerdictTiles(pressuredInputs)).get("store-floor");
+  assert.equal(pressure?.status, "degraded");
+  assert.equal(pressure?.summary, "router is near its limit");
+  assert.ok(pressure?.lines.includes("Near the limit: router."), JSON.stringify(pressure?.lines));
+  // With the agent directory the panel names the agent the way people know it.
+  const named = tileById(
+    computeVerdictTiles({
+      ...pressuredInputs,
+      scopeName: (scope) =>
+        overviewScopeName(scope, (key) => (key === "router" ? "Release Router" : key)),
+    }),
+  ).get("store-floor");
+  assert.equal(named?.summary, "Release Router is near its limit");
+  // Two scopes at the limit read as a count.
+  const both = tileById(
+    computeVerdictTiles({
+      ...emptyVerdictInputs,
+      overview: {
+        scopes: [
+          overviewScope({ scope_kind: "identity", scope_key: "router", floor_pressure: true }),
+          overviewScope({ scope_kind: "mob", scope_key: "research", floor_pressure: true }),
+        ],
+      },
+    }),
+  ).get("store-floor");
+  assert.equal(both?.summary, "2 scopes are near their limit");
+  assert.ok(both?.lines.includes("Near the limit: router, Research team."), JSON.stringify(both?.lines));
+  assert.ok(both?.lines.includes("The per-scope limit is not reported."), JSON.stringify(both?.lines));
+});
+
+// ── Phase-2: injection ledger DUP annotation ───────────────────────────────
+
+function ledgerEntry(
+  identity: string,
+  recordId: string,
+  atMs: number,
+  overrides: Partial<MemoryLedgerEntry> = {},
+): MemoryLedgerEntry {
+  return {
+    realm: "default",
+    record_id: recordId,
+    identity,
+    surface: "turn",
+    at_ms: atMs,
+    ...overrides,
+  };
+}
+
+test("consecutive duplicate injections per identity carry the DUP flag", () => {
+  // Newest-first, as panel/injections serves them.
+  const annotated = annotateInjectionDups([
+    ledgerEntry("ada", "rec-1", 400), // dup: ada's previous row was also rec-1
+    ledgerEntry("bob", "rec-1", 300), // NOT a dup: different identity
+    ledgerEntry("ada", "rec-1", 200),
+    ledgerEntry("ada", "rec-2", 100),
+  ]);
+  assert.deepEqual(
+    annotated.map(({ dup }) => dup),
+    [true, false, false, false],
+  );
+  // Original (newest-first) order is preserved.
+  assert.deepEqual(
+    annotated.map(({ entry }) => entry.at_ms),
+    [400, 300, 200, 100],
+  );
+});
+
+test("non-consecutive repeats are not DUPs; interleaved identities keep separate lanes", () => {
+  const annotated = annotateInjectionDups([
+    ledgerEntry("ada", "rec-1", 500), // ada's previous was rec-2 → not a dup
+    ledgerEntry("bob", "rec-9", 400), // dup: bob's previous was rec-9
+    ledgerEntry("ada", "rec-2", 300),
+    ledgerEntry("bob", "rec-9", 200),
+    ledgerEntry("ada", "rec-1", 100),
+  ]);
+  assert.deepEqual(
+    annotated.map(({ dup }) => dup),
+    [false, true, false, false, false],
+  );
+  assert.deepEqual(annotateInjectionDups([]), []);
+});
+
+// ── Phase-2: durable dream verdict sheets ──────────────────────────────────
+
+function sheet(
+  overrides: Partial<MemoryDreamRunSheet> & Pick<MemoryDreamRunSheet, "run_id">,
+): MemoryDreamRunSheet {
+  return { realm: "default", ...overrides };
+}
+
+test("dream run sheets sort newest-first by completion (started as fallback)", () => {
+  const sorted = dreamRunsNewestFirst([
+    sheet({ run_id: "old", completed_at_ms: 100 }),
+    sheet({ run_id: "new", completed_at_ms: 300 }),
+    sheet({ run_id: "started-only", started_at_ms: 200 }),
+  ]);
+  assert.deepEqual(
+    sorted.map((run) => run.run_id),
+    ["new", "started-only", "old"],
+  );
+});
+
+test("dream run duration formats ms/s/m buckets and degrades to a dash", () => {
+  assert.equal(formatDurationMs(412), "412ms");
+  assert.equal(formatDurationMs(3200), "3.2s");
+  assert.equal(formatDurationMs(4 * 60 * 1000 + 5 * 1000), "4m 5s");
+  assert.equal(formatDurationMs(-1), "-");
+  assert.equal(
+    dreamRunDuration({ started_at_ms: 1_000, completed_at_ms: 4_200 }),
+    "3.2s",
+  );
+  assert.equal(dreamRunDuration({ started_at_ms: 1_000 }), "-");
+  assert.equal(dreamRunDuration({}), "-");
+});
+
+test("dream run detail normalizes phases in order, non-zero verdicts, and skips", () => {
+  const detail = normalizeDreamRunDetail({
+    phases: [
+      ["orient", "ok"],
+      ["gather", "31 candidates"],
+      ["prune", ""],
+    ],
+    verdicts: {
+      proposals_accepted: 3,
+      proposals_rejected: 0,
+      quarantine_release_blocked: 1,
+      usage_dead_weight: 0,
+    },
+    skips: ["group g-2 failed"],
+  });
+  // Phase order is the steward's execution order, never re-sorted.
+  assert.deepEqual(detail.phases, [
+    ["orient", "ok"],
+    ["gather", "31 candidates"],
+    ["prune", ""],
+  ]);
+  // Zero counters drop; declaration order is preserved.
+  assert.deepEqual(detail.verdicts, [
+    ["proposals_accepted", 3],
+    ["quarantine_release_blocked", 1],
+  ]);
+  assert.deepEqual(detail.skips, ["group g-2 failed"]);
+  assert.equal(detail.raw, null);
+});
+
+test("dream run detail degrades to raw text when the stored JSON did not parse", () => {
+  const raw = normalizeDreamRunDetail("not-json");
+  assert.deepEqual(raw.phases, []);
+  assert.deepEqual(raw.verdicts, []);
+  assert.equal(raw.raw, "not-json");
+
+  const missing = normalizeDreamRunDetail(undefined);
+  assert.equal(missing.raw, null);
+  assert.deepEqual(missing.phases, []);
+
+  // Malformed phase tuples are tolerated row by row.
+  const partial = normalizeDreamRunDetail({ phases: [["solo"]] as never });
+  assert.deepEqual(partial.phases, [["solo", ""]]);
+});
+
+test("a non-denial query error keeps the prior page instead of clobbering it", async () => {
+  const state: {
+    paged: { records: MemoryPanelRecord[]; nextCursor: string | null; denied?: boolean } | null;
+    loading: boolean;
+  } = { paged: null, loading: false };
+  let mode: "ok" | "fail" = "ok";
+  const pager = createMemoryRecordsPager({
+    query: async () => {
+      if (mode === "fail") throw new Error("gateway hiccup");
+      return {
+        records: [record({ id: "ok-1", scope: { scope: "realm", realm: "default" } })],
+        next_cursor: "cursor-2",
+        realms: ["default"],
+      };
+    },
+    setPaged: (paged) => {
+      state.paged = paged;
+    },
+    setLoading: (loading) => {
+      state.loading = loading;
+    },
+  });
+
+  await pager.applyFilter({ status: "active" });
+  assert.deepEqual(state.paged?.records.map((r) => r.id), ["ok-1"]);
+
+  mode = "fail";
+  await pager.applyFilter({ status: "quarantined" });
+  // The failed re-query neither cleared the page nor marked it denied.
+  assert.deepEqual(state.paged?.records.map((r) => r.id), ["ok-1"]);
+  assert.notEqual(state.paged?.denied, true);
+  assert.equal(state.loading, false);
+});
+
+function quarantinedDetail(overrides: Partial<MemoryFullRecord> = {}): MemoryFullRecord {
+  return {
+    id: "mem-q",
+    scope: { scope: "identity", realm: "default", identity: "lead:main" },
+    kind: "preference",
+    title: "Reading preference",
+    body: "Prefers slow literary fantasy.",
+    trust: "agent_observed",
+    status: { status: "quarantined", reason: "session tainted by configured untrusted tool" },
+    content_hash: "c0ffee",
+    ...overrides,
+  } as MemoryFullRecord;
+}
+
+function receipt(memoryId: string, status: MemoryReviewedRecordReceipt["status"]): MemoryReviewedRecordReceipt {
+  return {
+    memory_id: memoryId,
+    scope: { scope: "identity", realm: "default", identity: "lead:main" },
+    kind: "preference",
+    status,
+    trust: "agent_observed",
+    ever_quarantined: true,
+    content_hash: "c0ffee",
+    derived_from: [],
+    created_at_ms: 1,
+    updated_at_ms: 2,
+  };
+}
+
+test("the quarantine decision is offered only for hash-bound identity quarantine", () => {
+  assert.equal(canDecideQuarantinedRecord(quarantinedDetail()), true);
+  assert.equal(
+    canDecideQuarantinedRecord(quarantinedDetail({ status: { status: "active" } })),
+    false,
+    "active records are not awaiting review",
+  );
+  assert.equal(
+    canDecideQuarantinedRecord(
+      quarantinedDetail({ scope: { scope: "mob", realm: "default", mob: "reading" } }),
+    ),
+    false,
+    "mob-scope quarantine stays with the steward and gating",
+  );
+  assert.equal(
+    canDecideQuarantinedRecord(quarantinedDetail({ content_hash: undefined })),
+    false,
+    "an older gateway without content_hash cannot bind a decision",
+  );
+});
+
+test("quarantine decision summaries say what happened and carry the record IDs apart", () => {
+  const released: MemoryQuarantineDecideResult = {
+    outcome: "released",
+    realm: "default",
+    origin: receipt("mem-q", { status: "tombstoned" }),
+    successor: receipt("mem-q-released", { status: "active" }),
+    decision: {
+      audit_token: "review-1",
+      decided_at_ms: 3,
+      review: {
+        verdict: "release",
+        reviewer: { kind: "operator", principal: "operator@example.test" },
+        origin: "mem-q",
+        successor: "mem-q-released",
+        expected_content_hash: "c0ffee",
+        origin_quarantine_reason: "session tainted by configured untrusted tool",
+      },
+    },
+  };
+  const summaries = [];
+  const releaseNotice = quarantineDecisionSummary(released);
+  summaries.push(releaseNotice);
+  assert.match(releaseNotice.text, /^Released\. A new active record holds this memory at observed trust/);
+  assert.match(releaseNotice.text, /the quarantined original is kept, marked as discarded\.$/);
+  // The successor's ID moved out of the sentence into its own copyable ID.
+  assert.deepEqual(releaseNotice.ids, [{ label: "New record", value: "mem-q-released" }]);
+  const replay = quarantineDecisionSummary({ ...released, outcome: "already_released" });
+  summaries.push(replay);
+  assert.equal(replay.text, "Already released earlier; nothing changed.");
+  assert.deepEqual(replay.ids, [{ label: "New record", value: "mem-q-released" }]);
+  const tombstoned = quarantineDecisionSummary({ ...released, outcome: "tombstoned", successor: null });
+  summaries.push(tombstoned);
+  assert.equal(tombstoned.text, "Discarded; it will never be recalled.");
+  assert.deepEqual(tombstoned.ids, []);
+  const withPromotion = (invalidated: string[]) =>
+    quarantineDecisionSummary({
+      ...released,
+      outcome: "tombstoned",
+      successor: null,
+      decision: {
+        ...released.decision,
+        review: { ...released.decision.review, verdict: "tombstone", invalidated_promotions: invalidated },
+      },
+    });
+  const one = withPromotion(["gate-1"]);
+  summaries.push(one);
+  assert.match(one.text, /The move to team memory waiting on it was cancelled and can no longer publish/);
+  assert.deepEqual(one.ids, [{ label: "Cancelled move", value: "gate-1" }]);
+  const two = withPromotion(["gate-1", "gate-2"]);
+  summaries.push(two);
+  assert.match(two.text, /The 2 moves to team memory waiting on it were cancelled/);
+  assert.deepEqual(two.ids.map((id) => id.value), ["gate-1", "gate-2"]);
+  const again = quarantineDecisionSummary({ ...released, outcome: "already_tombstoned", successor: null });
+  summaries.push(again);
+  assert.equal(again.text, "Already discarded; nothing changed.");
+  for (const notice of summaries) {
+    assert.doesNotMatch(notice.text, /mem-q|gate-\d/, `IDs stay out of the sentence: ${notice.text}`);
+    // The store's word for it stays out of the sentence too.
+    assert.doesNotMatch(notice.text, /tombston/i, `store terms stay out of the sentence: ${notice.text}`);
+  }
+});
+
+test("quarantine rationale is limited in UTF-8 bytes, as the server counts it", () => {
+  assert.equal(quarantineRationaleProblem(""), null);
+  assert.equal(quarantineRationaleProblem("a".repeat(400)), null);
+  assert.match(quarantineRationaleProblem("a".repeat(401)) ?? "", /401 bytes/);
+  // Two-byte characters: 201 of them are far fewer than 400 UTF-16 units
+  // (what an input maxLength counts) but over the server's 400 bytes.
+  assert.equal(quarantineRationaleProblem("\u00e9".repeat(200)), null);
+  assert.match(quarantineRationaleProblem("\u00e9".repeat(201)) ?? "", /402 bytes/);
+  // Astral characters: four bytes, two UTF-16 units each.
+  assert.equal(quarantineRationaleProblem("\u{1f600}".repeat(100)), null);
+  assert.match(quarantineRationaleProblem("\u{1f600}".repeat(101)) ?? "", /404 bytes/);
+  // Measured as sent: surrounding whitespace is trimmed first.
+  assert.equal(quarantineRationaleProblem(`  ${"a".repeat(400)}\n`), null);
+});
+
+test("quarantine decision errors render typed refusals without echoing content", () => {
+  const refused = (data: Record<string, unknown>) =>
+    Object.assign(new Error("quarantine review refused"), {
+      rpcError: {
+        code: -32043,
+        data: { kind: "memory_quarantine_review_refused", ...data },
+      },
+    });
+  const notices = [];
+  const gate = quarantineDecisionErrorText(refused({ reason: "gate_pending", pending_id: "gate-1" }));
+  notices.push(gate);
+  assert.equal(
+    gate.text,
+    "Refused: this record is waiting for approval to move to team memory. Decide it in Approvals. Discarding the record instead cancels the move.",
+  );
+  assert.deepEqual(gate.ids, [{ label: "Waiting move", value: "gate-1" }]);
+  const expiring = quarantineDecisionErrorText(
+    refused({ reason: "gate_pending", pending_id: "gate-1", expires_at_ms: Date.UTC(2026, 9, 31, 12) }),
+  );
+  notices.push(expiring);
+  assert.match(
+    expiring.text,
+    /Decide it in Approvals, or wait until it expires on .*2026.*\. Discarding the record instead cancels the move\./,
+  );
+  const conflict = quarantineDecisionErrorText(
+    refused({ reason: "successor_conflict", successor_id: "mem-q-released" }),
+  );
+  notices.push(conflict);
+  assert.match(conflict.text, /already holds the ID this release would create; nothing was changed/);
+  assert.deepEqual(conflict.ids, [{ label: "Conflicting record", value: "mem-q-released" }]);
+  const secret = quarantineDecisionErrorText(refused({ reason: "secret_detected", class: "aws-access-key-id" }));
+  notices.push(secret);
+  assert.match(secret.text, /aws-access-key-id secret pattern; it can only be discarded/);
+  const mismatch = quarantineDecisionErrorText(refused({ reason: "content_mismatch" }));
+  notices.push(mismatch);
+  assert.match(mismatch.text, /Reload it and review again/);
+  const releasedAs = quarantineDecisionErrorText(
+    refused({ reason: "not_quarantined", status: "tombstoned", released_as: "mem-q-released" }),
+  );
+  notices.push(releasedAs);
+  assert.equal(releasedAs.text, "Refused: it was already released.");
+  assert.deepEqual(releasedAs.ids, [{ label: "Released as", value: "mem-q-released" }]);
+  const active = quarantineDecisionErrorText(refused({ reason: "not_quarantined", status: "active" }));
+  notices.push(active);
+  assert.match(active.text, /the record is active, not quarantined/);
+  const stale = quarantineDecisionErrorText(
+    refused({ reason: "stale_update", prior: "mem-p", prior_status: "tombstoned" }),
+  );
+  notices.push(stale);
+  assert.match(stale.text, /the version this record replaces is discarded; discard it instead/);
+  assert.deepEqual(stale.ids, [{ label: "Replaced version", value: "mem-p" }]);
+  const supersededRecord = quarantineDecisionErrorText(refused({ reason: "not_quarantined", status: "superseded" }));
+  notices.push(supersededRecord);
+  assert.match(supersededRecord.text, /the record is replaced, not quarantined/);
+  const denied = quarantineDecisionErrorText(
+    Object.assign(new Error("access denied: agent.memory.write"), { rpcError: { code: -32030 } }),
+  );
+  notices.push(denied);
+  assert.match(denied.text, /^No access/);
+  // The permissions read as words; their grant names are the tooltip.
+  assert.match(denied.text, /you need permission to review quarantined memory/);
+  assert.match(denied.title ?? "", /memory\.quarantine\.review/);
+  assert.match(denied.title ?? "", /agent\.memory\.delete/);
+  for (const notice of notices) {
+    assert.doesNotMatch(notice.text, /mem-q|mem-p|gate-\d/, `IDs stay out of the sentence: ${notice.text}`);
+    // Grant names and the store's terms stay out of the sentence.
+    assert.doesNotMatch(notice.text, /[a-z]+\.memory\.|memory\.quarantine|tombston|supersed/i, `plain words: ${notice.text}`);
+  }
+  assert.deepEqual(quarantineDecisionErrorText(new Error("network down")), { text: "network down", ids: [] });
+});
+
+// ── Display helpers: what people read ──────────────────────────────────────
+
+test("sizes, kinds, trust and status read as words", () => {
+  assert.equal(formatSize(0), "0 B");
+  assert.equal(formatSize(860), "860 B");
+  assert.equal(formatSize(2210), "2.2 KB");
+  assert.equal(formatSize(32 * 1024 * 1024), "32.0 MB");
+  assert.equal(kindLabel("open_loop"), "Open loop");
+  assert.equal(kindLabel("fact"), "Fact");
+  assert.equal(kindLabel("brand_new_kind"), "Brand new kind");
+  assert.equal(kindLabel(undefined), "Record");
+  assert.equal(trustDisplay("agent_observed"), "Observed");
+  assert.equal(trustDisplay("agent_verified"), "Verified");
+  assert.equal(trustDisplay("operator"), "Operator");
+  assert.equal(trustChipTone("agent_verified"), "ok");
+  assert.equal(trustChipTone("application"), "ok");
+  assert.equal(trustChipTone("agent_observed"), "neutral");
+  assert.equal(trustChipTone("untrusted"), "neutral");
+  // The superseding record's ID stays out of the status word; the Biography
+  // offers the newer version as a link and keeps its ID in the technical
+  // details ("Replaced by").
+  assert.equal(statusWord({ status: "superseded", by: "mem-9" }), "Replaced");
+  assert.equal(statusWord({ status: "tombstoned" }), "Discarded");
+  assert.equal(statusWord({ status: "quarantined", reason: "conflict" }), "Quarantined");
+  assert.equal(statusWord(undefined), "Unknown");
+  // The store's own words are the tooltip, with what they mean.
+  assert.match(statusTitle({ status: "superseded", by: "mem-9" }) ?? "", /^Superseded: a newer version replaced this record/);
+  assert.match(statusTitle({ status: "tombstoned" }) ?? "", /^Tombstoned: kept only as a deletion marker/);
+  assert.equal(statusTitle({ status: "active" }), undefined);
+  assert.equal(statusChipTone({ status: "active" }), "ok");
+  assert.equal(statusChipTone({ status: "quarantined" }), "warn");
+  assert.equal(statusChipTone({ status: "tombstoned" }), "neutral");
+});
+
+test("authors, evidence and injections name people, not keys", () => {
+  const names = (key: string) => (key === "identity:x" ? "Xavier" : key.replace(/^identity:/, ""));
+  assert.equal(authorDisplay({ author: "agent", identity: "identity:x" }), "x (agent)");
+  assert.equal(authorDisplay({ author: "agent", identity: "identity:x" }, names), "Xavier (agent)");
+  assert.equal(authorDisplay({ author: "agent" }), "An agent");
+  assert.equal(authorDisplay({ author: "steward", run_id: "run-1" }), "The memory steward");
+  assert.equal(authorDisplay({ author: "distiller", run_id: "run-2" }), "The memory distiller");
+  assert.equal(authorDisplay({ author: "operator" }), "An operator");
+  assert.equal(authorDisplay({ author: "application" }), "The application");
+  assert.equal(authorDisplay(undefined), "Unknown");
+
+  assert.equal(
+    evidenceDisplay({ session_id: "s", generation: 2, range: [1, 5] }, "Ada"),
+    "Conversation with Ada, messages 1-5",
+  );
+  assert.equal(evidenceDisplay({ range: [3, 3] }), "Conversation, message 3");
+  assert.equal(evidenceDisplay({ revision: "r7" }), "Conversation");
+  assert.equal(evidenceDetails({ session_id: "s", generation: 2, revision: "r7" }), "generation 2 · revision r7");
+  assert.equal(evidenceDetails({}), "");
+
+  assert.equal(injectionMoment("build"), "at startup");
+  assert.equal(injectionMoment("turn"), "during a turn");
+  assert.equal(
+    utilityDisplay({
+      usage: { injected_count: 6, explicit_recall_count: 1, judged_useful_count: 0 },
+      body_bytes: 1000,
+    }),
+    "Given to agents 6 times · recalled 1 time · judged useful 0 times · about 5.9 KB spent",
+  );
+  assert.equal(utilityDisplay({ usage: undefined, body_bytes: 10 }), "Never given to agents or recalled");
+  assert.equal(reviewVerdictLabel("dead_weight"), "Never useful");
+  assert.equal(reviewVerdictLabel("needs_correction"), "Needs correction");
+});
+
+test("scopes read as whose memory it is", () => {
+  const names = (key: string) => (key === "identity:ada" ? "Ada" : key);
+  assert.equal(scopeKindLabel("identity"), "Agent memory");
+  assert.equal(scopeKindLabel("mob"), "Team memory");
+  assert.equal(scopeKindLabel("operator"), "Operator memory");
+  assert.equal(scopeKindLabel("realm"), "Shared memory");
+  assert.equal(scopeOwnerName("identity", "identity:ada", names), "Ada");
+  // A team reads by a name made from its key; the key is the tooltip.
+  assert.equal(scopeOwnerName("mob", "ops-team"), "Ops team");
+  assert.equal(scopeOwnerName("mob", "research"), "Research team");
+  assert.equal(teamName("ops-team"), "Ops team");
+  assert.equal(teamName("research"), "Research team");
+  assert.equal(teamName("release_engineering"), "Release engineering team");
+  assert.equal(teamName(""), "Team");
+  assert.equal(scopeOwnerName("operator", "admin@example.test"), "admin@example.test");
+  assert.equal(scopeOwnerName("realm", ""), "Everyone");
+  assert.equal(scopeHeading({ scope: "identity", realm: "default", identity: "identity:luka" }), "luka");
+  assert.equal(scopeHeading({ scope: "identity", realm: "default", identity: "identity:ada" }, names), "Ada");
+  assert.equal(scopeHeading({ scope: "mob", realm: "default", mob: "ops-team" }), "Team memory · Ops team");
+  assert.equal(scopeHeading({ scope: "operator", realm: "default", operator: "op-1" }), "Operator memory · op-1");
+  assert.equal(scopeHeading({ scope: "realm", realm: "default" }), "Shared memory");
+  assert.equal(scopeKeyOf({ scope: "operator", realm: "default", operator: "op-1" }), "op-1");
+  assert.equal(scopeKeyOf({ scope: "realm", realm: "default" }), "");
+  assert.equal(overviewScopeName(overviewScope({ scope_kind: "identity", scope_key: "router" })), "router");
+  assert.equal(overviewScopeName(overviewScope({ scope_kind: "mob", scope_key: "research" })), "Research team");
+  assert.equal(overviewScopeName(overviewScope({ scope_kind: "realm", scope_key: "" })), "Shared memory");
+  assert.equal(scopeCountsText({ active: 3, superseded: 1 }), "3 active, 1 replaced");
+  assert.equal(scopeCountsText({ active: 1, quarantined: 2, tombstoned: 1 }), "1 active, 2 quarantined, 1 discarded");
+  assert.equal(scopeCountsText({}), "0 active");
+  assert.equal(targetName("identity", "agent:support-triage"), "support-triage");
+  assert.equal(targetName("identity", "identity:ada", names), "Ada");
+  assert.equal(targetName("mob", "ops-team"), "Ops team");
+  assert.equal(targetName("operator", "admin@example.test"), "admin@example.test (operator)");
+  assert.equal(targetName("realm", ""), "everyone");
+});
+
+test("dream runs read as whose memory they tidied and what changed", () => {
+  assert.deepEqual(
+    dreamVerdictChips([
+      ["kept", 5],
+      ["quarantined", 1],
+      ["proposals_accepted", 3],
+    ]),
+    [
+      { key: "kept", label: "5 kept", tone: "neutral" },
+      { key: "quarantined", label: "1 quarantined", tone: "warn" },
+      { key: "proposals_accepted", label: "3 proposals accepted", tone: "neutral" },
+    ],
+  );
+  assert.equal(
+    dreamOpKindsDisplay({ promote: 3, merge: 2, quarantine: 1, noop: 0 }),
+    "3 moved, 2 merged, 1 quarantined",
+  );
+  // The store's own op names read as plain words.
+  assert.equal(dreamOpKindsDisplay({ supersede: 2, tombstone: 1 }), "2 replaced, 1 discarded");
+  assert.equal(dreamOpKindsDisplay({ reshuffle: 2 }), "2 reshuffle");
+  assert.equal(dreamOpKindsDisplay(undefined), "");
+  assert.deepEqual(
+    dreamVerdictChips([["quarantine_tombstoned", 2]]).map((chip) => chip.label),
+    ["2 quarantine discarded"],
+  );
+  // One of a counter reads singular; the counter's other words stay.
+  assert.deepEqual(
+    dreamVerdictChips([
+      ["open_loops_escalated", 1],
+      ["contradictions_emitted", 1],
+      ["usage_load_bearing", 1],
+      ["proposals_held", 2],
+    ]).map((chip) => chip.label),
+    ["1 open loop escalated", "1 contradiction emitted", "1 usage load bearing", "2 proposals held"],
+  );
+  const names = (key: string) => (key === "identity:coordinator" ? "Coordinator" : "");
+  assert.equal(partitionName("identity:coordinator", names), "Coordinator");
+  assert.equal(partitionName("identity:coordinator"), "coordinator");
+  assert.equal(partitionName("mob:ops-team"), "Ops team");
+  assert.equal(partitionName("operator:admin@example.test"), "admin@example.test (operator)");
+  assert.equal(partitionName("realm"), "everyone");
+  assert.equal(partitionName("custom:thing"), "custom:thing");
+  assert.equal(partitionName(undefined), "");
+});
+
+test("knowledge segments read in words while their testid keys stay raw", () => {
+  const records = [
+    record({ id: "a", scope: { scope: "identity", realm: "default", identity: "router" } }),
+    record({ id: "m", scope: { scope: "mob", realm: "default", mob: "research" } }),
+  ];
+  const [own, team, operator, shared] = knowledgeComposition(records, "router");
+  // memory-knowledge-segment:${label} keeps keying by the raw label.
+  assert.equal(own.label, "identity:router");
+  assert.equal(team.label, "mob (all mobs)");
+  assert.equal(knowledgeSegmentTitle(own, "Router"), "Router's own memory");
+  assert.equal(knowledgeSegmentTitle(team, "Router"), "Team memory");
+  assert.equal(knowledgeSegmentTitle(operator, "Router"), "Operator memory");
+  assert.equal(knowledgeSegmentTitle(shared, "Router"), "Shared memory");
+});
+
+test("a missing grant reads as a sentence; the grant's name is only the tooltip", () => {
+  assert.equal(
+    needsGrantText("memory.quarantine.review"),
+    "You need permission to review quarantined memory",
+  );
+  assert.equal(needsGrantText("mob.memory.read"), "You need permission to read team memory");
+  assert.equal(needsGrantText("operator.memory.read"), "You need permission to read operator memory");
+  // A grant this console has no words for never puts its key in the sentence.
+  assert.equal(needsGrantText("custom.unknown.grant"), "You need a permission you do not have");
+  for (const grant of ["memory.quarantine.review", "mob.memory.read", "operator.memory.read", "custom.unknown.grant"]) {
+    assert.doesNotMatch(needsGrantText(grant), /\.|grant/, grant);
+    assert.equal(grantTitle(grant), `Grant: ${grant}`);
+  }
+});
+
+test("realms read as spaces in lines; the word realm stays the tooltip", () => {
+  assert.equal(realmSpaceName("ops"), "ops space");
+  assert.equal(realmSpaceName("default"), "default space");
+});
+
+// ── Console v2 (B3): not set up, the trust rule fix, the pictures ──────────
+
+const v2 = __memoryTest;
+
+test("a missing records capability reads as not set up unless the experience reports a store", () => {
+  const miss = new Error("Meta capability missing for meta/memory/panel/records");
+  // No store reported (the plain fixture, or an older experience): not set up.
+  assert.equal(v2.memoryListingOutcome(miss, false), "unavailable");
+  assert.equal(v2.memoryListingOutcome(miss, undefined), "unavailable");
+  // A store exists: the method was intersected away for this principal.
+  assert.equal(v2.memoryListingOutcome(miss, true), "denied");
+  // A real -32030 stays a denial; the server's -32601 stays unavailable.
+  const rpcError = (code: number): Error => {
+    const error = new Error(`RPC error ${code}`);
+    (error as Error & { rpcError?: { code?: unknown } }).rpcError = { code };
+    return error;
+  };
+  assert.equal(v2.memoryListingOutcome(rpcError(-32030), false), "denied");
+  assert.equal(v2.memoryListingOutcome(rpcError(-32601), true), "unavailable");
+  assert.equal(v2.memoryListingOutcome(new Error("network down"), false), "error");
+  // Sections keep their rule: a capability miss is denial by intersection.
+  assert.equal(memorySectionOutcome(miss), "denied");
+  assert.equal(v2.memoryNotSetUp({ available: false }), true);
+  assert.equal(v2.memoryNotSetUp({ available: true }), false);
+  assert.equal(v2.memoryNotSetUp(undefined), false);
+});
+
+test("the trust rules never flag a steward's re-tier of a verified agent record", () => {
+  const verifiedClaim = record({
+    id: "steward-verified",
+    scope: { scope: "identity", realm: "default", identity: "billing" },
+    trust: "agent_verified",
+    provenance: {
+      author: { author: "agent", identity: "billing" },
+      verification: { checked: "Matched the refund policy page" },
+    },
+  });
+  const noClaim = record({
+    id: "no-claim",
+    scope: { scope: "identity", realm: "default", identity: "billing" },
+    trust: "agent_verified",
+    provenance: { author: { author: "agent", identity: "billing" } },
+  });
+  const onceQuarantined = record({
+    id: "once-quarantined",
+    scope: { scope: "identity", realm: "default", identity: "billing" },
+    trust: "agent_verified",
+    ever_quarantined: true,
+    provenance: { author: { author: "agent", identity: "billing" }, verification: { checked: "x" } },
+  });
+  const aboveVerified = record({
+    id: "above-verified",
+    scope: { scope: "identity", realm: "default", identity: "billing" },
+    trust: "application",
+    provenance: { author: { author: "steward", run_id: "d-1" }, verification: { checked: "x" } },
+  });
+  const result = latticeInvariants([verifiedClaim, noClaim, onceQuarantined, aboveVerified], { complete: true });
+  assert.deepEqual(
+    result.llmCeilingViolations.map((ref) => ref.id).sort(),
+    ["above-verified", "no-claim", "once-quarantined"],
+  );
+  assert.equal(v2.isStewardVerified(verifiedClaim), true);
+  assert.equal(v2.isStewardVerified(noClaim), false);
+});
+
+test("landscape ticks sit at the time each record was written, earlier ones counted apart", () => {
+  const day = 24 * 60 * 60 * 1000;
+  const now = Date.UTC(2026, 9, 31, 12);
+  const window = v2.landscapeWindow(now);
+  assert.equal(window.end - window.start, 30 * day);
+  const scope = { scope: "identity" as const, realm: "default", identity: "billing" };
+  const lanes = v2.landscapeLanes(
+    [
+      record({ id: "today", scope, created_at_ms: now }),
+      record({ id: "half", scope, created_at_ms: now - 15 * day }),
+      record({ id: "start", scope, created_at_ms: now - 30 * day }),
+      record({ id: "older", scope, created_at_ms: now - 45 * day }),
+      record({ id: "updated-only", scope, updated_at_ms: now - 6 * day }),
+      record({ id: "undated", scope }),
+      record({ id: "held", scope, created_at_ms: now - day, status: { status: "quarantined" } }),
+      record({ id: "gone", scope, created_at_ms: now - 2 * day, status: { status: "tombstoned" } }),
+    ],
+    window,
+  );
+  const lane = lanes.get("identity:default:billing");
+  assert.ok(lane);
+  const x = (id: string) => lane.ticks.find((tick) => tick.id === id)?.x;
+  assert.equal(x("today"), 1);
+  assert.equal(x("half"), 0.5);
+  assert.equal(x("start"), 0);
+  assert.equal(Math.round((x("updated-only") ?? 0) * 30), 24);
+  assert.equal(x("older"), undefined);
+  assert.equal(x("undated"), undefined);
+  assert.equal(lane.earlier, 1);
+  assert.deepEqual(lane.ticks.map((tick) => tick.x), [...lane.ticks.map((tick) => tick.x)].sort((a, b) => a - b));
+  assert.equal(lane.ticks.find((tick) => tick.id === "held")?.shape, "quarantined");
+  assert.equal(lane.ticks.find((tick) => tick.id === "gone")?.shape, "faint");
+  assert.equal(lane.ticks.find((tick) => tick.id === "today")?.shape, "active");
+});
+
+test("a dense landscape row is sampled, keeping every quarantined tick", () => {
+  const now = Date.UTC(2026, 9, 31, 12);
+  const window = v2.landscapeWindow(now);
+  const scope = { scope: "realm" as const, realm: "default" };
+  const records = Array.from({ length: 50 }, (_, index) =>
+    record({ id: `r-${index}`, scope, created_at_ms: now - index * 60_000, status: index % 10 === 0 ? { status: "quarantined" } : { status: "active" } }),
+  );
+  const lane = v2.landscapeLanes(records, window, 12).get("realm:default");
+  assert.ok(lane);
+  assert.equal(lane.ticks.length, 12);
+  assert.equal(lane.sampled, 38);
+  assert.equal(lane.ticks.filter((tick) => tick.shape === "quarantined").length, 5);
+});
+
+test("records and injections bin into days and hours ending now", () => {
+  const hour = 60 * 60 * 1000;
+  const now = Date.UTC(2026, 9, 31, 12);
+  assert.deepEqual(v2.binCounts([now, now - 1, now - 2 * hour - 1, now - 5 * hour], now, 3, hour), [1, 0, 2]);
+  const perHour = v2.injectionsPerHour([{ at_ms: now - 30 * 60_000 }, { at_ms: now - 25 * hour }], now);
+  assert.equal(perHour.length, 24);
+  assert.equal(perHour[23], 1);
+  assert.equal(perHour.reduce((sum: number, count: number) => sum + count, 0), 1);
+});
+
+test("the Records timeline groups by local day under Today, Yesterday and dates", () => {
+  const now = new Date(2026, 9, 31, 15, 0).getTime();
+  const scope = { scope: "realm" as const, realm: "default" };
+  const groups = v2.recordsByDay(
+    [
+      record({ id: "a", scope, updated_at_ms: new Date(2026, 9, 31, 9).getTime() }),
+      record({ id: "b", scope, updated_at_ms: new Date(2026, 9, 30, 22).getTime() }),
+      record({ id: "c", scope, updated_at_ms: new Date(2026, 9, 26, 8).getTime() }),
+      record({ id: "d", scope }),
+    ],
+    now,
+  );
+  assert.deepEqual(groups.map((group) => group.label), ["Today", "Yesterday", "Mon 26 Oct", "Date unknown"]);
+  assert.deepEqual(v2.supersedeLinks([
+    record({ id: "new", scope, supersedes: "old" }),
+    record({ id: "old", scope }),
+    record({ id: "orphan", scope, supersedes: "missing" }),
+  ]), [{ newer: "new", older: "old" }]);
+});
+
+test("kind clusters count each kind, spread it over trust and name the most used", () => {
+  const scope = { scope: "realm" as const, realm: "default" };
+  const clusters = v2.kindClusters([
+    record({ id: "f1", scope, kind: "fact", trust: "agent_observed", usage: { injected_count: 1 } }),
+    record({ id: "f2", scope, kind: "fact", trust: "operator", usage: { injected_count: 5, judged_useful_count: 2 } }),
+    record({ id: "g1", scope, kind: "gotcha", status: { status: "quarantined" } }),
+  ]);
+  assert.deepEqual(clusters.map((cluster) => cluster.kind), [
+    "fact", "preference", "procedure", "gotcha", "relationship", "open_loop", "reference",
+  ]);
+  const facts = clusters[0];
+  assert.equal(facts.count, 2);
+  assert.deepEqual(facts.trust, [0, 1, 0, 0, 1]);
+  assert.deepEqual(facts.top.map((entry) => entry.id), ["f2", "f1"]);
+  assert.equal(clusters[3].quarantined, 1);
+  assert.equal(clusters[1].count, 0);
+});
+
+test("audit verdicts keep one row per record, the newest, with the times it was flagged", () => {
+  const deduped = v2.dedupeAuditVerdicts([
+    { realm: "default", run_id: "run-1", record_id: "m-1", verdict: "dead_weight", created_at_ms: 10 },
+    { realm: "default", run_id: "run-2", record_id: "m-1", verdict: "dead_weight", created_at_ms: 30 },
+    { realm: "default", run_id: "run-2", record_id: "m-2", verdict: "contradicted", created_at_ms: 20 },
+    { realm: "other", run_id: "run-3", record_id: "m-1", verdict: "dead_weight", created_at_ms: 5 },
+  ]);
+  assert.deepEqual(
+    deduped.map(({ verdict, flags }) => `${verdict.realm}:${verdict.record_id}:${verdict.run_id}:${flags}`),
+    ["default:m-1:run-2:2", "default:m-2:run-2:1", "other:m-1:run-3:1"],
+  );
+});
+
+test("dream runs withheld by access never read as no dream yet", () => {
+  const withheld = computeVerdictTiles({ ...emptyVerdictInputs, dreamsWithheld: true });
+  const tile = withheld.find((entry) => entry.id === "dreams");
+  assert.equal(tile?.status, "no-grant");
+  assert.equal(tile?.summary, "Dream history is withheld by access");
+  assert.equal(tile?.lines.some((line) => /no dream/i.test(line)), false);
+  // Older servers send no flag: the empty history reads as before.
+  const plain = computeVerdictTiles({ ...emptyVerdictInputs });
+  assert.equal(plain.find((entry) => entry.id === "dreams")?.summary, "No dream has run yet");
+});
+
+test("proposals and promotions of a scope kind the probes denied never show", () => {
+  const items = [
+    { scope_kind: "identity", id: "a" },
+    { scope_kind: "mob", id: "b" },
+    { scope_kind: "operator", id: "c" },
+  ];
+  assert.deepEqual(v2.visibleForScopeKinds(items, {}).map((item) => item.id), ["a", "b", "c"]);
+  assert.deepEqual(
+    v2.visibleForScopeKinds(items, { operatorScopeDenied: true }).map((item) => item.id),
+    ["a", "b"],
+  );
+  assert.deepEqual(
+    v2.visibleForScopeKinds(items, { operatorScopeDenied: true, mobScopeDenied: true }).map((item) => item.id),
+    ["a"],
+  );
+});
+
+test("load more follows a few empty pages that still carry a cursor, then stops", async () => {
+  // An older server, which paged before it filtered, could give a restricted
+  // caller empty pages while more rows lay past them. The current server
+  // fills each page from the rows the caller may read and sends no such page.
+  const pages: Record<string, MemoryPanelRecordsResult> = {
+    first: { records: [], next_cursor: "c2", realms: ["default"] },
+    c2: { records: [], next_cursor: "c3", realms: ["default"] },
+    c3: { records: [record({ id: "found", scope: { scope: "realm", realm: "default" } })], next_cursor: "c4", realms: ["default"] },
+  };
+  const calls: Array<Record<string, unknown>> = [];
+  let paged: { records: MemoryPanelRecord[]; nextCursor: string | null } | null = null;
+  const pager = createMemoryRecordsPager({
+    query: async (params) => {
+      calls.push(params);
+      return pages[(params.cursor as string) ?? "first"] ?? { records: [], next_cursor: `${params.cursor}+`, realms: ["default"] };
+    },
+    setPaged: (next) => {
+      paged = next;
+    },
+    setLoading: () => undefined,
+  });
+  await pager.loadMore({ filter: {}, paged: null, baseRecords: [], baseCursor: "c2" });
+  assert.deepEqual(calls.map((params) => params.cursor), ["c2", "c3"]);
+  assert.deepEqual(paged?.records.map((entry) => entry.id), ["found"]);
+  assert.equal(paged?.nextCursor, "c4");
+
+  // Endless empty pages: one click reads at most 1 + 4 pages and keeps the cursor.
+  calls.length = 0;
+  await pager.loadMore({ filter: {}, paged: { records: [], nextCursor: "e" }, baseRecords: [], baseCursor: null });
+  assert.equal(calls.length, 5);
+});
+
+test("the trust rules walk stops after a bounded number of pages, as incomplete", async () => {
+  let fetches = 0;
+  const walk = await runLatticeWalk(
+    async () => {
+      fetches += 1;
+      return { records: [], next_cursor: `page-${fetches}`, realms: ["default"] };
+    },
+    { realms: ["default"], maxRecords: 400 },
+  );
+  // 400 records at 200 a page need 2 pages; 10 more are allowed for short pages.
+  assert.equal(fetches, 12);
+  assert.equal(walk?.complete, false);
+  assert.equal(walk?.checked, 0);
+});
+
+test("the dream week puts each run on its day; sheets and audit runs of one run merge", () => {
+  const hour = 60 * 60 * 1000;
+  const now = Date.UTC(2026, 9, 31, 12);
+  const week = v2.dreamTimeline(
+    [
+      { realm: "default", run_id: "run-1", partition: "team", started_at_ms: now - 2 * hour, completed_at_ms: now - hour, ops_committed: 2 },
+      { realm: "default", run_id: "old", started_at_ms: now - 10 * 24 * hour, completed_at_ms: now - 10 * 24 * hour + hour },
+    ],
+    [
+      { realm: "default", run_id: "run-1", first_op_at_ms: now - 90 * 60_000, last_op_at_ms: now - 80 * 60_000, ops: 2, quarantined_ops: 1 },
+      { realm: "lab", run_id: "audit-only", first_op_at_ms: now - 24 * hour, last_op_at_ms: now - 24 * hour, ops: 3 },
+    ],
+    now,
+  );
+  assert.equal(week.older, 1);
+  assert.deepEqual(week.rows.map((row) => row.realm), ["default", "lab"]);
+  const bar = week.rows[0].bars[0];
+  assert.equal(bar.runId, "run-1");
+  assert.equal(bar.sheet, true);
+  assert.equal(bar.ops, 2);
+  assert.equal(bar.quarantined, 1);
+  assert.equal(bar.start, now - 2 * hour);
+  assert.ok(bar.x0 > 0.98 && bar.x1 <= 1);
+  assert.equal(week.rows[1].bars[0].sheet, false);
+});
+
+test("records refine by text over titles, descriptions and tags, by kind and by trust", () => {
+  const scope = { scope: "realm" as const, realm: "default" };
+  const all = [
+    record({ id: "a", scope, title: "Refund threshold", kind: "procedure", trust: "agent_observed" }),
+    record({ id: "b", scope, title: "Carrier", description: "A refund route", kind: "fact", trust: "agent_verified" }),
+    record({ id: "c", scope, title: "Escalation", tags: ["refunds"], kind: "fact", trust: "operator" }),
+    record({ id: "d", scope, title: "Unrelated", kind: "gotcha" }),
+  ];
+  const ids = (refinement: { text: string; kinds: Array<MemoryPanelRecord["kind"]>; trust: number[] }) =>
+    v2.refineRecords(all, refinement).map((entry) => entry.id);
+  assert.deepEqual(ids({ text: "refund", kinds: [], trust: [] }), ["a", "b", "c"]);
+  assert.deepEqual(ids({ text: "refund", kinds: ["fact"], trust: [] }), ["b", "c"]);
+  assert.deepEqual(ids({ text: "", kinds: [], trust: [5] }), ["c"]);
+  assert.deepEqual(v2.matchRanges("Refund and refunds", "refund"), [[0, 6], [11, 17]]);
+  assert.equal(v2.trustLevel("untrusted"), 1);
+  assert.equal(v2.trustLevel("operator"), 5);
+});

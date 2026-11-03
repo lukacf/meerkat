@@ -415,7 +415,7 @@ mod tests {
             SourceUuid::builtin(),
             url,
             Some(auth),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Duration::from_secs(5),
             SourceHealthThresholds::default(),
         )

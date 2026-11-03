@@ -214,12 +214,19 @@ mod bridge_request_claim_test_support;
 pub use boot_plan::{
     MemberRestorePolicy, MobBootSetBasis, MobBootSetUnobservedCause, MobCompositionAuthority,
 };
+mod declared_apply;
+pub use declared_apply::{
+    DECLARED_APPLY_CHUNK, DeclaredEntry, DeclaredEntryNote, DeclaredEntryOutcome,
+    DeclaredEntryRefusal, DeclaredRoster, DeclaredRosterOutcome, FirstBootRequest,
+    UnlistedEntryOutcome,
+};
 mod dormant_seat;
 pub use dormant_seat::DormantSeatOutcome;
 pub(crate) use dormant_seat::{SeatBuild, SeatBuildInputs, SeatLocalBuildInputs};
 mod builder;
 pub mod composition;
 pub mod conditions;
+mod created_identity;
 mod delegation;
 mod delivery_scope;
 mod delivery_wait;
@@ -239,6 +246,20 @@ mod fork_context;
 pub mod forked_participant_routing;
 mod handle;
 mod held_spawn;
+mod identity_change;
+pub use identity_change::{
+    CreatedIdentityRequest, IdentityArchiveChange, IdentityChangeConsentInput, IdentityChangeGrant,
+    IdentityChangeOutcome, IdentityChangeRefusal, IdentityChangeRequesterInput,
+    IdentityCreateOutcome, IdentityGrantEntry, IdentityGrantRequest, IdentityNameHolder,
+    IdentityOperation, IdentityRemoval, IdentityRosterChange, IdentityUpdateOutcome,
+    MemberGrantMint, MemberGrantMintRequest, StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
+};
+mod identity_entry;
+mod identity_preparation;
+pub use identity_preparation::{
+    ConstructionEnd, ConstructionFailure, HeldPreparation, IdentityConstructionRequest,
+    IdentityPreparationSettle, IdentityPreparationSettled, PreparationSettlement,
+};
 mod identity_incarnation_custody;
 mod identity_local_services;
 #[cfg(any(test, feature = "test-support"))]
@@ -329,6 +350,7 @@ mod member_history_proxy;
 mod member_instruction;
 mod member_live_proxy;
 mod member_operator_ceiling;
+mod member_session_authority;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub use member_instruction::MemberInstructionActivationError;
 pub use member_operator_ceiling::MemberOperatorAuthorityCeiling;
@@ -339,6 +361,7 @@ pub mod member_upcall;
 mod mob_member_lifecycle_projection;
 mod mob_runtime_bridge_authority;
 mod mobpack_execution;
+pub(crate) mod operator_instruction_delivery;
 mod ops_adapter;
 mod panic_capture;
 pub mod path;
@@ -363,6 +386,7 @@ mod remote_flow_ticket;
 mod remote_turn_reconciler;
 mod retirement_settlement;
 mod roster_authority;
+mod rotation_intent;
 #[cfg(feature = "runtime-adapter")]
 mod run_drain;
 pub(crate) mod scope_gate;
@@ -521,6 +545,14 @@ pub use held_spawn::HeldSpawnDeadline;
 pub use held_spawn::{HeldSpawn, HeldSpawnSettlement, HeldSpawnStart, abort_all_held};
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub use host_schedule::HostObservationScheduleMobHost;
+pub use identity_entry::{
+    EntryStanding, HistoryUnavailable, HostPreparationCause, IDENTITY_ENTRY_PAGE_MAX,
+    IdentityCensus, IdentityEntryOrigin, IdentityEntryPage, IdentityEntryRead, IdentityEntryView,
+    IdentityRecordCensus, IdentityTombstonePage, LegacyIdentityEntryAdoption, MemberBrokenFact,
+    MemberLifecycleEvent, MemberLifecyclePage, MemberLifecycleRecord, MemberRetirementCause,
+    MobJournalCursor, RetiredRotation, SeatRotation, SeatedMember, UnseatedEntryCause,
+    UnseatedEntryCounts, WorkerMember,
+};
 pub use identity_local_services::{
     IdentityLocalExternalToolsError, IdentityLocalExternalToolsProvider,
     IdentityLocalMaterializationKey,
@@ -561,6 +593,8 @@ pub use retirement_settlement::{
     RetirementStage, ShutdownOptions, ShutdownOptionsError,
 };
 use roster_authority::{RosterAuthority, RosterMutator};
+pub use rotation_intent::{MemberRespawn, MemberRotationRecord, ReleaseOutcome, RotationTarget};
+pub(crate) use rotation_intent::{RotationSuccessor, rotation_held_for_host};
 #[cfg(not(target_arch = "wasm32"))]
 pub use session_service::ControllerRouteObservation;
 pub use session_service::LiveDurableSourceObservation;

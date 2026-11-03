@@ -220,6 +220,12 @@ goal-status and attention-list reads. Agents create, claim, update, link,
 evidence, close, reassign attention, and escalate policy through WorkGraph tools
 inside sessions; goal and attention mutators stay on trusted in-process host
 authority.
+
+`GET /workgraph/items`, `/workgraph/ready` and `/workgraph/snapshot` return
+the page fields of the matching RPC methods: a response that ended early has
+`truncated: true` and a `next_cursor` to pass back as the `cursor` query
+parameter (a malformed or foreign cursor is a 400). `GET /workgraph/events`
+reports `truncated` and `next_after_seq` for `after_seq`.
 </Note>
 
 ## Request cancellation
@@ -1023,7 +1029,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 
 ```json Response (abbreviated)
 {
-  "contract_version": {"major": 0, "minor": 9, "patch": 8},
+  "contract_version": {"major": 0, "minor": 9, "patch": 9},
   "providers": [
     {
       "provider": "anthropic",
@@ -1057,7 +1063,7 @@ Returns runtime capabilities with status resolved against config.
 
 ```json Response (abbreviated)
 {
-  "contract_version": {"major": 0, "minor": 9, "patch": 8},
+  "contract_version": {"major": 0, "minor": 9, "patch": 9},
   "capabilities": [
     {
       "id": "sessions",

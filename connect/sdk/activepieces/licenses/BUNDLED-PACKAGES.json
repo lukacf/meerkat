@@ -1,0 +1,3799 @@
+{
+  "schema_version": 1,
+  "scope": "All npm packages contributing bytes to the generated donor bundle, including inactive SDK fallback modules. Build tools without bundled contribution are excluded.",
+  "packages": [
+    {
+      "package_path": "node_modules/@aws-sdk/checksums",
+      "name": "@aws-sdk/checksums",
+      "version": "3.1001.1",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/checksums/-/checksums-3.1001.1.tgz",
+      "integrity": "sha512-x12Q17KYlJAd3nKf8LV5LV0vt8sh8/6YfQLGPtrGnQf/tW4jqxPGq5GPpuVitpQYM3eUR4XB7CbxZf751NMbLw==",
+      "package_json_sha256": "9c1751c72a009ef46aad64865ed2de2c992fd8c5e3359aff9d02dc891b87652a",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/checksums/3.1001.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/checksums/3.1001.1/LICENSE",
+          "sha256": "07364a5f7d0177a59a05a0002187431f8f899320983c0dc049d72df015e8064c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/client-s3",
+      "name": "@aws-sdk/client-s3",
+      "version": "3.974.0",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/client-s3/-/client-s3-3.974.0.tgz",
+      "integrity": "sha512-X+vpXNJ8cU8Iw1FtDgDHxo9z6RxlXfcTtpdGnKws4rk+tCYKSAor/DG6BRMzbh4E5xAA7DiU1Ny3BTrRRSt/Yg==",
+      "package_json_sha256": "1f58d63c1c736d87aa4529592f431dd1a2d957af8c938e7ca90066790fea2639",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/client-s3/3.974.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/client-s3/3.974.0/LICENSE",
+          "sha256": "e345c2ee7df4446e739de7b91535f0c10ddcd909b9753889e943ee637b05db8c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/core",
+      "name": "@aws-sdk/core",
+      "version": "3.978.1",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/core/-/core-3.978.1.tgz",
+      "integrity": "sha512-LbY9aGsEiznDWmUc30Nwv3aIX/+dbwTx8KfS0yOC3NPYMO+O91e6jkT1azf34FwjOndq8/Q+RcVVZz5xnerwdg==",
+      "package_json_sha256": "f41e316f4145afaa611248576fac940f67e7d1e1c6a1cafa11c444189c98493d",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/core/3.978.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/core/3.978.1/LICENSE",
+          "sha256": "edea91454b811f127fbdea3d86f378f6719bd372ed440abf82b232f6fca06c3d",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/credential-provider-env",
+      "name": "@aws-sdk/credential-provider-env",
+      "version": "3.972.72",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/credential-provider-env/-/credential-provider-env-3.972.72.tgz",
+      "integrity": "sha512-xTKO/FWJPozTIXbozVnVGoNBhaGba8TBcx+KyUjRVeOlXE+dUc7GTR1cLvu0uTdIdmemzaFbqqCshXeZA1fZew==",
+      "package_json_sha256": "83cb069a705d40c4d8cac65c4df9f3094d64db8c3105cd15670d2676f730192c",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/credential-provider-env/3.972.72/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/credential-provider-env/3.972.72/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/credential-provider-http",
+      "name": "@aws-sdk/credential-provider-http",
+      "version": "3.972.74",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/credential-provider-http/-/credential-provider-http-3.972.74.tgz",
+      "integrity": "sha512-u91E/hT8f4d1xy0Jl7VG4nVKJ3lxbrZkoBTeSVoJdWBiSEUMwMS/9+e0H/aJVQV//Lt5wuzP+E69v4aRSsNTmw==",
+      "package_json_sha256": "6db5ed1c0c41ca8672b0eb663e539f87ed0deb7fc96d241ef766d2b441fe59a1",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/credential-provider-http/3.972.74/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/credential-provider-http/3.972.74/LICENSE-APACHE-2.0",
+          "sha256": "e345c2ee7df4446e739de7b91535f0c10ddcd909b9753889e943ee637b05db8c",
+          "source": "Standard Apache 2.0 text from locked @aws-sdk/client-s3/LICENSE in the same upstream repository; this package tarball omits LICENSE but declares Apache-2.0 in retained PACKAGE.json"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/credential-provider-ini",
+      "name": "@aws-sdk/credential-provider-ini",
+      "version": "3.973.17",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/credential-provider-ini/-/credential-provider-ini-3.973.17.tgz",
+      "integrity": "sha512-ged4KXdBkvIC81bLvNHHuQKdKak/VXhQTR1NWYTTqW0474nlmsxy9O/vlgTIohDDWH3xpBdtVMZRyjb+DnocDA==",
+      "package_json_sha256": "825c4827279fad1a15aa72a365f4f91557305259771ab2216682c4f24690c075",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/credential-provider-ini/3.973.17/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/credential-provider-ini/3.973.17/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/credential-provider-login",
+      "name": "@aws-sdk/credential-provider-login",
+      "version": "3.972.79",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/credential-provider-login/-/credential-provider-login-3.972.79.tgz",
+      "integrity": "sha512-L+Z85anONJd8MaiuraO4wRxATCdEejBZ3K3eymzWI5JPXa9sOS9CkIm72PBKqXKX+Z9p9NGMX5AIMXm0LEflgw==",
+      "package_json_sha256": "5993af12213692c03386b8af68d3894c007c87fcbee64356743668aa9ea39696",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/credential-provider-login/3.972.79/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/credential-provider-login/3.972.79/LICENSE-APACHE-2.0",
+          "sha256": "e345c2ee7df4446e739de7b91535f0c10ddcd909b9753889e943ee637b05db8c",
+          "source": "Standard Apache 2.0 text from locked @aws-sdk/client-s3/LICENSE in the same upstream repository; this package tarball omits LICENSE but declares Apache-2.0 in retained PACKAGE.json"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/credential-provider-node",
+      "name": "@aws-sdk/credential-provider-node",
+      "version": "3.972.84",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/credential-provider-node/-/credential-provider-node-3.972.84.tgz",
+      "integrity": "sha512-oHt854odINVwzwsh+c5x69j0ajm4DbqqqVJ+O1ECsCIZeMDAbzFpXItaqP7UZstJj/ATdTk/KFSH0LaNAgV+kA==",
+      "package_json_sha256": "d107f130cf4631f0b687351fd8d2baf74d8a8496f28a0bd463545306ba9e6f22",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/credential-provider-node/3.972.84/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/credential-provider-node/3.972.84/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/credential-provider-process",
+      "name": "@aws-sdk/credential-provider-process",
+      "version": "3.972.72",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/credential-provider-process/-/credential-provider-process-3.972.72.tgz",
+      "integrity": "sha512-rLIp2xbMjX/k9/od7APpqq1ZgXXnV0pOL1Th3ZsL8Wu0TRtBsDTVS8iPqcfRFcHakFxPvR04OSTv2ka2qOb/2A==",
+      "package_json_sha256": "37354078bd4f4ffcaeccfafe9e818b4dd298f4685fcbd6695c13437ff2e2360b",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/credential-provider-process/3.972.72/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/credential-provider-process/3.972.72/LICENSE",
+          "sha256": "2ef1e48ea743d9c82313e6887858f7c1feaddd636f5a3f43926aab0143e67ebd",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/credential-provider-sso",
+      "name": "@aws-sdk/credential-provider-sso",
+      "version": "3.973.16",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/credential-provider-sso/-/credential-provider-sso-3.973.16.tgz",
+      "integrity": "sha512-IGihaJfFZYacJJr/odqILCoK7W/mvrZ7cuK7ECn3sAu4vLC6u0V8bS7mCGbdugJ8Aum2tnvqmx0F2MRFp2rn9g==",
+      "package_json_sha256": "417af24392691fbaa2023130328fe065688b74e4f69a2dbd96319242f86621c9",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/credential-provider-sso/3.973.16/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/credential-provider-sso/3.973.16/LICENSE",
+          "sha256": "2ef1e48ea743d9c82313e6887858f7c1feaddd636f5a3f43926aab0143e67ebd",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/credential-provider-web-identity",
+      "name": "@aws-sdk/credential-provider-web-identity",
+      "version": "3.972.78",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/credential-provider-web-identity/-/credential-provider-web-identity-3.972.78.tgz",
+      "integrity": "sha512-/y9WvNtlcPBGLR0qc1a+9J/xtYZfVczvLUOuXaVWylzttH7ewsxwHtjmiJSolNrVSDorIxHGHMU61CbonRkmwA==",
+      "package_json_sha256": "f7b5562bbccef5b2387e5b282a7edaf1645da0cab95f2855dc33e8f38c4189af",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/credential-provider-web-identity/3.972.78/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/credential-provider-web-identity/3.972.78/LICENSE",
+          "sha256": "2ef1e48ea743d9c82313e6887858f7c1feaddd636f5a3f43926aab0143e67ebd",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/middleware-bucket-endpoint",
+      "name": "@aws-sdk/middleware-bucket-endpoint",
+      "version": "3.972.50",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/middleware-bucket-endpoint/-/middleware-bucket-endpoint-3.972.50.tgz",
+      "integrity": "sha512-p5uNKjGeFdyXKAzgbt6H37+WdLCQ6lKBuUFSybB0D0I1olc1G5btF5xBxeBbOJpaLanCOOFzyB8l7+J/mFVNKg==",
+      "package_json_sha256": "8484f3b3151d03e17b398f61f02fef84ef173978e536694fb7b8fca6a15548a1",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/middleware-bucket-endpoint/3.972.50/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/middleware-bucket-endpoint/3.972.50/LICENSE",
+          "sha256": "e345c2ee7df4446e739de7b91535f0c10ddcd909b9753889e943ee637b05db8c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/middleware-expect-continue",
+      "name": "@aws-sdk/middleware-expect-continue",
+      "version": "3.972.46",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/middleware-expect-continue/-/middleware-expect-continue-3.972.46.tgz",
+      "integrity": "sha512-+dyYf1VYmZu1hD5yl9V8W9/OHymUANnKgLRu4ABizzaPv4n0JoDEnBBZKWZQRDParc8h7IzRicBTw3kEycaAAQ==",
+      "package_json_sha256": "1f0c07bc91ca84b105b5a25281e2e075cf47a7fd741805b15df080e6f52039bb",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/middleware-expect-continue/3.972.46/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/middleware-expect-continue/3.972.46/LICENSE",
+          "sha256": "e345c2ee7df4446e739de7b91535f0c10ddcd909b9753889e943ee637b05db8c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/middleware-flexible-checksums",
+      "name": "@aws-sdk/middleware-flexible-checksums",
+      "version": "3.974.56",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/middleware-flexible-checksums/-/middleware-flexible-checksums-3.974.56.tgz",
+      "integrity": "sha512-bBwhvvVRmJ/hdLbfrRhrOtTNa8CKhTN/Oh1v6FDIbiEpDAVD4KDcnZFMcyIssLYEg0NWXSbfJV4f1Io+/arI/w==",
+      "package_json_sha256": "375016e7423cd0aac97a349a67e383f18b0a59703836a630320b9509fca1bc39",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/middleware-flexible-checksums/3.974.56/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/middleware-flexible-checksums/3.974.56/LICENSE",
+          "sha256": "0c0468e2286378bb0b229c5d7be3512e3fefd83a23b7b064fc79001b43fb54b0",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/middleware-host-header",
+      "name": "@aws-sdk/middleware-host-header",
+      "version": "3.972.47",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/middleware-host-header/-/middleware-host-header-3.972.47.tgz",
+      "integrity": "sha512-whuEbJFUrhULI519UvSKPIAj4vcWEMFQn3riuo1ApKZNUbRU7IERsSXPy/InoRU0tj+2u8U2C3m5iFputKbclQ==",
+      "package_json_sha256": "0b47ba3f797e074fe4f4d096249202228835cf05c8d6f25f611fa268f5cd8e09",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/middleware-host-header/3.972.47/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/middleware-host-header/3.972.47/LICENSE",
+          "sha256": "07364a5f7d0177a59a05a0002187431f8f899320983c0dc049d72df015e8064c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/middleware-location-constraint",
+      "name": "@aws-sdk/middleware-location-constraint",
+      "version": "3.972.43",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/middleware-location-constraint/-/middleware-location-constraint-3.972.43.tgz",
+      "integrity": "sha512-2OxLCMnzvHiykfQxLMmDxXEp3NRWaQfqOvFdBWLpRp1QhtgBSE2gOOJCu1czFnUBRZNRiIiAp0MuuOefrHZ2Ag==",
+      "package_json_sha256": "20e2c24fd0233f6ccb5b2725595396970e7e65f07e59c5a42cdcf51d4810b439",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/middleware-location-constraint/3.972.43/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/middleware-location-constraint/3.972.43/LICENSE",
+          "sha256": "e345c2ee7df4446e739de7b91535f0c10ddcd909b9753889e943ee637b05db8c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/middleware-logger",
+      "name": "@aws-sdk/middleware-logger",
+      "version": "3.972.46",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/middleware-logger/-/middleware-logger-3.972.46.tgz",
+      "integrity": "sha512-wYpwRmsqZ3pX54XREl3ZFLoo8Dyjh28LF5xBeZxxQYgGnWJDQDRQyWQt21/7JbHW86BKCKJ8jUdtgLslcVu0AQ==",
+      "package_json_sha256": "bd33bc544dc5ae611b1903ae559e3e1dabb60d8619609e6109995d5f390871e1",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/middleware-logger/3.972.46/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/middleware-logger/3.972.46/LICENSE",
+          "sha256": "b50925b3e63e2192e04323a29e905154bda999c8dcc4c78e96733a00a10fed9a",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/middleware-recursion-detection",
+      "name": "@aws-sdk/middleware-recursion-detection",
+      "version": "3.972.48",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/middleware-recursion-detection/-/middleware-recursion-detection-3.972.48.tgz",
+      "integrity": "sha512-8trsnwbqBck2i3a086mqNe5qJH1zr5QnIQ2xn8dUAx6+phPxadRGmKtGneCzZHP0mTeWWyei5znWoipQyYjSSw==",
+      "package_json_sha256": "e55d8d43cb9847513ea9fefca59042d347b6bbdc17a38649c25b1b65a41e09c5",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/middleware-recursion-detection/3.972.48/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/middleware-recursion-detection/3.972.48/LICENSE",
+          "sha256": "07364a5f7d0177a59a05a0002187431f8f899320983c0dc049d72df015e8064c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/middleware-sdk-s3",
+      "name": "@aws-sdk/middleware-sdk-s3",
+      "version": "3.972.77",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/middleware-sdk-s3/-/middleware-sdk-s3-3.972.77.tgz",
+      "integrity": "sha512-E7W2UOeUoc+lg3uIfR/dM7ZwusHwhBQrKMnlkRv4EXRR+C0YtV1pg25xC7GdZIhXH+NAMgZPCbE7o5to2cjFiw==",
+      "package_json_sha256": "c0c7f1ba04f7627ea45a757daa04cbe768772fee67a0b56fdf9c41c95a68b06c",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/middleware-sdk-s3/3.972.77/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/middleware-sdk-s3/3.972.77/LICENSE",
+          "sha256": "07364a5f7d0177a59a05a0002187431f8f899320983c0dc049d72df015e8064c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/middleware-sdk-s3/node_modules/@aws-sdk/signature-v4-multi-region",
+      "name": "@aws-sdk/signature-v4-multi-region",
+      "version": "3.996.47",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/signature-v4-multi-region/-/signature-v4-multi-region-3.996.47.tgz",
+      "integrity": "sha512-Zk08macMvQTHzQJCLJVkOlviVoqwYMrpXv4lmLN7b7sAbiMoOK7Go0NYdR5UeF+MW8LIbRmwrNy9u/5VvX1U5g==",
+      "package_json_sha256": "a500d3298997fbe442acc76fd217dabd4c8310a0085a65578ba868a37d4e3f79",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/signature-v4-multi-region/3.996.47/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/signature-v4-multi-region/3.996.47/LICENSE",
+          "sha256": "07364a5f7d0177a59a05a0002187431f8f899320983c0dc049d72df015e8064c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/middleware-ssec",
+      "name": "@aws-sdk/middleware-ssec",
+      "version": "3.972.43",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/middleware-ssec/-/middleware-ssec-3.972.43.tgz",
+      "integrity": "sha512-cluyDRiDdOO63gvbjzw7qs2ZUD7bDemaTGRyi3pCuKm1TXmUBwBeRj/Bx5/wyfzVcMFMwOsRUJS239tBF2AJDA==",
+      "package_json_sha256": "7c345dbc2f1bf6382f4fdf4b84389c3273b131994b7b0ae8884d216b5d70c6c1",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/middleware-ssec/3.972.43/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/middleware-ssec/3.972.43/LICENSE",
+          "sha256": "e345c2ee7df4446e739de7b91535f0c10ddcd909b9753889e943ee637b05db8c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/middleware-user-agent",
+      "name": "@aws-sdk/middleware-user-agent",
+      "version": "3.972.76",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/middleware-user-agent/-/middleware-user-agent-3.972.76.tgz",
+      "integrity": "sha512-cspAO/d2y5A0rn+h+E49MmgZWGHASIqrq0/XqtvHNrA3wY1tqjZ/e2+F/v5cF34EmxMf1OFH54hP1XGRj9+22Q==",
+      "package_json_sha256": "6f0ea60c759f431c0855cc48363aaf57bc553ec580f8c92d86d49543ebbeabc6",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/middleware-user-agent/3.972.76/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/middleware-user-agent/3.972.76/LICENSE",
+          "sha256": "07364a5f7d0177a59a05a0002187431f8f899320983c0dc049d72df015e8064c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/nested-clients",
+      "name": "@aws-sdk/nested-clients",
+      "version": "3.997.46",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/nested-clients/-/nested-clients-3.997.46.tgz",
+      "integrity": "sha512-oRxtBcka/JGHGs9l9p9IVajGoTP8vTPmoAzdHGy4Qcy9P5vPnDf6nhIeM/COQNY9k/OahImTRaLkHftoXvfcmQ==",
+      "package_json_sha256": "dd334b9f6453d2e9094bf36a10e3a1a5637fa6c43fe38ca42e649e3fae4fdbd3",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/nested-clients/3.997.46/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/nested-clients/3.997.46/LICENSE-APACHE-2.0",
+          "sha256": "e345c2ee7df4446e739de7b91535f0c10ddcd909b9753889e943ee637b05db8c",
+          "source": "Standard Apache 2.0 text from locked @aws-sdk/client-s3/LICENSE in the same upstream repository; this package tarball omits LICENSE but declares Apache-2.0 in retained PACKAGE.json"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/nested-clients/node_modules/@aws-sdk/signature-v4-multi-region",
+      "name": "@aws-sdk/signature-v4-multi-region",
+      "version": "3.996.47",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/signature-v4-multi-region/-/signature-v4-multi-region-3.996.47.tgz",
+      "integrity": "sha512-Zk08macMvQTHzQJCLJVkOlviVoqwYMrpXv4lmLN7b7sAbiMoOK7Go0NYdR5UeF+MW8LIbRmwrNy9u/5VvX1U5g==",
+      "package_json_sha256": "a500d3298997fbe442acc76fd217dabd4c8310a0085a65578ba868a37d4e3f79",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/signature-v4-multi-region/3.996.47/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/signature-v4-multi-region/3.996.47/LICENSE",
+          "sha256": "07364a5f7d0177a59a05a0002187431f8f899320983c0dc049d72df015e8064c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/region-config-resolver",
+      "name": "@aws-sdk/region-config-resolver",
+      "version": "3.972.50",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/region-config-resolver/-/region-config-resolver-3.972.50.tgz",
+      "integrity": "sha512-qspQXZb0efwK/2/i6RRLRhR4cgCZE40WKgPjcG7AJhG4d1d5xMZTLQdQF0M0Cu1EMRef6QqyCe913FGE8KWZmw==",
+      "package_json_sha256": "a2028e38a6ad44fd106d2a76a75dbe4a66c689b12d0964336b2adc14abcbec84",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/region-config-resolver/3.972.50/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/region-config-resolver/3.972.50/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/signature-v4-multi-region",
+      "name": "@aws-sdk/signature-v4-multi-region",
+      "version": "3.972.0",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/signature-v4-multi-region/-/signature-v4-multi-region-3.972.0.tgz",
+      "integrity": "sha512-2udiRijmjpN81Pvajje4TsjbXDZNP6K9bYUanBYH8hXa/tZG5qfGCySD+TyX0sgDxCQmEDMg3LaQdfjNHBDEgQ==",
+      "package_json_sha256": "e31e73ad5c4f66b74bec812d539c397551a5a2eb7146a949a19f6484095362aa",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/signature-v4-multi-region/3.972.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/signature-v4-multi-region/3.972.0/LICENSE",
+          "sha256": "07364a5f7d0177a59a05a0002187431f8f899320983c0dc049d72df015e8064c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/signature-v4-multi-region/node_modules/@aws-sdk/core",
+      "name": "@aws-sdk/core",
+      "version": "3.972.0",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/core/-/core-3.972.0.tgz",
+      "integrity": "sha512-nEeUW2M9F+xdIaD98F5MBcQ4ITtykj3yKbgFZ6J0JtL3bq+Z90szQ6Yy8H/BLPYXTs3V4n9ifnBo8cprRDiE6A==",
+      "package_json_sha256": "4f532cdccc0ec99dff440a71ab9675988f956f84e0659f57e2eb502f2133f49c",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/core/3.972.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/core/3.972.0/LICENSE",
+          "sha256": "edea91454b811f127fbdea3d86f378f6719bd372ed440abf82b232f6fca06c3d",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/signature-v4-multi-region/node_modules/@aws-sdk/middleware-sdk-s3",
+      "name": "@aws-sdk/middleware-sdk-s3",
+      "version": "3.972.0",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/middleware-sdk-s3/-/middleware-sdk-s3-3.972.0.tgz",
+      "integrity": "sha512-0bcKFXWx+NZ7tIlOo7KjQ+O2rydiHdIQahrq+fN6k9Osky29v17guy68urUKfhTobR6iY6KvxkroFWaFtTgS5w==",
+      "package_json_sha256": "9ccf418dd852e90c8983c812501f70df3dfbb26bf21bb4758f4649bc322c9ae2",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/middleware-sdk-s3/3.972.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/middleware-sdk-s3/3.972.0/LICENSE",
+          "sha256": "07364a5f7d0177a59a05a0002187431f8f899320983c0dc049d72df015e8064c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/signature-v4-multi-region/node_modules/@aws-sdk/xml-builder",
+      "name": "@aws-sdk/xml-builder",
+      "version": "3.972.0",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/xml-builder/-/xml-builder-3.972.0.tgz",
+      "integrity": "sha512-POaGMcXnozzqBUyJM3HLUZ9GR6OKJWPGJEmhtTnxZXt8B6JcJ/6K3xRJ5H/j8oovVLz8Wg6vFxAHv8lvuASxMg==",
+      "package_json_sha256": "7af87d710cbc882b46ea6e5cf400eb8aa860fbe9a8fb956bdac9ab9c9d85c0bc",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/xml-builder/3.972.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/xml-builder/3.972.0/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/token-providers",
+      "name": "@aws-sdk/token-providers",
+      "version": "3.1138.0",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/token-providers/-/token-providers-3.1138.0.tgz",
+      "integrity": "sha512-GpyAr0DD63YOEmYFM6Df+gJuIgC92MMTiBK4FTKfxii5MJ9ge20epR7LyroulscYlG89J+ZB2ivFDPjvfQhzdw==",
+      "package_json_sha256": "8680751f73f36f637b0b96dc5ff4b39578af9b3186195726eef4147758153dee",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/token-providers/3.1138.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/token-providers/3.1138.0/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/util-arn-parser",
+      "name": "@aws-sdk/util-arn-parser",
+      "version": "3.972.0",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/util-arn-parser/-/util-arn-parser-3.972.0.tgz",
+      "integrity": "sha512-RM5Mmo/KJ593iMSrALlHEOcc9YOIyOsDmS5x2NLOMdEmzv1o00fcpAkCQ02IGu1eFneBFT7uX0Mpag0HI+Cz2g==",
+      "package_json_sha256": "6a6822e5408ea0e3a4abba8049f101df9014e90cbf1f8be2119fdd8995563541",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/util-arn-parser/3.972.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/util-arn-parser/3.972.0/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/util-endpoints",
+      "name": "@aws-sdk/util-endpoints",
+      "version": "3.972.0",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/util-endpoints/-/util-endpoints-3.972.0.tgz",
+      "integrity": "sha512-6JHsl1V/a1ZW8D8AFfd4R52fwZPnZ5H4U6DS8m/bWT8qad72NvbOFAC7U2cDtFs2TShqUO3TEiX/EJibtY3ijg==",
+      "package_json_sha256": "434eebb8e83a5fcb1742f1019b9dad7e4ce981d62efd005c76fbc49b757c49bb",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/util-endpoints/3.972.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/util-endpoints/3.972.0/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/util-user-agent-node",
+      "name": "@aws-sdk/util-user-agent-node",
+      "version": "3.973.62",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/util-user-agent-node/-/util-user-agent-node-3.973.62.tgz",
+      "integrity": "sha512-R2yHO3Jl20JcR5DK2LhrcZ4cKb/OijyHlyQxvXf8u5wScgk3SD+Ea2HwUXYbSKbuAx5ABXanLeEAT5tivgi45g==",
+      "package_json_sha256": "92ce3ba452bc918fb4959829c934ee5eb0636f6790305355f081e7c56fc08c3a",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/util-user-agent-node/3.973.62/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/util-user-agent-node/3.973.62/LICENSE",
+          "sha256": "e345c2ee7df4446e739de7b91535f0c10ddcd909b9753889e943ee637b05db8c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws-sdk/xml-builder",
+      "name": "@aws-sdk/xml-builder",
+      "version": "3.972.41",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws-sdk/xml-builder/-/xml-builder-3.972.41.tgz",
+      "integrity": "sha512-ctjVSyCMegrWfXlx6VqzSBFI6UqmQ5ZlnfMhdLIiWmhoH8UAQxSCP5N3OpG7X3k4LnS7ou74C4mt20+bfTW2aQ==",
+      "package_json_sha256": "103e94854d3f01cdb7eda3d170d3a8775e4fb107da472a1347418abb76116e08",
+      "retained_package_json": "licenses/dependencies/@aws-sdk/xml-builder/3.972.41/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws-sdk/xml-builder/3.972.41/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@aws/lambda-invoke-store",
+      "name": "@aws/lambda-invoke-store",
+      "version": "0.3.0",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@aws/lambda-invoke-store/-/lambda-invoke-store-0.3.0.tgz",
+      "integrity": "sha512-sl4Bm6yiMNYrZKkqqDFWN0UfnWhlS8ivKxrYl+6t0gCLrqr8y3B2IqZZbFRkfaVVp7C/baApyh71P+LeE1A2sQ==",
+      "package_json_sha256": "67dd0cc15cb17df9e12654a78486e710e13a2e96623cb28c683056378fa973dc",
+      "retained_package_json": "licenses/dependencies/@aws/lambda-invoke-store/0.3.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@aws/lambda-invoke-store/0.3.0/LICENSE",
+          "sha256": "09e8a9bcec8067104652c168685ab0931e7868f9c8284b66f5ae6edae5f1130b",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@datadog/datadog-api-client",
+      "name": "@datadog/datadog-api-client",
+      "version": "1.43.0",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@datadog/datadog-api-client/-/datadog-api-client-1.43.0.tgz",
+      "integrity": "sha512-AKJkM9kC3quJQiHULm6uYYqBCYhZ8KengdfC5JIvgehZSYkZF8Ff3yMteV2fUP/xwIJjdO9/n1DZQ1mJV0cxtA==",
+      "package_json_sha256": "e38a56a0925538a93bd278f2b43d14cfd22fe4528e54d5c8c27e61b8d0a24b4a",
+      "retained_package_json": "licenses/dependencies/@datadog/datadog-api-client/1.43.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@datadog/datadog-api-client/1.43.0/LICENSE",
+          "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+          "source": "LICENSE"
+        },
+        {
+          "path": "licenses/dependencies/@datadog/datadog-api-client/1.43.0/LICENSE-3rdparty.csv",
+          "sha256": "fc8fe6548504496680d48d5ed99991ea4d10abf654c14be6b89a5342fc7ac3b8",
+          "source": "LICENSE-3rdparty.csv"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@googleapis/docs",
+      "name": "@googleapis/docs",
+      "version": "9.3.0",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@googleapis/docs/-/docs-9.3.0.tgz",
+      "integrity": "sha512-ga0ZlsrYxZGUfWbio7paMEs/0f6UtwUSJZcayFZ3DpJFSAnh9KhsPGj0bynrojensab18eO0ffVllUGKYCvOqA==",
+      "package_json_sha256": "3e78c1c13d5c59288438dbc733dbd03164a3f1bd094988d5cc1adf765c6feb17",
+      "retained_package_json": "licenses/dependencies/@googleapis/docs/9.3.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@googleapis/docs/9.3.0/LICENSE-APACHE-2.0",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "source": "Standard Apache 2.0 text from locked googleapis-common/LICENSE; package README declares Apache-2.0"
+        },
+        {
+          "path": "licenses/dependencies/@googleapis/docs/9.3.0/README.md",
+          "sha256": "bb546cc4f48079b8e191328dafd98982233cf5fe5c6305dd7641ad18dc842323",
+          "source": "README.md"
+        },
+        {
+          "path": "licenses/dependencies/@googleapis/docs/9.3.0/COPYRIGHT-HEADER.txt",
+          "sha256": "9dd772e3cba80e841b046ba82acf94a6c94085efe83592d2e85d1f38230aae80",
+          "source": "build/index.js lines 2-13"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@googleapis/drive",
+      "name": "@googleapis/drive",
+      "version": "20.2.0",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@googleapis/drive/-/drive-20.2.0.tgz",
+      "integrity": "sha512-6xPjqqLl34jBXWYMO34ywLVQsT8FgH948x8YI9o6Tdqs7+n4QRyvkC+BcvVQaAPNc+pyqsvZAXcbdMEcGgDUGw==",
+      "package_json_sha256": "0110b91d5c4474b14bcba92154fc31342376356dae9d3f815cc24d8143213b25",
+      "retained_package_json": "licenses/dependencies/@googleapis/drive/20.2.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@googleapis/drive/20.2.0/LICENSE-APACHE-2.0",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "source": "Standard Apache 2.0 text from locked googleapis-common/LICENSE; package README declares Apache-2.0"
+        },
+        {
+          "path": "licenses/dependencies/@googleapis/drive/20.2.0/README.md",
+          "sha256": "388da888c73a54900f6522c9c0835c503fa7da43b1b83d1ad63f6a5ed2341a24",
+          "source": "README.md"
+        },
+        {
+          "path": "licenses/dependencies/@googleapis/drive/20.2.0/COPYRIGHT-HEADER.txt",
+          "sha256": "9dd772e3cba80e841b046ba82acf94a6c94085efe83592d2e85d1f38230aae80",
+          "source": "build/index.js lines 2-13"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@googleapis/oauth2",
+      "name": "@googleapis/oauth2",
+      "version": "5.0.1",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@googleapis/oauth2/-/oauth2-5.0.1.tgz",
+      "integrity": "sha512-C67lu327UqJJwjrDzw/6j3udYlBF9vJudv7CrZZAQW47Q1sVhvzAriQ1+MdIGIb0Aypv9IXsVaWya8jqJzjpQA==",
+      "package_json_sha256": "99a3be6968b3689559269f6cda3d337143260cc4e6f30be91e27bfe3fdad79c0",
+      "retained_package_json": "licenses/dependencies/@googleapis/oauth2/5.0.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@googleapis/oauth2/5.0.1/LICENSE-APACHE-2.0",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "source": "Standard Apache 2.0 text from locked googleapis-common/LICENSE; package README declares Apache-2.0"
+        },
+        {
+          "path": "licenses/dependencies/@googleapis/oauth2/5.0.1/README.md",
+          "sha256": "b1ec885502d91d8ce3f66ee5f8a7de157d32ddea16ecd27e752f742c43c1460f",
+          "source": "README.md"
+        },
+        {
+          "path": "licenses/dependencies/@googleapis/oauth2/5.0.1/COPYRIGHT-HEADER.txt",
+          "sha256": "9dd772e3cba80e841b046ba82acf94a6c94085efe83592d2e85d1f38230aae80",
+          "source": "build/index.js lines 2-13"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@googleapis/sheets",
+      "name": "@googleapis/sheets",
+      "version": "13.0.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@googleapis/sheets/-/sheets-13.0.2.tgz",
+      "integrity": "sha512-b1tBlMcfvNEziM4DZCikLOc9iqSlgCK1e5bMKtNQIADRXr1CQmbkHV3ZBVvTsFsjLErgihqO58Itn/kzCnSZ0A==",
+      "package_json_sha256": "67d0b3497f137e6cfb49dd92fafdc1118f3a172f2f0ac66503367223e587eb5b",
+      "retained_package_json": "licenses/dependencies/@googleapis/sheets/13.0.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@googleapis/sheets/13.0.2/LICENSE-APACHE-2.0",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "source": "Standard Apache 2.0 text from locked googleapis-common/LICENSE; package README declares Apache-2.0"
+        },
+        {
+          "path": "licenses/dependencies/@googleapis/sheets/13.0.2/README.md",
+          "sha256": "a48904baf76a981bda6b490fb0ac99ce88a773610747176bd9ab9f8e99848bcb",
+          "source": "README.md"
+        },
+        {
+          "path": "licenses/dependencies/@googleapis/sheets/13.0.2/COPYRIGHT-HEADER.txt",
+          "sha256": "9dd772e3cba80e841b046ba82acf94a6c94085efe83592d2e85d1f38230aae80",
+          "source": "build/index.js lines 2-13"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@hubspot/api-client",
+      "name": "@hubspot/api-client",
+      "version": "12.0.1",
+      "license": "ISC",
+      "resolved": "https://registry.npmjs.org/@hubspot/api-client/-/api-client-12.0.1.tgz",
+      "integrity": "sha512-lMxDEuhaP1KDxo0Z/t+3xAT/wzVaQCZ9ThSewj9qCMkhBMYA2ABWLOY/I+huQCERuMqkqwmMBx/NOCspBlGQGg==",
+      "package_json_sha256": "883af020ad7eb10ac4517d12a7ab2c7e894016b12dae8ea6fcab66a6f1dc11e7",
+      "retained_package_json": "licenses/dependencies/@hubspot/api-client/12.0.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@hubspot/api-client/12.0.1/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@hubspot/api-client/node_modules/form-data",
+      "name": "form-data",
+      "version": "2.5.6",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/form-data/-/form-data-2.5.6.tgz",
+      "integrity": "sha512-Ogz/E85h9tlfJzpI6TuFpGcHZFhLrb9Gw8wq9v40CxSCPnv7ahKr6Xgtkn0KYCDQJ8DNn5VoMO8EXr9V5PadyA==",
+      "package_json_sha256": "47e88a1abedf820ac2d27787bc39ed95597cb519f4a52a53bfe17cf28abeeb32",
+      "retained_package_json": "licenses/dependencies/form-data/2.5.6/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/form-data/2.5.6/License",
+          "sha256": "e5b780d4f38d1d3328e3e53186c4e62d3fa149ea6f2bacd5de5ad0c30ac85343",
+          "source": "License"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@linear/sdk",
+      "name": "@linear/sdk",
+      "version": "7.0.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/@linear/sdk/-/sdk-7.0.1.tgz",
+      "integrity": "sha512-+t5yW3gHZHOvMCpK4wn7ucC3BATkody3MSL0QxrtL6JaqNPMfdDHYEI8J34A38IBpCudvNCugi5jqOewvwt+jg==",
+      "package_json_sha256": "14ae309388042e584d57284b64e9eb5e429660abf978c9b81606c17641af2d28",
+      "retained_package_json": "licenses/dependencies/@linear/sdk/7.0.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@linear/sdk/7.0.1/LICENSE",
+          "sha256": "6d01159ad48e1c4a2c053ec32a97afc658786aa69362ead7d3adc912f9a10ce2",
+          "source": "Exact SDK 7.0.1 Git tag; npm omits license"
+        },
+        {
+          "path": "licenses/dependencies/@linear/sdk/7.0.1/upstream-license-source.json",
+          "sha256": "481270802cb4d2a8fd66e2b358d0961843f7b78954414959ca536f57f9b8607c",
+          "source": "Exact SDK 7.0.1 Git tag; npm omits license"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@mailchimp/mailchimp_marketing",
+      "name": "@mailchimp/mailchimp_marketing",
+      "version": "3.0.80",
+      "license": "Apache 2.0",
+      "resolved": "https://registry.npmjs.org/@mailchimp/mailchimp_marketing/-/mailchimp_marketing-3.0.80.tgz",
+      "integrity": "sha512-Cgz0xPb+1DUjmrl5whAsmqfAChBko+Wf4/PLQE4RvwfPlcq2agfHr1QFiXEhZ8e+GQwQ3hZQn9iLGXwIXwxUCg==",
+      "package_json_sha256": "05c3783943568861161e9b12bce3ab3d5797951e797928d802815406c98312cf",
+      "retained_package_json": "licenses/dependencies/@mailchimp/mailchimp_marketing/3.0.80/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@mailchimp/mailchimp_marketing/3.0.80/LICENSE",
+          "sha256": "8e0b5de8995421007b8d0d84f857cc4408fd7900b909e2a016b50c3cc9cc483e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@microsoft/microsoft-graph-client",
+      "name": "@microsoft/microsoft-graph-client",
+      "version": "3.0.7",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/@microsoft/microsoft-graph-client/-/microsoft-graph-client-3.0.7.tgz",
+      "integrity": "sha512-/AazAV/F+HK4LIywF9C+NYHcJo038zEnWkteilcxC1FM/uK/4NVGDKGrxx7nNq1ybspAroRKT4I1FHfxQzxkUw==",
+      "package_json_sha256": "422da2a422700fadb200f3d60f13c87dbdee197a804a414c2ebe4afe90367ba7",
+      "retained_package_json": "licenses/dependencies/@microsoft/microsoft-graph-client/3.0.7/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@microsoft/microsoft-graph-client/3.0.7/LICENSE",
+          "sha256": "1ac9b2d78d4fb073e94bd8ebd2093a2da48d5bfc0ae5785b15a1f8c0982e442c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@notionhq/client",
+      "name": "@notionhq/client",
+      "version": "2.2.14",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/@notionhq/client/-/client-2.2.14.tgz",
+      "integrity": "sha512-oqUefZtCiJPCX+74A1Os9OVTef3fSnVWe2eVQtU1HJSD+nsfxfhwvDKnzJTh2Tw1ZHKLxpieHB/nzGdY+Uo12A==",
+      "package_json_sha256": "9c8f8b8bece8a89ca3e9be91cc2f9c19d1befda7c902268ba8710ccf6b5abc0a",
+      "retained_package_json": "licenses/dependencies/@notionhq/client/2.2.14/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@notionhq/client/2.2.14/LICENSE",
+          "sha256": "937800d46af836c27e0f9a3fd32257d9cf73b17a01ac135b45616581c8638f1b",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@selderee/plugin-htmlparser2",
+      "name": "@selderee/plugin-htmlparser2",
+      "version": "0.12.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/@selderee/plugin-htmlparser2/-/plugin-htmlparser2-0.12.0.tgz",
+      "integrity": "sha512-oELmoyA6ML9jDRMV3kgcMQFKxUfBU0yFVn6yTctVaLT5ygXnxH52I3TZEgV9EhXJC68/uFvE5Daj1/25c0Xa/A==",
+      "package_json_sha256": "d7b92b27f9577a9a7f3873c8c98c7f5bf2b62ab14d7312253aadd7e7ce89577c",
+      "retained_package_json": "licenses/dependencies/@selderee/plugin-htmlparser2/0.12.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@selderee/plugin-htmlparser2/0.12.0/LICENSE",
+          "sha256": "a1f4c08ef3e49b39b716674993fb4c2e7fcf0db4386b829038c6dcb99200a056",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@slack/logger",
+      "name": "@slack/logger",
+      "version": "4.0.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/@slack/logger/-/logger-4.0.1.tgz",
+      "integrity": "sha512-6cmdPrV/RYfd2U0mDGiMK8S7OJqpCTm7enMLRR3edccsPX8j7zXTLnaEF4fhxxJJTAIOil6+qZrnUPTuaLvwrQ==",
+      "package_json_sha256": "b4a055d6562cd86cf476c5b3e195cbd7b6dc9995f40c2e18fb1280719e47a91f",
+      "retained_package_json": "licenses/dependencies/@slack/logger/4.0.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@slack/logger/4.0.1/LICENSE",
+          "sha256": "3f09a5ab0f8c178fd227a5d5386e53f6350c2a536f6d462e36e69830bb615b8e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@slack/types",
+      "name": "@slack/types",
+      "version": "2.22.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/@slack/types/-/types-2.22.0.tgz",
+      "integrity": "sha512-sZ9lIgJhPX2qft/tKWiklFlc0o1FWeI7QtciZJfW1+ErH1eGGHvOZ8e73sleTCFEFJp1q/R0WeS8Oa7AsiDprg==",
+      "package_json_sha256": "d4ea7b7c90d8ee8dd43a8c6f98b1f98437a7ffdb59a3bc72388bbfdb4f1d9bdb",
+      "retained_package_json": "licenses/dependencies/@slack/types/2.22.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@slack/types/2.22.0/LICENSE",
+          "sha256": "3f09a5ab0f8c178fd227a5d5386e53f6350c2a536f6d462e36e69830bb615b8e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@slack/web-api",
+      "name": "@slack/web-api",
+      "version": "7.9.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/@slack/web-api/-/web-api-7.9.0.tgz",
+      "integrity": "sha512-PEvscTsHj4pLQr6g/0OwPEFDN9ElJMdba9uYvhTPjC2yGQGzjB4YmqilXaDX0Lm3IBEcLtJNRAbsfQp+x3X3Qg==",
+      "package_json_sha256": "ee5d34cce08ee57a60bba83fe5ca2aa8bb683fbfe3521511b29c04ecebd51d29",
+      "retained_package_json": "licenses/dependencies/@slack/web-api/7.9.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@slack/web-api/7.9.0/LICENSE",
+          "sha256": "3f09a5ab0f8c178fd227a5d5386e53f6350c2a536f6d462e36e69830bb615b8e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/config-resolver",
+      "name": "@smithy/config-resolver",
+      "version": "4.7.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/config-resolver/-/config-resolver-4.7.2.tgz",
+      "integrity": "sha512-Y1XfSefHIOub9762qm3ShafdlEE/Va8h3kLUeMq765fNeWeNLcOP2YUPr86H1SlyGwZTOqQ67RlBZPZ3k9Djgg==",
+      "package_json_sha256": "d04d770e309d97b0027b5aff38237f9e7e36a6185b0f51629cff7eeede114205",
+      "retained_package_json": "licenses/dependencies/@smithy/config-resolver/4.7.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/config-resolver/4.7.2/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/core",
+      "name": "@smithy/core",
+      "version": "3.35.1",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/core/-/core-3.35.1.tgz",
+      "integrity": "sha512-i4YPS4B6ts7bjn7UwLnGjiZdprOvHvgGobFZsYK3GIY3E5hIqtj0rReU69BcTpGp+fvtraSNXeG1l+jtJvF55w==",
+      "package_json_sha256": "214f92aba7ee2716d7bc984887bf42213cdca828b73c4ba1ffd69cad2d69ecf0",
+      "retained_package_json": "licenses/dependencies/@smithy/core/3.35.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/core/3.35.1/LICENSE",
+          "sha256": "07364a5f7d0177a59a05a0002187431f8f899320983c0dc049d72df015e8064c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/credential-provider-imds",
+      "name": "@smithy/credential-provider-imds",
+      "version": "4.5.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/credential-provider-imds/-/credential-provider-imds-4.5.2.tgz",
+      "integrity": "sha512-A9uSdn72ozbRUSit0eib0TW7nXuNPlaeM0zcGkJ+nE6tFcSDbnmtwoxbTCFBukVQcszDAyvsd7+rTduPTXpygg==",
+      "package_json_sha256": "1e3b437bfaf7800cbcd770cc744084ab9e3b6c445196b707fde90e2f66e0403c",
+      "retained_package_json": "licenses/dependencies/@smithy/credential-provider-imds/4.5.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/credential-provider-imds/4.5.2/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/eventstream-serde-config-resolver",
+      "name": "@smithy/eventstream-serde-config-resolver",
+      "version": "4.6.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/eventstream-serde-config-resolver/-/eventstream-serde-config-resolver-4.6.2.tgz",
+      "integrity": "sha512-GVWpmVKiVAvZDr3E0qRPu+A7TzeeMUctuP9SoFpzGx31lenW3Wk8zq7N97p8sJMwLCyVhXcbv5D0UTURCHdH0w==",
+      "package_json_sha256": "13e2a60d76bd0b94d348f9923613bddbb09bfd13c219af1bb8064c6ab10e0253",
+      "retained_package_json": "licenses/dependencies/@smithy/eventstream-serde-config-resolver/4.6.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/eventstream-serde-config-resolver/4.6.2/LICENSE",
+          "sha256": "07364a5f7d0177a59a05a0002187431f8f899320983c0dc049d72df015e8064c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/eventstream-serde-node",
+      "name": "@smithy/eventstream-serde-node",
+      "version": "4.5.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/eventstream-serde-node/-/eventstream-serde-node-4.5.2.tgz",
+      "integrity": "sha512-WkWkseIHXv+hr6RnrkpEOv5TOPHWLzzlOsocnPCCKsdfCOkBN7qhBn1/Pij9QZynkloJXYsQp9A5ykdIPVL2tg==",
+      "package_json_sha256": "1910648a5fd525259a58794cab6cbe36fc22c849a8d00875dcbe476146b50a37",
+      "retained_package_json": "licenses/dependencies/@smithy/eventstream-serde-node/4.5.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/eventstream-serde-node/4.5.2/LICENSE",
+          "sha256": "07364a5f7d0177a59a05a0002187431f8f899320983c0dc049d72df015e8064c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/hash-node",
+      "name": "@smithy/hash-node",
+      "version": "4.5.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/hash-node/-/hash-node-4.5.2.tgz",
+      "integrity": "sha512-OcD8fGClTkP0BWHVEAgUp1RZyCw8cKfqTPQ+DgrSF5jvR8zKkw2Aud79L4G/1Fu3QKLcsHExxRIPQCcKx7+xkg==",
+      "package_json_sha256": "5bd4a285383eb3cb3522f8c8cbee2897f0d98394957b427243fc0058791986dd",
+      "retained_package_json": "licenses/dependencies/@smithy/hash-node/4.5.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/hash-node/4.5.2/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/hash-stream-node",
+      "name": "@smithy/hash-stream-node",
+      "version": "4.5.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/hash-stream-node/-/hash-stream-node-4.5.2.tgz",
+      "integrity": "sha512-0sx3A9RyCV8taQ1UM9P7K9JFH2bsLXhdIr85vNNXkhq7Q9TqUdm+XxGiBuInq76aA7vBdvUQFvvyBoB95DJf3Q==",
+      "package_json_sha256": "e8f25cd59cdac2b2c4ec188a0a7832fc343874fe2e11a5edf919c539a962e159",
+      "retained_package_json": "licenses/dependencies/@smithy/hash-stream-node/4.5.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/hash-stream-node/4.5.2/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/middleware-content-length",
+      "name": "@smithy/middleware-content-length",
+      "version": "4.5.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/middleware-content-length/-/middleware-content-length-4.5.2.tgz",
+      "integrity": "sha512-43Ixsc2OE5rhruhc9a1vETUCmK3Yh1AIbg2+wwQUgloOIti2FgPHmPLLBkjIqx8vdmpABtsVlhazNr5TMZKJmA==",
+      "package_json_sha256": "52fe8ae1657601d8c4afe5c236c407f98d6831c75c134da4d7c8dee8125eaa00",
+      "retained_package_json": "licenses/dependencies/@smithy/middleware-content-length/4.5.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/middleware-content-length/4.5.2/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/middleware-endpoint",
+      "name": "@smithy/middleware-endpoint",
+      "version": "4.7.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/middleware-endpoint/-/middleware-endpoint-4.7.2.tgz",
+      "integrity": "sha512-7HgK3/pQQHcD5w9lOPtK53/eDMKDp324Nd4KZ8XvxlcKHiWytuM9VwVOB2iy3rutsz/N1WNEWBkaRBayrGnuog==",
+      "package_json_sha256": "08a4a36d809f416e57c9d2113115156bde0b2c002bd2134cab9716410e5f1e0f",
+      "retained_package_json": "licenses/dependencies/@smithy/middleware-endpoint/4.7.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/middleware-endpoint/4.7.2/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/middleware-retry",
+      "name": "@smithy/middleware-retry",
+      "version": "4.8.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/middleware-retry/-/middleware-retry-4.8.2.tgz",
+      "integrity": "sha512-wj0BTZ6SC7YI8hSLMbZCO1BP7k8JOuSUHjRYrZJApqNEiHL6jxaLs5Sr92EeXu5CuVzZOUCFUuewXusWxps0bQ==",
+      "package_json_sha256": "4778ed89765386aa1e27049fa927bc8ebfd99eb5234382a41eedb5ce093e5663",
+      "retained_package_json": "licenses/dependencies/@smithy/middleware-retry/4.8.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/middleware-retry/4.8.2/LICENSE",
+          "sha256": "e345c2ee7df4446e739de7b91535f0c10ddcd909b9753889e943ee637b05db8c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/node-config-provider",
+      "name": "@smithy/node-config-provider",
+      "version": "4.6.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/node-config-provider/-/node-config-provider-4.6.2.tgz",
+      "integrity": "sha512-zMrXu/O5tPa7GLtra8L4wFG6DACcXT9QV4Ay+WEAjUhXm1dVq7c/q9Qv9gkJZNLY8hmQKg08778kDcxpKNMqOA==",
+      "package_json_sha256": "35e930dfe51d990e1aec94c3bf90512fd13fda22f544b31e0cb8971271c6451e",
+      "retained_package_json": "licenses/dependencies/@smithy/node-config-provider/4.6.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/node-config-provider/4.6.2/LICENSE",
+          "sha256": "b50925b3e63e2192e04323a29e905154bda999c8dcc4c78e96733a00a10fed9a",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/node-http-handler",
+      "name": "@smithy/node-http-handler",
+      "version": "4.12.1",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/node-http-handler/-/node-http-handler-4.12.1.tgz",
+      "integrity": "sha512-ThMkboGeONWXAelq9FvGsuJC4rOi+qyC4/zhUF58xYpxUg5sQKx2VXZYJmtNjr4dSuBJ1HeJXETQILCz3wOHvw==",
+      "package_json_sha256": "e685e00a1e28371390ffab5711e5300b81743b7a7d5f5bf1a994e40197467221",
+      "retained_package_json": "licenses/dependencies/@smithy/node-http-handler/4.12.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/node-http-handler/4.12.1/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/property-provider",
+      "name": "@smithy/property-provider",
+      "version": "4.5.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/property-provider/-/property-provider-4.5.2.tgz",
+      "integrity": "sha512-SPJCSCCGpHf5g5b8244ig3WVKIdv2DS+X6cfmy4bpKEYo4VlLYM+bGHpHbfbmp76vegMKQBvs7DEpwQ5YuhKLA==",
+      "package_json_sha256": "e4efdab1b46b8cf056e44bf44a842aa1bad9edc3594252c1134cf0a5284837ca",
+      "retained_package_json": "licenses/dependencies/@smithy/property-provider/4.5.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/property-provider/4.5.2/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/protocol-http",
+      "name": "@smithy/protocol-http",
+      "version": "5.6.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/protocol-http/-/protocol-http-5.6.2.tgz",
+      "integrity": "sha512-Asd04MaxODN6FNY8EPTeCAM4kPNi3jDUAjZU0Y4F9rHvpLUrrUo7KLcxFgSthywFr6dZfIyDLIJda6jxmVTk5w==",
+      "package_json_sha256": "055f7e97def162d975e7dad0656ae316bec1bbb2d44e9d51de0281a210dc7c63",
+      "retained_package_json": "licenses/dependencies/@smithy/protocol-http/5.6.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/protocol-http/5.6.2/LICENSE",
+          "sha256": "07364a5f7d0177a59a05a0002187431f8f899320983c0dc049d72df015e8064c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/signature-v4",
+      "name": "@smithy/signature-v4",
+      "version": "5.7.4",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/signature-v4/-/signature-v4-5.7.4.tgz",
+      "integrity": "sha512-tHy0K0VtqNd5Y7Y41h0a0Lhh0L1GzC08dTWg0F7vRJWFtTENg7IZikf3wQkanYIRdb7ngoIPMTmqgUi401fEeQ==",
+      "package_json_sha256": "d4794533b211f0100c0be02a8d35b677db84d84a7061ad7c0c6bb0bc5394cf11",
+      "retained_package_json": "licenses/dependencies/@smithy/signature-v4/5.7.4/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/signature-v4/5.7.4/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/smithy-client",
+      "name": "@smithy/smithy-client",
+      "version": "4.15.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/smithy-client/-/smithy-client-4.15.2.tgz",
+      "integrity": "sha512-qweA7dHwcWmq8IN2mIGo7nAfeji1nwWBra+P3nz4R8W8yoQYE6Iy2bN33I0W3d50MN/V5EiDY/nElr4EHITsrg==",
+      "package_json_sha256": "c8c5e1f9751ee355d68f580870014c9dfd5708ffffc73380d3c346c616b58a1b",
+      "retained_package_json": "licenses/dependencies/@smithy/smithy-client/4.15.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/smithy-client/4.15.2/LICENSE",
+          "sha256": "07364a5f7d0177a59a05a0002187431f8f899320983c0dc049d72df015e8064c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/types",
+      "name": "@smithy/types",
+      "version": "4.19.0",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/types/-/types-4.19.0.tgz",
+      "integrity": "sha512-r7jh49VJxGerfAcTQA6gXcKc+98zOp/tqRwzYjgOE+iSQsP6cEU1hq2QzbuipmP68QtYdY9wKEhiCQZIzHgZ4Q==",
+      "package_json_sha256": "3de7840fd63a03c33bb687fbdc4794884598402600b2ee02c68856e78e41bd52",
+      "retained_package_json": "licenses/dependencies/@smithy/types/4.19.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/types/4.19.0/LICENSE",
+          "sha256": "07364a5f7d0177a59a05a0002187431f8f899320983c0dc049d72df015e8064c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/url-parser",
+      "name": "@smithy/url-parser",
+      "version": "4.5.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/url-parser/-/url-parser-4.5.2.tgz",
+      "integrity": "sha512-xqZcyU/YjOt9ofe8WM1y9aCaAmxel2iRiHpkT0x2BN++mRXw0M4VdxPAOtuux279JndY6wWMiOt5BJ2xmAuMYA==",
+      "package_json_sha256": "9251757dbaf660550c9995c6e0022c0f745e44816c6af0a516b1795c48308630",
+      "retained_package_json": "licenses/dependencies/@smithy/url-parser/4.5.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/url-parser/4.5.2/LICENSE",
+          "sha256": "e345c2ee7df4446e739de7b91535f0c10ddcd909b9753889e943ee637b05db8c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/util-base64",
+      "name": "@smithy/util-base64",
+      "version": "4.6.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/util-base64/-/util-base64-4.6.2.tgz",
+      "integrity": "sha512-wTQX1hPfElIqY6AzM/s6c4UgpMxCL4MwJ5u6340ksLPq78lur6Y+keheIDk5gMX4G3KFh4MERcDt6xhRq+ie1Q==",
+      "package_json_sha256": "b76047905a8f6603678544e2e631d17c0931d6fea0b8081b6944f15e9a11cbc9",
+      "retained_package_json": "licenses/dependencies/@smithy/util-base64/4.6.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/util-base64/4.6.2/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/util-body-length-node",
+      "name": "@smithy/util-body-length-node",
+      "version": "4.5.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/util-body-length-node/-/util-body-length-node-4.5.2.tgz",
+      "integrity": "sha512-SErsW8pBKTCkFEA1RoChwW6/8JYzdcWqWDOsRP0xOtxMYsHOUMcldkcQjtujpKSy2FtlywqygCOxSKarc4TAZw==",
+      "package_json_sha256": "0315722780c41319de1cde9fcc0e77003e96471f84e112f5a0b7c4a8d6cbc1d9",
+      "retained_package_json": "licenses/dependencies/@smithy/util-body-length-node/4.5.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/util-body-length-node/4.5.2/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/util-config-provider",
+      "name": "@smithy/util-config-provider",
+      "version": "4.5.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/util-config-provider/-/util-config-provider-4.5.2.tgz",
+      "integrity": "sha512-bAtInttsiHw9HX/vaNUU6Nj8pWqxMNKD0okEsjr8StgKwRdzN4mpl4/P7/en2JNCWlCyterSDOoveptct/jOGg==",
+      "package_json_sha256": "ad853d1086c39ab064959d88dbd700db4a974401ef19a5b0ad9e5639c63dabd0",
+      "retained_package_json": "licenses/dependencies/@smithy/util-config-provider/4.5.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/util-config-provider/4.5.2/LICENSE",
+          "sha256": "b50925b3e63e2192e04323a29e905154bda999c8dcc4c78e96733a00a10fed9a",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/util-defaults-mode-node",
+      "name": "@smithy/util-defaults-mode-node",
+      "version": "4.5.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/util-defaults-mode-node/-/util-defaults-mode-node-4.5.2.tgz",
+      "integrity": "sha512-3915rhdCibo7Do927AFV6pXxsIiaKOZGGexJ3LnT2l5CgJZi3DPqZ2ZMhYTIPjiRA3asHhPe0gaFBtxuqXC8aA==",
+      "package_json_sha256": "c19f2038c9021eb8ace6e882278977e286d89e56d1ab66fc2f5de5d642a6cdb3",
+      "retained_package_json": "licenses/dependencies/@smithy/util-defaults-mode-node/4.5.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/util-defaults-mode-node/4.5.2/LICENSE",
+          "sha256": "e345c2ee7df4446e739de7b91535f0c10ddcd909b9753889e943ee637b05db8c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/util-endpoints",
+      "name": "@smithy/util-endpoints",
+      "version": "3.7.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/util-endpoints/-/util-endpoints-3.7.2.tgz",
+      "integrity": "sha512-16wQS3r4gXctr9/uYB0OUAUOm1LZLUKAsBeG364l64OalFwsRRvgO+AjL3OYxmxt060z1ExchX2ayrNVfM0r9Q==",
+      "package_json_sha256": "a07bcbac266e1f92b243f2bd39b79ef3ae325525bcda1eee61c5b15161ad5ac1",
+      "retained_package_json": "licenses/dependencies/@smithy/util-endpoints/3.7.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/util-endpoints/3.7.2/LICENSE",
+          "sha256": "8fcd6f5db99d14a8b87285b19311b170aefb3ccafd03d4e299dc05761c912b3a",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/util-middleware",
+      "name": "@smithy/util-middleware",
+      "version": "4.5.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/util-middleware/-/util-middleware-4.5.2.tgz",
+      "integrity": "sha512-wmfA04AZqTwu10EWGKUu4dm/3BZfSedqlqAiQPWVr8OkwFh0MovRDBwc48Pzd2YEEjqpI0JwXVk65TBarff3wQ==",
+      "package_json_sha256": "33576945242938be1dfec2cf63478d9bd92a5366a80adfb96401b64347bd99ac",
+      "retained_package_json": "licenses/dependencies/@smithy/util-middleware/4.5.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/util-middleware/4.5.2/LICENSE",
+          "sha256": "8fcd6f5db99d14a8b87285b19311b170aefb3ccafd03d4e299dc05761c912b3a",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/util-retry",
+      "name": "@smithy/util-retry",
+      "version": "4.6.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/util-retry/-/util-retry-4.6.2.tgz",
+      "integrity": "sha512-q6MXFNu+W4ZCNdNKutzDLP/Hzumd1FU9CQX++P/7ylanYIYiGhgZwSzwZWAw+G1RNcfY+RBYv61XcGlSYhj+BA==",
+      "package_json_sha256": "54ea7c889d8f3778b40c6e249054dfc73ddb19879a5c4d6ca783a54472e9feae",
+      "retained_package_json": "licenses/dependencies/@smithy/util-retry/4.6.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/util-retry/4.6.2/LICENSE",
+          "sha256": "8fcd6f5db99d14a8b87285b19311b170aefb3ccafd03d4e299dc05761c912b3a",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/util-stream",
+      "name": "@smithy/util-stream",
+      "version": "4.8.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/util-stream/-/util-stream-4.8.2.tgz",
+      "integrity": "sha512-R+S7jmu8VdbtOygMUSIGfkmOBp0SowT8+8LZdk21oXdmmKfN4G/bwN5IGIi0UH3RwWc9KJWDH1Dzm45DClyUvw==",
+      "package_json_sha256": "53b39a9dea9de938a206d79dca43374f464a632dfc5e18670b0462ac22bd6d1d",
+      "retained_package_json": "licenses/dependencies/@smithy/util-stream/4.8.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/util-stream/4.8.2/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/util-utf8",
+      "name": "@smithy/util-utf8",
+      "version": "4.5.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/util-utf8/-/util-utf8-4.5.2.tgz",
+      "integrity": "sha512-7wNWV7SugHpcMA7uzEawJNpE0GrasXM7a9E+1+Wm6NxVuDClESac/AKt+G7jMZNUz5vBLWqKlqVV7Sv7AtUr6Q==",
+      "package_json_sha256": "de35dfb7cc1ee35e095203a08a614690cd5dec5af4f5fc9bf9d6ee32c41c1721",
+      "retained_package_json": "licenses/dependencies/@smithy/util-utf8/4.5.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/util-utf8/4.5.2/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@smithy/util-waiter",
+      "name": "@smithy/util-waiter",
+      "version": "4.6.2",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@smithy/util-waiter/-/util-waiter-4.6.2.tgz",
+      "integrity": "sha512-TNNK01i1HiSAR6hBF94J7q338JgEaHPrP8QKRSeQBsbSbw5O4+YGdZYitmsTeEWvHGX+2R/oQ7BzxyAjeZxuWg==",
+      "package_json_sha256": "6de18449c0ad4dea9596fb44f0b30c56efd41b2869b9b8c6b2a1f77fc3da4bd2",
+      "retained_package_json": "licenses/dependencies/@smithy/util-waiter/4.6.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@smithy/util-waiter/4.6.2/LICENSE",
+          "sha256": "d82ceb8cbd004a2d4834085c557d55459f528e30268d95159ee1e4030a693a6e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@supabase/auth-js",
+      "name": "@supabase/auth-js",
+      "version": "2.69.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/@supabase/auth-js/-/auth-js-2.69.1.tgz",
+      "integrity": "sha512-FILtt5WjCNzmReeRLq5wRs3iShwmnWgBvxHfqapC/VoljJl+W8hDAyFmf1NVw3zH+ZjZ05AKxiKxVeb0HNWRMQ==",
+      "package_json_sha256": "9ee58c0a789bdc8bc4b1623db82c8c906e5f6e0cb1975a54324d7bb13673cffd",
+      "retained_package_json": "licenses/dependencies/@supabase/auth-js/2.69.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@supabase/auth-js/2.69.1/LICENSE",
+          "sha256": "334dd6820e2eaeab2064e7c59001b810566728a28a41a7c1dbf69bbee17d0936",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@supabase/node-fetch",
+      "name": "@supabase/node-fetch",
+      "version": "2.6.15",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/@supabase/node-fetch/-/node-fetch-2.6.15.tgz",
+      "integrity": "sha512-1ibVeYUacxWYi9i0cf5efil6adJ9WRyZBLivgjs+AUpewx1F3xPi7gLgaASI2SmIQxPoCEjAsLAzKPgMJVgOUQ==",
+      "package_json_sha256": "1e5d376c5fd01251083e77df1593bf40f008dcac775b891423450fc4771924b4",
+      "retained_package_json": "licenses/dependencies/@supabase/node-fetch/2.6.15/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@supabase/node-fetch/2.6.15/LICENSE.md",
+          "sha256": "84eaa985e1ef71b8c630e8aba73404c219ff425c6fdb45c62e998b58d4fbdc8e",
+          "source": "LICENSE.md"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/@zone-eu/mailsplit",
+      "name": "@zone-eu/mailsplit",
+      "version": "5.4.16",
+      "license": "(MIT OR EUPL-1.1+)",
+      "resolved": "https://registry.npmjs.org/@zone-eu/mailsplit/-/mailsplit-5.4.16.tgz",
+      "integrity": "sha512-zQ9iXvlT3Wi/hazeC1MdI4rQc1UJwJ6IQ6QzSZ5KDxLZZWQSazWLOzImLFluXadKShJ9WJvI1xH+AyVS8b9azg==",
+      "package_json_sha256": "6c427720e253cabd93b1e1c2989b203d10dde240afc69f5dbd7e222af661f94e",
+      "retained_package_json": "licenses/dependencies/@zone-eu/mailsplit/5.4.16/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/@zone-eu/mailsplit/5.4.16/LICENSE.EUPL-1.2",
+          "sha256": "1dc969d706e1c7f06961186aadb674ed4886a669fe91b31914ac4fd8dbec83dc",
+          "source": "LICENSE.EUPL-1.2"
+        },
+        {
+          "path": "licenses/dependencies/@zone-eu/mailsplit/5.4.16/LICENSE.MIT",
+          "sha256": "412ad6764b495ece74454c3b1d1816a4bf9b533f94158d23bfe4342559d8ca46",
+          "source": "LICENSE.MIT"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/abort-controller",
+      "name": "abort-controller",
+      "version": "3.0.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/abort-controller/-/abort-controller-3.0.0.tgz",
+      "integrity": "sha512-h8lQ8tacZYnR3vNQTgibj+tODHI5/+l06Au2Pcriv/Gmet0eaj4TwWH41sO9wnHDiQsEj19q0drzdWdeAHtweg==",
+      "package_json_sha256": "3d64dcdcf9d0a1d045eb6bcaa5013d486f15527a3668e64b1155839a797da164",
+      "retained_package_json": "licenses/dependencies/abort-controller/3.0.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/abort-controller/3.0.0/LICENSE",
+          "sha256": "dbbf03317f0101fed5643cd87ca80fb769e358fa4f428445bf2315deeb23a154",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/abortcontroller-polyfill",
+      "name": "abortcontroller-polyfill",
+      "version": "1.7.8",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/abortcontroller-polyfill/-/abortcontroller-polyfill-1.7.8.tgz",
+      "integrity": "sha512-9f1iZ2uWh92VcrU9Y8x+LdM4DLj75VE0MJB8zuF1iUnroEptStw+DQ8EQPMUdfe5k+PkB1uUfDQfWbhstH8LrQ==",
+      "package_json_sha256": "8c083c1db7ef347e287cfcc662feaa1794da2b65a5c4f2d67150cf4232fc3632",
+      "retained_package_json": "licenses/dependencies/abortcontroller-polyfill/1.7.8/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/abortcontroller-polyfill/1.7.8/LICENSE",
+          "sha256": "c301f5d2eb20d1b285b5e2f09cd1f7ec3a70a1f1bf497ad7c37906cc18da143c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/agent-base",
+      "name": "agent-base",
+      "version": "7.1.4",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/agent-base/-/agent-base-7.1.4.tgz",
+      "integrity": "sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==",
+      "package_json_sha256": "7a08cb2fe1d2b788e0a7bf6a9b7597dbeeeae804698c2fbd15de786d284d327c",
+      "retained_package_json": "licenses/dependencies/agent-base/7.1.4/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/agent-base/7.1.4/LICENSE",
+          "sha256": "8d8c55319c7729d57be811c747452636688d54f19701ee0752b6b15ad3771d9a",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/airtable",
+      "name": "airtable",
+      "version": "0.11.6",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/airtable/-/airtable-0.11.6.tgz",
+      "integrity": "sha512-Na67L2TO1DflIJ1yOGhQG5ilMfL2beHpsR+NW/jhaYOa4QcoxZOtDFs08cpSd1tBMsLpz5/rrz/VMX/pGL/now==",
+      "package_json_sha256": "cee6c6a083f7e13ecb8c42bb86410f422e5b223567161d30965b25efa2f3569d",
+      "retained_package_json": "licenses/dependencies/airtable/0.11.6/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/airtable/0.11.6/LICENSE.txt",
+          "sha256": "de6cc263f206fe7559bf1c9ec13a0c37699ab16d04e2741267915d6b6337be4e",
+          "source": "LICENSE.txt"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/asynckit",
+      "name": "asynckit",
+      "version": "0.4.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/asynckit/-/asynckit-0.4.0.tgz",
+      "integrity": "sha512-Oei9OH4tRh0YqU3GxhX79dM/mwVgvbZJaSNaRk+bshkj0S5cfHcgYakreBjrHwatXKbz+IoIdYLxrKim2MjW0Q==",
+      "package_json_sha256": "63eb9ff63be2e241ee6e80434d4641d6e9b5157d88bd3bbb692fcb2dfc8da4a9",
+      "retained_package_json": "licenses/dependencies/asynckit/0.4.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/asynckit/0.4.0/LICENSE",
+          "sha256": "1953150d5d4b10c7542cee6f6e0c613b2682545233f069d75cfff1936386ce10",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/axios",
+      "name": "axios",
+      "version": "1.20.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/axios/-/axios-1.20.0.tgz",
+      "integrity": "sha512-r8aOh8j9cGKpgQAqpzrUHnSIc6a59Y3Xf/cv8sy1DrHCkZHzQGEuoq1tARk6qSyDdtQGSDgpb9kFlruzPvrgwg==",
+      "package_json_sha256": "cc221510be6315b0ebf648d7e4346680e47a828fafcbb9cc141922d2d219761e",
+      "retained_package_json": "licenses/dependencies/axios/1.20.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/axios/1.20.0/LICENSE",
+          "sha256": "82761059eaedacb3356803aea8a170d8298609f91b14fc32ee1bfb40d690183c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/axios/node_modules/agent-base",
+      "name": "agent-base",
+      "version": "6.0.2",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/agent-base/-/agent-base-6.0.2.tgz",
+      "integrity": "sha512-RZNwNclF7+MS/8bDg70amg32dyeZGZxiDuQmZxKLAlQjr3jGyLx+4Kkk58UO7D2QdgFIQCovuSuZESne6RG6XQ==",
+      "package_json_sha256": "05daa619e51686fd21d15f987f943f6692c56b9f489f555cbaf42a4263d5c5e8",
+      "retained_package_json": "licenses/dependencies/agent-base/6.0.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/agent-base/6.0.2/README.md",
+          "sha256": "f1425c3b72330fe4fb2aa5a2fb152e939bdf534692a32b5f0b38f74147b98556",
+          "source": "README.md (contains full MIT copyright and license)"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/axios/node_modules/https-proxy-agent",
+      "name": "https-proxy-agent",
+      "version": "5.0.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/https-proxy-agent/-/https-proxy-agent-5.0.1.tgz",
+      "integrity": "sha512-dFcAjpTQFgoLMzC2VwU+C/CbS7uRL0lWmxDITmqm7C+7F0Odmj6s9l6alZc6AELXhrnggM2CeWSXHGOdX2YtwA==",
+      "package_json_sha256": "d41d9127cbed43df8e2d404bfaf41361942a8afeb82eb57ccf8515e04eb33d1d",
+      "retained_package_json": "licenses/dependencies/https-proxy-agent/5.0.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/https-proxy-agent/5.0.1/README.md",
+          "sha256": "32f0856d2c43df7d05cca960fdee84e1e38ab545bd7b2186433dfa41aa90a712",
+          "source": "README.md (contains full MIT copyright and license)"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/base64-js",
+      "name": "base64-js",
+      "version": "1.5.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/base64-js/-/base64-js-1.5.1.tgz",
+      "integrity": "sha512-AKpaYlHn8t4SVbOHCy+b5+KKgvR4vrsD8vbvrbiQJps7fKDTkjkDry6ji0rUJjC0kzbNePLwzxq8iypo41qeWA==",
+      "package_json_sha256": "9758f3ab8c45e07bb9a368e32f9a8b3729623bbf47cbbb205b32d674ab2a91f0",
+      "retained_package_json": "licenses/dependencies/base64-js/1.5.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/base64-js/1.5.1/LICENSE",
+          "sha256": "5b37224c080cdcc97c871ada971c224e9926370fe74f11b539aa1cf9f3b1aca1",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/bignumber.js",
+      "name": "bignumber.js",
+      "version": "9.3.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/bignumber.js/-/bignumber.js-9.3.1.tgz",
+      "integrity": "sha512-Ko0uX15oIUS7wJ3Rb30Fs6SkVbLmPBAKdlm7q9+ak9bbIeFf0MwuBsQV6z7+X768/cHsfg+WlysDWJcmthjsjQ==",
+      "package_json_sha256": "192208575108629a3272453526258511a5911a8127ab955371fb1f25ac79e99d",
+      "retained_package_json": "licenses/dependencies/bignumber.js/9.3.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/bignumber.js/9.3.1/LICENCE.md",
+          "sha256": "def75ba75d6426f1c3f02addf8e175fbe6e0d8a82e541cbdffc16d2bd8fd7d6a",
+          "source": "LICENCE.md"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/bottleneck",
+      "name": "bottleneck",
+      "version": "2.19.5",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/bottleneck/-/bottleneck-2.19.5.tgz",
+      "integrity": "sha512-VHiNCbI1lKdl44tGrhNfU3lup0Tj/ZBMJB5/2ZbNXRCPuRCO7ed2mgcK4r17y+KB2EfuYuRaVlwNbAeaWGSpbw==",
+      "package_json_sha256": "9e73efe094fc7802ce2288f1e342e9f28c2fe75f017002a96a35a478eb1df4d9",
+      "retained_package_json": "licenses/dependencies/bottleneck/2.19.5/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/bottleneck/2.19.5/LICENSE",
+          "sha256": "84a08edb16cc9ae161c31e76c9e593702f3d9192061abc6721398e0227bdb5e7",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/bowser",
+      "name": "bowser",
+      "version": "2.14.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/bowser/-/bowser-2.14.1.tgz",
+      "integrity": "sha512-tzPjzCxygAKWFOJP011oxFHs57HzIhOEracIgAePE4pqB3LikALKnSzUyU4MGs9/iCEUuHlAJTjTc5M+u7YEGg==",
+      "package_json_sha256": "b12b643998a1a7febff9933b5a05e53045c722ff4de13fab751391b2d346a974",
+      "retained_package_json": "licenses/dependencies/bowser/2.14.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/bowser/2.14.1/LICENSE",
+          "sha256": "dfde54fedc270c2a305d9a9f993d93f706d34624455a2fd2d2a05ca34d8ae8c3",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/buffer-equal-constant-time",
+      "name": "buffer-equal-constant-time",
+      "version": "1.0.1",
+      "license": "BSD-3-Clause",
+      "resolved": "https://registry.npmjs.org/buffer-equal-constant-time/-/buffer-equal-constant-time-1.0.1.tgz",
+      "integrity": "sha512-zRpUiDwd/xk6ADqPMATG8vc9VPrkck7T07OIx0gnjmJAnHnTVXNQG3vfvWNuiZIkwu9KrKdA1iJKfsfTVxE6NA==",
+      "package_json_sha256": "2d3df7ecb57811cf6fc43be180d9801c7c70928e5388391a6f258d889449ef4e",
+      "retained_package_json": "licenses/dependencies/buffer-equal-constant-time/1.0.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/buffer-equal-constant-time/1.0.1/LICENSE.txt",
+          "sha256": "751d0e80fb5c828f8c3de198cc760e1e05377e47c8263ab6ee2f10cdc19ba658",
+          "source": "LICENSE.txt"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/buffer-from",
+      "name": "buffer-from",
+      "version": "1.1.2",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/buffer-from/-/buffer-from-1.1.2.tgz",
+      "integrity": "sha512-E+XQCRwSbaaiChtv6k6Dwgc+bx+Bs6vuKJHHl5kox/BaKbhiXzqQOwK4cO22yElGp2OCmjwVhT3HmxgyPGnJfQ==",
+      "package_json_sha256": "f7cde31d1db3e71738045206397d472e1f12513643ba4b9fd60ea337f22b1e3f",
+      "retained_package_json": "licenses/dependencies/buffer-from/1.1.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/buffer-from/1.1.2/LICENSE",
+          "sha256": "14275f5c8139d02054c5259d52a88ccbba662a86af18c30f071c8d082dc6004c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/call-bind-apply-helpers",
+      "name": "call-bind-apply-helpers",
+      "version": "1.0.2",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/call-bind-apply-helpers/-/call-bind-apply-helpers-1.0.2.tgz",
+      "integrity": "sha512-Sp1ablJ0ivDkSzjcaJdxEunN5/XvksFJ2sMBFfq6x0ryhQV/2b/KwFe21cMpmHtPOSij8K99/wSfoEuTObmuMQ==",
+      "package_json_sha256": "59639b628c6846f674857c6a613fd47e2e4d2a24036cdf0f7a62ac634f4c8a5f",
+      "retained_package_json": "licenses/dependencies/call-bind-apply-helpers/1.0.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/call-bind-apply-helpers/1.0.2/LICENSE",
+          "sha256": "5e325595b4ea8cfec3802f545b1def5d7b73e4a5b8e9ba63e32a320f67732292",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/call-bound",
+      "name": "call-bound",
+      "version": "1.0.4",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/call-bound/-/call-bound-1.0.4.tgz",
+      "integrity": "sha512-+ys997U96po4Kx/ABpBCqhA9EuxJaQWDQg7295H4hBphv3IZg0boBKuwYpt4YXp6MZ5AmZQnU/tyMTlRpaSejg==",
+      "package_json_sha256": "dcc8abb3c4ad3774234272149020cb36d7b1a3d377a419454d1e7adb368dd9c3",
+      "retained_package_json": "licenses/dependencies/call-bound/1.0.4/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/call-bound/1.0.4/LICENSE",
+          "sha256": "5e325595b4ea8cfec3802f545b1def5d7b73e4a5b8e9ba63e32a320f67732292",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/combined-stream",
+      "name": "combined-stream",
+      "version": "1.0.8",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/combined-stream/-/combined-stream-1.0.8.tgz",
+      "integrity": "sha512-FQN4MRfuJeHf7cBbBMJFXhKSDq+2kAArBlmRBvcvFE5BB1HZKXtSFASDhdlz9zOYwxh8lDdnvmMOe/+5cdoEdg==",
+      "package_json_sha256": "761adece21443081ae818fe0e18864d7fa03f387075b89afa6cc5dd98356fafa",
+      "retained_package_json": "licenses/dependencies/combined-stream/1.0.8/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/combined-stream/1.0.8/License",
+          "sha256": "47eb8ca82c798246774946d1be0f9aa08f025fa8325ced0947aeeb4c05fe5547",
+          "source": "License"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/contentful-management",
+      "name": "contentful-management",
+      "version": "11.48.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/contentful-management/-/contentful-management-11.48.1.tgz",
+      "integrity": "sha512-LxN5Vcdc7UNbQVOVIb49iIwtNBumdL2vKi820Az/XTejkRAvk9dOO5QDUIMmLT6clK2LPGGa1F3xnVtemr8IhQ==",
+      "package_json_sha256": "0b33594ca39198eccf6dafc06adbe7baee0f9e393d60509f62e52a5f90d6a6c3",
+      "retained_package_json": "licenses/dependencies/contentful-management/11.48.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/contentful-management/11.48.1/LICENSE",
+          "sha256": "396954153e39c46854424b32d2961bc5854a93ffbc1eda6d12288761adb0ec4f",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/contentful-sdk-core",
+      "name": "contentful-sdk-core",
+      "version": "9.4.5",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/contentful-sdk-core/-/contentful-sdk-core-9.4.5.tgz",
+      "integrity": "sha512-8eGTMO11LXFAiosaiV38bjvW6cjoQFtNE38pNtVilZTXpmGFinClljihH0eriv11Ispd4q82TqtsXMJPYD/C+A==",
+      "package_json_sha256": "0dc8e734cdbafc685a36e8978ad2b5f2db3e327183df2c348fce5c5069cf64b1",
+      "retained_package_json": "licenses/dependencies/contentful-sdk-core/9.4.5/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/contentful-sdk-core/9.4.5/LICENSE",
+          "sha256": "396954153e39c46854424b32d2961bc5854a93ffbc1eda6d12288761adb0ec4f",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/cross-fetch",
+      "name": "cross-fetch",
+      "version": "3.2.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/cross-fetch/-/cross-fetch-3.2.0.tgz",
+      "integrity": "sha512-Q+xVJLoGOeIMXZmbUK4HYk+69cQH6LudR0Vu/pRm2YlU/hDV9CiS0gKUMaWY5f2NeUH9C1nV3bsTlCo0FsTV1Q==",
+      "package_json_sha256": "350d571599257e12db8800f8c185bd94597e98cfa783e86392c50f4e4fd98c64",
+      "retained_package_json": "licenses/dependencies/cross-fetch/3.2.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/cross-fetch/3.2.0/LICENSE",
+          "sha256": "821a6be45c3fd08815688b30b6210fc97848cf88c7a6ed8afb22ae75b83571b4",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/data-uri-to-buffer",
+      "name": "data-uri-to-buffer",
+      "version": "4.0.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/data-uri-to-buffer/-/data-uri-to-buffer-4.0.1.tgz",
+      "integrity": "sha512-0R9ikRb668HB7QDxT1vkpuUBtqc53YyAwMwGeUFKRojY/NWKvdZ+9UYtRfGmhqNbRkTSVpMbmyhXipFFv2cb/A==",
+      "package_json_sha256": "ad4f90a737ab5d8af4dad265e9218456e3779ca5beb70df38dd5feecf80121dd",
+      "retained_package_json": "licenses/dependencies/data-uri-to-buffer/4.0.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/data-uri-to-buffer/4.0.1/README.md",
+          "sha256": "a7cc4332acfa1f9b6530e01aac77fefe74f2efa32579215fddaa473013f9a25c",
+          "source": "README.md"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/dayjs",
+      "name": "dayjs",
+      "version": "1.11.9",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/dayjs/-/dayjs-1.11.9.tgz",
+      "integrity": "sha512-QvzAURSbQ0pKdIye2txOzNaHmxtUBXerpY0FJsFXUMKbIZeFm5ht1LS/jFsrncjnmtv8HsG0W2g6c0zUjZWmpA==",
+      "package_json_sha256": "4d14b27235c433feac3504884a26d6adc5c584cf810844ae7e3c3da43ef861ef",
+      "retained_package_json": "licenses/dependencies/dayjs/1.11.9/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/dayjs/1.11.9/LICENSE",
+          "sha256": "5faab7526d055651be3aab769d58897be6bd91f3d39d137f25f12dba1b31d5dc",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/debug",
+      "name": "debug",
+      "version": "4.4.3",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/debug/-/debug-4.4.3.tgz",
+      "integrity": "sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA==",
+      "package_json_sha256": "ea8e33d63fe5f3a4c36609b6c3df8e2ef1f8b8ba2fc3a2e1e53cb27291f384af",
+      "retained_package_json": "licenses/dependencies/debug/4.4.3/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/debug/4.4.3/LICENSE",
+          "sha256": "3a61c6c96caf5c1d9b623fb9b04c822b783dfcb78aa7e49c76a3f643e6ed7f95",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/deepmerge-ts",
+      "name": "deepmerge-ts",
+      "version": "8.0.2",
+      "license": "BSD-3-Clause",
+      "resolved": "https://registry.npmjs.org/deepmerge-ts/-/deepmerge-ts-8.0.2.tgz",
+      "integrity": "sha512-uqbvqLUMrc6p0MO+WBRtTxY55hmyh94WRwI5a++PZe54X+bfVh59FSN7uWCBCW1CCVjzjnrwzfI8zidE2obMMw==",
+      "package_json_sha256": "acba39ae6d1a41fb87555e2a3ed8343b8264e477e547b2e8cacc422eea6a05dd",
+      "retained_package_json": "licenses/dependencies/deepmerge-ts/8.0.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/deepmerge-ts/8.0.2/LICENSE",
+          "sha256": "734d8fd2baff4a5b7450a5b8242d4a960bc4ade3b0ade5e6cad642965d1d496d",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/delayed-stream",
+      "name": "delayed-stream",
+      "version": "1.0.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/delayed-stream/-/delayed-stream-1.0.0.tgz",
+      "integrity": "sha512-ZySD7Nf91aLB0RxL4KGrKHBXl7Eds1DAmEdcoVawXnLD7SDhpNgtuII2aAkg7a7QS41jxPSZ17p4VdGnMHk3MQ==",
+      "package_json_sha256": "4f5bd886efbd8feda6ac04db6ac1aa8b2e8dfc159503b0652667e1bc88efd4cb",
+      "retained_package_json": "licenses/dependencies/delayed-stream/1.0.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/delayed-stream/1.0.0/License",
+          "sha256": "47eb8ca82c798246774946d1be0f9aa08f025fa8325ced0947aeeb4c05fe5547",
+          "source": "License"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/dom-serializer",
+      "name": "dom-serializer",
+      "version": "2.0.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/dom-serializer/-/dom-serializer-2.0.0.tgz",
+      "integrity": "sha512-wIkAryiqt/nV5EQKqQpo3SToSOV9J0DnbJqwK7Wv/Trc92zIAYZ4FlMu+JPFW1DfGFt81ZTCGgDEabffXeLyJg==",
+      "package_json_sha256": "098603e7fee62c07fb392e31dae4dc151a3e03c72555ce1f9182011fbf898501",
+      "retained_package_json": "licenses/dependencies/dom-serializer/2.0.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/dom-serializer/2.0.0/LICENSE",
+          "sha256": "94cfe87de9b178e8fee313a19178e625129e2ce559db32e772e7bd95114ee6ff",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/domelementtype",
+      "name": "domelementtype",
+      "version": "2.3.0",
+      "license": "BSD-2-Clause",
+      "resolved": "https://registry.npmjs.org/domelementtype/-/domelementtype-2.3.0.tgz",
+      "integrity": "sha512-OLETBj6w0OsagBwdXnPdN0cnMfF9opN69co+7ZrbfPGrdpPVNBUj02spi6B1N7wChLQiPn4CSH/zJvXw56gmHw==",
+      "package_json_sha256": "4ddf28a1e60ae7ec15f62cda0d72eb06bcae05b3819942d971c841b7cc0b6930",
+      "retained_package_json": "licenses/dependencies/domelementtype/2.3.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/domelementtype/2.3.0/LICENSE",
+          "sha256": "cb992345949ccd6e8394b2cd6c465f7b897c864f845937dbf64e8997f389e164",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/domhandler",
+      "name": "domhandler",
+      "version": "5.0.3",
+      "license": "BSD-2-Clause",
+      "resolved": "https://registry.npmjs.org/domhandler/-/domhandler-5.0.3.tgz",
+      "integrity": "sha512-cgwlv/1iFQiFnU96XXgROh8xTeetsnJiDsTc7TYCLFd9+/WNkIqPTxiM/8pSd8VIrhXGTf1Ny1q1hquVqDJB5w==",
+      "package_json_sha256": "cbb42a446eef285863e04158c7f269e0e7b8e868c1042d6845e996d760f7376c",
+      "retained_package_json": "licenses/dependencies/domhandler/5.0.3/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/domhandler/5.0.3/LICENSE",
+          "sha256": "cb992345949ccd6e8394b2cd6c465f7b897c864f845937dbf64e8997f389e164",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/domutils",
+      "name": "domutils",
+      "version": "3.2.2",
+      "license": "BSD-2-Clause",
+      "resolved": "https://registry.npmjs.org/domutils/-/domutils-3.2.2.tgz",
+      "integrity": "sha512-6kZKyUajlDuqlHKVX1w7gyslj9MPIXzIFiz/rGu35uC1wMi+kMhQwGhl4lt9unC9Vb9INnY9Z3/ZA3+FhASLaw==",
+      "package_json_sha256": "9a04689cc67f52e9f7323e0dd4d18c8cbe68744c3373ad524d133ddf12bf99ab",
+      "retained_package_json": "licenses/dependencies/domutils/3.2.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/domutils/3.2.2/LICENSE",
+          "sha256": "cb992345949ccd6e8394b2cd6c465f7b897c864f845937dbf64e8997f389e164",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/dunder-proto",
+      "name": "dunder-proto",
+      "version": "1.0.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/dunder-proto/-/dunder-proto-1.0.1.tgz",
+      "integrity": "sha512-KIN/nDJBQRcXw0MLVhZE9iQHmG68qAVIBg9CqmUYjmQIhgij9U5MFvrqkUL5FbtyyzZuOeOt0zdeRe4UY7ct+A==",
+      "package_json_sha256": "24df71008e4225c858f389dd2728b76cf66b752256d42a38ed7930aacae7fe2b",
+      "retained_package_json": "licenses/dependencies/dunder-proto/1.0.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/dunder-proto/1.0.1/LICENSE",
+          "sha256": "2b770a704c15de238c3f622b01b0044ddd60b49ee30608ea6991ebf19db7a7a1",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/ecdsa-sig-formatter",
+      "name": "ecdsa-sig-formatter",
+      "version": "1.0.11",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/ecdsa-sig-formatter/-/ecdsa-sig-formatter-1.0.11.tgz",
+      "integrity": "sha512-nagl3RYrbNv6kQkeJIpt6NJZy8twLB/2vtz6yN9Z4vRKHN4/QZJIEbqohALSgwKdnksuY3k5Addp5lg8sVoVcQ==",
+      "package_json_sha256": "f8c0805a13487310192db6ae04452c4315f5538ae87d7bc20de2904902c34027",
+      "retained_package_json": "licenses/dependencies/ecdsa-sig-formatter/1.0.11/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/ecdsa-sig-formatter/1.0.11/LICENSE",
+          "sha256": "50a6b24f8defc31a078aa9799a91d776f83948071574854f12473362aee74d0d",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/encoding",
+      "name": "encoding",
+      "version": "0.1.13",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/encoding/-/encoding-0.1.13.tgz",
+      "integrity": "sha512-ETBauow1T35Y/WZMkio9jiM0Z5xjHHmJ4XmjZOq1l/dXz3lr2sRn87nJy20RupqSh1F2m3HHPSp8ShIPQJrJ3A==",
+      "package_json_sha256": "8a868d7c206bf2eb71c0721a957b7a255738678f72c290c880b46fec4ec54dbe",
+      "retained_package_json": "licenses/dependencies/encoding/0.1.13/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/encoding/0.1.13/LICENSE",
+          "sha256": "2453d3b90aa23715eec80b25fcda1bebf71052ad41a6694d58a9aa867d103c81",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/encoding-japanese",
+      "name": "encoding-japanese",
+      "version": "2.3.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/encoding-japanese/-/encoding-japanese-2.3.0.tgz",
+      "integrity": "sha512-eQyh1vzHz13DUkZcJO+0IOAoKXRQwKV5IBffeuYsWZyRLGiSzfzXObCqWvqFXdX0UU8qOk+lBXbkUhMCpdJe4Q==",
+      "package_json_sha256": "32f1759ad2cf8bc8659e9e9455a52468445dbbd223c2a5c6092b44e17ce787c9",
+      "retained_package_json": "licenses/dependencies/encoding-japanese/2.3.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/encoding-japanese/2.3.0/LICENSE",
+          "sha256": "9817440890faace3016b8552aeb245cecebbbc50ef1ae30f56dc6fbc36e08bda",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/entities",
+      "name": "entities",
+      "version": "4.5.0",
+      "license": "BSD-2-Clause",
+      "resolved": "https://registry.npmjs.org/entities/-/entities-4.5.0.tgz",
+      "integrity": "sha512-V0hjH4dGPh9Ao5p0MoRY6BVqtwCjhz6vI5LT8AJ55H+4g9/4vbHx1I54fS0XuclLhDHArPQCiMjDxjaL8fPxhw==",
+      "package_json_sha256": "c92f657f679669a91bc32cd98f0b4812b3f4a9c6f3b3af3022a70cb25b7efc7c",
+      "retained_package_json": "licenses/dependencies/entities/4.5.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/entities/4.5.0/LICENSE",
+          "sha256": "cb992345949ccd6e8394b2cd6c465f7b897c864f845937dbf64e8997f389e164",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/es-define-property",
+      "name": "es-define-property",
+      "version": "1.0.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/es-define-property/-/es-define-property-1.0.1.tgz",
+      "integrity": "sha512-e3nRfgfUZ4rNGL232gUgX06QNyyez04KdjFrF+LTRoOXmrOgFKDg4BCdsjW8EnT69eqdYGmRpJwiPVYNrCaW3g==",
+      "package_json_sha256": "3a2cb30dae30a96705dcd9aa2d5fb190cf8200f27badccfa5a81a4374e5708b4",
+      "retained_package_json": "licenses/dependencies/es-define-property/1.0.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/es-define-property/1.0.1/LICENSE",
+          "sha256": "5e325595b4ea8cfec3802f545b1def5d7b73e4a5b8e9ba63e32a320f67732292",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/es-errors",
+      "name": "es-errors",
+      "version": "1.3.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/es-errors/-/es-errors-1.3.0.tgz",
+      "integrity": "sha512-Zf5H2Kxt2xjTvbJvP2ZWLEICxA6j+hAmMzIlypy4xcBg1vKVnx89Wy0GbS+kf5cwCVFFzdCFh2XSCFNULS6csw==",
+      "package_json_sha256": "1a0a0bcccc76b915cb64073317312840cf6363e9144b96f406d0059774dd5278",
+      "retained_package_json": "licenses/dependencies/es-errors/1.3.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/es-errors/1.3.0/LICENSE",
+          "sha256": "5e325595b4ea8cfec3802f545b1def5d7b73e4a5b8e9ba63e32a320f67732292",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/es-object-atoms",
+      "name": "es-object-atoms",
+      "version": "1.1.2",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/es-object-atoms/-/es-object-atoms-1.1.2.tgz",
+      "integrity": "sha512-HWcBoN6NileqtSydK2FqHbS/LoDd2pqrnQHLyJzBj4kOp/ky2MWMN694xOfkK8/SnUsW2DH7EfyVlydKCsm1Zw==",
+      "package_json_sha256": "e4b7882975d10c68457945c883e1060d0b058af5b1216215c872263f42e12fc9",
+      "retained_package_json": "licenses/dependencies/es-object-atoms/1.1.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/es-object-atoms/1.1.2/LICENSE",
+          "sha256": "5e325595b4ea8cfec3802f545b1def5d7b73e4a5b8e9ba63e32a320f67732292",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/es-set-tostringtag",
+      "name": "es-set-tostringtag",
+      "version": "2.1.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/es-set-tostringtag/-/es-set-tostringtag-2.1.0.tgz",
+      "integrity": "sha512-j6vWzfrGVfyXxge+O0x5sh6cvxAog0a/4Rdd2K36zCMV5eJ+/+tOAngRO8cODMNWbVRdVlmGZQL2YS3yR8bIUA==",
+      "package_json_sha256": "c9506942c9ef472286aff079bb65b7f3edcaccbc7f59fac9f419787b570086e5",
+      "retained_package_json": "licenses/dependencies/es-set-tostringtag/2.1.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/es-set-tostringtag/2.1.0/LICENSE",
+          "sha256": "1a3aeb1f1398bd697d57c3c585faadf59d825aca6e3162cd7eeb72ff76eb2466",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/event-target-shim",
+      "name": "event-target-shim",
+      "version": "5.0.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/event-target-shim/-/event-target-shim-5.0.1.tgz",
+      "integrity": "sha512-i/2XbnSz/uxRCU6+NdVJgKWDTM427+MqYbkQzD321DuCQJUqOuJKIA0IM2+W2xtYHdKOmZ4dR6fExsd4SXL+WQ==",
+      "package_json_sha256": "980bdd7706c72d04a4df2e3ee2c8ffccf3bc72bd8e7cd13ca38be00cafc6e8db",
+      "retained_package_json": "licenses/dependencies/event-target-shim/5.0.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/event-target-shim/5.0.1/LICENSE",
+          "sha256": "97d87142793695cd73243de7258694abe85b3b6060fca7f247b0a2afa8219678",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/eventemitter3",
+      "name": "eventemitter3",
+      "version": "5.0.4",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/eventemitter3/-/eventemitter3-5.0.4.tgz",
+      "integrity": "sha512-mlsTRyGaPBjPedk6Bvw+aqbsXDtoAyAzm5MO7JgU+yVRyMQ5O8bD4Kcci7BS85f93veegeCPkL8R4GLClnjLFw==",
+      "package_json_sha256": "0dd9bc32a77be8238fad41d58aa5b24ccdfee79d8bcf4cbee85f16e3d15c1658",
+      "retained_package_json": "licenses/dependencies/eventemitter3/5.0.4/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/eventemitter3/5.0.4/LICENSE",
+          "sha256": "3aecc12b1cb28832b5f65ab64291de96568c3f236a74d646281b4491f7bcadbf",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/extend",
+      "name": "extend",
+      "version": "3.0.2",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/extend/-/extend-3.0.2.tgz",
+      "integrity": "sha512-fjquC59cD7CyW6urNXK0FBufkZcoiGG80wTuPujX590cB5Ttln20E2UB4S/WARVqhXffZl2LNgS+gQdPIIim/g==",
+      "package_json_sha256": "8d891b3f00bead114c4741d8a594e7aaa59114f53782ec9a9319a619709dc14f",
+      "retained_package_json": "licenses/dependencies/extend/3.0.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/extend/3.0.2/LICENSE",
+          "sha256": "97af7428f93afbab9bf79cd09254da1357161794f4255eb1b4599f04dd2d2e7c",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/fast-copy",
+      "name": "fast-copy",
+      "version": "3.1.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/fast-copy/-/fast-copy-3.1.0.tgz",
+      "integrity": "sha512-IuCOCDFM1F/s4LtG7Bjr3yUUwPHybyhqN74xk2cMYoP51vVeErMy8+6HGFchi/+45lW8uzhs6lBeEqks2GWt6A==",
+      "package_json_sha256": "c5eeaf5ff939d7a6c06c15f567daf17e4c61ecc8d47ffc40579d1ee8676b1758",
+      "retained_package_json": "licenses/dependencies/fast-copy/3.1.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/fast-copy/3.1.0/LICENSE",
+          "sha256": "13d1abb8d9ebb8a8a725c7b462928ddb063b03c2c353fa61408648882a10fea9",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/fast-xml-parser",
+      "name": "fast-xml-parser",
+      "version": "5.2.5",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/fast-xml-parser/-/fast-xml-parser-5.2.5.tgz",
+      "integrity": "sha512-pfX9uG9Ki0yekDHx2SiuRIyFdyAr1kMIMitPvb0YBo8SUfKvia7w7FIyd/l6av85pFYRhZscS75MwMnbvY+hcQ==",
+      "package_json_sha256": "82dcf7dcfa136930baaf135c10ac48496a3af9301ff13fa8e8cc4aec61e32ff6",
+      "retained_package_json": "licenses/dependencies/fast-xml-parser/5.2.5/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/fast-xml-parser/5.2.5/LICENSE",
+          "sha256": "7883225d5e84a6bbb9b170c3d891b4bf6d6259cee869c86bd86381a927071745",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/fetch-blob",
+      "name": "fetch-blob",
+      "version": "3.2.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/fetch-blob/-/fetch-blob-3.2.0.tgz",
+      "integrity": "sha512-7yAQpD2UMJzLi1Dqv7qFYnPbaPx7ZfFK6PiIxQ4PfkGPyNyl2Ugx+a/umUonmKqjhM4DnfbMvdX6otXq83soQQ==",
+      "package_json_sha256": "ee47bb73168049962586a09317017c44b1b10b2a90fc74e5c4561efdb361411b",
+      "retained_package_json": "licenses/dependencies/fetch-blob/3.2.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/fetch-blob/3.2.0/LICENSE",
+          "sha256": "a5edccac92c3aa845694dcfaa72a0c098c1ae40d5ca6a37e4e59d778cf8e29bd",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/follow-redirects",
+      "name": "follow-redirects",
+      "version": "1.16.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/follow-redirects/-/follow-redirects-1.16.1.tgz",
+      "integrity": "sha512-FNvFGzoMLWmE6Yj9spb/zjd7yiNCHiAW9/Tg9CXrQ8wuu32HtlJOwWO11OJafl5FfY3DxTdQ0vj42zU1kvv5jg==",
+      "package_json_sha256": "3b63e57223c63eff7b1c9ecdcd6615af8c6fcbaa9d436e949f02acf2b6dbe588",
+      "retained_package_json": "licenses/dependencies/follow-redirects/1.16.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/follow-redirects/1.16.1/LICENSE",
+          "sha256": "bfa8a54bb952ccda79f0f1889721d108f5b605babbb2b8a3705ffb52f4132eb7",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/form-data",
+      "name": "form-data",
+      "version": "4.0.6",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/form-data/-/form-data-4.0.6.tgz",
+      "integrity": "sha512-vKatAh4SlVfgbv+YtmhiRjhEMJsYpsG1Y2rMQtR+SVSbytsSD1YGzDIcrAJmdFec88u/+VoGmxnl+80gL1tRCQ==",
+      "package_json_sha256": "d5222c863d975ddefb3ec2c012d3c3ab92f51ef8f3f5c3080dee02c79d217665",
+      "retained_package_json": "licenses/dependencies/form-data/4.0.6/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/form-data/4.0.6/License",
+          "sha256": "e5b780d4f38d1d3328e3e53186c4e62d3fa149ea6f2bacd5de5ad0c30ac85343",
+          "source": "License"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/formdata-polyfill",
+      "name": "formdata-polyfill",
+      "version": "4.0.10",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/formdata-polyfill/-/formdata-polyfill-4.0.10.tgz",
+      "integrity": "sha512-buewHzMvYL29jdeQTVILecSaZKnt/RJWjoZCF5OW60Z67/GmSLBkOFM7qh1PI3zFNtJbaZL5eQu1vLfazOwj4g==",
+      "package_json_sha256": "09767e86a596171ef17e8ec4977eb11f530654740fa3105dbbd7cd545753421e",
+      "retained_package_json": "licenses/dependencies/formdata-polyfill/4.0.10/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/formdata-polyfill/4.0.10/LICENSE",
+          "sha256": "435a6437e47e5e479942255680e7fbe5f333d55234ada1c35f6115ca641d5bb4",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/function-bind",
+      "name": "function-bind",
+      "version": "1.1.2",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/function-bind/-/function-bind-1.1.2.tgz",
+      "integrity": "sha512-7XHNxH7qX9xG5mIwxkhumTox/MIRNcOgDrxWsMt2pAr23WHp6MrRlN7FBSFpCpr+oVO0F744iUgR82nJMfG2SA==",
+      "package_json_sha256": "edb1c4faf4148e6e3d74ed8dbac1a1dc359a647ff4207aad4851396dc7a3559a",
+      "retained_package_json": "licenses/dependencies/function-bind/1.1.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/function-bind/1.1.2/LICENSE",
+          "sha256": "773e131a7684726005a7e4688a80b4620033bc08499bc1404dd1a1eb3bca725e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/gaxios",
+      "name": "gaxios",
+      "version": "7.3.1",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/gaxios/-/gaxios-7.3.1.tgz",
+      "integrity": "sha512-kB3rzJV7d9juLZh8/56QTXCwQfxyhdOMdyYk1HdQKFtF8TJTDTZQJtixWIwXdE9Jji91mC41DUNpjleo4L4eAQ==",
+      "package_json_sha256": "6d8ac1fadd9a3e890a0407f04f49dd8b919e418e46d10e65df9cba295ce319ad",
+      "retained_package_json": "licenses/dependencies/gaxios/7.3.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/gaxios/7.3.1/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/gaxios/node_modules/node-fetch",
+      "name": "node-fetch",
+      "version": "3.3.2",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/node-fetch/-/node-fetch-3.3.2.tgz",
+      "integrity": "sha512-dRB78srN/l6gqWulah9SrxeYnxeddIG30+GOqK/9OlLVyLg3HPnr6SqOWTWOXKRwC2eGYCkZ59NNuSgvSrpgOA==",
+      "package_json_sha256": "058acbc2474901ffa0b95c3f9d0903111426b118b55f928300e448d7252fc27d",
+      "retained_package_json": "licenses/dependencies/node-fetch/3.3.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/node-fetch/3.3.2/LICENSE.md",
+          "sha256": "3e2c11dcf3f17ab585baab8faba54772d7872f1c6e026022acd4b4006665efb0",
+          "source": "LICENSE.md"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/gcp-metadata",
+      "name": "gcp-metadata",
+      "version": "8.1.4",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/gcp-metadata/-/gcp-metadata-8.1.4.tgz",
+      "integrity": "sha512-iJ9KMsiu+xKtNRX0PmGLSaIU3bUBAyzWTyqKemKPzNPsmmsBCQYmlNg+brEbES7IHSXtdVwzBPzx1vz3FAaipw==",
+      "package_json_sha256": "df0e21947d257ed2688b5d434e9841eac821bf7e2a57055655461ef2ba7a8150",
+      "retained_package_json": "licenses/dependencies/gcp-metadata/8.1.4/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/gcp-metadata/8.1.4/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/gcp-metadata/node_modules/gaxios",
+      "name": "gaxios",
+      "version": "7.1.3",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/gaxios/-/gaxios-7.1.3.tgz",
+      "integrity": "sha512-YGGyuEdVIjqxkxVH1pUTMY/XtmmsApXrCVv5EU25iX6inEPbV+VakJfLealkBtJN69AQmh1eGOdCl9Sm1UP6XQ==",
+      "package_json_sha256": "50418f21fc44aff9e1ab0214ec7913082472d5465237c5b11321cfb0735a72ac",
+      "retained_package_json": "licenses/dependencies/gaxios/7.1.3/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/gaxios/7.1.3/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/gcp-metadata/node_modules/google-logging-utils",
+      "name": "google-logging-utils",
+      "version": "1.1.3",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/google-logging-utils/-/google-logging-utils-1.1.3.tgz",
+      "integrity": "sha512-eAmLkjDjAFCVXg7A1unxHsLf961m6y17QFqXqAXGj/gVkKFrEICfStRfwUlGNfeCEjNRa32JEWOUTlYXPyyKvA==",
+      "package_json_sha256": "74980e1fd2db59c71a20ddf6accf42704c67da3b905fc5d2134ee39807dad42f",
+      "retained_package_json": "licenses/dependencies/google-logging-utils/1.1.3/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/google-logging-utils/1.1.3/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/gcp-metadata/node_modules/node-fetch",
+      "name": "node-fetch",
+      "version": "3.3.2",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/node-fetch/-/node-fetch-3.3.2.tgz",
+      "integrity": "sha512-dRB78srN/l6gqWulah9SrxeYnxeddIG30+GOqK/9OlLVyLg3HPnr6SqOWTWOXKRwC2eGYCkZ59NNuSgvSrpgOA==",
+      "package_json_sha256": "058acbc2474901ffa0b95c3f9d0903111426b118b55f928300e448d7252fc27d",
+      "retained_package_json": "licenses/dependencies/node-fetch/3.3.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/node-fetch/3.3.2/LICENSE.md",
+          "sha256": "3e2c11dcf3f17ab585baab8faba54772d7872f1c6e026022acd4b4006665efb0",
+          "source": "LICENSE.md"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/get-intrinsic",
+      "name": "get-intrinsic",
+      "version": "1.3.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/get-intrinsic/-/get-intrinsic-1.3.0.tgz",
+      "integrity": "sha512-9fSjSaos/fRIVIp+xSJlE6lfwhES7LNtKaCBIamHsjr2na1BiABJPo0mOjjz8GJDURarmCPGqaiVg5mfjb98CQ==",
+      "package_json_sha256": "45b14763baacc59b0fd7b39e3ad983d5d2aaf7f5ed682f2fce9edb469826c999",
+      "retained_package_json": "licenses/dependencies/get-intrinsic/1.3.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/get-intrinsic/1.3.0/LICENSE",
+          "sha256": "39c5ec504cf6bd5cd782a7c695828e09189df79f5d94840e4f08feb97b9fd416",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/get-proto",
+      "name": "get-proto",
+      "version": "1.0.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/get-proto/-/get-proto-1.0.1.tgz",
+      "integrity": "sha512-sTSfBjoXBp89JvIKIefqw7U2CCebsc74kiY6awiGogKtoSGbgjYE/G/+l9sF3MWFPNc9IcoOC4ODfKHfxFmp0g==",
+      "package_json_sha256": "73839e012ac7134a632c9d9fc6bdb700ac9ab5553cce39eb789ba2b65663e734",
+      "retained_package_json": "licenses/dependencies/get-proto/1.0.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/get-proto/1.0.1/LICENSE",
+          "sha256": "be46ce1e3b0479af9ce82d22b465a6d7d2ff084fca0aaf3d54172da2b5eb5781",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/google-auth-library",
+      "name": "google-auth-library",
+      "version": "10.5.0",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/google-auth-library/-/google-auth-library-10.5.0.tgz",
+      "integrity": "sha512-7ABviyMOlX5hIVD60YOfHw4/CxOfBhyduaYB+wbFWCWoni4N7SLcV46hrVRktuBbZjFC9ONyqamZITN7q3n32w==",
+      "package_json_sha256": "6f7ab03fc35d235fe9eb7d7b481af322687f6115558caba3fe93ad32f761f86b",
+      "retained_package_json": "licenses/dependencies/google-auth-library/10.5.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/google-auth-library/10.5.0/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/google-logging-utils",
+      "name": "google-logging-utils",
+      "version": "1.2.0",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/google-logging-utils/-/google-logging-utils-1.2.0.tgz",
+      "integrity": "sha512-WE9av4wKDZgRjBwgVUabocx8T6/7o3Ca1Fat46FXDhXVAFibzNadedcOXrdgd1Kzmk8tsk/9ZH89Wyf/SqeZ3A==",
+      "package_json_sha256": "b9e83843c9585ffccf8e0f9f408ea53ace27421bc7e57ef6bf725a49a1a33122",
+      "retained_package_json": "licenses/dependencies/google-logging-utils/1.2.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/google-logging-utils/1.2.0/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/googleapis-common",
+      "name": "googleapis-common",
+      "version": "8.0.3",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/googleapis-common/-/googleapis-common-8.0.3.tgz",
+      "integrity": "sha512-7g1yzQKx0mmNTjiK0H9dJ8eqKqDBveES9vLHeg5neb3BMQy/d1oQefIMhIpOVT8a+f+LOcixMEdRbFIW/cQUJw==",
+      "package_json_sha256": "a9cfe1e3cfb7b7355bacb7583c66ef37920ac2206c75fbb3d3d164aa4161ed9e",
+      "retained_package_json": "licenses/dependencies/googleapis-common/8.0.3/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/googleapis-common/8.0.3/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/googleapis-common/node_modules/gaxios",
+      "name": "gaxios",
+      "version": "7.1.3",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/gaxios/-/gaxios-7.1.3.tgz",
+      "integrity": "sha512-YGGyuEdVIjqxkxVH1pUTMY/XtmmsApXrCVv5EU25iX6inEPbV+VakJfLealkBtJN69AQmh1eGOdCl9Sm1UP6XQ==",
+      "package_json_sha256": "50418f21fc44aff9e1ab0214ec7913082472d5465237c5b11321cfb0735a72ac",
+      "retained_package_json": "licenses/dependencies/gaxios/7.1.3/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/gaxios/7.1.3/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/googleapis-common/node_modules/node-fetch",
+      "name": "node-fetch",
+      "version": "3.3.2",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/node-fetch/-/node-fetch-3.3.2.tgz",
+      "integrity": "sha512-dRB78srN/l6gqWulah9SrxeYnxeddIG30+GOqK/9OlLVyLg3HPnr6SqOWTWOXKRwC2eGYCkZ59NNuSgvSrpgOA==",
+      "package_json_sha256": "058acbc2474901ffa0b95c3f9d0903111426b118b55f928300e448d7252fc27d",
+      "retained_package_json": "licenses/dependencies/node-fetch/3.3.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/node-fetch/3.3.2/LICENSE.md",
+          "sha256": "3e2c11dcf3f17ab585baab8faba54772d7872f1c6e026022acd4b4006665efb0",
+          "source": "LICENSE.md"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/gopd",
+      "name": "gopd",
+      "version": "1.2.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/gopd/-/gopd-1.2.0.tgz",
+      "integrity": "sha512-ZUKRh6/kUFoAiTAtTYPZJ3hw9wNxx+BIBOijnlG9PnrJsCcSjs1wyyD6vJpaYtgnzDrKYRSqf3OO6Rfa93xsRg==",
+      "package_json_sha256": "33ace32dc861f6da9d1fd9d0a44c66e8c6ff3b13358d070683c1c2978ff5f19f",
+      "retained_package_json": "licenses/dependencies/gopd/1.2.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/gopd/1.2.0/LICENSE",
+          "sha256": "d90bf0a089da4cf43d644ed240a0b3825dcdb705e64e38371d56995a4cc9e4c5",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/gtoken",
+      "name": "gtoken",
+      "version": "8.0.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/gtoken/-/gtoken-8.0.0.tgz",
+      "integrity": "sha512-+CqsMbHPiSTdtSO14O51eMNlrp9N79gmeqmXeouJOhfucAedHw9noVe/n5uJk3tbKE6a+6ZCQg3RPhVhHByAIw==",
+      "package_json_sha256": "61b6e5629d661969286a7bbd259173bd8133e5204791d241b5c54370e0d05096",
+      "retained_package_json": "licenses/dependencies/gtoken/8.0.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/gtoken/8.0.0/LICENSE",
+          "sha256": "ace51ee77a0c6ebf8885e3b1de75b410f77fbc76602b063fbfd74d96f8574296",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/has-flag",
+      "name": "has-flag",
+      "version": "4.0.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/has-flag/-/has-flag-4.0.0.tgz",
+      "integrity": "sha512-EykJT/Q1KjTWctppgIAgfSO0tKVuZUjhgMr17kqTumMl6Afv3EISleU7qZUzoXDFTAHTDC4NOoG/ZxU3EvlMPQ==",
+      "package_json_sha256": "3fef4b52efbeabeadfffd5994e90b1025eb24263286e34170675956637d368b1",
+      "retained_package_json": "licenses/dependencies/has-flag/4.0.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/has-flag/4.0.0/license",
+          "sha256": "48da2f39e100d4085767e94966b43f4fa95ff6a0698fba57ed460914e35f94a0",
+          "source": "license"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/has-symbols",
+      "name": "has-symbols",
+      "version": "1.1.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/has-symbols/-/has-symbols-1.1.0.tgz",
+      "integrity": "sha512-1cDNdwJ2Jaohmb3sg4OmKaMBwuC48sYni5HUw2DvsC8LjGTLK9h+eb1X6RyuOHe4hT0ULCW68iomhjUoKUqlPQ==",
+      "package_json_sha256": "5190268c0e3308d7446d1f7c036238f329f786938453e6017cb90980b3612e7a",
+      "retained_package_json": "licenses/dependencies/has-symbols/1.1.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/has-symbols/1.1.0/LICENSE",
+          "sha256": "206c1adcf206dc0031b11232f5b054ec5f1662407ab1ca415247921cab2068ab",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/has-tostringtag",
+      "name": "has-tostringtag",
+      "version": "1.0.2",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/has-tostringtag/-/has-tostringtag-1.0.2.tgz",
+      "integrity": "sha512-NqADB8VjPFLM2V0VvHUewwwsw0ZWBaIdgo+ieHtK3hasLz4qeCRjYcqfB6AQrBggRKppKF8L52/VqdVsO47Dlw==",
+      "package_json_sha256": "30ab773c52021a6b800ea48f251abeeb1f6e378300f819204dfbb38d6e43f3ad",
+      "retained_package_json": "licenses/dependencies/has-tostringtag/1.0.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/has-tostringtag/1.0.2/LICENSE",
+          "sha256": "e2560e002e13281578c75c850061d9255c33d16d732939e8c2db64c2506642fa",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/hasown",
+      "name": "hasown",
+      "version": "2.0.4",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/hasown/-/hasown-2.0.4.tgz",
+      "integrity": "sha512-T2UbfbBEF32wiepXIsMlTW9+dDYC6wMh/t/vYA4tuOMKqWz/n3vr1NFSxQiyP+zk2mXsoMA/i/7qV6LKut1t1A==",
+      "package_json_sha256": "40b750c55a8bacf2c5ac316f5299dd44d48acc101c189a00cd59d39376b5eb89",
+      "retained_package_json": "licenses/dependencies/hasown/2.0.4/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/hasown/2.0.4/LICENSE",
+          "sha256": "bf9b0d665be2a689851eea667ca9f42066ea1d903b38349c51e6a44b2577680a",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/he",
+      "name": "he",
+      "version": "1.2.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/he/-/he-1.2.0.tgz",
+      "integrity": "sha512-F/1DnUGPopORZi0ni+CvrCgHQ5FyEAHRLSApuYWMmrbSwoN2Mn/7k+Gl38gJnR7yyDZk6WLXwiGod1JOWNDKGw==",
+      "package_json_sha256": "3a776250efb03ffc16e87c251bddf5e0d82fca990059dc7f277a1e99a169b723",
+      "retained_package_json": "licenses/dependencies/he/1.2.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/he/1.2.0/LICENSE-MIT.txt",
+          "sha256": "483acb265f182907d1caf6cff9c16c96f31325ed23792832cc5d8b12d5f88c8a",
+          "source": "LICENSE-MIT.txt"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/html-to-text",
+      "name": "html-to-text",
+      "version": "10.0.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/html-to-text/-/html-to-text-10.0.1.tgz",
+      "integrity": "sha512-GiVhRI1BatGARSCmlXWNCjDT0cWrwBWoeduLoV0WSKAgaV/wa+hUWy5LiQLUs4UwiUrE52ZCMfBGiKD87TDPrg==",
+      "package_json_sha256": "29ed7a8fc180e25a0e31bd83a393c4a344b400a81c5d6a23e084a3d62a4dec4b",
+      "retained_package_json": "licenses/dependencies/html-to-text/10.0.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/html-to-text/10.0.1/LICENSE",
+          "sha256": "43659035063c7ae7e47d4ba4bb41b6acbde34d2fb7d21205e92909ea4ddb843b",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/htmlparser2",
+      "name": "htmlparser2",
+      "version": "10.1.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/htmlparser2/-/htmlparser2-10.1.0.tgz",
+      "integrity": "sha512-VTZkM9GWRAtEpveh7MSF6SjjrpNVNNVJfFup7xTY3UpFtm67foy9HDVXneLtFVt4pMz5kZtgNcvCniNFb1hlEQ==",
+      "package_json_sha256": "8aa0d39ff4c9df2d53b02a0fe434d03a6348353cb1d23ea2b448692687b8c8ab",
+      "retained_package_json": "licenses/dependencies/htmlparser2/10.1.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/htmlparser2/10.1.0/LICENSE",
+          "sha256": "204cfa747341660e4da64cd23e8c876c6b20279d247f48564993d3fc4a2eab47",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/htmlparser2/node_modules/entities",
+      "name": "entities",
+      "version": "7.0.1",
+      "license": "BSD-2-Clause",
+      "resolved": "https://registry.npmjs.org/entities/-/entities-7.0.1.tgz",
+      "integrity": "sha512-TWrgLOFUQTH994YUyl1yT4uyavY5nNB5muff+RtWaqNVCAK408b5ZnnbNAUEWLTCpum9w6arT70i1XdQ4UeOPA==",
+      "package_json_sha256": "b33b5d3fd4a8e196d3245c10ebb8feb2e076fc8d392f99a1050377d6e2b8b641",
+      "retained_package_json": "licenses/dependencies/entities/7.0.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/entities/7.0.1/LICENSE",
+          "sha256": "cb992345949ccd6e8394b2cd6c465f7b897c864f845937dbf64e8997f389e164",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/https-proxy-agent",
+      "name": "https-proxy-agent",
+      "version": "7.0.6",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/https-proxy-agent/-/https-proxy-agent-7.0.6.tgz",
+      "integrity": "sha512-vK9P5/iUfdl95AI+JVyUuIcVtd4ofvtrOr3HNtM2yxC9bnMbEdp3x01OhQNnjb8IJYi38VlTE3mBXwcfvywuSw==",
+      "package_json_sha256": "b08c1977d38f14f4be7fb5be33aab545e3e5a6e2e12100733a6ad97dec995206",
+      "retained_package_json": "licenses/dependencies/https-proxy-agent/7.0.6/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/https-proxy-agent/7.0.6/LICENSE",
+          "sha256": "8d8c55319c7729d57be811c747452636688d54f19701ee0752b6b15ad3771d9a",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/iconv-lite",
+      "name": "iconv-lite",
+      "version": "0.6.3",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/iconv-lite/-/iconv-lite-0.6.3.tgz",
+      "integrity": "sha512-4fCk79wshMdzMp2rH06qWrJE4iolqLhCUH+OiuIgU++RB0+94NlDL81atO7GX55uUKueo0txHNtvEyI6D7WdMw==",
+      "package_json_sha256": "3a9582fd121f841c245d1fcf84ef0b9e41c94b785b8d7eb63f9f5aec9bad0b98",
+      "retained_package_json": "licenses/dependencies/iconv-lite/0.6.3/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/iconv-lite/0.6.3/LICENSE",
+          "sha256": "ac779f7314c74f232ef847ea86e714abe25cf6eeb5cc97b69451b74e2af6492d",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/intercom-client",
+      "name": "intercom-client",
+      "version": "6.2.0",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/intercom-client/-/intercom-client-6.2.0.tgz",
+      "integrity": "sha512-ta9UB6twCk6b4OLiC1HUtB0NgDCpHLtiXfWSV8QjAUmXzjq1aBd4axKW6CgPiEnBhrkTdeJ4u0Mvx/MRzXlVWw==",
+      "package_json_sha256": "cf5a93771d21b8380f7c4cedd50d458f723bc5f49bb1e641065259b8054aca87",
+      "retained_package_json": "licenses/dependencies/intercom-client/6.2.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/intercom-client/6.2.0/LICENSE",
+          "sha256": "16e6df940b86ccaeaa347f7a31a6f8eca9de9fd82a12d775380823d614107917",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/ipaddr.js",
+      "name": "ipaddr.js",
+      "version": "2.3.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/ipaddr.js/-/ipaddr.js-2.3.0.tgz",
+      "integrity": "sha512-Zv/pA+ciVFbCSBBjGfaKUya/CcGmUHzTydLMaTwrUUEM2DIEO3iZvueGxmacvmN50fGpGVKeTXpb2LcYQxeVdg==",
+      "package_json_sha256": "df082d10f5b8d7e4be0cea5bd5fa00aecaf147f2e6eed9a7feaf327882209d92",
+      "retained_package_json": "licenses/dependencies/ipaddr.js/2.3.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/ipaddr.js/2.3.0/LICENSE",
+          "sha256": "62568a2d1337b77171ecca9db10579163446de1ba6151678e81f06cdc199971b",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/is-electron",
+      "name": "is-electron",
+      "version": "2.2.2",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/is-electron/-/is-electron-2.2.2.tgz",
+      "integrity": "sha512-FO/Rhvz5tuw4MCWkpMzHFKWD2LsfHzIb7i6MdPYZ/KW7AlxawyLkqdy+jPZP1WubqEADE3O4FUENlJHDfQASRg==",
+      "package_json_sha256": "0b659ea6023b3a3d02a3df96b5788ee976ec333f21eaf317aacbff779e132e11",
+      "retained_package_json": "licenses/dependencies/is-electron/2.2.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/is-electron/2.2.2/LICENSE",
+          "sha256": "204a107dc498856f1ba3d83e3e338ea0afada874af9bdc72f019dc2eb7006773",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/is-stream",
+      "name": "is-stream",
+      "version": "2.0.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/is-stream/-/is-stream-2.0.1.tgz",
+      "integrity": "sha512-hFoiJiTl63nn+kstHGBtewWSKnQLpyb155KHheA1l39uvtO9nWIop1p3udqPcUd/xbF1VLMO4n7OI6p7RbngDg==",
+      "package_json_sha256": "07cf93d9490a2d7ed7731810b49b1c314c760291bb66cdfbc0279258ceb65ec9",
+      "retained_package_json": "licenses/dependencies/is-stream/2.0.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/is-stream/2.0.1/license",
+          "sha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3",
+          "source": "license"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/js-base64",
+      "name": "js-base64",
+      "version": "3.7.7",
+      "license": "BSD-3-Clause",
+      "resolved": "https://registry.npmjs.org/js-base64/-/js-base64-3.7.7.tgz",
+      "integrity": "sha512-7rCnleh0z2CkXhH67J8K1Ytz0b2Y+yxTPL+/KOJoa20hfnVQ/3/T6W/KflYI4bRHRagNeXeU2bkNGI3v1oS/lw==",
+      "package_json_sha256": "48ee6969afba4d24d341bcc444c312bf01de28c1ce436a7275fadfe2fcaa7aa2",
+      "retained_package_json": "licenses/dependencies/js-base64/3.7.7/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/js-base64/3.7.7/LICENSE.md",
+          "sha256": "fcf06aacb36ee29237110d6b3a9fbd6296e85ad4324263abf5f8a5cfb5706c81",
+          "source": "LICENSE.md"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/json-bigint",
+      "name": "json-bigint",
+      "version": "1.0.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/json-bigint/-/json-bigint-1.0.0.tgz",
+      "integrity": "sha512-SiPv/8VpZuWbvLSMtTDU8hEfrZWg/mH/nV/b4o0CYbSxu1UIQPLdwKOCIyLQX+VIPO5vrLX3i8qtqFyhdPSUSQ==",
+      "package_json_sha256": "1c3b07ce46552112606922f0782b316383529b3da935d637c0606cb38a8caa5a",
+      "retained_package_json": "licenses/dependencies/json-bigint/1.0.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/json-bigint/1.0.0/LICENSE",
+          "sha256": "def82c085d05e795fe6a9cb5b70c48e022212355afc0e91d4de047cade28df06",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/jsonwebtoken",
+      "name": "jsonwebtoken",
+      "version": "9.0.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/jsonwebtoken/-/jsonwebtoken-9.0.1.tgz",
+      "integrity": "sha512-K8wx7eJ5TPvEjuiVSkv167EVboBDv9PZdDoF7BgeQnBLVvZWW9clr2PsQHVJDTKaEIH5JBIwHujGcHp7GgI2eg==",
+      "package_json_sha256": "04e9c3dafa9ce2bc3a58a3c9ae14f1955549520a94f6bd840738a54320eccb31",
+      "retained_package_json": "licenses/dependencies/jsonwebtoken/9.0.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/jsonwebtoken/9.0.1/LICENSE",
+          "sha256": "2144eb6894cb440fde6b2b3aaae3b617c8f1dc9bb19813079dcf62ec6c517042",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/jsonwebtoken/node_modules/jwa",
+      "name": "jwa",
+      "version": "1.4.2",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/jwa/-/jwa-1.4.2.tgz",
+      "integrity": "sha512-eeH5JO+21J78qMvTIDdBXidBd6nG2kZjg5Ohz/1fpa28Z4CcsWUzJ1ZZyFq/3z3N17aZy+ZuBoHljASbL1WfOw==",
+      "package_json_sha256": "b9bb9207f37f9d48a2d705e65bc22c53acdc68c06830e741901f8e32855edf7f",
+      "retained_package_json": "licenses/dependencies/jwa/1.4.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/jwa/1.4.2/LICENSE",
+          "sha256": "3320319f8a5f42bc4254e65471eca7a5ea4dc8c883c4c24b4868e36b14890bcf",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/jsonwebtoken/node_modules/jws",
+      "name": "jws",
+      "version": "3.2.3",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/jws/-/jws-3.2.3.tgz",
+      "integrity": "sha512-byiJ0FLRdLdSVSReO/U4E7RoEyOCKnEnEPMjq3HxWtvzLsV08/i5RQKsFVNkCldrCaPr2vDNAOMsfs8T/Hze7g==",
+      "package_json_sha256": "df91b6d5b5711e70a83238092877cf6bc8214e3d47dd241640b71cf91b89885d",
+      "retained_package_json": "licenses/dependencies/jws/3.2.3/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/jws/3.2.3/LICENSE",
+          "sha256": "3320319f8a5f42bc4254e65471eca7a5ea4dc8c883c4c24b4868e36b14890bcf",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/jwa",
+      "name": "jwa",
+      "version": "2.0.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/jwa/-/jwa-2.0.1.tgz",
+      "integrity": "sha512-hRF04fqJIP8Abbkq5NKGN0Bbr3JxlQ+qhZufXVr0DvujKy93ZCbXZMHDL4EOtodSbCWxOqR8MS1tXA5hwqCXDg==",
+      "package_json_sha256": "53610fa0143c2cdef9d280e0c029ededf688930648358d4f3e35a081d75219d8",
+      "retained_package_json": "licenses/dependencies/jwa/2.0.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/jwa/2.0.1/LICENSE",
+          "sha256": "3320319f8a5f42bc4254e65471eca7a5ea4dc8c883c4c24b4868e36b14890bcf",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/jws",
+      "name": "jws",
+      "version": "4.0.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/jws/-/jws-4.0.1.tgz",
+      "integrity": "sha512-EKI/M/yqPncGUUh44xz0PxSidXFr/+r0pA70+gIYhjv+et7yxM+s29Y+VGDkovRofQem0fs7Uvf4+YmAdyRduA==",
+      "package_json_sha256": "a934389f53e2ac8909d5399410c1ede3e35397be9e9f521bde25b61e1fee0b2f",
+      "retained_package_json": "licenses/dependencies/jws/4.0.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/jws/4.0.1/LICENSE",
+          "sha256": "3320319f8a5f42bc4254e65471eca7a5ea4dc8c883c4c24b4868e36b14890bcf",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/leac",
+      "name": "leac",
+      "version": "0.7.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/leac/-/leac-0.7.0.tgz",
+      "integrity": "sha512-qMrZeyEekgdRQ9o6a4NAB2EQZrv827GJdn1vnapwSJ90hWRB4TzUSunvacPkxQ2TnNqHNI1/zSt0hlo0crG8Jw==",
+      "package_json_sha256": "54ab05a7dd2d7d0a37c6d47f7d2f49fb7c34f42363d917eda3a658daa4b5379c",
+      "retained_package_json": "licenses/dependencies/leac/0.7.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/leac/0.7.0/LICENSE",
+          "sha256": "ddd4eaafae6009e31c12abb70cf4369034db2fe17de7074ea89aecd3e95d7ffc",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/libbase64",
+      "name": "libbase64",
+      "version": "1.3.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/libbase64/-/libbase64-1.3.0.tgz",
+      "integrity": "sha512-GgOXd0Eo6phYgh0DJtjQ2tO8dc0IVINtZJeARPeiIJqge+HdsWSuaDTe8ztQ7j/cONByDZ3zeB325AHiv5O0dg==",
+      "package_json_sha256": "b2d295bd942594bd3a80b1c731345149217cdf95927880fad1c785d55c2a2934",
+      "retained_package_json": "licenses/dependencies/libbase64/1.3.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/libbase64/1.3.0/LICENSE",
+          "sha256": "27d7db274ef1ff4ade7505f696a4d86243b6c73936d1ea10d235f0cee609a576",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/libmime",
+      "name": "libmime",
+      "version": "5.4.3",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/libmime/-/libmime-5.4.3.tgz",
+      "integrity": "sha512-di9BoDabBUMqjeD/wGj+hHpSgdqAph5ui7w6OdY6NpzU6O6VFLQsMOg9tqCjm/zf9OHzAM9EZxSOF7uIb8O8Hw==",
+      "package_json_sha256": "d5e29b3c331a079ae0aa21ae96d057ce28b57f312170172f9dd1d42328f22893",
+      "retained_package_json": "licenses/dependencies/libmime/5.4.3/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/libmime/5.4.3/LICENSE",
+          "sha256": "0f2482bc852021c3226c1df9d75b610a9b795a5a88032cda51098dce3dae6740",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/libmime/node_modules/iconv-lite",
+      "name": "iconv-lite",
+      "version": "0.7.3",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/iconv-lite/-/iconv-lite-0.7.3.tgz",
+      "integrity": "sha512-IKXpvIzjnC9XTAUbVBcMfGS0EPaIXtW6v+zr+RRp+hqULEpo0owZax6wyRwPOJbWbzjYspQwusTsfVr0ifh4uQ==",
+      "package_json_sha256": "f24ad03476d51470a5b069e65b03ef6383d615897ffe2239edf22584ea0e3d03",
+      "retained_package_json": "licenses/dependencies/iconv-lite/0.7.3/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/iconv-lite/0.7.3/LICENSE",
+          "sha256": "ac779f7314c74f232ef847ea86e714abe25cf6eeb5cc97b69451b74e2af6492d",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/libqp",
+      "name": "libqp",
+      "version": "2.1.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/libqp/-/libqp-2.1.1.tgz",
+      "integrity": "sha512-0Wd+GPz1O134cP62YU2GTOPNA7Qgl09XwCqM5zpBv87ERCXdfDtyKXvV7c9U22yWJh44QZqBocFnXN11K96qow==",
+      "package_json_sha256": "12685d615a8d52c72ef75e31ecca511f121fea880a4582a76c173064dda825e5",
+      "retained_package_json": "licenses/dependencies/libqp/2.1.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/libqp/2.1.1/LICENSE",
+          "sha256": "2dd95346123a3ae1ecae06a32a40d83f3bd3aecb0aa4198074c6518775974982",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/linkify-it",
+      "name": "linkify-it",
+      "version": "5.0.2",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/linkify-it/-/linkify-it-5.0.2.tgz",
+      "integrity": "sha512-ONTm2jCMAVZjgQa/Fy1kScXsuOoF5NPTsoFBdE1KVIZ2vAh/r9+Bqo+0jINCBYnavTPQZz38QzFTme79ENoN3Q==",
+      "package_json_sha256": "492ffef383ead25ddc4a7615129c3c41eafe1a0a10172680a93fbb5039c84204",
+      "retained_package_json": "licenses/dependencies/linkify-it/5.0.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/linkify-it/5.0.2/LICENSE",
+          "sha256": "95e3f7f0e81e9b4940cdfaa1956aaff5e4dfd2fb1565041e7c78eb9a606f23e3",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/lodash",
+      "name": "lodash",
+      "version": "4.18.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/lodash/-/lodash-4.18.1.tgz",
+      "integrity": "sha512-dMInicTPVE8d1e5otfwmmjlxkZoUpiVLwyeTdUsi/Caj/gfzzblBcCE5sRHV/AsjuCmxWrte2TNGSYuCeCq+0Q==",
+      "package_json_sha256": "5ef0a453b679125b155af19e1477f93b577ea826a57e1545f77608d326966e6a",
+      "retained_package_json": "licenses/dependencies/lodash/4.18.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/lodash/4.18.1/LICENSE",
+          "sha256": "f71e8ed126b46346494aad5486874cd8f0aafe95092ed67d2e3cb6110f939abc",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/lodash.get",
+      "name": "lodash.get",
+      "version": "4.4.2",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/lodash.get/-/lodash.get-4.4.2.tgz",
+      "integrity": "sha512-z+Uw/vLuy6gQe8cfaFWD7p0wVv8fJl3mbzXh33RS+0oW2wvUqiRXiQ69gLWSLpgB5/6sU+r6BlQR0MBILadqTQ==",
+      "package_json_sha256": "8a30f2e98f80d83ece76ca1031f75df6db855bcf75143f9ecccfda7b507623c5",
+      "retained_package_json": "licenses/dependencies/lodash.get/4.4.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/lodash.get/4.4.2/LICENSE",
+          "sha256": "ffd8b33b354585f4ce119f19c53728281e48a97b074491eb6bf6d5c5ff305272",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/lodash.merge",
+      "name": "lodash.merge",
+      "version": "4.6.2",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/lodash.merge/-/lodash.merge-4.6.2.tgz",
+      "integrity": "sha512-0KpjqXRVvrYyCsX1swR/XTK0va6VQkQM6MNo7PqW77ByjAhoARA8EfrP1N4+KlKj8YS0ZUCtRT/YUuhyYDujIQ==",
+      "package_json_sha256": "5aaf4c24df9052e680d0728754c249fb94c11aef2e76ec3f76320431915c92f1",
+      "retained_package_json": "licenses/dependencies/lodash.merge/4.6.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/lodash.merge/4.6.2/LICENSE",
+          "sha256": "f71e8ed126b46346494aad5486874cd8f0aafe95092ed67d2e3cb6110f939abc",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/loglevel",
+      "name": "loglevel",
+      "version": "1.9.2",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/loglevel/-/loglevel-1.9.2.tgz",
+      "integrity": "sha512-HgMmCqIJSAKqo68l0rS2AanEWfkxaZ5wNiEFb5ggm08lDs9Xl2KxBlX3PTcaD2chBM1gXAYf491/M2Rv8Jwayg==",
+      "package_json_sha256": "aa689ceb5c6fa7468424cc5734d221eeb1aabc99cb37702942307018866e0685",
+      "retained_package_json": "licenses/dependencies/loglevel/1.9.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/loglevel/1.9.2/LICENSE-MIT",
+          "sha256": "18e8cf5f0dbaf13d9562e93b9bef79aff2acff18fab698c2d589d2159375a1f9",
+          "source": "LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/mailparser",
+      "name": "mailparser",
+      "version": "3.9.20",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/mailparser/-/mailparser-3.9.20.tgz",
+      "integrity": "sha512-PZ9RD6B7SkmyQ9rj8JvYNS18rL6pWoNkSw9KGVuJQrrdouFxFIB05ugnR3ubInlnjLXV3KHXhGyz8MlTz1VGzw==",
+      "package_json_sha256": "a5805c3dcef90ba06bedd23fc1e73911a25fd9091495c9560429cef598003635",
+      "retained_package_json": "licenses/dependencies/mailparser/3.9.20/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/mailparser/3.9.20/LICENSE",
+          "sha256": "4f1ac0e65b58ac085331698c7a1c01857ee00af203adce645bb0f47f4ae32b87",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/mailparser/node_modules/iconv-lite",
+      "name": "iconv-lite",
+      "version": "0.7.3",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/iconv-lite/-/iconv-lite-0.7.3.tgz",
+      "integrity": "sha512-IKXpvIzjnC9XTAUbVBcMfGS0EPaIXtW6v+zr+RRp+hqULEpo0owZax6wyRwPOJbWbzjYspQwusTsfVr0ifh4uQ==",
+      "package_json_sha256": "f24ad03476d51470a5b069e65b03ef6383d615897ffe2239edf22584ea0e3d03",
+      "retained_package_json": "licenses/dependencies/iconv-lite/0.7.3/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/iconv-lite/0.7.3/LICENSE",
+          "sha256": "ac779f7314c74f232ef847ea86e714abe25cf6eeb5cc97b69451b74e2af6492d",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/math-intrinsics",
+      "name": "math-intrinsics",
+      "version": "1.1.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/math-intrinsics/-/math-intrinsics-1.1.0.tgz",
+      "integrity": "sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==",
+      "package_json_sha256": "39d74aa5a354153130706286dd60a2d8409ce0c8f66546eff2edcac0afff17e1",
+      "retained_package_json": "licenses/dependencies/math-intrinsics/1.1.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/math-intrinsics/1.1.0/LICENSE",
+          "sha256": "2b770a704c15de238c3f622b01b0044ddd60b49ee30608ea6991ebf19db7a7a1",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/mime-db",
+      "name": "mime-db",
+      "version": "1.52.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/mime-db/-/mime-db-1.52.0.tgz",
+      "integrity": "sha512-sPU4uV7dYlvtWJxwwxHD0PuihVNiE7TyAbQ5SWxDCB9mUYvOgroQOwYQQOKPJ8CIbE+1ETVlOoK1UC2nU3gYvg==",
+      "package_json_sha256": "d03e37b915a050af548d543f4e45ff5de06ec767c19e745f18c431d9dc26b5bf",
+      "retained_package_json": "licenses/dependencies/mime-db/1.52.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/mime-db/1.52.0/LICENSE",
+          "sha256": "cc1dfd4dafa27271e8212cd3b274eeb3f262e40a6fdab36ddc3f9696f706f58b",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/mime-types",
+      "name": "mime-types",
+      "version": "2.1.35",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/mime-types/-/mime-types-2.1.35.tgz",
+      "integrity": "sha512-ZDY+bPm5zTTF+YpCrAU9nK0UgICYPT0QtT1NZWFv4s++TNkcgVaT0g6+4R2uI4MjQjzysHB1zxuWL50hzaeXiw==",
+      "package_json_sha256": "5053cc10259c3913ab6b6c8f13170a619c0d1836c1d9081238329a559fafeb3a",
+      "retained_package_json": "licenses/dependencies/mime-types/2.1.35/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/mime-types/2.1.35/LICENSE",
+          "sha256": "71f83c4c0621102a56d9853812777b85751bce7e9726f686f5b056c1f8a4b0e6",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/monday-sdk-js",
+      "name": "monday-sdk-js",
+      "version": "0.5.2",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/monday-sdk-js/-/monday-sdk-js-0.5.2.tgz",
+      "integrity": "sha512-ZxlfnuogPN966e3OcRuZmML/jedhLZTW0h6G00alXejTzKS7avR6z9npco8b++up6Cx0gJfyaQ9cXTTM6+sU1Q==",
+      "package_json_sha256": "60febb79bb0353cb561ebb49d6db028cc31a72ae274662497dadaaf7bdbed077",
+      "retained_package_json": "licenses/dependencies/monday-sdk-js/0.5.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/monday-sdk-js/0.5.2/LICENSE",
+          "sha256": "8ff8459faf9ec137f7f2659cb9df8c75a88878137fc1cd15b19e396bac62833e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/ms",
+      "name": "ms",
+      "version": "2.1.3",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/ms/-/ms-2.1.3.tgz",
+      "integrity": "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==",
+      "package_json_sha256": "1a6b4d9739790c0b94ab96c8cc0507e281c164c311ff4fbf5e57fb8d26290b40",
+      "retained_package_json": "licenses/dependencies/ms/2.1.3/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/ms/2.1.3/license.md",
+          "sha256": "1662fae9b5314d11cf51284e2dcd1f006a354f7343f08712a730fcff9a359801",
+          "source": "license.md"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/nanoid",
+      "name": "nanoid",
+      "version": "3.3.18",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.18.tgz",
+      "integrity": "sha512-DTg4MJbGMWkfi6VZFdNt2/caMbQy4Ou+Op/hJQvGEWcnVfoA1QA+xzRKAzw9jD6+GVOOeYr/mIcuDSdug6F6+w==",
+      "package_json_sha256": "18673eb0d7ed43dd871d59dc22a5670303f5d4eb9b17783b1f698f5840ce1fff",
+      "retained_package_json": "licenses/dependencies/nanoid/3.3.18/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/nanoid/3.3.18/LICENSE",
+          "sha256": "da4db1480d9beea3483a2eda5c53b22238d0827d57da162b48f122e04d2d9987",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/node-domexception",
+      "name": "node-domexception",
+      "version": "1.0.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/node-domexception/-/node-domexception-1.0.0.tgz",
+      "integrity": "sha512-/jKZoMpw0F8GRwl4/eLROPA3cfcXtLApP0QzLmUT/HuPCZWyB7IY9ZrMeKw2O/nFIqPQB3PVM9aYm0F312AXDQ==",
+      "package_json_sha256": "1ff59c11ab7aef2b2f7fa393e8b871362e21b8a2defbd4922a8f8a5082fbfa06",
+      "retained_package_json": "licenses/dependencies/node-domexception/1.0.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/node-domexception/1.0.0/LICENSE",
+          "sha256": "8ec1386f7f078b0c7cd25341cd80f332df902371cda9f40c10ec2b4007b420b7",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/node-fetch",
+      "name": "node-fetch",
+      "version": "2.7.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/node-fetch/-/node-fetch-2.7.0.tgz",
+      "integrity": "sha512-c4FRfUm/dbcWZ7U+1Wq0AwCyFL+3nt2bEw05wfxSz+DWpWsitgmSgYmy2dQdWyKC1694ELPqMs/YzUSNozLt8A==",
+      "package_json_sha256": "000a0b3b037d4e3e211e7b7ca559a5a62a39b96ca2c6bcdaed3aba0a545eedba",
+      "retained_package_json": "licenses/dependencies/node-fetch/2.7.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/node-fetch/2.7.0/LICENSE.md",
+          "sha256": "84eaa985e1ef71b8c630e8aba73404c219ff425c6fdb45c62e998b58d4fbdc8e",
+          "source": "LICENSE.md"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/nodemailer",
+      "name": "nodemailer",
+      "version": "9.1.1",
+      "license": "MIT-0",
+      "resolved": "https://registry.npmjs.org/nodemailer/-/nodemailer-9.1.1.tgz",
+      "integrity": "sha512-izw9mVKFix6YSnC9eLgV6g1opl9DUlRio9ZNcq+Wu9Ujn2UwF+8Nl0B8nz22kEC+CTZCvinkxwJ0DeFbb6NwcQ==",
+      "package_json_sha256": "4ea1ee33f7582183473fe5c89215231534c90b3489da575347993505132dbb95",
+      "retained_package_json": "licenses/dependencies/nodemailer/9.1.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/nodemailer/9.1.1/LICENSE",
+          "sha256": "4f814dcacd2da618d62829ea1f6238701cf421f18a6b36c91c5d8212245e2c78",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/object-inspect",
+      "name": "object-inspect",
+      "version": "1.13.4",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/object-inspect/-/object-inspect-1.13.4.tgz",
+      "integrity": "sha512-W67iLl4J2EXEGTbfeHCffrjDfitvLANg0UlX3wFUUSTx92KXRFegMHUVgSqE+wvhAbi4WqjGg9czysTV2Epbew==",
+      "package_json_sha256": "21c5c63f653705f44a60f5fe93752b231caf6ff07b01805740bd89b71b2d6d8a",
+      "retained_package_json": "licenses/dependencies/object-inspect/1.13.4/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/object-inspect/1.13.4/LICENSE",
+          "sha256": "bd40cc437e28a3ad7bef2ad34e6b72e757b182e67bda1acadbab4ef0476f8232",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/p-finally",
+      "name": "p-finally",
+      "version": "1.0.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/p-finally/-/p-finally-1.0.0.tgz",
+      "integrity": "sha512-LICb2p9CB7FS+0eR1oqWnHhp0FljGLZCWBE9aix0Uye9W8LTQPwMTYVGWQWIw9RdQiDg4+epXQODwIYJtSJaow==",
+      "package_json_sha256": "a96137ab1fb624d4e5fe2b6413417565e72323e709268eab8a790ea51eeda6dc",
+      "retained_package_json": "licenses/dependencies/p-finally/1.0.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/p-finally/1.0.0/license",
+          "sha256": "6fb9754611c20f6649f68805e8c990e83261f29316e29de9e6cedae607b8634c",
+          "source": "license"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/p-queue",
+      "name": "p-queue",
+      "version": "6.6.2",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/p-queue/-/p-queue-6.6.2.tgz",
+      "integrity": "sha512-RwFpb72c/BhQLEXIZ5K2e+AhgNVmIejGlTgiB9MzZ0e93GRvqZ7uSi0dvRF7/XIXDeNkra2fNHBxTyPDGySpjQ==",
+      "package_json_sha256": "603eca03631b96fe551dc9f020648a6c6408d2d0c1e3bd151c1daa054950709d",
+      "retained_package_json": "licenses/dependencies/p-queue/6.6.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/p-queue/6.6.2/license",
+          "sha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3",
+          "source": "license"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/p-queue/node_modules/eventemitter3",
+      "name": "eventemitter3",
+      "version": "4.0.7",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/eventemitter3/-/eventemitter3-4.0.7.tgz",
+      "integrity": "sha512-8guHBZCwKnFhYdHr2ysuRWErTwhoN2X8XELRlrRwpmfeY2jjuUN4taQMsULKUVo1K4DvZl+0pgfyoysHxvmvEw==",
+      "package_json_sha256": "2e9612fd0b3b723d4e27dbd741752f84ad840f3151973250820be782650cb7e1",
+      "retained_package_json": "licenses/dependencies/eventemitter3/4.0.7/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/eventemitter3/4.0.7/LICENSE",
+          "sha256": "3aecc12b1cb28832b5f65ab64291de96568c3f236a74d646281b4491f7bcadbf",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/p-retry",
+      "name": "p-retry",
+      "version": "4.6.2",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/p-retry/-/p-retry-4.6.2.tgz",
+      "integrity": "sha512-312Id396EbJdvRONlngUx0NydfrIQ5lsYu0znKVUzVvArzEIt08V1qhtyESbGVd1FGX7UKtiFp5uwKZdM8wIuQ==",
+      "package_json_sha256": "ee4376966f4f8db899019ec955b3dc25fd972e12587a0da10d8313dc7b617b3f",
+      "retained_package_json": "licenses/dependencies/p-retry/4.6.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/p-retry/4.6.2/license",
+          "sha256": "48da2f39e100d4085767e94966b43f4fa95ff6a0698fba57ed460914e35f94a0",
+          "source": "license"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/p-timeout",
+      "name": "p-timeout",
+      "version": "3.2.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/p-timeout/-/p-timeout-3.2.0.tgz",
+      "integrity": "sha512-rhIwUycgwwKcP9yTOOFK/AKsAopjjCakVqLHePO3CC6Mir1Z99xT+R63jZxAT5lFZLa2inS5h+ZS2GvR99/FBg==",
+      "package_json_sha256": "35fd0811e4089e3e01f47ebe4bc884d1e6f049bb7dc71d34ee50621fd02b6238",
+      "retained_package_json": "licenses/dependencies/p-timeout/3.2.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/p-timeout/3.2.0/license",
+          "sha256": "48da2f39e100d4085767e94966b43f4fa95ff6a0698fba57ed460914e35f94a0",
+          "source": "license"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/pako",
+      "name": "pako",
+      "version": "2.2.0",
+      "license": "(MIT AND Zlib)",
+      "resolved": "https://registry.npmjs.org/pako/-/pako-2.2.0.tgz",
+      "integrity": "sha512-zJq6RP/5q+TO2OpFV3FHzlPnFjmkb7Nc99a5SNjJE+uu/PkpChs+NIZSSzbBoD+6kjiISXjfYdwj1ZRQ81dz/w==",
+      "package_json_sha256": "d9c254197b7c7a1b00eaffb0196f10c3f48061e61d8b6c41dccd3d5d0ab3f1ea",
+      "retained_package_json": "licenses/dependencies/pako/2.2.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/pako/2.2.0/LICENSE",
+          "sha256": "a04665b3b2de56c66730c1f720f528175739e4104f79073614aa611da1e85539",
+          "source": "LICENSE"
+        },
+        {
+          "path": "licenses/dependencies/pako/2.2.0/ZLIB-NOTICE",
+          "sha256": "170d7d544d380b38d5f76ab5eda29475b44ef537f4564163d6d9bece85c51c13",
+          "source": "Exact identical Zlib source headers from 11 contributing lib/zlib modules; see ZLIB-SOURCE-PROVENANCE.json"
+        },
+        {
+          "path": "licenses/dependencies/pako/2.2.0/ZLIB-SOURCE-PROVENANCE.json",
+          "sha256": "a673b4aa3edb99644a582e2611229a0b9e074b345362c8d081813fe871ac8769",
+          "source": "Locked npm package source paths, full-file hashes and exact retained notice line ranges"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/parseley",
+      "name": "parseley",
+      "version": "0.13.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/parseley/-/parseley-0.13.1.tgz",
+      "integrity": "sha512-uNBJZzmb60l6p6VWLTmevizNAGnE0xoSf1n0B4q3ntegDNzcS68NRCcBDZTcyXHxt2XhBChsCuqj4M+nChvE/A==",
+      "package_json_sha256": "ca422bce60dbf414aa9a2f77960346466d543332487daf2d4d5559cb46c188fc",
+      "retained_package_json": "licenses/dependencies/parseley/0.13.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/parseley/0.13.1/LICENSE",
+          "sha256": "ddd4eaafae6009e31c12abb70cf4369034db2fe17de7074ea89aecd3e95d7ffc",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/peberminta",
+      "name": "peberminta",
+      "version": "0.10.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/peberminta/-/peberminta-0.10.0.tgz",
+      "integrity": "sha512-80B2AsU+I4Qdb0ZAPSfe9UwvGzwkM37IKIFEvdS3D/3Ndgv2bsuJ0bfG1+iEYO+l7Gfd4EUJmuRyq7efLgRMzQ==",
+      "package_json_sha256": "eef5ac95f8c83d7be63e9719104ebb45243eef9cce3e61bf3719ffe1b054034d",
+      "retained_package_json": "licenses/dependencies/peberminta/0.10.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/peberminta/0.10.0/LICENSE",
+          "sha256": "ddd4eaafae6009e31c12abb70cf4369034db2fe17de7074ea89aecd3e95d7ffc",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/proxy-from-env",
+      "name": "proxy-from-env",
+      "version": "2.1.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/proxy-from-env/-/proxy-from-env-2.1.0.tgz",
+      "integrity": "sha512-cJ+oHTW1VAEa8cJslgmUZrc+sjRKgAKl3Zyse6+PV38hZe/V6Z14TbCuXcan9F9ghlz4QrFr2c92TNF82UkYHA==",
+      "package_json_sha256": "d01e73f0bf86e192e7eab7ff3f6f9e1284695ecc713ace22d982f9a35c9be451",
+      "retained_package_json": "licenses/dependencies/proxy-from-env/2.1.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/proxy-from-env/2.1.0/LICENSE",
+          "sha256": "f55828df4b8752c48e765a806465b76a103e3cb363379c569b15a1df2ba2d79e",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/punycode.js",
+      "name": "punycode.js",
+      "version": "2.3.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/punycode.js/-/punycode.js-2.3.1.tgz",
+      "integrity": "sha512-uxFIHU0YlHYhDQtV4R9J6a52SLx28BCjT+4ieh7IGbgwVJWO+km431c4yRlREUAsAmt/uMjQUyQHNEPf0M39CA==",
+      "package_json_sha256": "ce0bcedcc3d00b235770a2c49af74712e10e5dac8d3dda5ed23c433b19720c3c",
+      "retained_package_json": "licenses/dependencies/punycode.js/2.3.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/punycode.js/2.3.1/LICENSE-MIT.txt",
+          "sha256": "483acb265f182907d1caf6cff9c16c96f31325ed23792832cc5d8b12d5f88c8a",
+          "source": "LICENSE-MIT.txt"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/qs",
+      "name": "qs",
+      "version": "6.16.0",
+      "license": "BSD-3-Clause",
+      "resolved": "https://registry.npmjs.org/qs/-/qs-6.16.0.tgz",
+      "integrity": "sha512-h6fhOIaRrID2CbEY2fqs+7t+UXZo+MLAnU5gRIq85uFtdiUPCdsApMlHhXogKVM4HM2DVbIjGNTTYH2OcmP1vA==",
+      "package_json_sha256": "69d58ca5abcff9be3f6becc70940caa76d8ec1b72ef7d2d735305c16cb877dca",
+      "retained_package_json": "licenses/dependencies/qs/6.16.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/qs/6.16.0/LICENSE.md",
+          "sha256": "e7dc37bf662d7f786efcb46c545615e70c1daf458a38385521c63cf6607cdfe1",
+          "source": "LICENSE.md"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/retry",
+      "name": "retry",
+      "version": "0.13.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/retry/-/retry-0.13.1.tgz",
+      "integrity": "sha512-XQBQ3I8W1Cge0Seh+6gjj03LbmRFWuoszgK9ooCpwYIrhhoO80pfq4cUkU5DkknwfOfFteRwlZ56PYOGYyFWdg==",
+      "package_json_sha256": "7ae366b6b8133485abf27abe657c0ffa2d32600611ecf2c4fe5246165bed73d5",
+      "retained_package_json": "licenses/dependencies/retry/0.13.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/retry/0.13.1/License",
+          "sha256": "01ad164273e8e095abc9dbd1c21e194594a671af7d528cb43ee7b4c903ba7da3",
+          "source": "License"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/safe-buffer",
+      "name": "safe-buffer",
+      "version": "5.2.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/safe-buffer/-/safe-buffer-5.2.1.tgz",
+      "integrity": "sha512-rp3So07KcdmmKbGvgaNxQSJr7bGVSVk5S9Eq1F+ppbRo70+YeaDxkw5Dd8NPN+GD6bjnYm2VuPuCXmpuYvmCXQ==",
+      "package_json_sha256": "e4018fdbfe625433371f48274fee26f520bbe865e0d8c85bf3aa07424134b90c",
+      "retained_package_json": "licenses/dependencies/safe-buffer/5.2.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/safe-buffer/5.2.1/LICENSE",
+          "sha256": "c7cc929b57080f4b9d0c6cf57669f0463fc5b39906344dfc8d3bc43426b30eac",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/safer-buffer",
+      "name": "safer-buffer",
+      "version": "2.1.2",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/safer-buffer/-/safer-buffer-2.1.2.tgz",
+      "integrity": "sha512-YZo3K82SD7Riyi0E1EQPojLz7kpepnSQI9IyPbHHg1XXXevb5dJI7tpyN2ADxGcQbHG7vcyRHk0cbwqcQriUtg==",
+      "package_json_sha256": "4247a3a63c45a6a7ced1557fe4dd9d2a163af4915d594b95e5867b69a53edb52",
+      "retained_package_json": "licenses/dependencies/safer-buffer/2.1.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/safer-buffer/2.1.2/LICENSE",
+          "sha256": "4bc935e71be198c67ddf3c2b5fddb195f6edc182bfc155a96a6db61b44b494b9",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/selderee",
+      "name": "selderee",
+      "version": "0.12.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/selderee/-/selderee-0.12.0.tgz",
+      "integrity": "sha512-b1YMh3+DHZp59DLna3qVwQ5iOla/nrI6mLBNW02XxU77M3046Df6VLkoaJyFz20VsGIG5kkp+FK0kg4K4HnUFw==",
+      "package_json_sha256": "4bfe1ae988274ea2a25f9cc72ada4e77f3ce181c292e0169520af84bd87666d3",
+      "retained_package_json": "licenses/dependencies/selderee/0.12.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/selderee/0.12.0/LICENSE",
+          "sha256": "a1f4c08ef3e49b39b716674993fb4c2e7fcf0db4386b829038c6dcb99200a056",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/semver",
+      "name": "semver",
+      "version": "7.8.5",
+      "license": "ISC",
+      "resolved": "https://registry.npmjs.org/semver/-/semver-7.8.5.tgz",
+      "integrity": "sha512-Y7/KDsb8LjooZpwaqGyulO6DQlksgCncchHGk+sZIY4SBvUocMBEFH5Ur1fI4dV+Jvl0w6cjvucaIi40puRioA==",
+      "package_json_sha256": "7c94cb7f2a53c27b20d76386ec144c062894dbcc909cfabd0f728c37874b1776",
+      "retained_package_json": "licenses/dependencies/semver/7.8.5/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/semver/7.8.5/LICENSE",
+          "sha256": "4ec3d4c66cd87f5c8d8ad911b10f99bf27cb00cdfcff82621956e379186b016b",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/side-channel",
+      "name": "side-channel",
+      "version": "1.1.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/side-channel/-/side-channel-1.1.1.tgz",
+      "integrity": "sha512-6x6dK6zJdpTzF4sQeNYxwtvBzf6Eg4GtlesS94HOvTudUeyK2WXAaIfmDgsyslYrRBeFIlsi54AYsFGUuhmvrQ==",
+      "package_json_sha256": "14da3b013c3762da85cfd8b173290285394dfa41870bc4a1e8243aaa38316f2a",
+      "retained_package_json": "licenses/dependencies/side-channel/1.1.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/side-channel/1.1.1/LICENSE",
+          "sha256": "cfc3f455254c0af0655cc3ff46a41ed644b67599f6043346169d285bf2b3cf3b",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/side-channel-list",
+      "name": "side-channel-list",
+      "version": "1.0.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/side-channel-list/-/side-channel-list-1.0.1.tgz",
+      "integrity": "sha512-mjn/0bi/oUURjc5Xl7IaWi/OJJJumuoJFQJfDDyO46+hBWsfaVM65TBHq2eoZBhzl9EchxOijpkbRC8SVBQU0w==",
+      "package_json_sha256": "90f0c08c6c17f4a3fa3dd61873223957b89da4201f01dc0c8b95b0b9e6a2a59a",
+      "retained_package_json": "licenses/dependencies/side-channel-list/1.0.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/side-channel-list/1.0.1/LICENSE",
+          "sha256": "5e325595b4ea8cfec3802f545b1def5d7b73e4a5b8e9ba63e32a320f67732292",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/side-channel-map",
+      "name": "side-channel-map",
+      "version": "1.0.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/side-channel-map/-/side-channel-map-1.0.1.tgz",
+      "integrity": "sha512-VCjCNfgMsby3tTdo02nbjtM/ewra6jPHmpThenkTYh8pG9ucZ/1P8So4u4FGBek/BjpOVsDCMoLA/iuBKIFXRA==",
+      "package_json_sha256": "914a8bd732b82523d95bb697eec3e6d95badc5eb13b196fb0772e59354a3ab25",
+      "retained_package_json": "licenses/dependencies/side-channel-map/1.0.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/side-channel-map/1.0.1/LICENSE",
+          "sha256": "5e325595b4ea8cfec3802f545b1def5d7b73e4a5b8e9ba63e32a320f67732292",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/side-channel-weakmap",
+      "name": "side-channel-weakmap",
+      "version": "1.0.2",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/side-channel-weakmap/-/side-channel-weakmap-1.0.2.tgz",
+      "integrity": "sha512-WPS/HvHQTYnHisLo9McqBHOJk2FkHO/tlpvldyrnem4aeQp4hai3gythswg6p01oSoTl58rcpiFAjF2br2Ak2A==",
+      "package_json_sha256": "8c11f0a1c6cfa549588d991a5cb1b04d62953277ed29f47463d415d5946388a8",
+      "retained_package_json": "licenses/dependencies/side-channel-weakmap/1.0.2/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/side-channel-weakmap/1.0.2/LICENSE",
+          "sha256": "cfc3f455254c0af0655cc3ff46a41ed644b67599f6043346169d285bf2b3cf3b",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/stripe",
+      "name": "stripe",
+      "version": "18.2.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/stripe/-/stripe-18.2.1.tgz",
+      "integrity": "sha512-GwB1B7WSwEBzW4dilgyJruUYhbGMscrwuyHsPUmSRKrGHZ5poSh2oU9XKdii5BFVJzXHn35geRvGJ6R8bYcp8w==",
+      "package_json_sha256": "3649735766d0456a2f568f4a5ab44777a70eacec749deb192edc3a680bc9dd56",
+      "retained_package_json": "licenses/dependencies/stripe/18.2.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/stripe/18.2.1/LICENSE",
+          "sha256": "b36d54d51ac6f20b867c24264b9433f54372c3370d4984cf1c9884c5c6de1f7a",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/supports-color",
+      "name": "supports-color",
+      "version": "7.2.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/supports-color/-/supports-color-7.2.0.tgz",
+      "integrity": "sha512-qpCAvRl9stuOHveKsn7HncJRvv501qIacKzQlO/+Lwxc9+0q2wLyv4Dfvt80/DPn2pqOBsJdDiogXGR9+OvwRw==",
+      "package_json_sha256": "d410a772f9f64b224482ec13815a4bbf1837c533e1be04b3687755c48b2efa1f",
+      "retained_package_json": "licenses/dependencies/supports-color/7.2.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/supports-color/7.2.0/license",
+          "sha256": "48da2f39e100d4085767e94966b43f4fa95ff6a0698fba57ed460914e35f94a0",
+          "source": "license"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/tlds",
+      "name": "tlds",
+      "version": "1.261.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/tlds/-/tlds-1.261.0.tgz",
+      "integrity": "sha512-QXqwfEl9ddlGBaRFXIvNKK6OhipSiLXuRuLJX5DErz0o0Q0rYxulWLdFryTkV5PkdZct5iMInwYEGe/eR++1AA==",
+      "package_json_sha256": "6cdedcd0e3908ce474b46a21ffac3c8529c4e377c935049b2088ebabd410a901",
+      "retained_package_json": "licenses/dependencies/tlds/1.261.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/tlds/1.261.0/LICENSE",
+          "sha256": "65972abf99c026dca44677f537b7bacc8d7a95df3126912b74e697b6352331a6",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/tr46",
+      "name": "tr46",
+      "version": "0.0.3",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/tr46/-/tr46-0.0.3.tgz",
+      "integrity": "sha512-N3WMsuqV66lT30CrXNbEjx4GEwlow3v6rr4mCcv6prnfwhS01rkgyFdjPNBYd9br7LpXV1+Emh01fHnq2Gdgrw==",
+      "package_json_sha256": "615087f58ee138fd35c2b414c355b72e36e5919725b8aecc1c34f6a5585b9779",
+      "retained_package_json": "licenses/dependencies/tr46/0.0.3/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/tr46/0.0.3/tr46-LICENSE.md",
+          "sha256": "eeed1ca176eebad5c73870e233cfff03981fecd319c969475dfa3633036c336b",
+          "source": "supplemental upstream license; see tr46-license-source.json"
+        },
+        {
+          "path": "licenses/dependencies/tr46/0.0.3/tr46-license-source.json",
+          "sha256": "7cb3b41df01ff70452570b74e43343f6f0a92c3ef6e9b80a9be4fa92be8198ce",
+          "source": "supplemental upstream license; see tr46-license-source.json"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/tslib",
+      "name": "tslib",
+      "version": "2.8.1",
+      "license": "0BSD",
+      "resolved": "https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz",
+      "integrity": "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==",
+      "package_json_sha256": "f02b4851df316f29bdfcd404aa1eb41e4e216b5859015f81fcd3e91caf8be931",
+      "retained_package_json": "licenses/dependencies/tslib/2.8.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/tslib/2.8.1/LICENSE.txt",
+          "sha256": "210b19e543130388c68654b7497e967119ce17145f66ab7d85688fbd70f08751",
+          "source": "LICENSE.txt"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/uc.micro",
+      "name": "uc.micro",
+      "version": "2.1.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/uc.micro/-/uc.micro-2.1.0.tgz",
+      "integrity": "sha512-ARDJmphmdvUk6Glw7y9DQ2bFkKBHwQHLi2lsaH6PPmz/Ka9sFOBsBluozhDltWmnv9u/cF6Rt87znRTPV+yp/A==",
+      "package_json_sha256": "8b60af5ea73b0bac4d26111a3f5b00844657b998f9a3fd473710d9e33d274250",
+      "retained_package_json": "licenses/dependencies/uc.micro/2.1.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/uc.micro/2.1.0/LICENSE.txt",
+          "sha256": "483acb265f182907d1caf6cff9c16c96f31325ed23792832cc5d8b12d5f88c8a",
+          "source": "LICENSE.txt"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/url-join",
+      "name": "url-join",
+      "version": "4.0.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/url-join/-/url-join-4.0.1.tgz",
+      "integrity": "sha512-jk1+QP6ZJqyOiuEI9AEWQfju/nB2Pw466kbA0LEZljHwKeMgd9WrAEgEGxjPDD2+TNbbb37rTyhEfrCXfuKXnA==",
+      "package_json_sha256": "6f3ffd4eb86e8810cac470a1fcdd625b5d786d27bf6de6acbbb09ca86e2fe0d1",
+      "retained_package_json": "licenses/dependencies/url-join/4.0.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/url-join/4.0.1/LICENSE",
+          "sha256": "08e017f066892c56857a93c2168b37222091ad080ca9384972fd5040daf174f4",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/url-template",
+      "name": "url-template",
+      "version": "2.0.8",
+      "license": "BSD",
+      "resolved": "https://registry.npmjs.org/url-template/-/url-template-2.0.8.tgz",
+      "integrity": "sha512-XdVKMF4SJ0nP/O7XIPB0JwAEuT9lDIYnNsK8yGVe43y0AWoKeJNdv3ZNWh7ksJ6KqQFjOO6ox/VEitLnaVNufw==",
+      "package_json_sha256": "afb9445b35ffd64f9735d3112ffb8ddfef72b807b2c32d87162975bd18467fbc",
+      "retained_package_json": "licenses/dependencies/url-template/2.0.8/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/url-template/2.0.8/LICENSE",
+          "sha256": "70723b90e3f26aa2808616e846cd8cd349fe33864fd328a91a5bb9d33e58e9d9",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/web-streams-polyfill",
+      "name": "web-streams-polyfill",
+      "version": "3.3.3",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/web-streams-polyfill/-/web-streams-polyfill-3.3.3.tgz",
+      "integrity": "sha512-d2JWLCivmZYTSIoge9MsgFCZrt571BikcWGYkjC1khllbTeDlGqZ2D8vD8E/lJa8WGWbb7Plm8/XJYV7IJHZZw==",
+      "package_json_sha256": "13e22b076747f7673afc2afad4b932843844b1ffb2e5bd613442937eacdaf7d7",
+      "retained_package_json": "licenses/dependencies/web-streams-polyfill/3.3.3/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/web-streams-polyfill/3.3.3/LICENSE",
+          "sha256": "81008a3fb78f69f3c4a72a9e005c8582342ab62864371b3ab8e1b6af9041e080",
+          "source": "LICENSE"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/webidl-conversions",
+      "name": "webidl-conversions",
+      "version": "3.0.1",
+      "license": "BSD-2-Clause",
+      "resolved": "https://registry.npmjs.org/webidl-conversions/-/webidl-conversions-3.0.1.tgz",
+      "integrity": "sha512-2JAn3z8AR6rjK8Sm8orRC0h/bcl/DqL7tRPdGZ4I1CjdF+EaMLmYxBHyXuKL849eucPFhvBoxMsflfOb8kxaeQ==",
+      "package_json_sha256": "e26568c06b82596d754c7490fd568b4b3f970b3b97c55020d42f65990d0c86af",
+      "retained_package_json": "licenses/dependencies/webidl-conversions/3.0.1/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/webidl-conversions/3.0.1/LICENSE.md",
+          "sha256": "a889cc4dbee2ae172c179856b25d75b0b7a5a136e1b97109b9b590b2ff1a879c",
+          "source": "LICENSE.md"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/whatwg-url",
+      "name": "whatwg-url",
+      "version": "5.0.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/whatwg-url/-/whatwg-url-5.0.0.tgz",
+      "integrity": "sha512-saE57nupxk6v3HY35+jzBwYa0rKSy0XR8JSxZPwgLr7ys0IBzhGviA1/TUGJLmSVqs8pb9AnvICXEuOHLprYTw==",
+      "package_json_sha256": "05a015c4176246f051bbaa3a543ed82480a4a4d85360283e049f159ba014b008",
+      "retained_package_json": "licenses/dependencies/whatwg-url/5.0.0/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/whatwg-url/5.0.0/LICENSE.txt",
+          "sha256": "6b7a1792144374d84dc5ed3655b8bbe2754d06f4f1f64a9fb8b9de2d6f448b85",
+          "source": "LICENSE.txt"
+        }
+      ]
+    },
+    {
+      "package_path": "node_modules/zod",
+      "name": "zod",
+      "version": "4.3.6",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/zod/-/zod-4.3.6.tgz",
+      "integrity": "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg==",
+      "package_json_sha256": "1a316ad36e36c6c500bce6e9a6dcbec8efda1083f49a72185226b35573b543ba",
+      "retained_package_json": "licenses/dependencies/zod/4.3.6/PACKAGE.json",
+      "notices": [
+        {
+          "path": "licenses/dependencies/zod/4.3.6/LICENSE",
+          "sha256": "3f1189b28e3866e0d979968d466b78f813f76827cfdca1fbb124cc0a5c8841f8",
+          "source": "LICENSE"
+        }
+      ]
+    }
+  ]
+}

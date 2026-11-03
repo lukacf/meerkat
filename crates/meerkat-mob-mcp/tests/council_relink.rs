@@ -69,7 +69,7 @@ async fn await_completion_records(
     session: &meerkat_core::SessionId,
     job_id: &str,
 ) -> Vec<String> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    let deadline = tokio::time::Instant::now() + Duration::from_mins(2);
     loop {
         let records = completion_records(fixture, session, job_id).await;
         if !records.is_empty() {
@@ -117,7 +117,7 @@ fn one_participant_request(fixture: &CouncilFixture, id: &str) -> TemporaryCounc
             ProfileName::from("participant"),
         )],
         "Should we ship the migration this week?",
-        TemporaryCouncilBounds::relative(Duration::from_secs(240), 1, 4096),
+        TemporaryCouncilBounds::relative(Duration::from_mins(4), 1, 4096),
         MergeBackPolicy::NoMerge,
     )
 }
@@ -612,7 +612,7 @@ async fn a_relink_sweep_that_runs_before_the_convener_mob_is_registered_delivers
         "the convener's mob is not registered yet"
     );
     tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         sweep_passes.wait_for(|passes| *passes >= 1),
     )
     .await

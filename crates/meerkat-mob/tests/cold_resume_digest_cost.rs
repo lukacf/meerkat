@@ -295,7 +295,7 @@ fn persistent_service(
 /// timer. The deadline only bounds a broken run, so it fails with the roster
 /// instead of hanging until the harness timeout.
 async fn wait_all_active(handle: &MobHandle, expected: usize, what: &str) {
-    let deadline = Instant::now() + Duration::from_secs(300);
+    let deadline = Instant::now() + Duration::from_mins(5);
     let mut changes = handle.machine_state_changes();
     loop {
         let members = handle.list_members().await;

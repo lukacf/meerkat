@@ -12,7 +12,7 @@
   "existing_products_unchanged": true,
   "static_validation": "pass",
   "mirror_adjustments": [
-    "Prose that named a downstream host product describes it neutrally; package identifiers are unchanged. rendered_sha256 covers the adjusted pages."
+    "Prose that named a downstream host product describes it neutrally, and package identifiers that named it take the neutral names of this repository's Connect source (connect/sdk/python). The device extension example is published as examples/device-extension.mdx. rendered_sha256 covers the adjusted pages."
   ],
   "files": [
     {
@@ -48,7 +48,7 @@
     {
       "path": "concepts/ownership.mdx",
       "source_sha256": "4a52e1d9db8cb1894d9d6c1c55ac37c5783c7b8f5bc323305bbcf34ced57a6e4",
-      "rendered_sha256": "7cea66fc3758ba2e50d8aaf30d9d53c8adf30fa165d2b85da5353dc4ea82a83e"
+      "rendered_sha256": "fea711177f79ddc03820fccb0447ff2f38ba7fbfff4d07a714d2007cc8700996"
     },
     {
       "path": "concepts/readiness.mdx",
@@ -66,14 +66,14 @@
       "rendered_sha256": "b81eab7e171577099f5178a057c99eb0a4473068d31f1d086871a6a87ce9fdf5"
     },
     {
+      "path": "examples/device-extension.mdx",
+      "source_sha256": "39317ce44e5a7029303bde23ac082449561d8430fe1f4fd68eabb550ebaa6491",
+      "rendered_sha256": "a0ba4c29dc0c96a02ad7d4c403277b67b0d3f76eccf8c6f085df48a4db6eccbd"
+    },
+    {
       "path": "examples/organizational-host.mdx",
       "source_sha256": "22c0ead6817e7607b2f243d933d0616c6f4de849efad42014c17d3b669c41a65",
       "rendered_sha256": "f0e6a167806b58f14c57fd2804f8b64eaed5a0ef33951b44877c3d538d6ff7ff"
-    },
-    {
-      "path": "examples/reachy-extension.mdx",
-      "source_sha256": "39317ce44e5a7029303bde23ac082449561d8430fe1f4fd68eabb550ebaa6491",
-      "rendered_sha256": "39317ce44e5a7029303bde23ac082449561d8430fe1f4fd68eabb550ebaa6491"
     },
     {
       "path": "examples/remembered-tool.mdx",
@@ -88,7 +88,7 @@
     {
       "path": "guides/agent-frontends.mdx",
       "source_sha256": "eafa675dbfe9fdfcccee019adf90657c81dcec4fc788e87490088162f031d517",
-      "rendered_sha256": "f05b98030cbe7b0c1fb70be8edfb6dcb0a7469b02846101a1e7f11c1452df5c1"
+      "rendered_sha256": "be34adb117da1a21c338ef1360fbd780337f43246b8b2cf2f719734a5a779445"
     },
     {
       "path": "guides/host-composition.mdx",
@@ -233,12 +233,12 @@
     {
       "path": "sdks/python-frontends.mdx",
       "source_sha256": "10641beb93a7fae407771a495b878a43c12cb06d6d9345932893d452a939696f",
-      "rendered_sha256": "1b5a6e326d7964da500b367db4b057afe9d5c4383a74cc18d1a44e66caeb1c06"
+      "rendered_sha256": "04b649233485067ca5a89680ae846153790e071940c843ec3177c61c49c55e71"
     },
     {
       "path": "sdks/python.mdx",
       "source_sha256": "f6e808d7b39c79a14937373e0f2173f8f80be9ddf5f63748b2348ad8c20b5c0f",
-      "rendered_sha256": "fa3db7621cbe00a820069385b9009f6a3ba52c99c006d947631709e077a08adc"
+      "rendered_sha256": "dccdefd9d89aa5a96eea465b8951568247e7db23e244e601a14e842ae848bfb3"
     },
     {
       "path": "sdks/rust.mdx",

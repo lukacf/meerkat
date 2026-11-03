@@ -1950,6 +1950,7 @@ mod wiring_incarnation_tests {
             fork_job: None,
             fork_source: None,
             fork_overlay: Default::default(),
+            definition_wiring: crate::DefinitionWiring::Applies,
             direct_member_fence: None,
         }
     }

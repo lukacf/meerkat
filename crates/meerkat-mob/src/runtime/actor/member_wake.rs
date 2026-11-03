@@ -2014,51 +2014,81 @@ impl MobActor {
     /// serving its deliveries: the release is refused retryably while its
     /// session holds accepted work that has not reached a terminal, and
     /// otherwise answers with nothing closed.
+    ///
+    /// A scoped release (`MobHandle::release_member_at_scope`) releases only
+    /// the scope's incarnation on its session: MobMachine answers any other
+    /// one (another runtime id, fence or session, or no member) Stale, and
+    /// nothing is released. The registration it closes is the one current
+    /// when MobMachine classified the release, read in the same actor step,
+    /// so a later incarnation's registration (a successor's wake) is never
+    /// the one closed.
     pub(in crate::runtime) async fn handle_release_member(
         &mut self,
         identity: AgentIdentity,
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
+        scope: Option<Box<crate::runtime::MemberDeliveryScope>>,
+        reply_tx: oneshot::Sender<Result<crate::runtime::ReleaseOutcome, MobError>>,
     ) {
-        match self.prepare_member_release(&identity).await {
+        match self
+            .prepare_member_release(&identity, scope.as_deref())
+            .await
+        {
             Err(error) => {
                 let _ = reply_tx.send(Err(error));
             }
-            Ok(None) => {
-                let _ = reply_tx.send(Ok(()));
+            Ok(MemberReleasePreparation::Stale) => {
+                let _ = reply_tx.send(Ok(crate::runtime::ReleaseOutcome::Stale));
+            }
+            Ok(MemberReleasePreparation::NothingMaterialized) => {
+                let _ = reply_tx.send(Ok(crate::runtime::ReleaseOutcome::Released));
             }
             #[cfg(feature = "runtime-adapter")]
-            Ok(Some(target)) => {
+            Ok(MemberReleasePreparation::Target(target)) => {
+                let registration = match &target {
+                    MemberReleaseTarget::Close {
+                        adapter,
+                        session_id,
+                    } => {
+                        adapter
+                            .current_session_registration_witness(session_id)
+                            .await
+                    }
+                    MemberReleaseTarget::KeepMaterialized { .. } => None,
+                };
                 self.actor_io_tasks.spawn(async move {
                     let result = match target {
-                        MemberReleaseTarget::Close {
-                            adapter,
-                            session_id,
-                        } => release_member_registration(adapter, session_id, &identity).await,
+                        MemberReleaseTarget::Close { adapter, .. } => {
+                            release_member_registration(adapter, registration, &identity).await
+                        }
                         MemberReleaseTarget::KeepMaterialized {
                             adapter,
                             session_id,
                         } => keep_member_materialized(adapter, session_id, &identity).await,
                     };
-                    let _ = reply_tx.send(result);
+                    let _ =
+                        reply_tx.send(result.map(|()| crate::runtime::ReleaseOutcome::Released));
                 });
             }
-            #[cfg(not(feature = "runtime-adapter"))]
-            Ok(Some(never)) => match never {},
         }
     }
 
     /// The release, as MobMachine classifies it (`ClassifyMemberRelease`),
     /// realized on the actor: the member's local session and its runtime
-    /// owner when it releases, `None` when nothing is materialized. On a
-    /// session service that keeps no durable sessions the target keeps the
-    /// member materialized (see `handle_release_member`).
+    /// owner when it releases, `NothingMaterialized` when nothing is
+    /// materialized, `Stale` when `scope` names an incarnation that is not
+    /// the current one on its session. On a session service that keeps no
+    /// durable sessions the target keeps the member materialized (see
+    /// `handle_release_member`).
     async fn prepare_member_release(
         &mut self,
         identity: &AgentIdentity,
-    ) -> Result<Option<MemberReleaseTarget>, MobError> {
-        let verdict = self.classify_member_release(identity)?;
+        scope: Option<&crate::runtime::MemberDeliveryScope>,
+    ) -> Result<MemberReleasePreparation, MobError> {
+        let verdict = self.classify_member_release(identity, scope)?;
         match verdict {
             mob_dsl::MemberReleaseVerdict::Release | mob_dsl::MemberReleaseVerdict::HostOwned => {}
+            // The scope is not the current incarnation on its session:
+            // nothing is released.
+            mob_dsl::MemberReleaseVerdict::Stale => return Ok(MemberReleasePreparation::Stale),
             mob_dsl::MemberReleaseVerdict::NotAMember => {
                 return Err(MobError::MemberNotFound(identity.clone()));
             }
@@ -2095,7 +2125,9 @@ impl MobActor {
             }
             // Dormant, or not materialized at all (Broken, retiring): nothing
             // is materialized here to release.
-            mob_dsl::MemberReleaseVerdict::NothingMaterialized => return Ok(None),
+            mob_dsl::MemberReleaseVerdict::NothingMaterialized => {
+                return Ok(MemberReleasePreparation::NothingMaterialized);
+            }
         }
         let entry = self
             .roster
@@ -2130,15 +2162,19 @@ impl MobActor {
             // that keeps sessions: elsewhere the closed registration would
             // take the session with it, so nothing is closed.
             if self.session_service.supports_persistent_sessions() {
-                Ok(Some(MemberReleaseTarget::Close {
-                    adapter,
-                    session_id,
-                }))
+                Ok(MemberReleasePreparation::Target(
+                    MemberReleaseTarget::Close {
+                        adapter,
+                        session_id,
+                    },
+                ))
             } else {
-                Ok(Some(MemberReleaseTarget::KeepMaterialized {
-                    adapter,
-                    session_id,
-                }))
+                Ok(MemberReleasePreparation::Target(
+                    MemberReleaseTarget::KeepMaterialized {
+                        adapter,
+                        session_id,
+                    },
+                ))
             }
         }
         #[cfg(not(feature = "runtime-adapter"))]
@@ -2217,15 +2253,23 @@ impl MobActor {
     }
 
     /// MobMachine's release verdict for `identity` (`ClassifyMemberRelease`,
-    /// a pure verdict legal in every phase the actor serves).
+    /// a pure verdict legal in every phase the actor serves), for the
+    /// incarnation `scope` names when it names one.
     fn classify_member_release(
         &mut self,
         identity: &AgentIdentity,
+        scope: Option<&crate::runtime::MemberDeliveryScope>,
     ) -> Result<mob_dsl::MemberReleaseVerdict, MobError> {
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
         let transition = self.apply_dsl_input_collect_transition(
             mob_dsl::MobMachineInput::ClassifyMemberRelease {
                 agent_identity: dsl_identity.clone(),
+                scope_agent_runtime_id: scope
+                    .map(|scope| mob_dsl::AgentRuntimeId::from_domain(scope.runtime_id())),
+                scope_fence_token: scope
+                    .map(|scope| mob_dsl::FenceToken::from_domain(scope.fence_token())),
+                scope_session_id: scope
+                    .map(|scope| mob_dsl::SessionId::from_domain(scope.session_id())),
             },
             "classify_member_release",
         )?;
@@ -2333,6 +2377,19 @@ pub(in crate::runtime) enum PeerNoticeRealization {
     Suppressed,
 }
 
+/// What a release does, as MobMachine classified it.
+enum MemberReleasePreparation {
+    /// The scope names an incarnation that is not the current one on its
+    /// session: nothing is released.
+    Stale,
+    /// Nothing of the member is materialized here to release.
+    NothingMaterialized,
+    /// Close (or keep) the member's registration. Without the runtime
+    /// adapter nothing is released.
+    #[cfg(feature = "runtime-adapter")]
+    Target(MemberReleaseTarget),
+}
+
 /// What a release MobMachine permits does with the member's registration.
 #[cfg(feature = "runtime-adapter")]
 enum MemberReleaseTarget {
@@ -2351,10 +2408,6 @@ enum MemberReleaseTarget {
         session_id: SessionId,
     },
 }
-/// Without the runtime adapter nothing is released.
-#[cfg(not(feature = "runtime-adapter"))]
-type MemberReleaseTarget = std::convert::Infallible;
-
 /// Answer a release that keeps the member materialized: refused retryably
 /// while the session holds accepted work that has not reached a terminal
 /// (queued, held at its start, or running), done otherwise. Nothing is
@@ -2376,18 +2429,16 @@ async fn keep_member_materialized(
     Ok(())
 }
 
-/// Close the member's current registration while it is quiescent. The
-/// runtime's unregister saga emits the release that reaches MobMachine.
+/// Close `registration`, the member's registration when MobMachine
+/// classified the release, while it is quiescent. The runtime's unregister
+/// saga emits the release that reaches MobMachine.
 #[cfg(feature = "runtime-adapter")]
 async fn release_member_registration(
     adapter: Arc<meerkat_runtime::MeerkatMachine>,
-    session_id: SessionId,
+    registration: Option<meerkat_runtime::RuntimeSessionRegistrationWitness>,
     identity: &AgentIdentity,
 ) -> Result<(), MobError> {
-    let Some(registration) = adapter
-        .current_session_registration_witness(&session_id)
-        .await
-    else {
+    let Some(registration) = registration else {
         // Nothing is registered: nothing is materialized to release.
         return Ok(());
     };

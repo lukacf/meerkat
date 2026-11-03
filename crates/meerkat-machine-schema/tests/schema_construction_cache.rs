@@ -39,10 +39,12 @@ fn every_catalog_machine_schema_is_constructed_at_most_once() {
     use dsl::approval_lifecycle::ApprovalLifecycleMachineState;
     use dsl::auth_machine::AuthMachineState;
     use dsl::detached_job::DetachedJobMachineState;
+    use dsl::durable_decision::DurableDecisionMachineState;
     use dsl::forked_participant_lifecycle::ForkedParticipantLifecycleMachineState;
     use dsl::meerkat_machine::MeerkatMachineState;
     use dsl::mob_host_binding_authority::MobHostBindingAuthorityState;
     use dsl::mob_machine::MobMachineState;
+    use dsl::mob_store_restore_lifecycle::MobStoreRestoreLifecycleMachineState;
     use dsl::occurrence_lifecycle::OccurrenceLifecycleMachineState;
     use dsl::runtime_delivery::RuntimeDeliveryMachineState;
     use dsl::schedule_lifecycle::ScheduleLifecycleMachineState;
@@ -50,6 +52,7 @@ fn every_catalog_machine_schema_is_constructed_at_most_once() {
     use dsl::session_persistence_version_authority::SessionPersistenceVersionAuthorityMachineState;
     use dsl::session_turn_admission::SessionTurnAdmissionMachineState;
     use dsl::temporary_council_lifecycle::TemporaryCouncilLifecycleMachineState;
+    use dsl::tool_grant_lifecycle::ToolGrantLifecycleMachineState;
     use dsl::work_attention_lifecycle::WorkAttentionLifecycleMachineState;
     use dsl::work_item_admission::WorkItemAdmissionMachineState;
     use dsl::workgraph_lifecycle::WorkGraphLifecycleMachineState;
@@ -70,6 +73,10 @@ fn every_catalog_machine_schema_is_constructed_at_most_once() {
         "ApprovalLifecycleMachine",
     );
     assert_construction_is_cached(DetachedJobMachineState::schema_static, "DetachedJobMachine");
+    assert_construction_is_cached(
+        DurableDecisionMachineState::schema_static,
+        "DurableDecisionMachine",
+    );
     assert_construction_is_cached(
         RuntimeDeliveryMachineState::schema_static,
         "RuntimeDeliveryMachine",
@@ -105,6 +112,14 @@ fn every_catalog_machine_schema_is_constructed_at_most_once() {
     assert_construction_is_cached(
         TemporaryCouncilLifecycleMachineState::schema_static,
         "TemporaryCouncilLifecycleMachine",
+    );
+    assert_construction_is_cached(
+        ToolGrantLifecycleMachineState::schema_static,
+        "ToolGrantLifecycleMachine",
+    );
+    assert_construction_is_cached(
+        MobStoreRestoreLifecycleMachineState::schema_static,
+        "MobStoreRestoreLifecycleMachine",
     );
     assert_construction_is_cached(
         SessionPersistenceVersionAuthorityMachineState::schema_static,

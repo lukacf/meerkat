@@ -480,6 +480,9 @@ pub fn agent_transport_error_code(error: &meerkat_core::AgentError) -> ErrorCode
         AgentError::ConfigError(_)
         | AgentError::InstructionActivation(_)
         | AgentError::StagedPromptDirectedTurnRefused => ErrorCode::InvalidParams,
+        // A scoped tool grant gate no grant could honour is the caller's
+        // request, refused with the typed refusal as the error's data.
+        AgentError::ToolGrantGateRefused(_) => ErrorCode::InvalidParams,
         AgentError::HookDenied { .. } => ErrorCode::HookDenied,
         AgentError::Llm { .. } | AgentError::BuildError(_) => ErrorCode::ProviderError,
         AgentError::SessionNotFound(_) => ErrorCode::SessionNotFound,
@@ -725,6 +728,23 @@ mod tests {
             );
             assert!(cli > 0, "CLI exit code should be positive");
         }
+    }
+
+    /// A refused scoped tool grant gate is the caller's request, refused as
+    /// invalid params, never a provider or internal fault.
+    #[test]
+    fn a_refused_grant_gate_is_an_invalid_params_error() {
+        let refused = meerkat_core::AgentError::ToolGrantGateRefused(Box::new(
+            meerkat_core::tool_grant::GrantGateRefusal::NoGrantService,
+        ));
+        assert_eq!(
+            agent_transport_error_code(&refused),
+            ErrorCode::InvalidParams
+        );
+        assert_eq!(
+            session_transport_error_code(&meerkat_core::SessionError::Agent(refused)),
+            ErrorCode::InvalidParams
+        );
     }
 
     /// The session transport mapping (JSON-RPC session methods and the

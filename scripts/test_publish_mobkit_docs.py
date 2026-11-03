@@ -16,36 +16,45 @@ class PublishMobKitDocsWorkflowTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.workflow = WORKFLOW.read_text(encoding="utf-8")
 
-    def test_mirrors_main_on_docs_push_manual_dispatch_and_nightly_catch_up(self) -> None:
-        self.assertIn("repository_dispatch:", self.workflow)
-        # Meta 0.9 dispatches meta-docs-updated; earlier releases dispatch
-        # mobkit-docs-updated. Both must keep mirroring.
-        self.assertIn("types: [mobkit-docs-updated, meta-docs-updated]", self.workflow)
-        self.assertIn("workflow_dispatch:", self.workflow)
-        self.assertIn("source_sha:", self.workflow)
-        self.assertIn("schedule:", self.workflow)
-        self.assertIn("cron:", self.workflow)
+    def test_mirrors_main_on_meta_docs_push_and_manual_dispatch(self) -> None:
+        on = self.workflow[self.workflow.index("\non:\n") : self.workflow.index("\npermissions:\n")]
+        self.assertIn("push:", on)
+        self.assertIn("- main", on)
+        self.assertIn('- "meta/docs/**"', on)
+        # The script renders the mirror: a change to it changes the mirror.
+        self.assertIn('- "scripts/sync-mobkit-docs.py"', on)
+        self.assertIn("workflow_dispatch:", on)
+        # Meta lives under meta/ in this repository: no cross-repository
+        # dispatch to wait for, and no nightly catch-up (the nightly lag check
+        # reports an unmirrored docs commit instead).
+        self.assertNotIn("repository_dispatch", self.workflow)
+        self.assertNotIn("schedule:", on)
+        self.assertNotIn("cron:", on)
+        self.assertNotIn("source_sha:", on)
         # Releases no longer publish documentation.
         self.assertNotIn("mobkit-release-published", self.workflow)
         self.assertNotIn("release_tag", self.workflow)
         self.assertNotIn("releases/latest", self.workflow)
         self.assertNotIn("verify-published-registries.py", self.workflow)
 
-    def test_only_commits_on_mobkit_main_can_be_mirrored(self) -> None:
-        self.assertIn("repository: lukacf/meerkat-meta", self.workflow)
-        self.assertIn("ref: main", self.workflow[self.workflow.index("repository: lukacf/meerkat-meta"):])
-        verify = self.workflow.index("Resolve and verify the source commit")
-        generate = self.workflow.index("scripts/sync-mobkit-docs.py _mobkit")
-        self.assertLess(verify, generate)
-        self.assertIn('if [[ "$REQUESTED_REF" != "main" ]]', self.workflow[verify:generate])
-        self.assertIn(
-            'git -C _mobkit merge-base --is-ancestor "$source_sha" origin/main',
-            self.workflow[verify:generate],
-        )
-        self.assertIn('git -C _mobkit checkout --quiet --detach "$source_sha"', self.workflow[verify:generate])
+    def test_mirrors_the_in_tree_meta_docs_at_the_main_head(self) -> None:
+        # One checkout, of this repository's main with its history; the
+        # standalone MobKit repository is never read.
+        self.assertEqual(self.workflow.count("uses: actions/checkout@"), 1)
+        self.assertNotIn("repository:", self.workflow)
+        self.assertNotIn("meerkat-meta", self.workflow)
+        self.assertNotIn("_mobkit", self.workflow)
+        checkout = self.workflow.index("uses: actions/checkout@")
+        resolve = self.workflow.index("Resolve the source commit")
+        self.assertIn("ref: main", self.workflow[checkout:resolve])
+        self.assertIn("fetch-depth: 0", self.workflow[checkout:resolve])
+        generate = self.workflow.index("python3 scripts/sync-mobkit-docs.py meta")
+        self.assertLess(resolve, generate)
+        self.assertIn("source_sha=$(git rev-parse HEAD)", self.workflow[resolve:generate])
+        self.assertIn('if [[ "$(git rev-parse origin/main)" != "$source_sha" ]]', self.workflow[resolve:generate])
 
     def test_generates_from_clean_main_source(self) -> None:
-        self.assertIn("scripts/sync-mobkit-docs.py _mobkit", self.workflow)
+        self.assertIn("scripts/sync-mobkit-docs.py meta", self.workflow)
         self.assertIn("--source-ref main", self.workflow)
         self.assertIn("--require-clean", self.workflow)
 
@@ -122,14 +131,18 @@ class PublishMobKitDocsWorkflowTests(unittest.TestCase):
             self.skipTest("PyYAML is not installed")
         parsed = yaml.safe_load(self.workflow)
         triggers = parsed[True]
-        self.assertEqual(
-            triggers["repository_dispatch"]["types"],
-            ["mobkit-docs-updated", "meta-docs-updated"],
-        )
-        self.assertIn("source_sha", triggers["workflow_dispatch"]["inputs"])
-        self.assertFalse(triggers["workflow_dispatch"]["inputs"]["source_sha"]["required"])
-        self.assertEqual(len(triggers["schedule"]), 1)
+        self.assertEqual(set(triggers), {"push", "workflow_dispatch"})
+        self.assertEqual(triggers["push"]["branches"], ["main"])
+        self.assertEqual(triggers["push"]["paths"], ["meta/docs/**", "scripts/sync-mobkit-docs.py"])
+        self.assertIsNone(triggers["workflow_dispatch"])
         steps = {step.get("id", step["name"]): step for step in parsed["jobs"]["publish"]["steps"]}
+        checkouts = [
+            step for step in parsed["jobs"]["publish"]["steps"] if step.get("uses", "").startswith("actions/checkout@")
+        ]
+        self.assertEqual(len(checkouts), 1)
+        self.assertEqual(checkouts[0]["with"], {"ref": "main", "fetch-depth": 0})
+        generate = steps["Generate MobKit documentation from main"]["run"]
+        self.assertIn("python3 scripts/sync-mobkit-docs.py meta", generate)
         self.assertEqual(parsed["permissions"]["issues"], "write")
         self.assertEqual(steps["direct"]["if"], "steps.stage.outputs.changed == 'true' && env.MOBKIT_DOCS_PR_TOKEN != ''")
         self.assertEqual(steps["branch"]["if"], "steps.stage.outputs.changed == 'true' && env.MOBKIT_DOCS_PR_TOKEN == ''")

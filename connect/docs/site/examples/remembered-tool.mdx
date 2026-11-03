@@ -1,0 +1,45 @@
+---
+title: "From a remembered tool to setup"
+description: "How an agent investigates a vague integration request and turns it into an exact, reviewable choice."
+icon: "magnifying-glass"
+---
+
+This example follows an integration request from initial investigation to a concrete selection.
+
+The user says:
+
+```text
+I vaguely remember a tool that can look through our project discussions
+and tell me what we decided. I think it worked with Slack. Can you use
+something like that to summarize the launch decisions from last week?
+```
+
+## Preserve the request
+
+The original agent passes the full wording, time interpretation, known workspace context and any supplied links. It does not turn the request into an invented exact package name or claim the user selected Gmail, a bot frontend or a particular vendor.
+
+The setup agent inspects current connections and public recipe descriptions. It can investigate beyond the catalog. A package's claim that it "supports Slack" is only a starting point: the task needs the relevant conversation access, thread coverage, evidence links and permitted output.
+
+## Resolve the material choice
+
+Suppose research finds that the remembered product is a hosted search service, while an existing approved Slack REST binding can read the requested conversations. The setup agent explains the distinction and selects the existing binding if it satisfies the request and policy. If there are two plausible workspaces, it asks which one; it does not guess from a fuzzy name match.
+
+| Candidate | Evidence needed | Possible result |
+| --- | --- | --- |
+| Existing Slack connection | Selected workspace, relevant grants and actual history/replies access | Reuse and verify |
+| Provider MCP strategy | Eligibility, host registration, account and observed tool coverage | Prepare or report missing prerequisite |
+| New hosted search tool | Source/terms, indexing scope, data destination, cost and task fit | Concrete proposal when a new decision is required |
+
+These are example investigation paths, not current provider recommendations or an automatic ranking algorithm.
+
+## Record the exact selection
+
+Once the agent chooses, code validates package/version/strategy, selected exports, host contracts, configuration and dependency identity. The host supplies authority and deployment policy. A strategy failure returns a specific result; another strategy requires another explicit selection.
+
+If the host can configure the active integration now, setup verifies the account and binds the required read operations. If new executable or policy deployment is required, it returns a pending proposal with the next owner action. The original task can continue independent work while waiting.
+
+## Complete the actual task
+
+After current service readiness, the original agent reads the selected interval, retains coverage limitations, synthesizes the decisions and links supporting observations. Acquisition success alone is not the summary. If coverage is incomplete, the summary states the gap rather than claiming every decision was found.
+
+See [bounded Slack retrieval](/examples/slack-summary) for the service API example.

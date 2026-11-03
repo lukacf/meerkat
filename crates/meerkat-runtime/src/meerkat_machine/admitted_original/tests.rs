@@ -37,7 +37,7 @@ fn the_own_admission_of_the_expected_original_is_observed() {
     let state = row(&expected);
     let own = own_admission(&state, association(&expected), &expected).expect("its own admission");
     assert_eq!(own.input_id(), expected.id());
-    assert!(own.association() == association(&expected));
+    assert_eq!(own.association(), association(&expected));
 }
 
 /// A row whose own contributor is missing, duplicated or another input's,
@@ -73,7 +73,7 @@ fn a_missing_duplicated_or_other_own_contributor_conflicts() {
     );
 
     let other = input("another-requester");
-    assert!(association(&other) != association(&expected));
+    assert_ne!(association(&other), association(&expected));
     assert_eq!(
         observed(&row(&expected), association(&other), &expected),
         conflict,

@@ -1479,13 +1479,13 @@ mod tests {
             .context_control_observation(&control.operation_id)
             .unwrap()
             .unwrap();
-        assert!(audit.source.as_ref() == Some(&expected));
+        assert_eq!(audit.source.as_ref(), Some(&expected));
         let restored: Session =
             serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
         let restored_audit = restored
             .context_control_observation(&control.operation_id)
             .unwrap()
             .unwrap();
-        assert!(restored_audit.source == Some(expected));
+        assert_eq!(restored_audit.source, Some(expected));
     }
 }

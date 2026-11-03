@@ -1,0 +1,25 @@
+# Calibration profile — Distiller stage, version 0.
+# Format: docs/design/agent-memory-architecture.md §11
+# {stage, prompt bundle, model, params, version}. Records carry the profile
+# that produced them (CalibrationRef, §7.1).
+
+stage         = "distiller"
+version       = "1"
+# Resolved through meerkat's model-client seam (§8.1). Extraction is the
+# highest-value LLM stage (§8.4); the calibration matrix decides whether a
+# larger tier earns its cost. Deployments override per-config via
+# `agent_memory.distiller.model`. Must stay in sync with
+# `DistillerProfile::embedded_default()`
+# (crates/meerkat-meta/src/memory/distiller.rs) — a unit test enforces the prompt
+# half of that sync.
+model         = "claude-haiku-4-5"
+prompt_bundle = "prompts/distiller-v0.md"
+
+[params]
+temperature          = 0.0
+max_output_tokens    = 2048
+# Manifest rows rendered into the prompt ("don't re-remember what the
+# manifest shows").
+max_manifest_records = 200
+# Recent tombstones rendered into the "never re-create" list (§8.4).
+max_tombstones       = 32

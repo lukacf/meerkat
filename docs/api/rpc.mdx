@@ -155,6 +155,10 @@ of this full catalog.
 | `approval/list` | Approval | `ApprovalListParams` | `ApprovalListResult` | List approval audit records |
 | `approval/get` | Approval | `ApprovalGetParams` | `ApprovalRecord` | Get one approval audit record |
 | `approval/decide` | Approval | `ApprovalDecideParams` | `ApprovalRecord` | Record an approval audit decision |
+| `tool_grants/grant` | Tool grants | `GrantToolParams` | `GrantToolResult` | Grant a session's grant-gated tool name or built-in tool family for a bounded window |
+| `tool_grants/revoke` | Tool grants | `RevokeToolGrantParams` | `RevokeToolGrantResult` | Revoke a scoped tool grant; idempotent, the result says whether this revoke ended it |
+| `tool_grants/list` | Tool grants | `ListToolGrantsParams` | `ListToolGrantsResult` | List a session's scoped tool grants, each due grant settled as expired first |
+| `tool_grants/audit` | Tool grants | `ToolGrantAuditParams` | `ToolGrantAuditResult` | Read a page of the audit log of a session's scoped tool grants |
 | `events/latest_cursor` | Events | `EventsLatestCursorParams` | `EventsLatestCursorResult` | Read the latest replay cursor for a typed event scope |
 | `events/list_since` | Events | `EventsListSinceParams` | `EventsListSinceResult` | List replayable events after a typed cursor |
 | `events/snapshot` | Events | `EventsSnapshotParams` | `EventsSnapshotResult` | Read a point-in-time snapshot with its replay cursor |
@@ -180,7 +184,7 @@ of this full catalog.
 | `session/stream_open` | Session | `SessionStreamOpenParams` | `SessionStreamOpenResult` | Open a standalone session event stream |
 | `session/stream_close` | Session | `SessionStreamCloseParams` | `SessionStreamCloseResult` | Close a standalone session event stream |
 | `mob/create` | Mob | `MobCreateParams` | `MobCreateResult` | Create a mob from a definition (mob feature) |
-| `mob/list` | Mob | — | `MobListResult` | List mobs (mob feature) |
+| `mob/list` | Mob | - | `MobListResult` | List mobs, and under `quarantined` the persisted mobs whose stores did not restore (mob feature) |
 | `mob/status` | Mob | `MobIdParams` | `MobStatusResult` | Get mob status (mob feature) |
 | `mob/members` | Mob | `MobIdParams` | `MobMembersResult` | List mob members (mob feature) |
 | `mob/member_tool_declaration` | Mob | `MobMemberToolDeclarationParams` | `MobMemberToolDeclarationResult` | Read one durable member-tool declaration and fresh identity convergence status (mob feature) |
@@ -207,7 +211,7 @@ of this full catalog.
 | `mob/flow_status` | Mob | `MobFlowStatusParams` | `MobFlowStatusResult` | Get flow run status (mob feature) |
 | `mob/run_result` | Mob | `MobRunResultParams` | `MobRunResult` | Get a typed output envelope for a mob run (mob feature) |
 | `mob/flow_cancel` | Mob | `MobFlowCancelParams` | `MobFlowCancelResult` | Cancel a flow run (mob feature) |
-| `mob/ensure_member` | Mob | `MobEnsureMemberParams` | `MobEnsureMemberResult` | Idempotent spawn — returns existing entry if member already exists (mob feature) |
+| `mob/ensure_member` | Mob | `MobEnsureMemberParams` | `MobEnsureMemberResult` | Idempotent spawn: returns the existing member, waiting for one whose spawn is in flight (mob feature) |
 | `mob/reconcile` | Mob | `MobReconcileParams` | `MobReconcileResult` | Declarative roster reconcile against a desired spec list (mob feature) |
 | `mob/list_members_matching` | Mob | `MobListMembersMatchingParams` | `MobListMembersMatchingResult` | Label-filtered member listing with server-side filter (mob feature) |
 | `mob/spawn_helper` | Mob | `MobSpawnHelperParams` | `MobHelperResult` | Spawn a helper member and wait for its result (mob feature) |
@@ -218,6 +222,7 @@ of this full catalog.
 | `mob/snapshot` | Mob | `MobIdParams` | `MobSnapshotResult` | Point-in-time aggregate of mob status plus member list (mob feature) |
 | `mob/destroy` | Mob | `MobIdParams` | `MobDestroyResult` | Destroy a mob and surface the structured MobDestroyReport (mob feature) |
 | `mob/rotate_supervisor` | Mob | `MobIdParams` | `MobRotateSupervisorResult` | Rotate the supervisor bridge for all members of a mob (mob feature) |
+| `mob/restore_retry` | Mob | `MobIdParams` | `MobRestoreRetryResult` | Re-attempt the restore of a quarantined persisted mob, for example after a repair (mob feature) |
 | `mob/claim_callback_route` | Mob | `MobClaimCallbackRouteParams` | `MobClaimCallbackRouteResult` | Bind a mob's member callback route to this connection with the mob's claim token (mob feature) |
 | `mob/submit_work` | Mob | `MobSubmitWorkParams` | `MobSubmitWorkResult` | Submit a unit of work to a mob member through the work lane (mob feature) |
 | `mob/conclude_objective` | Mob | `MobConcludeObjectiveParams` | `MobConcludeObjectiveResult` | Explicitly conclude a durable kickoff objective (mob feature) |
@@ -593,9 +598,9 @@ Handshake. Returns server capabilities.
   "result": {
     "server_info": {
       "name": "meerkat-rpc",
-      "version": "0.9.8"
+      "version": "0.9.9"
     },
-    "contract_version": "0.9.8",
+    "contract_version": "0.9.9",
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read",
@@ -814,6 +819,20 @@ During execution, `session/event` notifications are emitted (see
   Provider-specific parameters (e.g., thinking config, reasoning effort).
 </ParamField>
 
+<ParamField body="grant_gated_tools" type="object | null" default="null">
+  Scoped tool grant gate, `{"families": [...], "tools": [...]}`: built-in tool
+  families and tool names the session mounts hidden and refuses at dispatch
+  until a live grant opens them (see [Scoped tool grants](#scoped-tool-grants)).
+  The session records its gate. A field the gate does not know is an invalid
+  parameter, and a gate no grant could honour (an unknown or disabled family,
+  a name nothing mounts) fails the session's build with invalid params whose
+  `data` is
+  `{"kind": "tool_grant_gate_refused", "tool_grant_gate_refusal": {...}}`;
+  a deferred create reports it at its first `turn/start`. With
+  `keep_alive: true`, `session/create` answers before its first turn builds
+  the session, so it does not report the refusal.
+</ParamField>
+
 #### Response fields
 
 <ResponseField name="session_id" type="string">
@@ -892,7 +911,7 @@ Trajectory Interchange Format) v1.7 trajectory document.
   "params": {
     "session_id": "01936f8a-7b2c-7000-8000-000000000001",
     "agent_name": "meerkat",
-    "agent_version": "0.9.8",
+    "agent_version": "0.9.9",
     "model_name": "claude-opus-5"
   }
 }
@@ -1071,7 +1090,7 @@ Create a new idle session whose transcript is the source session prefix ending b
 
 `running_behavior` currently supports `"reject"`, which returns `SESSION_BUSY` if the source session has active work.
 
-`inherited_instructions` decides what the child does with the instruction activations it copies from the prefix. The child is not materialized, so nobody can activate it before its first turn: with the field absent or `"require_explicit_activation"` (the default), and with `"refuse"`, a prefix that carries activation rows is refused before anything is committed with `FORK_INSTRUCTION_REFUSED` (-32037), whose `data` carries `kind: "fork_instruction_refused"` and the typed `fork_instruction_refusal` (`cause`, `keys`). `"reactivate_inherited"` appends the child's own activation of every key that was effective in the source; the result's `reactivated_instruction_count` counts those rows, which `message_count` includes. A prefix without activation rows forks the same way under every value.
+`inherited_instructions` decides what the child does with the instruction activations it copies from the prefix. The child is not materialized, so nobody can activate it before its first turn: with the field absent or `"require_explicit_activation"` (the default), and with `"refuse"`, a prefix that carries activation rows is refused before anything is committed with `FORK_INSTRUCTION_REFUSED` (-32037), whose `data` carries `kind: "fork_instruction_refused"` and the typed `fork_instruction_refusal` (`cause`, `keys`). `"reactivate_inherited"` appends the child's own activation of every key that was effective in the source; the result's `reactivated_instruction_count` counts those rows, which `message_count` includes. Under it, a prefix whose last row of a key is one whose body a compaction of the source retired (a later row of that key, past the prefix, superseded it) is refused with cause `head_body_retired`; a fork at a later boundary copies the superseding row, with its body. A prefix without activation rows forks the same way under every value.
 
 ### session/fork_replace
 
@@ -1171,12 +1190,17 @@ present.
 `events/list_since`, `workgraph/list`, `workgraph/ready`,
 `workgraph/snapshot`, and `workgraph/events`.
 
-WorkGraph ready-set and snapshot projections are atomic only within explicit
-process bounds. A projection over more than 1,000 live (non-terminal) items,
-1,000 edges that touch a live item, or 1,000 attention bindings fails closed
-with `INVALID_PARAMS`; narrow the realm/namespace/filter and retry. Terminal
-items and edges between two terminal items do not count against these bounds,
-and an oversized graph is never truncated after the fact.
+WorkGraph `workgraph/ready` and `workgraph/snapshot` read one atomic
+observation of the whole namespace and classify readiness against all of it,
+however many items, edges and attention bindings the namespace holds. `limit`
+then cuts the result, and `workgraph/list`, `workgraph/ready` and
+`workgraph/snapshot` report the cut: `total_items` counts the items that
+matched before it (for `workgraph/ready`, the ready items), and `truncated` is
+true when matching items exist after the last one returned. A page that ended
+early names a `next_cursor`; pass it back as `cursor` for the next page (see
+`workgraph/list` below). `workgraph/events` pages with `after_seq` and
+reports `truncated` and `next_after_seq`. A result without
+these fields comes from an older server and may still have been cut.
 
 ### session/read
 
@@ -2030,6 +2054,104 @@ a decision on an approval the pipe never presented is refused.
 }
 ```
 
+## Scoped tool grants
+
+A session created with `grant_gated_tools` mounts its gated tool families and
+names hidden: the model is not shown them and every call is refused until a
+live grant opens them (see [scoped tool grants](/concepts/tools#scoped-tool-grants)).
+`tool_grants/grant`, `tool_grants/revoke`, `tool_grants/list` and
+`tool_grants/audit` manage a session's grants. They read and write grant rows
+only: no method loads, registers or wakes the session.
+
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 40,
+  "method": "tool_grants/grant",
+  "params": {
+    "subject": {"kind": "session", "session_id": "01936f8a-7b2c-7000-8000-000000000001"},
+    "target": {"kind": "family", "family": "shell"},
+    "duration_ms": 3600000,
+    "reason": "incident response"
+  }
+}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 40,
+  "result": {
+    "grant": {
+      "grant_id": "0b6f9f5e-8f3d-4a51-9a52-3c1f6d1e2a10",
+      "subject": {"kind": "session", "session_id": "01936f8a-7b2c-7000-8000-000000000001"},
+      "target": {"kind": "family", "family": "shell", "names": ["monitor_start", "shell", "shell_job_cancel", "shell_job_status", "shell_jobs"]},
+      "issuer": {"kind": "operator"},
+      "reason": "incident response",
+      "status": "active",
+      "issued_at_ms": 1761735600000,
+      "expires_at_ms": 1761739200000
+    }
+  }
+}
+```
+
+- **`tool_grants/grant`** opens a `target` for the `subject` session: a tool
+  name (`{"kind": "tool", "name": ...}`) the session gates by name or through a
+  gated family, or a family the session gates (`{"kind": "family", "family":
+  ...}`; the server fills in `names` with the names the family can provide, so
+  omit them). Exactly one of `duration_ms` and `expires_at_ms` (UNIX ms)
+  bounds the grant, at most the host's maximum lifetime (24 hours by default).
+  A session before or during its first turn is granted from its staged build.
+  A gate no grant could honour fails the session's build, which a deferred
+  create reports at its first `turn/start`.
+- **`tool_grants/revoke`** ends a grant before its deadline. It is idempotent:
+  revoking a grant that already ended answers it as it stands, and `changed`
+  says whether this revoke ended it. A revoke at or after the deadline records
+  the expiry instead.
+- **`tool_grants/list`** answers the session's grants, each due one settled as
+  `expired` first. Ended grants (`expired`, `revoked`) are listed only with
+  `include_ended`; `unreadable` names any stored grant this server cannot read
+  (written by a newer version, or damaged), which opens nothing.
+- **`tool_grants/audit`** answers a page of the session's audit log, `granted`,
+  `expired` (with the `driver` that observed it: `timer`, `boundary`,
+  `dispatch`, `read` or `revoke`), `revoked` and `refused` rows, in `sequence`
+  order after `after_sequence`. `limit` defaults to 100 rows and caps at 1000;
+  a full page carries `next_sequence`, the next page's `after_sequence`. A row
+  this server cannot read is named in `unreadable` with its `sequence`, and the
+  rest of the page is served.
+
+List and audit read the session's grant rows without checking that the
+session exists: an archived session's grants stay listable and auditable, and
+a session id with no grants, or one no session has, answers empty.
+
+A grant's `status` is `active`, `expired` or `revoked`; `requested` and
+`declined` are reserved for grant requests. A request's `subject` and `target`
+refuse a kind or a field this server does not know (invalid params), so a
+request is never read as wider than it asked. Every vocabulary a result
+carries (subject and target kind, status, issuer, audit event kind, expiry
+driver, refusal reason) decodes a value a later version adds as `unknown`,
+which this server never sends.
+
+Errors use the standard codes: invalid params for a window that is past,
+empty, longer than the maximum or given twice or not at all, a target the
+session does not gate, family `names` in a request, and an unknown or
+malformed grant id; `SESSION_NOT_FOUND` for a grant to a session that does not
+exist or is archived; `SESSION_BUSY` when concurrent writers changed the grant
+under a grant or revoke twice, which a retry resolves; capability unavailable
+for an `identity` subject (this server grants to sessions only) or a store
+without grant support.
+
+The stock governed stdio pipe serves a fixed method set: it does not serve the
+`tool_grants/*` methods, and its `session/create` refuses `grant_gated_tools`
+as an unsupported parameter.
+
+<Warning>
+`rkat-rpc` does not authenticate the caller of these methods: a grant's issuer
+is recorded as an operator without a caller. Authorize grant administration in
+the trusted host or an authenticated proxy before forwarding the call.
+</Warning>
+
 ## Schedules, WorkGraph, and multi-host mobs
 
 The schedule family provides CRUD, pause/resume, occurrence listing, tool
@@ -2156,17 +2278,22 @@ The response is abridged; the full `WorkItem` shape is in the
 Every evidence entry, here and everywhere a `WorkEvidenceRef` appears (the
 `workgraph_add_evidence` tool argument, host mutation surfaces such as Meta's
 `meta/workgraph/evidence/add`), has the shape
-`{"kind": string, "id": string, "label"?: string, "summary"?: string}`. `kind`
-is an opaque provenance label (`artifact`, `pr`, `log`, `summary`,
+`{"kind": string, "id": string, "label"?: string, "summary"?: string, "withdraws"?: string[]}`.
+`kind` is an opaque provenance label (`artifact`, `pr`, `log`, `summary`,
 `notification`, ...); the reserved confirmation kinds (`host_confirmation`,
 `principal_confirmation`, `supervisor_confirmation`, `reviewer_confirmation`)
 are refused from generic callers and stamped only by trusted goal-confirm
-authority.
+authority. `withdraws` lists the ids of earlier evidence on the same item that
+the entry withdraws; nothing is removed, and an entry is withdrawn when a later
+entry lists its id (see
+[Withdrawing Evidence](/reference/workgraph-reference#withdrawing-evidence)).
 
 ### workgraph/list
 
-List items in the granted realm and namespace. Params are a `WorkItemFilter`;
-all fields are optional and an empty object lists live work.
+List items in the granted realm and namespace, most recently updated first
+(`updated_at`, then `id`, both descending), so a cut keeps the most recently
+updated items. Params are a `WorkItemFilter`; all fields are optional and an
+empty object lists live work.
 
 <CodeGroup>
 ```json Request
@@ -2191,7 +2318,11 @@ all fields are optional and an empty object lists live work.
   "result": {
     "items": [
       {"id": "work_release_notes", "status": "completed", "labels": ["release", "docs"], "revision": 6}
-    ]
+    ],
+    "total_items": 1,
+    "truncated": false,
+    "anchor_event_seq": 412,
+    "changed_since_anchor": false
   }
 }
 ```
@@ -2224,6 +2355,34 @@ all fields are optional and an empty object lists live work.
 <ParamField body="limit" type="integer" default="100">
   Maximum items returned. Omitted means 100; values above 1,000 fail with `INVALID_PARAMS` before the store is queried.
 </ParamField>
+
+<ParamField body="cursor" type="string">
+  The `next_cursor` of the previous page. The page holds the items strictly after the cursor's position, in the same order, so items never shift between pages. Pass it with any filter. A cursor is opaque and continues only the read that returned it: a cursor that does not decode, has another version, or came from `workgraph/ready` or `workgraph/snapshot` fails with `INVALID_PARAMS`. It is not authority: the namespace grant scopes every page.
+</ParamField>
+
+The result is `{"items": [...], "total_items": N, "truncated": bool,
+"next_cursor": "...", "anchor_event_seq": N, "changed_since_anchor": bool}`.
+`total_items` counts every item that matched the filter at this read, before
+the cursor and `limit` cut them. `truncated` is true when matching items exist
+after the last one returned, and `next_cursor` is present exactly then (a
+`limit: 0` page returns only the totals). `anchor_event_seq` is the event
+ledger's high-water mark when the walk began: the first page reads it before
+its rows, and the cursor carries it (it is absent when the ledger had no
+event). `changed_since_anchor` is true when the ledger has moved past it.
+
+A walk over every page keeps these promises:
+
+- An item that does not change during the walk is on exactly one page.
+- An item that changes during the walk is on at most one page. It can repeat
+  only when a write gives it an `updated_at` older than the one it had (the
+  store clock moved back), so a reader that dedupes by `id` and keeps the
+  higher `revision` is safe.
+- An item changed or created after the anchor can be missing from later
+  pages. Those pages say `changed_since_anchor: true`, and `workgraph/events`
+  with `after_seq` set to `anchor_event_seq` names every such item.
+  Execution-binding events also move the ledger, so the flag can be true with
+  no public change. The flag covers writes only: a change that writes no
+  event, such as readiness arriving as time passes, is not flagged.
 
 Items and edges are never deleted. There is no unlink or delete method on any
 surface and no tool for it; the graph is an append-only ledger. To take an item
@@ -2266,17 +2425,30 @@ are a `ReadyWorkFilter`.
   Maximum items returned after sorting by priority (high first), then creation time, then id. Omitted means 100; above 1,000 is `INVALID_PARAMS`.
 </ParamField>
 
+<ParamField body="cursor" type="string">
+  The `next_cursor` of the previous `workgraph/ready` page: the page holds the ready items after it in the same order. A cursor of another read, of another version, or one that does not decode fails with `INVALID_PARAMS`.
+</ParamField>
+
 There is no `include_terminal` here because a terminal item is never ready.
-Readiness is evaluated atomically over the namespace; a namespace with more
-than 1,000 live (non-terminal) items fails with `INVALID_PARAMS` and must be
-narrowed rather than truncated. Terminal items do not count. The result is `{"items": [...]}`.
+Readiness is evaluated atomically over every live item of the namespace,
+however many it holds, and the cursor and `limit` then cut the sorted ready
+items. The result has the page fields of `workgraph/list`, where
+`total_items` counts every ready item. The cursor's order key is the priority,
+creation time and id: an item whose priority changes during a walk can move
+across the cursor either way, so it can be missing or appear twice, and one
+whose readiness changes during the walk can be missing. `changed_since_anchor`
+flags the items an event changed after the anchor, such as a priority update
+or a blocker's close. Readiness that arrives by time passing (`not_before`,
+`snoozed_until`) writes no event, so it is not flagged. A reader that dedupes
+by `id` and keeps the higher `revision` is safe.
 
 ### workgraph/snapshot
 
 Read one atomic observation of the namespace. Params are a
 `WorkGraphSnapshotFilter` with the same fields and semantics as
 `WorkItemFilter` (`realm_id`, `namespace`, `all_namespaces`, `statuses`,
-`labels`, `include_terminal`, `limit`).
+`labels`, `include_terminal`, `limit`, `cursor`); a cursor continues only a
+`workgraph/snapshot` walk.
 
 <CodeGroup>
 ```json Request
@@ -2305,20 +2477,33 @@ Read one atomic observation of the namespace. Params are a
     "items": [],
     "edges": [],
     "attention": [],
-    "ready_item_ids": []
+    "ready_item_ids": [],
+    "total_items": 0,
+    "truncated": false,
+    "anchor_event_seq": 412,
+    "changed_since_anchor": false
   }
 }
 ```
 </CodeGroup>
 
 `statuses`, `labels`, and `include_terminal` select the items exactly as in
-`workgraph/list`; `limit` then bounds them (default 100, maximum 1,000).
-`edges` contains only edges whose both endpoints are among the returned items,
-`attention` only bindings on those items, and `ready_item_ids` the subset of
-returned items that is ready at `captured_at`. A snapshot therefore omits an
-edge to a terminal item unless `include_terminal` is true. The atomic scan is
-bounded before filtering: a namespace with more than 1,000 items, 1,000 edges,
-or 1,000 attention bindings fails with `INVALID_PARAMS` and must be narrowed.
+`workgraph/list`; `limit` then keeps the most recently updated of them after
+the cursor (default 100, maximum 1,000), and `total_items`, `truncated` and
+`next_cursor` report the cut as in `workgraph/list`. A first page's `edges`
+contains only edges whose both endpoints are among its items; a continuation
+page adds the edges from its items to the items at or before the cursor, so a
+walk reports every edge between the items it returned once, on the page of
+the edge's later end. `attention` holds only bindings on the page's items,
+and `ready_item_ids` the page's items that are ready at `captured_at`. A
+snapshot therefore omits an edge to a terminal item unless `include_terminal`
+is true. `limit` bounds the items only: `edges` and `attention` follow the
+returned items and are neither counted nor cut on their own. Readiness is
+classified against the whole namespace, however many items, edges and
+attention bindings it holds: a returned item is not ready while a blocker the
+cut left out is unresolved. The walk's anchor is the first page's own
+`event_high_water_mark`, and `changed_since_anchor` is true when a later
+page's `event_high_water_mark` is past it.
 
 ### workgraph/events
 
@@ -2352,12 +2537,14 @@ Read the public event history of the namespace. Params are a
         "item_id": "work_release_notes",
         "kind": "closed",
         "at": "2026-09-03T10:14:58Z",
-        "payload": {"status": "completed"},
+        "payload": {"item": {"id": "work_release_notes", "status": "completed", "revision": 7}},
         "facts": [
           {"kind": "namespace_terminal", "namespace": "default", "observed_at": "2026-09-03T10:14:58Z"}
         ]
       }
-    ]
+    ],
+    "truncated": false,
+    "event_high_water_mark": 401
   }
 }
 ```
@@ -2383,10 +2570,19 @@ Read the public event history of the namespace. Params are a
   Maximum events returned; above 1,000 is `INVALID_PARAMS`.
 </ParamField>
 
+The result is `{"events": [...], "truncated": bool, "next_after_seq": N,
+"event_high_water_mark": N}`, in `seq` order. `truncated` is true when
+matching events exist after the last one returned, and `next_after_seq` is
+then that event's `seq`: pass it back as `after_seq` for the next page.
+`event_high_water_mark` is the ledger's highest sequence in the namespace at
+this read. It counts the execution-binding events this projection omits, so
+it can be past the last event returned.
+
 Each event carries `seq`, `realm_id`, `namespace`, optional `item_id`, `kind`
 (`created`, `updated`, `readiness_observed`, `claimed`, `released`, `blocked`,
 `closed`, `linked`, `evidence_added`, `attention_created`,
-`attention_updated`), `at`, a kind-specific `payload`, and any typed `facts`
+`attention_updated`), `at`, a kind-specific `payload` (an item event carries
+the whole item), and any typed `facts`
 committed with the mutation (`{"kind": "item_ready" | "lease_expired" |
 "namespace_terminal", ...}`). Flow execution-binding events are kept in the
 durable journal but omitted from this projection.
@@ -2816,7 +3012,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "jsonrpc": "2.0",
   "id": 17,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 8},
+    "contract_version": {"major": 0, "minor": 9, "patch": 9},
     "providers": [
       {
         "provider": "anthropic",
@@ -2880,7 +3076,7 @@ synthesized with that status.
   "jsonrpc": "2.0",
   "id": 8,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 8},
+    "contract_version": {"major": 0, "minor": 9, "patch": 9},
     "capabilities": [
       {
         "id": "sessions",

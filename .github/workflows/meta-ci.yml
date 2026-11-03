@@ -1,0 +1,1802 @@
+name: Meta CI
+
+# Meta's CI in the monorepo, moved here from meta/.github/workflows/ci.yml for
+# the transition: it runs on every pull request, push and dispatch, exits
+# early when no path in Meta's scope changed, and reports one aggregate job,
+# `Meta gate`. The root CI (ci.yml, scripts/ci-cargo-lanes.mjs) plans Meta's
+# Rust rows: rustfmt (the root's fmt check), Clippy on the pull request, and
+# on the push the unit tests, the openai-live and extension-state feature
+# suites (lib and bin tests) and the integration tests (closure-tests rows);
+# cargo-deny runs in the root's nightly sweep. A pull request leaves Meta's
+# tests to that push (meerkat-meta compiles the meerkat-mob chain), so this
+# workflow runs them on a pull request that reaches Meta's Rust lanes (the
+# jobs marked "pull requests" below) and keeps the rest: every example, the
+# feature-gated integration targets and the no-default-features check on
+# every run that reaches their lanes, the SDK suites, the console and flow
+# editor suites, and Meta's Python and script checks. Steps run in meta/;
+# Cargo runs from the repository root through ./scripts/repo-cargo for
+# Meta's packages, never the workspace, with the root CI's compile
+# environment and sccache bucket, so the dependency builds the root CI
+# compiled (Core's crates) are cache hits here and every job compiles only
+# Meta's.
+#
+# Budget: the root CI's, with the root CI's own step. On a pull request the
+# lanes' execution path (each job's run time plus the jobs it waits for, the
+# classification included; runner queue excluded) may take 1080 s and the
+# push-to-terminal time without runner queue 1200 s; a push or a dispatch
+# only reports them. The gate runs ci.yml's "Enforce lane execution budget"
+# step, copied byte for byte (scripts/ci-release-projection-selftest.mjs and
+# meta/scripts/test_ci_workflow.py fail on any difference), with this
+# workflow's job names. A job that compiles meerkat-meta spends most of the
+# budget on that compile (the library 337 s, its test harness 505 s, on 4
+# CPUs of the machine the jobs were sized on; hosted runners compiled Meta
+# 1.4 to 1.65 times slower), so each job compiles one configuration of it
+# and the long ones are split by test.
+#
+# Jobs (each runs only when `changes` says Meta is reached; lane jobs only
+# when their lane is):
+#   changes                  - classify the diff with the base commit's
+#                              meta/scripts/ci-changes.py --monorepo
+#   meta-checks              - Meta's Python and script contract checks
+#   test-typescript          - the TypeScript SDK suite
+#   test-python              - the Python SDK suite against a fresh
+#                              rpc_gateway
+#   rust-unit (x4)           - pull requests: Meta's lib tests, a nextest
+#                              partition per leg
+#   rust-examples            - every example built and linked (a pull
+#                              request also runs the bin tests and
+#                              meta-extension-state's suite)
+#   rust-conformance         - pull requests: meta-store-conformance's suite
+#   rust-integration (x4)    - pull requests: Meta's integration tests,
+#                              sharded by test target name
+#   rust-features-check      - the no-default-features check
+#   rust-extension-state     - the extension-state feature's integration
+#                              targets
+#   rust-extension-state-lib - pull requests: that feature's lib tests
+#   rust-voice               - the openai-live feature's voice integration
+#                              cases (a pull request also runs the gateway
+#                              binaries' voice cases)
+#   rust-voice-lib           - pull requests: that feature's lib voice cases
+#   console-backends         - the five acceptance backends, built once for
+#                              the console and console-browser jobs
+#   console                  - console contracts and the API, voice, memory
+#                              and workgraph suites
+#   console-browser (x7)     - the browser scenarios, --shard=i/6, and the
+#                              native MCP Apps checks in a leg of their own
+#   console-fixtures         - the customization fixtures and the acceptance
+#                              fixture's own tests
+#   console-acceptance       - the stock incident topology acceptance
+#   console-perf             - composer typing in a real browser (no Rust)
+#   flow-editor-contracts    - the flow editor's source, projection and
+#                              visual contracts (no Rust)
+#   flow-editor              - the flow editor's browser checks against
+#                              meta_flow_editor
+#   warm-cache               - a push that reaches no Meta lane: Meta's
+#                              production binaries and no-default-features
+#                              check, for the sccache bucket
+#   gate                     - "Meta gate", the aggregate and the budget
+
+on:
+  push:
+    branches:
+      - main
+      - 'release/**'
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  workflow_dispatch: {}
+
+# A newer push to a pull request cancels its older run. Every push and
+# dispatch runs to the end in a group of its own: a push that reaches Meta
+# is classified on its own diff alone (its first parent is the ref's previous
+# tip), so no later run covers a cancelled one's change.
+concurrency:
+  group: >-
+    ${{
+      github.event_name == 'pull_request' && format('meta-ci-pr-{0}', github.event.pull_request.number) ||
+      format('meta-ci-{0}-{1}-{2}', github.event_name, github.ref_name, github.sha)
+    }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+# The root CI's compile environment, value for value: rust-cache hashes the
+# CARGO*/RUST* variables into its key and sccache serves an object only to a
+# compile with the same inputs, so the registry entry and the objects the
+# root CI wrote are hits here only while these agree
+# (scripts/test_ci_workflow.py checks them against ci.yml). Debuginfo is off,
+# as there: a backend's panic keeps its message but not file:line.
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_HOME: /home/runner/.cargo
+  RUSTUP_TOOLCHAIN: 1.97.0
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  SCCACHE_ERROR_LOG: /home/runner/work/_temp/sccache.log
+  SCCACHE_LOG: info
+  SCCACHE_IDLE_TIMEOUT: "0"
+  RUST_LANE_ID: ci
+  SCCACHE_GCS_BUCKET_NAME: ${{ vars.MEERKAT_SCCACHE_GCS_BUCKET }}
+  # The root CI's budget (ci.yml's values; the gate's budget step reads them).
+  CI_MAX_EXEC_SECONDS: "1080"
+  CI_MAX_TERMINAL_SECONDS: "1200"
+  CI_QUEUE_WARN_SECONDS: "300"
+
+defaults:
+  run:
+    working-directory: meta
+
+jobs:
+  # A pull request runs the lanes its changed files reach (none for docs,
+  # only the console lanes for meta/console/, the other configurations of a
+  # Rust change left to the push), a push that reaches Meta and a dispatch
+  # run every lane, and a pull request or push that reaches nothing of
+  # Meta's runs none: meta=false, and every other job is skipped.
+  changes:
+    name: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      rust: ${{ steps.classify.outputs.rust }}
+      integration: ${{ steps.classify.outputs.integration }}
+      voice: ${{ steps.classify.outputs.voice }}
+      extension_state: ${{ steps.classify.outputs.extension_state }}
+      python: ${{ steps.classify.outputs.python }}
+      console: ${{ steps.classify.outputs.console }}
+      console_perf: ${{ steps.classify.outputs.console_perf }}
+      flow_editor: ${{ steps.classify.outputs.flow_editor }}
+      meta: ${{ steps.classify.outputs.meta }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # A pull request checks out GitHub's merge commit, whose first
+          # parent is the base; a push checks out its head, whose first
+          # parent is the ref's previous tip when the push added one commit
+          # (a merge). Either way the diff is the run's own change.
+          fetch-depth: 2
+          persist-credentials: false
+      - id: classify
+        # The base commit's classifier decides, so a pull request never
+        # classifies itself with the classifier it changes. Fails closed:
+        # if it errors, or prints no line for some lane (a base that
+        # predates --monorepo), every lane runs. A dispatch, and a push whose
+        # previous tip is not HEAD's first parent (several commits, a new
+        # ref), run every lane without asking it; a push it finds Meta's
+        # runs every lane whatever lanes it printed.
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          lanes="rust integration voice extension_state python console console_perf flow_editor meta"
+          every_lane() {
+            echo "$1: every lane runs"
+            for lane in ${lanes}; do
+              echo "${lane}=true" >> "${GITHUB_OUTPUT}"
+            done
+          }
+          if [[ "${EVENT}" != "pull_request" && "${EVENT}" != "push" ]]; then
+            every_lane "${EVENT}"
+            exit 0
+          fi
+          if [[ "${EVENT}" == "push" && "${BEFORE}" != "$(git rev-parse --verify --quiet HEAD^1)" ]]; then
+            every_lane "the push's previous tip ${BEFORE:-(none)} is not HEAD's first parent"
+            exit 0
+          fi
+          result="${RUNNER_TEMP}/lanes"
+          classified=false
+          if git show HEAD^1:meta/scripts/ci-changes.py > "${RUNNER_TEMP}/ci-changes.py" \
+              && python3 "${RUNNER_TEMP}/ci-changes.py" --monorepo --event "${EVENT}" --github-output "${result}"; then
+            classified=true
+            for lane in ${lanes}; do
+              grep -Eqx "${lane}=(true|false)" "${result}" || classified=false
+            done
+          fi
+          if [[ "${classified}" != true ]]; then
+            every_lane "the base classifier failed or has no lanes"
+          elif [[ "${EVENT}" == "push" ]] && grep -qx "meta=true" "${result}"; then
+            every_lane "a push that reaches Meta"
+          else
+            grep -Ex "(${lanes// /|})=(true|false)" "${result}" >> "${GITHUB_OUTPUT}"
+          fi
+
+  # The checks that compile nothing: the repository contract tests, the
+  # classifier and workflow contracts, version parity, publication and
+  # package lists, the decorator and memory gates. Cargo only reads metadata
+  # and package lists here.
+  meta-checks:
+    name: meta-checks
+    needs: changes
+    if: needs.changes.outputs.meta == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - run: python3 scripts/check-conflict-markers
+      - run: python3 scripts/test_check_conflict_markers.py
+      - run: scripts/verify-version-parity.sh
+      - run: python3 scripts/verify-runtime-options-reachable.py
+      - run: python3 scripts/verify-decorator-authority.py
+      - run: python3 scripts/verify-session-service-decorators.py
+      - run: python3 scripts/test_verify_session_service_decorators.py
+      - run: python3 scripts/test_ci_workflow.py
+      - run: python3 scripts/test_ci_changes.py
+      - run: python3 scripts/test_repo_cargo.py
+      - run: python3 scripts/test_pre_push_clippy.py
+      - run: python3 scripts/test_release_version_scripts.py
+      - run: python3 scripts/test_release_workflow.py
+      - run: python3 scripts/test_release_candidate.py
+      - run: python3 scripts/test_installer_release.py
+      - run: python3 scripts/test_installer_publish_dispatch.py
+      - run: python3 scripts/test_verify_published_registries.py
+      - run: python3 scripts/test_verify_release_assets.py
+      - run: python3 scripts/verify-crate-publication.py
+      - run: python3 scripts/test_verify_crate_publication.py
+      - run: python3 scripts/verify-crate-package-files.py
+      - run: python3 scripts/test_verify_crate_package_files.py
+      - run: python3 scripts/test_memory_evals.py
+      - run: python3 scripts/test_verify_unit_test_filter.py
+      # The standalone continuity export scripts a 0.9.3 SDK-hosted
+      # deployment runs before it upgrades. Each verifies both golden files.
+      - run: python3 tools/continuity-export/test_continuity_export.py
+      - run: node --test tools/continuity-export/continuity-export.test.mjs
+      # The blob restore that follows a continuity mirror's session import.
+      - run: python3 tools/continuity-export/test_restore_blobs.py
+      - run: scripts/check-memory-bright-line
+      - run: scripts/memory-evals --check
+      # The export scripts' suites again on the oldest runtimes a 0.9.3 host
+      # may run them on, the 0.9.3 SDKs' floors: Python 3.10 and Node.js 18,
+      # and the blob restore's suite on the Python floor it states.
+      # Last in the job, since each setup step changes the python3 or node
+      # every later step runs.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.10"
+      - run: python3 tools/continuity-export/test_continuity_export.py
+      - run: python3 tools/continuity-export/test_restore_blobs.py
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "18"
+      - run: node --test tools/continuity-export/continuity-export.test.mjs
+
+  # The TypeScript SDK suite: `validate` is typecheck, build and test in that
+  # order, because most of its tests import the built dist/, not src/.
+  test-typescript:
+    name: test-typescript
+    needs: changes
+    if: needs.changes.outputs.meta == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "20"
+      - run: npm --prefix sdk/typescript ci --silent --no-fund --no-audit
+      - run: npm --prefix sdk/typescript run validate --silent
+
+  test-python:
+    name: test-python
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # The sccache bucket's workload identity, as in the root CI.
+      id-token: write
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - name: Restore the cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # The root CI's registry entry; this workflow saves none.
+          save-if: false
+          shared-key: ci-registry
+          cache-targets: "false"
+      - run: python -m pip install 'sdk/python[dev]'
+      # Gateway-backed structural tests materialize OpenAI profiles but never
+      # issue provider requests. Meerkat resolves auth during construction, so
+      # give those tests an explicit non-secret bootstrap credential instead of
+      # depending on repository secrets or silently skipping the gateway lane.
+      # make builds rpc_gateway through the root wrapper.
+      - run: make test-python CARGO=../scripts/repo-cargo
+        env:
+          OPENAI_API_KEY: meta-ci-bootstrap-only-not-a-secret
+
+  # Meta's lib tests with default features, on a pull request that reaches
+  # the rust lane. The root CI runs them on the push (main unit,
+  # closure-tests), where its plan leaves every crate that compiles the
+  # meerkat-mob chain, so a push does not run this job. The lib's test
+  # harness is one rustc process: 505 s on 4 CPUs of the machine the budget
+  # was sized on, and hosted runners compiled Meta 1.4 to 1.65 times slower
+  # than that (Meta CI run 40465856836), so the compile alone takes most of
+  # the budget. Four legs each compile it and run a quarter of the tests
+  # (nextest --partition count:i/4; all of them took 253 s on a runner).
+  # Each Cargo invocation selects one package, as the root CI's main unit
+  # rows do: Cargo resolves features per invocation, so Core's crates then
+  # compile with the same features and are those rows' sccache objects; the
+  # job compiles Meta's crates only.
+  rust-unit:
+    name: rust-unit (${{ matrix.partition }}/4)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' && github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4]
+    runs-on: ubuntu-24.04
+    # A cold run of the monorepo layout compiles all of Core first (PR
+    # #2011's first run was cut at 30 minutes still compiling); sccache
+    # keeps the units a job compiled, so later runs are shorter.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # The sccache bucket's workload identity, as in the root CI.
+      id-token: write
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - name: Restore the cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: false
+          shared-key: ci-registry
+          cache-targets: "false"
+      - name: Install nextest
+        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+      # Meta's tests run on the 16 MiB thread stack its product line sets
+      # (ci/products.json test_stack); the root's Cargo configuration gives 8.
+      - name: Lib tests
+        working-directory: .
+        env:
+          RUST_MIN_STACK: "16777216"
+          PARTITION: ${{ matrix.partition }}
+        run: ./scripts/repo-cargo nextest run -p meerkat-meta --lib --partition "count:${PARTITION}/4" --no-fail-fast
+
+  # Every example built and linked (Cargo's default test selection builds
+  # them; the root CI only type-checks them), on every run that reaches the
+  # rust lane. A pull request also runs the bin tests and
+  # meta-extension-state's suite, which the root CI runs on the push: the
+  # bins' test harnesses link against the library the examples built (Cargo
+  # shares it between the dev and test profiles while their settings agree),
+  # and meta-extension-state does not depend on meerkat-meta.
+  rust-examples:
+    name: rust-examples
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    # A cold run of the monorepo layout compiles all of Core twice here: the
+    # examples build, then the test build of the bins (PR #2011's run was cut
+    # at 60 minutes in the second build). Compiling Core once is a follow-up.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      # The sccache bucket's workload identity, as in the root CI.
+      id-token: write
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - name: Restore the cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: false
+          shared-key: ci-registry
+          cache-targets: "false"
+      - name: Build every example
+        working-directory: .
+        run: ./scripts/repo-cargo build -p meerkat-meta --examples
+      - name: Install nextest
+        if: github.event_name == 'pull_request'
+        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+      - name: Bin tests and meta-extension-state's suite
+        if: github.event_name == 'pull_request'
+        working-directory: .
+        env:
+          RUST_MIN_STACK: "16777216"
+        run: |
+          ./scripts/repo-cargo nextest run -p meerkat-meta --bins --no-fail-fast
+          ./scripts/repo-cargo nextest run -p meta-extension-state --no-fail-fast
+
+  # meta-store-conformance's suite, on a pull request that reaches the rust
+  # lane (the root CI runs it on the push). Selected alone, as the root CI's
+  # row selects it, it resolves meerkat-meta's features its own way and
+  # compiles the library once more, so it runs in a job of its own, off the
+  # other jobs' paths.
+  rust-conformance:
+    name: rust-conformance
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    # A cold run of the monorepo layout compiles all of Core first (PR
+    # #2011's first run was cut at 30 minutes still compiling); sccache
+    # keeps the units a job compiled, so later runs are shorter.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # The sccache bucket's workload identity, as in the root CI.
+      id-token: write
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - name: Restore the cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: false
+          shared-key: ci-registry
+          cache-targets: "false"
+      - name: Install nextest
+        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+      - name: meta-store-conformance tests
+        working-directory: .
+        env:
+          RUST_MIN_STACK: "16777216"
+        run: ./scripts/repo-cargo nextest run -p meta-store-conformance --no-fail-fast
+
+  # meerkat-meta's integration tests with default features, on a pull
+  # request that reaches the integration lane (the root CI's closure-tests
+  # rows run them on the push), in four shards by test target name: each
+  # shard compiles the meerkat-meta library (337 s on 4 CPUs of the machine
+  # the budget was sized on) and its own targets, so the shards split the
+  # link time as well as the run time. Each class holds about a quarter of
+  # the targets' measured build and test time (170 targets: 1092 s of builds
+  # and 1017 s of tests, four at a time); identity_first_* alone held a
+  # third, so its targets are split in two. Selecting meerkat-meta alone, as
+  # rust-unit does, keeps Core's crates the root CI's sccache objects. Every
+  # integration test target of meerkat-meta matches exactly one pattern
+  # (scripts/test_ci_workflow.py checks it). The idle CPU gate asserts an
+  # absolute per-30 s CPU budget calibrated on real hardware, which hosted
+  # runners cannot meet (HOSTED_RUNNER_EXCLUDED_BINARIES in the root plan);
+  # it runs locally and in the release-gate protocol.
+  rust-integration:
+    name: rust-integration (${{ matrix.shard }}/4)
+    needs: changes
+    if: needs.changes.outputs.integration == 'true' && github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: 1
+            tests: "identity_first_[a-h]* [ejkqt]*"
+          - shard: 2
+            tests: "[bcglnv]*"
+          - shard: 3
+            tests: "identity_first_[i-z]* idle* i[!d]* [afhpuxyz]*"
+          - shard: 4
+            tests: "[dmorsw]*"
+    runs-on: ubuntu-24.04
+    # A cold run of the monorepo layout compiles all of Core first (PR
+    # #2011's first run was cut at 30 minutes still compiling); sccache
+    # keeps the units a job compiled, so later runs are shorter.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # The sccache bucket's workload identity, as in the root CI.
+      id-token: write
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      # Each shard links Meta's integration test binaries, every one of them
+      # against all of Core, and the hosted runner's root disk ran out while
+      # they linked (No space left on device; rust-lld SIGBUS on an mmapped
+      # output). No step here uses these preinstalled toolchains.
+      - name: Free runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - name: Restore the cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: false
+          shared-key: ci-registry
+          cache-targets: "false"
+      - name: Install nextest
+        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+      # One --test per pattern; read splits the list without expanding the
+      # globs against the checkout.
+      - name: Integration tests
+        working-directory: .
+        env:
+          RUST_MIN_STACK: "16777216"
+          TESTS: ${{ matrix.tests }}
+        run: |
+          read -r -a patterns <<< "${TESTS}"
+          tests=()
+          for pattern in "${patterns[@]}"; do tests+=(--test "${pattern}"); done
+          ./scripts/repo-cargo nextest run -p meerkat-meta "${tests[@]}" -E 'not test(converged_idle_gateway_consumes_near_zero_cpu)' --no-fail-fast
+
+  # meerkat-meta without its default features, which no other lane
+  # compiles (a check). Not a duplicate of the push's root rows, so it runs
+  # on every run that reaches the rust lane.
+  rust-features-check:
+    name: rust-features-check
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    # A cold run of the monorepo layout compiles all of Core first (PR
+    # #2011's first run was cut at 30 minutes still compiling); sccache
+    # keeps the units a job compiled, so later runs are shorter.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # The sccache bucket's workload identity, as in the root CI.
+      id-token: write
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - name: Restore the cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: false
+          shared-key: ci-registry
+          cache-targets: "false"
+      - name: Check without default features
+        working-directory: .
+        run: ./scripts/repo-cargo check -p meerkat-meta --no-default-features
+
+  # The extension-state feature's integration targets (the mob announcement
+  # process tests ride the same build: their fault points are inert unless
+  # a test sets one), on every run that reaches the extension_state lane:
+  # the root CI's feature suite runs only lib and bin tests.
+  rust-extension-state:
+    name: rust-extension-state
+    needs: changes
+    if: needs.changes.outputs.extension_state == 'true'
+    runs-on: ubuntu-24.04
+    # A cold run of the monorepo layout compiles all of Core first (PR
+    # #2011's first run was cut at 30 minutes still compiling); sccache
+    # keeps the units a job compiled, so later runs are shorter.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # The sccache bucket's workload identity, as in the root CI.
+      id-token: write
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - name: Restore the cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: false
+          shared-key: ci-registry
+          cache-targets: "false"
+      - name: Build the extension-state targets
+        working-directory: .
+        run: ./scripts/repo-cargo test -p meerkat-meta --features extension-state,announcement-test-faults,console-test-faults --test extension_state --test mob_announcements_delivery_process --test mob_announcements_remote_process --test console_send_recovery_process --no-run
+      - name: Extension-state integration targets
+        working-directory: .
+        env:
+          RUST_MIN_STACK: "16777216"
+        run: ./scripts/repo-cargo test -p meerkat-meta --features extension-state,announcement-test-faults,console-test-faults --test extension_state --test mob_announcements_delivery_process --test mob_announcements_remote_process --test console_send_recovery_process
+
+  # The extension-state feature's lib tests, on a pull request that reaches
+  # the extension_state lane (the root CI's feature suite runs them on the
+  # push). The feature's lib test harness is a compile of its own (521 s on
+  # 4 CPUs of the machine the budget was sized on), so it has a job of its
+  # own.
+  rust-extension-state-lib:
+    name: rust-extension-state-lib
+    needs: changes
+    if: needs.changes.outputs.extension_state == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    # A cold run of the monorepo layout compiles all of Core first (PR
+    # #2011's first run was cut at 30 minutes still compiling); sccache
+    # keeps the units a job compiled, so later runs are shorter.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # The sccache bucket's workload identity, as in the root CI.
+      id-token: write
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - name: Restore the cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: false
+          shared-key: ci-registry
+          cache-targets: "false"
+      - name: Extension-state lib tests
+        working-directory: .
+        env:
+          RUST_MIN_STACK: "16777216"
+        run: ./scripts/repo-cargo test -p meerkat-meta --features extension-state,announcement-test-faults,console-test-faults --lib -- extension_ document_mcp_child_supply
+
+  # The openai-live feature's voice tests on a loopback provider (never paid
+  # credentials): its integration targets, filtered to their voice and
+  # restart cases, on every run that reaches the voice lane, and on a pull
+  # request also the gateway binaries' voice cases (the root CI's feature
+  # suite runs those on the push).
+  rust-voice:
+    name: rust-voice
+    needs: changes
+    if: needs.changes.outputs.voice == 'true'
+    runs-on: ubuntu-24.04
+    # A cold run of the monorepo layout compiles all of Core first (PR
+    # #2011's first run was cut at 30 minutes still compiling); sccache
+    # keeps the units a job compiled, so later runs are shorter.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # The sccache bucket's workload identity, as in the root CI.
+      id-token: write
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - name: Restore the cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: false
+          shared-key: ci-registry
+          cache-targets: "false"
+      - name: Build the voice tests
+        working-directory: .
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          bins=()
+          if [[ "${EVENT}" == "pull_request" ]]; then bins=(--bin rpc_gateway --bin meta_gateway); fi
+          ./scripts/repo-cargo test -p meerkat-meta --features openai-live "${bins[@]}" --test console_route_auth --test console_experience --test never_executed_persistence --test swarm_integration --test meta_gateway_bootstrap --no-run
+      - name: Voice integration cases
+        working-directory: .
+        env:
+          RUST_MIN_STACK: "16777216"
+        run: |
+          ./scripts/repo-cargo test -p meerkat-meta --features openai-live --test console_route_auth --test console_experience --test never_executed_persistence --test swarm_integration console_voice
+          ./scripts/repo-cargo test -p meerkat-meta --features openai-live --test meta_gateway_bootstrap persistent_http_restarts
+      - name: Voice bin cases
+        if: github.event_name == 'pull_request'
+        working-directory: .
+        env:
+          RUST_MIN_STACK: "16777216"
+        run: ./scripts/repo-cargo test -p meerkat-meta --features openai-live --bin rpc_gateway --bin meta_gateway console_voice
+
+  # The openai-live feature's lib voice cases, on a pull request that
+  # reaches the voice lane (the root CI's feature suite runs them on the
+  # push). The feature's lib test harness is Meta's longest compile (600 s
+  # on 4 CPUs of the machine the budget was sized on): on a slow hosted
+  # runner this job alone can pass the budget, and it runs only for a pull
+  # request that changes the feature's own inputs.
+  rust-voice-lib:
+    name: rust-voice-lib
+    needs: changes
+    if: needs.changes.outputs.voice == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    # A cold run of the monorepo layout compiles all of Core first (PR
+    # #2011's first run was cut at 30 minutes still compiling); sccache
+    # keeps the units a job compiled, so later runs are shorter.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # The sccache bucket's workload identity, as in the root CI.
+      id-token: write
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - name: Restore the cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: false
+          shared-key: ci-registry
+          cache-targets: "false"
+      - name: Voice lib cases
+        working-directory: .
+        env:
+          RUST_MIN_STACK: "16777216"
+        run: |
+          ./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib console_voice
+          ./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib gateway_openai_live_registration
+
+  # The five acceptance backends, built once from freshly built console
+  # bundles (the backends embed crates/meerkat-meta/console-dist, which
+  # `run build` writes) and handed to the console and console-browser jobs
+  # as one archive (example-backend.cjs runs META_EXAMPLE_BIN_DIR's binaries
+  # and never falls back to cargo). Each browser leg built them itself
+  # before: 393 s of a 14.3-minute leg (run 38776842877).
+  console-backends:
+    name: console-backends
+    needs: changes
+    if: needs.changes.outputs.console == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: meta/console/package-lock.json
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - name: Restore the cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: false
+          shared-key: ci-registry
+          cache-targets: "false"
+      - run: npm --prefix console ci --silent --no-fund --no-audit
+      - run: npm --prefix console run build --silent
+      - name: Build console acceptance backends
+        working-directory: .
+        run: ./scripts/repo-cargo build -p meerkat-meta --example library_mode_reference --example console_acceptance_fixture --example memory_console_reference --example workgraph_console_reference --example mcp_apps_gateway_fixture
+      # The artifact keeps no file mode; the archive keeps the binaries
+      # executable.
+      - name: Pack the backends
+        run: tar -C "${CARGO_TARGET_DIR}/debug/examples" -cf "${RUNNER_TEMP}/console-backends.tar" library_mode_reference console_acceptance_fixture memory_console_reference workgraph_console_reference mcp_apps_gateway_fixture
+      - name: Retain the backends
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          # One name per run: a rerun leg reads the backends of the run, and
+          # a rerun of this job replaces them.
+          name: console-backends
+          path: ${{ runner.temp }}/console-backends.tar
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+  # The console lane's contract checks and its API, voice, memory and
+  # workgraph suites, on the shared backends.
+  console:
+    name: console
+    needs: [changes, console-backends]
+    if: needs.changes.outputs.console == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: meta/console/package-lock.json
+      - name: Fetch the console acceptance backends
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: console-backends
+          path: ${{ runner.temp }}/console-backends
+      - name: Unpack the console acceptance backends
+        run: |
+          bin_dir="${RUNNER_TEMP}/console-backends/bin"
+          mkdir -p "${bin_dir}"
+          tar -C "${bin_dir}" -xf "${RUNNER_TEMP}/console-backends/console-backends.tar"
+          echo "META_EXAMPLE_BIN_DIR=${bin_dir}" >> "${GITHUB_ENV}"
+      - run: npm --prefix console ci --silent --no-fund --no-audit
+      - run: npm --prefix console run phase0:types --silent
+      - run: npm --prefix console run contracts:console --silent
+      - run: npm --prefix console run contracts:conversation --silent
+      # Continuing a transcript derivation must equal deriving from scratch,
+      # checked on every adapter suite's frame sequences.
+      - run: npm --prefix console run contracts:timeline-incremental --silent
+      - run: npm --prefix console run typecheck:contracts --silent
+      - run: npm --prefix console run test:scenario-registry --silent
+      - run: npm --prefix console run e2e:api:list --silent
+      - run: npm --prefix console run e2e:browser:list --silent
+      - run: npm --prefix console run phase1:targets --silent
+      - run: npm --prefix console run headless:transport --silent
+      - run: npm --prefix console run topology:adapter --silent
+      - run: npm --prefix console run topology:components --silent
+      - run: npm --prefix console run components:reuse --silent
+      - run: npm --prefix console run embedded:freshness --silent
+      - run: npm --prefix console run build:acceptance --silent
+      - run: npm --prefix console exec -- playwright install --with-deps chromium
+      - run: node console/api-e2e.cjs
+      - run: node console/voice-e2e.cjs
+      # Validate paid-lane evidence and continuous silent audio without credentials.
+      - run: node console/voice-e2e-live.cjs --self-test
+      - run: node console/voice-e2e-live.cjs --self-test-audio
+      - run: node console/memory-e2e.cjs
+      - run: node console/workgraph-e2e.cjs
+      - name: Upload console evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: console-${{ github.run_id }}-${{ github.run_attempt }}
+          path: meta/output/playwright/console-acceptance/
+          if-no-files-found: error
+
+  # The browser scenarios against the shared backends and freshly built
+  # console bundles (the scenarios read console/dist). Six scenario legs:
+  # the scenario registry deals each of browser-e2e's ~100 scenarios to
+  # exactly one --shard=i/n leg (console/scenario-registry.test.cjs). Dealt
+  # three ways, run 38776842877's scenarios took 135 s, 217 s and 222 s; six
+  # ways they take about half that, and with the backends built once a leg
+  # is setup (npm, bundles, Playwright: about 3 minutes) plus its share. The
+  # native MCP Apps checks (113 s in Meta CI run 40465856836) run in a
+  # seventh leg of their own: the legs wait for console-backends, whose
+  # build takes most of the lane's budget.
+  console-browser:
+    name: console-browser
+    needs: [changes, console-backends]
+    if: needs.changes.outputs.console == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, mcp-apps]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: meta/console/package-lock.json
+      - name: Fetch the console acceptance backends
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: console-backends
+          path: ${{ runner.temp }}/console-backends
+      - name: Unpack the console acceptance backends
+        run: |
+          bin_dir="${RUNNER_TEMP}/console-backends/bin"
+          mkdir -p "${bin_dir}"
+          tar -C "${bin_dir}" -xf "${RUNNER_TEMP}/console-backends/console-backends.tar"
+          echo "META_EXAMPLE_BIN_DIR=${bin_dir}" >> "${GITHUB_ENV}"
+      - run: npm --prefix console ci --silent --no-fund --no-audit
+      - run: npm --prefix console run build --silent
+      - run: npm --prefix console run build:acceptance --silent
+      - run: npm --prefix console exec -- playwright install --with-deps chromium
+      # The first two MCP Apps steps run the persistent rpc_gateway composition
+      # (mcp_apps_gateway_fixture): members come from the gateway's own member
+      # factories, whose MCP routers carry the stock connector call-context
+      # provider, so an MCP App resource-read regression there fails here.
+      - name: Native MCP Apps rendering and reload
+        if: matrix.shard == 'mcp-apps'
+        timeout-minutes: 5
+        run: npm --prefix console run e2e:mcp-apps --silent
+        env:
+          META_BROWSER_EVIDENCE: ${{ github.workspace }}/meta/output/playwright/console-acceptance/mcp-apps
+      # The model remains held for more than the native HTTP action timeout.
+      # Three mounted Apps must keep polling through the same MCP connection.
+      - name: Native MCP Apps polling during an active model turn
+        if: matrix.shard == 'mcp-apps'
+        timeout-minutes: 5
+        run: npm --prefix console run e2e:mcp-apps --silent
+        env:
+          META_MCP_APPS_LONG_POLL: "1"
+          META_BROWSER_EVIDENCE: ${{ github.workspace }}/meta/output/playwright/console-acceptance/mcp-apps
+      # The gateway lane spawns classic members. This one runs the same quick
+      # checks on console_acceptance_fixture, a UnifiedRuntime::builder() host
+      # whose identity-first members carry no call-context provider.
+      - name: Native MCP Apps on a builder host with identity-first members
+        if: matrix.shard == 'mcp-apps'
+        timeout-minutes: 5
+        run: npm --prefix console run e2e:mcp-apps --silent
+        env:
+          META_MCP_APPS_BACKEND: builder
+          META_BROWSER_EVIDENCE: ${{ github.workspace }}/meta/output/playwright/console-acceptance/mcp-apps
+      - if: matrix.shard != 'mcp-apps'
+        run: node console/browser-e2e.cjs --shard=${{ matrix.shard }}/6
+      - name: Upload console browser evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: console-browser-${{ github.run_id }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: meta/output/playwright/console-acceptance/
+          # The MCP Apps leg always writes evidence; the scenario legs write
+          # only what their scenarios capture.
+          if-no-files-found: ${{ matrix.shard == 'mcp-apps' && 'error' || 'warn' }}
+
+  # Needs Rust but not Playwright: the customization fixtures bundle with
+  # esbuild, run `node --test`, then cargo test's
+  # console_customization_fixtures target, built here first with the
+  # acceptance fixture example's own tests through the root wrapper (the
+  # npm script's cargo test then finds both fresh).
+  console-fixtures:
+    name: console-fixtures
+    needs: changes
+    if: needs.changes.outputs.console == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: meta/console/package-lock.json
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - name: Restore the cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: false
+          shared-key: ci-registry
+          cache-targets: "false"
+      - run: npm --prefix console ci --silent --no-fund --no-audit
+      - name: Build the console fixture tests
+        working-directory: .
+        run: ./scripts/repo-cargo test -p meerkat-meta --example console_acceptance_fixture --test console_customization_fixtures --no-run
+      # Meta's tests run on the 16 MiB thread stack Meta's product line sets
+      # (ci/products.json test_stack); the root's Cargo configuration gives 8.
+      - name: Console acceptance fixture unit tests
+        working-directory: .
+        env:
+          RUST_MIN_STACK: "16777216"
+        run: ./scripts/repo-cargo test -p meerkat-meta --example console_acceptance_fixture
+      - name: Console customization fixtures
+        env:
+          RUST_MIN_STACK: "16777216"
+        run: npm --prefix console run fixtures:console-customization --silent
+
+  # Needs Playwright (it captures screenshots) and its own two binaries,
+  # built here through the root wrapper; the pack's script runs them from
+  # META_EXAMPLE_BIN_DIR. The bundles are built first, as the script did
+  # before its own build, so the example embeds fresh ones.
+  console-acceptance:
+    name: console-acceptance
+    needs: changes
+    if: needs.changes.outputs.console == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      # The incident example and its fixture build against all of Core next
+      # to Playwright's Chromium, and the runner's root disk is the limit
+      # (rust-integration ran out of it on PR #2011's runs). No step here
+      # uses these preinstalled toolchains.
+      - name: Free runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: meta/console/package-lock.json
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - name: Restore the cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: false
+          shared-key: ci-registry
+          cache-targets: "false"
+      - run: npm --prefix console ci --silent --no-fund --no-audit
+      - run: npm --prefix console exec -- playwright install --with-deps chromium
+      - run: npm --prefix console run build --silent
+      - name: Build the incident pack's binaries
+        working-directory: .
+        run: |
+          ./scripts/repo-cargo build -p meerkat-meta --example incident_command_center --bin mcp_fixture
+          bin_dir="${RUNNER_TEMP}/incident-bins"
+          mkdir -p "${bin_dir}"
+          ln -s "${CARGO_TARGET_DIR}/debug/examples/incident_command_center" "${CARGO_TARGET_DIR}/debug/mcp_fixture" "${bin_dir}/"
+          echo "META_EXAMPLE_BIN_DIR=${bin_dir}" >> "${GITHUB_ENV}"
+      - name: Stock incident topology acceptance
+        run: examples/001-incident-command-center-pack/topology_examples.sh
+      - name: Upload incident topology screenshots
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: incident-topology-${{ github.run_id }}-${{ github.run_attempt }}
+          path: meta/output/playwright/incident-topology-*.png
+          if-no-files-found: warn
+          retention-days: 7
+
+  # The composer typing check. It bundles its own host with esbuild and
+  # needs no Rust.
+  console-perf:
+    name: console-perf
+    needs: changes
+    if: needs.changes.outputs.console_perf == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: meta/console/package-lock.json
+      - run: npm --prefix console ci --silent --no-fund --no-audit
+      - run: npm --prefix console exec -- playwright install --with-deps chromium
+      # Real-browser composer typing with a full identity log and a
+      # FlowForensics-shaped session, idle and while a reply streams. jsdom
+      # has no style, layout or paint, so only a browser can see this
+      # regress. Fails only on runner-independent work counts (layout objects
+      # per keystroke, full derivations and turn renders per streamed token);
+      # wall-clock p95 is printed as advisory (META_TYPING_LAG_ENFORCE_TIMING=1
+      # makes it a failure for local perf work).
+      - run: npm --prefix console run perf:typing:browser --silent
+
+  # The flow editor's checks that need neither the binary nor a browser:
+  # the bundle freshness, typecheck, source, package-boundary, controller
+  # and visual contracts. Split from flow-editor, whose binary build is its
+  # critical path.
+  flow-editor-contracts:
+    name: flow-editor-contracts
+    needs: changes
+    if: needs.changes.outputs.flow_editor == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: meta/flow-editor/package-lock.json
+      - run: npm --prefix flow-editor ci --silent --no-fund --no-audit
+      - run: npm --prefix flow-editor run test:controller --silent
+      - run: npm --prefix flow-editor run test:visual-contract --silent
+
+  # The flow editor's rendered browser checks against the meta_flow_editor
+  # host (flow-editor/test/flow-editor-binary.cjs finds it under
+  # CARGO_TARGET_DIR).
+  flow-editor:
+    name: flow-editor
+    needs: changes
+    if: needs.changes.outputs.flow_editor == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: meta/flow-editor/package-lock.json
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - name: Restore the cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: false
+          shared-key: ci-registry
+          cache-targets: "false"
+      - run: npm --prefix flow-editor ci --silent --no-fund --no-audit
+      - run: npm --prefix flow-editor exec -- playwright install --with-deps chromium
+      - name: Build the flow editor host
+        working-directory: .
+        run: ./scripts/repo-cargo build -p meerkat-meta --bin meta_flow_editor
+      - run: npm --prefix flow-editor run test:browser-source --silent
+      - run: npm --prefix flow-editor run test:browser-interactions --silent
+
+  # A push that reaches no Meta lane (a Core change) still moves Core's
+  # crates. The root CI's push rows then compile them for Meta's test
+  # builds (its main unit and feature suite rows select meerkat-meta), but
+  # nothing compiles Meta's production binaries or its no-default-features
+  # check, and a pull request only reads the sccache bucket: its next
+  # pull request's flow editor, Python SDK and features-check jobs would
+  # compile the moved crates themselves, over the budget. This job compiles
+  # exactly those configurations on such a push, which writes the bucket
+  # (a push that reaches Meta runs those jobs themselves). It warms a cache
+  # and proves nothing the root CI's downstream rows do not, so the gate
+  # does not wait for it.
+  warm-cache:
+    name: warm-cache
+    needs: changes
+    if: github.event_name == 'push' && needs.changes.outputs.meta == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # The sccache bucket's workload identity, as in the root CI.
+      id-token: write
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - name: Restore the cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: false
+          shared-key: ci-registry
+          cache-targets: "false"
+      - name: Compile Meta's production binaries and its no-default-features check
+        working-directory: .
+        run: |
+          ./scripts/repo-cargo build -p meerkat-meta --bin meta_flow_editor --bin rpc_gateway
+          ./scripts/repo-cargo check -p meerkat-meta --no-default-features
+
+  gate:
+    name: Meta gate
+    if: always()
+    needs: [changes, meta-checks, test-typescript, test-python, rust-unit, rust-examples, rust-conformance, rust-integration, rust-features-check, rust-extension-state, rust-extension-state-lib, rust-voice, rust-voice-lib, console-backends, console, console-browser, console-fixtures, console-acceptance, console-perf, flow-editor-contracts, flow-editor]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # The budget step reads this run's jobs.
+      actions: read
+    # No checkout here, so no meta/ to run in.
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Check job results
+        env:
+          LANE_META: ${{ needs.changes.outputs.meta }}
+          LANE_RUST: ${{ needs.changes.outputs.rust }}
+          LANE_INTEGRATION: ${{ needs.changes.outputs.integration }}
+          LANE_VOICE: ${{ needs.changes.outputs.voice }}
+          LANE_EXTENSION_STATE: ${{ needs.changes.outputs.extension_state }}
+          LANE_PYTHON: ${{ needs.changes.outputs.python }}
+          LANE_CONSOLE: ${{ needs.changes.outputs.console }}
+          LANE_CONSOLE_PERF: ${{ needs.changes.outputs.console_perf }}
+          LANE_FLOW_EDITOR: ${{ needs.changes.outputs.flow_editor }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          status=0
+          # check <job> <result> <required|lane> [pull_request]: a job in a
+          # lane (meta: every job that runs whenever Meta is reached) may be
+          # skipped only when `changes` set that lane to exactly "false",
+          # never when the classification is missing or failed; a job of a
+          # lane that runs on pull requests only (the root CI runs it on the
+          # push) may also be skipped when the run is not a pull request.
+          check() {
+            local lane_value=""
+            if [[ "$3" != "required" ]]; then
+              local variable="LANE_${3^^}"
+              lane_value="${!variable-}"
+            fi
+            if [[ "$2" == "success" ]]; then
+              echo "  $1: success"
+            elif [[ "$3" != "required" && "$2" == "skipped" && "${lane_value}" == "false" ]]; then
+              echo "  $1: skipped (no change reaches the $3 lane)"
+            elif [[ "${4-}" == "pull_request" && "$2" == "skipped" && "${EVENT}" != "pull_request" && -n "${lane_value}" ]]; then
+              echo "  $1: skipped (the root CI runs it on a ${EVENT})"
+            else
+              echo "  $1: $2"
+              status=1
+            fi
+          }
+          if [[ "${LANE_META}" == "false" ]]; then
+            echo "No path in Meta's scope changed; every Meta job is skipped."
+          fi
+          check changes "${{ needs.changes.result }}" required
+          check meta-checks "${{ needs.meta-checks.result }}" meta
+          check test-typescript "${{ needs.test-typescript.result }}" meta
+          check test-python "${{ needs.test-python.result }}" python
+          check rust-unit "${{ needs.rust-unit.result }}" rust pull_request
+          check rust-examples "${{ needs.rust-examples.result }}" rust
+          check rust-conformance "${{ needs.rust-conformance.result }}" rust pull_request
+          check rust-integration "${{ needs.rust-integration.result }}" integration pull_request
+          check rust-features-check "${{ needs.rust-features-check.result }}" rust
+          check rust-extension-state "${{ needs.rust-extension-state.result }}" extension_state
+          check rust-extension-state-lib "${{ needs.rust-extension-state-lib.result }}" extension_state pull_request
+          check rust-voice "${{ needs.rust-voice.result }}" voice
+          check rust-voice-lib "${{ needs.rust-voice-lib.result }}" voice pull_request
+          check console-backends "${{ needs.console-backends.result }}" console
+          check console "${{ needs.console.result }}" console
+          check console-browser "${{ needs.console-browser.result }}" console
+          check console-fixtures "${{ needs.console-fixtures.result }}" console
+          check console-acceptance "${{ needs.console-acceptance.result }}" console
+          check console-perf "${{ needs.console-perf.result }}" console_perf
+          check flow-editor-contracts "${{ needs.flow-editor-contracts.result }}" flow_editor
+          check flow-editor "${{ needs.flow-editor.result }}" flow_editor
+          if [[ "${status}" != 0 ]]; then
+            echo "One or more jobs failed, were cancelled, or were skipped without a classification that excludes their lane."
+            exit 1
+          fi
+      - name: Enforce lane execution budget
+        # ci.yml's step (see this workflow's header): the same script, read
+        # with this workflow's job names. Runs on every run that was not
+        # cancelled, after the result check above, and fails only a pull
+        # request.
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAX_EXEC_SECONDS: ${{ env.CI_MAX_EXEC_SECONDS }}
+          MAX_TERMINAL_SECONDS: ${{ env.CI_MAX_TERMINAL_SECONDS }}
+          QUEUE_WARN_SECONDS: ${{ env.CI_QUEUE_WARN_SECONDS }}
+          ENFORCE_BUDGET: ${{ github.event_name == 'pull_request' }}
+          GATE_JOB_NAME: Meta gate
+          CLASSIFICATION_JOB_NAME: changes
+          ROOT_JOB_NAMES: changes
+          # No stagger job and no exact-profile lanes here.
+          STAGGER_JOB_NAME: ""
+          GUARD_LANE_REASONS: "{}"
+          GUARD_LANE_JOBS: ""
+          # The jobs that wait for another job besides the classification.
+          LANE_UPSTREAMS: console=console-backends;console-browser*=console-backends
+          # Seconds to wait before each retry of a GitHub API request that
+          # answered with a server error (5xx).
+          API_RETRY_DELAYS: 5 10 20
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import datetime
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          import time
+
+          API_RETRY_DELAYS = [int(delay) for delay in os.environ.get("API_RETRY_DELAYS", "").split()]
+          SERVER_ERROR = re.compile(r"HTTP 5\d\d")
+
+
+          def api(path):
+              delays = list(API_RETRY_DELAYS)
+              while True:
+                  result = subprocess.run(
+                      ["gh", "api", "--paginate", "--slurp", path],
+                      capture_output=True,
+                      text=True,
+                  )
+                  if result.returncode == 0:
+                      return json.loads(result.stdout)
+                  if delays and SERVER_ERROR.search(result.stderr):
+                      delay = delays.pop(0)
+                      print(f"GitHub API server error for {path} ({result.stderr.strip()}); retrying in {delay} s")
+                      time.sleep(delay)
+                      continue
+                  raise subprocess.CalledProcessError(
+                      result.returncode, result.args, output=result.stdout, stderr=result.stderr
+                  )
+
+
+          def ts(value):
+              return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          run_id = os.environ["GITHUB_RUN_ID"]
+          attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
+          max_exec = int(os.environ["MAX_EXEC_SECONDS"])
+          max_terminal = int(os.environ["MAX_TERMINAL_SECONDS"])
+          queue_warn = int(os.environ["QUEUE_WARN_SECONDS"])
+          enforce = os.environ["ENFORCE_BUDGET"] == "true"
+          gate_name = os.environ["GATE_JOB_NAME"]
+          classification_name = os.environ["CLASSIFICATION_JOB_NAME"]
+          root_names = set(os.environ["ROOT_JOB_NAMES"].split(","))
+          stagger_name = os.environ["STAGGER_JOB_NAME"]
+
+          # On a pull request, the exact-profile lanes the plan ran only
+          # because the change touched their inputs or changed their
+          # definition, by job name, with their reasons. Read from the plan,
+          # never inferred; fails closed.
+          EXEMPT_REASONS = {"definition_changed", "inputs_changed"}
+          guard_jobs = {}
+          for entry in os.environ.get("GUARD_LANE_JOBS", "").split(","):
+              lane_id, _, job_name = entry.partition("=")
+              if lane_id and job_name:
+                  guard_jobs[lane_id] = job_name
+          exempt = {}
+          if enforce:
+              raw_reasons = os.environ.get("GUARD_LANE_REASONS", "")
+              try:
+                  plan_reasons = json.loads(raw_reasons)
+                  if not isinstance(plan_reasons, dict) or not all(
+                      isinstance(reasons, list) and all(isinstance(reason, str) for reason in reasons)
+                      for reasons in plan_reasons.values()
+                  ):
+                      raise ValueError("expected an object of reason lists")
+              except ValueError as error:
+                  print(f"::error::the plan's guard_lane_reasons is unreadable ({raw_reasons!r}): {error}")
+                  sys.exit(1)
+              for lane_id, reasons in plan_reasons.items():
+                  if lane_id not in guard_jobs:
+                      print(
+                          f"::error::the plan ran guard lane {lane_id} ({', '.join(reasons)}), "
+                          f"which GUARD_LANE_JOBS does not name."
+                      )
+                      sys.exit(1)
+                  if reasons and set(reasons) <= EXEMPT_REASONS:
+                      exempt[guard_jobs[lane_id]] = reasons
+
+          def collect_lanes():
+              # Start of every attempt so far; a carried-over job belongs to the
+              # latest attempt that had started when the job started.
+              attempt_starts = []
+              for n in range(1, attempt + 1):
+                  page = api(f"/repos/{repo}/actions/runs/{run_id}/attempts/{n}")[0]
+                  attempt_starts.append((n, ts(page["run_started_at"])))
+              jobs = [
+                  job
+                  for page in api(
+                      f"/repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100"
+                  )
+                  for job in page["jobs"]
+              ]
+
+              lanes = []
+              for job in jobs:
+                  if job["name"] == gate_name or job["conclusion"] in (None, "skipped"):
+                      continue
+                  if not job["started_at"] or not job["completed_at"]:
+                      continue
+                  started, completed = ts(job["started_at"]), ts(job["completed_at"])
+                  if completed < started:
+                      continue
+                  created = ts(job["created_at"]) if job.get("created_at") else started
+                  ran_in, clock = attempt_starts[0]
+                  for n, begun in attempt_starts:
+                      if begun <= started:
+                          ran_in, clock = n, begun
+                  lanes.append(
+                      {
+                          "name": job["name"],
+                          "attempt": ran_in,
+                          "created": created,
+                          "completed": completed,
+                          "queued": max(0, int((started - created).total_seconds())),
+                          "duration": int((completed - started).total_seconds()),
+                          "terminal": int((completed - clock).total_seconds()),
+                          "conclusion": job["conclusion"],
+                      }
+                  )
+              return lanes
+
+
+          # Measurement needs the Actions API. A failure to measure fails a
+          # pull request, whose budget is enforced, but only warns on a push
+          # or a dispatch, where the budget is a report: a transient API error
+          # must not turn main's CI gate red and block release readiness.
+          try:
+              lanes = collect_lanes()
+          except (subprocess.CalledProcessError, KeyError, IndexError, TypeError, ValueError) as error:
+              detail = (getattr(error, "stderr", None) or str(error)).strip()
+              if enforce:
+                  print(f"::error::could not measure the lane execution budget: {detail}")
+                  sys.exit(1)
+              print(f"::warning::lane execution budget report unavailable (budget not enforced): {detail}")
+              sys.exit(0)
+          if not lanes:
+              level = "error" if enforce else "warning"
+              print(f"::{level}::no completed lanes found for the lane execution budget.")
+              sys.exit(1 if enforce else 0)
+
+          # Every lane except the roots waits for the change classification,
+          # so its execution path starts with the classification's run time
+          # and its queue includes the classification's queue. The rest wave
+          # of a two-wave lane and the short lanes also wait for the stagger
+          # job. The jobs API does not list a job's needs, but it creates a
+          # job when they complete: a lane created no earlier than the
+          # stagger job completed, in the same attempt, waited for it (the
+          # other lanes are created with the stagger job itself, when the
+          # classification completes).
+          classification = next((lane for lane in lanes if lane["name"] == classification_name), None)
+          stagger = next((lane for lane in lanes if lane["name"] == stagger_name), None)
+          if classification is None and enforce:
+              print(f"::error::no completed {classification_name} job: the execution path is unmeasurable.")
+              sys.exit(1)
+          for lane in lanes:
+              upstream = [classification] if lane["name"] not in root_names and classification else []
+              if (
+                  stagger is not None
+                  and lane is not stagger
+                  and lane["attempt"] == stagger["attempt"]
+                  and lane["created"] >= stagger["completed"]
+              ):
+                  upstream.append(stagger)
+              lane["exec_path"] = lane["duration"] + sum(job["duration"] for job in upstream)
+              # A lane re-run in a later attempt did not wait for the
+              # carried-over upstream jobs' runners.
+              lane["path_queued"] = lane["queued"] + sum(
+                  job["queued"] for job in upstream if job["attempt"] == lane["attempt"]
+              )
+              # The runaway ceiling is measured without runner queue: the
+              # 40-job account cap is shared, so queue is reported, never
+              # budgeted.
+              lane["exec_terminal"] = max(0, lane["terminal"] - lane["path_queued"])
+
+          # Lanes that also wait for other lanes (LANE_UPSTREAMS; this
+          # workflow's lanes wait for none and leave it unset; Meta CI, which
+          # runs this same step, sets it): "lane=upstream|upstream;..." by job
+          # name, where a name ending in "*" also matches a matrix job's legs
+          # ("name (...)"). Such a lane's execution path is its own run time
+          # plus the longest path among the lanes it waits for, whose own
+          # paths hold the classification's, and its path queue is that
+          # path's queue in the lane's attempt.
+          def named(pattern, name):
+              if pattern.endswith("*"):
+                  return name == pattern[:-1] or name.startswith(pattern[:-1] + " (")
+              return name == pattern
+
+          waits = []
+          for entry in os.environ.get("LANE_UPSTREAMS", "").split(";"):
+              waiter, _, upstreams = entry.partition("=")
+              upstreams = [name.strip() for name in upstreams.split("|") if name.strip()]
+              if waiter.strip() and upstreams:
+                  waits.append((waiter.strip(), upstreams))
+          for _ in range(len(lanes)):
+              extended = False
+              for lane in lanes:
+                  ahead = [
+                      other
+                      for waiter, upstreams in waits
+                      if named(waiter, lane["name"])
+                      for other in lanes
+                      if other is not lane and any(named(upstream, other["name"]) for upstream in upstreams)
+                  ]
+                  if not ahead:
+                      continue
+                  longest = max(ahead, key=lambda other: other["exec_path"])
+                  if lane["duration"] + longest["exec_path"] > lane["exec_path"]:
+                      lane["exec_path"] = lane["duration"] + longest["exec_path"]
+                      lane["path_queued"] = lane["queued"] + (
+                          longest["path_queued"] if longest["attempt"] == lane["attempt"] else 0
+                      )
+                      lane["exec_terminal"] = max(0, lane["terminal"] - lane["path_queued"])
+                      extended = True
+              if not extended:
+                  break
+
+          # A lane the plan ran for its inputs or definition is outside the
+          # budget only when it succeeded; failed or cancelled, it is
+          # measured like any other.
+          for job_name, reasons in exempt.items():
+              if not any(lane["name"] == job_name for lane in lanes):
+                  print(
+                      f"::error::the plan ran {job_name} ({', '.join(reasons)}), but this attempt "
+                      f"has no completed job of that name."
+                  )
+                  sys.exit(1)
+          for lane in lanes:
+              lane["outside_budget"] = lane["name"] in exempt and lane["conclusion"] == "success"
+          budgeted = [lane for lane in lanes if not lane["outside_budget"]]
+          outside = [lane for lane in lanes if lane["outside_budget"]]
+          if not budgeted:
+              print("::error::no completed lane is left in the lane execution budget.")
+              sys.exit(1)
+
+          exec_critical = max(budgeted, key=lambda lane: lane["exec_path"])
+          critical = max(budgeted, key=lambda lane: lane["terminal"])
+          runaway_critical = max(budgeted, key=lambda lane: lane["exec_terminal"])
+          slowest = max(budgeted, key=lambda lane: lane["duration"])
+          exec_path = exec_critical["exec_path"]
+          terminal = critical["terminal"]
+          queued = critical["path_queued"]
+          exec_terminal = runaway_critical["exec_terminal"]
+
+          # The verdict is the measurement; only pull requests fail on it.
+          if exec_terminal > max_terminal:
+              verdict_type = "runaway"
+          elif exec_path > max_exec:
+              verdict_type = "exec_over_budget"
+          elif queued >= queue_warn:
+              verdict_type = "queue_delayed"
+          else:
+              verdict_type = "within_budget"
+
+          rows = sorted(lanes, key=lambda lane: lane["terminal"], reverse=True)
+          table = [
+              "| lane | attempt | queued s | ran s | exec path s | terminal s | terminal excl. queue s | result |",
+              "| --- | --- | --- | --- | --- | --- | --- | --- |",
+          ] + [
+              f"| {r['name']} | {r['attempt']} | {r['queued']} | {r['duration']} | {r['exec_path']} | {r['terminal']} | {r['exec_terminal']} | {r['conclusion']}{' (outside the budget)' if r['outside_budget'] else ''} |"
+              for r in rows[:12]
+          ]
+          because = {"definition_changed": "changed its definition", "inputs_changed": "touched its inputs"}
+          outside_notes = [
+              f"{lane['name']} ran {lane['duration']} s (execution path {lane['exec_path']} s, "
+              f"push-to-terminal excluding runner queue {lane['exec_terminal']} s) outside the lane "
+              f"budgets: the plan ran it because the change "
+              f"{' and '.join(because[reason] for reason in exempt[lane['name']])} "
+              f"({', '.join(exempt[lane['name']])}); it is still required to succeed, and its own "
+              f"timeout-minutes bounds it."
+              for lane in outside
+          ]
+          verdict = (
+              f"Lane execution: {exec_path}/{max_exec} s (execution critical path: {exec_critical['name']}); "
+              f"push-to-terminal: {terminal} s (critical path: {critical['name']}, "
+              f"attempt {critical['attempt']}, {queued} s of it runner queue); "
+              f"push-to-terminal excluding runner queue: {exec_terminal}/{max_terminal} s "
+              f"(critical path: {runaway_critical['name']}); "
+              f"slowest lane: {slowest['name']}, ran {slowest['duration']} s; verdict: {verdict_type}"
+              + "".join(f"; outside the budget: {lane['name']}, ran {lane['duration']} s" for lane in outside)
+          )
+          print(verdict)
+          print("\n".join(table))
+          for note in outside_notes:
+              print(f"::warning title=Guard lane outside the budget::{note}")
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write(
+                      f"### Lane execution budget\n\n{verdict}\n\n"
+                      + "".join(f"Guard lane outside the budget: {note}\n\n" for note in outside_notes)
+                      + "\n".join(table)
+                      + "\n"
+                  )
+          output = os.environ.get("GITHUB_OUTPUT")
+          if output:
+              with open(output, "a", encoding="utf-8") as handle:
+                  handle.write(
+                      f"exec_path_seconds={exec_path}\n"
+                      f"terminal_seconds={terminal}\n"
+                      f"terminal_excluding_queue_seconds={exec_terminal}\n"
+                      f"queue_seconds={queued}\n"
+                      f"budget_verdict={verdict_type}\n"
+                      "guard_lanes_outside_budget="
+                      + json.dumps(
+                          [
+                              {
+                                  "job": lane["name"],
+                                  "reasons": exempt[lane["name"]],
+                                  "ran_seconds": lane["duration"],
+                                  "exec_path_seconds": lane["exec_path"],
+                                  "terminal_excluding_queue_seconds": lane["exec_terminal"],
+                              }
+                              for lane in outside
+                          ],
+                          separators=(",", ":"),
+                      )
+                      + "\n"
+                  )
+          if queued >= queue_warn:
+              print(
+                  f"::warning title=CI runner queue wait::{critical['name']} waited {queued} s for hosted "
+                  f"runners on the critical path (classification included); runner queue is reported, "
+                  f"not budgeted."
+              )
+          failed = False
+          if enforce and exec_path > max_exec:
+              print(
+                  f"::error::CI exceeded the {max_exec}-second lane execution budget "
+                  f"({exec_path} s; execution critical path {exec_critical['name']}, slowest lane "
+                  f"{slowest['name']} at {slowest['duration']} s)."
+              )
+              failed = True
+          if enforce and exec_terminal > max_terminal:
+              print(
+                  f"::error::CI exceeded the {max_terminal}-second push-to-terminal runaway ceiling "
+                  f"excluding runner queue ({exec_terminal} s; critical path {runaway_critical['name']}, "
+                  f"which also waited {runaway_critical['path_queued']} s for runners, not counted)."
+              )
+              failed = True
+          if failed:
+              sys.exit(1)
+          PY

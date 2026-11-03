@@ -225,6 +225,35 @@ class ClassifierTests(unittest.TestCase):
         self.assertEqual(result.first_publish, ["gamma"])
         self.assertEqual(result.unchanged, ["alpha", "beta"])
 
+    def test_member_the_baseline_did_not_publish_is_first_publish(self) -> None:
+        text = (self.repo.root / "crates" / "beta" / "Cargo.toml").read_text()
+        (self.repo.root / "crates" / "beta" / "Cargo.toml").write_text(
+            text.replace('name = "beta"\n', 'name = "beta"\npublish = false\n')
+        )
+        self.repo.commit("beta unpublished")
+        git(self.repo.root, "tag", "-f", "v0.1.0")
+        (self.repo.root / "crates" / "beta" / "Cargo.toml").write_text(text)
+        (self.repo.root / "crates" / "beta" / "src" / "lib.rs").write_text("pub fn g() {}\n")
+        self.repo.commit("publish beta")
+        result = self.repo.classify(["alpha", "beta"], published=frozenset({"alpha"}))
+        self.assertEqual(result.first_publish, ["beta"])
+        self.assertEqual(result.unchanged, ["alpha"])
+        self.assertIn("publish = false at v0.1.0", result.reasons["beta"])
+
+    def test_unpublishable_baseline_member_the_registry_has_is_measured(self) -> None:
+        text = (self.repo.root / "crates" / "beta" / "Cargo.toml").read_text()
+        (self.repo.root / "crates" / "beta" / "Cargo.toml").write_text(
+            text.replace('name = "beta"\n', 'name = "beta"\npublish = false\n')
+        )
+        self.repo.commit("beta unpublished")
+        git(self.repo.root, "tag", "-f", "v0.1.0")
+        (self.repo.root / "crates" / "beta" / "Cargo.toml").write_text(text)
+        self.repo.commit("publish beta")
+        result = self.repo.classify(["beta"], published=frozenset({"beta"}))
+        self.assertEqual(result.first_publish, [])
+        self.assertEqual(result.changed, ["beta"])
+        self.assertIn("published on the registry but publish = false", result.reasons["beta"])
+
     def test_published_crate_missing_from_the_baseline_is_never_first_publish(self) -> None:
         delta = self.repo.root / "crates" / "delta"
         (delta / "src").mkdir(parents=True)

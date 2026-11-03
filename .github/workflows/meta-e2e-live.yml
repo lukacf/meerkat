@@ -1,0 +1,65 @@
+# Meta's real-API end-to-end lane, moved here from
+# meta/.github/workflows/e2e-live.yml. Costs money and needs a provider
+# secret, so it is NOT part of pull-request CI: nightly plus manual dispatch.
+# It FAILS when the secret is absent rather than skipping, because a live lane
+# that skips is a green check that gates nothing. Add the repository secret
+# ANTHROPIC_API_KEY to enable it.
+name: Meta e2e-live
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+# The lane's log is read by grep, so Cargo prints it without color codes:
+# dtolnay/rust-toolchain sets CARGO_TERM_COLOR=always only when it is unset,
+# and the codes then sit inside the summary lines a check looks for.
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  CARGO_INCREMENTAL: "0"
+
+concurrency:
+  group: meta-e2e-live
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: meta
+
+jobs:
+  e2e-live:
+    name: e2e-live (real rpc_gateway, real Anthropic turns)
+    runs-on: ubuntu-24.04
+    # The gateway builds from source with no cache (below), about 20
+    # minutes on this runner, before the live turns.
+    timeout-minutes: 60
+    # The provider secret reaches only the step that makes the real calls,
+    # and the job restores no cache and no sccache object: nothing it runs
+    # beside the secret was built by another run.
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Refuse to run without the provider secret
+        env:
+          HAS_PROVIDER_SECRET: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+        run: |
+          if [ "${HAS_PROVIDER_SECRET}" != "true" ]; then
+            echo "::error::repository secret ANTHROPIC_API_KEY is not set; the real-API lane cannot run and will not pretend to" >&2
+            exit 1
+          fi
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - run: python -m pip install 'sdk/python[dev]'
+      # make builds rpc_gateway through the root wrapper (-p meerkat-meta).
+      - name: Real-API end-to-end lane
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: make e2e-live CARGO=../scripts/repo-cargo

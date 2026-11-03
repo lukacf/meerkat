@@ -1,0 +1,5 @@
+/.venv/
+/.studio/
+/.artifacts/
+/.tools/
+/web/dist/

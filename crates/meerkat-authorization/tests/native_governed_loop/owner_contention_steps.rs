@@ -50,7 +50,7 @@ const STEP_CALL: &str = "contended-read";
 /// The intended child of B's R1 issuance.
 const CHILD: &str = "contended-helper-child";
 /// B's tool time when nothing should cut its wait short.
-const TOOL_TIME: Duration = Duration::from_secs(600);
+const TOOL_TIME: Duration = Duration::from_mins(10);
 /// B's tool time when A holds past it: well inside the 2 s owner-change
 /// bound, so the bound that ends B's wait is the tool time.
 const SHORT_TOOL_TIME: Duration = Duration::from_secs(1);

@@ -1,9 +1,9 @@
 // Generated wire types for Meerkat SDK
-// Contract version: 0.9.8
+// Contract version: 0.9.9
 
 import { MeerkatError } from "./errors.js";
 
-export const CONTRACT_VERSION = "0.9.8";
+export const CONTRACT_VERSION = "0.9.9";
 
 export type Value = unknown;
 
@@ -501,11 +501,19 @@ export interface ToolsRegisterResult {
 }
 
 export interface WorkEventsResult {
+  event_high_water_mark?: number | null;
   events: unknown[];
+  next_after_seq?: number | null;
+  truncated?: boolean | null;
 }
 
 export interface WorkItemsResult {
+  anchor_event_seq?: number | null;
+  changed_since_anchor?: boolean | null;
   items: unknown[];
+  next_cursor?: string | null;
+  total_items?: number | null;
+  truncated?: boolean | null;
 }
 
 export type ConfigSetParams = Record<string, unknown>;
@@ -851,6 +859,127 @@ export interface WireLoginCancelledConnectorSlotTarget {
 }
 
 export type WireLoginCancelled = WireLoginCancelledMcpLoginTarget | WireLoginCancelledConnectorSlotTarget;
+
+export interface ToolGrantSubjectSession {
+  kind: "session";
+  session_id: string;
+}
+
+export interface ToolGrantSubjectIdentity {
+  identity: string;
+  kind: "identity";
+  mob_id: string;
+}
+
+export type ToolGrantSubjectRequest = ToolGrantSubjectSession | ToolGrantSubjectIdentity;
+
+export interface ToolGrantTargetTool {
+  kind: "tool";
+  name: string;
+}
+
+export interface ToolGrantTargetFamily {
+  family: string;
+  kind: "family";
+}
+
+export type ToolGrantTargetRequest = ToolGrantTargetTool | ToolGrantTargetFamily;
+
+export interface WireToolGrantSubjectSession {
+  kind: "session";
+  session_id: string;
+}
+
+export interface WireToolGrantSubjectIdentity {
+  identity: string;
+  kind: "identity";
+  mob_id: string;
+}
+
+export interface WireToolGrantSubjectUnknown {
+  kind: "unknown";
+}
+
+export type WireToolGrantSubject = WireToolGrantSubjectSession | WireToolGrantSubjectIdentity | WireToolGrantSubjectUnknown;
+
+export interface WireToolGrantTargetTool {
+  kind: "tool";
+  name: string;
+}
+
+export interface WireToolGrantTargetFamily {
+  family: string;
+  kind: "family";
+  names?: string[];
+}
+
+export interface WireToolGrantTargetUnknown {
+  kind: "unknown";
+}
+
+export type WireToolGrantTarget = WireToolGrantTargetTool | WireToolGrantTargetFamily | WireToolGrantTargetUnknown;
+
+export interface WireToolGrantIssuerOperator {
+  caller?: string | null;
+  kind: "operator";
+}
+
+export interface WireToolGrantIssuerApproval {
+  approval_id: string;
+  kind: "approval";
+}
+
+export interface WireToolGrantIssuerUnknown {
+  kind: "unknown";
+}
+
+export type WireToolGrantIssuer = WireToolGrantIssuerOperator | WireToolGrantIssuerApproval | WireToolGrantIssuerUnknown;
+
+export type WireToolGrantStatus = "active" | "expired" | "revoked" | "requested" | "declined" | "unknown";
+
+export type WireToolGrantExpiryDriver = "timer" | "boundary" | "dispatch" | "read" | "revoke" | "unknown";
+
+export type WireToolGrantRefusalKind = "required" | "expired" | "revoked" | "unavailable" | "unknown";
+
+export interface WireToolGrantAuditEventGranted {
+  expires_at_ms: number;
+  grant_id: string;
+  issuer: WireToolGrantIssuer;
+  kind: "granted";
+  reason?: string | null;
+  target: WireToolGrantTarget;
+}
+
+export interface WireToolGrantAuditEventExpired {
+  driver: WireToolGrantExpiryDriver;
+  expires_at_ms: number;
+  grant_id: string;
+  kind: "expired";
+  observed_at_ms: number;
+}
+
+export interface WireToolGrantAuditEventRevoked {
+  actor?: string | null;
+  grant_id: string;
+  kind: "revoked";
+  observed_at_ms: number;
+  reason?: string | null;
+}
+
+export interface WireToolGrantAuditEventRefused {
+  call_id: string;
+  grant_id?: string | null;
+  kind: "refused";
+  reason: WireToolGrantRefusalKind;
+  run_id?: string | null;
+  tool: string;
+}
+
+export interface WireToolGrantAuditEventUnknown {
+  kind: "unknown";
+}
+
+export type WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventUnknown;
 
 export interface ActivateInstructionParams {
   activation: Record<string, unknown>;
@@ -1416,6 +1545,78 @@ export interface WireSessionTranscriptRevisionList {
   head_revision: string;
 }
 
+export interface WireToolGrant {
+  ended_at_ms?: number | null;
+  expires_at_ms: number;
+  grant_id: string;
+  issued_at_ms: number;
+  issuer: WireToolGrantIssuer;
+  reason?: string | null;
+  status: WireToolGrantStatus;
+  subject: WireToolGrantSubject;
+  target: WireToolGrantTarget;
+}
+
+export interface WireUnreadableToolGrant {
+  detail: string;
+  grant_id: string;
+}
+
+export interface WireToolGrantAuditRow {
+  at_ms: number;
+  event: WireToolGrantAuditEvent;
+  sequence: number;
+}
+
+export interface WireUnreadableToolGrantAuditRow {
+  detail: string;
+  sequence: number;
+}
+
+export interface GrantToolParams {
+  duration_ms?: number | null;
+  expires_at_ms?: number | null;
+  reason?: string | null;
+  subject: ToolGrantSubjectRequest;
+  target: ToolGrantTargetRequest;
+}
+
+export interface GrantToolResult {
+  grant: WireToolGrant;
+}
+
+export interface RevokeToolGrantParams {
+  grant_id: string;
+  reason?: string | null;
+}
+
+export interface RevokeToolGrantResult {
+  changed: boolean;
+  grant: WireToolGrant;
+}
+
+export interface ListToolGrantsParams {
+  include_ended?: boolean;
+  subject: ToolGrantSubjectRequest;
+}
+
+export interface ListToolGrantsResult {
+  grants: WireToolGrant[];
+  unreadable?: WireUnreadableToolGrant[];
+}
+
+export interface ToolGrantAuditParams {
+  after_sequence?: number | null;
+  limit?: number | null;
+  subject: ToolGrantSubjectRequest;
+}
+
+export interface ToolGrantAuditResult {
+  next_sequence?: number | null;
+  rows: WireToolGrantAuditRow[];
+  unreadable?: WireUnreadableToolGrantAuditRow[];
+}
+
 export interface CallbackToolExecutionFast {
   mode: "fast";
 }
@@ -1718,8 +1919,20 @@ export interface MobCreateResult {
   mob_id: string;
 }
 
+export interface WireQuarantinedMob {
+  attempts?: number;
+  class: WireMobQuarantineClass;
+  code?: "SESSION_NOT_FOUND" | "SCHEDULE_NOT_FOUND" | "SESSION_BUSY" | "SESSION_NOT_RUNNING" | "REQUEST_CANCELLED" | "PROVIDER_ERROR" | "BUDGET_EXHAUSTED" | "HOOK_DENIED" | "AGENT_ERROR" | "CAPABILITY_UNAVAILABLE" | "SKILL_NOT_FOUND" | "SKILL_RESOLUTION_FAILED" | "INVALID_PARAMS" | "INTERNAL_ERROR" | "DUPLICATE_INPUT" | "SUPERVISOR_ROTATION_INCOMPLETE" | "SCOPE_DENIED" | "HOST_UNAVAILABLE" | "STALE_CURSOR" | "STALE_FENCE" | "MEMBER_RELOAD_REQUIRED" | "INPUT_REFUSED" | "INPUT_NOT_READY" | "SESSION_RUNTIME_UNAVAILABLE" | "APPROVAL_STORE_UNAVAILABLE" | "APPROVAL_CONFLICT" | "APPROVAL_COMMIT_UNKNOWN" | "STALE_DELIVERY_SCOPE" | "FORK_INSTRUCTION_REFUSED" | null;
+  message: string;
+  mob_id: string;
+  retryable: boolean;
+  retrying?: boolean;
+  structured_data?: unknown;
+}
+
 export interface MobListResult {
   mobs: Record<string, unknown>[];
+  quarantined?: WireQuarantinedMob[];
 }
 
 export interface WireMobLifecycleFailure {
@@ -2341,6 +2554,11 @@ export interface MobRotateSupervisorResult {
   mob_id: string;
   ok: boolean;
   report: SupervisorRotationReportWire;
+}
+
+export interface MobRestoreRetryResult {
+  mob_id: string;
+  outcome: WireMobRestoreRetryOutcome;
 }
 
 export interface MobClaimCallbackRouteParams {
@@ -3056,6 +3274,7 @@ export interface GoalStatusResult {
 }
 
 export interface ReadyWorkFilter {
+  cursor?: string | null;
   labels?: string[];
   limit?: number | null;
   namespace?: string | null;
@@ -3084,7 +3303,10 @@ export interface WorkGraphEventFilter {
 }
 
 export interface WorkGraphEventsResponse {
+  event_high_water_mark?: number | null;
   events: WorkGraphEvent[];
+  next_after_seq?: number | null;
+  truncated?: boolean | null;
 }
 
 export interface WorkGraphIdParams {
@@ -3094,23 +3316,34 @@ export interface WorkGraphIdParams {
 }
 
 export interface WorkGraphItemsResponse {
+  anchor_event_seq?: number | null;
+  changed_since_anchor?: boolean | null;
   items: WorkItem[];
+  next_cursor?: string | null;
+  total_items?: number | null;
+  truncated?: boolean | null;
 }
 
 export interface WorkGraphSnapshot {
   all_namespaces: boolean;
+  anchor_event_seq?: number | null;
   attention?: WorkAttentionBinding[];
   captured_at: string;
+  changed_since_anchor?: boolean | null;
   edges: WorkEdge[];
   event_high_water_mark?: number | null;
   items: WorkItem[];
   namespace?: string | null;
+  next_cursor?: string | null;
   ready_item_ids: string[];
   realm_id: string;
+  total_items?: number | null;
+  truncated?: boolean | null;
 }
 
 export interface WorkGraphSnapshotFilter {
   all_namespaces?: boolean;
+  cursor?: string | null;
   include_terminal?: boolean;
   labels?: string[];
   limit?: number | null;
@@ -3147,6 +3380,7 @@ export interface WorkItem {
 
 export interface WorkItemFilter {
   all_namespaces?: boolean;
+  cursor?: string | null;
   include_terminal?: boolean;
   labels?: string[];
   limit?: number | null;
@@ -3178,6 +3412,7 @@ export interface WorkEvidenceRef {
   kind: string;
   label?: string | null;
   summary?: string | null;
+  withdraws?: string[];
 }
 
 export interface WorkGraphEvent {
@@ -3577,7 +3812,11 @@ export interface ForkInstructionRefusalCauseMemberHostUnsupported {
   kind: "member_host_unsupported";
 }
 
-export type ForkInstructionRefusalCause = ForkInstructionRefusalCausePolicyRefuses | ForkInstructionRefusalCauseNotEffectiveInSource | ForkInstructionRefusalCauseLineageBodyBudgetExceeded | ForkInstructionRefusalCauseActivation | ForkInstructionRefusalCauseMemberHostUnsupported;
+export interface ForkInstructionRefusalCauseHeadBodyRetired {
+  kind: "head_body_retired";
+}
+
+export type ForkInstructionRefusalCause = ForkInstructionRefusalCausePolicyRefuses | ForkInstructionRefusalCauseNotEffectiveInSource | ForkInstructionRefusalCauseLineageBodyBudgetExceeded | ForkInstructionRefusalCauseActivation | ForkInstructionRefusalCauseMemberHostUnsupported | ForkInstructionRefusalCauseHeadBodyRetired;
 
 export interface ForkInstructionRefusal {
   cause: ForkInstructionRefusalCause;
@@ -3972,7 +4211,11 @@ export type WireContinuationStatus = WireContinuationStatusPending | WireContinu
 
 export type WireMemberCustodyRestore = "startup_binding" | "cleanup_delivery";
 
-export type WireMemberCustodyDeferralCause = "served_elsewhere" | "hosting_unavailable" | "durable_tail_unprovable";
+export type WireMemberCustodyDeferralCause = "served_elsewhere" | "hosting_unavailable" | "durable_tail_unprovable" | "store_unavailable" | "store_unreadable";
+
+export type WireMobQuarantineClass = "store_unavailable" | "store_unreadable" | "resume_refused";
+
+export type WireMobRestoreRetryOutcome = "restored" | "held" | "settled" | "not_quarantined";
 
 export type WireMobRunStatus = "pending" | "running" | "completed" | "failed" | "canceled";
 
@@ -7558,7 +7801,9 @@ export interface WireSessionMessageSystem {
   created_at: string;
   identity?: Record<string, unknown> | null;
   instruction_activation?: InstructionActivationIdentity | null;
+  instruction_entry?: Record<string, unknown> | unknown | null;
   prompt_version?: SystemPromptVersionIdentity | null;
+  retired_instruction_body?: Record<string, unknown> | unknown | null;
   role: "system";
 }
 
@@ -7663,7 +7908,12 @@ export function parseWorkGraphEvent(value: unknown): WorkGraphEvent {
 export function parseWorkGraphItemsResponse(value: unknown): WorkGraphItemsResponse {
   const data = expectWireObject(value, "WorkGraphItemsResponse");
   return {
+    ...(data["anchor_event_seq"] === undefined || data["anchor_event_seq"] === null ? {} : { anchor_event_seq: expectWireInteger(data["anchor_event_seq"], "WorkGraphItemsResponse.anchor_event_seq") }),
+    ...(data["changed_since_anchor"] === undefined || data["changed_since_anchor"] === null ? {} : { changed_since_anchor: expectWireBoolean(data["changed_since_anchor"], "WorkGraphItemsResponse.changed_since_anchor") }),
     items: expectWireArray(requireWireField(data, "items", "WorkGraphItemsResponse"), "WorkGraphItemsResponse.items").map((entry) => parseWorkItem(entry)),
+    ...(data["next_cursor"] === undefined || data["next_cursor"] === null ? {} : { next_cursor: expectWireString(data["next_cursor"], "WorkGraphItemsResponse.next_cursor") }),
+    ...(data["total_items"] === undefined || data["total_items"] === null ? {} : { total_items: expectWireInteger(data["total_items"], "WorkGraphItemsResponse.total_items") }),
+    ...(data["truncated"] === undefined || data["truncated"] === null ? {} : { truncated: expectWireBoolean(data["truncated"], "WorkGraphItemsResponse.truncated") }),
   };
 }
 
@@ -7671,7 +7921,10 @@ export function parseWorkGraphItemsResponse(value: unknown): WorkGraphItemsRespo
 export function parseWorkGraphEventsResponse(value: unknown): WorkGraphEventsResponse {
   const data = expectWireObject(value, "WorkGraphEventsResponse");
   return {
+    ...(data["event_high_water_mark"] === undefined || data["event_high_water_mark"] === null ? {} : { event_high_water_mark: expectWireInteger(data["event_high_water_mark"], "WorkGraphEventsResponse.event_high_water_mark") }),
     events: expectWireArray(requireWireField(data, "events", "WorkGraphEventsResponse"), "WorkGraphEventsResponse.events").map((entry) => parseWorkGraphEvent(entry)),
+    ...(data["next_after_seq"] === undefined || data["next_after_seq"] === null ? {} : { next_after_seq: expectWireInteger(data["next_after_seq"], "WorkGraphEventsResponse.next_after_seq") }),
+    ...(data["truncated"] === undefined || data["truncated"] === null ? {} : { truncated: expectWireBoolean(data["truncated"], "WorkGraphEventsResponse.truncated") }),
   };
 }
 
@@ -7680,14 +7933,19 @@ export function parseWorkGraphSnapshot(value: unknown): WorkGraphSnapshot {
   const data = expectWireObject(value, "WorkGraphSnapshot");
   return {
     all_namespaces: expectWireBoolean(requireWireField(data, "all_namespaces", "WorkGraphSnapshot"), "WorkGraphSnapshot.all_namespaces"),
+    ...(data["anchor_event_seq"] === undefined || data["anchor_event_seq"] === null ? {} : { anchor_event_seq: expectWireInteger(data["anchor_event_seq"], "WorkGraphSnapshot.anchor_event_seq") }),
     ...(data["attention"] === undefined || data["attention"] === null ? {} : { attention: expectWireArray(data["attention"], "WorkGraphSnapshot.attention").map((entry) => parseWorkAttentionBinding(entry)) }),
     captured_at: expectWireString(requireWireField(data, "captured_at", "WorkGraphSnapshot"), "WorkGraphSnapshot.captured_at"),
+    ...(data["changed_since_anchor"] === undefined || data["changed_since_anchor"] === null ? {} : { changed_since_anchor: expectWireBoolean(data["changed_since_anchor"], "WorkGraphSnapshot.changed_since_anchor") }),
     edges: expectWireArray(requireWireField(data, "edges", "WorkGraphSnapshot"), "WorkGraphSnapshot.edges").map((entry) => parseWorkEdge(entry)),
     ...(data["event_high_water_mark"] === undefined || data["event_high_water_mark"] === null ? {} : { event_high_water_mark: expectWireInteger(data["event_high_water_mark"], "WorkGraphSnapshot.event_high_water_mark") }),
     items: expectWireArray(requireWireField(data, "items", "WorkGraphSnapshot"), "WorkGraphSnapshot.items").map((entry) => parseWorkItem(entry)),
     ...(data["namespace"] === undefined || data["namespace"] === null ? {} : { namespace: expectWireString(data["namespace"], "WorkGraphSnapshot.namespace") }),
+    ...(data["next_cursor"] === undefined || data["next_cursor"] === null ? {} : { next_cursor: expectWireString(data["next_cursor"], "WorkGraphSnapshot.next_cursor") }),
     ready_item_ids: expectWireArray(requireWireField(data, "ready_item_ids", "WorkGraphSnapshot"), "WorkGraphSnapshot.ready_item_ids").map((entry) => expectWireString(entry, "WorkGraphSnapshot.ready_item_ids[]")),
     realm_id: expectWireString(requireWireField(data, "realm_id", "WorkGraphSnapshot"), "WorkGraphSnapshot.realm_id"),
+    ...(data["total_items"] === undefined || data["total_items"] === null ? {} : { total_items: expectWireInteger(data["total_items"], "WorkGraphSnapshot.total_items") }),
+    ...(data["truncated"] === undefined || data["truncated"] === null ? {} : { truncated: expectWireBoolean(data["truncated"], "WorkGraphSnapshot.truncated") }),
   };
 }
 
@@ -7695,7 +7953,12 @@ export function parseWorkGraphSnapshot(value: unknown): WorkGraphSnapshot {
 export function parseWorkItemsResult(value: unknown): WorkItemsResult {
   const data = expectWireObject(value, "WorkItemsResult");
   return {
+    ...(data["anchor_event_seq"] === undefined || data["anchor_event_seq"] === null ? {} : { anchor_event_seq: expectWireInteger(data["anchor_event_seq"], "WorkItemsResult.anchor_event_seq") }),
+    ...(data["changed_since_anchor"] === undefined || data["changed_since_anchor"] === null ? {} : { changed_since_anchor: expectWireBoolean(data["changed_since_anchor"], "WorkItemsResult.changed_since_anchor") }),
     items: expectWireArray(requireWireField(data, "items", "WorkItemsResult"), "WorkItemsResult.items"),
+    ...(data["next_cursor"] === undefined || data["next_cursor"] === null ? {} : { next_cursor: expectWireString(data["next_cursor"], "WorkItemsResult.next_cursor") }),
+    ...(data["total_items"] === undefined || data["total_items"] === null ? {} : { total_items: expectWireInteger(data["total_items"], "WorkItemsResult.total_items") }),
+    ...(data["truncated"] === undefined || data["truncated"] === null ? {} : { truncated: expectWireBoolean(data["truncated"], "WorkItemsResult.truncated") }),
   };
 }
 
@@ -7703,7 +7966,10 @@ export function parseWorkItemsResult(value: unknown): WorkItemsResult {
 export function parseWorkEventsResult(value: unknown): WorkEventsResult {
   const data = expectWireObject(value, "WorkEventsResult");
   return {
+    ...(data["event_high_water_mark"] === undefined || data["event_high_water_mark"] === null ? {} : { event_high_water_mark: expectWireInteger(data["event_high_water_mark"], "WorkEventsResult.event_high_water_mark") }),
     events: expectWireArray(requireWireField(data, "events", "WorkEventsResult"), "WorkEventsResult.events"),
+    ...(data["next_after_seq"] === undefined || data["next_after_seq"] === null ? {} : { next_after_seq: expectWireInteger(data["next_after_seq"], "WorkEventsResult.next_after_seq") }),
+    ...(data["truncated"] === undefined || data["truncated"] === null ? {} : { truncated: expectWireBoolean(data["truncated"], "WorkEventsResult.truncated") }),
   };
 }
 
@@ -7778,6 +8044,7 @@ export function parseWorkEvidenceRef(value: unknown): WorkEvidenceRef {
     kind: expectWireString(requireWireField(data, "kind", "WorkEvidenceRef"), "WorkEvidenceRef.kind"),
     ...(data["label"] === undefined || data["label"] === null ? {} : { label: expectWireString(data["label"], "WorkEvidenceRef.label") }),
     ...(data["summary"] === undefined || data["summary"] === null ? {} : { summary: expectWireString(data["summary"], "WorkEvidenceRef.summary") }),
+    ...(data["withdraws"] === undefined || data["withdraws"] === null ? {} : { withdraws: expectWireArray(data["withdraws"], "WorkEvidenceRef.withdraws").map((entry) => expectWireString(entry, "WorkEvidenceRef.withdraws[]")) }),
   };
 }
 

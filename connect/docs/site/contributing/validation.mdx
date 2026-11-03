@@ -1,0 +1,67 @@
+---
+title: "Contribute and validate"
+description: "Keep source, artifact, host and live evidence distinct while growing the library and documentation."
+icon: "code-branch"
+---
+
+Contributions should improve one concrete reusable behavior and its evidence while preserving the full design target. Passing a small component suite does not redefine a larger requirement as complete.
+
+## Source changes
+
+Read repository `AGENTS.md` and the owning crate/SDK contract. Preserve unrelated work. Keep integration selection with agents and concrete validation in code. Prefer existing Meerkat/Meta owners over parallel runtime, policy or persistence authorities.
+
+The root Rust workspace contains the standalone `toolkit-package` crate. Use
+`./scripts/repo-cargo test --workspace --all-features --locked` to include the
+artifact and recipe functionality. `python3 scripts/verify-local` records
+formatting, tests and Clippy against that workspace's actual source and graph.
+
+The native integration crates, including `toolkit-store`, remain required work
+in the explicit `native-candidate` workspace. Use `python3 scripts/verify-local --manifest-path native-candidate/Cargo.toml` with the exact reviewed prerequisite checkouts and
+lockfile. That graph retains local development paths and can fail before
+compilation. A root workspace pass does not certify native integration, and
+an older passing snapshot does not establish current compatibility.
+
+## Evidence levels
+
+| Level | What to verify |
+| --- | --- |
+| Inert metadata | Parse actual files, exact digests, version identity, prerequisites and refusal paths |
+| Source component | Real bounded parsing/transport/storage behavior, failures, cancellation and replay |
+| Installed artifact | Public imports/declarations, payload identity, dependency closure and notices |
+| Host composition | Actual owner wiring, account/resource policy, runtime dispatch and restoration |
+| Live provider or device | Scoped actual account, destination or hardware behavior |
+| Complete scenario | Original request through setup, readiness, continuation and business outcome |
+
+Retain failures and corrections alongside final receipts. State the exact backend and environment tested. An in-memory substitute cannot establish a claimed durable backend, and a simulated physical device cannot establish actual actuation.
+
+## Connector and frontend acceptance
+
+Service checks cover account isolation, schemas/results, pagination, limits, rate errors, redirects, cancellation/cleanup, explicit policy and uncertain writes. Frontend checks additionally cover forged inputs, two users/conversations, replay, audience change, permitted output, queued delivery, pause/removal and uncertain multipart outcomes.
+
+Use actual runtime dispatch and observations for claims about native tools, including restoration and every supported spawn path. Keep proposed startup protocol tests separate from released SDK behavior. The complete design also needs cross-host activation, injected-store recovery, custom device/live cases and generic-host retirement evidence.
+
+## Documentation-only validation
+
+From the repository root:
+
+```sh
+python3 scripts/check-docs.py
+```
+
+This standard-library checker validates site navigation, frontmatter, local links/anchors, assets and ASCII hyphens. It does not compile SDK examples or establish runtime behavior.
+
+Use Node 22 or 24 for the pinned Mintlify CLI. Node 24.19.0 is the locally validated preview choice. From `docs/site/`:
+
+```sh
+npx --yes mint@4.2.728 validate
+npx --yes mint@4.2.728 broken-links
+npx --yes mint@4.2.728 dev --port 3333
+```
+
+Mintlify validation parses the actual MDX/configuration. Inspect representative pages in the preview for navigation, tables, callouts, code, tabs and Mermaid rendering. A successful parser check alone is not visual verification.
+
+## Update claims with changes
+
+When changing an operation, update the corresponding SDK reference and examples. When changing a recipe, update its version and evidence, compiled registration if intended, and [catalog inventory](/reference/catalog). When changing readiness or native composition, recheck [availability](/availability), [readiness](/concepts/readiness) and the affected host guides.
+
+Keep public pages concise and audience-focused. Detailed private reviews, validation captures, source snapshots and requirement ledgers remain outside `docs/site/`. The repository's `docs/DOCUMENTATION.md` contains the maintainer source map and site workflow.

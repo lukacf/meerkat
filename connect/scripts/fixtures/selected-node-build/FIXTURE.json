@@ -1,0 +1,21 @@
+{
+  "files": {
+    "index.cjs": {
+      "bytes": 579,
+      "sha256": "e7a3ec5810b7341cc8dfa5470a8a528358e2f2258743873b5c3259c72b4dc6ee"
+    },
+    "package.json": {
+      "bytes": 172,
+      "sha256": "fcd9c1d664eae0eeff2a763a05402bb8a8eb686db94c9554cb932102a67873e0"
+    },
+    "should-not-run.cjs": {
+      "bytes": 206,
+      "sha256": "75f3c9d5183cce7e558223fc9c412d6c59e81cfd31c847a32e7aa289f8124038"
+    },
+    "src/add.c": {
+      "bytes": 1013,
+      "sha256": "e962f17ad20aab939d28deb9e68bc02f946abeb9fe478a94a0c5d35252037446"
+    }
+  },
+  "schema_version": 1
+}

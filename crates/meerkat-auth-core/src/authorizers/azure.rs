@@ -141,7 +141,7 @@ pub struct AzureAdAuthorizer {
 impl AzureAdAuthorizer {
     pub fn new(scope: impl Into<String>, creds: AzureClientCredentials) -> Self {
         let scope = scope.into();
-        let label = format!("azure-ad({})", &scope);
+        let label = format!("azure-ad({scope})");
         Self {
             scope,
             creds,

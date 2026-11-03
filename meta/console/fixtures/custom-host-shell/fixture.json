@@ -1,0 +1,47 @@
+{
+  "name": "custom-host-shell",
+  "models": "custom host navigation with selected Meta components",
+  "rendererTransport": {
+    "kind": "host-adapter",
+    "directBrowserRpc": false,
+    "rawRuntimeCalls": false,
+    "preservesTypedErrors": true,
+    "preservesCursors": true,
+    "preservesBlobs": true
+  },
+  "hostRecords": [
+    {
+      "kind": "host/project",
+      "id": "project:alpha",
+      "title": "Project Alpha",
+      "metaTarget": {
+        "kind": "meta/identity-chat",
+        "id": "chat:identity:project-alpha",
+        "title": "Project Alpha",
+        "identity": "identity:project-alpha"
+      }
+    },
+    {
+      "kind": "host/thread",
+      "id": "thread:alpha:plan",
+      "title": "Planning Thread",
+      "metaTarget": {
+        "kind": "meta/identity-chat",
+        "id": "chat:identity:thread-alpha-plan",
+        "title": "Planning Thread",
+        "identity": "identity:thread-alpha-plan"
+      }
+    }
+  ],
+  "hostNavigation": {
+    "orientation": "horizontal",
+    "records": ["project:alpha", "thread:alpha:plan"],
+    "bindsMetaTargets": true
+  },
+  "metaComponents": [
+    "ConsoleDock",
+    "ConsoleComposer",
+    "ConversationPane",
+    "ConversationTranscript"
+  ]
+}

@@ -7,8 +7,19 @@ use crate::seam::SeamClassification;
 use indexmap::{IndexMap, IndexSet};
 use std::fmt;
 
-const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
+// Native helpers of every machine: a machine's DSL calls them without
+// declaring them, and each has a hand-written body in the executors of the
+// machine that calls it.
+const NATIVE_MACHINE_HELPERS: &[&str] = &[
     "runtime_delivery_recipient_outcomes_after_set",
+    // SessionDocumentMachine: one session's slot map with one slot set, the
+    // body bytes of a slot set's Active slots, the entries of a slot map
+    // whose slot is Active, and the activation rows a retirement leaves
+    // retired per key.
+    "session_document_instruction_slot_after_set",
+    "session_document_instruction_active_bytes",
+    "session_document_instruction_active_slots",
+    "session_document_activation_retired_after",
     "meerkat_machine_session_id_matches_string",
     "meerkat_peer_endpoint_set_cardinality_matches",
     "meerkat_peer_endpoint_set_contains_peer_id",
@@ -83,6 +94,8 @@ const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
     "mob_machine_optional_u64_is_exact_successor",
     "mob_machine_members_to_spawn",
     "mob_machine_members_to_retire",
+    // A destroy's abandoned rotation sessions: the FreshSession rotations'.
+    "mob_machine_fresh_rotation_sessions",
     "mob_machine_placed_cleanup_absent_for_identity",
     "mob_machine_placed_cleanup_obligation",
     "mob_machine_placed_carrier_binding_active",
@@ -181,6 +194,14 @@ pub enum InputFieldDomainKind {
     /// the input field's type. Use it for inputs that echo machine state back,
     /// such as an `expected_revision` that must equal `revision`.
     StateField(FieldId),
+    /// Explore exactly these values in the CI profile; the Deep profile
+    /// explores them together with the default unsigned domain (`0..2`). The
+    /// generated model ranges the field over a constant that each profile's
+    /// config assigns; a composition, which has no machine CI profile,
+    /// explores the Deep set. Use it to keep a CI sweep within its budget when
+    /// the field's other values only reach states that no guard or invariant
+    /// tells apart from the kept ones.
+    CiValues(std::collections::BTreeSet<u64>),
 }
 
 /// Why an input field domain declaration is refused.
@@ -195,7 +216,7 @@ pub enum InputFieldDomainError {
     Unused,
     /// The same input field is declared twice.
     Duplicate,
-    /// An `AdditionalValues` declaration lists no values.
+    /// An `AdditionalValues` or `CiValues` declaration lists no values.
     EmptyValues,
     /// A value exceeds [`TLC_MAX_UNSIGNED_INPUT_SAMPLE`].
     ValueOutOfRange { value: u64 },
@@ -215,7 +236,7 @@ impl fmt::Display for InputFieldDomainError {
             Self::NotUnsigned => f.write_str("the field is not u32 or u64"),
             Self::Unused => f.write_str("no transition binds this field"),
             Self::Duplicate => f.write_str("the field is declared more than once"),
-            Self::EmptyValues => f.write_str("no additional values are listed"),
+            Self::EmptyValues => f.write_str("no values are listed"),
             Self::ValueOutOfRange { value } => write!(
                 f,
                 "value {value} exceeds the TLC maximum {TLC_MAX_UNSIGNED_INPUT_SAMPLE}"
@@ -276,7 +297,8 @@ impl MachineSchema {
                 return Err(refuse(InputFieldDomainError::Unused));
             }
             match &declaration.domain {
-                InputFieldDomainKind::AdditionalValues(values) => {
+                InputFieldDomainKind::AdditionalValues(values)
+                | InputFieldDomainKind::CiValues(values) => {
                     if values.is_empty() {
                         return Err(refuse(InputFieldDomainError::EmptyValues));
                     }
@@ -1698,7 +1720,7 @@ impl Expr {
             }
             Self::Call { helper, args } => {
                 if !helper_names.contains(helper.as_str())
-                    && !NATIVE_MOB_MACHINE_HELPERS.contains(&helper.as_str())
+                    && !NATIVE_MACHINE_HELPERS.contains(&helper.as_str())
                 {
                     return Err(MachineSchemaError::UnknownHelper {
                         helper: helper.clone(),

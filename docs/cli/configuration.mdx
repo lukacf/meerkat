@@ -391,11 +391,14 @@ Important files:
 - `blobs/` (realm blob objects)
 - `artifacts/` (stable artifact records)
 - `<store_path>/approvals.json` (RPC approval-record sidecar when the persistence bundle exposes a store path)
+- `<store_path>/approval_decisions.sqlite3` (durable decisions, created by the first hold)
 - `mobs/` (per-mob `<mob_id>.db` SQLite storage plus `realm_profiles.db`)
 
 `<store_path>/approvals.json` is not an eighth `RealmStorageProvider` durability domain.
 The current `storage doctor` and `storage migrate` commands do not inventory or
-migrate this RPC-owned sidecar.
+migrate this RPC-owned sidecar. They do cover `approval_decisions.sqlite3`
+(schema domain `approval-decisions`), at the realm root and under
+`sessions_jsonl/`.
 For built-in SQLite and named memory realms, `store_path` is the realm root;
 for the JSONL backend, it is the `sessions_jsonl/` directory.
 

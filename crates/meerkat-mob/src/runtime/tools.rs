@@ -2260,7 +2260,7 @@ impl MobOperatorToolDispatcher {
                         .map(|receipt| AsyncOpRef::detached(receipt.operation_id.clone()))
                         .collect::<Vec<_>>();
                     let mut results = Vec::with_capacity(receipts.len());
-                    for (result, identity) in receipts.into_iter().zip(identities.into_iter()) {
+                    for (result, identity) in receipts.into_iter().zip(identities) {
                         match result {
                             Ok(_receipt) => {
                                 let entry = self
@@ -2845,7 +2845,7 @@ mod declaration_forwarding_tests {
             meerkat_core::ToolDeadlineChain::new(vec![
                 meerkat_core::ToolDeadlineContributor::finite(
                     meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
-                    std::time::Duration::from_secs(600),
+                    std::time::Duration::from_mins(10),
                 ),
             ])
             .expect("valid test deadline chain"),

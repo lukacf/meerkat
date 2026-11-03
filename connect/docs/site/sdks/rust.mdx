@@ -1,0 +1,127 @@
+---
+title: "Rust crates"
+description: "Inspect packages, validate selections and compose native setup."
+icon: "rust"
+---
+
+The public source has a root workspace for `toolkit-package` and `toolkit-store`,
+and a `native-candidate` workspace for Connect and its native adapters. It uses
+published Core and Meta 0.9.0 crates plus the exact included Core code generator.
+Build with Rust 1.97.0. See the repository
+`BUILDING.md` for resource-bound native build commands.
+
+## Crate map
+
+| Crate | Source API | Boundary |
+| --- | --- | --- |
+| `toolkit-package` | Package/import types, `bundled_integration_library`, `ActivationManifest`, `ValidatedManifest` | Inert descriptions and exact checks; no execution or grants |
+| `toolkit-catalog` | `acquisition_schema`, `acquisition_model_artifacts`, generated acquisition authority | Application lifecycle source; not the provider recipe catalog |
+| `toolkit-store` | `ToolkitStore`, `SqliteStore`, `ConditionalAdmissionStore` | Atomic feature records/effects; no policy or external exactly-once guarantee |
+| `toolkit-mobkit` | `discovery::DiscoveryTools`, `FindAndInstallTool` | Discovery and acquisition admission; execution requires the installed native owner |
+| `meerkat-toolkit` | Setup, request, binding and continuation modules | Host composition retains native grants, lifecycle and currentness |
+| `meerkat-connect` | `service_preparation::NativeSetup`, `SessionStartup`, `session::ResumedStandalone` | Reusable native setup conversation in the separate `native-candidate` workspace; source dependency |
+
+## Embed the native setup conversation
+
+`meerkat_connect::service_preparation::NativeSetup` composes the existing setup
+tools over the adapter created by Meerkat's `AgentFactory`. It belongs to one
+exact session and realm. It neither grants those tools nor owns a second MCP
+router or the adapter's shutdown.
+
+| Public API | Use |
+| --- | --- |
+| `NativeSetup::new` | Retain the existing Reading Forge recipe with the selected example-host frontend binding, terminal connectors and local approvals |
+| `NativeSetup::with_forge` | Supply the application's loaded Forge binding and its matching protected presenter |
+| `SessionStartup::open_native_setup` | Open the selected governed standalone setup with protected approval and the existing cancellation listener |
+| `session::ResumedStandalone::open_native_setup` | Continue the retained standalone startup using its native owners |
+| `NativeSetup::take_composition` | After successful native construction, take the sole `LazySetup` and `ServicePreparationPresenter` |
+| `LazySetup::take_forge_presenter` | Take the protected Forge presenter from that composition |
+
+For a custom Forge application, obtain the pair with
+`ForgeFrontend::for_application` from its exact loaded `ForgeHost` and declared
+private fields, then move the pair together into `NativeSetup::with_forge`.
+Crossed, used or previously claimed pairs are refused. A later setup needs a
+fresh pair from the same trusted application configuration after the earlier
+setup closes. This operation selects no new host origin, login or permission.
+
+Keep the returned setup and presenters with the existing session owner. Cancel
+and await active input before awaiting `ConnectSession::close`; preserve a
+returned cleanup failure instead of treating a drop as completed shutdown.
+If installation enters finalization, retain that future until it settles as
+required by [service-secret setup](/guides/host-composition#standalone-service-secret-setup).
+The selected example-host binding can expose its frontend setup operations; this
+standalone composer does not turn the session into a persistent frontend host.
+
+See [host composition](/guides/host-composition#native-application-lifecycle) for application restore, preparation and replacement.
+
+## Inspect the integration library
+
+This source example needs the repository's prepared dependency graph. Loading the library parses compiled-in data and performs no provider requests:
+
+```rust
+use toolkit_package::bundled_integration_library;
+
+fn inspect_library() -> Result<(), Box<dyn std::error::Error>> {
+    let library = bundled_integration_library()?;
+    println!("retained versions: {}", library.entries().count());
+    Ok(())
+}
+```
+
+`IntegrationLibrary::entries()` returns retained `IntegrationBundle` values. A bundle exposes `package()`, `recipes()`, `servers()` and `digest()`. Package identity is the exact publisher/name/version tuple. The [catalog reference](/reference/catalog) distinguishes compiled registration from files present in the checkout.
+
+## Retain local recipes
+
+The optional `local-recipes` feature supplies `LocalRecipeStore` over a host-selected `ToolkitStore`. The host supplies its authorized realm and owner, exact plugin/MCP/recipe documents, and a reference to the agent's decision. Saving preserves those bytes and local provenance across restart. `load_exact` requires the selected package identity and bundle digest; a different decision or document cannot overwrite the same identity through save replay.
+
+For a selected local Python or Node integration, `save_selection` retains the exact `IntegrationPackage` and `ActivationManifest` documents, selected profile and component, decision and historical verification references. It uses the existing manifest and installation-plan validators. `load_retained_exact` and `list_retained` support both forms in the same immutable identity namespace. The local-selection digest also binds the original document formatting and evidence references; it is distinct from the canonical package and manifest digests. Older remote records keep their existing format and digest rules.
+
+For a self-contained Node MCPB selection, `save_mcpb_selection` additionally retains exact host-designated nonsecret configuration bytes. `configuration_json()` exposes those bytes; `configuration_digest()` exposes their validated binding. The same selection type and immutable namespace use version 3 for this form, while version-1 remote and version-2 Python/Node records keep their bytes and digests. Metadata validation does not certify archive compatibility: the existing MCPB installer still checks actual field sensitivity, completeness and argument expansion against the prepared archive.
+
+`RetainedLocalSelection::with_plugin_source` attaches an optional exact public plugin-source observation before `save_retained_selection`. The existing store retains its file text and historical diagnostics; `plugin_source_json()` returns the same bytes after reopening. It verifies the observation's structure, hashes and imported metadata without opening referenced paths. The source participates in the immutable recipe digest and remains untrusted historical guidance. Omitting it preserves older record digests. Retention grants no new execution or account authority.
+
+The returned local selection describes a past choice. The host supplies current configuration, policy and artifact files before calling the existing installer. Store lookup never runs code, fetches an artifact, dereferences evidence or grants access. Custom host-service selections are not supported by this retention form.
+
+The source binary `toolkit-local-recipes` provides `save`, `list`, `read` and `export` for a trusted local operator with explicit database and scope arguments. It is a metadata reuse and export tool, not a remote authorization boundary. Inputs must already be sanitized by the host; recipe validation cannot identify every secret in arbitrary text. The source guide is `crates/toolkit-package/LOCAL-RECIPES.md`.
+
+Retained recipes remain local. They are not added to the public discovery inventory, and a curated library refuses a bundle marked as locally investigated. Reuse supplies previous setup knowledge; installation, current permissions, verification and original-task continuation still require their respective owners.
+
+## Validate a selection
+
+An agent or application supplies the concrete `ActivationManifest`. Its `validate(&package)` method returns a `ValidatedManifest` only after package, strategy, component graph and export checks. The validated value exposes:
+
+| Method | Meaning |
+| --- | --- |
+| `manifest()` | Exact selected logical input |
+| `digest()` | Identity for that validated payload |
+| `canonical_bytes()` | Canonical serialized selection |
+| `initialization_order()` | Dependency order |
+| `shutdown_order()` | Reverse initialization order |
+| `check_host(&capabilities)` | Missing host contracts and explicit optional degradation |
+| `state_changes_from(...)` | Migration and retained-state obligations |
+
+`IntegrationBundle::validate_selection` additionally checks the recipe bundle selection. Compatibility and matching declarations do not establish actual enforcement, installation, credentials or readiness.
+
+## Export a selected portable endpoint
+
+`IntegrationBundle::export_portable(&bundle_digest, selection)` validates a concrete `ActivationManifest` through the existing recipe owner and returns `PortablePluginExport`. It exports exactly the selected remote recipe's retained server, with matching portable declarations. Required Connect contracts, services, dependencies and package state prevent portable export. It does not invent host capabilities or claim host compatibility.
+
+`PortablePluginExport::new` also supports plain portable manifests and explicitly included files through `with_file`, including skill documents, supporting references and already bundled executables. Optional metadata remains absent rather than null, namespaces remain opaque and placeholders remain literal. Realizing artifact-backed Connect components is still unsupported. `write_new` writes files into a new host-controlled directory and refuses existing destinations; it is not an atomic or durable install.
+
+On Unix, `with_file` retains exact bytes and executable intent from the same opened regular file. `write_new` uses creation mode `0755` for an executable and `0644` for other files, subject to the caller's umask, without copying ownership or special/group-write/world-write bits. The included program is never run by import or export. `inspect_existing` detects executable-mode drift even when bytes are unchanged; the optional fingerprint field `executable` is unrecorded for legacy observations. This behavior has a local generic stdio-client round-trip control, with source removal and exact skill/reference preservation. Windows permission behavior and automatic plugin-directory discovery are not qualified by that control.
+
+The local operator's `export` command requires an existing recipe, its exact identity and bundle digest, an absolute selection-file path and a new destination. Its result retains local decision provenance and hashes the selection and emitted files. A generic client gets the whole endpoint, not a proxy enforcing Connect operation lists, grants or resource limits. The client owns its authentication and authorization.
+
+## Expose discovery
+
+`DiscoveryTools::new(&public_catalog)` takes a deliberately public `PackageCatalog`. `DiscoveryTools::from_library(&library)` includes versioned recipe data. Both snapshot their inputs and reject oversized metadata.
+
+The dispatcher implements Meerkat's tool surface, but the application must compose it through the accepted native owner and select its allowed profiles. Keep private connections and restricted catalogs outside this public adapter. [Discovery API](/api/discovery) gives the exact tool arguments.
+
+## MCP integrations
+
+Connect supports MCP servers through Meerkat's native session APIs. Use the host's existing credential, grant and runtime owners when attaching a selected integration.
+
+## Source locations
+
+The exported crate roots are `crates/<crate>/src/lib.rs`. Detailed package structs live in `crates/toolkit-package/src/model.rs` and `manifest.rs`; discovery arguments live in `crates/toolkit-mobkit/src/discovery.rs`. Use [contributor validation](/contributing/validation) with the repository wrapper and exact reviewed dependency graph.

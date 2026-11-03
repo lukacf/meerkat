@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust-1.94+-orange?logo=rust" alt="Rust 1.94+">
+  <img src="https://img.shields.io/badge/Rust-1.97+-orange?logo=rust" alt="Rust 1.97+">
   <img src="https://img.shields.io/badge/License-MIT%2FApache--2.0-blue" alt="License">
 </p>
 
@@ -443,7 +443,7 @@ Meerkat is pre-1.0 and patch releases can contain declared public API breaks.
 Exactly pin the Meerkat crate family and bump deliberately:
 
 ```toml
-meerkat = { version = "=0.9.8", features = ["sqlite-store", "session-store"] }
+meerkat = { version = "=0.9.9", features = ["sqlite-store", "session-store"] }
 ```
 
 ## License

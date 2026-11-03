@@ -1337,6 +1337,23 @@
               "stop"
             ],
             "type": "object"
+          },
+          {
+            "description": "The session's build refused its scoped tool grant gate\n([`AgentError::ToolGrantGateRefused`]): no grant could honour it. A\nturn whose build was refused carries it, so a surface answers the\nturn with the refusal it answers the session error with.",
+            "properties": {
+              "reason_type": {
+                "const": "tool_grant_gate_refused",
+                "type": "string"
+              },
+              "refusal": {
+                "$ref": "#/$defs/GrantGateRefusal"
+              }
+            },
+            "required": [
+              "reason_type",
+              "refusal"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -9730,7 +9747,7 @@
             "type": "object"
           },
           {
-            "description": "Re-activating the effective bodies would exceed the retained\nactivation-body budget of the lineage.",
+            "description": "Re-activating the effective bodies would exceed the activation-body\nbudget: the live bodies of the child's transcript, the copied rows'\nincluded, a retired body not counted.",
             "properties": {
               "kind": {
                 "const": "lineage_body_budget_exceeded",
@@ -9770,6 +9787,19 @@
             "properties": {
               "kind": {
                 "const": "member_host_unsupported",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Re-activation was asked for, but the last copied row of a key holds\nno body: a compaction of the source retired it, because a later row\nof the key superseded it, and the fork's prefix ends before that row.\nA fork at a later boundary copies the superseding row with its body;\na host can also activate the key in the child itself.",
+            "properties": {
+              "kind": {
+                "const": "head_body_retired",
                 "type": "string"
               }
             },
@@ -9992,6 +10022,126 @@
         ],
         "type": "string"
       },
+      "GrantGateRefusal": {
+        "description": "Why a build's scoped tool grant gate was refused: a gate no grant could\nhonour. The agent factory answers it, and a session service surfaces it as\n[`crate::error::AgentError::ToolGrantGateRefused`], whose wire form is an\ninvalid-params error carrying this refusal, tagged by `kind`.",
+        "oneOf": [
+          {
+            "description": "A gated family is not a built-in tool family.",
+            "properties": {
+              "family": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "unknown_family",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A gated family is disabled by this build; a gated family is mounted\nclosed, never disabled.",
+            "properties": {
+              "family": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "family_disabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A gated family none of whose names this build's final dispatcher\nmounts: no grant could ever open it.",
+            "properties": {
+              "family": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "family_not_mounted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A gated name a known tool source can provide, that this build's final\ndispatcher does not mount and no pending source could provide once it\nconnects.",
+            "properties": {
+              "kind": {
+                "const": "tool_not_mounted",
+                "type": "string"
+              },
+              "tool": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "tool"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A gated tool name that no tool source of this build provides, and no\npending source could provide once it connects.",
+            "properties": {
+              "kind": {
+                "const": "unknown_tool",
+                "type": "string"
+              },
+              "tool": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "tool"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The build's tool policy refuses a gated name, so no grant could ever\nopen it.",
+            "properties": {
+              "kind": {
+                "const": "policy_refused",
+                "type": "string"
+              },
+              "tool": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "tool"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The build has no grant service: a gate needs the runtime's, carried\non the session's runtime bindings.",
+            "properties": {
+              "kind": {
+                "const": "no_grant_service",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "HandlingMode": {
         "description": "Handling mode for ordinary content-bearing work.\n\n`Queue` means outer-loop / next-turn handling and leaves the current run\nuntouched.\n`Steer` means inner-loop handling and requests injection at the earliest\nadmissible cooperative boundary, while remaining ordinary work rather than\nan out-of-band control-plane command.",
         "enum": [
@@ -10211,8 +10361,187 @@
         ],
         "type": "object"
       },
+      "InstructionActiveRef": {
+        "additionalProperties": false,
+        "description": "One slot of the active set an entry leaves in effect.",
+        "properties": {
+          "body_bytes": {
+            "description": "Length of the body in UTF-8 bytes: a snapshot reads each body at\nthis length.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision",
+          "content_sha256",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
+      "InstructionChange": {
+        "description": "One change a delta entry carries.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The body at `revision` applies from this entry on. `supersedes` is\nthe revision that was in effect for the slot, if one was.",
+            "properties": {
+              "body_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "change": {
+                "const": "activate",
+                "type": "string"
+              },
+              "content_sha256": {
+                "$ref": "#/$defs/InstructionContentDigest"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "supersedes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionRevision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "content_sha256",
+              "body_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The slot's body stops applying: `revokes` is the revision that was in\neffect.",
+            "properties": {
+              "change": {
+                "const": "revoke",
+                "type": "string"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "revokes": {
+                "$ref": "#/$defs/InstructionRevision"
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "revokes"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "InstructionContentDigest": {
         "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionEntryIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one operator-instruction entry row.\n\nIt has no public constructor: only the session-document authorization of\na run start or of a compaction fold mints one, and rewrite input cannot\nexpress it. Reads (history, wire) carry it as they carry the other System\nidentities.",
+        "properties": {
+          "active": {
+            "items": {
+              "$ref": "#/$defs/InstructionActiveRef"
+            },
+            "type": "array"
+          },
+          "changes": {
+            "items": {
+              "$ref": "#/$defs/InstructionChange"
+            },
+            "type": "array"
+          },
+          "entry_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/$defs/InstructionEntryKind"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "origin_session_id",
+          "entry_sequence",
+          "kind",
+          "target_generation"
+        ],
+        "type": "object"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
         "type": "string"
       },
       "InstructionKey": {
@@ -10238,6 +10567,12 @@
       "InstructionNamespace": {
         "description": "Application or issuer namespace for one instruction artifact family.",
         "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "InstructionRevisionId": {
         "description": "Immutable application-owned revision identifier.",
@@ -13654,6 +13989,30 @@
           "failed"
         ],
         "type": "string"
+      },
+      "RetiredInstructionBody": {
+        "additionalProperties": false,
+        "description": "The typed marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key superseded\nit. The row keeps its [`InstructionActivationIdentity`], whose digest\nstill binds the body, and this marker keeps the body's length; the row's\ncontent is the retired header (`[meerkat-retired-instruction-v1]`).",
+        "properties": {
+          "body_bytes": {
+            "description": "The UTF-8 byte length of the retired body.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "render_version": {
+            "description": "The render version of the retired header:\n[`crate::RETIRED_INSTRUCTION_RENDER_VERSION_V1`]. Render versions are\nadditive and permanently ratcheted.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "body_bytes"
+        ],
+        "type": "object"
       },
       "RevisedPromptDisposition": {
         "oneOf": [
@@ -17117,6 +17476,18 @@
         ],
         "type": "string"
       },
+      "WireInstructionEntryIdentity": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionEntryIdentity",
+            "description": "An identity this version knows."
+          },
+          {
+            "description": "An identity this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of an operator-instruction entry's typed identity.\n\nReads are tolerant: an identity whose form this version does not know (a\nnewer entry kind, change kind or field) reads as [`Self::Raw`], the value\nas it was sent, and is written back the same. It never fails the history\npage or bridge message that carries it. The session document keeps the\nclosed core type."
+      },
       "WireLiveAdapterStatus": {
         "description": "Wire mirror of [`meerkat_core::live_adapter::LiveAdapterStatus`].\n\nInternally-tagged on `status` (snake_case). The `degraded` variant\nreferences [`WireLiveDegradationReason`] so the typed reason is visible at\nthe SDK boundary.",
         "oneOf": [
@@ -18500,6 +18871,18 @@
           }
         ]
       },
+      "WireRetiredInstructionBody": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RetiredInstructionBody",
+            "description": "A marker this version knows."
+          },
+          {
+            "description": "A marker this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of the marker of an instruction activation row whose\nbody a compaction retired.\n\nReads are tolerant: a marker reads as [`Self::Known`] whenever its fields\ndecode (a later render version with the same two fields included), and\none with a field this version does not know reads as [`Self::Raw`], the\nvalue as it was sent, and is written back the same. It never fails the\nhistory page or bridge message that carries it; either form marks the\nrow's body as retired. The session document keeps the closed core type."
+      },
       "WireRunStopCompletion": {
         "description": "Completion class delivered to one contributor of a stopped run.\n\nA batch contributor of a cancelled run receives `cancelled`. An\nunretained durable Steer join is terminalized through the runtime\ntermination carrier, so its completion is `runtime_terminated` while its\ncommitted terminal is `cancelled`: read `terminal` for the lifecycle fact.",
         "enum": [
@@ -18721,6 +19104,17 @@
                 ],
                 "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
               },
+              "instruction_entry": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireInstructionEntryIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Typed operator-instruction entry identity (a delta appended at a\nrun start, or a compaction snapshot). Read-only: the session\nmints it and validates the rendered entry in `content` against\nit; no write accepts it. An identity whose form this reader does\nnot know reads raw instead of failing the read."
+              },
               "prompt_version": {
                 "anyOf": [
                   {
@@ -18731,6 +19125,17 @@
                   }
                 ],
                 "description": "Typed replacement-slot identity. Historical versions remain\nvisible on history/revision reads even though model materialization\nselects only the latest version for each key."
+              },
+              "retired_instruction_body": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireRetiredInstructionBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key\nsuperseded it: `content` is then the retired header, which names\nthe key, the revision and the body's length. Read-only: no write\naccepts it. A marker whose form this reader does not know reads\nraw instead of failing the read."
               },
               "role": {
                 "const": "system",
@@ -25394,6 +25799,137 @@
     "title": "ForkSessionReplaceParams",
     "type": "object"
   },
+  "GrantToolParams": {
+    "$defs": {
+      "ToolGrantSubjectRequest": {
+        "description": "The subject a request names: whose grants it writes or reads. Closed: a\nkind or a field this version does not know is refused, never ignored.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "One session's grants.",
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "One mob member identity's grants. Refused by servers that do not\nsupport identity subjects.",
+            "properties": {
+              "identity": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "identity",
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "mob_id",
+              "identity"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolGrantTargetRequest": {
+        "description": "The target a grant request names: one tool name, or a built-in tool\nfamily, whose names the server takes at grant time. Closed: a kind or a\nfield this version does not know is refused, never ignored, so a request\nis never read as wider than it asked.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "One tool name.",
+            "properties": {
+              "kind": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A built-in tool family.",
+            "properties": {
+              "family": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "family",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "family"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "`tool_grants/grant` parameters. Exactly one of `expires_at_ms` and\n`duration_ms` bounds the grant, at most the host's maximum lifetime.",
+    "properties": {
+      "duration_ms": {
+        "description": "The grant's lifetime from the server's clock, in ms.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "expires_at_ms": {
+        "description": "The grant's absolute deadline, in UNIX ms.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "reason": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "subject": {
+        "$ref": "#/$defs/ToolGrantSubjectRequest"
+      },
+      "target": {
+        "$ref": "#/$defs/ToolGrantTargetRequest"
+      }
+    },
+    "required": [
+      "subject",
+      "target"
+    ],
+    "title": "GrantToolParams",
+    "type": "object"
+  },
   "HelpRequest": {
     "$defs": {
       "HelpExecutionMode": {
@@ -28124,6 +28660,73 @@
       }
     },
     "title": "ListSessionsParams",
+    "type": "object"
+  },
+  "ListToolGrantsParams": {
+    "$defs": {
+      "ToolGrantSubjectRequest": {
+        "description": "The subject a request names: whose grants it writes or reads. Closed: a\nkind or a field this version does not know is refused, never ignored.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "One session's grants.",
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "One mob member identity's grants. Refused by servers that do not\nsupport identity subjects.",
+            "properties": {
+              "identity": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "identity",
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "mob_id",
+              "identity"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "`tool_grants/list` parameters.",
+    "properties": {
+      "include_ended": {
+        "default": false,
+        "description": "List ended (expired or revoked) grants too.",
+        "type": "boolean"
+      },
+      "subject": {
+        "$ref": "#/$defs/ToolGrantSubjectRequest"
+      }
+    },
+    "required": [
+      "subject"
+    ],
+    "title": "ListToolGrantsParams",
     "type": "object"
   },
   "LoginCancelParams": {
@@ -41000,6 +41603,13 @@
   "ReadyWorkFilter": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
+      "cursor": {
+        "description": "Continue a walk: the `next_cursor` the previous page of this read\nreturned. The page holds the rows after the cursor's position, in the\nsame order.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "labels": {
         "items": {
           "type": "string"
@@ -41112,6 +41722,27 @@
       "reason"
     ],
     "title": "RestoreSessionTranscriptRevisionParams",
+    "type": "object"
+  },
+  "RevokeToolGrantParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "`tool_grants/revoke` parameters.",
+    "properties": {
+      "grant_id": {
+        "type": "string"
+      },
+      "reason": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "grant_id"
+    ],
+    "title": "RevokeToolGrantParams",
     "type": "object"
   },
   "RewriteSessionTranscriptParams": {
@@ -44966,6 +45597,176 @@
     ],
     "title": "SystemPromptUpdateResult",
     "type": "object"
+  },
+  "ToolGrantAuditParams": {
+    "$defs": {
+      "ToolGrantSubjectRequest": {
+        "description": "The subject a request names: whose grants it writes or reads. Closed: a\nkind or a field this version does not know is refused, never ignored.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "One session's grants.",
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "One mob member identity's grants. Refused by servers that do not\nsupport identity subjects.",
+            "properties": {
+              "identity": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "identity",
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "mob_id",
+              "identity"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "`tool_grants/audit` parameters: a page of the subject's audit log.",
+    "properties": {
+      "after_sequence": {
+        "description": "Rows after this sequence; the log's start when absent.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "limit": {
+        "description": "At most this many rows; the server's default when absent.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "subject": {
+        "$ref": "#/$defs/ToolGrantSubjectRequest"
+      }
+    },
+    "required": [
+      "subject"
+    ],
+    "title": "ToolGrantAuditParams",
+    "type": "object"
+  },
+  "ToolGrantSubjectRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The subject a request names: whose grants it writes or reads. Closed: a\nkind or a field this version does not know is refused, never ignored.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "description": "One session's grants.",
+        "properties": {
+          "kind": {
+            "const": "session",
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "session_id"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "One mob member identity's grants. Refused by servers that do not\nsupport identity subjects.",
+        "properties": {
+          "identity": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "identity",
+            "type": "string"
+          },
+          "mob_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "mob_id",
+          "identity"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "ToolGrantSubjectRequest"
+  },
+  "ToolGrantTargetRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The target a grant request names: one tool name, or a built-in tool\nfamily, whose names the server takes at grant time. Closed: a kind or a\nfield this version does not know is refused, never ignored, so a request\nis never read as wider than it asked.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "description": "One tool name.",
+        "properties": {
+          "kind": {
+            "const": "tool",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "name"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "A built-in tool family.",
+        "properties": {
+          "family": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "family",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "family"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "ToolGrantTargetRequest"
   },
   "ToolsRegisterParams": {
     "$defs": {
@@ -49989,6 +50790,13 @@
         "default": false,
         "type": "boolean"
       },
+      "cursor": {
+        "description": "Continue a walk: the `next_cursor` the previous page of this read\nreturned. The page holds the rows after the cursor's position, in the\nsame order.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "include_terminal": {
         "default": false,
         "type": "boolean"
@@ -50048,6 +50856,13 @@
       "all_namespaces": {
         "default": false,
         "type": "boolean"
+      },
+      "cursor": {
+        "description": "Continue a walk: the `next_cursor` the previous page of this read\nreturned. The page holds the rows after the cursor's position, in the\nsame order.",
+        "type": [
+          "string",
+          "null"
+        ]
       },
       "include_terminal": {
         "default": false,

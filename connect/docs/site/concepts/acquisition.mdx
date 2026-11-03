@@ -1,0 +1,41 @@
+---
+title: "Agent-led discovery and installation"
+description: "Find and prepare integrations beyond the built-in library."
+icon: "compass"
+---
+
+The integration library gives the setup agent a starting point. For other tasks, the agent can research public documentation and repositories, choose a Python, Node or MCP package, and prepare it for installation.
+
+The original request stays with the setup work, including your constraints and supplied context. You can start with a goal, a remembered name, a URL or a repository.
+
+## From request to integration
+
+<Steps>
+  <Step title="Investigate">
+    Inspect existing connections and library recipes, then research additional sources when needed. Compare the available operations with the task.
+  </Step>
+  <Step title="Select">
+    Choose the exact package, version, entrypoint and operations. Identify required configuration, dependencies and account inputs.
+  </Step>
+  <Step title="Prepare">
+    Acquire the selected artifacts and dependency closure. Validate the package and activation manifest, then present the installation for review.
+  </Step>
+  <Step title="Connect and authorize">
+    Complete account setup through protected controls and grant the intended agent the selected operations.
+  </Step>
+  <Step title="Use">
+    Attach the integration through the host's runtime. In an integrated application, return the setup result to the original task; in the CLI, use a new ordinary agent session in the same realm.
+  </Step>
+</Steps>
+
+## Inspection tools
+
+A host can expose `setup_inspect_acquired` for Python and Node packages. It lists and reads archive contents without running the package. The agent uses the files to choose the entrypoint and author the integration metadata.
+
+Plugin inspection reads selected skill and MCP files. Saved source observations and local recipes preserve the configuration and research for later reuse. Current installation and access decisions are made when that recipe is used.
+
+## Waiting for an action
+
+Setup may wait for account sign-in, an administrator or deployment approval. Its status identifies the required action and the task waiting for it. Closing the panel leaves the operation available to inspect later through the application.
+
+See [installation APIs](/api/acquisition), [package preparation](/acquisition/local-install) and [continuation](/reference/continuation) for host integration.

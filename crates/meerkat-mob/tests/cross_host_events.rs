@@ -30,7 +30,7 @@ use support::{
     spawn_peer_comms_endpoint, unregister_session_until_terminal, wait_until,
 };
 
-const WAIT: Duration = Duration::from_secs(60);
+const WAIT: Duration = Duration::from_mins(1);
 
 fn identity(name: &str) -> AgentIdentity {
     AgentIdentity::from(name)

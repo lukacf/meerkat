@@ -117,6 +117,9 @@ impl SessionGeneration {
 }
 
 #[cfg(test)]
+mod activation_places_tests;
+mod activation_retirement;
+#[cfg(test)]
 mod assistant_message_identity_tests;
 pub mod context_control;
 mod digest_accumulator;
@@ -125,11 +128,23 @@ mod import_0810;
 #[cfg(test)]
 mod inline_image_externalization_tests;
 mod instruction_activation;
+#[cfg(test)]
+mod instruction_envelope_tests;
+mod instruction_target;
+#[cfg(test)]
+mod instruction_target_tests;
 pub mod model_routing_control;
 pub mod model_routing_handoff_staging;
+mod operator_instructions;
+#[cfg(test)]
+mod operator_instructions_tests;
 mod system_prompt_update;
+mod system_row_prune;
+#[cfg(test)]
+mod system_row_prune_tests;
 mod transcript_history;
 
+pub(crate) use activation_retirement::{ActivationRetirement, with_retired_activation_bodies};
 pub use digest_accumulator::TranscriptDigestMidstate;
 pub(crate) use digest_accumulator::TranscriptMessages;
 pub use head_metadata::{
@@ -151,12 +166,44 @@ pub use instruction_activation::{
     InstructionActivationProjectionWitness, InstructionActivationReadPage,
     InstructionActivationReadQuery, InstructionActivationReceipt, InstructionActivationRecord,
     InstructionActivationRequest, MAX_INSTRUCTION_ACTIVATION_LINEAGE_BYTES,
-    MAX_INSTRUCTION_BODY_BYTES, inherited_instruction_keys_requiring_activation,
-    materialize_instruction_activation_messages, validate_instruction_activation_messages,
+    MAX_INSTRUCTION_BODY_BYTES, RETIRED_INSTRUCTION_RENDER_VERSION_V1,
+    inherited_instruction_keys_requiring_activation, materialize_instruction_activation_messages,
+    validate_instruction_activation_messages,
+};
+pub(crate) use instruction_activation::{
+    instruction_activation_offsets, instruction_activation_places,
+    project_instruction_activation_rows, refuse_own_retired_activation_head,
+    retired_activation_row, superseded_activation_rows,
+};
+pub(crate) use instruction_target::InstructionFold;
+pub use instruction_target::{
+    InstructionDeferReason, InstructionLowering, InstructionRecordDisposition,
+    InstructionRecordReceipt, InstructionReleaseDisposition, InstructionRunStart,
+    InstructionSetErrorCode, InstructionStateError, InstructionTargetOwner,
+    InstructionTargetRecord, InstructionTargetRecordSlot, InstructionTargetSlot,
+    InstructionWriteDisposition, InstructionWriteError, RunStartInstructionOutcome,
+    SessionInstructionChange, SessionInstructionReceipt, SessionInstructionState,
+    SessionInstructionWrite,
+};
+pub use operator_instructions::{
+    EffectiveInstructionSlot, EffectiveOperatorInstructions, INSTRUCTION_ENTRY_RENDER_VERSION_V1,
+    InstructionActiveRef, InstructionChange, InstructionEffect, InstructionEntryIdentity,
+    InstructionEntryKind, InstructionEntryLoweringRefusal, InstructionEntryPlacement,
+    InstructionRevision, InstructionSlot, InvalidInstructionRevision,
+    MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES, MAX_OPERATOR_INSTRUCTION_SLOTS,
+    OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION, RunStartInstructionApplication,
+    effective_operator_instructions, materialize_operator_instruction_messages,
+    validate_operator_instruction_messages,
+};
+pub(crate) use operator_instructions::{
+    is_operator_instruction_entry, rows_besides_operator_instruction_entries,
 };
 pub use system_prompt_update::{
     SystemPromptUpdateError, SystemPromptUpdateRequest, SystemPromptUpdateResult,
     SystemPromptUpdateStatus,
+};
+pub use system_row_prune::{
+    SYSTEM_ROW_PRUNE_REASON_KIND, SystemRowPruneCommit, SystemRowPruneRefusal, SystemRowRef,
 };
 #[cfg(test)]
 pub(crate) use transcript_history::graph::TRANSCRIPT_DIGEST_FORMAT_RELEASED_0810;
@@ -185,6 +232,11 @@ pub use transcript_history::{
 /// in memory; new writes use the current version. The exact released 0.8.10
 /// envelope crosses only the explicit one-time importer.
 pub use crate::generated::session_persistence_version_authority::SESSION_VERSION;
+
+/// The envelope version a document without any operator-instruction fact is
+/// written with ([`Session::persisted_envelope_version`]): the released
+/// binaries' envelope, so such a document stays byte-identical.
+pub use crate::generated::session_persistence_version_authority::SESSION_ENVELOPE_BASELINE_VERSION;
 
 /// Current `SessionMetadata` schema version. Distinct from `SESSION_VERSION`
 /// so `SessionMetadata` can evolve independently of the Session envelope.
@@ -381,6 +433,7 @@ impl std::fmt::Display for TranscriptRewriteReason {
 
 /// Invalid typed transcript edit request.
 #[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
 pub enum TranscriptEditError {
     #[error("message index {message_index} out of bounds for {message_count} messages")]
     MessageIndexOutOfBounds {
@@ -425,6 +478,30 @@ pub enum TranscriptEditError {
         oldest_retained_revision: String,
         retired_rewrites: u64,
     },
+    /// A system-row prune ([`Session::prune_system_rows`]) refused the row it
+    /// names at `index`, for `cause`; nothing was written.
+    #[error("system row prune refused the row at message index {index}: {cause}")]
+    SystemRowPruneRefused {
+        index: usize,
+        cause: SystemRowPruneRefusal,
+    },
+}
+
+/// What a same-session rewrite commit checks of the instruction rows, beside
+/// the shape validation every commit runs.
+#[derive(Debug, Clone, Copy)]
+enum RewriteCommitGuard<'a> {
+    /// A generic rewrite, a keyed prompt update or a restore: every
+    /// instruction activation row and operator-instruction entry row keeps
+    /// its place, byte for byte.
+    Generic,
+    /// A system-row prune that retires the superseded activation bodies the
+    /// session-document authority authorized: as [`Self::Generic`], except
+    /// that each authorized row takes its exact retired form.
+    Retiring(&'a ActivationRetirement),
+    /// The validated compaction rebuild, bound to the revision its authority
+    /// minted; its own validation owns the instruction rows.
+    Compaction { expected_revision: &'a str },
 }
 
 /// Where the rows of a same-session rewrite replacement come from.
@@ -1138,7 +1215,7 @@ impl Serialize for Session {
         }
         let history = self.history_caches.shared_state.get();
         let serde_repr = SessionWholeBlobSerdeRef {
-            version: self.version,
+            version: self.persisted_envelope_version(),
             id: &self.id,
             messages: self.messages(),
             created_at: &self.created_at,
@@ -2098,6 +2175,14 @@ impl Session {
 
 /// Metadata key used to store deferred-turn control state.
 pub const SESSION_DEFERRED_TURN_STATE_KEY: &str = "session_deferred_turn_state";
+
+/// Metadata key holding the recorded operator-instruction target state: the
+/// owner, the target generation, the entry-sequence high-water and the slots
+/// the next run start applies (with the bodies still pending). A separate key
+/// from [`SESSION_DEFERRED_TURN_STATE_KEY`]: the target is long-lived and must
+/// not change [`Session::is_deferred_template`]. A document carrying it is
+/// written at envelope 5.
+pub const SESSION_INSTRUCTION_STATE_KEY: &str = "session_instruction_state_v1";
 
 /// Metadata key holding the open run cursor of a durable session.
 ///
@@ -4229,9 +4314,30 @@ pub struct SessionToolVisibilityState {
     pub requested_witnesses: BTreeMap<ToolName, ToolVisibilityWitness>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub filter_witnesses: BTreeMap<ToolName, ToolVisibilityWitness>,
+    /// The names this build marked grant-gated: hidden until a live scoped
+    /// tool grant opens them. Recomputed on every build, like
+    /// `policy_base_filter`.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tool_grant_gated_names: BTreeSet<ToolName>,
+    /// The gated names a live grant opened at the last model-request
+    /// boundary. Persisted with the rest of the projection, so the durable
+    /// projection stays the generated owner's exact one, but never restored:
+    /// every build clears it, so a restored session starts closed until its
+    /// first boundary adjudicates its grants.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tool_grant_open_names: BTreeSet<ToolName>,
 }
 
 impl SessionToolVisibilityState {
+    /// The gated names no live grant opened: hidden from the model.
+    #[must_use]
+    pub fn closed_tool_grant_gated_names(&self) -> BTreeSet<ToolName> {
+        self.tool_grant_gated_names
+            .difference(&self.tool_grant_open_names)
+            .cloned()
+            .collect()
+    }
+
     /// Deterministic projection of the generated CallingLlm visibility
     /// boundary. This is a comparison witness only: semantic promotion still
     /// belongs to the generated visibility owner.
@@ -5253,6 +5359,13 @@ fn assert_host_append_does_not_mint_system_semantics(message: &Message) {
         ),
         "ordinary Session append cannot mint an instruction activation; use activate_instruction",
     );
+    assert!(
+        !matches!(
+            message,
+            Message::System(system) if system.instruction_entry.is_some()
+        ),
+        "ordinary Session append cannot mint an operator instruction entry; only a run start or a compaction fold mints one",
+    );
 }
 
 impl Session {
@@ -5321,6 +5434,36 @@ impl Session {
     /// Get the session version
     pub fn version(&self) -> u32 {
         self.version
+    }
+
+    /// Whether this document carries a fact only envelope 5 can read: the
+    /// recorded operator-instruction state. Every path that puts an
+    /// operator-instruction entry row in a session records it (a run start's
+    /// application, a compaction fold, any entry append, a fork that copies
+    /// entry rows). So does a compaction that retires an instruction
+    /// activation body, and a fork that copies a retired one, since releases
+    /// before retirement read a retired row as a malformed envelope, and a
+    /// rewrite that moves an instruction activation row to another offset,
+    /// whose record releases before activation places refuse. Decode carries
+    /// it with the rows, so the key alone answers, in O(1) and without
+    /// reading the transcript. Entry rows leave the live transcript only
+    /// through a compaction fold, which records the state in the same
+    /// rewrite, so a document whose rewrite graph retains an entry row always
+    /// carries it too; an activation row is never erased and a retired body
+    /// never turns live again: once 5, always 5.
+    pub fn carries_operator_instruction_facts(&self) -> bool {
+        self.metadata.contains_key(SESSION_INSTRUCTION_STATE_KEY)
+    }
+
+    /// The envelope version this document is written with: the current
+    /// version when it carries an operator-instruction fact, the baseline
+    /// otherwise, so a document without one stays byte-identical to what the
+    /// released binaries write and read. In memory every restored document
+    /// carries [`SESSION_VERSION`] ([`Self::version`]).
+    pub fn persisted_envelope_version(&self) -> u32 {
+        session_persistence_version_authority::session_envelope_version_for_document(
+            self.carries_operator_instruction_facts(),
+        )
     }
 
     /// Get all messages.
@@ -5444,9 +5587,15 @@ impl Session {
                 matches!(message, Message::User(user) if user.transcript_role.is_compaction_summary())
             })
             .count();
-        if messages.len() >= self.messages.len() || summary_count != 1 {
+        // The shrink rule counts the rows other than operator-instruction
+        // entries: the fold's snapshot and the entry rows it takes out are
+        // neutral, so the compactor's own rebuild must have taken rows out.
+        if operator_instructions::rows_besides_operator_instruction_entries(&messages)
+            >= operator_instructions::rows_besides_operator_instruction_entries(self.messages())
+            || summary_count != 1
+        {
             return Err(TranscriptEditError::InvalidTranscriptShape(
-                "validated compaction rewrite must shrink the transcript and carry exactly one CompactionSummary"
+                "validated compaction rewrite must shrink the transcript (operator instruction entries aside) and carry exactly one CompactionSummary"
                     .to_string(),
             ));
         }
@@ -5458,7 +5607,9 @@ impl Session {
             TranscriptRewriteReason::new("compaction"),
             Some("meerkat-core".to_string()),
             Some(authority.parent_revision().to_string()),
-            Some(authority.revision()),
+            RewriteCommitGuard::Compaction {
+                expected_revision: authority.revision(),
+            },
         )?;
         Ok(Some(commit))
     }
@@ -5511,6 +5662,59 @@ impl Session {
         self.add_compaction_projection_intent(intent.clone())
             .map_err(|error| error.to_string())?;
         Ok((commit, intent))
+    }
+
+    /// [`Self::stage_validated_compaction_for_test`] for a compaction that
+    /// retires the superseded instruction activation bodies the
+    /// session-document authority authorizes, as the agent loop's
+    /// compaction does: each activation row of `replacement` whose source
+    /// row the authority retires takes its exact retired form, and the
+    /// envelope-5 marker is recorded with the rewrite.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn stage_retiring_compaction_for_test(
+        &mut self,
+        replacement: Vec<Message>,
+        summary_tokens: u64,
+    ) -> Result<
+        (
+            TranscriptRewriteCommit,
+            crate::memory::CompactionProjectionIntent,
+        ),
+        String,
+    > {
+        let retirement = self
+            .authorize_activation_body_retirement()
+            .map_err(|error| error.to_string())?;
+        let replacement = match retirement.as_ref() {
+            None => replacement,
+            Some(retirement) => {
+                let retired_rows = retirement
+                    .source_offsets()
+                    .filter_map(|offset| {
+                        Some((
+                            self.messages().get(offset)?.clone(),
+                            retirement.retired_row(offset)?.clone(),
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                replacement
+                    .into_iter()
+                    .map(|message| {
+                        match retired_rows.iter().find(|(source, _)| *source == message) {
+                            Some((_, retired)) => Message::System(retired.clone()),
+                            None => message,
+                        }
+                    })
+                    .collect()
+            }
+        };
+        let staged = self.stage_validated_compaction_for_test(replacement, summary_tokens)?;
+        if let Some(retirement) = retirement.as_ref() {
+            self.record_activation_body_retirement(retirement)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(staged)
     }
 
     /// Atomically refresh the synthetic runtime notices of one kind.
@@ -6707,6 +6911,17 @@ impl Session {
         self.push(Message::System(SystemMessage::new(content)));
     }
 
+    /// Whether the newest System row the model reads as a prompt holds
+    /// exactly `prompt`: a System row without an append identity, an
+    /// instruction activation or an operator-instruction entry, that is not
+    /// a superseded prompt version. A build that resumes this session with
+    /// an explicit `prompt` appends it only when this is false; a host that
+    /// materializes a resumed session itself applies the same rule.
+    #[must_use]
+    pub fn newest_prompt_row_is(&self, prompt: &str) -> bool {
+        crate::types::newest_prompt_row_is(self.messages(), prompt)
+    }
+
     /// Append an ordinary System message with optional control-ingress
     /// identity.
     ///
@@ -6782,6 +6997,8 @@ impl Session {
             identity,
             prompt_version: None,
             instruction_activation: None,
+            instruction_entry: None,
+            retired_instruction_body: None,
         }));
         Ok(crate::service::AppendSystemContextStatus::Applied)
     }
@@ -6861,13 +7078,13 @@ impl Session {
                             .tool_calls()
                             .any(|call| call.id == tool_call_id.as_str());
                 }
-                Message::ToolResults { results, .. } if asked => {
-                    if results
-                        .iter()
-                        .any(|result| result.tool_use_id == *tool_call_id)
-                    {
-                        return true;
-                    }
+                Message::ToolResults { results, .. }
+                    if asked
+                        && results
+                            .iter()
+                            .any(|result| result.tool_use_id == *tool_call_id) =>
+                {
+                    return true;
                 }
                 _ => {}
             }
@@ -6891,7 +7108,10 @@ impl Session {
     /// # Errors
     ///
     /// [`ModelBoundaryProjectionError`] when a row does not hold the bytes
-    /// its typed identity names: the projection fails closed.
+    /// its typed identity names, or when a key's newest instruction
+    /// activation row is the session's own and holds a retired body (a torn
+    /// document: a compaction never retires a key's newest row): the
+    /// projection fails closed.
     pub fn messages_for_model_boundary(
         &self,
     ) -> Result<Vec<Message>, ModelBoundaryProjectionError> {
@@ -6924,6 +7144,14 @@ impl Session {
         &self,
         messages: &[Message],
     ) -> Result<Vec<Message>, ModelBoundaryProjectionError> {
+        // Every operator-instruction entry row read here holds the bytes its
+        // typed identity names: the transcript buffer verifies each row once,
+        // and a row cannot change in place without dropping that record.
+        self.verify_operator_instruction_rows(messages.len())
+            .map_err(|reason| ModelBoundaryProjectionError {
+                session_id: self.id().clone(),
+                reason,
+            })?;
         let copied = crate::fork_notice::CopiedForkRows::of(
             self.messages(),
             self.id(),
@@ -6932,12 +7160,30 @@ impl Session {
         );
         let forked = crate::fork_notice::project_fork_rows(self.id(), messages, copied.as_ref());
         let messages = forked.as_deref().unwrap_or(messages);
-        let prompts = crate::types::materialize_latest_system_prompt_versions(messages);
-        let mut projected = materialize_instruction_activation_messages(self.id(), &prompts)
-            .map_err(|reason| ModelBoundaryProjectionError {
+        // A key whose newest activation row is the session's own keeps that
+        // row's body; a torn document that retired it fails closed. The
+        // whole transcript is judged, not `messages`: a prefix may end
+        // before the row that superseded a retired one.
+        refuse_own_retired_activation_head(self.id(), self.messages()).map_err(|reason| {
+            ModelBoundaryProjectionError {
                 session_id: self.id().clone(),
                 reason,
+            }
+        })?;
+        let prompts = crate::types::materialize_latest_system_prompt_versions(messages);
+        let mut projected =
+            project_instruction_activation_rows(self.id(), &prompts).map_err(|reason| {
+                ModelBoundaryProjectionError {
+                    session_id: self.id().clone(),
+                    reason,
+                }
             })?;
+        // Operator-instruction entries a fork copied read as history in the
+        // child.
+        operator_instructions::project_verified_operator_instruction_messages_in_place(
+            self.id(),
+            &mut projected,
+        );
         crate::types::strip_tool_result_host_metadata(&mut projected);
         Ok(projected)
     }
@@ -9003,7 +9249,7 @@ impl Session {
             reason,
             actor,
             expected_parent_revision,
-            None,
+            RewriteCommitGuard::Generic,
         )?;
         if let Some(cadence) = Self::compaction_cadence_without_transcript_facts(&self.metadata) {
             self.set_metadata_unchecked(crate::compact::SESSION_COMPACTION_CADENCE_KEY, cadence);
@@ -9011,12 +9257,14 @@ impl Session {
         Ok(commit)
     }
 
-    /// [`Self::commit_transcript_rewrite_authorized`] with an additional
-    /// expected digest for the FULL rewritten transcript. The compaction
-    /// authority passes its minted revision here, so the rebuilt side of the
-    /// token binds against the one digest this commit computes anyway
-    /// instead of a second whole-document hash at the authorization seam. A
-    /// mismatch fails closed before any state is touched.
+    /// [`Self::commit_transcript_rewrite_authorized`] under `guard`. The
+    /// compaction authority passes its minted revision
+    /// ([`RewriteCommitGuard::Compaction`]), so the rebuilt side of the token
+    /// binds against the one digest this commit computes anyway instead of a
+    /// second whole-document hash at the authorization seam; a mismatch fails
+    /// closed before any state is touched. A system-row prune passes the
+    /// activation bodies the session-document authority authorized it to
+    /// retire ([`RewriteCommitGuard::Retiring`]).
     fn commit_transcript_rewrite_bound(
         &mut self,
         selection: TranscriptRewriteSelection,
@@ -9024,7 +9272,7 @@ impl Session {
         reason: TranscriptRewriteReason,
         actor: Option<String>,
         expected_parent_revision: Option<String>,
-        expected_revision: Option<&str>,
+        guard: RewriteCommitGuard<'_>,
     ) -> Result<TranscriptRewriteCommit, TranscriptEditError> {
         let parent_revision = self
             .transcript_revision()
@@ -9062,28 +9310,69 @@ impl Session {
             .map_err(TranscriptEditError::InvalidTranscriptShape)?;
         validate_instruction_activation_messages(&rewritten)
             .map_err(TranscriptEditError::InvalidTranscriptShape)?;
+        // Whether this rewrite moves an instruction activation row to
+        // another offset. Releases before activation places compare
+        // activation rows at their offsets, so they refuse the record of such
+        // a rewrite: its document is written at envelope 5 (below).
+        let mut shifts_activation_offsets = false;
+        let expected_revision = match guard {
+            RewriteCommitGuard::Compaction { expected_revision } => Some(expected_revision),
+            RewriteCommitGuard::Generic | RewriteCommitGuard::Retiring(_) => None,
+        };
         if expected_revision.is_none() {
-            let activation_rows = |messages: &[Message]| {
-                messages
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, message)| {
-                        let Message::System(system) = message else {
-                            return None;
-                        };
-                        system
-                            .instruction_activation
-                            .as_ref()
-                            .map(|_| (index, system.clone()))
-                    })
-                    .collect::<Vec<_>>()
+            // Instruction activation rows are compared by place: the same
+            // rows, byte for byte, in the same order, each with the same
+            // conversation rows before it, whatever their offsets. A rewrite
+            // may add, remove or reorder ordinary System rows around one (a
+            // keyed prompt update inserts a later version before it), but
+            // cannot mint, alter, move, erase or restore one across
+            // conversational content. A system-row prune's rows are compared
+            // with the source as its authorized retirement leaves it, so it
+            // may retire exactly the bodies the session-document authority
+            // authorized, and nothing else.
+            let retired_parent = match guard {
+                RewriteCommitGuard::Retiring(retirement) => {
+                    Some(retirement.applied_to(self.messages()))
+                }
+                RewriteCommitGuard::Generic | RewriteCommitGuard::Compaction { .. } => None,
             };
-            if activation_rows(self.messages()) != activation_rows(&rewritten) {
+            let parent = retired_parent.as_deref().unwrap_or(self.messages());
+            if instruction_activation_places(parent) != instruction_activation_places(&rewritten) {
                 return Err(TranscriptEditError::InvalidTranscriptShape(
                     "same-session transcript rewrite cannot mint, alter, move, erase, or restore instruction activation boundaries"
                         .to_string(),
                 ));
             }
+            shifts_activation_offsets = instruction_activation_offsets(self.messages())
+                != instruction_activation_offsets(&rewritten);
+            // Only a run start appends an operator-instruction entry row, and
+            // only the validated compaction fold takes entry rows out and
+            // inserts a snapshot. Entry rows are compared by identity and by
+            // their place among the conversation rows and the System rows of
+            // their gap, not by offset: a keyed prompt update adopts a row in
+            // place and inserts its later version before them.
+            if operator_instructions::operator_instruction_entry_places(self.messages())
+                != operator_instructions::operator_instruction_entry_places(&rewritten)
+            {
+                return Err(TranscriptEditError::InvalidTranscriptShape(
+                    "same-session transcript rewrite cannot mint, alter, move, erase, or restore operator instruction entries"
+                        .to_string(),
+                ));
+            }
+        }
+        // A commit that moves an activation row to another offset, or that
+        // retires a body (a retiring prune), records the envelope-5 marker
+        // once it is installed: the stored instruction state is read now,
+        // so a state that does not read refuses the commit before anything
+        // changes, and the recording after it cannot fail.
+        let records_envelope_marker = shifts_activation_offsets
+            || matches!(
+                guard,
+                RewriteCommitGuard::Retiring(retirement) if retirement.retired_bodies() > 0
+            );
+        if records_envelope_marker {
+            self.instruction_target_state()
+                .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
         }
         // One required hash of the genuinely new content, computed FIRST so
         // the whole-span digests below reuse it instead of re-hashing the
@@ -9146,13 +9435,23 @@ impl Session {
             actor,
             committed_at,
         };
-        self.finish_compact_transcript_rewrite(
+        let commit = self.finish_compact_transcript_rewrite(
             prior_history,
             commit,
             replacement,
             rewritten,
             realtime_rebase,
-        )
+        )?;
+        if shifts_activation_offsets {
+            // The graph now retains a record that moved an activation row
+            // to another offset: the document carries a fact only envelope 5
+            // reads ([`Self::carries_operator_instruction_facts`]). The
+            // stored state was read before the commit, so this records the
+            // marker or keeps the state already recorded.
+            self.record_unowned_instruction_state()
+                .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+        }
+        Ok(commit)
     }
 
     fn finish_compact_transcript_rewrite(
@@ -9399,7 +9698,7 @@ impl Session {
                 cadence,
             );
         }
-        Self {
+        let mut forked = Self {
             version: session_version(),
             realtime_transcript: Box::new(SessionRealtimeTranscriptProjection::empty(&id)),
             id,
@@ -9421,7 +9720,9 @@ impl Session {
             model_routing_control: Box::new(
                 model_routing_control::SessionModelRoutingControlHistory::new(),
             ),
-        }
+        };
+        forked.record_instruction_state_of_copied_rows(self.carries_operator_instruction_facts());
+        forked
     }
 
     /// Fork at one complete transcript boundary.
@@ -9570,6 +9871,15 @@ impl Session {
                     .to_string(),
             ));
         }
+        if matches!(
+            &replacement_message,
+            Message::System(system) if system.instruction_entry.is_some()
+        ) {
+            return Err(TranscriptEditError::InvalidTranscriptShape(
+                "fork replacement cannot mint an operator instruction entry; fork-at may only copy exact source-prefix entries"
+                    .to_string(),
+            ));
+        }
 
         // The edited row is new content on a new branch. It keeps no
         // occurrence id, whether it replaced a whole message or one block of
@@ -9591,7 +9901,7 @@ impl Session {
     pub fn fork(&self) -> Self {
         let now = SystemTime::now();
         let id = SessionId::new();
-        Self {
+        let mut forked = Self {
             version: session_version(),
             realtime_transcript: Box::new(SessionRealtimeTranscriptProjection::empty(&id)),
             id,
@@ -9607,7 +9917,11 @@ impl Session {
             model_routing_control: Box::new(
                 model_routing_control::SessionModelRoutingControlHistory::new(),
             ),
-        }
+        };
+        // A source without the instruction state holds no entry row, so a
+        // fork of one stays O(1).
+        forked.record_instruction_state_of_copied_rows(self.carries_operator_instruction_facts());
+        forked
     }
 }
 
@@ -10010,6 +10324,20 @@ pub struct SessionLlmRequestPolicy {
     /// Narrow-only final policy for provider-native server tools.
     #[serde(default)]
     pub provider_native_tools: ProviderNativeToolPolicy,
+    /// How operator-instruction entries lower on the target as its backend
+    /// serves it, resolved with the config that resolves the target's
+    /// binding (`ModelRegistry::instruction_lowering_for_identity`). A live
+    /// hot swap installs it: the agent holds no config to judge the new
+    /// binding itself. Live policy only, never serialized; a deserialized
+    /// policy lowers no entry.
+    #[serde(skip, default = "lowering_of_a_deserialized_request_policy")]
+    pub operator_instruction_lowering: crate::InstructionLowering,
+}
+
+/// A request policy read back from bytes carries no resolved lowering: it
+/// lowers no operator-instruction entry.
+fn lowering_of_a_deserialized_request_policy() -> crate::InstructionLowering {
+    crate::InstructionLowering::Unavailable
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -10229,6 +10557,14 @@ pub struct SessionTooling {
     /// Active skills at session creation time (for deterministic resume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_skills: Option<Vec<crate::skills::SkillKey>>,
+    /// The tool families and names this session's builds mark grant-gated:
+    /// a gated name stays hidden and refused until a live scoped tool grant
+    /// opens it. A resume restores it.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::tool_grant::GrantGatedTools::is_empty"
+    )]
+    pub grant_gated: crate::tool_grant::GrantGatedTools,
 }
 
 impl From<&Session> for SessionMeta {

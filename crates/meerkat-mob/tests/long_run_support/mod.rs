@@ -102,7 +102,7 @@ const RACE_OUTCOME: &str = "race-outcome";
 const COMPACTION_THRESHOLD: u64 = 50_000;
 /// Bound for one step of a row (a child reaching its kill point, a restart
 /// going idle); it only turns a hang into a failure.
-pub const STEP: Duration = Duration::from_secs(120);
+pub const STEP: Duration = Duration::from_mins(2);
 /// How long the harness gate waits for the harness before it answers:
 /// under the runtime's attempt timeout, so a parked ask is never cancelled.
 const PARK: Duration = Duration::from_secs(6);
@@ -1080,7 +1080,7 @@ impl ScriptedTools {
             meerkat_core::RunnerIdentity::new("lr.detached", "v1").expect("runner identity"),
             meerkat_core::RestartClass::NonResumable,
             meerkat_core::IdempotencyScope::ToolCall,
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         )
         .expect("detached policy");
         let contract = meerkat_core::ToolExecutionContract::new(

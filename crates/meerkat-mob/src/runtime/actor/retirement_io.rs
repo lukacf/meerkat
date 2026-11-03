@@ -28,13 +28,73 @@ pub(super) enum RetirementReply {
     SpawnRollback,
     /// A re-drive the actor owns itself (on resume): no caller awaits it.
     Owned,
-    /// A rotation (`rotate_member`): the retirement records the rotation at
-    /// its admission and seats the next incarnation in its terminal step;
-    /// the caller is answered with the next incarnation's session.
+    /// A rotation (`rotate_member`, `respawn_member`): the retirement records
+    /// the rotation at its admission (its start row carries it) and seats the
+    /// next incarnation in its terminal step.
     Rotate {
         rotation: Box<super::dormant_seat::MemberRotation>,
-        reply: oneshot::Sender<Result<SessionId, MobError>>,
+        reply: RotationReply,
     },
+}
+
+/// Whom a rotation answers once its retirement settles.
+pub(super) enum RotationReply {
+    /// `rotate_member`: the next incarnation's session.
+    Session(oneshot::Sender<Result<SessionId, MobError>>),
+    /// A same-session successor (`respawn_member`, and `respawn` of an
+    /// identity entry's member): the successor's receipt.
+    Respawn(
+        oneshot::Sender<
+            Result<
+                super::super::handle::MemberRespawnReceipt,
+                super::super::handle::MobRespawnError,
+            >,
+        >,
+    ),
+    /// The typed re-drive of a rotation whose retirement settled stuck or was
+    /// recovered at a start (`redrive_retirement`): its barrier.
+    Redrive(oneshot::Sender<Result<(), MobError>>),
+    /// A rotation the actor re-drives itself: no caller awaits it.
+    Owned,
+}
+
+impl RotationReply {
+    /// Answer a rotation that did not finish.
+    fn fail(self, error: MobError) {
+        match self {
+            Self::Session(reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::Respawn(reply) => {
+                let _ = reply.send(Err(super::super::handle::MobRespawnError::from(error)));
+            }
+            Self::Redrive(reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::Owned => {}
+        }
+    }
+}
+
+impl RetirementState {
+    /// Whether this retirement is a same-session rotation's: it keeps the
+    /// member's session for the next incarnation, and hands its queued
+    /// inputs to it.
+    fn keeps_session(&self) -> bool {
+        matches!(&self.reply, RetirementReply::Rotate { rotation, .. } if rotation.keeps_session())
+    }
+
+    /// Whether this retirement keeps the member's topology for the next
+    /// incarnation: a same-session successor under the member's own role
+    /// keeps the member's endpoint, its wiring edges and its peers' trust,
+    /// so no peer is observed, notified or unwired. A same-session successor
+    /// under another role runs under the new role's comms name: its
+    /// retirement unwires its peers' trust as a plain retirement's does,
+    /// and keeps only the session.
+    fn keeps_topology(&self) -> bool {
+        matches!(&self.reply, RetirementReply::Rotate { rotation, .. }
+            if rotation.keeps_topology(&self.entry.role))
+    }
 }
 
 impl RetirementReply {
@@ -262,6 +322,12 @@ enum RetirementObservation {
         result: Result<(), MobError>,
     },
     AttachmentsReleased(Result<(), MobError>),
+    /// The retiring member's operator-instruction target is released (or
+    /// had nothing to release).
+    InstructionTargetReleased {
+        disposal: mob_dsl::MemberSessionDisposal,
+        result: Result<(), MobError>,
+    },
     CarrierDeleted {
         obligation: mob_dsl::PlacedCarrierCleanupObligation,
         result: Result<(), MobError>,
@@ -2289,14 +2355,68 @@ impl MobActor {
         self.retirement_start_external_cleanup(continuation).await;
     }
 
+    /// The retiring member's session is disposed of: before anything clears
+    /// the member's seat, MobMachine decides whether its mob releases the
+    /// member session's operator-instruction target (a host-owned session
+    /// the mob recorded or owes a snapshot), and the release lands first,
+    /// after any delivery in flight to the member.
     async fn retirement_post_archive(
+        &mut self,
+        continuation: RetirementContinuation,
+        disposal: mob_dsl::MemberSessionDisposal,
+    ) {
+        let release = match self.resolve_member_instruction_release(
+            &continuation.entry.agent_identity,
+            continuation.entry.bridge_session_id(),
+            disposal,
+        ) {
+            Ok(release) => release,
+            Err(error) => {
+                self.finish_retirement(continuation, Err(error)).await;
+                return;
+            }
+        };
+        let Some(release) = release else {
+            self.retirement_post_archive_released(continuation, disposal)
+                .await;
+            return;
+        };
+        let released_session = release.session_id().clone();
+        let realize =
+            self.member_instruction_release_future(&continuation.entry.agent_identity, release);
+        // The release waits for any delivery in flight to the member and for
+        // its session's turn boundary, within the retirement's deadline: past
+        // it the retirement fails typed and retryable, its member still
+        // seated, and a re-drive releases the target again.
+        let deadline = continuation.deadline;
+        // Fence scope: self-only; releases the retiring member's own session target.
+        self.dispatch_retirement(
+            continuation,
+            "retire-instruction-target-release",
+            RetirementFenceScope::SelfOnly,
+            async move {
+                let result = super::operator_instructions::bounded_member_instruction_release(
+                    deadline,
+                    released_session,
+                    realize,
+                )
+                .await;
+                RetirementObservation::InstructionTargetReleased { disposal, result }
+            },
+        );
+    }
+
+    async fn retirement_post_archive_released(
         &mut self,
         mut continuation: RetirementContinuation,
         disposal: mob_dsl::MemberSessionDisposal,
     ) {
-        // The member's session is disposed for good (#1500).
-        self.unstage_departed_member_mob_stop(&continuation.entry)
-            .await;
+        // The member's session is disposed for good (#1500); a same-session
+        // rotation keeps it for the next incarnation.
+        if !continuation.keeps_session() {
+            self.unstage_departed_member_mob_stop(&continuation.entry)
+                .await;
+        }
         continuation.archive_disposal = Some(disposal);
         if continuation.terminal_published {
             let identity = mob_dsl::AgentIdentity::from_domain(&continuation.entry.agent_identity);
@@ -2883,6 +3003,11 @@ impl MobActor {
             }
             let identity = mob_dsl::AgentIdentity::from_domain(&continuation.entry.agent_identity);
             let state = self.dsl_authority.state();
+            // A same-session successor under the member's own role unwires
+            // no edge: the next incarnation keeps them.
+            if continuation.keeps_topology() {
+                return Ok(());
+            }
             continuation.placed_peers = state
                 .wiring_edges
                 .iter()
@@ -2962,6 +3087,23 @@ impl MobActor {
                 );
                 return;
             }
+        }
+        if continuation.keeps_topology() {
+            // A same-session successor under the member's own role observes
+            // no peer: it keeps the member's endpoint, edges and peers' trust
+            // for the next incarnation, so its disposal carries no trust
+            // cleanup.
+            let mut ctx = Self::disposal_context_from_entry(
+                &continuation.entry.agent_identity,
+                &continuation.entry,
+                RetireTrustCleanupPlan::empty(),
+                false,
+            );
+            ctx.retirement_deadline = Some(continuation.deadline);
+            ctx.registration_refused = continuation.registration_refused;
+            continuation.disposal = Some(ctx);
+            self.retirement_stop_host(continuation).await;
+            return;
         }
         self.retirement_observe_endpoints(continuation, false).await;
     }
@@ -3082,6 +3224,10 @@ impl MobActor {
     }
 
     async fn retirement_prepare_archive(&mut self, mut continuation: RetirementContinuation) {
+        if continuation.keeps_session() {
+            self.retirement_release_kept_session(continuation);
+            return;
+        }
         let identity = &continuation.entry.agent_identity;
         let placed =
             super::super::member_runtime_is_host_owned(self.dsl_authority.state(), identity);
@@ -3192,7 +3338,8 @@ impl MobActor {
             || self.runtime_retire_archive_only(&continuation.entry.agent_runtime_id);
         // A seat's unborn session was never created (MobMachine keeps the
         // fact until this step): an archive that finds no session has
-        // nothing to archive.
+        // nothing to archive, and neither has one whose walk takes that
+        // session for another host's.
         let session_unborn = crate::runtime::boot_plan::domain_member_seat_session_unborn(
             self.dsl_authority.state(),
             &identity,
@@ -3240,6 +3387,20 @@ impl MobActor {
                     if not_found && session_unborn {
                         return Ok(mob_dsl::MemberSessionDisposal::Archived);
                     }
+                    // A runtime-backed walk takes a session its archive
+                    // authority never saw for another host's, and only
+                    // releases its runtime. A seat's unborn session is this
+                    // mob's own, and no build created it: its disposal is an
+                    // archive with nothing to archive, so the end of the
+                    // retirement records it as it records an archived one.
+                    if session_unborn
+                        && matches!(
+                            result,
+                            Ok(mob_dsl::MemberSessionDisposal::RuntimeReleasedOnlyHostOwned)
+                        )
+                    {
+                        return Ok(mob_dsl::MemberSessionDisposal::Archived);
+                    }
                     if not_found
                         && let Some(session) = member.bridge_session_id()
                         && observation.already_complete(session).await?
@@ -3247,6 +3408,92 @@ impl MobActor {
                         return Ok(mob_dsl::MemberSessionDisposal::Archived);
                     }
                     result
+                }
+                .await;
+                RetirementObservation::Archived(result)
+            },
+        );
+    }
+
+    /// A same-session rotation's disposal (`KeptForSuccessor`): the retiring
+    /// incarnation's runtime registration is released and its session is
+    /// kept for the next incarnation, as a Shutdown releases a member it
+    /// keeps. The session's eligible queued inputs are kept for the next
+    /// incarnation's first wake when the session commits each round; every
+    /// other input ends stopped, typed. A seat session no build created has
+    /// no registration to release. An unregister that does not complete in
+    /// the retirement's budget leaves the retirement stuck at this stage; its
+    /// re-drive releases the registration again.
+    fn retirement_release_kept_session(&mut self, continuation: RetirementContinuation) {
+        let identity = continuation.entry.agent_identity.clone();
+        let session = continuation.entry.bridge_session_id().cloned();
+        let unborn = crate::runtime::boot_plan::domain_member_seat_session_unborn(
+            self.dsl_authority.state(),
+            &identity,
+        );
+        #[cfg(feature = "runtime-adapter")]
+        let adapter = self.runtime_adapter.clone();
+        #[cfg(feature = "runtime-adapter")]
+        let ops = Arc::clone(&self.session_ops_adapter);
+        #[cfg(feature = "runtime-adapter")]
+        let queued_inputs = if self.member_sessions_commit_each_round() {
+            meerkat_runtime::UnregisterQueuedInputs::Requeue {
+                max_age: meerkat_runtime::UnregisterQueuedInputs::DEFAULT_MAX_AGE,
+            }
+        } else {
+            meerkat_runtime::UnregisterQueuedInputs::Stop
+        };
+        #[cfg(feature = "runtime-adapter")]
+        let deadline = continuation.deadline;
+        // Fence scope: self-only; releases the retiring member's own exact
+        // runtime registration and keeps its session.
+        self.dispatch_retirement(
+            continuation,
+            "retire-session-release",
+            RetirementFenceScope::SelfOnly,
+            async move {
+                let result = async {
+                    let Some(session) = session else {
+                        return Err(MobError::Internal(format!(
+                            "the same-session rotation of '{identity}' found no session to keep"
+                        )));
+                    };
+                    #[cfg(test)]
+                    if retirement_stage_test_hooks::take_kept_session_release_failure(&session) {
+                        return Err(MobError::Internal(
+                            "injected kept-session release failure".to_string(),
+                        ));
+                    }
+                    if unborn {
+                        return Ok(mob_dsl::MemberSessionDisposal::KeptForSuccessor);
+                    }
+                    #[cfg(feature = "runtime-adapter")]
+                    if let Some(adapter) = adapter.as_ref() {
+                        match super::shutdown_teardown::teardown_session(
+                            adapter,
+                            &ops,
+                            &session,
+                            None,
+                            deadline,
+                            queued_inputs,
+                        )
+                        .await
+                        {
+                            ShutdownUnregisterOutcome::Unregistered => {}
+                            ShutdownUnregisterOutcome::Pending { stage, .. } => {
+                                return Err(MobError::MemberRetirementInProgress {
+                                    member_id: identity,
+                                    stage: stage.to_string(),
+                                });
+                            }
+                            ShutdownUnregisterOutcome::Failed(reason) => {
+                                return Err(MobError::Internal(reason));
+                            }
+                        }
+                    }
+                    #[cfg(not(feature = "runtime-adapter"))]
+                    let _ = (&identity, &session);
+                    Ok(mob_dsl::MemberSessionDisposal::KeptForSuccessor)
                 }
                 .await;
                 RetirementObservation::Archived(result)
@@ -3597,6 +3844,12 @@ impl MobActor {
         };
         let session = bound.clone().or(pending.clone());
         let released = !placed && bound.is_none() && pending.is_some();
+        // The rotation a start row records: replay records it again, so a
+        // restarted mob finishes the rotation itself.
+        let rotation_record = match &continuation.reply {
+            RetirementReply::Rotate { rotation, .. } => Some(rotation.record()),
+            _ => None,
+        };
         let result = async {
             let journal = self.retirement_started_journal_kind(
                 entry,
@@ -3604,7 +3857,55 @@ impl MobActor {
                 session.as_ref(),
                 released,
             )?;
-            if live && !released {
+            if !continuation.retirement_started
+                && let RetirementReply::Rotate { rotation, .. } = &continuation.reply
+                && rotation.keeps_session()
+            {
+                // A same-session rotation starts the retirement itself, in
+                // one step with the rotation: `BeginMemberRotation`
+                // (SameSession) marks the incarnation Retiring, archive-only,
+                // on its kept binding and journals the start, whose row
+                // carries the rotation. A refused start journals and commits
+                // nothing, and the member stays seated.
+                let mut authority = self.dsl_authority.prepare_authority();
+                let transitions =
+                    Self::apply_member_rotation_transitions(&mut authority, entry, rotation)?;
+                let kept = Some(mob_dsl::SessionId::from_domain(
+                    &rotation.candidate.session_id,
+                ));
+                let started = transitions.first().ok_or_else(|| {
+                    MobError::Internal("the same-session rotation applied no start".into())
+                })?;
+                Self::require_member_lifecycle_journal_effect(
+                    started,
+                    mob_dsl::MobLifecycleJournalKind::MemberRetirementStartedPreservingBinding,
+                    &entry.agent_identity,
+                    &entry.agent_runtime_id,
+                    None,
+                    entry.generation,
+                    kept.clone(),
+                    "begin_same_session_rotation",
+                )?;
+                self.append_retirement_started_event_for_entry(
+                    entry,
+                    mob_dsl::MobLifecycleJournalKind::MemberRetirementStartedPreservingBinding,
+                    kept,
+                    false,
+                    rotation_record,
+                )
+                .await?;
+                let phase_changed = transitions
+                    .iter()
+                    .any(|transition| transition.from_phase != transition.to_phase);
+                self.commit_prepared_dsl_input(PreparedDslInput {
+                    authority,
+                    effects: transitions
+                        .into_iter()
+                        .flat_map(mob_dsl::MobMachineTransition::into_effects)
+                        .collect(),
+                    phase_changed,
+                })?;
+            } else if live && !released {
                 let mut prepared = self.prepare_dsl_input_transition(
                     mob_dsl::MobMachineInput::Retire {
                         mob_id: mob_dsl::MobId::from_domain(&self.definition.id),
@@ -3644,6 +3945,7 @@ impl MobActor {
                         journal,
                         session,
                         continuation.preserve_topology,
+                        rotation_record,
                     )
                     .await?;
                 }
@@ -4035,6 +4337,28 @@ impl MobActor {
         })
     }
 
+    /// MobMachine's answer to the retire of an identity with no roster
+    /// incarnation (`RetireAbsent`): in every phase it retires nothing and
+    /// changes nothing while the identity maps to no runtime, and it refuses
+    /// an identity the machine still maps. The actor's own retirement of an
+    /// absent member and the handle's retire of an identity its roster does
+    /// not list (`MobCommand::RetireAbsent`) both ask it, so no shell
+    /// answers that retire.
+    pub(super) fn retire_absent_admission(
+        &mut self,
+        identity: &AgentIdentity,
+        context: &str,
+    ) -> Result<(), MobError> {
+        self.apply_command_admission(
+            mob_dsl::MobMachineInput::RetireAbsent {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(identity),
+            },
+            MobState::Running,
+            context,
+        )
+        .map(|_| ())
+    }
+
     pub(super) async fn start_retirement(
         &mut self,
         identity: AgentIdentity,
@@ -4069,9 +4393,7 @@ impl MobActor {
                 RetirementReply::Respawn { reply, .. } => {
                     let _ = reply.send(Err(super::super::handle::MobRespawnError::from(error)));
                 }
-                RetirementReply::Rotate { reply, .. } => {
-                    let _ = reply.send(Err(error));
-                }
+                RetirementReply::Rotate { reply, .. } => reply.fail(error),
                 RetirementReply::IdentityReconcile(_) => {}
                 RetirementReply::SpawnRollback | RetirementReply::Owned => {}
             }
@@ -4093,9 +4415,7 @@ impl MobActor {
                 RetirementReply::Respawn { reply, .. } => {
                     let _ = reply.send(Err(super::super::handle::MobRespawnError::from(error)));
                 }
-                RetirementReply::Rotate { reply, .. } => {
-                    let _ = reply.send(Err(error));
-                }
+                RetirementReply::Rotate { reply, .. } => reply.fail(error),
                 RetirementReply::IdentityReconcile(_)
                 | RetirementReply::SpawnRollback
                 | RetirementReply::Owned => {}
@@ -4114,9 +4434,7 @@ impl MobActor {
                 RetirementReply::Respawn { reply, .. } => {
                     let _ = reply.send(Err(super::super::handle::MobRespawnError::from(error)));
                 }
-                RetirementReply::Rotate { reply, .. } => {
-                    let _ = reply.send(Err(error));
-                }
+                RetirementReply::Rotate { reply, .. } => reply.fail(error),
                 RetirementReply::IdentityReconcile(authority) => {
                     self.record_identity_reconcile_disposition(
                         &identity,
@@ -4133,6 +4451,15 @@ impl MobActor {
             }
             return;
         }
+        // While a rotation's intent stands, every retirement of the identity
+        // is the rotation's (MobMachine's plain archive terminal waits on
+        // it): a re-drive re-drives the rotation from its record.
+        let Some(reply) = self
+            .retirement_reply_under_rotation(&identity, reply, redriven)
+            .await
+        else {
+            return;
+        };
         let mut redriven_refused = false;
         if let Some(stuck) = self.stuck_retirements.get(&identity)
             && redriven
@@ -4149,15 +4476,7 @@ impl MobActor {
         }
         let entry = self.roster.read().await.get(&identity).cloned();
         let Some(entry) = entry else {
-            let result = self
-                .apply_command_admission(
-                    mob_dsl::MobMachineInput::RetireAbsent {
-                        agent_identity: mob_dsl::AgentIdentity::from_domain(&identity),
-                    },
-                    MobState::Running,
-                    "handle_retire_inner_absent",
-                )
-                .map(|_| ());
+            let result = self.retire_absent_admission(&identity, "handle_retire_inner_absent");
             match reply {
                 RetirementReply::Retire(reply) | RetirementReply::BatchRetire(reply) => {
                     let _ = reply.send(result);
@@ -4168,7 +4487,7 @@ impl MobActor {
                     )));
                 }
                 RetirementReply::Rotate { reply, .. } => {
-                    let _ = reply.send(Err(MobError::MemberNotFound(identity)));
+                    reply.fail(MobError::MemberNotFound(identity));
                 }
                 RetirementReply::IdentityReconcile(authority) => {
                     if let Err(error) = result {
@@ -4191,6 +4510,13 @@ impl MobActor {
             &reply,
             RetirementReply::Respawn { .. } | RetirementReply::IdentityReconcile(_)
         );
+        // A same-session rotation keeps the member's binding: its retirement
+        // releases the runtime and keeps the session for the next
+        // incarnation.
+        let same_session = matches!(
+            &reply,
+            RetirementReply::Rotate { rotation, .. } if rotation.keeps_session()
+        );
         let placed =
             super::super::member_runtime_is_host_owned(self.dsl_authority.state(), &identity);
         let placement = self.retirement_placement_fence(&identity);
@@ -4200,7 +4526,7 @@ impl MobActor {
         let mut continuation = Box::new(RetirementState {
             ticket: 0,
             entry,
-            preserve_binding: respawn && !placed,
+            preserve_binding: (respawn || same_session) && !placed,
             preserve_topology: respawn,
             deadline,
             stage: super::super::RetirementStage::ADMISSION,
@@ -4255,7 +4581,8 @@ impl MobActor {
                     )));
                 }
                 continuation.preserve_topology = preserved && !abandoned;
-                continuation.preserve_binding = continuation.preserve_topology && !placed;
+                continuation.preserve_binding =
+                    (continuation.preserve_topology || same_session) && !placed;
             }
             Ok(())
         }.await;
@@ -4273,6 +4600,272 @@ impl MobActor {
             self.retirement_retry_pending_anchors(continuation).await;
         } else {
             self.retirement_begin_member_effects(continuation).await;
+        }
+    }
+
+    /// The reply a retirement of `identity` runs with while MobMachine holds
+    /// a rotation intent for the identity. The intent's plain archive
+    /// terminal waits while it stands, so such a retirement is the
+    /// rotation's own: a re-issue of the standing rotation (its target and
+    /// next session) runs as it is, and a re-drive (typed, or the actor's
+    /// own) re-drives the rotation from its record (the one its start row
+    /// carries, or the one a stuck rotation left), planned again as the same
+    /// next incarnation; the actor's own re-drive leaves a host-pending
+    /// identity's rotation to the host's re-issue. Any other retirement
+    /// (another rotation, a plain retire, a respawn, a reconciliation) is
+    /// refused retryable before it starts anything, as a retirement of a
+    /// rotation in flight is, and a stuck rotation stays stuck. Without an
+    /// intent the reply runs as it is, but a rotation never takes over a
+    /// retirement that started without it unless the identity is
+    /// host-pending. `None`: the reply was answered.
+    async fn retirement_reply_under_rotation(
+        &mut self,
+        identity: &AgentIdentity,
+        reply: RetirementReply,
+        redriven: bool,
+    ) -> Option<RetirementReply> {
+        let (standing, started_role) = {
+            let state = self.dsl_authority.state();
+            let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+            (
+                state
+                    .member_rotation_targets
+                    .get(&dsl_identity)
+                    .copied()
+                    .zip(
+                        state
+                            .member_rotation_session_ids
+                            .get(&dsl_identity)
+                            .cloned(),
+                    ),
+                state
+                    .member_rotation_profile_names
+                    .get(&dsl_identity)
+                    .cloned(),
+            )
+        };
+        let Some((standing_target, standing_session)) = standing else {
+            // No rotation stands: a record left from one is spent.
+            self.rotation_records.remove(identity);
+            // A rotation never takes over a retirement that started without
+            // it: that start row carries no rotation, so a crash would end
+            // the identity as a plain retirement. A host that keeps its own
+            // record of a rotation whose start row predates the record marks
+            // the identity host-pending, and re-drives it.
+            if matches!(reply, RetirementReply::Rotate { .. })
+                && self.retiring_without_host_record(identity)
+            {
+                let error = MobError::LifecycleOperationPending {
+                    intent: format!("retirement member {identity}"),
+                };
+                self.answer_unstarted_retirement(identity, reply, error)
+                    .await;
+                return None;
+            }
+            return Some(reply);
+        };
+        let reply = match reply {
+            RetirementReply::Rotate { rotation, reply } => {
+                // A standing same-session rotation seats the role it started
+                // with (MobMachine's started role, which its terminal requires
+                // of the grant): its start's retirement prepared the member's
+                // topology for that role, so a re-issue under another role is
+                // another rotation.
+                let same_role = standing_target != mob_dsl::RotationTarget::SameSession
+                    || started_role.as_deref() == Some(rotation.candidate.profile_name.as_str());
+                if rotation.target.to_machine() == standing_target
+                    && mob_dsl::SessionId::from_domain(&rotation.candidate.session_id)
+                        == standing_session
+                    && same_role
+                {
+                    return Some(RetirementReply::Rotate { rotation, reply });
+                }
+                // Another rotation waits for the standing one: a same-session
+                // rotation the mob finishes itself (re-issued only under the
+                // role it started with), or a FreshSession one its re-issue or
+                // `redrive_retirement` finishes.
+                let intent = if standing_target == mob_dsl::RotationTarget::SameSession {
+                    match started_role.as_deref() {
+                        Some(role) => {
+                            format!("same-session rotation of member {identity} under role {role}")
+                        }
+                        None => format!("same-session rotation of member {identity}"),
+                    }
+                } else {
+                    format!("rotation of member {identity}")
+                };
+                reply.fail(MobError::LifecycleOperationPending { intent });
+                return None;
+            }
+            RetirementReply::Retire(reply) if redriven => RotationReply::Redrive(reply),
+            // The actor's own re-drive leaves a rotation held for its host
+            // (a host-pending member's FreshSession rotation) to the host,
+            // which keeps its own record of it and re-issues it: the rotation
+            // then runs once, on that re-issue (`redrive_retirement`
+            // re-drives it too). A same-session rotation is the mob's own and
+            // is always re-driven.
+            RetirementReply::Owned if self.rotation_held_for_host(identity) => {
+                tracing::info!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %identity,
+                    rotation_target = "fresh_session",
+                    next_session = %standing_session.0,
+                    "the mob leaves a host-pending member's rotation to the host's rotate_member (redrive_retirement re-drives it too)"
+                );
+                return None;
+            }
+            RetirementReply::Owned => RotationReply::Owned,
+            other => {
+                let error = MobError::LifecycleOperationPending {
+                    intent: format!("rotation of member {identity}"),
+                };
+                self.answer_unstarted_retirement(identity, other, error)
+                    .await;
+                return None;
+            }
+        };
+        let rotation = match self.rotation_records.get(identity).cloned() {
+            Some(record) => Box::pin(self.rotation_from_record(identity, &record)).await,
+            None => Err(MobError::Internal(format!(
+                "the rotation of '{identity}' stands with no recorded rotation to re-drive"
+            ))),
+        };
+        match rotation {
+            Ok(rotation) => Some(RetirementReply::Rotate {
+                rotation: Box::new(rotation),
+                reply,
+            }),
+            Err(error) => {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %identity,
+                    %error,
+                    "the re-drive of a member's rotation could not plan its next incarnation; the rotation stays recorded"
+                );
+                reply.fail(error);
+                None
+            }
+        }
+    }
+
+    /// Whether `identity`'s rotation is held for its host in the actor's
+    /// committed machine state: the one hold predicate
+    /// ([`super::super::rotation_held_for_host`]) the start, the actor's own
+    /// re-drive and the re-drive of a caller other than the host decide by.
+    pub(in crate::runtime) fn rotation_held_for_host(&self, identity: &AgentIdentity) -> bool {
+        super::super::rotation_held_for_host(
+            self.dsl_authority.state(),
+            &mob_dsl::AgentIdentity::from_domain(identity),
+        )
+    }
+
+    /// Whether the host marked `identity` host-pending at build (a
+    /// first-boot preparation, `FirstBootRow`): it keeps its own record of
+    /// the identity's preparation (a rotation it re-issues). A role hold
+    /// (`RoleMigrationUndeclared`) is no host record.
+    fn host_pending(&self, identity: &AgentIdentity) -> bool {
+        self.dsl_authority
+            .state()
+            .member_host_preparation_causes
+            .get(&mob_dsl::AgentIdentity::from_domain(identity))
+            == Some(&mob_dsl::HostPreparationCause::FirstBootRow)
+    }
+
+    /// Hold, at a start, a host-pending member's interrupted FreshSession
+    /// rotation for its host, which keeps its own record of it (see
+    /// [`super::super::MobBuilder::with_host_pending_members`]): the start
+    /// does not re-drive it. It is recorded stuck at admission with a typed
+    /// cause that names the wait, so a plain retire answers
+    /// `MemberRetirementStuck` with it and a Shutdown reports it, and the
+    /// host's `rotate_member` with the same spec (or a typed
+    /// `redrive_retirement`) re-drives it, once. Answers whether it held the
+    /// rotation: one it cannot read is left to the start's own re-drive.
+    pub(in crate::runtime) async fn hold_rotation_for_host(
+        &mut self,
+        identity: &AgentIdentity,
+    ) -> bool {
+        let Some(entry) = self.roster.read().await.get(identity).cloned() else {
+            return false;
+        };
+        let Some(next_session) = self
+            .dsl_authority
+            .state()
+            .member_rotation_session_ids
+            .get(&mob_dsl::AgentIdentity::from_domain(identity))
+            .map(|session| session.0.clone())
+        else {
+            return false;
+        };
+        tracing::info!(
+            mob_id = %self.definition.id,
+            agent_identity = %identity,
+            rotation_target = "fresh_session",
+            next_session = %next_session,
+            "the start leaves a host-pending member's interrupted rotation to the host's rotate_member (redrive_retirement re-drives it too)"
+        );
+        let cause = Arc::new(MobError::LifecycleOperationPending {
+            intent: format!(
+                "the host's rotate_member of member {identity}: the host keeps the record of its interrupted rotation onto session {next_session} (redrive_retirement re-drives it)"
+            ),
+        });
+        let stage = super::super::RetirementStage::ADMISSION;
+        let generation = entry.generation;
+        self.stuck_retirements.insert(
+            identity.clone(),
+            StuckRetirement {
+                entry,
+                stage,
+                cause: Arc::clone(&cause),
+                registration_refused: false,
+            },
+        );
+        self.lifecycle_observations.publish(
+            identity,
+            generation,
+            super::super::RetirementSettlement::Stuck { stage, cause },
+        );
+        true
+    }
+
+    /// Whether `identity`'s current incarnation is Retiring while the host
+    /// holds no record of a rotation for it (it is not host-pending).
+    fn retiring_without_host_record(&self, identity: &AgentIdentity) -> bool {
+        let state = self.dsl_authority.state();
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+        let retiring = state
+            .identity_to_runtime
+            .get(&dsl_identity)
+            .and_then(|runtime| state.member_state_markers.get(runtime))
+            == Some(&mob_dsl::MobMemberState::Retiring);
+        retiring && !self.host_pending(identity)
+    }
+
+    /// Answer a retirement that starts nothing with `error`, as its reply
+    /// takes an answer.
+    async fn answer_unstarted_retirement(
+        &mut self,
+        identity: &AgentIdentity,
+        reply: RetirementReply,
+        error: MobError,
+    ) {
+        match reply {
+            RetirementReply::Retire(reply) | RetirementReply::BatchRetire(reply) => {
+                let _ = reply.send(Err(error));
+            }
+            RetirementReply::Respawn { reply, .. } => {
+                let _ = reply.send(Err(super::super::handle::MobRespawnError::from(error)));
+            }
+            RetirementReply::Rotate { reply, .. } => reply.fail(error),
+            RetirementReply::IdentityReconcile(authority) => {
+                self.record_identity_reconcile_disposition(
+                    identity,
+                    &authority,
+                    identity_actuation_error_disposition(&error),
+                )
+                .await;
+                self.enqueue_identity_reconcile(identity.clone());
+            }
+            RetirementReply::SpawnRollback | RetirementReply::Owned => {}
         }
     }
 
@@ -4328,6 +4921,11 @@ impl MobActor {
             self.dsl_authority.state(),
             &continuation.entry.agent_identity,
         );
+        // A same-session rotation hands its session's queued inputs to the
+        // next incarnation: the member's run starts are held, so no queued
+        // input starts a run, and only its current run is cancelled, now.
+        // Every other retirement cancels the member's admitted work.
+        let keeps_session = continuation.keeps_session();
         #[cfg(feature = "runtime-adapter")]
         let adapter = self.runtime_adapter.clone();
         #[cfg(feature = "runtime-adapter")]
@@ -4336,6 +4934,10 @@ impl MobActor {
         // comms.
         self.dispatch_retirement(continuation, "retire-runtime-quiesce", RetirementFenceScope::SelfOnly, async move {
             let result = async {
+                if keeps_session {
+                    provisioner.stop_member_runtime_now(&member_ref, None).await?;
+                    return Ok(None);
+                }
                 #[cfg(feature = "runtime-adapter")]
                 if let Some(session) = session.as_ref() {
                     super::super::provisioner::MemberSessionDisposalArc::cancel_active_runtime_turn_before_retire_with_adapter_until(
@@ -4554,7 +5156,17 @@ impl MobActor {
                                 } => Some(Self::kickoff_notice_intent(intent)),
                                 _ => None,
                             }));
-                        self.retirement_observe_endpoints(continuation, true).await;
+                        // A same-session successor under the member's own
+                        // role keeps the member's endpoint, edges and peers'
+                        // trust: no peer is notified or unwired, and the
+                        // session is released, not archived. One under
+                        // another role notifies and unwires its peers as a
+                        // plain retirement does; its session is released too.
+                        if continuation.keeps_topology() {
+                            self.retirement_prepare_archive(continuation).await;
+                        } else {
+                            self.retirement_observe_endpoints(continuation, true).await;
+                        }
                     }
                 }
             }),
@@ -4581,6 +5193,17 @@ impl MobActor {
                     self.controlling_acceptor = Some(state);
                     match result {
                         Ok(()) => self.retirement_prepare_supervisor(continuation).await,
+                        Err(error) => self.finish_retirement(continuation, Err(error)).await,
+                    }
+                })
+            }
+            RetirementObservation::InstructionTargetReleased { disposal, result } => {
+                boxed_arm_future(move || async move {
+                    match result {
+                        Ok(()) => {
+                            self.retirement_post_archive_released(continuation, disposal)
+                                .await;
+                        }
                         Err(error) => self.finish_retirement(continuation, Err(error)).await,
                     }
                 })
@@ -5264,7 +5887,50 @@ impl MobActor {
                         )));
                 }
                 RetirementReply::Rotate { rotation, reply } => {
-                    let _ = reply.send(result.map(|()| rotation.candidate.session_id.clone()));
+                    let identity = continuation.entry.agent_identity.clone();
+                    if result.is_ok() {
+                        // The rotation's terminal committed: its record is
+                        // spent.
+                        self.rotation_records.remove(&identity);
+                    } else if continuation.retirement_started {
+                        // A durably started rotation that did not finish
+                        // keeps its intent in MobMachine: its re-drive plans
+                        // the same next incarnation again from this record.
+                        self.rotation_records
+                            .insert(identity.clone(), rotation.record());
+                    }
+                    match reply {
+                        RotationReply::Session(reply) => {
+                            let _ =
+                                reply.send(result.map(|()| rotation.candidate.session_id.clone()));
+                        }
+                        RotationReply::Respawn(reply) => {
+                            let previous_fence_token = continuation.entry.fence_token;
+                            let receipt = match result {
+                                Ok(()) => self
+                                    .roster
+                                    .read()
+                                    .await
+                                    .get(&identity)
+                                    .map(|successor| {
+                                        super::super::handle::MemberRespawnReceipt::new(
+                                            identity.clone(),
+                                            successor.agent_runtime_id.clone(),
+                                            previous_fence_token,
+                                            successor.fence_token,
+                                        )
+                                    })
+                                    .ok_or_else(|| MobError::MemberNotFound(identity.clone())),
+                                Err(error) => Err(error),
+                            };
+                            let _ = reply
+                                .send(receipt.map_err(super::super::handle::MobRespawnError::from));
+                        }
+                        RotationReply::Redrive(reply) => {
+                            let _ = reply.send(result);
+                        }
+                        RotationReply::Owned => {}
+                    }
                 }
             }
         })
@@ -5273,7 +5939,9 @@ impl MobActor {
     /// After a rotation's terminal step: the retired incarnation's projection
     /// is cleaned here, on the actor (the plain retirement's later stages
     /// fence on the retired incarnation, which the roster no longer holds),
-    /// and the rotation settles. The roster keeps the next incarnation.
+    /// and the rotation settles. The roster keeps the next incarnation. A
+    /// same-session successor keeps the tools overlay this process built the
+    /// member with, as a released member does.
     pub(super) async fn finish_member_rotation(&mut self, continuation: RetirementContinuation) {
         let identity = continuation.entry.agent_identity.clone();
         if let Err(error) = self
@@ -5292,10 +5960,12 @@ impl MobActor {
         self.edge_locks.prune(identity.as_str()).await;
         self.restore_diagnostics.write().await.remove(&identity);
         self.member_event_pumps.stop_pump(&identity).await;
-        self.per_spawn_external_tools
-            .write()
-            .await
-            .remove(&identity);
+        if !continuation.keeps_session() {
+            self.per_spawn_external_tools
+                .write()
+                .await
+                .remove(&identity);
+        }
         self.reachability_observations.clear_member(&identity);
         // The rotation's terminal changed the roster: wake the machine-state
         // watch, whose contract covers every roster mutation.
@@ -5704,6 +6374,16 @@ impl MobActor {
                                 "spawn rollback retirement journal has an invalid session: {error}"
                             ))
                         })?;
+                    // The cause read through the helper every start row reads
+                    // it with, from the machine state before its step. The
+                    // seal marks no member whose spawn is still in flight
+                    // (`marked_entry_has_no_spawn_in_flight`), so a spawn
+                    // rollback's start row records none: a seal before its
+                    // Retire step leaves the entry to a later seal.
+                    let cause = super::super::identity_entry::stored_retirement_cause(
+                        self.dsl_authority.state(),
+                        &identity,
+                    );
                     let desired = MobEventKind::MemberRetirementStarted {
                         agent_identity: identity,
                         agent_runtime_id: continuation.entry.agent_runtime_id.clone(),
@@ -5719,6 +6399,8 @@ impl MobActor {
                         session_id: session,
                         retiring_peer_endpoint: endpoint,
                         preserve_machine_topology: false,
+                        rotation: None,
+                        cause,
                     };
                     return Ok(Some(self.spawn_rollback_journal_effect(desired, false)));
                 }
@@ -5975,6 +6657,8 @@ impl MobActor {
                         agent_identity: identity,
                         generation: continuation.entry.generation,
                         role: continuation.entry.role.clone(),
+                        session_archived: false,
+                        facts: crate::event::MemberRetiredFacts::default(),
                     };
                     return Ok(Some(self.spawn_rollback_journal_effect(desired, true)));
                 }
@@ -6236,6 +6920,14 @@ impl MobActor {
                             ),
                             preserve_machine_topology: false,
                             preservation_started: false,
+                            session_archived: false,
+                            // An externally bound member's rollback keeps its
+                            // entry hosted on its first use, as the replay of
+                            // its row does.
+                            hosted_incarnation: Self::runtime_binding_for_entry(
+                                &continuation.entry,
+                            )
+                            .is_some(),
                         },
                         "rollback_resumed_spawn_membership",
                     )
@@ -6411,6 +7103,30 @@ pub(crate) mod retirement_stage_test_hooks {
     static DEGRADE_BEFORE_INGRESS_DETACH: Mutex<Vec<SessionId>> = Mutex::new(Vec::new());
     static REFUSED_INGRESS_STAGE_RELOADS: Mutex<Vec<SessionId>> = Mutex::new(Vec::new());
     static INGRESS_STAGE_RELOADS: Mutex<Vec<SessionId>> = Mutex::new(Vec::new());
+    static FAILING_KEPT_SESSION_RELEASES: Mutex<Vec<SessionId>> = Mutex::new(Vec::new());
+
+    /// The next kept-session release stage of a same-session rotation's
+    /// retirement of `session` fails, once: the retirement settles stuck at
+    /// that stage.
+    pub(crate) fn fail_next_kept_session_release(session: &SessionId) {
+        FAILING_KEPT_SESSION_RELEASES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(session.clone());
+    }
+
+    /// Whether the kept-session release failure armed for `session` has not
+    /// fired yet.
+    pub(crate) fn kept_session_release_failure_armed(session: &SessionId) -> bool {
+        FAILING_KEPT_SESSION_RELEASES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(session)
+    }
+
+    pub(super) fn take_kept_session_release_failure(session: &SessionId) -> bool {
+        take_armed(&FAILING_KEPT_SESSION_RELEASES, session)
+    }
 
     /// The reason of the refusal [`refuse_next_ingress_stage_reload`] arms.
     pub(crate) const INJECTED_RELOAD_REFUSAL: &str =
@@ -6562,6 +7278,7 @@ mod tests {
                 fork_job: None,
                 fork_source: None,
                 fork_overlay: Default::default(),
+                definition_wiring: crate::DefinitionWiring::Applies,
             };
             let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(
                 crate::roster::Roster::from_projected_entries([entry]),

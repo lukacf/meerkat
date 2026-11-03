@@ -286,18 +286,32 @@ longer manages the mob after a restart, because the record names its earlier
 generation; before the restart the session keeps the grant its create
 returned, and an operator grant over the mob restores manage.
 
-Unresumable stores at restore (since 0.9.4): one persisted mob whose resume is
-refused no longer fails `MobMcpState`'s whole restore (0.9.3 then failed every
-mob verb and brought no mob back). That mob is left unrestored with its store
-kept as found (`MobMcpState::unrestored_mobs`, not in `mob_list`), a lookup or
-create of its id answers its refusal (`IncarnationInconsistent` and
-`IncarnationDestroyed` keep their variants, any other refusal is `Internal`
-with its message), and the other mobs restore. Its stored roster still counts
-for provenance, so a create by a session it names is refused with
-`ProvenanceUnavailable`. An empty store whose creation record is not finalized
-is kept the same way (`IncarnationInconsistent`, `RecordWithoutCreation`;
-`MobStorage::unfinalized_creation_mob` reads it). A transport or persistence
-fault, or a store that names no mob, still fails the restore.
+Quarantined stores at restore (since 0.9.9): one persisted mob store that
+does not restore no longer fails `MobMcpState`'s restore (0.9.3 to 0.9.8
+failed every mob verb on any store fault other than a refused resume). The
+store is quarantined: kept exactly as found, with no actor, under the id the
+store names (or the one its file name encodes when it cannot be read), and
+the other mobs restore. Its class says why: `store_unavailable` (a store
+could not serve a read now; retryable), `store_unreadable` (the store, or
+stored state its restore needs, cannot be opened, read or decoded) or
+`resume_refused` (another typed refusal, such as `IncarnationInconsistent`).
+A lookup or create of its id answers `MobError::MobQuarantined` (structured
+`kind: "mob_quarantined"`, with `class`, `retryable` and the cause). An
+id-addressed verb re-attempts a `store_unavailable` store's restore once,
+one attempt at a time (a verb that meets an attempt in flight answers the
+quarantine at once); a list never does. `mob/restore_retry`
+(`MobMcpState::mob_restore_retry`) re-attempts any class after a repair, and
+every start classifies the stores again; `mob/list` names quarantined mobs
+under `quarantined`. `MobMcpState::mob_inventory` reads the managed, held and quarantined
+mobs in one read (each id in exactly one), and `quarantined_mobs` and
+`held_child_mobs` fail rather than answer empty when the restore fails. A
+quarantined store's roster still counts for provenance, so a create by a
+session it names is refused with `ProvenanceUnavailable` (every session
+create, while the roster cannot be read). An empty store
+whose creation record is not finalized is quarantined the same way
+(`resume_refused`: `IncarnationInconsistent`, `RecordWithoutCreation`;
+`MobStorage::unfinalized_creation_mob` reads it). Only a root that cannot be
+created, read or walked still fails the restore.
 
 Retire at scope (since 0.9.4): `retire_at_scope(&scope)` retires exactly the
 incarnation a `MemberDeliveryScope` names, with `retire`'s process-tree
@@ -464,6 +478,111 @@ can repeat. With no running mob, `MobStorage::read_member_binding_history(path)`
 never creates or migrates the store and refuses with
 `MemberBindingHistoryReadError::StoreMissing` or `ForeignSchema` (`Read` for
 a failed read).
+
+Identity entries (since 0.9.9, Rust only; the wire contracts do not carry
+them): a spawn or dormant seat with `SpawnMemberSpec::with_entry_custody(true)`
+seats the member of an identity entry, a host's own durable identity. No
+worker reconcile (`reconcile`, `ensure_member`) spawns or retires one, no
+spawn without entry custody takes its name (`MobError::IdentityMember`), and
+the agent lane and the agent mob tools refuse to act on it. A respawn keeps
+the entry; a retirement keeps it, unseated and owed its seat.
+`adopt_legacy_identity_entry` adopts, once, a member a host seated before
+entries existed. Reads that wake nothing: `identity_entry`,
+`identity_entries` (paged), `identity_census`, `member_lifecycle_events` (the
+journal's member lifecycle facts after a `MobJournalCursor`) and
+`members_holding_run_starts`. An entry's origin is `Declared`, or `Created`
+(a row Core keeps in the identity store); the origin is provenance and the
+custody of the entry's record only, and either member is built from its
+profile like any other member. A removed or unreadable name is reserved,
+never free.
+
+The declared apply (since 0.9.9): `apply_declared_roster(DeclaredRoster)`
+applies a host's roster of `DeclaredEntry` specs, each identity answered on
+its own (`DeclaredEntryOutcome`). An unchanged roster writes nothing and wakes
+nothing; an identity no member holds is seated Dormant; a runtime-mode change,
+or a role change with a migration declared from the member's current role,
+restamps the member on its own session at its next generation; a role change
+with none declared holds the member (wakes refused `HostPreparationPending`,
+run starts held). A complete roster unlists every Declared entry it leaves
+out: its member retires and the entry ends, and listed again it comes back on
+the session its retirement archived. Applies of one mob run one at a time
+(`MobError::LifecycleOperationPending`). Apply the complete roster after every
+start, before the host wakes or seats its identities.
+
+Store-owned identity changes (since 0.9.9, Rust only): Core writes
+store-owned identities itself, one change at a time:
+`create_store_owned_identities` (a batch, all or nothing),
+`update_store_owned_identity`, `archive_identity`, `unarchive_identity` and
+`remove_identity` (either custody); `unlist_declared_identity` unlists one
+roster-owned identity. Each change names its operation (`IdentityOperation`:
+an id and the request's digest), its requester (the host, a human principal,
+or an agent admitted by its ordinary spawn grant, asked again at the commit)
+and its consent, and commits its identity rows, journal rows and receipt
+(`IdentityChangeReceipt`, read back with `identity_operation`) in one store
+transaction. MobMachine admits each change: a repeat answers `Replayed`, and
+a refusal is a typed `IdentityChangeRefusal` (`OperationReused`,
+`GrantRevoked`, `StaleSpec` with the identity's current spec digest,
+`NameTaken`, `OwnerReadOnly`, `ChangesHeld`, ...) with nothing written. A
+removal is permanent: it tombstones the name (`identity_tombstones`), so drop
+a removed identity from the host's roster; unlist instead to take one out
+and list it again later. Deliveries to an archived identity are refused
+`MobError::IdentityArchived`. A roster that lists a store-owned name is
+answered `DeclaredEntryOutcome::Noted` (`DeclaredEntryNote::OwnedByStore`),
+a steady state that changes nothing. An identity whose profile requires its
+host's preparation (`IdentityPreparationMode::Required` or `Constructed`)
+waits unseated, refusing deliveries retryable, until
+`settle_identity_preparation` (after `construct_identity` for a held
+construction; `abort_identity_construction` ends an attempt).
+`identity_record` reads one identity's record, and `identity_record_census`
+counts what a downgrade must settle first: a mob that holds such rows has no
+supported downgrade to 0.9.8 before they are exported and purged.
+
+Same-session respawn (since 0.9.9): `respawn_member(identity, MemberRespawn)`
+retires the member's incarnation and seats its next one Dormant at the next
+generation on the same session, keeping its conversation, comms key and
+edges; queued durable prompts stay queued for the successor (their waiters
+are answered `RequeuedAcrossStop`), and a wake that fails after the successor
+is committed is reported on the receipt (`MemberRespawnReceipt::wake_error`).
+A member it cannot serve (placed, fork-derived, without a durable session of
+its own) is refused `UnsupportedForMode` before anything starts. `respawn` of
+an identity entry's member respawns it this way. Every rotation, a
+`rotate_member` onto a fresh session as well as a respawn's, is durable from
+its start: a restarted mob finishes it with no host record, and
+`redrive_retirement` re-drives one that stands; a host that keeps its own
+record of a `rotate_member` marks the identity host-pending
+(`MobBuilder::with_host_pending_members`) and calls it again after a restart.
+A dormant seat on in-process comms takes the members' comms identity root
+from the mob's session service when the host declares none (members on TCP
+or UDS still need `MobBuilder::with_network_member_comms`). `release_member_at_scope(scope)` releases a
+member's materialization only when the scope names its current incarnation
+on its current session (`ReleaseOutcome::Stale` otherwise).
+`SpawnMemberSpec::with_definition_wiring(DefinitionWiring::Exempt)` keeps a
+member out of `auto_wire_orchestrator` and `role_wiring` (not for a placed
+member).
+
+Operator instructions (since 0.9.9, Rust only; writes need `AdminHost` and
+are never an agent tool): `set_operator_instruction` writes a slot's body at
+a revision for every member, one profile's members or one member (a predicate
+over the roster, so a member added later receives it);
+`revoke_operator_instruction` revokes it at a higher revision; and
+`operator_instruction_status` (`ReadHistory`) reads each member's delivery
+state (`Current`, `Owed`, `Blocked`) without waking anyone. The mob records
+each member's whole snapshot in its session, through the session while it is
+live and store-only while it is dormant, never waking a member (at most
+`MobBuilder::with_member_instruction_delivery_concurrency` dormant deliveries
+at a time, 16 by default), and a member born on a new session carries the
+snapshot from its first build. A placed member is reported blocked. A mob
+that recorded one journals at mob event schema 10, which 0.9.8 and 0.9.7
+refuse (`rkat storage doctor`: `operator-instruction-mob-events`).
+
+Ensure and a spawn in flight (since 0.9.9): `ensure_member` (RPC
+`mob/ensure_member`, and `mob/ingress_interaction` for its ingress member)
+waits for an in-flight spawn of the same member to seat it and answers with
+it, within the 60 s ready-wait budget (then `ReadyWaitTimedOut`), where it
+answered `MemberNotFound`; if that spawn fails before its member commits, the
+ensure spawns the member itself. A second spawn of a member whose first spawn
+has not settled is refused `MemberAlreadyExists`, where it could fail-stop the
+mob.
 
 Scratch `task_create` / `task_update` / `task_list` / `task_get` are separately
 enabled agent tools, not `MobHandle` methods. Durable shared commitments belong

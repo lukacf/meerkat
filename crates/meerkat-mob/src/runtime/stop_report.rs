@@ -176,16 +176,24 @@ pub enum HostRunStartHoldReason {
     /// The member's tools are not published yet: it starts no run until
     /// its host releases this hold.
     ToolsNotPublished,
+    /// The member's host preparation is owed: the declared apply holds its
+    /// role move ([`crate::HostPreparationCause::RoleMigrationUndeclared`]).
+    /// The mob holds its run starts while the hold stands and releases them
+    /// when MobMachine ends it; a host does not release this hold
+    /// ([`crate::MobHandle::release_member_run_starts`] refuses it).
+    HostPreparation,
 }
 
 impl HostRunStartHoldReason {
-    /// Every reason a host holds a member's run starts for.
+    /// Every reason a member's run starts are held for until a release
+    /// other than a Resume.
     #[cfg(feature = "runtime-adapter")]
-    pub(crate) const ALL: [Self; 1] = [Self::ToolsNotPublished];
+    pub(crate) const ALL: [Self; 2] = [Self::ToolsNotPublished, Self::HostPreparation];
 
     pub(crate) fn runtime(self) -> meerkat_runtime::RunStartHoldReason {
         match self {
             Self::ToolsNotPublished => meerkat_runtime::RunStartHoldReason::ToolsNotPublished,
+            Self::HostPreparation => meerkat_runtime::RunStartHoldReason::HostPreparation,
         }
     }
 }

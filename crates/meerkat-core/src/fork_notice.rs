@@ -1115,6 +1115,8 @@ mod tests {
                     origin_session_id: origin.clone(),
                     render_version: 1,
                 }),
+                instruction_entry: None,
+                retired_instruction_body: None,
             })
         };
         let source = SessionId::new();

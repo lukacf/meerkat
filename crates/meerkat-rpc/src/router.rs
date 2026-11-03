@@ -3150,6 +3150,11 @@ impl MethodRouter {
                     .await
             }
             #[cfg(feature = "mob")]
+            "mob/restore_retry" => {
+                routed_arm(|| handlers::mob::handle_restore_retry(id, params, &self.mob_state))
+                    .await
+            }
+            #[cfg(feature = "mob")]
             "mob/claim_callback_route" => {
                 routed_arm(|| {
                     handlers::mob::handle_claim_callback_route(
@@ -3381,6 +3386,24 @@ impl MethodRouter {
             }
             "approval/decide" => {
                 routed_arm(|| handlers::approval::handle_decide(id, params, self.runtime.clone()))
+                    .await
+            }
+            "tool_grants/grant" => {
+                routed_arm(|| handlers::tool_grants::handle_grant(id, params, self.runtime.clone()))
+                    .await
+            }
+            "tool_grants/revoke" => {
+                routed_arm(|| {
+                    handlers::tool_grants::handle_revoke(id, params, self.runtime.clone())
+                })
+                .await
+            }
+            "tool_grants/list" => {
+                routed_arm(|| handlers::tool_grants::handle_list(id, params, self.runtime.clone()))
+                    .await
+            }
+            "tool_grants/audit" => {
+                routed_arm(|| handlers::tool_grants::handle_audit(id, params, self.runtime.clone()))
                     .await
             }
             // Compose the realm chain so an inherited (ancestor-realm) self-hosted
@@ -6978,6 +7001,629 @@ mod tests {
         assert_eq!(fetched["status"], "approved");
     }
 
+    /// `tool_grants/*` and the `session/create` grant gate over the router.
+    mod tool_grant_rpc {
+        use super::*;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        /// A grant clock the test sets.
+        struct TestGrantClock(AtomicU64);
+
+        impl meerkat_runtime::tool_grant::ToolGrantClock for TestGrantClock {
+            fn now_ms(&self) -> Result<u64, meerkat_runtime::tool_grant::ToolGrantClockError> {
+                Ok(self.0.load(Ordering::SeqCst))
+            }
+        }
+
+        fn session_subject(session_id: &str) -> serde_json::Value {
+            serde_json::json!({"kind": "session", "session_id": session_id})
+        }
+
+        async fn call(
+            router: &MethodRouter,
+            method: &str,
+            params: serde_json::Value,
+        ) -> RpcResponse {
+            router
+                .dispatch(make_request(method, params))
+                .await
+                .expect("response")
+        }
+
+        /// A session whose build grant-gates the shell family, its first
+        /// turn run.
+        async fn shell_gated_session(router: &MethodRouter) -> String {
+            let created = call(
+                router,
+                "session/create",
+                serde_json::json!({
+                    "prompt": "hello",
+                    "grant_gated_tools": {"families": ["shell"]},
+                }),
+            )
+            .await;
+            result_value(&created)["session_id"]
+                .as_str()
+                .expect("session id")
+                .to_string()
+        }
+
+        async fn grant_shell_family(
+            router: &MethodRouter,
+            session_id: &str,
+            duration_ms: u64,
+        ) -> serde_json::Value {
+            let granted = call(
+                router,
+                "tool_grants/grant",
+                serde_json::json!({
+                    "subject": session_subject(session_id),
+                    "target": {"kind": "family", "family": "shell"},
+                    "duration_ms": duration_ms,
+                    "reason": "incident",
+                }),
+            )
+            .await;
+            result_value(&granted)["grant"].clone()
+        }
+
+        async fn listed(
+            router: &MethodRouter,
+            session_id: &str,
+            include_ended: bool,
+        ) -> Vec<serde_json::Value> {
+            let listed = call(
+                router,
+                "tool_grants/list",
+                serde_json::json!({
+                    "subject": session_subject(session_id),
+                    "include_ended": include_ended,
+                }),
+            )
+            .await;
+            result_value(&listed)["grants"]
+                .as_array()
+                .expect("grants")
+                .clone()
+        }
+
+        #[tokio::test]
+        async fn grant_list_revoke_round_trip() {
+            let (router, _rx) = test_router().await;
+            let session_id = shell_gated_session(&router).await;
+
+            let grant = grant_shell_family(&router, &session_id, 600_000).await;
+            assert_eq!(grant["status"], "active");
+            assert_eq!(grant["subject"], session_subject(&session_id));
+            assert_eq!(grant["target"]["kind"], "family");
+            assert_eq!(grant["target"]["family"], "shell");
+            let names = grant["target"]["names"]
+                .as_array()
+                .expect("the server fills in the family's names");
+            assert!(names.iter().any(|name| name == "shell"), "{names:?}");
+            assert_eq!(grant["issuer"], serde_json::json!({"kind": "operator"}));
+            assert_eq!(grant["reason"], "incident");
+            assert!(grant.get("ended_at_ms").is_none(), "{grant}");
+            let grant_id = grant["grant_id"].as_str().expect("grant id").to_string();
+
+            let active = listed(&router, &session_id, false).await;
+            assert_eq!(active.len(), 1);
+            assert_eq!(active[0]["grant_id"], grant_id.as_str());
+
+            let revoked = result_value(
+                &call(
+                    &router,
+                    "tool_grants/revoke",
+                    serde_json::json!({"grant_id": grant_id, "reason": "done"}),
+                )
+                .await,
+            );
+            assert_eq!(revoked["changed"], true);
+            assert_eq!(revoked["grant"]["status"], "revoked");
+
+            assert!(
+                listed(&router, &session_id, false).await.is_empty(),
+                "an ended grant is listed only on request"
+            );
+            let all = listed(&router, &session_id, true).await;
+            assert_eq!(all.len(), 1);
+            assert_eq!(all[0]["status"], "revoked");
+        }
+
+        #[tokio::test]
+        async fn grant_refuses_a_target_outside_the_session_gate() {
+            let (router, _rx) = test_router().await;
+            let session_id = shell_gated_session(&router).await;
+            for target in [
+                serde_json::json!({"kind": "tool", "name": "web_search"}),
+                serde_json::json!({"kind": "family", "family": "tasks"}),
+                serde_json::json!({"kind": "family", "family": "shell", "names": ["shell"]}),
+                // A field this server does not know is refused, never dropped
+                // into a grant wider than the request asked for.
+                serde_json::json!({"kind": "tool", "name": "shell", "scope": "current_run"}),
+            ] {
+                let refused = call(
+                    &router,
+                    "tool_grants/grant",
+                    serde_json::json!({
+                        "subject": session_subject(&session_id),
+                        "target": target,
+                        "duration_ms": 60_000,
+                    }),
+                )
+                .await;
+                assert_eq!(error_code(&refused), error::INVALID_PARAMS, "{target}");
+            }
+            assert!(listed(&router, &session_id, true).await.is_empty());
+
+            // A name the gated family provides is gated through the family.
+            let shell = result_value(
+                &call(
+                    &router,
+                    "tool_grants/grant",
+                    serde_json::json!({
+                        "subject": session_subject(&session_id),
+                        "target": {"kind": "tool", "name": "shell"},
+                        "duration_ms": 60_000,
+                    }),
+                )
+                .await,
+            );
+            assert_eq!(
+                shell["grant"]["target"],
+                serde_json::json!({"kind": "tool", "name": "shell"})
+            );
+
+            // A session that gates nothing has nothing to grant.
+            let ungated = result_value(
+                &call(
+                    &router,
+                    "session/create",
+                    serde_json::json!({"prompt": "hello"}),
+                )
+                .await,
+            )["session_id"]
+                .as_str()
+                .expect("session id")
+                .to_string();
+            let refused = call(
+                &router,
+                "tool_grants/grant",
+                serde_json::json!({
+                    "subject": session_subject(&ungated),
+                    "target": {"kind": "tool", "name": "shell"},
+                    "duration_ms": 60_000,
+                }),
+            )
+            .await;
+            assert_eq!(error_code(&refused), error::INVALID_PARAMS);
+
+            let unknown_session = call(
+                &router,
+                "tool_grants/grant",
+                serde_json::json!({
+                    "subject": session_subject(&SessionId::new().to_string()),
+                    "target": {"kind": "family", "family": "shell"},
+                    "duration_ms": 60_000,
+                }),
+            )
+            .await;
+            assert_eq!(error_code(&unknown_session), error::SESSION_NOT_FOUND);
+
+            let identity = call(
+                &router,
+                "tool_grants/grant",
+                serde_json::json!({
+                    "subject": {"kind": "identity", "mob_id": "mob-1", "identity": "worker"},
+                    "target": {"kind": "family", "family": "shell"},
+                    "duration_ms": 60_000,
+                }),
+            )
+            .await;
+            assert_eq!(
+                error_code(&identity),
+                meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
+            );
+        }
+
+        #[tokio::test]
+        async fn grant_refuses_both_or_neither_of_expires_at_and_duration() {
+            let (router, _rx) = test_router().await;
+            let session_id = shell_gated_session(&router).await;
+            for window in [
+                serde_json::json!({}),
+                serde_json::json!({"duration_ms": 60_000, "expires_at_ms": 4_102_444_800_000_u64}),
+                // Longer than the default maximum lifetime of 24 hours.
+                serde_json::json!({"duration_ms": 25 * 60 * 60 * 1_000}),
+                // Already past.
+                serde_json::json!({"expires_at_ms": 1}),
+            ] {
+                let mut params = serde_json::json!({
+                    "subject": session_subject(&session_id),
+                    "target": {"kind": "family", "family": "shell"},
+                });
+                params
+                    .as_object_mut()
+                    .expect("params object")
+                    .extend(window.as_object().expect("window object").clone());
+                let refused = call(&router, "tool_grants/grant", params).await;
+                assert_eq!(error_code(&refused), error::INVALID_PARAMS, "{window}");
+            }
+            assert!(listed(&router, &session_id, true).await.is_empty());
+        }
+
+        #[tokio::test]
+        async fn revoke_is_idempotent_and_reports_changed() {
+            let (router, _rx) = test_router().await;
+            let session_id = shell_gated_session(&router).await;
+            let grant = grant_shell_family(&router, &session_id, 600_000).await;
+            let revoke = serde_json::json!({"grant_id": grant["grant_id"], "reason": "done"});
+
+            let first = result_value(&call(&router, "tool_grants/revoke", revoke.clone()).await);
+            assert_eq!(first["changed"], true);
+            assert_eq!(first["grant"]["status"], "revoked");
+            let ended_at = first["grant"]["ended_at_ms"].clone();
+            assert!(ended_at.is_u64(), "{first}");
+
+            let second = result_value(&call(&router, "tool_grants/revoke", revoke).await);
+            assert_eq!(second["changed"], false, "a second revoke changes nothing");
+            assert_eq!(second["grant"]["status"], "revoked");
+            assert_eq!(second["grant"]["ended_at_ms"], ended_at);
+
+            let unknown = call(
+                &router,
+                "tool_grants/revoke",
+                serde_json::json!({
+                    "grant_id": meerkat_core::tool_grant::ToolGrantId::mint().to_string(),
+                }),
+            )
+            .await;
+            assert_eq!(error_code(&unknown), error::INVALID_PARAMS);
+            let malformed = call(
+                &router,
+                "tool_grants/revoke",
+                serde_json::json!({"grant_id": "not-a-grant-id"}),
+            )
+            .await;
+            assert_eq!(error_code(&malformed), error::INVALID_PARAMS);
+        }
+
+        #[tokio::test]
+        async fn list_reports_due_grants_as_expired() {
+            let (router, _rx) = test_router().await;
+            let session_id = shell_gated_session(&router).await;
+            let clock = Arc::new(TestGrantClock(AtomicU64::new(1_000_000)));
+            router
+                .runtime
+                .runtime_adapter()
+                .set_tool_grant_clock(clock.clone());
+
+            let grant = grant_shell_family(&router, &session_id, 1_000).await;
+            assert_eq!(grant["expires_at_ms"], 1_001_000);
+            clock.0.store(1_001_000, Ordering::SeqCst);
+
+            assert!(
+                listed(&router, &session_id, false).await.is_empty(),
+                "a grant at its deadline is not active"
+            );
+            let all = listed(&router, &session_id, true).await;
+            assert_eq!(all.len(), 1);
+            assert_eq!(all[0]["status"], "expired");
+            assert_eq!(all[0]["ended_at_ms"], 1_001_000);
+        }
+
+        #[tokio::test]
+        async fn audit_pages_by_sequence() {
+            let (router, _rx) = test_router().await;
+            let session_id = shell_gated_session(&router).await;
+            let first = grant_shell_family(&router, &session_id, 600_000).await;
+            result_value(
+                &call(
+                    &router,
+                    "tool_grants/revoke",
+                    serde_json::json!({"grant_id": first["grant_id"]}),
+                )
+                .await,
+            );
+            grant_shell_family(&router, &session_id, 600_000).await;
+
+            let page = result_value(
+                &call(
+                    &router,
+                    "tool_grants/audit",
+                    serde_json::json!({"subject": session_subject(&session_id), "limit": 2}),
+                )
+                .await,
+            );
+            let rows = page["rows"].as_array().expect("rows");
+            assert_eq!(
+                rows.iter()
+                    .map(|row| row["sequence"].as_u64())
+                    .collect::<Vec<_>>(),
+                [Some(0), Some(1)]
+            );
+            assert_eq!(rows[0]["event"]["kind"], "granted");
+            assert_eq!(rows[1]["event"]["kind"], "revoked");
+            assert_eq!(page["next_sequence"], 1);
+
+            let next = result_value(
+                &call(
+                    &router,
+                    "tool_grants/audit",
+                    serde_json::json!({
+                        "subject": session_subject(&session_id),
+                        "after_sequence": 1,
+                        "limit": 2,
+                    }),
+                )
+                .await,
+            );
+            let rows = next["rows"].as_array().expect("rows");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["sequence"], 2);
+            assert_eq!(rows[0]["event"]["kind"], "granted");
+            assert!(next.get("next_sequence").is_none(), "{next}");
+
+            let refused = call(
+                &router,
+                "tool_grants/audit",
+                serde_json::json!({"subject": session_subject(&session_id), "limit": 0}),
+            )
+            .await;
+            assert_eq!(error_code(&refused), error::INVALID_PARAMS);
+        }
+
+        /// A full audit page that ends on a row the server cannot read names
+        /// that row's sequence as its next cursor, so the next page starts
+        /// after it: no row is skipped or served twice.
+        #[tokio::test]
+        async fn a_full_audit_page_ending_on_an_unreadable_row_names_it_as_the_next_cursor() {
+            let (router, _rx, runtime_store) = test_router_with_runtime_store().await;
+            let session_id = shell_gated_session(&router).await;
+            let grant = grant_shell_family(&router, &session_id, 600_000).await;
+            // A row a newer binary wrote, between the grant and its revoke.
+            let subject = meerkat_core::tool_grant::ToolGrantSubject::session(
+                SessionId::parse(&session_id).expect("session id"),
+            );
+            runtime_store
+                .append_tool_grant_audit(
+                    subject.key().as_str(),
+                    &[br#"{"at_ms":1,"event":{"kind":"activated"}}"#.to_vec()],
+                )
+                .await
+                .expect("append an audit row");
+            result_value(
+                &call(
+                    &router,
+                    "tool_grants/revoke",
+                    serde_json::json!({"grant_id": grant["grant_id"]}),
+                )
+                .await,
+            );
+
+            let page = result_value(
+                &call(
+                    &router,
+                    "tool_grants/audit",
+                    serde_json::json!({"subject": session_subject(&session_id), "limit": 2}),
+                )
+                .await,
+            );
+            let rows = page["rows"].as_array().expect("rows");
+            assert_eq!(rows.len(), 1, "{page}");
+            assert_eq!(rows[0]["sequence"], 0);
+            assert_eq!(rows[0]["event"]["kind"], "granted");
+            assert_eq!(page["unreadable"][0]["sequence"], 1, "{page}");
+            assert_eq!(page["next_sequence"], 1, "{page}");
+
+            let next = result_value(
+                &call(
+                    &router,
+                    "tool_grants/audit",
+                    serde_json::json!({
+                        "subject": session_subject(&session_id),
+                        "after_sequence": page["next_sequence"],
+                        "limit": 2,
+                    }),
+                )
+                .await,
+            );
+            let rows = next["rows"].as_array().expect("rows");
+            assert_eq!(rows.len(), 1, "{next}");
+            assert_eq!(rows[0]["sequence"], 2);
+            assert_eq!(rows[0]["event"]["kind"], "revoked");
+            assert!(next.get("unreadable").is_none(), "{next}");
+            assert!(next.get("next_sequence").is_none(), "{next}");
+        }
+
+        #[tokio::test]
+        async fn create_session_with_grant_gated_tools_persists_the_gate() {
+            let (router, _rx) = test_router().await;
+            let session_id = shell_gated_session(&router).await;
+            let session = router
+                .runtime
+                .load_persisted_session(&SessionId::parse(&session_id).expect("session id"))
+                .await
+                .expect("read")
+                .expect("persisted");
+            let metadata = session.session_metadata().expect("metadata");
+            assert_eq!(
+                metadata.tooling.grant_gated,
+                meerkat_core::tool_grant::GrantGatedTools::default().with_family("shell")
+            );
+
+            // A deferred create is granted from its staged build before its
+            // first turn materializes it.
+            let deferred = result_value(
+                &call(
+                    &router,
+                    "session/create",
+                    serde_json::json!({
+                        "prompt": "hello",
+                        "initial_turn": "deferred",
+                        "grant_gated_tools": {"families": ["shell"]},
+                    }),
+                )
+                .await,
+            )["session_id"]
+                .as_str()
+                .expect("session id")
+                .to_string();
+            let granted = result_value(
+                &call(
+                    &router,
+                    "tool_grants/grant",
+                    serde_json::json!({
+                        "subject": session_subject(&deferred),
+                        "target": {"kind": "tool", "name": "shell"},
+                        "duration_ms": 60_000,
+                    }),
+                )
+                .await,
+            );
+            assert_eq!(granted["grant"]["status"], "active");
+
+            // A gate field this version does not know is refused, never
+            // read as an empty gate.
+            let misspelled = call(
+                &router,
+                "session/create",
+                serde_json::json!({"prompt": "hello", "grant_gated_tools": {"family": ["shell"]}}),
+            )
+            .await;
+            assert_eq!(error_code(&misspelled), error::INVALID_PARAMS);
+        }
+
+        /// A grant while the session's first turn runs: the session has no
+        /// durable document until that turn commits, and its staged slot is
+        /// promoting, so the grant reads the gate the slot keeps.
+        #[tokio::test]
+        async fn grant_during_the_first_turn_reads_the_staged_gate() {
+            // Bounds a failure only; the passing path never waits for it.
+            const FAILURE_BOUND: Duration = Duration::from_secs(30);
+            let calls = Arc::new(tokio::sync::watch::channel(0usize).0);
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            let (router, _rx) = test_router_with_llm(Arc::new(GatedLlmClient {
+                calls: Arc::clone(&calls),
+                release: Arc::clone(&release),
+                requests: Arc::new(StdMutex::new(Vec::new())),
+            }))
+            .await;
+            let created = call(
+                &router,
+                "session/create",
+                serde_json::json!({
+                    "prompt": "seed",
+                    "initial_turn": "deferred",
+                    "grant_gated_tools": {"families": ["shell"]},
+                }),
+            )
+            .await;
+            let session_id = result_value(&created)["session_id"]
+                .as_str()
+                .expect("session id")
+                .to_string();
+            let first_turn = {
+                let router = router.clone();
+                let session_id = session_id.clone();
+                tokio::spawn(async move {
+                    router
+                        .dispatch(make_request(
+                            "turn/start",
+                            serde_json::json!({"session_id": session_id, "prompt": "first"}),
+                        ))
+                        .await
+                        .expect("turn/start response")
+                })
+            };
+            let mut seen = calls.subscribe();
+            tokio::time::timeout(FAILURE_BOUND, seen.wait_for(|calls| *calls >= 1))
+                .await
+                .expect("the first turn reaches the provider")
+                .expect("call counter stays open");
+
+            let granted = call(
+                &router,
+                "tool_grants/grant",
+                serde_json::json!({
+                    "subject": session_subject(&session_id),
+                    "target": {"kind": "family", "family": "shell"},
+                    "duration_ms": 60_000,
+                }),
+            )
+            .await;
+            assert_eq!(
+                result_value(&granted)["grant"]["status"],
+                "active",
+                "a grant during the first turn is issued against the staged gate"
+            );
+
+            release.add_permits(1);
+            let first = tokio::time::timeout(FAILURE_BOUND, first_turn)
+                .await
+                .expect("the first turn finishes once released")
+                .expect("first turn task");
+            assert!(first.error.is_none(), "first turn: {:?}", first.error);
+            assert_eq!(listed(&router, &session_id, false).await.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn session_create_refuses_a_gate_no_grant_could_honour_with_typed_data() {
+            let (router, _rx) = test_router().await;
+            let refused = call(
+                &router,
+                "session/create",
+                serde_json::json!({"prompt": "hello", "grant_gated_tools": {"families": ["shel"]}}),
+            )
+            .await;
+            let failure = refused.error.as_ref().expect("a refused gate is an error");
+            assert_eq!(failure.code, error::INVALID_PARAMS, "{failure:?}");
+            let data = failure.data.as_ref().expect("typed refusal data");
+            assert_eq!(data["kind"], "tool_grant_gate_refused");
+            assert_eq!(
+                data["tool_grant_gate_refusal"],
+                serde_json::json!({"kind": "unknown_family", "family": "shel"})
+            );
+        }
+
+        /// A deferred create builds nothing, so a gate no grant could honour
+        /// is refused at its first turn: `turn/start` answers the same typed
+        /// invalid-params refusal an immediate create answers.
+        #[tokio::test]
+        async fn deferred_create_reports_a_refused_gate_at_its_first_turn_with_typed_data() {
+            let (router, _rx) = test_router().await;
+            let created = call(
+                &router,
+                "session/create",
+                serde_json::json!({
+                    "prompt": "hello",
+                    "initial_turn": "deferred",
+                    "grant_gated_tools": {"families": ["shel"]},
+                }),
+            )
+            .await;
+            let session_id = result_value(&created)["session_id"]
+                .as_str()
+                .expect("a deferred create answers its session id")
+                .to_string();
+
+            let refused = call(
+                &router,
+                "turn/start",
+                serde_json::json!({"session_id": session_id, "prompt": "first"}),
+            )
+            .await;
+            let failure = refused.error.as_ref().expect("a refused gate is an error");
+            assert_eq!(failure.code, error::INVALID_PARAMS, "{failure:?}");
+            let data = failure.data.as_ref().expect("typed refusal data");
+            assert_eq!(data["kind"], "tool_grant_gate_refused");
+            assert_eq!(
+                data["tool_grant_gate_refusal"],
+                serde_json::json!({"kind": "unknown_family", "family": "shel"})
+            );
+        }
+    }
+
     async fn pending_runtime_approval(router: &MethodRouter) -> String {
         let created = router
             .dispatch(make_request(
@@ -7188,7 +7834,7 @@ mod tests {
                 router.runtime.approval_service(),
                 Duration::from_secs(30),
             )
-            .with_human_consent(route.clone(), Duration::from_secs(4 * 60 * 60)),
+            .with_human_consent(route.clone(), Duration::from_hours(4)),
         );
         let context = meerkat_core::ToolDispatchContext::default()
             .with_work_authorization(Some(meerkat_core::WorkAuthorizationContext::new(
@@ -7211,7 +7857,7 @@ mod tests {
                 meerkat_core::ToolDeadlineChain::new(vec![
                     meerkat_core::ToolDeadlineContributor::finite(
                         meerkat_core::ToolDeadlineOwner::DirectCaller,
-                        Duration::from_secs(600),
+                        Duration::from_mins(10),
                     ),
                 ])
                 .expect("finite caller deadline"),
@@ -11005,10 +11651,10 @@ mod tests {
             },
         );
 
-        assert!(
+        assert_eq!(
             sink.emit_session_stream_event(&StreamRef::mint(), 1, &session_id, &envelope)
-                .await
-                == StreamEmitStatus::Delivered
+                .await,
+            StreamEmitStatus::Delivered
         );
         assert!(
             sink.emit_session_stream_event(&StreamRef::mint(), 2, &session_id, &envelope)
@@ -15329,7 +15975,7 @@ mod tests {
         );
 
         // The first server stops; a new one opens the same stores.
-        tokio::time::timeout(Duration::from_secs(60), runtime.try_shutdown())
+        tokio::time::timeout(Duration::from_mins(1), runtime.try_shutdown())
             .await
             .expect("the first server shuts down in bounded time")
             .expect("the first server shuts down");
@@ -15648,7 +16294,7 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        tokio::time::timeout(Duration::from_secs(60), runtime.try_shutdown())
+        tokio::time::timeout(Duration::from_mins(1), runtime.try_shutdown())
             .await
             .expect("the first server shuts down in bounded time")
             .expect("the first server shuts down");
@@ -16614,6 +17260,105 @@ mod tests {
             "the second call is the queued turn: {}",
             requests[1]
         );
+    }
+
+    /// `mob/list` names a persisted mob whose store did not restore under
+    /// `quarantined`, with the refusal a lookup of its id answers, and a
+    /// lookup answers that refusal. `mob/restore_retry` of a store that
+    /// still does not decode keeps it quarantined, answers the refusal and
+    /// counts the attempt; an unknown id is not found.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_list_names_a_quarantined_store_and_restore_retry_answers_its_refusal() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().to_path_buf();
+        std::fs::create_dir_all(root_path.join("mobs")).unwrap();
+        std::fs::write(
+            root_path.join("mobs").join("mob--broken.db"),
+            b"not a sqlite database",
+        )
+        .unwrap();
+        let config_store = meerkat_core::TaggedConfigStore::new(
+            Arc::new(MemoryConfigStore::new(
+                anthropic_test_config(),
+                meerkat_models::canonical(),
+            )),
+            meerkat_core::ConfigStoreMetadata {
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                resolved_paths: Some(meerkat_core::ConfigResolvedPaths {
+                    root: root_path.display().to_string(),
+                    manifest_path: root_path.join("realm.toml").display().to_string(),
+                    config_path: root_path.join("config.toml").display().to_string(),
+                    sessions_sqlite_path: None,
+                    sessions_jsonl_dir: root_path.join("sessions").display().to_string(),
+                }),
+            },
+        );
+        let (router, _notif_rx) = test_router_with_config_store(Arc::new(config_store)).await;
+
+        let listed = router
+            .dispatch(make_request("mob/list", serde_json::json!({})))
+            .await
+            .expect("mob/list answers");
+        let listed = result_value(&listed);
+        assert_eq!(listed["mobs"], serde_json::json!([]), "{listed}");
+        let quarantined = listed["quarantined"]
+            .as_array()
+            .expect("the quarantined mobs are listed");
+        assert_eq!(quarantined.len(), 1, "{listed}");
+        assert_eq!(quarantined[0]["mob_id"], "broken");
+        assert_eq!(quarantined[0]["class"], "store_unreadable");
+        assert_eq!(quarantined[0]["retryable"], false);
+        assert_eq!(quarantined[0]["attempts"], 0);
+        assert_eq!(quarantined[0]["structured_data"]["kind"], "mob_quarantined");
+
+        let status = router
+            .dispatch(make_request(
+                "mob/status",
+                serde_json::json!({"mob_id": "broken"}),
+            ))
+            .await
+            .expect("mob/status answers");
+        let data = status
+            .error
+            .expect("a quarantined mob has no status")
+            .data
+            .expect("the quarantine's structured data");
+        assert_eq!(data["kind"], "mob_quarantined");
+        assert_eq!(data["class"], "store_unreadable");
+        assert_eq!(data["mob_id"], "broken");
+
+        let retry = router
+            .dispatch(make_request(
+                "mob/restore_retry",
+                serde_json::json!({"mob_id": "broken"}),
+            ))
+            .await
+            .expect("mob/restore_retry answers");
+        let data = retry
+            .error
+            .expect("the store still does not decode")
+            .data
+            .expect("the quarantine's structured data");
+        assert_eq!(data["kind"], "mob_quarantined");
+        assert_eq!(data["class"], "store_unreadable");
+        let listed = router
+            .dispatch(make_request("mob/list", serde_json::json!({})))
+            .await
+            .expect("mob/list answers");
+        let listed = result_value(&listed);
+        assert_eq!(listed["quarantined"][0]["attempts"], 1, "{listed}");
+
+        let unknown = router
+            .dispatch(make_request(
+                "mob/restore_retry",
+                serde_json::json!({"mob_id": "never-existed"}),
+            ))
+            .await
+            .expect("mob/restore_retry answers");
+        assert!(unknown.error.is_some(), "an unknown id is not found");
     }
 
     /// A `mob/create` whose RPC handler is dropped mid-creation (a cancelled
@@ -20327,7 +21072,7 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
         use super::*;
 
         #[cfg(feature = "mob")]
-        const STATUS_WAIT: Duration = Duration::from_secs(60);
+        const STATUS_WAIT: Duration = Duration::from_mins(1);
 
         /// A router over in-memory stores. With `realm`, construction arms
         /// the runtime's delivery owner, so committed continuations drain;

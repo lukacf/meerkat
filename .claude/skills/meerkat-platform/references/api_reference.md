@@ -158,10 +158,10 @@ is active. Host REST/RPC/SDK surfaces provide observability, while CLI and
 trusted in-process hosts also expose narrow goal/attention controls:
 
 ```bash
-rkat workgraph list [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--json]
+rkat workgraph list [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--cursor <CURSOR>] [--json]
 rkat workgraph show <ID> [--namespace <NS>] [--json]
-rkat workgraph ready [--namespace <NS>] [--label <LABEL>] [--limit <N>] [--json]
-rkat workgraph snapshot [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--json]
+rkat workgraph ready [--namespace <NS>] [--label <LABEL>] [--limit <N>] [--cursor <CURSOR>] [--json]
+rkat workgraph snapshot [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--cursor <CURSOR>] [--json]
 rkat workgraph events [--namespace <NS>] [--all-namespaces] [--after-seq <N>] [--limit <N>] [--json]
 rkat workgraph goal-create <SESSION_ID> <TITLE> [--namespace <NS>] [--description <TEXT>] [--mode pursue|coordinate|review|falsify|judge|observe] [--completion-policy self-attest|host-confirmed] [--json]
 rkat workgraph goal-status <BINDING_ID> [--namespace <NS>] [--json]
@@ -184,6 +184,17 @@ RPC exposes `workgraph/get`, `workgraph/list`, `workgraph/ready`,
 `/workgraph/snapshot`, `/workgraph/events`, `POST /workgraph/goal/status`, and
 `POST /workgraph/attention/list`. Python and TypeScript SDKs wrap the same
 read-only observability surface.
+
+Reads are pages (0.9.9). List and snapshot return the most recently updated
+items first, ready by priority, then age, at most `limit` (default 100, at
+most 1,000); a namespace of any size is read whole, with no refusal past
+1,000 live items. Every list, ready and snapshot result reports
+`total_items` and `truncated`, names a `next_cursor` when it ended early
+(pass it back as `cursor`, CLI `--cursor`), and reports `anchor_event_seq` and
+`changed_since_anchor` for a walk of several pages. Events results report
+`truncated`, `next_after_seq` (CLI `--after-seq`) and
+`event_high_water_mark`. A result without these fields comes from an older
+server and may still have been cut.
 
 ### MCP CLI config surface
 
@@ -389,6 +400,7 @@ remote peer, start `rkat run` with `--comms-listen-tcp` and usually
 - `turn/stop_run` - stop one exact run (`session_id`, `run_id` from the `run_started` event, `reason`) and terminalize every input bound to it; receipt `outcome` is `stopped`, `not_current`, or `not_stoppable`
 - `blob/get` — fetch generated image / artifact payload bytes by blob id
 - `artifact/list`, `artifact/get`, `artifact/download`
+- `tool_grants/grant`, `tool_grants/revoke`, `tool_grants/list`, `tool_grants/audit` (0.9.9) - scoped tool grants of a session created with `grant_gated_tools` (`{"families": [...], "tools": [...]}` on `session/create`): the gated built-in families and tool names are mounted hidden and refused at dispatch (`policy_denied`, code `tool_grant_required`, `tool_grant_expired`, `tool_grant_revoked` or `tool_grant_unavailable`) until a live grant opens them. A grant names a gated `tool` or `family` (the server fills in the family's names) for exactly one of `duration_ms` and `expires_at_ms`, at most the host's maximum lifetime (24 hours by default); a revoke is idempotent and reports `changed`; a list settles due grants as `expired` and shows ended ones only with `include_ended`; an audit read pages by `sequence` (`after_sequence`, `limit` up to 1000, `next_sequence`). No method loads, registers or wakes the session, list and audit do not check that it exists, and an `identity` subject is refused as capability unavailable. A gate no grant could honour fails the session's build with invalid params (`data.kind = "tool_grant_gate_refused"`); with `keep_alive: true` the create answers before that build and does not report it. The stock governed stdio pipe serves neither these methods nor `grant_gated_tools`, `rkat-rpc` does not authenticate their caller, and an `rkat-rpc` older than 0.9.9 ignores `grant_gated_tools` and builds the session ungated
 
 Generated assistant images appear in `session/history` as assistant blocks with `block_type: "image"`; fetch bytes via `blob/get` using `data.blob_ref.blob_id`.
 
@@ -490,6 +502,10 @@ matching `managed_store` binding and select it with `--auth-binding`). With `cop
 provisions `global:copilot_openai`, `global:copilot_anthropic`, and
 `global:copilot_gemini`, all sharing the `github_copilot` credential account.
 These are provider-specific Copilot backends, not a fourth LLM provider family.
+`rkat auth login copilot --non-interactive [--secret <TOKEN> | --from-env]`
+writes the same routes with `github_copilot_token`, an operator GitHub token
+and no device sign-in (`--from-env`: read `COPILOT_GITHUB_TOKEN`, then
+`GH_TOKEN`, then `GITHUB_TOKEN`; otherwise the checked token is stored).
 Legacy `dev`-realm logins migrate to `global` on the
 run path (idempotent, no-clobber). Credential reads inherit down the chain; RPC, REST and `HostAuthService`
 writes are strict-owner and must explicitly address the realm that defines the
@@ -537,6 +553,17 @@ failures return typed codes: `APPROVAL_STORE_UNAVAILABLE` (nothing committed),
 `APPROVAL_CONFLICT` (another owner changed it first), and
 `APPROVAL_COMMIT_UNKNOWN` (reconcile from the store before reuse).
 
+Durable decisions (0.9.9) are a Rust API with no wire method:
+`meerkat_runtime::decision::DurableDecisionService` holds one operation, sealed
+by its operation id and request digest, until an attested party decides it,
+its requester or the host withdraws it, or its deadline passes; the operation's
+owner then executes it at most once under a `DecisionExecutionPermit`. Rows
+live in `approval_decisions.sqlite3` beside `approvals.json` (schema domain
+`approval-decisions`, created by the first hold; `rkat storage doctor`
+reports it). `approval/list` never shows a decision. The RPC host reaches the
+owner through `SessionRuntime::decision_service`, a Rust embedding through
+`PersistenceBundle::decision_owner`.
+
 ### Config
 
 - `config/get`, `config/set`, `config/patch` (same envelope + CAS as REST)
@@ -550,7 +577,8 @@ failures return typed codes: `APPROVAL_STORE_UNAVAILABLE` (nothing committed),
 
 Lifecycle and identity:
 
-- `mob/create`, `mob/list`, `mob/status`, `mob/lifecycle`, `mob/destroy`, `mob/snapshot`
+- `mob/create`, `mob/list`, `mob/status`, `mob/lifecycle`, `mob/destroy`, `mob/snapshot`,
+  `mob/restore_retry` (`mob/list` names quarantined mobs under `quarantined`)
 - `mob/members`, `mob/list_members_matching`, `mob/member_status`
 - `mob/spawn`, `mob/spawn_many`, `mob/spawn_helper`, `mob/fork_helper`
 - `mob/ensure_member`, `mob/reconcile`
@@ -759,6 +787,7 @@ Client methods:
 - `get_blob(blob_id)` → `BlobPayload`
 - `create_mob(*, definition)` → `Mob` — call `await client.create_mob(definition=definition)`
 - `list_mobs()` → `list[dict[str, Any]]`
+- `list_quarantined_mobs()` → `list[dict[str, Any]]` / `mob_restore_retry(mob_id)`; `mob_quarantined(error)` reads the refusal
 - `get_config()` / `set_config(...)` / `patch_config(...)`
 - `mcp_add(session_id, server_config, *, persisted=False)`
 - `mcp_remove(session_id, server_name, *, persisted=False)`
@@ -772,6 +801,7 @@ Durable jobs, approvals, artifacts, event replay, WorkGraph:
 - `jobs_get`, `jobs_list`, `jobs_cancel`, `jobs_progress`, `jobs_result`, `jobs_artifacts`, `jobs_retry`, `jobs_health()`, `jobs_subscribe`, `jobs_unsubscribe`, `monitors_start`
 - `meta_job_heartbeat`, `meta_job_progress`, `meta_job_checkpoint`, `meta_job_complete`, `meta_job_fail`, `meta_job_cancel_ack` (host-worker `meta/jobs/*`; renamed from `mobkit_job_*` in 0.9.0)
 - `request_approval`, `list_approvals`, `get_approval`, `decide_approval`; `on_consent_notice(callback)` delivers typed `approval/consent_notice` and returns an unsubscribe function
+- `grant_tool(session_id, *, tool=None, family=None, duration_ms=None, expires_at_ms=None, reason=None)` (exactly one of `tool`/`family` and of `duration_ms`/`expires_at_ms`), `revoke_tool_grant(grant_id, *, reason=None)`, `list_tool_grants(session_id, *, include_ended=False)`, `tool_grant_audit(session_id, *, after_sequence=None, limit=None)`; `create_session(..., grant_gated_tools={"families": [...], "tools": [...]})` gates tools (0.9.9; the client refuses to send a gate to a server whose contract is older than 0.9.9)
 - `list_artifacts`, `get_artifact`, `download_artifact`; `latest_event_cursor`, `list_events_since`, `event_snapshot`
 - `get_workgraph_item`, `list_workgraph_items`, `list_ready_workgraph_items`, `get_workgraph_snapshot`, `list_workgraph_events`, `get_workgraph_goal_status`, `list_workgraph_attention`
 
@@ -900,6 +930,7 @@ Client methods:
 - `getBlob(blobId)` → `BlobPayload`
 - `createMob({ definition })` → `Mob` — call `await client.createMob({ definition })`; neither mob creation nor a mob role `Profile` declares an initial auth binding. Configure host/realm credentials, or select a preconfigured realm binding through supported per-member spawn/helper auth options.
 - `listMobs()` → `MobSummary[]`
+- `listQuarantinedMobs()` → `QuarantinedMobSummary[]` / `mobRestoreRetry(mobId)`; `mobQuarantined(err)` reads the refusal
 - `getConfig()` / `setConfig(...)` / `patchConfig(...)`
 - `mcpAdd(params)` / `mcpRemove(params)` / `mcpReload(params)`
 - `listSkills()`
@@ -911,6 +942,7 @@ Durable jobs, approvals, artifacts, event replay, WorkGraph:
 - `jobsGet`, `jobsList`, `jobsCancel`, `jobsProgress`, `jobsResult`, `jobsArtifacts`, `jobsRetry`, `jobsHealth()`, `jobsSubscribe`, `jobsUnsubscribe`, `monitorsStart`
 - `metaJobHeartbeat`, `metaJobProgress`, `metaJobCheckpoint`, `metaJobComplete`, `metaJobFail`, `metaJobCancelAck` (host-worker `meta/jobs/*`; renamed from `mobkitJob*` in 0.9.0)
 - `requestApproval`, `listApprovals`, `getApproval`, `decideApproval`; `onConsentNotice(listener)` delivers typed `approval/consent_notice` (`ConsentNotice`) and returns an unsubscribe function
+- `grantTool(sessionId, { tool } | { family }, { durationMs } | { expiresAtMs }, { reason }?)`, `revokeToolGrant(grantId, { reason }?)`, `listToolGrants(sessionId, { includeEnded }?)`, `toolGrantAudit(sessionId, { afterSequence, limit }?)`; `SessionOptions.grantGatedTools` (`{ families?, tools? }`) gates tools (0.9.9; the client refuses to send a gate to a server whose contract is older than 0.9.9)
 - `listArtifacts`, `getArtifact`, `downloadArtifact`; `latestEventCursor`, `listEventsSince`, `eventSnapshot`
 - `getWorkGraphItem`, `listWorkGraphItems`, `listReadyWorkGraphItems`, `getWorkGraphSnapshot`, `listWorkGraphEvents`, `getWorkGraphGoalStatus`, `listWorkGraphAttention`
 

@@ -68,7 +68,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.9",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-live",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -79,7 +79,7 @@ rust_library(
     deps = [
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
-        "@meerkat_live_crates//:bytes-1.11.1",
+        "@meerkat_live_crates//:bytes-1.12.1",
         "@meerkat_live_crates//:opus-0.3.1",
         "@meerkat_live_crates//:rubato-2.0.0",
         "@meerkat_live_crates//:webrtc-0.14.0",
@@ -118,7 +118,7 @@ rust_library(
         "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.9",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-live",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -129,7 +129,7 @@ rust_library(
     deps = [
         "//crates/meerkat:meerkat_contracts_agent_factory_build",
         "//crates/meerkat:meerkat_core_agent_factory_build",
-        "@meerkat_live_crates//:bytes-1.11.1",
+        "@meerkat_live_crates//:bytes-1.12.1",
         "@meerkat_live_crates//:opus-0.3.1",
         "@meerkat_live_crates//:rubato-2.0.0",
         "@meerkat_live_crates//:webrtc-0.14.0",
@@ -166,7 +166,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.9",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-live",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -196,7 +196,7 @@ rust_test(
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
-        "@meerkat_live_crates//:bytes-1.11.1",
+        "@meerkat_live_crates//:bytes-1.12.1",
         "@meerkat_live_crates//:opus-0.3.1",
         "@meerkat_live_crates//:rubato-2.0.0",
         "@meerkat_live_crates//:webrtc-0.14.0",

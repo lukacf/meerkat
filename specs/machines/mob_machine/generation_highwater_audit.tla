@@ -35,6 +35,27 @@
 \* unreachable, so the replay accepts those histories only because it
 \* accepts an ascending generation.
 \*
+\* The reset run (ResetSpec) adds the retirement of the recovered member, the
+\* reset's quiesce and the mob reset (ResetToRunning), which ends every
+\* incarnation's retained history as a restart after the reset does: it
+\* folds the retained generation into the high-water and drops the retained
+\* generation, fence, profile and runtime mode together. Its properties:
+\*
+\*   AuditRetainedOnlyThisEpoch (invariant): the machine retains a
+\*     generation for the identity only for an incarnation of the current
+\*     reset epoch, the epoch a restart replays (live equals replay).
+\*   AuditMintAboveEverySeat (invariant): the identity's next incarnation
+\*     mints above every generation it was seated at, across a reset too.
+\*   AuditHighwaterNeverLowers (action property), as above. The seal
+\*     property is not checked there: a reset raises the high-water after
+\*     the seal, by design.
+\*
+\* Its witness ResetFolded is a reset that dropped a retained generation
+\* into the high-water. With --mutants, a reset that keeps the retained
+\* history must be refused by AuditRetainedOnlyThisEpoch, and one that drops
+\* it without the fold by AuditMintAboveEverySeat, each in a run with its
+\* target as the only invariant.
+\*
 \* The TLC config is DERIVED from the generated ci.cfg on every run by
 \* generation_highwater_audit.sh. Run a deeper bound by hand with:
 \*   specs/machines/mob_machine/generation_highwater_audit.sh 6
@@ -45,9 +66,13 @@ CONSTANT AuditMaxSteps
 VARIABLES
     audit_raised,             \* a recovery re-recorded or raised an existing high-water
     audit_first_above_zero,   \* the replay's first generation for the identity was above 0
-    audit_reset_gap           \* a replayed member reset skipped a generation
+    audit_reset_gap,          \* a replayed member reset skipped a generation
+    audit_epoch_seated,       \* the identity had an incarnation since the last mob reset
+    audit_seated_generations, \* every generation the identity was seated at
+    audit_reset_folded        \* a mob reset dropped a retained generation of the identity
 
-auditVars == <<audit_raised, audit_first_above_zero, audit_reset_gap>>
+auditVars == <<audit_raised, audit_first_above_zero, audit_reset_gap,
+               audit_epoch_seated, audit_seated_generations, audit_reset_folded>>
 
 AuditIdentity == "agentidentity_1"
 
@@ -60,20 +85,25 @@ RosterRecover ==
         /\ audit_first_above_zero' =
                (audit_first_above_zero
                 \/ (AuditIdentity \notin DOMAIN identity_runtime_generations /\ g > 0))
-        /\ UNCHANGED <<audit_raised, audit_reset_gap>>
+        /\ audit_epoch_seated' = TRUE
+        /\ audit_seated_generations' = audit_seated_generations \cup {g}
+        /\ UNCHANGED <<audit_raised, audit_reset_gap, audit_reset_folded>>
 
 RosterResetRecover ==
     \E previous \in AgentRuntimeIdValues, previous_g \in GenerationValues,
        rid \in AgentRuntimeIdValues, fence \in FenceTokenValues, g \in GenerationValues :
         /\ RecoverRosterMemberResetRunning(AuditIdentity, previous, previous_g, rid, fence, g)
         /\ audit_reset_gap' = (audit_reset_gap \/ g > previous_g + 1)
-        /\ UNCHANGED <<audit_raised, audit_first_above_zero>>
+        /\ audit_epoch_seated' = TRUE
+        /\ audit_seated_generations' = audit_seated_generations \cup {previous_g, g}
+        /\ UNCHANGED <<audit_raised, audit_first_above_zero, audit_reset_folded>>
 
 AuditNext ==
     \/ \E g \in GenerationValues :
         /\ HighwaterRecover(g)
         /\ audit_raised' = (audit_raised \/ AuditIdentity \in DOMAIN identity_generation_highwater)
-        /\ UNCHANGED <<audit_first_above_zero, audit_reset_gap>>
+        /\ UNCHANGED <<audit_first_above_zero, audit_reset_gap, audit_epoch_seated,
+                       audit_seated_generations, audit_reset_folded>>
     \/ SealIdentityGenerationHighwaterRunning /\ UNCHANGED auditVars
     \/ RosterRecover
     \/ RosterResetRecover
@@ -83,8 +113,41 @@ AuditInit ==
     /\ audit_raised = FALSE
     /\ audit_first_above_zero = FALSE
     /\ audit_reset_gap = FALSE
+    /\ audit_epoch_seated = FALSE
+    /\ audit_seated_generations = {}
+    /\ audit_reset_folded = FALSE
 
 AuditSpec == AuditInit /\ [][AuditNext]_<<vars, auditVars>>
+
+\* The end of the recovered member's incarnation, keeping its retained
+\* history (a retirement's end does).
+RosterRetire ==
+    \E rid \in AgentRuntimeIdValues, g \in GenerationValues :
+        /\ RecoverRosterMemberRetiredRunning(AuditIdentity, rid, g, FALSE, FALSE, FALSE, FALSE)
+        /\ UNCHANGED auditVars
+
+\* The reset's quiesce, which its commit requires.
+ResetQuiesce ==
+    /\ BeginPlacedCompletionLifecycleQuiesceFresh("Reset")
+    /\ UNCHANGED auditVars
+
+\* The mob reset's commit: a new reset epoch, in which the identity has no
+\* incarnation yet.
+MobReset ==
+    /\ ResetToRunning
+    /\ audit_reset_folded' =
+           (audit_reset_folded \/ AuditIdentity \in DOMAIN identity_runtime_generations)
+    /\ audit_epoch_seated' = FALSE
+    /\ UNCHANGED <<audit_raised, audit_first_above_zero, audit_reset_gap,
+                   audit_seated_generations>>
+
+ResetNext ==
+    \/ AuditNext
+    \/ RosterRetire
+    \/ ResetQuiesce
+    \/ MobReset
+
+ResetSpec == AuditInit /\ [][ResetNext]_<<vars, auditVars>>
 
 AuditStateConstraint == model_step_count <= AuditMaxSteps
 
@@ -121,10 +184,39 @@ AuditWitnessFirstRecoveredAboveZero == audit_first_above_zero
 \* high-water after a generation an earlier restart reused.
 AuditWitnessResetGap == audit_reset_gap
 
+\* The machine retains a generation for the identity only for an incarnation
+\* of the current reset epoch, the epoch a restart replays: live equals
+\* replay. A reset that kept a pre-reset generation would make a fresh life
+\* after it follow a pre-reset incarnation only until a restart.
+AuditRetainedOnlyThisEpoch ==
+    AuditIdentity \in DOMAIN identity_runtime_generations => audit_epoch_seated
+
+\* The identity's next incarnation mints above every generation it was seated
+\* at, across a mob reset too (the reset folds the retained generation into
+\* the high-water). None is an exhausted generation space, which mints
+\* nothing. The order goes through the model's OptionLt, as the generated
+\* model renders `next > Some(g)`: it reads `tag` before `value`. This module
+\* names no option field itself: TLC orders a record's fields by when their
+\* names were first parsed, and a `value` parsed here, before the model's
+\* None, would make every comparison of None with Some(n) compare "none"
+\* with n first, which TLC refuses.
+AuditMintAboveEverySeat ==
+    LET next == mob_machine_next_minted_generation(
+                    identity_runtime_generations, identity_generation_highwater, AuditIdentity)
+    IN next = None \/ \A g \in audit_seated_generations : OptionLt(Some(g), next)
+
+\* A mob reset dropped a retained generation of the identity, folded into its
+\* high-water.
+AuditWitnessResetFolded ==
+    /\ audit_reset_folded
+    /\ AuditIdentity \notin DOMAIN identity_runtime_generations
+    /\ AuditIdentity \in DOMAIN identity_generation_highwater
+
 NotAuditWitnessRecorded == ~AuditWitnessRecorded
 NotAuditWitnessRaised == ~AuditWitnessRaised
 NotAuditWitnessSealedWithHighwater == ~AuditWitnessSealedWithHighwater
 NotAuditWitnessRetainedBelowHighwater == ~AuditWitnessRetainedBelowHighwater
 NotAuditWitnessFirstRecoveredAboveZero == ~AuditWitnessFirstRecoveredAboveZero
 NotAuditWitnessResetGap == ~AuditWitnessResetGap
+NotAuditWitnessResetFolded == ~AuditWitnessResetFolded
 ====

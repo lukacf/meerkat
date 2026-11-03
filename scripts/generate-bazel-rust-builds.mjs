@@ -69,9 +69,23 @@ const allFeaturesMetadata = JSON.parse(
 );
 
 const workspaceMembers = new Set(metadata.workspace_members);
+// The products other than Core (ci/products.json) build with Cargo only: no
+// Bazel target builds their crates, so their members get a BUILD file that
+// only exports the manifest crate_universe reads (productBuild below), and
+// every rule, feature union and check here covers Core's members alone.
+const productRoots = JSON.parse(readFileSync(resolve(root, "ci/products.json"), "utf8"))
+  .products.filter((product) => product.root)
+  .map((product) => product.root);
+const isProductPackage = (pkg) => {
+  const dir = relative(root, dirname(pkg.manifest_path)).split(sep).join("/");
+  return productRoots.some((productRoot) => dir === productRoot || dir.startsWith(`${productRoot}/`));
+};
+const productPackages = metadata.packages.filter(
+  (pkg) => pkg.source === null && workspaceMembers.has(pkg.id) && isProductPackage(pkg),
+);
 const localPackages = new Map(
   metadata.packages
-    .filter((pkg) => pkg.source === null && workspaceMembers.has(pkg.id))
+    .filter((pkg) => pkg.source === null && workspaceMembers.has(pkg.id) && !isProductPackage(pkg))
     .map((pkg) => [pkg.id, pkg]),
 );
 const inTreePathPackages = metadata.packages.filter((pkg) => {
@@ -1472,9 +1486,13 @@ function testTagsFromName(pkg, target) {
   return [...new Set(tags)].sort();
 }
 
+// The product crates' files ride along too: no Bazel rule builds them, but
+// the cargo-equivalent lanes run Cargo in the workspace copy, and Cargo reads
+// every workspace member (a member glob such as meta/crates/* that matches
+// nothing fails the whole workspace).
 const packageRunfileLabels = [
   ...new Set(
-    [...localPackages.values(), ...inTreePathPackages]
+    [...localPackages.values(), ...inTreePathPackages, ...productPackages]
       .map((pkg) => relative(root, packageDir(pkg)))
       .filter((dir) => dir !== "")
       .map((dir) => `//${dir}:package_runfiles`),
@@ -1491,7 +1509,7 @@ const packageRunfileLabels = [
 // exports its BUILD file as `:build_file`; tools/buildbuddy declares its own.
 const workspaceBuildFileLabels = [
   ...new Set(
-    [...localPackages.values(), ...inTreePathPackages]
+    [...localPackages.values(), ...inTreePathPackages, ...productPackages]
       .map((pkg) => relative(root, packageDir(pkg)))
       .filter((dir) => dir !== "")
       .map((dir) => `//${dir}:build_file`),
@@ -1865,7 +1883,7 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     `        "@rules_rust//rust/toolchain:current_rust_toolchain",`,
     `        "@rules_rust//rust/toolchain:current_rustc_files",`,
     `        "@rules_rust//rust/toolchain:current_rustc_lib_files",`,
-    `        "@rust_std_wasm32_unknown_unknown_1_94_0//:rust_std",`,
+    `        "@rust_std_wasm32_unknown_unknown_1_97_0//:rust_std",`,
     `    ],`,
     `)`,
     ``,
@@ -1932,7 +1950,7 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     `        "@rules_rust//rust/toolchain:current_rust_toolchain",`,
     `        "@rules_rust//rust/toolchain:current_rustc_files",`,
     `        "@rules_rust//rust/toolchain:current_rustc_lib_files",`,
-    `        "@rust_std_wasm32_unknown_unknown_1_94_0//:rust_std",`,
+    `        "@rust_std_wasm32_unknown_unknown_1_97_0//:rust_std",`,
     `        "@wasm_pack_darwin_arm64//:wasm-pack",`,
     `        "@wasm_pack_linux_x86_64//:wasm-pack",`,
     `        "//crates/meerkat-cli:cli_mobpack_live_smoke_test",`,
@@ -1999,7 +2017,7 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     `    "@rules_rust//rust/toolchain:current_rust_toolchain",`,
     `    "@rules_rust//rust/toolchain:current_rustc_files",`,
     `    "@rules_rust//rust/toolchain:current_rustc_lib_files",`,
-    `    "@rust_std_wasm32_unknown_unknown_1_94_0//:rust_std",`,
+    `    "@rust_std_wasm32_unknown_unknown_1_97_0//:rust_std",`,
     `    "@wasm_pack_darwin_arm64//:wasm-pack",`,
     `    "@wasm_pack_linux_x86_64//:wasm-pack",`,
     `    "//crates/meerkat-cli:cli_mobpack_live_smoke_test",`,
@@ -2973,9 +2991,9 @@ for (const pkg of localPackages.values()) {
     const rustfmtLib = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib";
     const rustfmtLinux = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin";
     const rustfmtLinuxLib = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib";
-    // The canonical TLC lane runs as nine parts, so each fits a CI job
+    // The canonical TLC lane runs as twenty-two parts, so each fits a CI job
     // limit and the machine-authority lane runs them in parallel: the
-    // machine-verify sweep plus adaptive witness, and eight hand-written
+    // machine-verify sweep plus adaptive witness, and twenty-one hand-written
     // audit shards. `make machine-verify` runs all of them (`--part all`).
     // Each part reserves its share of a c3d-standard-30 executor, so the
     // BuildBuddy pool does not pack it with a heavy cargo-equivalent action,
@@ -3007,6 +3025,45 @@ for (const pkg of localPackages.values()) {
         `"TLC_WORKERS": "8",
         "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
       ["machine_verify_audits_h_tlc_test", "audits-h", "8", "24GB",
+        `"TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
+      ["machine_verify_audits_i_tlc_test", "audits-i", "8", "24GB",
+        `"TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
+      ["machine_verify_audits_j_tlc_test", "audits-j", "8", "24GB",
+        `"TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
+      ["machine_verify_audits_k_tlc_test", "audits-k", "8", "24GB",
+        `"TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
+      ["machine_verify_audits_l_tlc_test", "audits-l", "8", "24GB",
+        `"TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
+      ["machine_verify_audits_m_tlc_test", "audits-m", "8", "24GB",
+        `"TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
+      ["machine_verify_audits_n_tlc_test", "audits-n", "8", "24GB",
+        `"TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
+      ["machine_verify_audits_o_tlc_test", "audits-o", "8", "24GB",
+        `"TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
+      ["machine_verify_audits_q_tlc_test", "audits-q", "8", "24GB",
+        `"TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
+      ["machine_verify_audits_r_tlc_test", "audits-r", "8", "24GB",
+        `"TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
+      ["machine_verify_audits_s_tlc_test", "audits-s", "8", "24GB",
+        `"TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
+      ["machine_verify_audits_t_tlc_test", "audits-t", "8", "24GB",
+        `"TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
+      ["machine_verify_audits_u_tlc_test", "audits-u", "8", "24GB",
+        `"TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
+      ["machine_verify_audits_v_tlc_test", "audits-v", "8", "24GB",
         `"TLC_WORKERS": "8",
         "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
     ]) {
@@ -3091,6 +3148,39 @@ for (const pkg of localPackages.values()) {
       ...packageRules,
       "",
     ].join("\n\n"),
+  );
+}
+
+// A product crate's BUILD file: its manifest as a source of the package, so
+// crate_universe can read the workspace member, its files for the
+// cargo-equivalent lanes' workspace copy, and no rule.
+for (const pkg of productPackages) {
+  const product = productRoots.find((productRoot) =>
+    relative(root, dirname(pkg.manifest_path)).split(sep).join("/").startsWith(`${productRoot}/`),
+  );
+  writeGenerated(
+    resolve(dirname(pkg.manifest_path), "BUILD.bazel"),
+    [
+      `# ${pkg.name} belongs to ${product}/, which builds with Cargo only: no Bazel`,
+      "# target builds it. Its manifest is a workspace member manifest that",
+      "# crate_universe reads (MODULE.bazel crate.from_cargo), and the",
+      "# cargo-equivalent lanes copy its files with the workspace (Cargo reads",
+      "# every member).",
+      'exports_files(["Cargo.toml"])',
+      "",
+      "filegroup(",
+      '    name = "package_runfiles",',
+      '    srcs = glob(["Cargo.toml", "**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),',
+      '    visibility = ["//visibility:public"],',
+      ")",
+      "",
+      "# This package's BUILD file, for the cargo-equivalent lanes' workspace copy.",
+      "filegroup(",
+      '    name = "build_file",',
+      '    srcs = ["BUILD.bazel"],',
+      '    visibility = ["//visibility:public"],',
+      ")",
+    ].join("\n"),
   );
 }
 

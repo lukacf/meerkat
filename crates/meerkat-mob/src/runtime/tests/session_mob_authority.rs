@@ -374,7 +374,9 @@ async fn a_member_built_without_a_mob_tools_factory_follows_the_final_authority(
 }
 
 /// The hook removes the member's mob authority: the runtime's mob operator
-/// tools are no longer listed, and a call that reaches them is denied.
+/// tools are no longer listed, a call that reaches them is denied, and the
+/// runtime's reads of the session's grant find neither spawn nor manage
+/// scope in the mob.
 async fn assert_removed_authority_hides_and_denies(edit: fn(&mut meerkat::AgentBuildConfig)) {
     let (handle, service, session_id) = mob_with_spawned_worker().await;
     let tools = recorded_member_tools(&service, &session_id).await;
@@ -382,6 +384,14 @@ async fn assert_removed_authority_hides_and_denies(edit: fn(&mut meerkat::AgentB
     edit(&mut config);
     let (_dir, _agent) = build_through_factory(config, None).await;
 
+    assert!(
+        !handle.member_spawn_profile_scope_contains(&session_id, "worker"),
+        "the build bound no spawn grant in the mob"
+    );
+    assert!(
+        !handle.member_manage_scope_contains(&session_id),
+        "the build bound no manage scope over the mob"
+    );
     let listed = tool_names(&tools);
     for name in ["spawn_member", "spawn_many_members", "list_members"] {
         assert!(
@@ -803,4 +813,240 @@ async fn a_first_build_does_not_warn() {
         "a restore with the same authority does not warn: {:?}",
         warnings.restore_build
     );
+}
+
+/// Row (RED): the runtime reads a member session's live spawn grant through
+/// its receiver. A worker whose profile enables mob tools is spawned, and the
+/// build the runtime provisioned for its session carries the runtime's
+/// receiver for that session, to which the session service bound the default
+/// authority the runtime composed for the profile: spawn scope over every
+/// profile of the mob, and no manage scope. The host's hook then narrows that
+/// authority to the worker profile, and the build runs through the real agent
+/// factory, which binds the narrowed authority to the session's external
+/// tools, the receiver among them: the runtime's read finds the worker
+/// profile in the session's spawn grant and no longer the lead profile. A
+/// session the runtime did not build holds none.
+///
+/// RED on the old tree: the runtime's read asked the session's identity
+/// creation scope for a template, which no spawn grant fills, so the
+/// session's spawn grant was never read (the read takes a template and
+/// answers a refusal there, so the row does not compile).
+#[tokio::test]
+async fn a_member_spawn_grant_is_read_through_the_runtime_receiver() {
+    let (handle, service, session_id) = mob_with_spawned_worker().await;
+    let tools = recorded_member_tools(&service, &session_id).await;
+    assert!(
+        handle.member_spawn_profile_scope_contains(&session_id, "lead"),
+        "the session's default authority spawns every profile of the mob"
+    );
+    assert!(
+        !handle.member_manage_scope_contains(&session_id),
+        "the session's default authority holds no manage scope"
+    );
+
+    let mob_id = handle.definition().id.to_string();
+    let mut config = worker_build_config(&handle, MEMBER, Arc::clone(&tools)).await;
+    narrow_to_worker(&mut config, &mob_id);
+    let (_dir, _agent) = build_through_factory(config, None).await;
+
+    assert!(handle.member_spawn_profile_scope_contains(&session_id, "worker"));
+    assert!(
+        !handle.member_spawn_profile_scope_contains(&session_id, "lead"),
+        "the read follows the session's final authority, which spawns the worker profile only"
+    );
+    assert!(
+        !handle.member_spawn_profile_scope_contains(&SessionId::new(), "worker"),
+        "a session the runtime did not build"
+    );
+}
+
+/// Turn the WorkGraph family on in a member's build: its tools over a fresh
+/// in-memory store, granted in the member's mob realm.
+fn enable_workgraph(config: &mut meerkat::AgentBuildConfig) {
+    let realm = config
+        .realm_id
+        .as_ref()
+        .expect("a member builds in its mob realm");
+    let grant = meerkat::WorkGraphNamespaceGrant::new(realm.as_str(), "default")
+        .expect("a WorkGraph grant in the member's realm");
+    let service = meerkat::WorkGraphService::with_namespace_grant(
+        Arc::new(meerkat::MemoryWorkGraphStore::new()),
+        grant.clone(),
+    )
+    .expect("a WorkGraph service for the grant");
+    config.override_workgraph = ToolCategoryOverride::Enable;
+    config.workgraph_namespace_grant = Some(grant);
+    config.workgraph_tools = Some(Arc::new(meerkat::WorkGraphToolSurface::new(service)));
+}
+
+/// The names a built member shows the model, sorted.
+fn visible_tool_names(agent: &meerkat::DynAgent) -> Vec<String> {
+    let mut names = agent
+        .tool_scope()
+        .visible_tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+/// Row (RED): the runtime's receiver changes nothing in the surface of a
+/// member build that has no external tools of its own. A worker with comms
+/// and the WorkGraph family, and no built-in or other external tools,
+/// carries a receiver that wraps none. Built through the real agent factory,
+/// its tool catalog projects exactly as the same build without external
+/// tools: the same catalog exactness and mode, and every entry, WorkGraph's
+/// deferred-eligible attention tools included, as visible as there.
+///
+/// RED on the old tree: the receiver wrapped an empty composite, which
+/// reports an exact catalog where a build without built-in or external tools
+/// composes a non-exact one. With WorkGraph's two deferred-eligible
+/// attention tools the member's catalog then selected the deferred mode: it
+/// hid `workgraph_attention_reassign` and `workgraph_policy_escalate` behind
+/// the catalog control plane it composed.
+#[tokio::test]
+async fn a_receiver_that_wraps_no_tools_leaves_the_member_surface_unchanged() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from(MEMBER),
+            None,
+        )
+        .await
+        .expect("spawn the worker");
+    let session_id = member_session(&handle, MEMBER).await;
+    let receiver = recorded_member_tools(&service, &session_id).await;
+    assert!(
+        tool_names(&receiver).is_empty(),
+        "the runtime's receiver lists no tool"
+    );
+
+    let mut config = worker_build_config(&handle, MEMBER, Arc::clone(&receiver)).await;
+    enable_workgraph(&mut config);
+    let (_dir, member) = build_through_factory(config, None).await;
+    // The same build without external tools, for another member of the
+    // profile, so the two sessions do not share a comms name.
+    let mut reference_config =
+        worker_build_config(&handle, "w-reference", Arc::clone(&receiver)).await;
+    reference_config.external_tools = None;
+    enable_workgraph(&mut reference_config);
+    let (_reference_dir, reference) = build_through_factory(reference_config, None).await;
+
+    let expected = reference
+        .tool_catalog_view()
+        .expect("the reference build's catalog view");
+    for name in ["workgraph_attention_reassign", "workgraph_policy_escalate"] {
+        assert!(
+            expected
+                .entries
+                .iter()
+                .any(|entry| entry.name.as_str() == name),
+            "the build composes {name}: {expected:?}"
+        );
+    }
+    assert_eq!(
+        member
+            .tool_catalog_view()
+            .expect("the member's catalog view"),
+        expected,
+        "the receiver changes nothing in the member's tool catalog"
+    );
+    assert_eq!(
+        visible_tool_names(&member),
+        visible_tool_names(&reference),
+        "the member shows the model the tools a build without the receiver shows"
+    );
+}
+
+/// Row (RED): the runtime's reads of a member's grant read only that member
+/// session's own live authority. Two members of one mob hold different
+/// grants: the host's member build hook narrows each one's spawn grant to one
+/// profile, from the default authority the runtime composed for their
+/// profile, and grants the second manage scope over the mob with the witness
+/// its build carries. The second member's sealed authority, which a caller
+/// could hold, manages the mob and spawns the lead profile in it; the
+/// runtime's reads for the first member still find neither, since they take
+/// no authority from their caller and read the first member's own. Each
+/// member's reads find its own grant.
+///
+/// RED on the old tree: the runtime's read asked the session's identity
+/// creation scope for a template, which no spawn grant fills, so neither
+/// member's grant was read, and no manage-scope read existed (the row does
+/// not compile there).
+#[tokio::test]
+async fn a_caller_supplied_authority_is_never_used_for_the_spawn_grant_read() {
+    let (handle, service) = create_test_mob(sample_definition_with_mob_tools()).await;
+    // The host's member build hook narrows each member's spawn grant to one
+    // profile, and grants the second member manage scope over the mob with
+    // the witness its build carries.
+    service.set_member_build_hook(Arc::new(|req: &mut CreateSessionRequest| {
+        let Some(build) = req.build.as_mut() else {
+            return;
+        };
+        let Some(member) = build.mob_member_binding.clone() else {
+            return;
+        };
+        let profile = match member.member.as_str() {
+            "member-a" => "worker",
+            "member-b" => "lead",
+            _ => return,
+        };
+        let Some(authority) = build.mob_tool_authority_context.as_ref() else {
+            return;
+        };
+        let mut grant = meerkat_runtime::mob_operator_authority::restrict_spawn_profiles_in_mob(
+            authority,
+            &member.mob_id,
+            [profile],
+        )
+        .expect("narrow the member's spawn grant");
+        if member.member == "member-b" {
+            let witness = build
+                .mob_incarnation
+                .expect("the build carries the runtime's witness");
+            grant = meerkat_runtime::mob_operator_authority::grant_manage_mob(
+                &grant,
+                member.mob_id.clone(),
+                witness,
+            )
+            .expect("grant the second member manage scope");
+        }
+        build.mob_tool_authority_context = Some(grant);
+    }));
+    for member in ["member-a", "member-b"] {
+        handle
+            .spawn(
+                ProfileName::from("worker"),
+                AgentIdentity::from(member),
+                None,
+            )
+            .await
+            .expect("spawn a member");
+    }
+    let first = member_session(&handle, "member-a").await;
+    let second = member_session(&handle, "member-b").await;
+
+    let wider = last_member_build(&service, &AgentIdentity::from("member-b"))
+        .await
+        .mob_tool_authority_context
+        .expect("the second member's sealed authority");
+    let mob_id = handle.definition().id.as_str();
+    assert!(
+        wider.spawn_profile_scope_contains(mob_id, handle.incarnation(), "lead")
+            && wider.can_manage_mob(mob_id, handle.incarnation()),
+        "the second member's authority manages the mob and spawns the lead profile"
+    );
+    assert!(
+        !handle.member_spawn_profile_scope_contains(&first, "lead"),
+        "the first member's read never reads another session's authority"
+    );
+    assert!(
+        !handle.member_manage_scope_contains(&first),
+        "nor does the first member's manage-scope read"
+    );
+    assert!(handle.member_spawn_profile_scope_contains(&first, "worker"));
+    assert!(handle.member_spawn_profile_scope_contains(&second, "lead"));
+    assert!(handle.member_manage_scope_contains(&second));
 }

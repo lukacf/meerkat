@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "maintainer": "meerkat-toolkit",
+  "reviewed_at_unix_ms": 1790772920187,
+  "sources": [
+    {
+      "id": "linear",
+      "url": "https://linear.app/docs/mcp",
+      "observed_sha256": "6bb73a4cb7951bb333ad81458a0efbb9408cbd85862334fe95d4d0e43c10c4e3",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Provider documentation and hosted service retain their own terms. No implementation is copied."
+    }
+  ],
+  "recipes": [
+    {
+      "strategy": "hosted",
+      "export": "linear-readonly.service",
+      "role": "service_connector",
+      "prerequisites": [
+        {
+          "kind": "account",
+          "instruction": "A Linear account in the intended workspace and permission to access the selected issues/projects."
+        },
+        {
+          "kind": "client_authentication",
+          "instruction": "A Streamable HTTP client and host-owned OAuth ceremony or approved protected token entry."
+        }
+      ],
+      "plan": {
+        "kind": "remote_mcp",
+        "server": "linear-readonly",
+        "publisher": "linear",
+        "documented_api_version": null,
+        "read_only": true,
+        "read_only_evidence": "linear"
+      }
+    }
+  ]
+}

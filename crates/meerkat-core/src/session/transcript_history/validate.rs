@@ -8,8 +8,18 @@ use super::graph::{
     TranscriptHistoryState, TranscriptParentAdvance, TranscriptRevisionBody,
     TranscriptRevisionEdge, TranscriptRewriteCommit, TranscriptRewritePrefixAccumulator,
 };
-use crate::session::{TranscriptEditError, TranscriptRewriteSemantic, transcript_messages_digest};
-use crate::types::{AssistantBlock, Message};
+use crate::session::operator_instructions::{
+    is_operator_instruction_entry, operator_instruction_entry_places,
+    operator_instruction_entry_rows, rows_besides_operator_instruction_entries,
+};
+use crate::session::{
+    InstructionEntryKind, TranscriptEditError, TranscriptRewriteSemantic,
+    instruction_activation_offsets, instruction_activation_places, retired_activation_row,
+    superseded_activation_rows, transcript_messages_digest,
+};
+use crate::types::{
+    AssistantBlock, InstructionActivationId, InstructionKey, InstructionNamespace, Message,
+};
 use std::collections::BTreeSet;
 
 pub(crate) fn message_role_name(message: &Message) -> &'static str {
@@ -133,29 +143,124 @@ fn validate_instruction_activation_revision_transition(
             },
         )?;
     }
-    let activation_rows = |messages: &[Message], preserve_offsets: bool| {
-        messages
+    // Activation rows pair in order. A compaction may summarize the
+    // conversation around them. Any other rewrite keeps each at its place
+    // among the conversation rows (`instruction_activation_places`), or, as
+    // releases before activation places required, at its offset: the
+    // records those releases wrote keep validating. A paired row is the same
+    // row, or the exact retirement of a live parent row that a later row of
+    // its key follows in the revision. Retirement is allowed in any record
+    // and never required: who may retire is decided when a rewrite commits.
+    let parent = instruction_activation_places(&parent_body.messages);
+    let revision = instruction_activation_places(&revision_body.messages);
+    let superseded = superseded_activation_rows(&revision_body.messages);
+    let same_rows = parent.len() == revision.len()
+        && parent
             .iter()
-            .enumerate()
-            .filter_map(|(index, message)| {
-                let Message::System(system) = message else {
-                    return None;
-                };
-                system.instruction_activation.as_ref().map(|_| {
-                    (
-                        preserve_offsets.then_some(index),
-                        Message::System(system.clone()),
-                    )
-                })
-            })
-            .collect::<Vec<_>>()
-    };
-    let preserve_offsets = commit.selection.semantic() != TranscriptRewriteSemantic::Compaction;
-    if activation_rows(&parent_body.messages, preserve_offsets)
-        != activation_rows(&revision_body.messages, preserve_offsets)
-    {
+            .zip(&revision)
+            .all(|((_, parent_row), (_, revision_row))| {
+                parent_row == revision_row
+                    || retires_a_superseded_body(parent_row, revision_row, &superseded)
+            });
+    let kept_in_place = commit.selection.semantic() == TranscriptRewriteSemantic::Compaction
+        || parent
+            .iter()
+            .zip(&revision)
+            .all(|((parent_place, _), (revision_place, _))| parent_place == revision_place)
+        || instruction_activation_offsets(&parent_body.messages)
+            == instruction_activation_offsets(&revision_body.messages);
+    if !same_rows || !kept_in_place {
         return Err(TranscriptEditError::HistoryStateMalformed(
             "transcript rewrite changed an instruction activation boundary".to_string(),
+        ));
+    }
+    validate_operator_instruction_entry_transition(commit, parent_body, revision_body)
+}
+
+/// Whether `revision_row` is the exact retired form of the live activation
+/// row `parent_row`, and `superseded` (the revision's activation rows that a
+/// later row of their key follows) names it. A retired row never turns live
+/// again, and its header and body length never change.
+fn retires_a_superseded_body(
+    parent_row: &Message,
+    revision_row: &Message,
+    superseded: &BTreeSet<(
+        InstructionNamespace,
+        InstructionKey,
+        InstructionActivationId,
+    )>,
+) -> bool {
+    let (Message::System(parent), Message::System(revision)) = (parent_row, revision_row) else {
+        return false;
+    };
+    let Some(identity) = revision.instruction_activation.as_ref() else {
+        return false;
+    };
+    superseded.contains(&(
+        identity.revision.namespace.clone(),
+        identity.revision.key.clone(),
+        identity.activation_id.clone(),
+    )) && retired_activation_row(parent).as_ref() == Some(revision)
+}
+
+/// Operator-instruction entry rows across one rewrite: a compaction fold
+/// takes every one out and leaves at most one snapshot, the last row of the
+/// rewritten transcript's leading System prefix, whose entry sequence follows
+/// every entry its origin session wrote before it. Any other rewrite keeps
+/// every entry row exactly, at its place among the conversation rows and the
+/// System rows of its gap (`operator_instruction_entry_places`), not at its
+/// offset: a keyed prompt update inserts a later version before it.
+fn validate_operator_instruction_entry_transition(
+    commit: &TranscriptRewriteCommit,
+    parent_body: &TranscriptRevisionBody,
+    revision_body: &TranscriptRevisionBody,
+) -> Result<(), TranscriptEditError> {
+    if commit.selection.semantic() != TranscriptRewriteSemantic::Compaction {
+        if operator_instruction_entry_places(&parent_body.messages)
+            != operator_instruction_entry_places(&revision_body.messages)
+        {
+            return Err(TranscriptEditError::HistoryStateMalformed(
+                "transcript rewrite changed an operator instruction entry".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+    let parent_entries = operator_instruction_entry_rows(&parent_body.messages);
+    let revision_entries = operator_instruction_entry_rows(&revision_body.messages);
+    let folded = match revision_entries.as_slice() {
+        // No snapshot: the folded set was empty. The rows the fold took out
+        // cannot tell otherwise. A fold at a run's first request folds the
+        // recorded target, which may revoke every slot those rows had in
+        // effect, and a fork child's fold takes out the rows it copied from
+        // another session, whose set is not its own.
+        [] => return Ok(()),
+        [(index, Message::System(system))] => system
+            .instruction_entry
+            .as_ref()
+            .map(|snapshot| (*index, snapshot)),
+        _ => None,
+    };
+    let leading_system_rows = revision_body
+        .messages
+        .iter()
+        .take_while(|message| matches!(message, Message::System(_)))
+        .count();
+    let well_placed = folded.is_some_and(|(index, snapshot)| {
+        snapshot.kind() == InstructionEntryKind::Snapshot
+            && index + 1 == leading_system_rows
+            && parent_entries.iter().all(|(_, message)| match message {
+                Message::System(parent) => parent.instruction_entry.as_ref().is_none_or(|entry| {
+                    entry.origin_session_id() != snapshot.origin_session_id()
+                        || entry.entry_sequence() < snapshot.entry_sequence()
+                }),
+                _ => true,
+            })
+    });
+    if !well_placed {
+        return Err(TranscriptEditError::HistoryStateMalformed(
+            "compaction rewrite left an operator instruction entry other than one snapshot after \
+             the leading System prefix"
+                .to_string(),
         ));
     }
     Ok(())
@@ -375,11 +480,12 @@ fn validate_transcript_rewrite_record_with_digest(
                 matches!(message, Message::User(user) if user.transcript_role.is_compaction_summary())
             })
             .count();
-        if start != 0
-            || end != commit.messages_before
-            || commit.messages_after >= commit.messages_before
-            || summary_count != 1
-        {
+        // The shrink rule counts the rows other than operator-instruction
+        // entries: the fold's snapshot and the entry rows it takes out are
+        // neutral, so the compactor's own rebuild must have taken rows out.
+        let shrinks = rows_besides_operator_instruction_entries(&revision_body.messages)
+            < rows_besides_operator_instruction_entries(&parent_body.messages);
+        if start != 0 || end != commit.messages_before || !shrinks || summary_count != 1 {
             return Err(TranscriptEditError::HistoryStateMalformed(
                 "typed compaction rewrite must shrink the full transcript and carry exactly one CompactionSummary"
                     .to_string(),
@@ -794,9 +900,19 @@ pub(super) fn validate_transcript_revision_edge(
                 matches!(message, Message::User(user) if user.transcript_role.is_compaction_summary())
             })
             .count();
+        // The fold's one snapshot is neutral in the shrink rule. The
+        // parent's rows are not at hand here, so they all count; the record
+        // validation, which holds both bodies, counts the rows other than
+        // operator-instruction entries on both sides.
+        let snapshot = usize::from(
+            edge.rewrite()
+                .replacement()
+                .iter()
+                .any(is_operator_instruction_entry),
+        );
         if start != 0
             || end != commit.messages_before
-            || commit.messages_after >= commit.messages_before
+            || commit.messages_after.saturating_sub(snapshot) >= commit.messages_before
             || summaries != 1
         {
             return Err(TranscriptEditError::HistoryStateMalformed(

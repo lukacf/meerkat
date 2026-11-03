@@ -1,0 +1,22 @@
+# Hygienist calibration profile v0 (agent-memory-architecture.md §8.6/§11).
+#
+# Stage: transcript curation at compaction boundaries and on demand —
+# prune dead tool results, collapse repeated scaffolding, preserve
+# decisions with rationale. Judgment output is a revision proposal; a
+# deterministic validator (role law, quarantine hard-block, §8.4 ordering)
+# and meerkat's audited transcript-revision commit are the law it passes
+# through, so calibration measures judgment quality, not safety.
+#
+# Version bumps on ANY change to the prompt bundle or params; records and
+# staged batches carry the profile that produced them (§11).
+
+stage         = "hygienist"
+version       = "0"
+# The curation call reads a whole transcript and must distinguish decisions
+# from scaffolding — same judgment tier as the steward's consolidate.
+model         = "claude-sonnet-4-6"
+prompt_bundle = "prompts/hygienist-v0.md"
+
+[params]
+temperature       = 0.0
+max_output_tokens = 2048

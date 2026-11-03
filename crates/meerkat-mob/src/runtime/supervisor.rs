@@ -90,12 +90,12 @@ impl Supervisor {
                         ));
                     }
                 }
-                mob_dsl::MobMachineEffect::SupervisorEscalationFailed { cause, .. } => {
-                    if failure_cause.replace(cause).is_some() {
-                        return Err(MobError::Internal(
-                            "MobMachine emitted multiple supervisor escalation failures".into(),
-                        ));
-                    }
+                mob_dsl::MobMachineEffect::SupervisorEscalationFailed { cause, .. }
+                    if failure_cause.replace(cause).is_some() =>
+                {
+                    return Err(MobError::Internal(
+                        "MobMachine emitted multiple supervisor escalation failures".into(),
+                    ));
                 }
                 _ => {}
             }

@@ -1,0 +1,183 @@
+name: Meta release semver readiness
+
+# Meta's release line in the monorepo: the semver-breaks gate for
+# meta-extension-state and meerkat-meta (scripts/release-meta-crates.sh),
+# measured against Meta's newest crates.io release with the breaks named in
+# meta/CHANGELOG.md (`make semver-breaks-meta`). A workflow of its own, so
+# Core's release-semver-readiness.yml (and the contract test that pins it)
+# is unchanged, and each product's evidence names its own product. The
+# meta-release.yml semver gate trusts only the main-push artifact
+# `meta-semver-attestation-main-<tree_sha>` of this workflow.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      # Cargo.toml: the workspace dependency table carries the Core version
+      # Meta's crates declare.
+      - Cargo.toml
+      - meta/CHANGELOG.md
+      - meta/crates/*/Cargo.toml
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths:
+      # Cargo.toml: the workspace dependency table carries the Core version
+      # Meta's crates declare.
+      - Cargo.toml
+      - meta/CHANGELOG.md
+      - meta/crates/*/Cargo.toml
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: Commit or branch to measure before tagging.
+        required: true
+        type: string
+
+concurrency:
+  group: meta-release-semver-${{ github.event.pull_request.number || github.event.inputs.release_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  semver:
+    name: Measure and attest Meta release semver
+    runs-on: ubuntu-24.04
+    # Only crates that differ from the published baseline are rebuilt and the
+    # baseline is one checkout of its tag, so a release measurement is a
+    # minutes-scale job. Anything longer is a regression, not a slow day.
+    timeout-minutes: 45
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_ref || github.sha }}
+          fetch-depth: 0
+
+      - name: Resolve candidate identity
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(python3 - <<'PY'
+          import pathlib
+          import tomllib
+
+          manifest = tomllib.loads(pathlib.Path("meta/crates/meerkat-meta/Cargo.toml").read_text())
+          print(manifest["package"]["version"])
+          PY
+          )"
+          tree_sha="$(git rev-parse 'HEAD^{tree}')"
+          commit_sha="$(git rev-parse HEAD)"
+          {
+            echo "version=${version}"
+            echo "tree_sha=${tree_sha}"
+            echo "commit_sha=${commit_sha}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Check whether candidate is unpublished
+        id: unpublished
+        shell: bash
+        env:
+          VERSION: ${{ steps.candidate.outputs.version }}
+        run: |
+          set -euo pipefail
+          endpoint="https://crates.io/api/v1/crates/meerkat-meta/${VERSION}"
+          # crates.io answers bursts with 429; curl treats 429 (and 5xx) as
+          # transient under --retry, while a 404 (unpublished) returns at once.
+          if curl -fsSL --retry 6 --retry-delay 10 \
+            -H 'User-Agent: meerkat-release-readiness (https://github.com/lukacf/meerkat)' \
+            "${endpoint}" >/dev/null 2>&1; then
+            echo "needed=false" >> "${GITHUB_OUTPUT}"
+            echo "meerkat-meta ${VERSION} is already public; no pre-tag evidence is needed."
+          else
+            echo "needed=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - if: ${{ steps.unpublished.outputs.needed == 'true' }}
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Install cargo-semver-checks
+        if: ${{ steps.unpublished.outputs.needed == 'true' }}
+        uses: taiki-e/install-action@0c0cd218980b4b04e3636f5d7f1216716931ed74 # cargo-semver-checks
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
+
+      - name: Measure and verify declared breaks
+        if: ${{ steps.unpublished.outputs.needed == 'true' }}
+        env:
+          MEERKAT_SEMVER_REPORT_OUT: ${{ runner.temp }}/semver-evidence/report.txt
+        run: make semver-breaks-meta
+
+      # Only a release tree is evidence for its version. A post-release tree
+      # (notes under a non-empty `## [Unreleased]` above the stamped workspace
+      # version) is measured against that version's own tag, so its green
+      # result says nothing about the breaks since the release before, which
+      # is what `release_semver_gate` trusts this artifact for.
+      - name: Classify the measured notes
+        id: notes
+        if: ${{ steps.unpublished.outputs.needed == 'true' }}
+        shell: bash
+        env:
+          VERSION: ${{ steps.candidate.outputs.version }}
+        run: |
+          set -euo pipefail
+          baseline="$(python3 scripts/check_semver_breaks.py --notes-baseline \
+            --changelog meta/CHANGELOG.md --version "${VERSION}")"
+          echo "baseline=${baseline}" >> "${GITHUB_OUTPUT}"
+          if [[ "${baseline}" != published ]]; then
+            echo "::notice::The pending notes follow the stamped ${VERSION} release; this tree is not ${VERSION} release evidence and no attestation is uploaded."
+          fi
+
+      - name: Build exact-tree semver attestation
+        if: ${{ steps.unpublished.outputs.needed == 'true' && steps.notes.outputs.baseline == 'published' }}
+        shell: bash
+        env:
+          TREE_SHA: ${{ steps.candidate.outputs.tree_sha }}
+          VERSION: ${{ steps.candidate.outputs.version }}
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/semver-evidence"
+          report_sha="$(sha256sum "${evidence}/report.txt" | awk '{print $1}')"
+          jq -n \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg product meta \
+            --arg tree_sha "${TREE_SHA}" \
+            --arg commit_sha "${{ steps.candidate.outputs.commit_sha }}" \
+            --arg version "${VERSION}" \
+            --arg workflow "${GITHUB_WORKFLOW}" \
+            --arg workflow_run_id "${GITHUB_RUN_ID}" \
+            --arg workflow_run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg event "${GITHUB_EVENT_NAME}" \
+            --arg ref "${GITHUB_REF}" \
+            --arg report_sha256 "${report_sha}" \
+            '{
+              schema_version: 1,
+              repository: $repository,
+              product: $product,
+              tree_sha: $tree_sha,
+              commit_sha: $commit_sha,
+              version: $version,
+              workflow: $workflow,
+              workflow_run_id: $workflow_run_id,
+              workflow_run_attempt: $workflow_run_attempt,
+              event: $event,
+              ref: $ref,
+              result: "success",
+              report_sha256: $report_sha256
+            }' > "${evidence}/attestation.json"
+
+      - name: Upload exact-tree semver evidence
+        if: ${{ steps.unpublished.outputs.needed == 'true' && steps.notes.outputs.baseline == 'published' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ${{ github.event_name == 'push' && format('meta-semver-attestation-main-{0}', steps.candidate.outputs.tree_sha) || format('meta-semver-attestation-preview-{0}', steps.candidate.outputs.tree_sha) }}
+          path: ${{ runner.temp }}/semver-evidence
+          if-no-files-found: error
+          retention-days: 30

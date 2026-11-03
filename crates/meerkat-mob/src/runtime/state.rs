@@ -198,6 +198,16 @@ pub(crate) struct MobDslT2Snapshot {
         std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
     pub member_restore_failure_codes:
         std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    // A seated member's unrestored custody: which restore, and the cause its
+    // last attempt met.
+    pub member_custody_unrestored: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::MemberCustodyRestoreKind,
+    >,
+    pub member_custody_unrestored_causes: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::MemberCustodyCauseKind,
+    >,
     pub runtime_retire_refusal_codes:
         std::collections::BTreeMap<crate::machines::mob_machine::AgentRuntimeId, String>,
     pub runtime_retire_refusal_reasons:
@@ -750,6 +760,23 @@ pub(super) enum ShutdownAnswerClass {
     ActorCompletion,
 }
 
+/// What a [`MobCommand::AdmitControlScope`] admission is for: chokepoint (a)
+/// applies to it the lane rules the admitted operation meets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ScopeAdmissionSubject {
+    /// The operation addresses the mob, or nothing the lane rules name.
+    Mob,
+    /// A member command addressed to this member: an agent never acts on
+    /// an identity entry's member.
+    Member(crate::ids::AgentIdentity),
+    /// The legacy adoption of this member as an identity entry: a host
+    /// verb, which an agent never runs.
+    LegacyAdoption(crate::ids::AgentIdentity),
+    /// The declared apply of a host's roster of identity entries: a host
+    /// verb, which an agent never runs.
+    DeclaredApply,
+}
+
 pub(super) enum MobCommand {
     Spawn {
         spec: Box<super::handle::SpawnMemberSpec>,
@@ -824,17 +851,31 @@ pub(super) enum MobCommand {
         /// What this command may retire: the exact roster incarnation the
         /// handle observed, or one step of a scoped retire.
         target: RetireTarget,
-        /// Re-drive a stuck retirement instead of answering
-        /// `MemberRetirementStuck` (typed re-drive transition).
-        redrive: bool,
+        /// What the retire does with a stuck retirement: answer it
+        /// `MemberRetirementStuck`, or re-drive it (typed re-drive
+        /// transition), or re-drive it unless it is held for its host.
+        redrive: RetirementRedrive,
         deadline: meerkat_core::time_compat::Instant,
         admission_tx: tokio::sync::watch::Sender<bool>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    /// The retire of an identity whose roster lists no incarnation. The
+    /// actor answers it with MobMachine's `RetireAbsent` verdict in its own
+    /// step and starts nothing: the command names no incarnation, so it can
+    /// retire or cancel no later incarnation of the identity.
+    RetireAbsent {
+        agent_identity: AgentIdentity,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     Respawn {
         agent_identity: AgentIdentity,
         initial_message: Option<ContentInput>,
         successor_spec: Option<Box<super::handle::SpawnMemberSpec>>,
+        /// A same-session successor's request
+        /// ([`super::handle::MobHandle::respawn_member`]): the member's next
+        /// incarnation keeps its session. `None` is `respawn`, which an
+        /// identity entry's member takes on its own session too.
+        same_session: Option<Box<super::MemberRespawn>>,
         reply_tx: oneshot::Sender<
             Result<super::handle::MemberRespawnReceipt, super::handle::MobRespawnError>,
         >,
@@ -970,11 +1011,22 @@ pub(super) enum MobCommand {
     RepairOwedEdge {
         edge: super::actor::member_wake::MemberWiringEdge,
     },
+    /// Internal: the run a member whose role move MobMachine holds had when
+    /// its run starts were held on `session_id` settled (or it had none):
+    /// release the member while the hold still stands there.
+    ReleaseHeldMember {
+        agent_identity: AgentIdentity,
+        session_id: SessionId,
+    },
     /// Release a live member's materialization, keeping it seated
-    /// ([`super::handle::MobHandle::release_member`]).
+    /// ([`super::handle::MobHandle::release_member`]). With a scope
+    /// ([`super::handle::MobHandle::release_member_at_scope`]) only the
+    /// scope's incarnation is released: MobMachine answers any other one
+    /// Stale, and nothing is released.
     ReleaseMember {
         agent_identity: AgentIdentity,
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
+        scope: Option<Box<super::MemberDeliveryScope>>,
+        reply_tx: oneshot::Sender<Result<super::ReleaseOutcome, MobError>>,
     },
     /// Internal re-entry carrying the settled recovery, and the readiness
     /// step, of one member a Running start left out (a stopped registration
@@ -1227,8 +1279,12 @@ pub(super) enum MobCommand {
     },
     /// Actor-linearized operator admission for composite/projection paths
     /// whose first semantic action is not itself a scoped MobCommand.
+    /// `subject` names what the admitted operation acts on, so chokepoint
+    /// (a) applies the lane rules the operation itself meets before the
+    /// caller does anything (a retirement before it elects its shared slot).
     AdmitControlScope {
         required: mob_dsl::ControlScope,
+        subject: ScopeAdmissionSubject,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     /// Actor-authorized capacity reclamation for the durable member-operator
@@ -1424,6 +1480,19 @@ pub(super) enum MobCommand {
         release_rx: oneshot::Receiver<()>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// State injection, test builds only: arm the actor to reserve
+    /// `agent_identity` as unreadable in its machine state, as the boot
+    /// scan's Unreadable arm does, the moment that name's local spawn ladder
+    /// opens (`BeginSpawnExec`), before the ladder's close is prepared. No
+    /// production path reserves a name under an open ladder: the boot scan
+    /// runs before any ladder opens, and `BeginSpawnExec` refuses a reserved
+    /// name. `injected_tx` answers once the name is reserved.
+    #[cfg(test)]
+    InjectUnreadableNameAtLadderOpenForTest {
+        agent_identity: crate::ids::AgentIdentity,
+        injected_tx: oneshot::Sender<Result<(), MobError>>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     /// Queue one routed effect behind the actor's pending routed effects; the
     /// boundary flush after this command dispatches it.
     #[cfg(test)]
@@ -1490,6 +1559,52 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<
             Result<Vec<super::dormant_seat::DormantSeatOutcome>, crate::MobError>,
         >,
+    },
+    /// The adoption of one legacy member as an identity entry
+    /// (`MobHandle::adopt_legacy_identity_entry`). MobMachine decides it from
+    /// the handle's observation of the spawn row of the member's incarnation
+    /// at `generation`; an adoption's row is journaled before it commits.
+    AdoptLegacyIdentityEntry {
+        agent_identity: crate::ids::AgentIdentity,
+        generation: crate::ids::Generation,
+        legacy_roster_member: bool,
+        reply_tx:
+            oneshot::Sender<Result<mob_dsl::LegacyIdentityEntryAdoptionKind, crate::MobError>>,
+    },
+    /// One step of a store-owned identity change
+    /// (`MobHandle::create_store_owned_identities`, the changes hold): its
+    /// plan, its commit step, or the host's hold.
+    IdentityChange(Box<super::identity_change::IdentityChangeCommand>),
+    /// Decide one chunk of a declared roster's identities in one MobMachine
+    /// step (`MobHandle::apply_declared_roster`): each identity's verdict,
+    /// and the change the chunk writes with them, when it carries one (a
+    /// roster-owned identity's change, or a store-owned identity's update).
+    DeclareIdentityEntries {
+        declarations: Vec<super::declared_apply::IdentityDeclaration>,
+        change: Option<Box<super::identity_change::DeclaredChangeWrite>>,
+        reply_tx: oneshot::Sender<Result<super::declared_apply::DeclarationStep, crate::MobError>>,
+    },
+    /// Seal a complete declared roster in one MobMachine step: `desired` is
+    /// every identity the roster lists.
+    SealDeclaredRoster {
+        desired: std::collections::BTreeSet<crate::ids::AgentIdentity>,
+        reply_tx: oneshot::Sender<Result<super::declared_apply::SealAnswer, crate::MobError>>,
+    },
+    /// Open a declared apply (`MobHandle::apply_declared_roster`): one apply
+    /// of the mob at a time, MobMachine's verdict. An opened apply is
+    /// answered with the lease of its open fact, whose close is the lease's
+    /// own command on the internal lane.
+    OpenDeclaredApply {
+        reply_tx: oneshot::Sender<
+            Result<super::declared_apply::DeclaredApplyOpening, crate::MobError>,
+        >,
+    },
+    /// Close the open declared apply, whatever its outcome: sent only by the
+    /// apply's lease, on the internal lane, and never refused (not by a
+    /// grant, not in a Shutdown step), so nothing leaves the mob's applies
+    /// refused.
+    CloseDeclaredApply {
+        reply_tx: oneshot::Sender<Result<(), crate::MobError>>,
     },
     /// An off-actor member-status observation returning to the actor, with
     /// every caller that joined it.
@@ -1832,6 +1947,47 @@ pub(super) enum MobCommand {
         caller: crate::control_policy::MobControlPrincipal,
         reply_tx: oneshot::Sender<Result<Vec<crate::control_policy::OperatorGrant>, MobError>>,
     },
+    /// Commit one operator-instruction write: MobMachine decides it, a
+    /// committed record is journaled store-first, then the transition
+    /// commits. Host verb (`AdminHost`), never an agent tool. `digest` is the
+    /// body's, computed by the handle.
+    SetOperatorInstruction {
+        write: Box<crate::operator_instruction::OperatorInstructionWrite>,
+        digest: meerkat_core::InstructionContentDigest,
+        reply_tx: oneshot::Sender<
+            Result<
+                crate::operator_instruction::OperatorInstructionReceipt,
+                crate::operator_instruction::OperatorInstructionError,
+            >,
+        >,
+    },
+    /// Revoke one operator-instruction slot at a higher revision, as
+    /// [`Self::SetOperatorInstruction`].
+    RevokeOperatorInstruction {
+        slot: meerkat_core::InstructionSlot,
+        revision: meerkat_core::InstructionRevision,
+        reply_tx: oneshot::Sender<
+            Result<
+                crate::operator_instruction::OperatorInstructionReceipt,
+                crate::operator_instruction::OperatorInstructionError,
+            >,
+        >,
+    },
+    /// The mob's delivery owner asks MobMachine to prepare one owed member's
+    /// operator-instruction delivery (internal).
+    PrepareMemberInstructionDelivery {
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<
+            Result<super::operator_instruction_delivery::MemberInstructionPreparation, MobError>,
+        >,
+    },
+    /// The mob's delivery owner reports what member sessions did with the
+    /// snapshots it delivered (internal); the recorded ones are journaled
+    /// store-first in one row.
+    SettleMemberInstructionDeliveries {
+        outcomes: Vec<super::operator_instruction_delivery::MemberInstructionDeliveryOutcome>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     PollEvents {
         after_cursor: u64,
         limit: usize,
@@ -1950,6 +2106,20 @@ pub(super) struct RetireMemberIncarnation {
     pub generation: Generation,
     pub fence_token: FenceToken,
     pub member_ref: MemberRef,
+}
+
+/// What a [`MobCommand::Retire`] does with a retirement that is stuck.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RetirementRedrive {
+    /// Answer it `MemberRetirementStuck` (a plain retire).
+    Plain,
+    /// Re-drive it (the typed re-drive transition).
+    Redrive,
+    /// Re-drive it unless it is a rotation held for its host
+    /// (`rotation_held_for_host`, decided in the command's own actor step):
+    /// a caller other than the host leaves that one held and is answered as
+    /// a plain retire is.
+    RedriveUnlessHeldForHost,
 }
 
 /// What one [`MobCommand::Retire`] may retire.
@@ -2139,6 +2309,7 @@ impl MobCommand {
             Self::Spawn { .. } => ShutdownAnswerClass::CallerRequest,
             Self::HostRuntimeIncarnationObserved { .. } => ShutdownAnswerClass::CallerRequest,
             Self::Retire { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::RetireAbsent { .. } => ShutdownAnswerClass::CallerRequest,
             Self::Respawn { .. } => ShutdownAnswerClass::CallerRequest,
             Self::RetireAll { .. } => ShutdownAnswerClass::CallerRequest,
             Self::SubmitWork { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2159,7 +2330,8 @@ impl MobCommand {
             Self::ReleaseMember { .. } => ShutdownAnswerClass::CallerRequest,
             Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
-            | Self::RepairOwedEdge { .. } => ShutdownAnswerClass::ActorCompletion,
+            | Self::RepairOwedEdge { .. }
+            | Self::ReleaseHeldMember { .. } => ShutdownAnswerClass::ActorCompletion,
             Self::ReloadMemberRegistration { .. } => ShutdownAnswerClass::CallerRequest,
             #[cfg(feature = "openai-live")]
             Self::StartLiveBridgeOperation { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2228,6 +2400,10 @@ impl MobCommand {
             #[cfg(test)]
             Self::ParkActorForObservationTest { .. } => ShutdownAnswerClass::CallerRequest,
             #[cfg(test)]
+            Self::InjectUnreadableNameAtLadderOpenForTest { .. } => {
+                ShutdownAnswerClass::CallerRequest
+            }
+            #[cfg(test)]
             Self::QueueRoutedEffectForTest { .. } => ShutdownAnswerClass::CallerRequest,
             #[cfg(test)]
             Self::WakeMemberFromEffectForTest { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2241,6 +2417,15 @@ impl MobCommand {
             Self::PlanMemberRotation { .. } => ShutdownAnswerClass::CallerRequest,
             Self::StartMemberRotation { .. } => ShutdownAnswerClass::CallerRequest,
             Self::CommitDormantSeats { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::AdoptLegacyIdentityEntry { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::IdentityChange(_) => ShutdownAnswerClass::CallerRequest,
+            Self::DeclareIdentityEntries { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::OpenDeclaredApply { .. } => ShutdownAnswerClass::CallerRequest,
+            // The lease's close is retained through a Shutdown step: a
+            // Shutdown that then fails leaves the actor serving, and the
+            // close closes the fact, so the mob's next apply opens.
+            Self::CloseDeclaredApply { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::SealDeclaredRoster { .. } => ShutdownAnswerClass::CallerRequest,
             Self::GetIdentityIntent { .. } => ShutdownAnswerClass::CallerRequest,
             Self::GetIdentityConvergenceStatus { .. } => ShutdownAnswerClass::CallerRequest,
             Self::AdoptMemberIdentityDeclaration { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2279,6 +2464,10 @@ impl MobCommand {
             Self::GrantScopes { .. } => ShutdownAnswerClass::CallerRequest,
             Self::RevokeScopes { .. } => ShutdownAnswerClass::CallerRequest,
             Self::Grants { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::SetOperatorInstruction { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::RevokeOperatorInstruction { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::PrepareMemberInstructionDelivery { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::SettleMemberInstructionDeliveries { .. } => ShutdownAnswerClass::CallerRequest,
             Self::PollEvents { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ReplayAllEvents { .. } => ShutdownAnswerClass::CallerRequest,
             Self::RecordOperatorActionProvenance { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2327,6 +2516,7 @@ impl MobCommand {
             Self::HostOrphanReleaseCompleted { .. } => "HostOrphanReleaseCompleted",
             Self::PlacedBehaviorCompleted { .. } => "PlacedBehaviorCompleted",
             Self::Retire { .. } => "Retire",
+            Self::RetireAbsent { .. } => "RetireAbsent",
             Self::Respawn { .. } => "Respawn",
             Self::RetireAll { .. } => "RetireAll",
             Self::SubmitWork { .. } => "SubmitWork",
@@ -2352,6 +2542,7 @@ impl MobCommand {
             Self::MemberWakeTimedOut { .. } => "MemberWakeTimedOut",
             Self::RetryOwedMemberWake { .. } => "RetryOwedMemberWake",
             Self::RepairOwedEdge { .. } => "RepairOwedEdge",
+            Self::ReleaseHeldMember { .. } => "ReleaseHeldMember",
             Self::ReleaseMember { .. } => "ReleaseMember",
             Self::StartupMemberRecovered { .. } => "StartupMemberRecovered",
             Self::ReloadMemberRegistration { .. } => "ReloadMemberRegistration",
@@ -2447,6 +2638,10 @@ impl MobCommand {
             #[cfg(test)]
             Self::ParkActorForObservationTest { .. } => "ParkActorForObservationTest",
             #[cfg(test)]
+            Self::InjectUnreadableNameAtLadderOpenForTest { .. } => {
+                "InjectUnreadableNameAtLadderOpenForTest"
+            }
+            #[cfg(test)]
             Self::QueueRoutedEffectForTest { .. } => "QueueRoutedEffectForTest",
             #[cfg(test)]
             Self::WakeMemberFromEffectForTest { .. } => "WakeMemberFromEffectForTest",
@@ -2472,6 +2667,12 @@ impl MobCommand {
             Self::PlanMemberRotation { .. } => "PlanMemberRotation",
             Self::StartMemberRotation { .. } => "StartMemberRotation",
             Self::CommitDormantSeats { .. } => "CommitDormantSeats",
+            Self::AdoptLegacyIdentityEntry { .. } => "AdoptLegacyIdentityEntry",
+            Self::IdentityChange(_) => "IdentityChange",
+            Self::DeclareIdentityEntries { .. } => "DeclareIdentityEntries",
+            Self::OpenDeclaredApply { .. } => "OpenDeclaredApply",
+            Self::CloseDeclaredApply { .. } => "CloseDeclaredApply",
+            Self::SealDeclaredRoster { .. } => "SealDeclaredRoster",
             Self::ProjectMemberStatusObserved { .. } => "ProjectMemberStatusObserved",
             Self::GetIdentityIntent { .. } => "GetIdentityIntent",
             Self::GetIdentityConvergenceStatus { .. } => "GetIdentityConvergenceStatus",
@@ -2493,6 +2694,10 @@ impl MobCommand {
             Self::GrantScopes { .. } => "GrantScopes",
             Self::RevokeScopes { .. } => "RevokeScopes",
             Self::Grants { .. } => "Grants",
+            Self::SetOperatorInstruction { .. } => "SetOperatorInstruction",
+            Self::RevokeOperatorInstruction { .. } => "RevokeOperatorInstruction",
+            Self::PrepareMemberInstructionDelivery { .. } => "PrepareMemberInstructionDelivery",
+            Self::SettleMemberInstructionDeliveries { .. } => "SettleMemberInstructionDeliveries",
             Self::PollEvents { .. } => "PollEvents",
             Self::ReplayAllEvents { .. } => "ReplayAllEvents",
             Self::RecordOperatorActionProvenance { .. } => "RecordOperatorActionProvenance",

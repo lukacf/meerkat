@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "es2020",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["es2020", "dom"],
+    "jsx": "react",
+    "jsxFactory": "React.createElement",
+    "jsxFragmentFactory": "React.Fragment",
+    "types": [],
+    "allowJs": true,
+    "strict": false,
+    "noImplicitAny": false,
+    "isolatedModules": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "paths": {
+      "@flow-editor-core": ["../packages/flow-editor-core/src/index.ts"],
+      "@flow-editor-components": ["../packages/flow-editor-components/src/index.ts"]
+    }
+  },
+  "include": ["src"]
+}

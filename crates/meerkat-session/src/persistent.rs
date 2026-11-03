@@ -52,7 +52,8 @@ use meerkat_core::service::{
     SessionTranscriptRevisionListEntry, SessionTranscriptRevisionListQuery,
     SessionTranscriptRevisionPage, SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
     SessionTranscriptRewriteResult, SessionUsage, SessionView, StageToolResultsDisposition,
-    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
+    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest, SystemRowPruneRequest,
+    SystemRowPruneResult,
 };
 use meerkat_core::session_document::{
     LiveSessionAuthorityKind, LiveSessionAuthorityReason, SessionArchiveDisposition,
@@ -126,7 +127,10 @@ fn activation_store_error_to_session_error(error: RuntimeStoreError) -> SessionE
 
 /// Map a committed-WholeBlob read failure to the typed session error hosts
 /// classify on: the audited-endpoint divergence means "this session needs the
-/// sanctioned repair", everything else stays an internal agent error.
+/// sanctioned repair"; a store that could not serve now and stored data that
+/// does not decode keep their typed store error (`SessionError::Store`), so a
+/// classifier tells an outage a later read may get past from state that
+/// needs a repair; everything else stays an internal agent error.
 fn whole_blob_read_error_to_session_error(
     session_id: &SessionId,
     role: &str,
@@ -138,9 +142,48 @@ fn whole_blob_read_error_to_session_error(
                 id: session_id.clone(),
             }
         }
+        error @ (RuntimeStoreError::Unavailable(_) | RuntimeStoreError::Corrupt(_)) => {
+            SessionError::Store(Box::new(error))
+        }
         other => SessionError::Agent(AgentError::InternalError(format!(
             "failed to load {role} for session {session_id}: {other}"
         ))),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+mod whole_blob_read_error_tests {
+    use super::*;
+
+    /// A host store realm's committed read that could not be served now, or
+    /// that met data that does not decode, keeps its typed store error; any
+    /// other read failure stays an internal agent error.
+    #[test]
+    fn an_unavailable_or_corrupt_read_keeps_its_typed_store_error() {
+        let session_id = SessionId::new();
+        for error in [
+            RuntimeStoreError::Unavailable("host store: unavailable".to_string()),
+            RuntimeStoreError::Corrupt("host store data is invalid".to_string()),
+        ] {
+            let mapped = whole_blob_read_error_to_session_error(&session_id, "session", error);
+            let SessionError::Store(source) = &mapped else {
+                panic!("a typed store read failure stays a store error: {mapped:?}");
+            };
+            assert!(
+                source.downcast_ref::<RuntimeStoreError>().is_some(),
+                "the source keeps the runtime store error: {source:?}"
+            );
+        }
+        let mapped = whole_blob_read_error_to_session_error(
+            &session_id,
+            "session",
+            RuntimeStoreError::ReadFailed("other".to_string()),
+        );
+        assert!(
+            matches!(mapped, SessionError::Agent(AgentError::InternalError(_))),
+            "{mapped:?}"
+        );
     }
 }
 
@@ -4858,6 +4901,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.inner.recorded_auth_binding(auth_binding).await
     }
 
+    /// Where this service's builds keep the durable comms identity of each
+    /// session they build with session-scoped comms: its builder's answer
+    /// ([`SessionAgentBuilder::session_comms_identity_root`]).
+    pub fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        self.inner.session_comms_identity_root()
+    }
+
     /// Commit one typed instruction activation while the caller holds this
     /// session's runtime-turn finalization boundary.
     ///
@@ -8458,6 +8508,124 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// moment instead of reporting busy on a gate that is about to free.
     pub const TURN_BOUNDARY_FORK_MIN_RECOVERY_GATE_BOUND: std::time::Duration =
         std::time::Duration::from_secs(1);
+
+    /// Stamp the member binding a dormant resume seat implies on the seat's
+    /// durable session, store-only, before the seat commits: the binding its
+    /// own comms name implies, when that name is the member `member` of mob
+    /// `mob_id` and the session names no binding yet (a session its host
+    /// created, or one a build before member bindings wrote). From then on
+    /// the session is a mob member's, as a build of the mob would have made
+    /// it: its host's operator-instruction writes are refused, and the mob's
+    /// first snapshot takes over the target its host wrote before. A session
+    /// that already names a binding, or whose comms name is not that
+    /// member's, is left as it is (its first wake admits or refuses it).
+    ///
+    /// It opens as a store-only operator-instruction control does, in the
+    /// same order, so it takes no lock in a new order: the session's turn
+    /// boundary and recovery gate, held until the save, so a host's write
+    /// to the same session lands wholly before or after the stamp; then a
+    /// live session is refused (`Busy`: a dormant seat binds a session no
+    /// runtime serves), the hosting claim refuses a session another runtime
+    /// owner hosts, an earlier incarnation's open run is settled, and the
+    /// strict read answers an absent or archived session not found.
+    // Hidden from the docs as `record_mob_instruction_target` and
+    // `release_mob_instruction_target` are: a mob-only store write, reached
+    // only through the mob session service
+    // (`MobSessionService::bind_seated_member_session`, which the CLI, RPC
+    // and Meta wrappers forward), never a host surface.
+    #[doc(hidden)]
+    pub async fn bind_seated_member_session(
+        &self,
+        session_id: &SessionId,
+        mob_id: &str,
+        member: &str,
+    ) -> Result<(), SessionError> {
+        // The opening of `operator_instruction_control`, step for step.
+        let persistence_profile = self.runtime_store.session_persistence_profile();
+        let _turn_finalization_guard = self
+            .acquire_runtime_turn_finalization_guard(session_id)
+            .await;
+        let _projection_guard = self
+            .recovery_gate_for_session(session_id)
+            .await
+            .lock_owned()
+            .await;
+        if let Some(gate) = self.existing_gate_for_session(session_id).await {
+            let cancelled = *gate.cancelled.lock().await;
+            if cancelled {
+                return Err(SessionError::NotFound {
+                    id: session_id.clone(),
+                });
+            }
+        }
+        if self.inner.has_live_session(session_id).await? {
+            return Err(SessionError::Busy {
+                id: session_id.clone(),
+            });
+        }
+        let hosting = self.grant_session_hosting(session_id)?;
+        self.settle_earlier_run_before_store_only_write(session_id, &hosting)
+            .await?;
+        let Some(mut session) = self
+            .load_persisted_session_for_control(session_id, "seated member binding")
+            .await?
+        else {
+            self.checkpointer_gates.lock().await.remove(session_id);
+            return Err(SessionError::NotFound {
+                id: session_id.clone(),
+            });
+        };
+        if self
+            .session_archived_by_authority(session_id, &session)
+            .await?
+        {
+            return Err(SessionError::NotFound {
+                id: session_id.clone(),
+            });
+        }
+        let Some(mut metadata) = session.try_session_metadata().map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to decode metadata while seating session {session_id}: {error}"
+            )))
+        })?
+        else {
+            return Ok(());
+        };
+        if metadata.mob_member_binding.is_some() {
+            return Ok(());
+        }
+        let Some(name) = metadata
+            .comms_name
+            .as_deref()
+            .and_then(|name| name.parse::<meerkat_core::MemberCommsName>().ok())
+        else {
+            return Ok(());
+        };
+        if name.mob_id() != mob_id || name.member() != member {
+            return Ok(());
+        }
+        metadata.mob_member_binding = Some(name.to_member_binding());
+        session.set_session_metadata(metadata).map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to stamp the member binding onto seated session {session_id}: {error}"
+            )))
+        })?;
+        match persistence_profile {
+            RuntimeSessionPersistenceProfile::WholeBlobV1 => {
+                self.save_normalized_session(session).await?;
+            }
+            RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
+                self.persist_detached_head_canonical_session(session, "seated member binding")
+                    .await?;
+            }
+            profile => {
+                return Err(SessionError::Agent(AgentError::InternalError(format!(
+                    "unsupported runtime session persistence profile {profile} while seating session {session_id}"
+                ))));
+            }
+        }
+        Ok(())
+    }
 
     /// Stamp one DETACHED fork session with the exact mob member binding it is
     /// being seated as.
@@ -19739,6 +19907,63 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceTranscriptEditExt
             commit,
         })
     }
+
+    /// The prune takes the path of every same-session rewrite: the
+    /// transcript-edit mutation guard (an active runtime admission or a
+    /// running turn is `Busy`), the committed source, the core prune, the
+    /// session-document authorization of the rewrite, and the persisted
+    /// commit under the session's hosting claim. A dormant session is
+    /// written store-only and is not woken; a live idle one converges on
+    /// the commit. The session's pending compaction projection intents
+    /// carry forward unchanged, as for every rewrite, and the runtime's
+    /// finalization settles them; an unsettled projection does not refuse
+    /// the prune.
+    async fn prune_system_rows(
+        &self,
+        id: &SessionId,
+        req: SystemRowPruneRequest,
+    ) -> Result<SystemRowPruneResult, SessionError> {
+        let _mutation_guard = self.transcript_edit_mutation_guard(id).await?;
+        let mut source = self.source_session_for_transcript_edit_locked(id).await?;
+        source = self.normalized_session_for_persistence(source).await?;
+        // A stale expected revision answers typed, with both revisions, so
+        // the host reads again; every other refusal maps as on the shared
+        // rewrite path.
+        let Some(pruned) = source.prune_system_rows(req).map_err(|error| match error {
+            meerkat_core::TranscriptEditError::RevisionConflict { expected, actual } => {
+                SessionError::transcript_revision_conflict(expected, actual)
+            }
+            other => other.into_session_error(),
+        })?
+        else {
+            let revision = source.transcript_revision().map_err(|err| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to read transcript head revision: {err}"
+                )))
+            })?;
+            return Ok(SystemRowPruneResult::NothingToPrune {
+                session_id: id.clone(),
+                revision,
+                message_count: source.messages().len(),
+            });
+        };
+        self.authorize_transcript_edit(id, TranscriptEditKind::Rewrite)?;
+        let meerkat_core::SystemRowPruneCommit {
+            commit,
+            removed_rows,
+            retired_bodies,
+        } = pruned;
+        let saved = self.persist_transcript_rewrite(source, &commit).await?;
+        Ok(SystemRowPruneResult::Pruned {
+            session_id: saved.id().clone(),
+            parent_revision: commit.parent_revision.clone(),
+            revision: commit.revision.clone(),
+            message_count: saved.messages().len(),
+            removed_rows,
+            retired_bodies,
+            commit,
+        })
+    }
 }
 
 #[async_trait]
@@ -19942,6 +20167,461 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             }
         }
         result
+    }
+}
+
+/// One operator-instruction control: a session-owned write, a mob record,
+/// or a mob's release of its member session's target.
+enum OperatorInstructionControl {
+    Set(meerkat_core::SessionInstructionWrite),
+    Record(meerkat_core::InstructionTargetRecord),
+    Release(String),
+}
+
+/// The receipt of one operator-instruction control.
+enum OperatorInstructionReceipt {
+    Set(meerkat_core::SessionInstructionReceipt),
+    Record(meerkat_core::InstructionRecordReceipt),
+    Release(meerkat_core::InstructionReleaseDisposition),
+}
+
+impl OperatorInstructionReceipt {
+    /// Whether the control changed the session document. A duplicate write
+    /// or an already recorded generation changes nothing and writes nothing.
+    fn changed(&self) -> bool {
+        match self {
+            Self::Set(receipt) => {
+                receipt.disposition == meerkat_core::InstructionWriteDisposition::Recorded
+            }
+            Self::Record(receipt) => {
+                receipt.disposition == meerkat_core::InstructionRecordDisposition::Recorded
+            }
+            Self::Release(disposition) => {
+                *disposition == meerkat_core::InstructionReleaseDisposition::Released
+            }
+        }
+    }
+}
+
+impl OperatorInstructionControl {
+    fn apply(
+        self,
+        session: &mut Session,
+    ) -> Result<OperatorInstructionReceipt, meerkat_core::service::SessionInstructionError> {
+        match self {
+            Self::Set(write) => session
+                .set_session_instruction(write)
+                .map(OperatorInstructionReceipt::Set)
+                .map_err(meerkat_core::service::SessionInstructionError::from),
+            Self::Record(record) => session
+                .record_instruction_target(record)
+                .map(OperatorInstructionReceipt::Record)
+                .map_err(meerkat_core::service::SessionInstructionError::from),
+            Self::Release(mob_id) => session
+                .release_instruction_target(&mob_id)
+                .map(OperatorInstructionReceipt::Release)
+                .map_err(meerkat_core::service::SessionInstructionError::from),
+        }
+    }
+}
+
+fn unsupported_instruction_profile(
+    profile: RuntimeSessionPersistenceProfile,
+    id: &SessionId,
+) -> SessionError {
+    SessionError::Agent(AgentError::InternalError(format!(
+        "unsupported runtime session persistence profile {profile} while recording operator \
+         instructions for session {id}"
+    )))
+}
+
+impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
+    /// Record one operator-instruction control in a session's document.
+    ///
+    /// A live session's actor applies it and the actor boundary commits it,
+    /// under the session's turn-finalization boundary, so it never lands
+    /// inside a run. Once the session is found live, a detached task owns
+    /// that boundary, the actor's apply and the commit (or, when the commit
+    /// fails, the actor's removal): a caller that stops waiting cannot leave
+    /// the actor holding a control its document does not, which a retry
+    /// would answer as a duplicate. A dormant session is written store-only
+    /// under its hosting claim: nothing is built, materialized or registered.
+    /// Every lock it takes is the session's own and none is realm-wide, so
+    /// records of different sessions proceed in parallel. A control that
+    /// changes nothing writes nothing.
+    async fn operator_instruction_control(
+        self: &Arc<Self>,
+        id: &SessionId,
+        control: OperatorInstructionControl,
+    ) -> Result<OperatorInstructionReceipt, meerkat_core::service::SessionInstructionError> {
+        let persistence_profile = self.runtime_store.session_persistence_profile();
+        let turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
+        let projection_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
+        if let Some(gate) = self.existing_gate_for_session(id).await {
+            let cancelled = *gate.cancelled.lock().await;
+            if cancelled {
+                return Err(SessionError::NotFound { id: id.clone() }.into());
+            }
+        }
+
+        if self.inner.has_live_session(id).await? {
+            if self
+                .session_archived_by_authority_with_terminal(id, None)
+                .await?
+            {
+                return Err(SessionError::NotFound { id: id.clone() }.into());
+            }
+            let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
+            let owner = Arc::clone(self);
+            let session_id = id.clone();
+            tokio::spawn(async move {
+                // Held until the control is committed or its actor is gone,
+                // even after the caller stops waiting.
+                let _turn_finalization_guard = turn_finalization_guard;
+                let _projection_guard = projection_guard;
+                let outcome = owner
+                    .apply_live_operator_instruction_control(&session_id, control)
+                    .await;
+                let _ = outcome_tx.send(outcome);
+            });
+            return outcome_rx.await.unwrap_or_else(|_| {
+                Err(SessionError::Agent(AgentError::InternalError(format!(
+                    "operator instruction control for session {id} ended without reporting an \
+                     outcome"
+                )))
+                .into())
+            });
+        }
+
+        // A store-only write takes the session's hosting claim before any
+        // strict read: a session another runtime owner hosts is refused
+        // (ServedElsewhere), and nothing here wakes it. Under the claim, an
+        // earlier incarnation's open run is settled first.
+        let hosting = self.grant_session_hosting(id)?;
+        self.settle_earlier_run_before_store_only_write(id, &hosting)
+            .await?;
+        let Some(mut session) = self
+            .load_persisted_session_for_control(id, "operator instruction control")
+            .await?
+        else {
+            self.checkpointer_gates.lock().await.remove(id);
+            return Err(SessionError::NotFound { id: id.clone() }.into());
+        };
+        if self.session_archived_by_authority(id, &session).await? {
+            return Err(SessionError::NotFound { id: id.clone() }.into());
+        }
+        let receipt = control.apply(&mut session)?;
+        if !receipt.changed() {
+            return Ok(receipt);
+        }
+        match persistence_profile {
+            RuntimeSessionPersistenceProfile::WholeBlobV1 => {
+                self.save_normalized_session(session).await?;
+            }
+            RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
+                self.persist_detached_head_canonical_session(
+                    session,
+                    "store-only operator instruction control",
+                )
+                .await?;
+            }
+            profile => return Err(unsupported_instruction_profile(profile, id).into()),
+        }
+        Ok(receipt)
+    }
+
+    /// The live half of [`Self::operator_instruction_control`], run by the
+    /// task that holds the session's turn-finalization boundary and recovery
+    /// gate. The actor applies the control, then the actor boundary commits
+    /// it. A commit that fails removes the actor, so the next access
+    /// materializes the committed document and a retry records the control
+    /// again; an actor that cannot be discarded is fatalized for the same
+    /// reason.
+    async fn apply_live_operator_instruction_control(
+        &self,
+        id: &SessionId,
+        control: OperatorInstructionControl,
+    ) -> Result<OperatorInstructionReceipt, meerkat_core::service::SessionInstructionError> {
+        let receipt = match control {
+            OperatorInstructionControl::Set(write) => self
+                .inner
+                .set_session_instruction_control(id, write)
+                .await
+                .map(OperatorInstructionReceipt::Set)?,
+            OperatorInstructionControl::Record(record) => self
+                .inner
+                .record_instruction_target_control(id, record)
+                .await
+                .map(OperatorInstructionReceipt::Record)?,
+            OperatorInstructionControl::Release(mob_id) => self
+                .inner
+                .release_instruction_target_control(id, mob_id)
+                .await
+                .map(OperatorInstructionReceipt::Release)?,
+        };
+        if !receipt.changed() {
+            return Ok(receipt);
+        }
+        let persisted = match self.runtime_store.session_persistence_profile() {
+            RuntimeSessionPersistenceProfile::WholeBlobV1 => {
+                match self.inner.export_session(id).await {
+                    Ok(session) => self.save_normalized_session(session).await.map(|_| ()),
+                    Err(error) => Err(error),
+                }
+            }
+            RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
+                match self
+                    .prepare_runtime_boundary(id, "operator instruction control", None)
+                    .await
+                {
+                    Ok(prepared) => self
+                        .commit_prepared_head_canonical_actor_boundary(
+                            id,
+                            "operator instruction control",
+                            prepared,
+                        )
+                        .await
+                        .map(|_| ()),
+                    Err(error) => Err(error),
+                }
+            }
+            profile => Err(unsupported_instruction_profile(profile, id)),
+        };
+        if let Err(error) = persisted {
+            // The actor holds the control and the session document does not.
+            match self.discard_live_session_unfenced(id).await {
+                Ok(()) | Err(SessionError::NotFound { .. }) => {}
+                Err(discard_error) => {
+                    tracing::warn!(
+                        session_id = %id,
+                        error = %discard_error,
+                        "a live actor holding an uncommitted operator instruction control \
+                         could not be discarded; fatalizing it"
+                    );
+                    self.fatalize_live_session_after_ambiguous_durable_commit(id)
+                        .await;
+                }
+            }
+            return Err(error.into());
+        }
+        Ok(receipt)
+    }
+}
+
+impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
+    /// Record a mob member's whole operator-instruction snapshot in the
+    /// member session's target. The mob runtime's member delivery only,
+    /// reached through its sealed delivery on the mob session service; never
+    /// a host or agent surface. A generation the session already recorded
+    /// answers "already recorded" and writes nothing; another mob's target
+    /// is refused until that mob releases it. A target the session's own
+    /// host wrote before the mob seated the session (an attach) is the
+    /// mob's from this snapshot on
+    /// ([`meerkat_core::Session::record_instruction_target`]). A live session
+    /// records it through its actor under the turn-finalization boundary, a
+    /// dormant one store-only under its hosting claim; neither wakes the
+    /// session.
+    #[doc(hidden)]
+    pub async fn record_mob_instruction_target(
+        self: &Arc<Self>,
+        id: &SessionId,
+        record: meerkat_core::InstructionTargetRecord,
+    ) -> Result<
+        meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        match self
+            .operator_instruction_control(id, OperatorInstructionControl::Record(record))
+            .await?
+        {
+            OperatorInstructionReceipt::Record(receipt) => Ok(receipt),
+            OperatorInstructionReceipt::Set(_) | OperatorInstructionReceipt::Release(_) => {
+                Err(SessionError::Agent(AgentError::InternalError(
+                    "an operator-instruction record answered with another control's receipt"
+                        .to_string(),
+                ))
+                .into())
+            }
+        }
+    }
+
+    /// Release a mob member session's operator-instruction target on behalf
+    /// of `mob_id`, the mob that owns it (its member retires and the host
+    /// keeps the session): the target empties and is unowned, so another
+    /// owner may bind it, and the session's next fresh run start revokes
+    /// what the mob had in effect. The mob runtime's member delivery only,
+    /// reached through its sealed release on the mob session service. A
+    /// target no owner holds answers "already unowned" and writes nothing;
+    /// another owner's target is refused. A live session releases it through
+    /// its actor under the turn-finalization boundary, a dormant one
+    /// store-only under its hosting claim; neither wakes the session.
+    #[doc(hidden)]
+    pub async fn release_mob_instruction_target(
+        self: &Arc<Self>,
+        id: &SessionId,
+        mob_id: &str,
+    ) -> Result<
+        meerkat_core::InstructionReleaseDisposition,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        match self
+            .operator_instruction_control(
+                id,
+                OperatorInstructionControl::Release(mob_id.to_owned()),
+            )
+            .await?
+        {
+            OperatorInstructionReceipt::Release(disposition) => Ok(disposition),
+            OperatorInstructionReceipt::Set(_) | OperatorInstructionReceipt::Record(_) => {
+                Err(SessionError::Agent(AgentError::InternalError(
+                    "an operator-instruction release answered with another control's receipt"
+                        .to_string(),
+                ))
+                .into())
+            }
+        }
+    }
+
+    /// Read several sessions' committed operator-instruction state in one
+    /// pass, one answer per id in order, as
+    /// [`meerkat_core::service::SessionServiceInstructionExt::read_session_instructions`]
+    /// reads one: the lowering of each model and binding the sessions record
+    /// is resolved once for the pass, not once per session. A mob's status
+    /// read asks for one page of its members this way. Wakes nothing.
+    pub async fn read_sessions_instructions(
+        &self,
+        ids: &[SessionId],
+    ) -> Vec<
+        Result<
+            meerkat_core::service::SessionInstructionRead,
+            meerkat_core::service::SessionInstructionError,
+        >,
+    > {
+        let mut lowerings = InstructionLoweringMemo::default();
+        let mut reads = Vec::with_capacity(ids.len());
+        for id in ids {
+            reads.push(
+                self.read_session_instructions_with(id, &mut lowerings)
+                    .await,
+            );
+        }
+        reads
+    }
+
+    async fn read_session_instructions_with(
+        &self,
+        id: &SessionId,
+        lowerings: &mut InstructionLoweringMemo,
+    ) -> Result<
+        meerkat_core::service::SessionInstructionRead,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let session = self
+            .load_authoritative_session(id)
+            .await?
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let target = session.instruction_target_state()?;
+        let effective =
+            meerkat_core::effective_operator_instructions(session.id(), session.messages())
+                .map_err(meerkat_core::InstructionStateError::MalformedHistory)?;
+        let lowering = match session.session_metadata() {
+            Some(metadata) => {
+                let identity = metadata.llm_identity();
+                match lowerings.get(&identity) {
+                    MemoizedLowering::Resolved(lowering) => lowering,
+                    MemoizedLowering::Unresolved => {
+                        let lowering = self
+                            .inner
+                            .instruction_lowering_for_identity(&identity)
+                            .await;
+                        lowerings.insert(identity, lowering);
+                        lowering
+                    }
+                }
+            }
+            None => None,
+        };
+        Ok(meerkat_core::service::SessionInstructionRead {
+            target,
+            effective,
+            lowering,
+        })
+    }
+}
+
+/// The lowerings one instruction read pass has resolved, per model and
+/// binding a session records.
+#[derive(Default)]
+struct InstructionLoweringMemo {
+    resolved: Vec<(
+        meerkat_core::SessionLlmIdentity,
+        Option<meerkat_core::InstructionLowering>,
+    )>,
+}
+
+/// What one instruction read pass knows of a model and binding's lowering.
+enum MemoizedLowering {
+    /// The pass has not resolved this model and binding yet.
+    Unresolved,
+    /// The pass resolved it: its lowering, or `None` when it has none.
+    Resolved(Option<meerkat_core::InstructionLowering>),
+}
+
+impl InstructionLoweringMemo {
+    fn get(&self, identity: &meerkat_core::SessionLlmIdentity) -> MemoizedLowering {
+        self.resolved
+            .iter()
+            .find(|(resolved, _)| resolved == identity)
+            .map_or(MemoizedLowering::Unresolved, |(_, lowering)| {
+                MemoizedLowering::Resolved(*lowering)
+            })
+    }
+
+    fn insert(
+        &mut self,
+        identity: meerkat_core::SessionLlmIdentity,
+        lowering: Option<meerkat_core::InstructionLowering>,
+    ) {
+        self.resolved.push((identity, lowering));
+    }
+}
+
+#[async_trait]
+impl<B: SessionAgentBuilder + 'static> meerkat_core::service::SessionServiceInstructionExt
+    for PersistentSessionService<B>
+{
+    async fn set_session_instruction(
+        self: Arc<Self>,
+        id: &SessionId,
+        write: meerkat_core::SessionInstructionWrite,
+    ) -> Result<
+        meerkat_core::SessionInstructionReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        match self
+            .operator_instruction_control(id, OperatorInstructionControl::Set(write))
+            .await?
+        {
+            OperatorInstructionReceipt::Set(receipt) => Ok(receipt),
+            OperatorInstructionReceipt::Record(_) | OperatorInstructionReceipt::Release(_) => {
+                Err(SessionError::Agent(AgentError::InternalError(
+                    "an operator-instruction write answered with another control's receipt"
+                        .to_string(),
+                ))
+                .into())
+            }
+        }
+    }
+
+    async fn read_session_instructions(
+        &self,
+        id: &SessionId,
+    ) -> Result<
+        meerkat_core::service::SessionInstructionRead,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        self.read_session_instructions_with(id, &mut InstructionLoweringMemo::default())
+            .await
     }
 }
 
@@ -27405,6 +28085,64 @@ mod tests {
             Ok(mutation)
         }
 
+        fn set_session_instruction_control(
+            &mut self,
+            write: meerkat_core::SessionInstructionWrite,
+        ) -> Result<
+            meerkat_core::SessionInstructionReceipt,
+            meerkat_core::service::SessionInstructionError,
+        > {
+            self.session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .set_session_instruction(write)
+                .map_err(meerkat_core::service::SessionInstructionError::from)
+        }
+
+        fn record_instruction_target_control(
+            &mut self,
+            record: meerkat_core::InstructionTargetRecord,
+        ) -> Result<
+            meerkat_core::InstructionRecordReceipt,
+            meerkat_core::service::SessionInstructionError,
+        > {
+            self.session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .record_instruction_target(record)
+                .map_err(meerkat_core::service::SessionInstructionError::from)
+        }
+
+        fn release_instruction_target_control(
+            &mut self,
+            mob_id: &str,
+        ) -> Result<
+            meerkat_core::InstructionReleaseDisposition,
+            meerkat_core::service::SessionInstructionError,
+        > {
+            self.session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .release_instruction_target(mob_id)
+                .map_err(meerkat_core::service::SessionInstructionError::from)
+        }
+
+        fn apply_run_start_operator_instructions(
+            &mut self,
+            run_start: meerkat_core::InstructionRunStart,
+            run_id: Option<RunId>,
+        ) -> Result<meerkat_core::RunStartInstructionOutcome, AgentError> {
+            self.session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .apply_run_start_instructions(
+                    run_start,
+                    meerkat_core::InstructionLowering::MidConversation,
+                    run_id,
+                )
+                .map_err(|error| AgentError::InternalError(error.to_string()))
+        }
+
         async fn prepare_head_canonical_runtime_boundary(
             &mut self,
             request: HeadCanonicalRuntimeBoundaryPrepareRequest,
@@ -27988,6 +28726,10 @@ mod tests {
     impl SessionAgentBuilder for CapabilityBuilder {
         type Agent = CapabilityAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &CreateSessionRequest,
@@ -28097,6 +28839,10 @@ mod tests {
     impl SessionAgentBuilder for DummyBuilder {
         type Agent = DummyAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &CreateSessionRequest,
@@ -28161,6 +28907,10 @@ mod tests {
     impl<B: SessionAgentBuilder> SessionAgentBuilder for CheckpointerHoldingBuilder<B> {
         type Agent = B::Agent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            self.inner.session_comms_identity_root()
+        }
+
         async fn model_supports_inline_video(
             &self,
             identity: &meerkat_core::SessionLlmIdentity,
@@ -28216,6 +28966,10 @@ mod tests {
     impl SessionAgentBuilder for FailingInstructionActivationExportBuilder {
         type Agent = DummyAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &CreateSessionRequest,
@@ -28245,6 +28999,10 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionAgentBuilder for FailOnceCompactionAbortBuilder {
         type Agent = DummyAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,
@@ -28280,6 +29038,10 @@ mod tests {
     impl SessionAgentBuilder for CountingBuilder {
         type Agent = DummyAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &CreateSessionRequest,
@@ -28311,6 +29073,10 @@ mod tests {
     impl SessionAgentBuilder for CallbackPendingBuilder {
         type Agent = DummyAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &CreateSessionRequest,
@@ -28340,6 +29106,10 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionAgentBuilder for FailingOverlayBuilder {
         type Agent = DummyAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,
@@ -28429,6 +29199,10 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionAgentBuilder for BlockingBuildBuilder {
         type Agent = DummyAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,
@@ -28527,6 +29301,10 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionAgentBuilder for BlockingRunBuilder {
         type Agent = BlockingRunAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,
@@ -28705,6 +29483,10 @@ mod tests {
     impl SessionAgentBuilder for EventfulBuilder {
         type Agent = EventfulDummyAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &CreateSessionRequest,
@@ -28740,6 +29522,10 @@ mod tests {
     impl SessionAgentBuilder for FloodingEventBuilder {
         type Agent = EventfulDummyAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &CreateSessionRequest,
@@ -28772,6 +29558,10 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionAgentBuilder for FailingRunBuilder {
         type Agent = DummyAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,
@@ -28833,6 +29623,10 @@ mod tests {
     impl SessionAgentBuilder for MachineTerminalRunBuilder {
         type Agent = DummyAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &CreateSessionRequest,
@@ -28860,6 +29654,10 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionAgentBuilder for StaleTerminalRunBuilder {
         type Agent = EventfulDummyAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,
@@ -28903,6 +29701,10 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionAgentBuilder for CapturingBuildBuilder {
         type Agent = DummyAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,
@@ -29115,6 +29917,10 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionAgentBuilder for ImagePreservingBuilder {
         type Agent = ImagePreservingAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,
@@ -29336,6 +30142,10 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionAgentBuilder for ToolDispatchBuilder {
         type Agent = ToolDispatchAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,
@@ -53215,7 +54025,7 @@ mod tests {
             .await
             .expect("a free boundary is taken")
             .expect("the exact current actor");
-        assert!(lease.witness() == &actor);
+        assert_eq!(lease.witness(), &actor);
         drop(lease);
         let pin = tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -57032,6 +57842,10 @@ mod tests {
     impl SessionAgentBuilder for DurableBoundaryProbeBuilder {
         type Agent = DurableBoundaryProbeAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &CreateSessionRequest,
@@ -57672,6 +58486,1460 @@ mod tests {
             )
             .await
             .expect("stop the fixture actor");
+        }
+    }
+
+    /// Rows for operator instructions through the persistent session service.
+    /// A write, a record or a release of a live session goes through its actor
+    /// and the actor boundary commit; a dormant session's is a store-only write
+    /// under the session's hosting claim, which wakes nothing and registers
+    /// nothing.
+    mod operator_instruction_service {
+        use super::*;
+        use meerkat_core::service::{SessionInstructionError, SessionServiceInstructionExt};
+        use meerkat_core::{
+            InstructionRecordDisposition, InstructionReleaseDisposition, InstructionRevision,
+            InstructionSetErrorCode, InstructionSlot, InstructionTargetOwner,
+            InstructionTargetRecord, InstructionTargetRecordSlot, InstructionWriteDisposition,
+            SessionInstructionChange, SessionInstructionWrite,
+        };
+
+        fn slot(key: &str) -> InstructionSlot {
+            InstructionSlot {
+                namespace: InstructionNamespace::new("app.example").unwrap(),
+                key: InstructionKey::new(key).unwrap(),
+            }
+        }
+
+        fn write(key: &str, revision: u64, body: &str) -> SessionInstructionWrite {
+            SessionInstructionWrite {
+                slot: slot(key),
+                revision: InstructionRevision::new(revision).unwrap(),
+                change: SessionInstructionChange::Activate {
+                    body: body.to_string(),
+                    content_sha256: None,
+                },
+            }
+        }
+
+        fn record(generation: u64) -> InstructionTargetRecord {
+            record_for("mob-1", generation)
+        }
+
+        /// A member snapshot `mob` delivers at `generation`.
+        fn record_for(mob: &str, generation: u64) -> InstructionTargetRecord {
+            InstructionTargetRecord {
+                mob_id: mob.to_string(),
+                agent_identity: "worker".to_string(),
+                generation,
+                slots: vec![InstructionTargetRecordSlot {
+                    slot: slot("tone"),
+                    revision: InstructionRevision::new(1).unwrap(),
+                    body: Some("Be brief.".to_string()),
+                }],
+            }
+        }
+
+        /// Counts every agent the service builds: a build is a wake.
+        #[derive(Clone, Default)]
+        struct CountingBuilder {
+            builds: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl SessionAgentBuilder for CountingBuilder {
+            type Agent = DummyAgent;
+
+            fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+                meerkat_core::SessionCommsIdentityRoot::NotKept
+            }
+
+            async fn build_agent(
+                &self,
+                req: &CreateSessionRequest,
+                event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+            ) -> Result<Self::Agent, SessionError> {
+                self.builds.fetch_add(1, Ordering::SeqCst);
+                DummyBuilder.build_agent(req, event_tx).await
+            }
+        }
+
+        fn counting_service(
+            runtime_store: Arc<dyn RuntimeStore>,
+        ) -> (PersistentSessionService<CountingBuilder>, Arc<AtomicUsize>) {
+            let builder = CountingBuilder::default();
+            let builds = Arc::clone(&builder.builds);
+            let service = PersistentSessionService::new(
+                builder,
+                4,
+                Arc::new(MemoryStore::new()),
+                runtime_store,
+                memory_blob_store(),
+            );
+            (service, builds)
+        }
+
+        /// Counts the lowering lookups a service makes through it; every
+        /// session it builds keeps the metadata its request carries.
+        #[derive(Clone, Default)]
+        struct LoweringCountingBuilder {
+            lookups: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl SessionAgentBuilder for LoweringCountingBuilder {
+            type Agent = DummyAgent;
+
+            fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+                meerkat_core::SessionCommsIdentityRoot::NotKept
+            }
+
+            async fn build_agent(
+                &self,
+                req: &CreateSessionRequest,
+                event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+            ) -> Result<Self::Agent, SessionError> {
+                DummyBuilder.build_agent(req, event_tx).await
+            }
+
+            async fn instruction_lowering_for_identity(
+                &self,
+                _identity: &meerkat_core::SessionLlmIdentity,
+            ) -> Option<meerkat_core::InstructionLowering> {
+                self.lookups.fetch_add(1, Ordering::SeqCst);
+                Some(meerkat_core::InstructionLowering::MidConversation)
+            }
+        }
+
+        /// One read pass over several sessions on the same model resolves the
+        /// model's lowering once, where a read per session resolves it for
+        /// each; every answer carries the lowering.
+        #[tokio::test]
+        async fn a_read_pass_resolves_each_models_lowering_once() {
+            let builder = LoweringCountingBuilder::default();
+            let lookups = Arc::clone(&builder.lookups);
+            let service = PersistentSessionService::new(
+                builder,
+                4,
+                Arc::new(MemoryStore::new()),
+                Arc::new(InMemoryRuntimeStore::new()),
+                memory_blob_store(),
+            );
+            let mut ids = Vec::new();
+            for _ in 0..3 {
+                let created = service
+                    .create_session(create_request_with_metadata(
+                        "hello",
+                        InitialTurnPolicy::Defer,
+                    ))
+                    .await
+                    .expect("create_session should succeed");
+                ids.push(created.session_id);
+            }
+
+            let reads = service.read_sessions_instructions(&ids).await;
+            assert_eq!(reads.len(), ids.len(), "one answer per session");
+            for read in reads {
+                assert_eq!(
+                    read.expect("each session reads").lowering,
+                    Some(meerkat_core::InstructionLowering::MidConversation)
+                );
+            }
+            assert_eq!(
+                lookups.load(Ordering::SeqCst),
+                1,
+                "the pass resolves the model's lowering once"
+            );
+
+            for id in &ids {
+                service
+                    .read_session_instructions(id)
+                    .await
+                    .expect("a single read");
+            }
+            assert_eq!(
+                lookups.load(Ordering::SeqCst),
+                1 + ids.len(),
+                "a read per session resolves it for each"
+            );
+        }
+
+        /// A session created by `service` and then left dormant: its document
+        /// is durable and no actor serves it.
+        async fn dormant_session<B: SessionAgentBuilder + 'static>(
+            service: &PersistentSessionService<B>,
+        ) -> SessionId {
+            let created = service
+                .create_session(create_request("hello", InitialTurnPolicy::Defer))
+                .await
+                .expect("create_session should succeed");
+            let id = created.session_id;
+            service
+                .discard_live_session_unfenced(&id)
+                .await
+                .expect("the live actor is discarded");
+            assert!(
+                !service.has_live_session(&id).await.unwrap(),
+                "the session is dormant"
+            );
+            id
+        }
+
+        #[tokio::test]
+        async fn a_live_session_write_persists_in_the_session_document() {
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let (service, _builds) = counting_service(runtime_store);
+            let service = Arc::new(service);
+            let created = service
+                .create_session(create_request("hello", InitialTurnPolicy::Defer))
+                .await
+                .expect("create_session should succeed");
+            let id = created.session_id;
+            let receipt = Arc::clone(&service)
+                .set_session_instruction(&id, write("tone", 1, "Answer formally."))
+                .await
+                .expect("a live session records the write");
+            assert_eq!(receipt.disposition, InstructionWriteDisposition::Recorded);
+            assert_eq!(receipt.target_generation, 1);
+            assert!(service.has_live_session(&id).await.unwrap());
+
+            let stored = service
+                .load_authoritative_session(&id)
+                .await
+                .expect("authoritative load")
+                .expect("the session document");
+            let state = stored
+                .instruction_target_state()
+                .expect("the target reads typed")
+                .expect("the committed document holds the target");
+            assert_eq!(state.target_generation(), 1);
+            assert_eq!(state.slots().len(), 1);
+            let read = service
+                .read_session_instructions(&id)
+                .await
+                .expect("the committed read");
+            assert_eq!(read.target, Some(state));
+            assert!(read.effective.is_empty(), "a write applies nothing");
+        }
+
+        #[tokio::test]
+        async fn mob_owned_session_refuses_session_writes() {
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let (service, _builds) = counting_service(runtime_store);
+            let service = Arc::new(service);
+            let created = service
+                .create_session(create_request("hello", InitialTurnPolicy::Defer))
+                .await
+                .expect("create_session should succeed");
+            let id = created.session_id;
+            let receipt = service
+                .record_mob_instruction_target(&id, record(1))
+                .await
+                .expect("a mob records the member's target");
+            assert_eq!(receipt.disposition, InstructionRecordDisposition::Recorded);
+            let error = Arc::clone(&service)
+                .set_session_instruction(&id, write("tone", 5, "Answer formally."))
+                .await
+                .expect_err("a mob-owned target takes no session write");
+            assert_eq!(error.code(), Some(InstructionSetErrorCode::OwnedByMob));
+        }
+
+        #[tokio::test]
+        async fn dormant_session_target_record_registers_nothing_and_wakes_nothing() {
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let (service, builds) = counting_service(Arc::clone(&runtime_store));
+            let service = Arc::new(service);
+            let id = dormant_session(service.as_ref()).await;
+            let builds_before = builds.load(Ordering::SeqCst);
+            let runtime_id =
+                PersistentSessionService::<CountingBuilder>::runtime_id_for_session(&id);
+            let runtime_state_before =
+                meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+                    .await
+                    .expect("runtime state load");
+
+            let receipt = service
+                .record_mob_instruction_target(&id, record(1))
+                .await
+                .expect("a dormant session records the target store-only");
+            assert_eq!(receipt.disposition, InstructionRecordDisposition::Recorded);
+            assert_eq!(receipt.target_generation, 1);
+
+            assert_eq!(
+                builds.load(Ordering::SeqCst),
+                builds_before,
+                "recording builds no agent: it wakes nothing"
+            );
+            assert!(
+                !service.has_live_session(&id).await.unwrap(),
+                "the session stays dormant"
+            );
+            assert_eq!(
+                meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+                    .await
+                    .expect("runtime state load"),
+                runtime_state_before,
+                "recording registers nothing with the runtime"
+            );
+            let read = service
+                .read_session_instructions(&id)
+                .await
+                .expect("the committed read");
+            let target = read.target.expect("the store holds the recorded target");
+            assert_eq!(target.target_generation(), 1);
+            assert!(read.effective.is_empty(), "recording applies nothing");
+            assert!(!service.has_live_session(&id).await.unwrap());
+        }
+
+        /// Whether `error` is the refusal of a session commit by the failing
+        /// test store.
+        fn is_store_commit_refusal(error: &SessionInstructionError) -> bool {
+            match error {
+                SessionInstructionError::Session(SessionError::Agent(
+                    AgentError::InternalError(message),
+                )) => message.contains("synthetic runtime snapshot commit"),
+                _ => false,
+            }
+        }
+
+        /// The target generation the committed session document holds.
+        async fn committed_target_generation<B: SessionAgentBuilder + 'static>(
+            service: &PersistentSessionService<B>,
+            id: &SessionId,
+        ) -> Option<u64> {
+            service
+                .load_authoritative_session(id)
+                .await
+                .expect("authoritative load")
+                .expect("the session document")
+                .instruction_target_state()
+                .expect("the target reads typed")
+                .map(|state| state.target_generation())
+        }
+
+        #[tokio::test]
+        async fn a_repeated_record_of_the_same_slot_revision_is_a_noop() {
+            let gated = Arc::new(GatedSnapshotRuntimeStore::new());
+            let (service, _builds) = counting_service(gated.clone());
+            let service = Arc::new(service);
+            let id = dormant_session(service.as_ref()).await;
+            let first = service
+                .record_mob_instruction_target(&id, record(1))
+                .await
+                .expect("the first delivery records");
+            assert_eq!(first.disposition, InstructionRecordDisposition::Recorded);
+
+            // From here on every session snapshot commit fails: a repeated
+            // delivery that tried to write would fail with it.
+            gated.set_fail_snapshot_commits(true);
+            let repeated = service
+                .record_mob_instruction_target(&id, record(1))
+                .await
+                .expect("a repeated delivery of the same (slot, revision) writes nothing");
+            assert_eq!(
+                repeated.disposition,
+                InstructionRecordDisposition::AlreadyRecorded
+            );
+            assert_eq!(repeated.target_generation, 1);
+            let refused = service
+                .record_mob_instruction_target(&id, record(2))
+                .await
+                .expect_err("a new generation does write, and the failing store refuses it");
+            assert!(
+                is_store_commit_refusal(&refused),
+                "the store's commit refusal: {refused:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn concurrent_dormant_records_for_different_sessions_do_not_serialize_on_a_realm_lock()
+         {
+            let gated = Arc::new(GatedSnapshotRuntimeStore::new());
+            let (service, _builds) = counting_service(gated.clone());
+            let service = Arc::new(service);
+            let held = dormant_session(service.as_ref()).await;
+            let free = dormant_session(service.as_ref()).await;
+
+            // Stop one record inside its store write: from here on it holds
+            // whatever a slow write holds (its session's turn boundary and
+            // recovery gate, and whatever the write path takes) across the
+            // write itself.
+            gated.set_pause_session_boundary_commit(true);
+            let blocked = tokio::spawn({
+                let service = Arc::clone(&service);
+                let held = held.clone();
+                async move {
+                    service
+                        .record_mob_instruction_target(&held, record(1))
+                        .await
+                }
+            });
+            gated.await_session_boundary_commit_entered().await;
+            // Later commits pass straight through; the stopped write waits
+            // for its release.
+            gated.set_pause_session_boundary_commit(false);
+
+            let other = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                service.record_mob_instruction_target(&free, record(1)),
+            )
+            .await
+            .expect("another session's record does not wait for a store write in flight")
+            .expect("the other session records");
+            assert_eq!(other.disposition, InstructionRecordDisposition::Recorded);
+            assert!(
+                !blocked.is_finished(),
+                "the held record is still inside its store write"
+            );
+
+            gated.release_session_boundary_commit();
+            let held_receipt = tokio::time::timeout(std::time::Duration::from_secs(5), blocked)
+                .await
+                .expect("the held record completes once its write is released")
+                .expect("join")
+                .expect("the held session records");
+            assert_eq!(
+                held_receipt.disposition,
+                InstructionRecordDisposition::Recorded
+            );
+        }
+
+        /// A caller that stops waiting once the live actor has applied its
+        /// record, while the record's commit is still in flight, does not
+        /// leave the record in the actor alone: the session document holds
+        /// it, and a retry never answers "already recorded" for a record the
+        /// document does not hold.
+        #[tokio::test]
+        async fn a_cancelled_live_record_is_durable_or_redelivered() {
+            let gated = Arc::new(GatedSnapshotRuntimeStore::new());
+            let (service, _builds) = counting_service(gated.clone());
+            let service = Arc::new(service);
+            let id = service
+                .create_session(create_request("hello", InitialTurnPolicy::Defer))
+                .await
+                .expect("create_session should succeed")
+                .session_id;
+            assert!(service.has_live_session(&id).await.unwrap());
+
+            // The record's commit stops inside the store: the actor has
+            // applied the record and the session document does not hold it.
+            gated.set_pause_session_boundary_commit(true);
+            let caller = Arc::clone(&service);
+            let mut cancelled = Box::pin(caller.record_mob_instruction_target(&id, record(1)));
+            tokio::select! {
+                outcome = &mut cancelled => unreachable!(
+                    "the record cannot complete while its commit is held: {outcome:?}"
+                ),
+                () = gated.await_session_boundary_commit_entered() => {}
+            }
+            // The caller goes away exactly here.
+            drop(cancelled);
+            gated.release_session_boundary_commit();
+
+            let retry = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                service.record_mob_instruction_target(&id, record(1)),
+            )
+            .await
+            .expect("the retry is not left waiting")
+            .expect("the retry answers");
+            assert_eq!(
+                committed_target_generation(service.as_ref(), &id).await,
+                Some(1),
+                "the retry answered {:?}; the session document must hold the record",
+                retry.disposition
+            );
+        }
+
+        /// A live write whose commit fails leaves no actor serving it, even
+        /// when that actor cannot be discarded: a retry records the write in
+        /// the session document instead of answering "duplicate" for a write
+        /// the document does not hold.
+        #[tokio::test]
+        async fn a_live_write_whose_commit_and_discard_fail_is_recorded_by_its_retry() {
+            let gated = Arc::new(GatedSnapshotRuntimeStore::new());
+            let (service, _builds) = counting_service(gated.clone());
+            let service = Arc::new(service);
+            let id = service
+                .create_session(create_request("hello", InitialTurnPolicy::Defer))
+                .await
+                .expect("create_session should succeed")
+                .session_id;
+
+            gated.set_fail_snapshot_commits(true);
+            service.inner.fail_next_discard();
+            let failed = Arc::clone(&service)
+                .set_session_instruction(&id, write("tone", 1, "Answer formally."))
+                .await
+                .expect_err("the store refuses the write's commit");
+            assert!(
+                is_store_commit_refusal(&failed),
+                "the store's commit refusal: {failed:?}"
+            );
+            gated.set_fail_snapshot_commits(false);
+
+            let retry = Arc::clone(&service)
+                .set_session_instruction(&id, write("tone", 1, "Answer formally."))
+                .await
+                .expect("the retry answers");
+            assert_eq!(
+                committed_target_generation(service.as_ref(), &id).await,
+                Some(1),
+                "the retry answered {:?}; the session document must hold the write",
+                retry.disposition
+            );
+        }
+
+        #[tokio::test]
+        async fn an_unknown_session_is_not_found() {
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let (service, builds) = counting_service(runtime_store);
+            let error = Arc::new(service)
+                .record_mob_instruction_target(&SessionId::new(), record(1))
+                .await
+                .expect_err("no session to record in");
+            assert!(
+                matches!(
+                    error,
+                    SessionInstructionError::Session(SessionError::NotFound { .. })
+                ),
+                "{error:?}"
+            );
+            assert_eq!(builds.load(Ordering::SeqCst), 0);
+        }
+
+        /// The committed document's target: its owner, generation and slot
+        /// count.
+        async fn committed_target<B: SessionAgentBuilder + 'static>(
+            service: &PersistentSessionService<B>,
+            id: &SessionId,
+        ) -> (InstructionTargetOwner, u64, usize) {
+            let state = service
+                .load_authoritative_session(id)
+                .await
+                .expect("authoritative load")
+                .expect("the session document")
+                .instruction_target_state()
+                .expect("the target reads typed")
+                .expect("the committed document holds the target state");
+            (
+                state.owner().clone(),
+                state.target_generation(),
+                state.slots().len(),
+            )
+        }
+
+        /// A live session's release goes through its actor and the actor
+        /// boundary commit: the committed target is empty and unowned.
+        #[tokio::test]
+        async fn a_live_session_release_empties_and_unowns_its_target() {
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let (service, _builds) = counting_service(runtime_store);
+            let service = Arc::new(service);
+            let id = service
+                .create_session(create_request("hello", InitialTurnPolicy::Defer))
+                .await
+                .expect("create_session should succeed")
+                .session_id;
+            service
+                .record_mob_instruction_target(&id, record(1))
+                .await
+                .expect("the mob records its member's target");
+            let released = service
+                .release_mob_instruction_target(&id, "mob-1")
+                .await
+                .expect("the owning mob releases the target");
+            assert_eq!(released, InstructionReleaseDisposition::Released);
+            assert!(service.has_live_session(&id).await.unwrap());
+            let (owner, generation, slots) = committed_target(service.as_ref(), &id).await;
+            assert!(
+                matches!(owner, InstructionTargetOwner::Unowned),
+                "the released target is unowned: {owner:?}"
+            );
+            assert_eq!(generation, 0, "an unowned target starts over");
+            assert_eq!(slots, 0, "the released target is empty");
+        }
+
+        /// A dormant session's release is a store-only write: it builds no
+        /// agent and registers nothing.
+        #[tokio::test]
+        async fn a_dormant_session_release_is_store_only_and_wakes_nothing() {
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let (service, builds) = counting_service(Arc::clone(&runtime_store));
+            let service = Arc::new(service);
+            let id = dormant_session(service.as_ref()).await;
+            service
+                .record_mob_instruction_target(&id, record(1))
+                .await
+                .expect("a dormant session records the target store-only");
+            let builds_before = builds.load(Ordering::SeqCst);
+            let runtime_id =
+                PersistentSessionService::<CountingBuilder>::runtime_id_for_session(&id);
+            let runtime_state_before =
+                meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+                    .await
+                    .expect("runtime state load");
+
+            let released = service
+                .release_mob_instruction_target(&id, "mob-1")
+                .await
+                .expect("a dormant session releases the target store-only");
+            assert_eq!(released, InstructionReleaseDisposition::Released);
+            assert_eq!(
+                builds.load(Ordering::SeqCst),
+                builds_before,
+                "releasing builds no agent: it wakes nothing"
+            );
+            assert!(
+                !service.has_live_session(&id).await.unwrap(),
+                "the session stays dormant"
+            );
+            assert_eq!(
+                meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+                    .await
+                    .expect("runtime state load"),
+                runtime_state_before,
+                "releasing registers nothing with the runtime"
+            );
+            let (owner, _, slots) = committed_target(service.as_ref(), &id).await;
+            assert!(matches!(owner, InstructionTargetOwner::Unowned));
+            assert_eq!(slots, 0);
+        }
+
+        /// A repeated release finds the target unowned and writes nothing.
+        #[tokio::test]
+        async fn a_repeated_release_answers_already_unowned_and_writes_nothing() {
+            let gated = Arc::new(GatedSnapshotRuntimeStore::new());
+            let (service, _builds) = counting_service(gated.clone());
+            let service = Arc::new(service);
+            let id = dormant_session(service.as_ref()).await;
+            service
+                .record_mob_instruction_target(&id, record(1))
+                .await
+                .expect("the mob records its member's target");
+            let first = service
+                .release_mob_instruction_target(&id, "mob-1")
+                .await
+                .expect("the first release writes");
+            assert_eq!(first, InstructionReleaseDisposition::Released);
+
+            // From here on every session snapshot commit fails: a repeated
+            // release that tried to write would fail with it.
+            gated.set_fail_snapshot_commits(true);
+            let repeated = service
+                .release_mob_instruction_target(&id, "mob-1")
+                .await
+                .expect("a repeated release writes nothing");
+            assert_eq!(repeated, InstructionReleaseDisposition::AlreadyUnowned);
+        }
+
+        /// A mob releases only the target it owns: another mob's release is
+        /// refused, and another mob's record is refused until the owning mob
+        /// releases the target; then the other mob binds it.
+        #[tokio::test]
+        async fn only_the_owning_mob_releases_and_another_mob_binds_after_it() {
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let (service, _builds) = counting_service(runtime_store);
+            let service = Arc::new(service);
+            let id = dormant_session(service.as_ref()).await;
+            service
+                .record_mob_instruction_target(&id, record_for("mob-a", 1))
+                .await
+                .expect("mob A records its member's target");
+
+            let refused = service
+                .record_mob_instruction_target(&id, record_for("mob-b", 5))
+                .await
+                .expect_err("mob B's record into mob A's target is refused");
+            assert_eq!(
+                refused.code(),
+                Some(InstructionSetErrorCode::OwnedByOtherMob)
+            );
+            let refused = service
+                .release_mob_instruction_target(&id, "mob-b")
+                .await
+                .expect_err("mob B cannot release mob A's target");
+            assert_eq!(
+                refused.code(),
+                Some(InstructionSetErrorCode::OwnedByOtherMob)
+            );
+            let (owner, generation, _) = committed_target(service.as_ref(), &id).await;
+            assert!(
+                matches!(&owner, InstructionTargetOwner::Mob { mob_id, .. } if mob_id == "mob-a"),
+                "mob A still owns the target: {owner:?}"
+            );
+            assert_eq!(generation, 1);
+
+            assert_eq!(
+                service
+                    .release_mob_instruction_target(&id, "mob-a")
+                    .await
+                    .expect("mob A releases its target"),
+                InstructionReleaseDisposition::Released
+            );
+            let bound = service
+                .record_mob_instruction_target(&id, record_for("mob-b", 1))
+                .await
+                .expect("after the release mob B binds the target");
+            assert_eq!(bound.disposition, InstructionRecordDisposition::Recorded);
+            let (owner, generation, slots) = committed_target(service.as_ref(), &id).await;
+            assert!(
+                matches!(&owner, InstructionTargetOwner::Mob { mob_id, .. } if mob_id == "mob-b"),
+                "mob B owns the target: {owner:?}"
+            );
+            assert_eq!(generation, 1);
+            assert_eq!(slots, 1);
+        }
+
+        /// The comms name of member `w1` (role `worker`) of mob `mob-1`.
+        fn member_comms_name() -> meerkat_core::MemberCommsName {
+            meerkat_core::MemberCommsName::new("mob-1", "worker", "w1")
+                .expect("a member comms name")
+        }
+
+        /// A session its host created under `comms_name`, naming no member
+        /// binding, whose actor is still live.
+        async fn live_host_session_named<B: SessionAgentBuilder + 'static>(
+            service: &PersistentSessionService<B>,
+            comms_name: &meerkat_core::MemberCommsName,
+        ) -> SessionId {
+            let mut request = create_request_with_metadata("hello", InitialTurnPolicy::Defer);
+            let session = request
+                .build
+                .as_mut()
+                .and_then(|build| build.resume_session.as_mut())
+                .expect("the request carries its session");
+            let mut metadata = session
+                .session_metadata()
+                .expect("the request's session carries metadata");
+            metadata.comms_name = Some(comms_name.to_string());
+            session
+                .set_session_metadata(metadata)
+                .expect("the metadata serializes");
+            service
+                .create_session(request)
+                .await
+                .expect("create_session should succeed")
+                .session_id
+        }
+
+        /// A session as `live_host_session_named` makes it, then left
+        /// dormant: no actor serves it.
+        async fn dormant_host_session_named<B: SessionAgentBuilder + 'static>(
+            service: &PersistentSessionService<B>,
+            comms_name: &meerkat_core::MemberCommsName,
+        ) -> SessionId {
+            let id = live_host_session_named(service, comms_name).await;
+            service
+                .discard_live_session_unfenced(&id)
+                .await
+                .expect("the live actor is discarded");
+            assert!(
+                !service.has_live_session(&id).await.unwrap(),
+                "the session is dormant"
+            );
+            id
+        }
+
+        /// The member binding the committed session document names.
+        async fn committed_member_binding<B: SessionAgentBuilder + 'static>(
+            service: &PersistentSessionService<B>,
+            id: &SessionId,
+        ) -> Option<meerkat_core::MobMemberBinding> {
+            service
+                .load_authoritative_session(id)
+                .await
+                .expect("authoritative load")
+                .expect("the session document")
+                .try_session_metadata()
+                .expect("the metadata decodes")
+                .expect("the session carries metadata")
+                .mob_member_binding
+        }
+
+        /// The persistent seat stamp binds a dormant session whose comms name
+        /// is the seated member's and that names no binding, once, and holds
+        /// the session's write guards (its turn boundary and recovery gate)
+        /// across its store write, as the store-only controls do: a host's
+        /// write that comes meanwhile waits for it, then meets a member's
+        /// session (`owned_by_mob`), so the stamp neither drops a write its
+        /// host was told was recorded nor is overwritten by one. A live
+        /// session is refused `Busy`, and a session that already names a
+        /// binding, or that is named for another member or mob, is left as
+        /// it is, with no write.
+        #[tokio::test]
+        async fn a_seat_stamp_binds_a_members_dormant_session_once_under_its_write_guards() {
+            let gated = Arc::new(GatedSnapshotRuntimeStore::new());
+            let (service, builds) = counting_service(gated.clone());
+            let service = Arc::new(service);
+            let name = member_comms_name();
+            let id = dormant_host_session_named(service.as_ref(), &name).await;
+            let host = Arc::clone(&service)
+                .set_session_instruction(&id, write("host", 1, "Answer formally."))
+                .await
+                .expect("the host writes its own session");
+            assert_eq!(host.disposition, InstructionWriteDisposition::Recorded);
+            let builds_before = builds.load(Ordering::SeqCst);
+
+            // The stamp stops inside its store write, holding what it holds
+            // across that write.
+            gated.set_pause_session_boundary_commit(true);
+            let stamp = tokio::spawn({
+                let service = Arc::clone(&service);
+                let id = id.clone();
+                async move { service.bind_seated_member_session(&id, "mob-1", "w1").await }
+            });
+            gated.await_session_boundary_commit_entered().await;
+            gated.set_pause_session_boundary_commit(false);
+            assert!(
+                service
+                    .turn_finalization_gate_for_session(&id)
+                    .await
+                    .try_lock_owned()
+                    .is_err(),
+                "the stamp holds the session's turn boundary across its store write"
+            );
+            assert!(
+                service
+                    .recovery_gate_for_session(&id)
+                    .await
+                    .try_lock_owned()
+                    .is_err(),
+                "the stamp holds the session's recovery gate across its store write"
+            );
+
+            // A host write that comes now waits for the stamp, then meets a
+            // member's session.
+            let host_write = tokio::spawn({
+                let service = Arc::clone(&service);
+                let id = id.clone();
+                async move {
+                    service
+                        .set_session_instruction(&id, write("host", 2, "Answer in French."))
+                        .await
+                }
+            });
+            gated.release_session_boundary_commit();
+            tokio::time::timeout(std::time::Duration::from_secs(5), stamp)
+                .await
+                .expect("the stamp completes once its write is released")
+                .expect("join")
+                .expect("the stamp binds the member's session");
+            let refused = tokio::time::timeout(std::time::Duration::from_secs(5), host_write)
+                .await
+                .expect("the host's write answers once the stamp is done")
+                .expect("join")
+                .expect_err("the host's write meets a member's session");
+            assert_eq!(refused.code(), Some(InstructionSetErrorCode::OwnedByMob));
+            assert_eq!(
+                committed_member_binding(service.as_ref(), &id).await,
+                Some(name.to_member_binding()),
+                "the stamp is durable"
+            );
+            let (owner, generation, slots) = committed_target(service.as_ref(), &id).await;
+            assert!(
+                matches!(owner, InstructionTargetOwner::Session),
+                "the target stays its host's until the mob's first record: {owner:?}"
+            );
+            assert_eq!(
+                (generation, slots),
+                (1, 1),
+                "the host's acknowledged write is kept, and nothing else landed"
+            );
+            assert_eq!(
+                builds.load(Ordering::SeqCst),
+                builds_before,
+                "the stamp builds no agent: it wakes nothing"
+            );
+            assert!(
+                !service.has_live_session(&id).await.unwrap(),
+                "the session stays dormant"
+            );
+
+            // A live session is refused, and nothing is stamped on it.
+            let live = live_host_session_named(service.as_ref(), &name).await;
+            let busy = service
+                .bind_seated_member_session(&live, "mob-1", "w1")
+                .await
+                .expect_err("a dormant seat binds no live session");
+            assert!(matches!(busy, SessionError::Busy { .. }), "{busy:?}");
+            assert_eq!(
+                committed_member_binding(service.as_ref(), &live).await,
+                None
+            );
+
+            // Another session named for the member, dormant and unbound. From
+            // here on every session snapshot commit fails: a stamp that tried
+            // to write would fail with it.
+            let other = dormant_host_session_named(service.as_ref(), &name).await;
+            gated.set_fail_snapshot_commits(true);
+            for (mob, member) in [("mob-1", "w1"), ("mob-1", "w2"), ("mob-2", "w1")] {
+                service
+                    .bind_seated_member_session(&id, mob, member)
+                    .await
+                    .expect("a session that names a binding is left as it is");
+            }
+            assert_eq!(
+                committed_member_binding(service.as_ref(), &id).await,
+                Some(name.to_member_binding())
+            );
+            for (mob, member) in [("mob-1", "w2"), ("mob-2", "w1")] {
+                service
+                    .bind_seated_member_session(&other, mob, member)
+                    .await
+                    .expect("a session named for another member is left as it is");
+            }
+            assert_eq!(
+                committed_member_binding(service.as_ref(), &other).await,
+                None
+            );
+        }
+    }
+
+    /// Rows for pruning ordinary System rows through the persistent session
+    /// service. The rows a host names go in one audited rewrite: a dormant
+    /// session's is a store-only write that wakes nothing (its next run
+    /// builds from the pruned transcript), a live idle session converges on
+    /// it, a running session is busy, and a refused row reaches the host
+    /// typed, with nothing written.
+    mod system_row_prune_service {
+        use super::*;
+        use meerkat_core::service::{
+            SessionServiceTranscriptEditExt, SystemRowPruneRequest, SystemRowPruneResult,
+        };
+        use meerkat_core::{SystemRowPruneRefusal, SystemRowRef};
+
+        const LEGACY_ONE: &str = "Legacy prompt one: you plan the team's calendar.";
+        const LEGACY_TWO: &str = "Legacy prompt two: you plan the team's calendar and travel.";
+        const CURRENT: &str = "You plan the team's calendar, travel and billing.";
+
+        /// Counts every agent the service builds: a build is a wake.
+        #[derive(Clone, Default)]
+        struct CountingBuilder {
+            builds: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl SessionAgentBuilder for CountingBuilder {
+            type Agent = DummyAgent;
+
+            fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+                meerkat_core::SessionCommsIdentityRoot::NotKept
+            }
+
+            async fn build_agent(
+                &self,
+                req: &CreateSessionRequest,
+                event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+            ) -> Result<Self::Agent, SessionError> {
+                self.builds.fetch_add(1, Ordering::SeqCst);
+                DummyBuilder.build_agent(req, event_tx).await
+            }
+        }
+
+        fn whole_blob_service() -> (
+            PersistentSessionService<CountingBuilder>,
+            Arc<dyn RuntimeStore>,
+            Arc<AtomicUsize>,
+        ) {
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let builder = CountingBuilder::default();
+            let builds = Arc::clone(&builder.builds);
+            let service = PersistentSessionService::new(
+                builder,
+                4,
+                Arc::new(MemoryStore::new()),
+                Arc::clone(&runtime_store),
+                memory_blob_store(),
+            );
+            (service, runtime_store, builds)
+        }
+
+        fn head_canonical_service(
+            directory: &tempfile::TempDir,
+        ) -> (
+            PersistentSessionService<CountingBuilder>,
+            Arc<dyn RuntimeStore>,
+            Arc<AtomicUsize>,
+        ) {
+            let database_path = directory.path().join("runtime.sqlite3");
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(
+                meerkat_runtime::SqliteRuntimeStore::new_head_canonical(&database_path)
+                    .expect("head-canonical runtime store"),
+            );
+            let store: Arc<dyn SessionStore> = Arc::new(
+                meerkat_store::SqliteSessionStore::open(&database_path)
+                    .expect("co-located head-canonical session store"),
+            );
+            let builder = CountingBuilder::default();
+            let builds = Arc::clone(&builder.builds);
+            let service = PersistentSessionService::new(
+                builder,
+                4,
+                store,
+                Arc::clone(&runtime_store),
+                memory_blob_store(),
+            );
+            (service, runtime_store, builds)
+        }
+
+        /// A session holding `[legacy one, legacy two, current, question,
+        /// answer]`: two prompts earlier boots wrote before the current one,
+        /// and one committed turn.
+        async fn seeded_session<B: SessionAgentBuilder + 'static>(
+            service: &PersistentSessionService<B>,
+            runtime_store: &dyn RuntimeStore,
+        ) -> SessionId {
+            let created = service
+                .create_session(create_request("hello", InitialTurnPolicy::Defer))
+                .await
+                .expect("create_session should succeed");
+            let id = created.session_id;
+            committed_content_turn(service, runtime_store, &id, "What is on the calendar?").await;
+            service
+                .rewrite_session_transcript(
+                    &id,
+                    meerkat_core::SessionTranscriptRewriteRequest {
+                        selection: TranscriptRewriteSelection::MessageRange { start: 0, end: 0 },
+                        replacement: [LEGACY_ONE, LEGACY_TWO, CURRENT]
+                            .into_iter()
+                            .map(|content| {
+                                Message::System(meerkat_core::types::SystemMessage::new(
+                                    content.to_string(),
+                                ))
+                            })
+                            .collect(),
+                        reason: TranscriptRewriteReason::new("seed legacy prompts"),
+                        actor: Some("test".to_string()),
+                        expected_parent_revision: None,
+                        running_behavior: TranscriptEditRunningBehavior::Reject,
+                    },
+                )
+                .await
+                .expect("seed the legacy prompts");
+            id
+        }
+
+        fn request(remove: Vec<SystemRowRef>) -> SystemRowPruneRequest {
+            SystemRowPruneRequest {
+                remove,
+                retire_superseded_activation_bodies: false,
+                expected_parent_revision: None,
+                note: Some("legacy prompts".to_string()),
+                actor: Some("test".to_string()),
+            }
+        }
+
+        /// The reference to the System row at `index` of a history read.
+        fn system_row(messages: &[Message], index: usize) -> SystemRowRef {
+            let Message::System(system) = &messages[index] else {
+                panic!("row {index} is a System row");
+            };
+            SystemRowRef::for_row(index, &system.content)
+        }
+
+        async fn history<B: SessionAgentBuilder + 'static>(
+            service: &PersistentSessionService<B>,
+            id: &SessionId,
+        ) -> Vec<Message> {
+            service
+                .read_history(id, SessionHistoryQuery::default())
+                .await
+                .expect("read the session history")
+                .messages
+        }
+
+        /// A dormant session's rows go in a store-only write: the prune
+        /// builds no agent and the session stays dormant, the committed
+        /// document holds the pruned transcript, and the session's next run
+        /// builds from it.
+        async fn prune_removes_named_rows_of_a_dormant_session_without_waking(
+            service: PersistentSessionService<CountingBuilder>,
+            runtime_store: Arc<dyn RuntimeStore>,
+            builds: Arc<AtomicUsize>,
+        ) {
+            let id = seeded_session(&service, runtime_store.as_ref()).await;
+            service
+                .discard_live_session_unfenced(&id)
+                .await
+                .expect("the live actor is discarded");
+            assert!(
+                !service.has_live_session(&id).await.unwrap(),
+                "the session is dormant"
+            );
+            let before = history(&service, &id).await;
+            let builds_before = builds.load(Ordering::SeqCst);
+
+            let result = service
+                .prune_system_rows(
+                    &id,
+                    request(vec![system_row(&before, 0), system_row(&before, 1)]),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("the legacy prompts are pruned: {error}"));
+            let SystemRowPruneResult::Pruned {
+                removed_rows,
+                message_count,
+                ..
+            } = result
+            else {
+                panic!("the prune commits: {result:?}");
+            };
+            assert_eq!(removed_rows, 2);
+            assert_eq!(message_count, before.len() - 2);
+            assert_eq!(
+                builds.load(Ordering::SeqCst),
+                builds_before,
+                "the prune builds no agent: it wakes nothing"
+            );
+            assert!(
+                !service.has_live_session(&id).await.unwrap(),
+                "the session stays dormant"
+            );
+            let stored = service
+                .load_authoritative_session(&id)
+                .await
+                .expect("authoritative load")
+                .expect("the session document");
+            assert_eq!(stored.messages(), &before[2..]);
+
+            // The next run wakes the session from its committed document, as
+            // a host's resume does: a runtime turn applies to a live session.
+            service
+                .create_session(resume_request(stored))
+                .await
+                .expect("the session wakes from its pruned document");
+            committed_content_turn(&service, runtime_store.as_ref(), &id, "And tomorrow?").await;
+            let after = history(&service, &id).await;
+            assert_eq!(
+                &after[..before.len() - 2],
+                &before[2..],
+                "the next run builds from the pruned transcript"
+            );
+            assert!(
+                !after.iter().any(|message| matches!(
+                    message,
+                    Message::System(system)
+                        if system.content == LEGACY_ONE || system.content == LEGACY_TWO
+                )),
+                "the pruned rows do not come back"
+            );
+        }
+
+        #[tokio::test]
+        async fn prune_removes_named_rows_of_a_dormant_session_without_waking_whole_blob() {
+            let (service, runtime_store, builds) = whole_blob_service();
+            prune_removes_named_rows_of_a_dormant_session_without_waking(
+                service,
+                runtime_store,
+                builds,
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn prune_removes_named_rows_of_a_dormant_session_without_waking_head_canonical() {
+            let directory = tempfile::tempdir().expect("prune test directory");
+            let (service, runtime_store, builds) = head_canonical_service(&directory);
+            prune_removes_named_rows_of_a_dormant_session_without_waking(
+                service,
+                runtime_store,
+                builds,
+            )
+            .await;
+        }
+
+        /// A live idle session converges on the pruned transcript.
+        #[tokio::test]
+        async fn prune_converges_a_live_idle_session() {
+            let (service, runtime_store, _builds) = whole_blob_service();
+            let id = seeded_session(&service, runtime_store.as_ref()).await;
+            assert!(
+                service.has_live_session(&id).await.unwrap(),
+                "the session is live and idle"
+            );
+            let before = history(&service, &id).await;
+            let result = service
+                .prune_system_rows(&id, request(vec![system_row(&before, 0)]))
+                .await
+                .unwrap_or_else(|error| panic!("the legacy prompt is pruned: {error}"));
+            assert!(
+                matches!(
+                    result,
+                    SystemRowPruneResult::Pruned {
+                        removed_rows: 1,
+                        ..
+                    }
+                ),
+                "{result:?}"
+            );
+            let live = service
+                .export_live_session(&id)
+                .await
+                .expect("the live session converged on the committed transcript");
+            assert_eq!(live.messages(), &before[1..]);
+        }
+
+        /// A session with a running turn refuses the prune as busy, before
+        /// anything is read or written.
+        #[tokio::test]
+        async fn prune_is_busy_while_a_turn_runs() {
+            let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let builder = BlockingRunBuilder::new();
+            let service = Arc::new(PersistentSessionService::new(
+                builder.clone(),
+                4,
+                Arc::clone(&store),
+                Arc::clone(&runtime_store),
+                memory_blob_store(),
+            ));
+            let created = service
+                .create_session(create_request("seed", InitialTurnPolicy::Defer))
+                .await
+                .expect("create_session should succeed");
+            let session_id = created.session_id;
+            let admission = service
+                .reserve_runtime_turn_admission(&session_id)
+                .await
+                .expect("runtime turn admission should be reserved");
+            let turn_service = Arc::clone(&service);
+            let turn_id = session_id.clone();
+            let active_turn = tokio::spawn(async move {
+                turn_service
+                    .apply_runtime_turn_with_reserved_admission(
+                        &turn_id,
+                        RunId::new(),
+                        runtime_content_turn_request("a slow question"),
+                        RunApplyBoundary::RunStart,
+                        vec![InputId::new()],
+                        admission,
+                    )
+                    .await
+            });
+            builder.wait_for_entered_runs(1).await;
+
+            let refused = service
+                .prune_system_rows(&session_id, request(Vec::new()))
+                .await;
+            assert!(
+                matches!(refused, Err(SessionError::Busy { ref id }) if id == &session_id),
+                "a prune refuses a running session: {refused:?}"
+            );
+
+            builder.release_notify.add_permits(1);
+            active_turn
+                .await
+                .expect("active turn task should join")
+                .expect("active turn should complete after the refusal");
+        }
+
+        const CALENDAR_ONE: &str = "CALENDAR-ONE: book meetings in the morning only.";
+        const CALENDAR_TWO: &str = "CALENDAR-TWO: book meetings in the afternoon only.";
+
+        /// Commit one activation of the `calendar` key on the live session
+        /// `id`, under its turn finalization boundary.
+        async fn activate<B: SessionAgentBuilder + 'static>(
+            service: &PersistentSessionService<B>,
+            id: &SessionId,
+            activation: &str,
+            supersedes: Option<&str>,
+            body: &str,
+        ) {
+            let boundary = service.acquire_runtime_turn_finalization_guard(id).await;
+            service
+                .activate_instruction_under_runtime_turn_boundary(
+                    id,
+                    InstructionActivationRequest {
+                        revision: InstructionRevisionRef {
+                            namespace: InstructionNamespace::new("app.skills").unwrap(),
+                            key: InstructionKey::new("calendar").unwrap(),
+                            revision_id: InstructionRevisionId::new(format!("rev-{activation}"))
+                                .unwrap(),
+                            content_sha256: InstructionContentDigest::for_body(body),
+                        },
+                        activation_id: meerkat_core::InstructionActivationId::new(activation)
+                            .unwrap(),
+                        expectation: supersedes.map_or(
+                            InstructionActivationExpectation::Absent,
+                            |previous| {
+                                InstructionActivationExpectation::Effective(
+                                    meerkat_core::InstructionActivationId::new(previous).unwrap(),
+                                )
+                            },
+                        ),
+                        supersedes: supersedes.map(|previous| {
+                            meerkat_core::InstructionActivationId::new(previous).unwrap()
+                        }),
+                        body: body.to_string(),
+                    },
+                    None,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("commit activation {activation}: {error}"));
+            drop(boundary);
+        }
+
+        /// A retiring prune through the service: a live idle session holding
+        /// `[legacy one, legacy two, current, question, answer, act-1,
+        /// act-2]` prunes the first legacy row and retires act-1's body in
+        /// one commit, whose span runs over the conversation rows. The
+        /// authoritative document holds the retired row with its marker at
+        /// envelope 5 and reloads; the live session converges on it.
+        async fn a_retiring_prune_persists_at_envelope_5(
+            service: &PersistentSessionService<CountingBuilder>,
+            runtime_store: &dyn RuntimeStore,
+        ) -> SessionId {
+            let id = seeded_session(service, runtime_store).await;
+            activate(service, &id, "act-1", None, CALENDAR_ONE).await;
+            activate(service, &id, "act-2", Some("act-1"), CALENDAR_TWO).await;
+            assert!(
+                service.has_live_session(&id).await.unwrap(),
+                "the session is live and idle"
+            );
+            let before = history(service, &id).await;
+            let mut retiring = request(vec![system_row(&before, 0)]);
+            retiring.retire_superseded_activation_bodies = true;
+            let result = service
+                .prune_system_rows(&id, retiring)
+                .await
+                .unwrap_or_else(|error| panic!("the retiring prune commits: {error}"));
+            let SystemRowPruneResult::Pruned {
+                removed_rows,
+                retired_bodies,
+                ..
+            } = result
+            else {
+                panic!("the prune commits: {result:?}");
+            };
+            assert_eq!((removed_rows, retired_bodies), (1, 1));
+
+            let stored = service
+                .load_authoritative_session(&id)
+                .await
+                .expect("authoritative load")
+                .expect("the session document");
+            let retired = stored
+                .messages()
+                .iter()
+                .find_map(|message| match message {
+                    Message::System(system)
+                        if system
+                            .instruction_activation
+                            .as_ref()
+                            .is_some_and(|identity| identity.activation_id.as_str() == "act-1") =>
+                    {
+                        Some(system.clone())
+                    }
+                    _ => None,
+                })
+                .expect("the superseded activation row stays");
+            assert!(
+                retired.retired_instruction_body.is_some()
+                    && !retired.content.contains(CALENDAR_ONE),
+                "the stored row holds the retired form: {}",
+                retired.content
+            );
+            assert_eq!(
+                stored.persisted_envelope_version(),
+                5,
+                "a retired body is written at envelope 5"
+            );
+            let reloaded = Session::from_persisted_bytes(&stored.to_persisted_bytes().unwrap())
+                .expect("the document reloads");
+            assert_eq!(reloaded.messages(), stored.messages());
+            let live = service
+                .export_live_session(&id)
+                .await
+                .expect("the live session converged on the retired row");
+            assert_eq!(live.messages(), stored.messages());
+            id
+        }
+
+        #[tokio::test]
+        async fn a_retiring_prune_persists_at_envelope_5_whole_blob() {
+            let (service, runtime_store, _builds) = whole_blob_service();
+            a_retiring_prune_persists_at_envelope_5(&service, runtime_store.as_ref()).await;
+        }
+
+        #[tokio::test]
+        async fn a_retiring_prune_persists_at_envelope_5_head_canonical() {
+            let directory = tempfile::tempdir().expect("prune test directory");
+            let (service, runtime_store, _builds) = head_canonical_service(&directory);
+            let id =
+                a_retiring_prune_persists_at_envelope_5(&service, runtime_store.as_ref()).await;
+            let store =
+                meerkat_store::SqliteSessionStore::open(directory.path().join("runtime.sqlite3"))
+                    .expect("a second handle on the head-canonical session store");
+            let head = meerkat_core::session_store::IncrementalSessionStore::load_head(&store, &id)
+                .await
+                .expect("the head reads")
+                .expect("the head row");
+            assert_eq!(head.version, 5, "the head row is at envelope 5");
+        }
+
+        /// A stale `expected_parent_revision` reaches the host typed, with the
+        /// revision it passed and the current one, and nothing is written.
+        #[tokio::test]
+        async fn a_stale_expected_revision_reaches_the_host_typed() {
+            let (service, runtime_store, _builds) = whole_blob_service();
+            let id = seeded_session(&service, runtime_store.as_ref()).await;
+            let SystemRowPruneResult::NothingToPrune {
+                revision: read_revision,
+                ..
+            } = service
+                .prune_system_rows(&id, request(Vec::new()))
+                .await
+                .expect("an empty prune answers the revision")
+            else {
+                panic!("an empty prune writes nothing");
+            };
+            let before = history(&service, &id).await;
+            let SystemRowPruneResult::Pruned {
+                revision: current, ..
+            } = service
+                .prune_system_rows(&id, request(vec![system_row(&before, 0)]))
+                .await
+                .expect("a later write")
+            else {
+                panic!("the prune commits");
+            };
+            let after = history(&service, &id).await;
+
+            let mut stale = request(vec![system_row(&after, 0)]);
+            stale.expected_parent_revision = Some(read_revision.clone());
+            let error = service
+                .prune_system_rows(&id, stale)
+                .await
+                .expect_err("a stale revision refuses the prune");
+            assert_eq!(
+                error.transcript_revision_conflict_revisions(),
+                Some((read_revision, current)),
+                "{error:?}"
+            );
+            assert_eq!(history(&service, &id).await, after, "nothing is written");
+        }
+
+        /// A refused row reaches the host typed (the row's index and cause in
+        /// the error's structured data), and nothing is written.
+        #[tokio::test]
+        async fn a_refused_row_reaches_the_host_typed() {
+            let (service, runtime_store, _builds) = whole_blob_service();
+            let id = seeded_session(&service, runtime_store.as_ref()).await;
+            let before = history(&service, &id).await;
+            let mut stale = system_row(&before, 0);
+            stale.content_sha256 =
+                meerkat_core::InstructionContentDigest::for_body("what an earlier read showed");
+            let error = service
+                .prune_system_rows(&id, request(vec![stale]))
+                .await
+                .expect_err("a stale row refuses the prune");
+            assert_eq!(
+                error.system_row_prune_refusal(),
+                Some((0, SystemRowPruneRefusal::DigestMismatch)),
+                "{error:?}"
+            );
+            assert_eq!(history(&service, &id).await, before, "nothing is written");
         }
     }
 }

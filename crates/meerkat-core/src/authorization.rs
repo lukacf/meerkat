@@ -1270,7 +1270,7 @@ mod tests {
             OperationRefusalKind::MalformedFacts,
         ] {
             let refusal = OperationRefused::new(kind);
-            assert!(refusal.kind() == kind);
+            assert_eq!(refusal.kind(), kind);
             assert_eq!(
                 refusal.to_string(),
                 "operation unavailable under current authorization"

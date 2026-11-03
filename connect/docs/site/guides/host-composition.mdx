@@ -1,0 +1,449 @@
+---
+title: "Compose Connect in a host"
+description: "Add reusable integration components while retaining your existing runtime, policy and lifecycle owners."
+icon: "cubes"
+---
+
+Connect is composable. Use individual service operations, setup components or the management UI, and supply the account, policy and lifecycle services your application needs.
+
+Connect adapters use public Meerkat and Meta interfaces. The application opts into them; Core and Meta remain independent of Connect.
+
+## Native application lifecycle
+
+These are application-author APIs. Ordinary users use the standalone
+`meerkat-connect` CLI or their application's integrated Console. They do not
+assemble a gateway, private channel, policy files or recovery records themselves.
+
+Choose the startup path from the application's existing transaction:
+
+| Path | Application supplies | Completion boundary |
+| --- | --- | --- |
+| Original-owner Restore | The retained `HostBootstrapSelection`, original native persistence and source callbacks | Reopen the selected owners and await ordinary native initialization; missing state is an error |
+| Fresh application | An admitted `ApplicationPreparation` plan and a trusted finalizer | Observe the completed compiler artifact, finalize and publish the exact selection, then join its adoption and native initialization in the same child |
+| Admitted replacement | An `ApplicationUpdateStartup` from the existing update transaction, its prior accepted policy, original persistence and candidate-source callbacks | Carry that exact selection into native declaration/resume and await its actual outcome |
+
+A selected path and hash describe inputs; they do not authorize an application
+transaction. The application retains its source lease, policy validation,
+publication and recovery decisions. Fresh preparation and replacement each
+consume one attempt. A lost reply or failed startup cannot authorize another
+preparation, update or publication. Restore can reconnect only after cleanup of
+the previous native child and its private channel has settled.
+
+The [Python runtime classes](/sdks/python#native-application-composition) and
+[TypeScript builder bindings](/sdks/typescript#native-application-composition)
+implement these three paths. They use the existing native runtime and callback
+owner. The separate [Rust `NativeSetup` API](/sdks/rust#embed-the-native-setup-conversation)
+embeds a standalone setup conversation over its factory-created native adapter;
+it is not an application replacement API.
+
+Fresh application startup prepares the offline integration resources before the
+gateway can acknowledge `meta/init`. Set Meta's `gateway_init_timeout` explicitly
+to cover that preparation within the host's startup budget. Its 60-second default
+can expire while preparation is still making progress; the bundled bootstrap
+uses its own 300-second budget. `init_deadline` separately bounds settlement
+after native init has been accepted, while `ApplicationPreparation.timeout`
+bounds the private preparation observation. Selecting only those latter budgets
+does not extend the pre-accept request wait. Keep normal cancellation and cleanup
+handling; a timeout is an unknown outcome, not permission to retry installation.
+
+During fresh preparation, cancellation closes private admission and prevents
+publication that has not entered. An entered finalizer and native initialization
+must settle. Retain their actual outcomes and any returned native cleanup
+capability, including after an error. Cleanup is not rollback; a preparation or
+bootstrap acknowledgement is not native readiness or completion of the user's
+original task.
+
+Service connectors expose operations under the selected account and grants.
+Agent frontends additionally require a compatible long-running host that owns
+admission, routing and delivery. These startup adapters preserve those host
+bindings; they do not supply a generic frontend host or make a one-turn realm
+session persistent. The [custom-extension path](#custom-extension-dependencies)
+describes package compatibility.
+
+## Prepare a setup researcher
+
+For broad discovery beyond supported registry searches, give the dedicated
+setup researcher an explicitly authorized general public research capability
+alongside Connect's setup and acquisition tools. Exact known packages or
+candidates found through supported registry searches can still be acquired
+without that broader capability. `PreparedSetupHelper` preserves the host's
+selected inline research profile and adds the setup server; it does not supply
+or authorize research tools on the host's behalf.
+
+Connect includes `setup_search_github` and `setup_read_github` on its existing
+setup MCP server for public repository discovery and document reading. The
+agent chooses its own queries and sources. These tools use anonymous GitHub API
+requests; no provider account or separate research server is required.
+
+For a prepared application helper, give the exact native helper member explicit
+`Invoke` grants for the selected research operations. Application compilation
+selects that optional server ceiling before retaining the helper definition and
+resource owner; completion and restore require the same compiled-policy selection.
+The prepared server ceiling and current application policy must both permit each
+call. An advanced standalone
+setup host can select the same surface with `--enable-public-github-research`
+during preparation. This selection does not authorize calls by itself.
+
+The host must classify the operations' behavior explicitly; an MCP annotation or
+allowlist alone is not read-only authority. Keep the task's data, audience and
+expiry limits when composing the researcher. Public query text can still disclose
+private knowledge, so target validation is not a semantic privacy guarantee.
+
+Installing a complete MCP server and granting access to selected operations are
+separate decisions. Public service access selects declared raw MCP operations;
+the application policy separately grants the corresponding model-facing tools.
+Installing a package does not grant every operation it exports. Operation
+filtering does not make an unsafe selected operation or unsafe startup behavior
+safe: inspect those behaviors before installation and access approval.
+
+## Shared multi-caller setup
+
+Shared planning members, shared preparation and waiter restoration are deferred
+to 0.9.5. The 0.9.4 source retains ordinary setup, including independent callers,
+caller-specific authority, cancellation and recovery. It does not expose the
+shared workflow or peer-transport APIs.
+
+## Cancel one original's operations
+
+These APIs describe unreleased development source. For an authenticated original
+retained by the host, pass its exact `PrivateOriginalRef`:
+
+| Surface | Method |
+| --- | --- |
+| Rust | `ToolkitGatewayHost::cancel_original_operation` |
+| Python | `PrivateHostClient.cancel_original_operation` |
+| TypeScript | `PrivateHostClient.cancelOriginalOperation` |
+
+The SDK returns `operations_cancelled` when the original source cancellation
+completes. This does not mean every entered operation, process or model run has
+stopped. Sibling requests and shared access retain their own owners. A timeout
+leaves the outcome unknown; the SDK does not repeat the command automatically.
+
+The host starts its acquisition recovery worker only after native bootstrap
+publishes readiness. Prepared-owner adoption alone does not start it. Preserve
+that native lifecycle boundary when composing the host.
+
+## Recover unpublished service approvals
+
+<Note>
+This is unreleased development functionality. Focused native, verified-Console
+and terminal controls pass; explicit installed recovery consumption remains
+unqualified. Published Connect 0.9.0 and the successful V40 business package do
+not include it.
+</Note>
+
+A failed approval can leave native access without a published task source.
+The installed host can expose the existing canonical records for an explicit
+operator decision. Missing publication alone does not prove abandonment.
+
+Select the applicable adapter when the existing application compiler creates
+its pinned `ApplicationAcquisitionParameters`, before Build/Prepare. These are
+independent opt-ins; omitted values preserve existing behavior. For Console:
+
+```rust
+use meerkat_connect::application_gateway::console_setup::ConsoleSetupSelection;
+
+parameters.console_setup = Some(
+    ConsoleSetupSelection::for_application_issued_access(
+        "https://console.example.org".to_owned(),
+    )
+    .with_operator_service_recovery(),
+);
+```
+
+This retains `recovery_management: "operator_unpublished_service_approvals"`
+alongside the existing origin and requester-leaf policy. The current verified
+human must also be the exact retained operator, with current administrative and
+member access. A viewer or requester-leaf grant alone cannot select operator
+cleanup. Use the host's supported exact-selection producer; do not edit a compiled
+artifact after approval. Ordinary Forge generation does not enable this option.
+Its custom-selection consumption and full-controller reconstruction are separate
+Forge/MobkitInstaller responsibilities.
+
+In the integrated setup panel, open **Unresolved service approvals**, inspect the
+agent, operations, resource, native access and policy observation, then choose
+**Revoke this unresolved approval** for an actionable row. The same current
+login and owner are checked again at entry. A retained published source or another
+approval's child is preserved.
+
+For an application whose configured service operator is the actual local OS
+operator, independently select the inherited-terminal adapter:
+
+```rust
+use toolkit_mobkit::host_gateway::LocalOperatorRecoveryPolicy;
+
+parameters.local_operator_recovery =
+    Some(LocalOperatorRecoveryPolicy::UnpublishedServiceApprovals);
+```
+
+After normal native startup, type `/recover` while that application's inherited
+operator terminal is idle. Choose a displayed row number, review the protected
+request, then enter its exact displayed `approve <approval-id>` or
+`deny <approval-id>` response. `refresh`, `next` when offered, and `back` operate
+only on that host's inventory. The existing terminal keeps sole input ownership.
+A remote Console issuer cannot be treated as the local OS operator.
+
+A trusted Rust host can use its existing `ToolkitGatewayHost` directly:
+`local_service_recovery()` returns the selected owner-bound view; `page(None)`
+reads the first bounded offer, and `revoke(&page, row_id)` consumes a displayed
+row after the host's explicit operator decision. Retain the existing host and
+native owners; do not open another runtime or pass a principal as proof. A custom
+host opts in with `with_local_operator_recovery(...)` before native attachment.
+
+Cleanup attempts exact native grant revocation. It does not uninstall software,
+remove credentials, roll back tool policy or stop running work. An absent parent,
+partial result or lost acknowledgement stays unresolved. Do not replay an old
+offer or retry automatically; obtain a fresh inventory before any later deliberate
+decision. Policy is an offer-time observation, not proof of current policy or
+logout settlement. This adds no standalone `meerkat-connect --realm` recovery
+command or general remote CLI transport.
+
+## Helper catalog access after reset
+
+<Note>
+This setting is unreleased development functionality. Published Connect 0.9.0
+does not support it.
+</Note>
+
+By default, `authorities.helper_catalog` authorizes only the helper session
+captured during preparation. A host that needs catalog access after normal helper
+resets can explicitly select:
+
+```json
+{
+  "helper_catalog": {
+    "issuance_id": "new-helper-catalog-parent",
+    "scope": "current_helper_successors"
+  }
+}
+```
+
+Connect retains this application-owned parent separately from the helper's
+operation grants. For new helper work, native dispatch binds the current helper
+and Connect derives a catalog grant for that exact session. Already retained work
+stays pinned to its original target; this does not retarget or replay it after a
+reset. Parent revocation still applies. Catalog search and loading do not
+authorize tool execution, installation or account use.
+
+The parent leaves resource-domain restrictions open because future helper
+session IDs are not yet known. The trusted Connect binder supplies the exact
+application and current-session domain for each child. Application-domain
+isolation therefore depends on that binding; the parent alone does not enforce it.
+
+If the host also selects explicit `agent_setup.helper_targets`, it must
+independently request the matching catalog target with `target: null`. That
+request authorizes catalog delegation to the selected helper, not direct catalog
+access by the original agent. Keep all other targets unchanged.
+
+Use new issuance IDs for changed selections, including an enclosing agent setup
+selection whose bounds change. Existing grants cannot be reinterpreted or renewed
+in place. Omitted scope and `exact_session` retain the previous behavior; a reset
+alone grants nothing. Host adapters must preserve and validate the new scope and
+the returned `helper.catalog_capability` before advertising this mode.
+
+## Acquire another public service through the same live helper (development)
+
+<Note>
+This optional development path now passes an installed controlled Console API
+case: one session uses X, requests Y through the same helper, reuses X's checked
+job and then uses X+Y with fresh grants. Five displayed grants are revoked and
+all physical owners join. Autonomous choice, Browser interaction, helper reset
+and authenticated-service batches are separate qualifications.
+</Note>
+
+The trusted host uses the existing `AgentSetupCapabilityRequest.helper_targets`
+selection with `OperatorSetup::configure_agent_setup`, or the stopped-host
+`configure_application_agent_setup_with_helper` method. Select the actual helper
+and its required operation targets, including an independent catalog target
+(`target: null`) with its own `issuance_id`. Preserve canonical target order and
+all existing operation grants. A target list or installed job is not authority
+by itself. Normal Forge preparation already emits this optional catalog entry;
+that source support is separate from installed warm acceptance.
+
+For public-service review, `InstalledServiceTaskSource::prepare_public_service`
+captures the current configured selection before the continued task's first
+binding. It requires the same audience and distinct actual agents and sessions.
+`InstalledServiceTask::has_configured_setup` reports the selected proposal, not a
+permit. Use `prepare_public_instruction` and the returned
+`PreparedPublicInstruction::{Single, WithSetup}` through its `request` and
+`approve` methods. The existing multi-service review uses the same selected owner.
+These methods are additive; existing public signatures and struct-literal fields
+are unchanged.
+
+The same protected access review names the new task's setup authority, exact
+service set and task deadline. Its metadata permission covers both named agents
+across both named sessions: the full four combinations, not only two paired
+agent/session entries. Read that scope and the separate persistent tool-policy
+successor before approving. Setup, catalog and service targets remain independently
+authorized. First admission requires the complete selected basis; after admission,
+revoking setup access blocks another acquisition without revoking independent
+business access.
+
+The continued task can request another public integration through that same
+surviving helper. To keep an earlier connection X while adding Y, the helper must
+select both exact checked jobs for the new access review. A still-current X job
+can be selected again without reinstalling it, but the new continued task gets
+fresh grants for both X and Y. Earlier grants are not copied or revived, and every
+required attachment must be Ready before continuation.
+
+Omitted, report-only, initially expired or otherwise valid but ineligible optional
+setup selection keeps legacy public preparation. A selection that changes after
+capture refuses; it does not silently downgrade. Software and authenticated
+preparation keep their previous paths. Legacy singleton and `public_services_v1`
+wire bytes remain unchanged. The setup-enabled `public_services_with_setup_v2`
+and catalog-v2 records are explicit new versions; older readers are not
+transparently forward compatible.
+
+## Advanced library host setup
+
+Start with the [local installation guide](/library/local-install) for the current
+distribution and setup command. The existing `bootstrap_host.py` installs and
+verifies an offline setup client, then calls `prepare_host.py` to write its host
+configuration. A host with an already verified client can use `prepare_host.py`
+directly. Successful preparation supplies a generated `mcp.json`; it does not
+start setup or connect an account.
+
+The host registers that setup connection with its existing MCP support. The
+agent can then choose, inspect, configure and install an integration through the
+exposed setup tools. After validating and authorizing the installed launch, a
+Meerkat host can use the existing public `mcp_add` operation to attach it to the
+original live session. Keep setup and that session alive through the handoff.
+The native runtime applies the change at a turn boundary; actual catalog
+discovery and invocation establish whether the selected tool is usable.
+
+For deferred operations, the original session needs its own explicitly authorized
+`tool_catalog_search` and `tool_catalog_load` scope. A service `Invoke` grant alone
+does not expose a hidden tool. Select `tool_policy.catalog` for a reviewed grant
+when needed. Leaving it `null` can remain valid when the session already has the
+required catalog authority or the host exposes the operation eagerly.
+
+See [live-session attachment](/guides/native-mcp#add-tools-to-a-live-session)
+for the supported mapping and example. `persisted=False` attaches the configuration to the live session. Inspect its connection state after the next turn boundary.
+
+For an already installed stdio MCP integration, use the
+[ordinary Meerkat host configuration](/guides/native-mcp). Use the application's native setup, authentication and continuation owners for those parts of the workflow.
+
+## Enable selected Node builds (unreleased)
+
+A host may opt into explicit Node build plans during resource preparation. Pass
+`--node-build-profile /absolute/path/profile.json` and
+`--node-build-profile-sha256 <exact-sha256>` through the existing resource-packaging
+or host-preparation command. The profile requires an enabled Node validator and
+explicitly selected Node and npm runtimes. Omission preserves ordinary installation
+with npm lifecycle scripts disabled.
+
+The version-1 host profile has scope `selected_node_build` and contains the exact
+Node target, named executables and input files with absolute paths and hashes, a
+fixed nonsecret environment, and time/output limits. Preparation retains the
+profile in the existing resource bundle; it does not install the referenced
+compiler, headers or other tools. Their paths must be valid on the execution host.
+Do not put credentials in this profile or its environment.
+
+The agent sees a bounded planning projection through `setup_state.node_build`
+and proposes commands using those IDs. It cannot supply a replacement host profile
+through tool arguments. The existing software-install approval carries the checked
+plan, and the existing installer owns execution and readback. No separate build
+agent, runtime or Core API is required.
+
+See [packages that need a build](/acquisition/local-install#packages-that-need-a-build-unreleased)
+for the setup sequence. Focused preparation controls and one Linux compile/load
+fixture pass. Use matching rebuilt development resources; this is not in 0.9.0.
+
+## Standalone service-secret setup
+
+The standalone terminal adds initial credential setup for checked library stdio
+integrations and selected Python/Node stdio packages. Library metadata supplies
+a complete `credential_environment_references` mapping and published operations.
+Outside-catalog metadata supplies researched `environment_secret_slots` names
+and an exact `operation_tools` map in the selected portable entry, with binding
+authentication. These are process requirements, never verified account identity.
+The canonical checker retains them in the same approved plan and reconciliation;
+omitting them preserves software installation without enabling secret setup.
+
+Connect keeps library field labels distinct from selected environment names and
+lowers names only into native `McpStdioConfig.secret_env`. The generic installed
+MCP document remains unchanged. Through `toolkit_enable_secret_service`, the
+model proposes only the installed job, operations, agent and explicit access
+lifetime. The protected terminal reviews the concrete configuration and collects
+values privately. Both before input and after setup closes, selected packages
+retain exact package and activation/declaration byte checks.
+
+The same retained review, native `ResolvedStorage` and original `AgentFactory`
+reach finalization after setup has closed and its host resources have settled.
+Connect uses the realm's existing `McpRealmPersistTarget` to add the installation,
+`set_mcp_service_secret` with the factory's paired `ProviderAuthPersistence` to
+save each slot, and the existing stock grant owner to issue exact reviewed
+access. Slot presence must be observed as all `NotStored` before setters begin
+and all `Stored` before the grant. Core's `RealmMcpServiceSecrets` supplies the
+slots to later native MCP launches. This uses the service-secret storage mode; it does not create a model
+account or an OAuth connector identity.
+
+The route requires the service name to be absent at review and finalization,
+including from the inherited view. Only a known successful
+`add(config, Some(reviewed_generation))` may proceed to credential writes. A
+competing initial installer that loses that native configuration comparison
+writes no slots. An already present definition is refused, even if it is equal
+or has empty slots. This prevents two supported initial attempts from combining
+their values. It does not introduce a new vault or an atomic multi-slot update.
+
+The original cancellation listener remains in use during finalization. An
+entered native operation settles before stopping; an observed cancellation
+prevents later effects. Embedding callers must retain the finalization future
+until it settles. Retained results still describe any saved configuration,
+credentials or grant. Failure does not trigger automatic retry or rollback. Preserve known failure and uncertain write outcomes
+separately. A later `Stored` observation proves presence, not which uncertain
+write landed. Credential changes affect future reads; an already running process
+retains its launch environment. Repair, rotation and account switching need their
+own concrete owner contracts.
+
+The terminal finalizes service-secret setup through native realm configuration and credential storage. It then returns to the setup conversation; use the service in a new ordinary agent session in that realm. An integrated Console supplies its application-owned persistence and runtime composition.
+
+See [the terminal journey](/guides/request-an-integration#set-up-a-service-key-in-the-terminal)
+for the user-facing steps.
+
+## Advanced host composition
+
+<Warning>
+Use the native application APIs above for startup. Supply the following application services when composing setup into a custom host.
+</Warning>
+
+<Steps>
+  <Step title="Choose a current adoption surface">
+    Python and TypeScript service libraries run without Meerkat or Meta. Supply an explicitly selected authenticated transport and enforce grants before each operation. For inert discovery, use the package library and read-only discovery dispatcher.
+  </Step>
+  <Step title="Provide application owners">
+    Identify current credential, account, principal, grant, approval, persistence, deployment and delivery owners. Establish who creates and checks their revisions. A metadata capability declaration cannot enforce them.
+  </Step>
+  <Step title="Select exact integration inputs">
+    Pin package identity, version, strategy, exports, artifact or remote endpoint observation, configuration and dependency closure. Check compatibility before importing code or starting processes.
+  </Step>
+  <Step title="Compose native tools through the existing owner">
+    Use Meerkat's existing native tool-bundle registration owner and the accepted Meta composition path for the selected upstream version. Registering a dispatcher does not itself grant every profile access. Avoid private parallel registration or session authorities.
+  </Step>
+  <Step title="Verify the actual execution surface">
+    Observe `identity_resolved_tools` for the intended identity and dispatch the selected operation through the real runtime. Exercise the supported restoration and spawn paths before claiming durable availability. Customizer registration alone does not establish these facts.
+  </Step>
+  <Step title="Project state to users">
+    Read current owner observations into the UI. Keep package, account, grant, runtime and frontend outcomes distinct. Authenticate every management read and revalidate every command at the actual owner.
+  </Step>
+</Steps>
+
+## Custom extension dependencies
+
+Validate an extension's selected files, dependencies and import origins before binding it. The pure-Python dependency profile accepts closed `py3-none-any` packages without extras, native code, namespace-only packages or startup hooks. Extensions with no third-party dependencies can use their compiled release records.
+
+Recheck the selected files before binding and retain the application's lifecycle, policy and domain checks. See [package contracts](/reference/packages).
+
+## Own the borrowed transport
+
+Python hosts prepare each HTTPX client once before sharing it. TypeScript hosts supply an authenticated Fetch binding. Account changes use an explicit new selection; neither SDK infers identity from a display label or supplies OAuth.
+
+Keep auth, hooks and transport configuration stable during operations. Preserve the selected method, destination, body and cancellation. Disable hidden request replay, including replay during credential refresh. The host closes its own transport after borrowed work has settled.
+
+## Compose setup and continuation
+
+Before offering functional acquisition, the host needs authenticated request admission, durable setup work, exact preparation ownership, human-action handling, permitted activation, role readiness and original-task continuation. Missing any of these is a declared unsupported path.
+
+The original agent's continuation targets its durable task and identity. Resolve the current session through Meerkat/Meta when resuming; an old session ID or a model-supplied correlation is not authority.
+
+See [stores](/reference/stores), [deployment](/reference/deployment), [continuation](/reference/continuation) and [readiness](/concepts/readiness).

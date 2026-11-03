@@ -1,0 +1,89 @@
+.forge-setup {
+  --forge-paper: #faf8f3;
+  --forge-ink: #292b27;
+  --forge-muted: #6d7067;
+  --forge-line: #dedfd5;
+  --forge-accent: #bf582f;
+  box-sizing: border-box;
+  width: min(480px, 100vw);
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  padding: 24px 26px 18px;
+  background: var(--forge-paper);
+  color: var(--forge-ink);
+  border-left: 1px solid var(--forge-line);
+  font: 14px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  text-align: left;
+  isolation: isolate;
+}
+.forge-setup *, .forge-setup *::before, .forge-setup *::after { box-sizing: border-box; }
+.forge-setup [hidden] { display: none !important; }
+.forge-setup h1, .forge-setup h2, .forge-setup p { margin: 0; }
+.forge-setup button, .forge-setup input, .forge-setup textarea { font: inherit; }
+.forge-setup button { cursor: pointer; border-radius: 9px; transition: background-color 120ms ease; }
+.forge-setup button:disabled { cursor: default; opacity: .55; }
+.forge-setup button:focus-visible, .forge-setup input:focus-visible, .forge-setup textarea:focus-visible, .forge-setup pre:focus-visible {
+  outline: 2px solid var(--forge-accent); outline-offset: 3px;
+}
+.forge-setup__header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.forge-setup__eyebrow { color: var(--forge-muted); font-size: 10px; font-weight: 650; letter-spacing: .14em; line-height: 1.5; }
+.forge-setup__close { padding: 7px 10px; color: var(--forge-muted); background: transparent; border: 1px solid transparent; }
+.forge-setup__close:hover { background: #eeece5; }
+.forge-setup__intro { display: flex; align-items: flex-start; gap: 14px; padding: 24px 0 22px; }
+.forge-setup__orbit { display: block; flex: 0 0 34px; width: 34px; height: 34px; position: relative; border: 1px solid #b4b9ac; border-radius: 50%; margin-top: 1px; }
+.forge-setup__orbit::before { content: ""; position: absolute; inset: 6px; border: 1px solid var(--forge-ink); border-radius: 50%; }
+.forge-setup__orbit::after { content: ""; position: absolute; width: 8px; height: 8px; top: 12px; left: 12px; border-radius: 50%; background: var(--forge-accent); }
+.forge-setup__title { font-size: 23px; font-weight: 600; line-height: 1.2; letter-spacing: -.035em; }
+.forge-setup__help { margin-top: 8px !important; color: var(--forge-muted); max-width: 38ch; font-size: 12px; }
+.forge-setup__status { position: relative; padding: 13px 0 12px 17px; border-block: 1px solid var(--forge-line); }
+.forge-setup__status::before { content: ""; position: absolute; top: 20px; left: 0; width: 5px; height: 5px; border-radius: 50%; background: #6e7862; }
+.forge-setup[data-state="reconnecting"] .forge-setup__status::before,
+.forge-setup[data-state="unavailable"] .forge-setup__status::before { background: var(--forge-accent); }
+.forge-setup__status-text { font-size: 12px; font-weight: 550; }
+.forge-setup__completion { color: var(--forge-muted); font-size: 11px; margin-top: 5px !important; }
+.forge-setup__completion:empty { display: none; }
+.forge-setup__check { padding: 0; margin-top: 9px; border: 0; background: transparent; color: var(--forge-muted); font-size: 11px !important; text-decoration: underline; text-underline-offset: 3px; }
+.forge-setup__protected { padding: 18px; margin-top: 20px; background: #fffefb; border: 1px solid #aeb2a5; border-radius: 13px; box-shadow: 0 2px 6px #292b2705; }
+.forge-setup__private-badge { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 12px; margin: -18px -18px 16px; padding: 11px 18px; border-bottom: 1px solid var(--forge-line); }
+.forge-setup__private-badge .forge-setup__eyebrow::before { content: ""; display: inline-block; width: 6px; height: 6px; border: 2px solid var(--forge-ink); border-radius: 50%; box-sizing: content-box; margin-right: 8px; background: var(--forge-accent); vertical-align: -1px; }
+.forge-setup__private-note { color: var(--forge-muted); font-size: 9px; }
+.forge-setup__decision-title { font-size: 18px; line-height: 1.3; font-weight: 600; letter-spacing: -.02em; }
+.forge-setup__decision-help { margin-top: 8px !important; color: var(--forge-muted); font-size: 12px; }
+.forge-setup__decisions { display: flex; flex-direction: column; gap: 8px; margin-top: 18px; }
+.forge-setup__decision { min-height: 44px; padding: 11px 13px; border: 1px solid var(--forge-ink); background: var(--forge-ink); color: #fffefb; text-align: center; line-height: 1.4; }
+.forge-setup__decision:hover:not(:disabled) { background: #44473e; }
+.forge-setup__decision--secondary { background: transparent; border-color: var(--forge-line); color: var(--forge-ink); }
+.forge-setup__decision--secondary:hover:not(:disabled) { background: #f5f3ed; }
+.forge-setup__choice-origin { display: block; color: var(--forge-muted); font-size: 10px; margin-top: 4px; overflow-wrap: anywhere; }
+.forge-setup__origin { display: block; margin-top: 13px; padding: 10px 12px; border: 1px solid var(--forge-line); border-radius: 6px; color: var(--forge-ink); font: 12px/1.5 ui-monospace, monospace; overflow-wrap: anywhere; }
+.forge-setup__password-form { margin-top: 17px; }
+.forge-setup__password-label { display: block; color: var(--forge-ink); font-size: 12px; font-weight: 550; }
+.forge-setup__password { display: block; width: 100%; margin-top: 7px; padding: 10px 12px; border: 1px solid #c5c9bb; border-radius: 7px; background: #fff; color: var(--forge-ink); }
+.forge-setup__password-form > button { width: 100%; margin-top: 13px; }
+.forge-setup__proposal { white-space: pre-wrap; overflow-wrap: anywhere; margin: 15px 0 0; max-height: 320px; overflow: auto; padding: 14px; border: 1px solid var(--forge-line); border-radius: 7px; background: #f5f4ef; font: 11px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; user-select: text; }
+.forge-setup__answer-status { margin-top: 14px !important; color: var(--forge-accent); font-size: 12px; }
+.forge-setup__chat { margin-top: 24px; }
+.forge-setup .toolkit-conversation { border: 0; border-radius: 0; padding: 0; background: transparent; color: var(--forge-ink); font: inherit; }
+.forge-setup .toolkit-conversation h2 { font-size: 14px; font-weight: 600; }
+.forge-setup .toolkit-conversation > p { color: var(--forge-muted); font-size: 11px; margin-top: 8px; }
+.forge-setup .toolkit-conversation ol { list-style: none; margin: 20px 0 0; padding: 0; }
+.forge-setup .toolkit-conversation li { padding: 13px 0; border-top: 1px solid var(--forge-line); }
+.forge-setup .toolkit-conversation li strong { color: var(--forge-muted); font-size: 10px; letter-spacing: .035em; }
+.forge-setup .toolkit-conversation li p, .forge-setup .toolkit-conversation [aria-label="Agent response in progress"] p { margin-top: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.forge-setup .toolkit-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.forge-setup .toolkit-controls button { padding: 7px 10px; border: 1px solid var(--forge-line); background: transparent; color: var(--forge-muted); font-size: 11px; }
+.forge-setup .toolkit-controls button[type="submit"] { background: var(--forge-ink); border-color: var(--forge-ink); color: #fffefb; }
+.forge-setup .toolkit-conversation form { margin-top: 20px; }
+.forge-setup .toolkit-conversation label { color: var(--forge-muted); font-size: 11px; }
+.forge-setup .toolkit-conversation textarea { display: block; width: 100%; margin-top: 7px; min-height: 92px; max-height: 220px; resize: vertical; padding: 12px 13px; background: #fffefb; color: var(--forge-ink); border: 1px solid #c5c9bb; border-radius: 10px; line-height: 1.5; font-size: 13px; }
+.forge-setup__footer { padding: 20px 0 2px; margin-top: 24px !important; border-top: 1px solid var(--forge-line); color: var(--forge-muted); font-size: 10px; line-height: 1.6; }
+@media (max-width: 640px) {
+  .forge-setup { width: 100%; border-left: 0; padding: 18px 20px; }
+  .forge-setup__intro { padding: 20px 0; }
+  .forge-setup__title { font-size: 22px; }
+  .forge-setup__protected { padding: 17px; }
+  .forge-setup__private-badge { margin: -17px -17px 16px; padding-inline: 17px; }
+  .forge-setup__password, .forge-setup .toolkit-conversation textarea { font-size: 16px; }
+}
+@media (prefers-reduced-motion: reduce) { .forge-setup button { transition: none; } }

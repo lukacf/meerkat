@@ -1,0 +1,37 @@
+---
+title: "GitHub MCP"
+description: "Read account information, repository commits and files through the GitHub integration."
+icon: "github"
+---
+
+The GitHub integration exposes selected repository reads through a local MCP server. Use Connect to select the profile and configure access for the repositories your agent needs.
+
+## Operations
+
+| Tool | Use |
+| --- | --- |
+| `get_me` | Read the authenticated account profile |
+| `list_commits` | Read a page of commits from a selected repository |
+| `get_file_contents` | Read a repository path, optionally at a specific commit |
+
+## Account setup
+
+Supply a GitHub token with access to the intended repositories through the host's credential controls. The server receives it as `GITHUB_PERSONAL_ACCESS_TOKEN`. Use a separate process for each account and retire that process when changing accounts.
+
+## Direct MCP configuration
+
+The selected server runs over stdio with:
+
+```text
+stdio --read-only --gh-host https://github.com --tools get_me,list_commits,get_file_contents
+```
+
+The host selects the executable and child environment. Keep unrelated GitHub, proxy and logging settings out of that environment. Retain the bundled notices alongside the executable.
+
+After connection, inspect the tool list and apply the intended agent grants. For reproducible file reads, use a commit SHA. For commit lists, provide positive integer `page` and `perPage` values and consume returned pages explicitly.
+
+## Process and output handling
+
+Set a caller deadline and retain process ownership through cleanup. Apply the host's network and output controls to repository content and provider errors. File reads may involve additional tree or reference requests; resource links are resolved by the consuming host.
+
+See [native MCP integration](/guides/native-mcp) for attachment and [access control](/reference/access-control) for operation and resource permissions.

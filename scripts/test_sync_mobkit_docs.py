@@ -126,6 +126,19 @@ class SyncMobKitDocsTests(unittest.TestCase):
             )
             self.assertEqual(sync.workspace_version(cargo_toml), "1.2.3")
 
+    def test_reads_the_meta_crate_package_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            cargo_toml = Path(temp) / "Cargo.toml"
+            cargo_toml.write_text(
+                '[package]\nname = "meerkat-meta"\nversion = "0.9.8"\nedition.workspace = true\n\n'
+                '[dependencies]\nserde = { version = "1" }\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(sync.package_version(cargo_toml), "0.9.8")
+            cargo_toml.write_text('[package]\nname = "meerkat-meta"\nversion.workspace = true\n', encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "package version not found"):
+                sync.package_version(cargo_toml)
+
     def test_release_navigation_replaces_retired_pages_at_the_product_boundary(self) -> None:
         source_config = {
             "navigation": {
@@ -186,15 +199,15 @@ class SyncMobKitDocsTests(unittest.TestCase):
                 {"navigation": {"products": []}},
             )
 
-    def test_version_stamp_names_the_source_commit_date_and_workspace_version(self) -> None:
+    def test_version_stamp_names_the_source_commit_date_and_mobkit_version(self) -> None:
         commit = "a" * 40
         stamp = sync.version_stamp("1.2.3", "main", commit, "2026-09-22")
         self.assertIn("Mirrored from MobKit main at", stamp)
-        self.assertIn(
-            f"[{commit[:12]}](https://github.com/lukacf/meerkat-meta/commit/{commit})", stamp
-        )
+        self.assertIn(f"[{commit[:12]}](https://github.com/lukacf/meerkat/commit/{commit})", stamp)
         self.assertIn("on 2026-09-22", stamp)
-        self.assertIn("MobKit workspace version 1.2.3 at that commit", stamp)
+        self.assertIn("MobKit version 1.2.3 at that commit", stamp)
+        standalone = sync.version_stamp("1.2.3", "main", commit, "2026-09-22", sync.STANDALONE_REPOSITORY)
+        self.assertIn(f"[{commit[:12]}](https://github.com/lukacf/meerkat-meta/commit/{commit})", standalone)
         self.assertNotIn("This page documents MobKit v", stamp)
         self.assertTrue(stamp.startswith("*") and stamp.endswith("*"))
         self.assertNotIn("\n", stamp)
@@ -294,6 +307,10 @@ class SyncMobKitDocsTests(unittest.TestCase):
             sync.build_snapshot(source, destination, source_ref=None, require_clean=True)
 
             manifest = json.loads((destination / "_source.json").read_text(encoding="utf-8"))
+            # A standalone meerkat-meta checkout still renders, with its own
+            # repository's links and its workspace version.
+            self.assertEqual(manifest["source_repository"], sync.STANDALONE_REPOSITORY)
+            self.assertEqual(manifest["source_path"], "docs")
             self.assertEqual(manifest["source_version"], "1.2.3")
             self.assertEqual(manifest["source_branch"], "main")
             self.assertEqual(manifest["source_ref"], "main")
@@ -305,7 +322,11 @@ class SyncMobKitDocsTests(unittest.TestCase):
             self.assertIs(manifest["source_docs_dirty"], False)
             self.assertEqual(manifest["content_sha256"], sync.validate.tree_digest(destination))
             expected_stamp = sync.version_stamp(
-                "1.2.3", "main", manifest["source_commit"], manifest["source_commit_date"]
+                "1.2.3",
+                "main",
+                manifest["source_commit"],
+                manifest["source_commit_date"],
+                sync.STANDALONE_REPOSITORY,
             )
             pages = sorted(destination.rglob("*.mdx"))
             self.assertEqual(len(pages), 5)
@@ -320,7 +341,7 @@ class SyncMobKitDocsTests(unittest.TestCase):
             introduction = (destination / "introduction.mdx").read_text(encoding="utf-8")
             self.assertIn("[deploy](/mobkit/guides/deploy)", introduction)
             self.assertIn("Mirrored from MobKit main at", introduction)
-            self.assertIn("MobKit workspace version 1.2.3 at that commit", introduction)
+            self.assertIn("MobKit version 1.2.3 at that commit", introduction)
             self.assertNotIn("v1.2.3", introduction)
             self.assertIn('icon: "boxes-stacked"', introduction)
             for page_id in ("quickstart", "api/rpc"):
@@ -344,6 +365,60 @@ class SyncMobKitDocsTests(unittest.TestCase):
                 sync.build_snapshot(
                     source, Path(temp) / "dirty", source_ref="main", require_clean=True
                 )
+
+    def test_in_tree_source_records_this_repository_its_docs_path_and_the_meta_crate_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp) / "meerkat"
+            meta = repo / "meta"
+            docs = meta / "docs"
+            docs.mkdir(parents=True)
+            # The repository's own workspace version is not MobKit's.
+            (repo / "Cargo.toml").write_text(
+                '[workspace]\n\n[workspace.package]\nversion = "9.9.9"\n',
+                encoding="utf-8",
+            )
+            crate = meta / "crates" / "meerkat-meta"
+            crate.mkdir(parents=True)
+            (crate / "Cargo.toml").write_text(
+                '[package]\nname = "meerkat-meta"\nversion = "0.9.8"\n',
+                encoding="utf-8",
+            )
+            group = {"group": "Start", "pages": ["introduction"]}
+            (docs / "docs.json").write_text(
+                json.dumps({"navigation": {"tabs": [{"tab": "Documentation", "groups": [group]}]}}),
+                encoding="utf-8",
+            )
+            (docs / "introduction.mdx").write_text(
+                '---\ntitle: "Introduction"\ndescription: "Intro"\n---\n\nSee [deploy](/guides/deploy).\n',
+                encoding="utf-8",
+            )
+            (repo / "README.md").write_text("readme\n", encoding="utf-8")
+            git = ["git", "-C", str(repo), "-c", "user.name=test", "-c", "user.email=test@example.com"]
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+            subprocess.run([*git, "add", "."], check=True)
+            subprocess.run([*git, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "monorepo"], check=True)
+            # Uncommitted work outside meta/docs does not make the docs dirty.
+            (repo / "README.md").write_text("edited\n", encoding="utf-8")
+
+            destination = Path(temp) / "mobkit"
+            sync.build_snapshot(meta, destination, source_ref=None, require_clean=True)
+
+            manifest = json.loads((destination / "_source.json").read_text(encoding="utf-8"))
+            commit = sync.git_output(repo, "rev-parse", "HEAD")
+            self.assertEqual(manifest["source_repository"], "https://github.com/lukacf/meerkat")
+            self.assertEqual(manifest["source_path"], "meta/docs")
+            self.assertEqual(manifest["source_version"], "0.9.8")
+            self.assertEqual(manifest["source_ref"], "main")
+            self.assertEqual(manifest["source_commit"], commit)
+            self.assertIs(manifest["source_docs_dirty"], False)
+            introduction = (destination / "introduction.mdx").read_text(encoding="utf-8")
+            self.assertIn(f"[{commit[:12]}](https://github.com/lukacf/meerkat/commit/{commit})", introduction)
+            self.assertIn("MobKit version 0.9.8 at that commit", introduction)
+            self.assertIn("[deploy](/mobkit/guides/deploy)", introduction)
+
+            (docs / "introduction.mdx").write_text("dirty", encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "uncommitted changes"):
+                sync.build_snapshot(meta, Path(temp) / "dirty", source_ref="main", require_clean=True)
 
 
 if __name__ == "__main__":

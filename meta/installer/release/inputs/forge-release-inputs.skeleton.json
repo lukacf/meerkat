@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "kind": "forge-release-inputs",
+  "guide": {
+    "version": "0.9.3",
+    "core_version": "0.9.3",
+    "meta_source": "3b0073a834b93725c20cfa97bbd6db099348ece6",
+    "core_source": "d21cd3ef1d0fdefa43f826464802702149decdee"
+  },
+  "targets": {
+    "linux-x86_64": {
+      "files": {
+        "guide/rpc_gateway": {
+          "url": "https://github.com/lukacf/meerkat-meta/releases/download/v0.9.3/meta-rpc-gateway-0.9.3-x86_64-unknown-linux-gnu.tar.gz",
+          "archive_size": 101221673,
+          "archive_sha256": "b416df1ba5648ca3ed849dec2692f664c37b0e7277232a6d2421ac53961a18b0",
+          "member": "rpc_gateway",
+          "size": 479374128,
+          "sha256": "757519ed1210d16d865e2e37de3fba098a1cca6ccba6a7e1dc646963fb04a335"
+        }
+      },
+      "gateway": "guide/rpc_gateway",
+      "selection": null,
+      "paths": null
+    }
+  }
+}

@@ -667,6 +667,7 @@ pub fn resolve_effective_turn_config(
         // Durable mob-member identity is carried forward verbatim at resume so
         // mob ownership routing keeps recognizing the member after restart.
         mob_member_binding: metadata.mob_member_binding.clone(),
+        mob_incarnation: None,
         keep_alive,
         checkpointer: context.checkpointer,
         silent_comms_intents: build_state.silent_comms_intents.clone(),
@@ -709,6 +710,11 @@ pub fn resolve_effective_turn_config(
         runtime_build_mode: context.runtime_build_mode,
         initial_turn_metadata: None,
         initial_work_authorization: None,
+        // The grant gate is durable session truth, like the access policy:
+        // a recovered session keeps its gated names closed until a live
+        // grant opens them.
+        grant_gated_tools: (!metadata.tooling.grant_gated.is_empty())
+            .then(|| metadata.tooling.grant_gated.clone()),
     };
     if let Some(override_mob) = overrides.override_mob {
         build.apply_generated_create_only_mob_operator_access(
@@ -789,6 +795,7 @@ mod tests {
                     spawn_tool_access_policy: None,
                     application_tool_policy: crate::ApplicationToolPolicyBinding::Unmanaged,
                     active_skills: Some(vec![skill_key("persisted-skill")]),
+                    grant_gated: Default::default(),
                 },
                 keep_alive: false,
                 comms_name: Some("peer-a".to_string()),

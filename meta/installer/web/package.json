@@ -1,0 +1,24 @@
+{
+  "name": "@meerkat/meta-forge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "node --check build.mjs && node --test *.test.mjs",
+    "test": "node --test *.test.mjs"
+  },
+  "dependencies": {
+    "clsx": "2.1.1",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
+    "@modelcontextprotocol/ext-apps": "2.0.3",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/core": "2.0.0",
+    "zod": "4.3.6"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.10"
+  }
+}

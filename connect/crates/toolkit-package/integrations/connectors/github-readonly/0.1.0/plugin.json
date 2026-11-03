@@ -1,0 +1,75 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "github-readonly",
+  "version": "0.1.0",
+  "description": "Retained remote MCP recipe with explicit source observations and newcomer prerequisites.",
+  "author": {
+    "name": "Meerkat Toolkit"
+  },
+  "license": "MIT OR Apache-2.0",
+  "extensions": {
+    "ai.rkat.toolkit": {
+      "schema_version": 1,
+      "identity": {
+        "publisher": "meerkat-toolkit",
+        "name": "github-readonly",
+        "version": "0.1.0"
+      },
+      "display_name": "GitHub read-only MCP",
+      "description": "Retained remote MCP recipe with explicit source observations and newcomer prerequisites.",
+      "provenance": {
+        "source": "https://raw.githubusercontent.com/github/github-mcp-server/85598ba6e1256f7ebf4867b95d63b833c4549264/docs/remote-server.md",
+        "source_revision": "sha256:871acf118eb662bbaf7a8e3306d2a3bbe2716343b0c8965695ba376e85247f80",
+        "license": "MIT OR Apache-2.0 for Toolkit-authored recipe metadata only. MIT for inspected GitHub source repository; hosted endpoint remains subject to GitHub service terms. No source is copied.",
+        "notices": [
+          "This package is authored by Meerkat Toolkit, not by the provider.",
+          "No upstream implementation is vendored. Hosted endpoints are mutable services, not pinned executable artifacts.",
+          "Offline recipe validation does not establish installation, authentication, readiness or supported live operations."
+        ],
+        "local_patches": []
+      },
+      "strategies": [
+        {
+          "id": "hosted",
+          "kind": "remote_mcp",
+          "instructions": "Use the retained read-only endpoint for default GitHub toolsets. Verify the intended user, organization and repository scope through the host credential owner. Inspect current tools and schemas before binding. The endpoint exposes read tools according to the cited provider contract; Toolkit still classifies and enforces each selected operation.",
+          "sources": [
+            "https://raw.githubusercontent.com/github/github-mcp-server/85598ba6e1256f7ebf4867b95d63b833c4549264/docs/remote-server.md",
+            "https://raw.githubusercontent.com/github/github-mcp-server/85598ba6e1256f7ebf4867b95d63b833c4549264/LICENSE"
+          ],
+          "known_requirements": [],
+          "unresolved_details": [
+            "Current endpoint schema, account identity, effective grants and owner verification must be supplied at selection time."
+          ]
+        }
+      ],
+      "known_exports": [
+        {
+          "id": "github-readonly.service",
+          "role": "service_connector",
+          "description": "GitHub read-only MCP; only individually selected and owner-verified capabilities may be bound."
+        }
+      ],
+      "assessments": [
+        {
+          "status": "experimental",
+          "scope": "Retained recipe and source inspection only. Live operation and deployment conformance are unverified.",
+          "source_revision": "sha256:871acf118eb662bbaf7a8e3306d2a3bbe2716343b0c8965695ba376e85247f80",
+          "assessed_at_unix_ms": 1790773041608,
+          "evidence": [
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "github",
+              "revision": "sha256:871acf118eb662bbaf7a8e3306d2a3bbe2716343b0c8965695ba376e85247f80"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "github-license",
+              "revision": "sha256:9e48ecfa18e2b15169746a3c97beda4d1d6c6796097038498ca434ca7e0ccd44"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -9028,6 +9028,10 @@ mod tests {
     impl meerkat_session::SessionAgentBuilder for ExactProjectionTestAgentBuilder {
         type Agent = ExactProjectionTestAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &meerkat_core::service::CreateSessionRequest,
@@ -10439,7 +10443,7 @@ mod tests {
             )
             .await
             .expect("commit A's provider acknowledgement");
-        tokio::time::timeout(std::time::Duration::from_secs(3600), delivery_task)
+        tokio::time::timeout(std::time::Duration::from_hours(1), delivery_task)
             .await
             .map_err(|_| "deadlock: B's release never woke after A's acknowledgement committed")?
             .expect("B's release task does not panic");

@@ -230,7 +230,8 @@ impl TurnFailureSourceKind {
             AgentError::BuildError(_)
             | AgentError::SessionIdentityInUse(_)
             | AgentError::DeclaredToolUnknown(_)
-            | AgentError::ToolArtifactRefused(_) => Self::BuildError,
+            | AgentError::ToolArtifactRefused(_)
+            | AgentError::ToolGrantGateRefused(_) => Self::BuildError,
             AgentError::AuthReauthRequired { .. } => Self::AuthReauthRequired,
             AgentError::CallbackPending { .. } | AgentError::CallbackBatchPending { .. } => {
                 Self::CallbackPending

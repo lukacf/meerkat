@@ -79,6 +79,17 @@ const { normalizePath, readMetadata, root, workspacePackages, packageDir } = awa
   "./rust-test-selector.mjs"
 );
 const { loadNonRustReaders, INVENTORY_PATH } = await import("./ci-non-rust-readers.mjs");
+const { CORE, loadProducts } = await import("./ci-products.mjs");
+// A crate of a product other than Core (ci/products.json) lives under that
+// product's root, and its root-relative literals ("docs/...", ".claude/...")
+// name the product's own tree: they resolve against the product root.
+const PRODUCT_ROOTS = loadProducts()
+  .filter((product) => product.name !== CORE)
+  .map((product) => product.root);
+function literalRootOf(pkgDir) {
+  const productRoot = PRODUCT_ROOTS.find((candidate) => pkgDir === candidate || pkgDir.startsWith(`${candidate}/`));
+  return productRoot ? resolve(root, productRoot) : root;
+}
 
 // Repository root entries that belong to no crate.
 export const ROOT_DIRS = [
@@ -1055,6 +1066,7 @@ export function scanReferences(model, index) {
     for (const { pkg, targets } of byPkg.values()) {
       const pkgDir = packageDir(pkg);
       const crateDir = resolve(root, pkgDir);
+      const literalRoot = literalRootOf(pkgDir);
       const ctx = { tokens, crateDir, index: fileIndex };
       fileIndex.memo.clear();
       const consumed = new Set();
@@ -1215,7 +1227,8 @@ export function scanReferences(model, index) {
             continue;
           }
           if (candidate.base === "root-fallback") {
-            if (existsInCheckout(candidate.rel.replace(/\/$/, ""), index)) push(k, "path-literal", resolve(root, candidate.rel), value);
+            const fallback = repoPathOf(resolve(literalRoot, candidate.rel));
+            if (fallback !== null && existsInCheckout(fallback.replace(/\/$/, ""), index)) push(k, "path-literal", resolve(literalRoot, candidate.rel), value);
             continue;
           }
           // A crate-local entry of the same name wins: crate tests run with
@@ -1225,7 +1238,7 @@ export function scanReferences(model, index) {
             if (joined && receiver === null) continue;
             if (candidate.bare && !joined && !inRepoPathArray(tokens, k, index)) continue;
           }
-          push(k, "path-literal", resolve(root, candidate.rel), value);
+          push(k, "path-literal", resolve(literalRoot, candidate.rel), value);
         }
       }
     }

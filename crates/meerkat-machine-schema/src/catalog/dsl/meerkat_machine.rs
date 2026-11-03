@@ -2529,6 +2529,9 @@ pub enum RunStartHoldReason {
     MobStop,
     /// A restored member waits until its host has published its tools.
     ToolsNotPublished,
+    /// A mob member whose host preparation is owed (a role move its mob
+    /// holds) starts no run until its mob releases it.
+    HostPreparation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -4032,6 +4035,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             turn_tool_overlay_allow_active: bool,
             turn_tool_overlay_allow_names: Set<ToolName>,
             turn_tool_overlay_deny_names: Set<ToolName>,
+            // The scoped tool grant gate. `tool_grant_gated_names` are the
+            // names this build marked grant-gated, replaced by every build
+            // (ReplaceToolGrantGate). `tool_grant_open_names` are the gated
+            // names a live grant opened at the last model-request boundary
+            // (ApplyToolGrantOpenSet). The gated names no grant opened are
+            // hidden. The machine never reads a grant: the open set is the
+            // grant service's adjudication, applied as an input.
+            tool_grant_gated_names: Set<ToolName>,
+            tool_grant_open_names: Set<ToolName>,
 
             // --- Input lifecycle substate ---
             // Authenticated shell supplies exact opaque association bytes. These
@@ -4868,6 +4880,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             turn_tool_overlay_allow_active = false,
             turn_tool_overlay_allow_names = EmptySet,
             turn_tool_overlay_deny_names = EmptySet,
+            tool_grant_gated_names = EmptySet,
+            tool_grant_open_names = EmptySet,
             // Input lifecycle substate
             input_authority_bindings = EmptyMap,
             input_authority_batch_keys = EmptyMap,
@@ -5613,6 +5627,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             RuntimeState { runtime_id: String },
             ModelRoutingStatus { session_id: SessionId },
             SetModelRoutingBaseline { baseline_model: String, realtime_capable: bool },
+            // `target_carries_transcript`: whether every request the target
+            // would serve can carry the session's transcript as it stands
+            // (the operator-instruction entry rows the session wrote itself,
+            // where they stand, and its ordered instruction activations). A
+            // target that cannot is a permanent refusal: the switch is
+            // denied, never held.
             RequestFiniteSwitchTurn {
                 request_id: String,
                 target_model: String,
@@ -5623,6 +5643,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 approval_denied: bool,
                 approval_reason: Option<Enum<RoutingSwitchApprovalReason>>,
                 realtime_detach_allowed: bool,
+                target_carries_transcript: bool,
             },
             RequestUntilChangedSwitchTurn {
                 request_id: String,
@@ -5633,6 +5654,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 approval_denied: bool,
                 approval_reason: Option<Enum<RoutingSwitchApprovalReason>>,
                 realtime_detach_allowed: bool,
+                target_carries_transcript: bool,
             },
             CompleteUntilChangedSwitchTurnReconfigure { request_id: String },
             AdmitModelRoutingAssistantTurn,
@@ -7350,6 +7372,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             // releases it.
             HoldInputController { input_id: String },
             ReleaseInputController { input_id: String },
+            // The scoped tool grant gate: every build replaces the gated
+            // names (every open name closes), and every model-request
+            // boundary applies the gated names a live grant opens.
+            ReplaceToolGrantGate { gated: Set<ToolName> },
+            ApplyToolGrantOpenSet { open: Set<ToolName> },
         }
 
         surface_only [
@@ -10706,6 +10733,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.supervisor_bound_epoch == self.supervisor_rotation_previous_epoch)
         }
 
+        // The scoped tool grant gate opens only names this build gated.
+        invariant tool_grant_open_names_are_gated {
+            for_all(name in self.tool_grant_open_names,
+                self.tool_grant_gated_names.contains(name))
+        }
+
 
         // =====================================================================
         // Direct transitions
@@ -11826,6 +11859,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 if initial_run_start_holds.contains(RunStartHoldReason::ToolsNotPublished) {
                     self.run_start_holds.insert(RunStartHoldReason::ToolsNotPublished);
                 }
+                if initial_run_start_holds.contains(RunStartHoldReason::HostPreparation) {
+                    self.run_start_holds.insert(RunStartHoldReason::HostPreparation);
+                }
                 self.current_session_llm_identity = None;
                 self.current_session_capability_surface = None;
                 self.current_session_capability_surface_status =
@@ -11862,6 +11898,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 }
                 if initial_run_start_holds.contains(RunStartHoldReason::ToolsNotPublished) {
                     self.run_start_holds.insert(RunStartHoldReason::ToolsNotPublished);
+                }
+                if initial_run_start_holds.contains(RunStartHoldReason::HostPreparation) {
+                    self.run_start_holds.insert(RunStartHoldReason::HostPreparation);
                 }
             }
             to Idle
@@ -12007,6 +12046,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 if initial_run_start_holds.contains(RunStartHoldReason::ToolsNotPublished) {
                     self.run_start_holds.insert(RunStartHoldReason::ToolsNotPublished);
                 }
+                if initial_run_start_holds.contains(RunStartHoldReason::HostPreparation) {
+                    self.run_start_holds.insert(RunStartHoldReason::HostPreparation);
+                }
             }
             to Idle
             emit RuntimeNotice { kind: RuntimeNoticeKind::Recover, detail: "stopped session re-admitted for resume" }
@@ -12045,6 +12087,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 }
                 if initial_run_start_holds.contains(RunStartHoldReason::ToolsNotPublished) {
                     self.run_start_holds.insert(RunStartHoldReason::ToolsNotPublished);
+                }
+                if initial_run_start_holds.contains(RunStartHoldReason::HostPreparation) {
+                    self.run_start_holds.insert(RunStartHoldReason::HostPreparation);
                 }
                 self.registration_phase = RegistrationPhase::Queuing;
                 self.runtime_stop_deferred = false;
@@ -13994,13 +14039,49 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit ModelRoutingStatusChanged { topology_epoch: self.model_routing_topology_epoch }
         }
 
+        // A switch onto a target that cannot carry the session's transcript
+        // as it stands is denied whatever else holds: the refusal is
+        // permanent, so a request held for it would never end.
+        transition RequestFiniteSwitchTurnTranscriptUnsupported {
+            per_phase [Idle, Attached, Running]
+            on input RequestFiniteSwitchTurn {
+                request_id, target_model, turns, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                approval_reason, realtime_detach_allowed, target_carries_transcript
+            }
+            guard "transcript_not_carried" { !target_carries_transcript }
+            update {
+                self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
+                self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::CapabilityPolicy);
+            }
+            to Idle
+            emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::CapabilityPolicy }
+        }
+
+        transition RequestUntilChangedSwitchTurnTranscriptUnsupported {
+            per_phase [Idle, Attached, Running]
+            on input RequestUntilChangedSwitchTurn {
+                request_id, target_model, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                approval_reason, realtime_detach_allowed, target_carries_transcript
+            }
+            guard "transcript_not_carried" { !target_carries_transcript }
+            update {
+                self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
+                self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::CapabilityPolicy);
+            }
+            to Idle
+            emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::CapabilityPolicy }
+        }
+
         transition RequestFiniteSwitchTurnApprovalUnavailable {
             per_phase [Idle, Attached, Running]
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed
+                approval_reason, realtime_detach_allowed, target_carries_transcript
             }
+            guard "transcript_carried" { target_carries_transcript }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "approval_unavailable" { requires_approval && !approval_available }
             update {
@@ -14016,8 +14097,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed
+                approval_reason, realtime_detach_allowed, target_carries_transcript
             }
+            guard "transcript_carried" { target_carries_transcript }
             guard "approval_denied" { requires_approval && approval_available && approval_denied }
             guard "approval_reason_present" { approval_reason != None }
             update {
@@ -14037,8 +14119,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed
+                approval_reason, realtime_detach_allowed, target_carries_transcript
             }
+            guard "transcript_carried" { target_carries_transcript }
             guard "scoped_conflict" {
                 self.model_routing_turn_override_id != None
                 || self.model_routing_operation_override_id != None
@@ -14057,8 +14140,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed
+                approval_reason, realtime_detach_allowed, target_carries_transcript
             }
+            guard "transcript_carried" { target_carries_transcript }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "positive_turns" { turns > 0 }
             guard "approval_satisfied" { !requires_approval || (approval_available && !approval_denied) }
@@ -14086,8 +14170,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestUntilChangedSwitchTurn {
                 request_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed
+                approval_reason, realtime_detach_allowed, target_carries_transcript
             }
+            guard "transcript_carried" { target_carries_transcript }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "approval_satisfied" { !requires_approval || (approval_available && !approval_denied) }
             update {
@@ -14110,8 +14195,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestUntilChangedSwitchTurn {
                 request_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed
+                approval_reason, realtime_detach_allowed, target_carries_transcript
             }
+            guard "transcript_carried" { target_carries_transcript }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "approval_unavailable" { requires_approval && !approval_available }
             update {
@@ -14127,8 +14213,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestUntilChangedSwitchTurn {
                 request_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed
+                approval_reason, realtime_detach_allowed, target_carries_transcript
             }
+            guard "transcript_carried" { target_carries_transcript }
             guard "approval_denied" { requires_approval && approval_available && approval_denied }
             guard "approval_reason_present" { approval_reason != None }
             update {
@@ -36513,6 +36600,51 @@ macro_rules! meerkat_catalog_machine_dsl {
                     self.next_staged_visibility_revision = staged_revision;
                 }
             }
+            to Idle
+        }
+
+        // ReplaceToolGrantGate: every build installs its scoped tool grant
+        // gate, the names it marked grant-gated, and every open name closes.
+        // A new build therefore starts closed until a model-request boundary
+        // applies the open set a live grant admits. A build without a gate
+        // installs the empty gate, which clears the last build's.
+        transition ReplaceToolGrantGate {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ReplaceToolGrantGate { gated }
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.tool_grant_gated_names = gated;
+                self.tool_grant_open_names = EmptySet;
+            }
+            to Idle
+            emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }
+        }
+
+        // ApplyToolGrantOpenSet: a model-request boundary applies the gated
+        // names a live grant opens now, as the grant service adjudicated
+        // them. Only gated names open: a set naming any other name matches
+        // no arm and is refused, and the gate stays as it was.
+        transition ApplyToolGrantOpenSetChanged {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ApplyToolGrantOpenSet { open }
+            guard "session_registered" { self.session_id != None }
+            guard "open_names_are_gated" {
+                for_all(name in open, self.tool_grant_gated_names.contains(name))
+            }
+            guard "open_set_changed" { open != self.tool_grant_open_names }
+            update {
+                self.tool_grant_open_names = open;
+            }
+            to Idle
+            emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }
+        }
+
+        transition ApplyToolGrantOpenSetUnchanged {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ApplyToolGrantOpenSet { open }
+            guard "session_registered" { self.session_id != None }
+            guard "open_set_unchanged" { open == self.tool_grant_open_names }
+            update {}
             to Idle
         }
 

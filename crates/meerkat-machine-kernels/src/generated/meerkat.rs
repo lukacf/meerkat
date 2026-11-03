@@ -10128,12 +10128,15 @@ pub enum RunStartHoldReason {
     MobStop,
     #[serde(rename = "ToolsNotPublished")]
     ToolsNotPublished,
+    #[serde(rename = "HostPreparation")]
+    HostPreparation,
 }
 impl RunStartHoldReason {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::MobStop => "MobStop",
             Self::ToolsNotPublished => "ToolsNotPublished",
+            Self::HostPreparation => "HostPreparation",
         }
     }
 }
@@ -10143,6 +10146,7 @@ impl std::convert::TryFrom<&str> for RunStartHoldReason {
         match value {
             "MobStop" => Ok(Self::MobStop),
             "ToolsNotPublished" => Ok(Self::ToolsNotPublished),
+            "HostPreparation" => Ok(Self::HostPreparation),
             other => Err(format!("invalid RunStartHoldReason value `{other}`")),
         }
     }
@@ -14254,6 +14258,8 @@ pub struct State {
     pub turn_tool_overlay_allow_active: bool,
     pub turn_tool_overlay_allow_names: std::collections::BTreeSet<ToolName>,
     pub turn_tool_overlay_deny_names: std::collections::BTreeSet<ToolName>,
+    pub tool_grant_gated_names: std::collections::BTreeSet<ToolName>,
+    pub tool_grant_open_names: std::collections::BTreeSet<ToolName>,
     pub input_authority_bindings: std::collections::BTreeMap<String, String>,
     pub input_authority_batch_keys: std::collections::BTreeMap<String, String>,
     pub scoped_context_binding: Option<String>,
@@ -15045,6 +15051,8 @@ impl std::fmt::Debug for State {
                 "turn_tool_overlay_deny_names",
                 &self.turn_tool_overlay_deny_names,
             )
+            .field("tool_grant_gated_names", &self.tool_grant_gated_names)
+            .field("tool_grant_open_names", &self.tool_grant_open_names)
             .field(
                 "input_authority_bindings",
                 &format_args!(
@@ -16768,6 +16776,7 @@ pub mod inputs {
         pub approval_denied: bool,
         pub approval_reason: Option<RoutingSwitchApprovalReason>,
         pub realtime_detach_allowed: bool,
+        pub target_carries_transcript: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestUntilChangedSwitchTurn {
@@ -16779,6 +16788,7 @@ pub mod inputs {
         pub approval_denied: bool,
         pub approval_reason: Option<RoutingSwitchApprovalReason>,
         pub realtime_detach_allowed: bool,
+        pub target_carries_transcript: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CompleteUntilChangedSwitchTurnReconfigure {
@@ -19073,6 +19083,14 @@ pub mod inputs {
     pub struct ReleaseInputController {
         pub input_id: String,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReplaceToolGrantGate {
+        pub gated: std::collections::BTreeSet<ToolName>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ApplyToolGrantOpenSet {
+        pub open: std::collections::BTreeSet<ToolName>,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -19504,6 +19522,8 @@ pub enum Input {
     ClaimCompositionResidency(inputs::ClaimCompositionResidency),
     HoldInputController(inputs::HoldInputController),
     ReleaseInputController(inputs::ReleaseInputController),
+    ReplaceToolGrantGate(inputs::ReplaceToolGrantGate),
+    ApplyToolGrantOpenSet(inputs::ApplyToolGrantOpenSet),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -20099,6 +20119,8 @@ impl Input {
             Self::ClaimCompositionResidency(_) => InputKind::ClaimCompositionResidency,
             Self::HoldInputController(_) => InputKind::HoldInputController,
             Self::ReleaseInputController(_) => InputKind::ReleaseInputController,
+            Self::ReplaceToolGrantGate(_) => InputKind::ReplaceToolGrantGate,
+            Self::ApplyToolGrantOpenSet(_) => InputKind::ApplyToolGrantOpenSet,
         }
     }
 }
@@ -20519,6 +20541,8 @@ pub enum InputKind {
     ClaimCompositionResidency,
     HoldInputController,
     ReleaseInputController,
+    ReplaceToolGrantGate,
+    ApplyToolGrantOpenSet,
 }
 
 pub mod signals {
@@ -26027,6 +26051,27 @@ pub enum TransitionId {
     ReleaseInputControllerRunning,
     ReleaseInputControllerRetired,
     ReleaseInputControllerStopped,
+    ReplaceToolGrantGateIdle,
+    ReplaceToolGrantGateAttached,
+    ReplaceToolGrantGateRunning,
+    ReplaceToolGrantGateRetired,
+    ReplaceToolGrantGateStopped,
+    ApplyToolGrantOpenSetChangedIdle,
+    ApplyToolGrantOpenSetChangedAttached,
+    ApplyToolGrantOpenSetChangedRunning,
+    ApplyToolGrantOpenSetChangedRetired,
+    ApplyToolGrantOpenSetChangedStopped,
+    ApplyToolGrantOpenSetUnchangedIdle,
+    ApplyToolGrantOpenSetUnchangedAttached,
+    ApplyToolGrantOpenSetUnchangedRunning,
+    ApplyToolGrantOpenSetUnchangedRetired,
+    ApplyToolGrantOpenSetUnchangedStopped,
+    RequestFiniteSwitchTurnTranscriptUnsupportedIdle,
+    RequestFiniteSwitchTurnTranscriptUnsupportedAttached,
+    RequestFiniteSwitchTurnTranscriptUnsupportedRunning,
+    RequestUntilChangedSwitchTurnTranscriptUnsupportedIdle,
+    RequestUntilChangedSwitchTurnTranscriptUnsupportedAttached,
+    RequestUntilChangedSwitchTurnTranscriptUnsupportedRunning,
     SuspendRunForStopFenceGapRunningToIdle,
     SuspendRunForStopFenceGapRunningToAttached,
     StopCurrentRunForRunResumableIdle,
@@ -26232,6 +26277,8 @@ pub fn initial_state() -> State {
         turn_tool_overlay_allow_active: false,
         turn_tool_overlay_allow_names: Default::default(),
         turn_tool_overlay_deny_names: Default::default(),
+        tool_grant_gated_names: Default::default(),
+        tool_grant_open_names: Default::default(),
         input_authority_bindings: Default::default(),
         input_authority_batch_keys: Default::default(),
         scoped_context_binding: None,

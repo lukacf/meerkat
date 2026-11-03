@@ -183,7 +183,7 @@ pub fn domain_ref(
 pub const MAX_FORKED_PARTICIPANT_USES: u32 = 64;
 
 /// Hard cap on a capability's time-to-live.
-pub const MAX_FORKED_PARTICIPANT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+pub const MAX_FORKED_PARTICIPANT_TTL: Duration = Duration::from_hours(24);
 
 /// Maximum accepted length of a caller-supplied attachment identity.
 pub const MAX_FORKED_PARTICIPANT_ATTACHMENT_ID_LEN: usize = 256;
@@ -983,7 +983,7 @@ pub enum ForkedParticipantCleanupPublish<T> {
 }
 
 /// How long a cleanup claim is honored before another sweeper may reclaim it.
-pub const FORKED_PARTICIPANT_CLEANUP_CLAIM_TTL: Duration = Duration::from_secs(300);
+pub const FORKED_PARTICIPANT_CLEANUP_CLAIM_TTL: Duration = Duration::from_mins(5);
 
 /// What a durable capability record says about one fork child session.
 ///

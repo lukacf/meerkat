@@ -1,0 +1,25 @@
+SPDX-License-Identifier: MIT OR Apache-2.0
+
+Extracted modules in Meerkat Toolkit
+
+Copyright (c) 2025-2026 Luka Crnkovic-Friis
+
+The extracted module copies listed below are licensed, at your option, under
+the MIT License in LICENSE-MIT or the Apache License, Version 2.0, in
+LICENSE-APACHE. They were extracted, by their author, from the author's own
+unpublished projects into Meerkat Toolkit. This grant covers these copies and
+their Toolkit adaptations only; it grants nothing for the unpublished
+originals or for separately distributed dependencies.
+
+  meerkat_toolkit/connectors/gmail_message.py
+  meerkat_toolkit/frontend/inbox.py
+  meerkat_toolkit/frontend/sender.py
+  meerkat_toolkit/frontend/egress.py
+  meerkat_toolkit/frontend/telegram.py
+  meerkat_toolkit/frontend/telegram_adapter.py
+  meerkat_toolkit/frontend/paired_host_live.py
+  meerkat_toolkit/_extension_wheels.py
+  meerkat_toolkit/extension_artifacts.py
+
+TELEGRAM.md, GMAIL.md and PAIRED-HOST-LIVE.md, included alongside this file,
+describe each module's scope and host boundary.

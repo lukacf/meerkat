@@ -812,6 +812,10 @@ struct FenceBuilder {
 impl SessionAgentBuilder for FenceBuilder {
     type Agent = FactoryAgent;
 
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        self.factory.session_comms_identity_root()
+    }
+
     async fn build_agent(
         &self,
         request: &CreateSessionRequest,
@@ -2418,7 +2422,7 @@ async fn a_requeue_stop_suspends_a_facade_run_in_flight_for_the_next_start() {
             .unregister_session_registration_until_terminal_with_queued_inputs_if_current(
                 &registration,
                 meerkat_runtime::UnregisterQueuedInputs::Requeue {
-                    max_age: Duration::from_secs(600),
+                    max_age: Duration::from_mins(10),
                 },
             )
             .await

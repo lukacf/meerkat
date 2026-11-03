@@ -1,0 +1,93 @@
+[mob]
+id = "swarm-stress"
+
+[skills.swarm_stress_protocol]
+source = "inline"
+content = """
+## Swarm Stress Protocol
+
+You are part of a real LLM-backed stress test for Meta and Meerkat. Keep
+replies short, concrete, and focused on control-plane observability.
+
+- Acknowledge the target shard, wave, and mob.
+- Prefer tool calls over long reasoning.
+- Do not perform real-world actions.
+- When receiving a fan-out message, return a compact status line.
+"""
+
+[skills.coordinator_role]
+source = "inline"
+content = """
+You coordinate one swarm mob. Track fan-out completion, missing shards, and
+whether newly created sessions become visible in the console timeline.
+"""
+
+[skills.worker_role]
+source = "inline"
+content = """
+You are a lightweight stress worker. Respond quickly and surface your shard.
+"""
+
+[skills.probe_role]
+source = "inline"
+content = """
+You are a probe agent. Verify that direct member sends and console projection
+produce visible transcript frames.
+"""
+
+[skills.auditor_role]
+source = "inline"
+content = """
+You are an auditor agent. Summarize whether the swarm member was dynamically
+spawned, which mob owns it, and which shard it belongs to.
+"""
+
+[profiles.swarm_coordinator]
+model = "gemini-3.1-flash-lite-preview"
+external_addressable = true
+runtime_mode = "turn_driven"
+skills = ["swarm_stress_protocol", "coordinator_role"]
+peer_description = "Coordinator for one large synthetic Meta stress mob."
+
+[profiles.swarm_coordinator.tools]
+builtins = true
+comms = true
+mob = true
+mob_tasks = true
+memory = false
+
+[profiles.swarm_worker]
+model = "gemini-3.1-flash-lite-preview"
+external_addressable = true
+runtime_mode = "turn_driven"
+skills = ["swarm_stress_protocol", "worker_role"]
+peer_description = "Cheap, fast stress worker."
+
+[profiles.swarm_worker.tools]
+builtins = true
+comms = true
+memory = false
+
+[profiles.swarm_probe]
+model = "gemini-3.1-flash-lite-preview"
+external_addressable = true
+runtime_mode = "turn_driven"
+skills = ["swarm_stress_protocol", "probe_role"]
+peer_description = "Timeline and routing probe."
+
+[profiles.swarm_probe.tools]
+builtins = true
+comms = true
+memory = false
+
+[profiles.swarm_auditor]
+model = "gemini-3.1-flash-lite-preview"
+external_addressable = true
+runtime_mode = "turn_driven"
+skills = ["swarm_stress_protocol", "auditor_role"]
+peer_description = "Stress test auditor."
+
+[profiles.swarm_auditor.tools]
+builtins = true
+comms = true
+memory = false

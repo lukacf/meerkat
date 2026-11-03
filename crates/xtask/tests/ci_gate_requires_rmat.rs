@@ -103,11 +103,13 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
             "closure-check",
             "closure-tests",
             "closure-tests-rest",
+            "connect-checks",
             "example-web",
             "feature-check",
             "feature-check-rest",
             "fmt-governance",
             "gate",
+            "governance-docs-gate",
             "governance-gates",
             "governed-jsonl",
             "integration",
@@ -116,6 +118,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
             "main-unit-archive-run",
             "main-unit-rest",
             "mcp-confinement-positive",
+            "published-floor",
             "ratchets",
             "rustdoc",
             "sdk-host",
@@ -451,10 +454,13 @@ fn pull_requests_leave_the_chain_and_closure_lanes_to_the_push() {
         "a push plan left lanes to a later push",
         "forbid_failure \"Closure check\" \"${CLOSURE_CHECK_RESULT}\"",
         "forbid_failure \"Rustdoc\" \"${RUSTDOC_RESULT}\"",
-        // Every crate documented with rustdoc's lints denied, once per leg.
+        // Every crate the plan names (Core's members, or the changed
+        // products' packages) documented with rustdoc's lints denied, once per
+        // leg.
         "RUSTDOCFLAGS: -Dwarnings",
-        "default) ./scripts/repo-cargo doc --workspace --no-deps --keep-going ;;",
-        "all) ./scripts/repo-cargo doc --workspace --no-deps --keep-going --all-features ;;",
+        "RUSTDOC_FLAGS: ${{ needs.changes.outputs.rustdoc_flags }}",
+        "default) ./scripts/repo-cargo doc \"${rustdoc_packages[@]}\" --no-deps --keep-going ;;",
+        "all) ./scripts/repo-cargo doc \"${rustdoc_packages[@]}\" --no-deps --keep-going --all-features ;;",
         "forbid_failure \"Governed JSONL\" \"${GOVERNED_JSONL_RESULT}\"",
         "forbid_failure \"MCP confinement positive\" \"${MCP_CONFINEMENT_POSITIVE_RESULT}\"",
         "left to the push (main or release/**): ${DEFERRED_TO_PUSH}",
@@ -630,9 +636,11 @@ fn cargo_diagnostic_workflow_preserves_the_full_gate_set() {
     // Unit and integration execution jobs consume portable Nextest archives
     // built once per compatible Cargo profile. The archive contract self-test
     // pins the complete build scopes and fail-closed partitions; clippy covers
-    // the whole workspace with all features (test-target lints run nightly).
+    // Core's members (the other products' packages excluded) with all
+    // features (test-target lints run nightly).
     for lane in [
-        "clippy --workspace --all-features",
+        "core_selection=\"$(node scripts/core-workspace-args.mjs)\"",
+        "clippy \"${core_workspace[@]}\" --all-features",
         "uses: ./.github/actions/build-nextest-archive",
         "uses: ./.github/actions/run-nextest-archive",
         "family: unit",
@@ -901,7 +909,8 @@ fn ci_runs_the_bounded_tlc_audits_on_machine_authority_changes() {
         parts,
         [
             "audits-a", "audits-b", "audits-c", "audits-d", "audits-e", "audits-f", "audits-g",
-            "audits-h"
+            "audits-h", "audits-i", "audits-j", "audits-k", "audits-l", "audits-m", "audits-n",
+            "audits-o", "audits-q", "audits-r", "audits-s", "audits-t", "audits-u", "audits-v"
         ],
         "every audit shard runs"
     );
@@ -909,7 +918,7 @@ fn ci_runs_the_bounded_tlc_audits_on_machine_authority_changes() {
         job.get("timeout-minutes")
             .and_then(serde_json::Value::as_u64),
         Some(20),
-        "a TLC shard times out at 20 minutes, well over its expected 6-10"
+        "a TLC shard times out at 20 minutes, over a shard's at most about 14 hosted"
     );
     let job_text = job_step_text(job);
     for required in [
@@ -926,6 +935,52 @@ fn ci_runs_the_bounded_tlc_audits_on_machine_authority_changes() {
     assert!(
         ci.contains("require_ran \"Bounded TLC audits\" \"${TLC_AUDITS_RESULT}\""),
         "the CI gate must require the TLC audits on a machine-authority change"
+    );
+}
+
+/// The runtime authority bypass audit reads every production Rust source of
+/// the workspace (among them the callers of the session service's mob-only
+/// operator-instruction entry points, which any crate could add), so it runs
+/// on every pull request that changes Rust or a governance path, in the
+/// `ratchets` job, which every pull request runs and the CI gate requires.
+#[test]
+fn ci_runs_the_runtime_authority_bypass_audit_on_every_rust_change() {
+    let ci_yml = workflow_yml_path("ci.yml");
+    let doc = read_workflow(&ci_yml);
+    let jobs = doc
+        .get("jobs")
+        .and_then(serde_json::Value::as_object)
+        .expect("ci workflow jobs mapping");
+    let ratchets = jobs
+        .get("ratchets")
+        .and_then(serde_json::Value::as_object)
+        .expect("ratchets job");
+    assert!(
+        ratchets.get("if").is_none(),
+        "the ratchets job runs on every pull request"
+    );
+    let steps = ratchets
+        .get("steps")
+        .and_then(serde_json::Value::as_array)
+        .expect("ratchets steps");
+    let audit = steps
+        .iter()
+        .find(|step| {
+            step.get("run").and_then(serde_json::Value::as_str)
+                == Some("make runtime-authority-bypass")
+        })
+        .expect("the ratchets job runs the runtime authority bypass audit");
+    assert_eq!(
+        audit.get("if").and_then(serde_json::Value::as_str),
+        Some(
+            "${{ needs.changes.outputs.rust_changed == 'true' || needs.changes.outputs.governance_gates == 'true' }}"
+        ),
+        "the audit runs on every Rust change and on every governance change"
+    );
+    let ci = std::fs::read_to_string(&ci_yml).expect("read ci.yml");
+    assert!(
+        ci.contains("require_success \"Generation ratchets\""),
+        "the CI gate requires the ratchets job"
     );
 }
 
@@ -952,16 +1007,31 @@ fn ci_runs_the_typed_governance_gates_on_governance_changes() {
     );
     let job_text = job_step_text(job);
     assert!(
-        job_text.contains(
-            "make rmat-audit seam-inventory runtime-authority-bypass machine-authority-docs-gate"
-        ),
-        "governance-gates must run every typed governance gate; job:\n{job_text}"
+        job_text.contains("make rmat-audit seam-inventory"),
+        "governance-gates must run the audit gates; job:\n{job_text}"
+    );
+    // The machine-authority docs gate runs in a job of its own, on the same
+    // condition, so the two halves run in parallel.
+    let docs = jobs
+        .get("governance-docs-gate")
+        .and_then(serde_json::Value::as_object)
+        .expect("governance-docs-gate job");
+    assert_eq!(
+        docs.get("if").and_then(serde_json::Value::as_str),
+        Some("${{ needs.changes.outputs.governance_gates == 'true' }}"),
+        "the docs gate runs exactly on governance changes"
+    );
+    let docs_text = job_step_text(docs);
+    assert!(
+        docs_text.contains("make machine-authority-docs-gate"),
+        "governance-docs-gate must run the machine-authority docs gate; job:\n{docs_text}"
     );
     let ci = std::fs::read_to_string(&ci_yml).expect("read ci.yml");
     for contract in [
         "governance_gates: ${{ steps.plan.outputs.governance_gates }}",
         "GOVERNANCE_GATES: ${{ needs.changes.outputs.governance_gates }}",
         "require_ran \"Typed governance gates\" \"${GOVERNANCE_GATES_RESULT}\"",
+        "require_ran \"Typed governance gates (machine-authority docs)\" \"${GOVERNANCE_DOCS_GATE_RESULT}\"",
     ] {
         assert!(ci.contains(contract), "CI must carry `{contract}`");
     }

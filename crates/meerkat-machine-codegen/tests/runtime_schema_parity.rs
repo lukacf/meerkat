@@ -3,8 +3,9 @@
 use meerkat_machine_schema::catalog::dsl::{
     dsl_auth_machine_production_schema, dsl_forked_participant_lifecycle_machine,
     dsl_meerkat_machine, dsl_meerkat_machine_production_schema, dsl_mob_machine,
-    dsl_mob_machine_production_schema, dsl_occurrence_lifecycle_machine,
-    dsl_schedule_lifecycle_machine, dsl_temporary_council_lifecycle_machine,
+    dsl_mob_machine_production_schema, dsl_mob_store_restore_lifecycle_machine,
+    dsl_occurrence_lifecycle_machine, dsl_schedule_lifecycle_machine,
+    dsl_temporary_council_lifecycle_machine, dsl_tool_grant_lifecycle_machine_production_schema,
     dsl_work_attention_lifecycle_machine, dsl_work_item_admission_machine,
     dsl_workgraph_lifecycle_machine,
     meerkat_machine::{MeerkatMachineInput, MeerkatMachineInputVariant},
@@ -152,6 +153,12 @@ fn phase1_schema_parity_cases() -> Vec<SchemaParityCase> {
             production_schema: meerkat_runtime::machine_schema_exports::auth_machine_schema,
         },
         SchemaParityCase {
+            machine: "DurableDecisionMachine",
+            catalog_schema:
+                meerkat_machine_schema::catalog::dsl::dsl_durable_decision_machine_production_schema,
+            production_schema: meerkat_runtime::machine_schema_exports::durable_decision_schema,
+        },
+        SchemaParityCase {
             machine: "MobMachine",
             catalog_schema: dsl_mob_machine_production_schema,
             production_schema: meerkat_mob::machine_schema_exports::mob_machine_schema,
@@ -196,6 +203,17 @@ fn phase1_schema_parity_cases() -> Vec<SchemaParityCase> {
             catalog_schema: dsl_temporary_council_lifecycle_machine,
             production_schema:
                 meerkat_mob::machine_schema_exports::temporary_council_lifecycle_schema,
+        },
+        SchemaParityCase {
+            machine: "ToolGrantLifecycleMachine",
+            catalog_schema: dsl_tool_grant_lifecycle_machine_production_schema,
+            production_schema: meerkat_runtime::machine_schema_exports::tool_grant_lifecycle_schema,
+        },
+        SchemaParityCase {
+            machine: "MobStoreRestoreLifecycleMachine",
+            catalog_schema: dsl_mob_store_restore_lifecycle_machine,
+            production_schema:
+                meerkat_mob::machine_schema_exports::mob_store_restore_lifecycle_schema,
         },
     ]
 }

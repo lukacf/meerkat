@@ -135,6 +135,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `turn_tool_overlay_allow_active`: `Bool`
 - `turn_tool_overlay_allow_names`: `Set<ToolName>`
 - `turn_tool_overlay_deny_names`: `Set<ToolName>`
+- `tool_grant_gated_names`: `Set<ToolName>`
+- `tool_grant_open_names`: `Set<ToolName>`
 - `input_authority_bindings`: `Map<String, String>`
 - `input_authority_batch_keys`: `Map<String, String>`
 - `scoped_context_binding`: `Option<String>`
@@ -591,8 +593,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverRevokedSupervisorReceipt`(peer_id: String, signing_public_key: String, epoch: u64)
 - `ModelRoutingStatus`(session_id: SessionId)
 - `SetModelRoutingBaseline`(baseline_model: String, realtime_capable: Bool)
-- `RequestFiniteSwitchTurn`(request_id: String, target_model: String, turns: u64, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingSwitchApprovalReason>, realtime_detach_allowed: Bool)
-- `RequestUntilChangedSwitchTurn`(request_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingSwitchApprovalReason>, realtime_detach_allowed: Bool)
+- `RequestFiniteSwitchTurn`(request_id: String, target_model: String, turns: u64, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingSwitchApprovalReason>, realtime_detach_allowed: Bool, target_carries_transcript: Bool)
+- `RequestUntilChangedSwitchTurn`(request_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingSwitchApprovalReason>, realtime_detach_allowed: Bool, target_carries_transcript: Bool)
 - `CompleteUntilChangedSwitchTurnReconfigure`(request_id: String)
 - `ArchiveUnresolvedModelRoutingHandoff`(request_id: String, observed: ModelRoutingHandoffRecord, record: ModelRoutingHandoffRecord)
 - `ResolveLiveBoundaryContextReceipt`(run_id: RunId, input_id: String)
@@ -911,6 +913,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClaimCompositionResidency`(session_id: SessionId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>)
 - `HoldInputController`(input_id: String)
 - `ReleaseInputController`(input_id: String)
+- `ReplaceToolGrantGate`(gated: Set<ToolName>)
+- `ApplyToolGrantOpenSet`(open: Set<ToolName>)
 
 ## Signals
 - `Initialize`
@@ -1532,6 +1536,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `supervisor_rotation_receipt_consistency`
 - `supervisor_rotation_terminal_receipts_closed_shape`
 - `supervisor_rotation_phase_shape`
+- `tool_grant_open_names_are_gated`
 
 ## Transitions
 ### `Initialize`
@@ -2912,10 +2917,59 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `ModelRoutingStatusChanged`
 - To: `Retired`
 
+### `RequestFiniteSwitchTurnTranscriptUnsupportedIdle`
+- From: `Idle`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- Guards:
+  - `transcript_not_carried`
+- Emits: `SwitchTurnDenied`
+- To: `Idle`
+
+### `RequestFiniteSwitchTurnTranscriptUnsupportedAttached`
+- From: `Attached`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- Guards:
+  - `transcript_not_carried`
+- Emits: `SwitchTurnDenied`
+- To: `Attached`
+
+### `RequestFiniteSwitchTurnTranscriptUnsupportedRunning`
+- From: `Running`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- Guards:
+  - `transcript_not_carried`
+- Emits: `SwitchTurnDenied`
+- To: `Running`
+
+### `RequestUntilChangedSwitchTurnTranscriptUnsupportedIdle`
+- From: `Idle`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- Guards:
+  - `transcript_not_carried`
+- Emits: `SwitchTurnDenied`
+- To: `Idle`
+
+### `RequestUntilChangedSwitchTurnTranscriptUnsupportedAttached`
+- From: `Attached`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- Guards:
+  - `transcript_not_carried`
+- Emits: `SwitchTurnDenied`
+- To: `Attached`
+
+### `RequestUntilChangedSwitchTurnTranscriptUnsupportedRunning`
+- From: `Running`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- Guards:
+  - `transcript_not_carried`
+- Emits: `SwitchTurnDenied`
+- To: `Running`
+
 ### `RequestFiniteSwitchTurnApprovalUnavailableIdle`
 - From: `Idle`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
+  - `transcript_carried`
   - `baseline_known`
   - `approval_unavailable`
 - Emits: `SwitchTurnDenied`
@@ -2923,8 +2977,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnApprovalUnavailableAttached`
 - From: `Attached`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
+  - `transcript_carried`
   - `baseline_known`
   - `approval_unavailable`
 - Emits: `SwitchTurnDenied`
@@ -2932,8 +2987,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnApprovalUnavailableRunning`
 - From: `Running`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
+  - `transcript_carried`
   - `baseline_known`
   - `approval_unavailable`
 - Emits: `SwitchTurnDenied`
@@ -2941,8 +2997,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnApprovalDeniedIdle`
 - From: `Idle`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
+  - `transcript_carried`
   - `approval_denied`
   - `approval_reason_present`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
@@ -2950,8 +3007,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnApprovalDeniedAttached`
 - From: `Attached`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
+  - `transcript_carried`
   - `approval_denied`
   - `approval_reason_present`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
@@ -2959,8 +3017,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnApprovalDeniedRunning`
 - From: `Running`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
+  - `transcript_carried`
   - `approval_denied`
   - `approval_reason_present`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
@@ -2968,32 +3027,36 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnScopedConflictIdle`
 - From: `Idle`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
+  - `transcript_carried`
   - `scoped_conflict`
 - Emits: `SwitchTurnDenied`
 - To: `Idle`
 
 ### `RequestFiniteSwitchTurnScopedConflictAttached`
 - From: `Attached`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
+  - `transcript_carried`
   - `scoped_conflict`
 - Emits: `SwitchTurnDenied`
 - To: `Attached`
 
 ### `RequestFiniteSwitchTurnScopedConflictRunning`
 - From: `Running`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
+  - `transcript_carried`
   - `scoped_conflict`
 - Emits: `SwitchTurnDenied`
 - To: `Running`
 
 ### `RequestFiniteSwitchTurnAcceptedIdle`
 - From: `Idle`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
+  - `transcript_carried`
   - `baseline_known`
   - `positive_turns`
   - `approval_satisfied`
@@ -3002,8 +3065,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnAcceptedAttached`
 - From: `Attached`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
+  - `transcript_carried`
   - `baseline_known`
   - `positive_turns`
   - `approval_satisfied`
@@ -3012,8 +3076,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnAcceptedRunning`
 - From: `Running`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
+  - `transcript_carried`
   - `baseline_known`
   - `positive_turns`
   - `approval_satisfied`
@@ -3022,8 +3087,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnAcceptedIdle`
 - From: `Idle`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
+  - `transcript_carried`
   - `baseline_known`
   - `approval_satisfied`
 - Emits: `SwitchTurnPersistentReconfigureRequested`
@@ -3031,8 +3097,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnAcceptedAttached`
 - From: `Attached`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
+  - `transcript_carried`
   - `baseline_known`
   - `approval_satisfied`
 - Emits: `SwitchTurnPersistentReconfigureRequested`
@@ -3040,8 +3107,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnAcceptedRunning`
 - From: `Running`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
+  - `transcript_carried`
   - `baseline_known`
   - `approval_satisfied`
 - Emits: `SwitchTurnPersistentReconfigureRequested`
@@ -3049,8 +3117,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalUnavailableIdle`
 - From: `Idle`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
+  - `transcript_carried`
   - `baseline_known`
   - `approval_unavailable`
 - Emits: `SwitchTurnDenied`
@@ -3058,8 +3127,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalUnavailableAttached`
 - From: `Attached`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
+  - `transcript_carried`
   - `baseline_known`
   - `approval_unavailable`
 - Emits: `SwitchTurnDenied`
@@ -3067,8 +3137,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalUnavailableRunning`
 - From: `Running`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
+  - `transcript_carried`
   - `baseline_known`
   - `approval_unavailable`
 - Emits: `SwitchTurnDenied`
@@ -3076,8 +3147,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalDeniedIdle`
 - From: `Idle`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
+  - `transcript_carried`
   - `approval_denied`
   - `approval_reason_present`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
@@ -3085,8 +3157,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalDeniedAttached`
 - From: `Attached`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
+  - `transcript_carried`
   - `approval_denied`
   - `approval_reason_present`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
@@ -3094,8 +3167,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalDeniedRunning`
 - From: `Running`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
+  - `transcript_carried`
   - `approval_denied`
   - `approval_reason_present`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
@@ -22974,6 +23048,136 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `staged_deferred_authorities_are_name_scoped`
   - `active_deferred_authorities_have_identity`
   - `staged_deferred_authorities_have_identity`
+- To: `Stopped`
+
+### `ReplaceToolGrantGateIdle`
+- From: `Idle`
+- On: `ReplaceToolGrantGate`(gated)
+- Guards:
+  - `session_registered`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Idle`
+
+### `ReplaceToolGrantGateAttached`
+- From: `Attached`
+- On: `ReplaceToolGrantGate`(gated)
+- Guards:
+  - `session_registered`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Attached`
+
+### `ReplaceToolGrantGateRunning`
+- From: `Running`
+- On: `ReplaceToolGrantGate`(gated)
+- Guards:
+  - `session_registered`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Running`
+
+### `ReplaceToolGrantGateRetired`
+- From: `Retired`
+- On: `ReplaceToolGrantGate`(gated)
+- Guards:
+  - `session_registered`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Retired`
+
+### `ReplaceToolGrantGateStopped`
+- From: `Stopped`
+- On: `ReplaceToolGrantGate`(gated)
+- Guards:
+  - `session_registered`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Stopped`
+
+### `ApplyToolGrantOpenSetChangedIdle`
+- From: `Idle`
+- On: `ApplyToolGrantOpenSet`(open)
+- Guards:
+  - `session_registered`
+  - `open_names_are_gated`
+  - `open_set_changed`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Idle`
+
+### `ApplyToolGrantOpenSetChangedAttached`
+- From: `Attached`
+- On: `ApplyToolGrantOpenSet`(open)
+- Guards:
+  - `session_registered`
+  - `open_names_are_gated`
+  - `open_set_changed`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Attached`
+
+### `ApplyToolGrantOpenSetChangedRunning`
+- From: `Running`
+- On: `ApplyToolGrantOpenSet`(open)
+- Guards:
+  - `session_registered`
+  - `open_names_are_gated`
+  - `open_set_changed`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Running`
+
+### `ApplyToolGrantOpenSetChangedRetired`
+- From: `Retired`
+- On: `ApplyToolGrantOpenSet`(open)
+- Guards:
+  - `session_registered`
+  - `open_names_are_gated`
+  - `open_set_changed`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Retired`
+
+### `ApplyToolGrantOpenSetChangedStopped`
+- From: `Stopped`
+- On: `ApplyToolGrantOpenSet`(open)
+- Guards:
+  - `session_registered`
+  - `open_names_are_gated`
+  - `open_set_changed`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Stopped`
+
+### `ApplyToolGrantOpenSetUnchangedIdle`
+- From: `Idle`
+- On: `ApplyToolGrantOpenSet`(open)
+- Guards:
+  - `session_registered`
+  - `open_set_unchanged`
+- To: `Idle`
+
+### `ApplyToolGrantOpenSetUnchangedAttached`
+- From: `Attached`
+- On: `ApplyToolGrantOpenSet`(open)
+- Guards:
+  - `session_registered`
+  - `open_set_unchanged`
+- To: `Attached`
+
+### `ApplyToolGrantOpenSetUnchangedRunning`
+- From: `Running`
+- On: `ApplyToolGrantOpenSet`(open)
+- Guards:
+  - `session_registered`
+  - `open_set_unchanged`
+- To: `Running`
+
+### `ApplyToolGrantOpenSetUnchangedRetired`
+- From: `Retired`
+- On: `ApplyToolGrantOpenSet`(open)
+- Guards:
+  - `session_registered`
+  - `open_set_unchanged`
+- To: `Retired`
+
+### `ApplyToolGrantOpenSetUnchangedStopped`
+- From: `Stopped`
+- On: `ApplyToolGrantOpenSet`(open)
+- Guards:
+  - `session_registered`
+  - `open_set_unchanged`
 - To: `Stopped`
 
 ### `McpServerConnectPendingIdle`

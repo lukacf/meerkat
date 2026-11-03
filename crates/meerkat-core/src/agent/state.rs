@@ -38734,6 +38734,9 @@ mod tests {
             },
             /// Refuse `ReprepareRequired` for a change that already completed.
             Stale,
+            /// Refuse `Denied`, with no change in progress: the owners'
+            /// answer once a change revoked the work's authority.
+            Deny,
             /// An owner change begins and this preparation refuses `Denied`;
             /// the change completes after `settle`.
             DenyDuringChange {
@@ -38829,6 +38832,9 @@ mod tests {
                     }
                     ChurnStep::Stale => {
                         Err(OperationRefused::new(OperationRefusalKind::ReprepareRequired).into())
+                    }
+                    ChurnStep::Deny => {
+                        Err(OperationRefused::new(OperationRefusalKind::Denied).into())
                     }
                     ChurnStep::DenyDuringChange { settle } => {
                         self.begin_change(Some(settle));
@@ -39272,25 +39278,82 @@ mod tests {
             assert_eq!(policy.prepares(), 1, "nothing prepares after the drop");
         }
 
-        /// A `ReprepareRequired` refusal with no change in progress takes its
-        /// ordinary path at once: one rebuild, then the controller feedback.
+        /// A `ReprepareRequired` refusal for a change that already completed
+        /// is a stale read: the model request pauses one backoff step and
+        /// rebuilds under the same operation, as one of its free rebuilds,
+        /// with no refusal notice and no controller feedback request, here
+        /// after two such reads in a row. When the change that completed
+        /// revoked the work's authority, the rebuild meets the owners'
+        /// current refusal (`Denied`), which goes to the controller as
+        /// before.
+        ///
+        /// RED on the base: after one rebuild with no wait, the second stale
+        /// read went to the controller as a refusal notice, and the host saw
+        /// a rebuild instead of a wait.
         #[cfg(feature = "workspace-tests")]
         #[tokio::test(start_paused = true)]
-        async fn a_refusal_without_a_change_in_progress_rebuilds_at_once() {
+        async fn a_stale_read_after_a_completed_change_rebuilds_after_one_pause() {
             let policy = ChurnPolicy::new([ChurnStep::Stale, ChurnStep::Stale, ChurnStep::Allow]);
             let client = ChurnClient::new(std::time::Duration::ZERO);
             let mut run = run_churn(&policy, &client, None).await;
 
-            run.result
-                .expect("the controller feedback attempt is authorized");
-            assert_eq!(policy.prepares(), 3);
-            assert_eq!(run.notices, 1);
-            assert_eq!(run.elapsed, std::time::Duration::ZERO, "nothing waited");
+            assert_eq!(
+                run.notices, 0,
+                "no refusal reached the transcript: {:?}",
+                run.result
+            );
+            let result = run
+                .result
+                .expect("the rebuild after the stale reads is authorized");
+            assert_eq!(result.text, "answered after the owner change");
+            assert_eq!(policy.prepares(), 3, "two stale reads, then one more");
+            assert!(
+                run.elapsed >= std::time::Duration::from_millis(2)
+                    && run.elapsed < crate::authorization::OWNER_CHANGE_WAIT_BOUND,
+                "one backoff step before each rebuild: {:?}",
+                run.elapsed
+            );
             let operations = client.operations();
             assert_eq!(operations.len(), 3);
-            assert_eq!(operations[0], operations[1]);
-            assert_ne!(operations[2], operations[0]);
+            assert!(
+                operations.iter().all(|id| *id == operations[0]),
+                "every rebuild keeps its operation"
+            );
             assert_completed_without_failure(&mut run.events);
+
+            // The change that completed revoked the work's authority.
+            let policy = ChurnPolicy::new([ChurnStep::Stale, ChurnStep::Deny, ChurnStep::Allow]);
+            let client = ChurnClient::new(std::time::Duration::ZERO);
+            let observer = Arc::new(RecordingObserver::default());
+            let run = run_churn_observed(&policy, &client, None, Some(Arc::clone(&observer))).await;
+            run.result
+                .expect("the controller feedback attempt is authorized");
+            assert_eq!(run.notices, 1, "the denial reached the controller");
+            let observed: Vec<_> = observer
+                .observed()
+                .iter()
+                .map(|observation| (observation.outcome(), observation.disposition()))
+                .collect();
+            assert!(
+                matches!(
+                    observed.as_slice(),
+                    [
+                        (
+                            first,
+                            crate::authorization::OperationRefusalDisposition::WaitedForOwnerChange {
+                                settled: true,
+                                ..
+                            }
+                        ),
+                        (
+                            last,
+                            crate::authorization::OperationRefusalDisposition::ControllerFeedback
+                        ),
+                    ] if *first == reprepare_outcome()
+                        && *last == OperationRefused::new(OperationRefusalKind::Denied).into()
+                ),
+                "a wait after the stale read, then the owners' current refusal: {observed:?}"
+            );
         }
 
         /// Only `ReprepareRequired` waits: a denial with a change in progress
@@ -39414,6 +39477,126 @@ mod tests {
             ));
         }
 
+        /// A compaction summary refused for a change that already completed
+        /// is a stale read: it pauses one backoff step and asks again under
+        /// the same operation, and the compaction completes. When that change
+        /// revoked the work's authority, the summary meets the owners'
+        /// current refusal (`Denied`) and the compaction is skipped as
+        /// before, under that refusal.
+        ///
+        /// RED on the base: the stale read skipped the compaction at once.
+        #[cfg(feature = "workspace-tests")]
+        #[tokio::test(start_paused = true)]
+        async fn a_compaction_summary_rebuilds_after_a_stale_read_whose_change_completed() {
+            for revoked in [false, true] {
+                // The first run answers; the second compacts first, and its
+                // summary reads stale after a change that completed.
+                let policy = if revoked {
+                    ChurnPolicy::new([
+                        ChurnStep::Allow,
+                        ChurnStep::Stale,
+                        ChurnStep::Deny,
+                        ChurnStep::Allow,
+                    ])
+                } else {
+                    ChurnPolicy::new([ChurnStep::Allow, ChurnStep::Stale, ChurnStep::Allow])
+                };
+                let client = ChurnClient::new(std::time::Duration::ZERO);
+                let observer = Arc::new(RecordingObserver::default());
+                let mut agent =
+                    with_test_turn_state_handle(AgentBuilder::new().model("fixture-model"))
+                        .compactor(Arc::new(DiscardingCompactor::new(1)))
+                        .with_operation_refusal_observer(Arc::clone(&observer) as _)
+                        .build_standalone(
+                            Arc::clone(&client),
+                            Arc::new(IndeterminateDispatcher),
+                            Arc::new(NoopStore),
+                        )
+                        .await;
+                let work = WorkAuthorizationContext::new(
+                    Arc::clone(&policy) as Arc<dyn WorkAuthorization>,
+                    crate::exact_operation::OperationExecutionScope::Domain,
+                )
+                .with_controller_client(crate::ControllerModelClient::new(
+                    fixture_controller_selection(),
+                    Arc::clone(&client) as Arc<dyn AgentLlmClient>,
+                ))
+                .unwrap();
+                let mut completed = 0;
+                for prompt in ["first retained input", "second input"] {
+                    let (tx, mut rx) = mpsc::channel(1024);
+                    agent
+                        .run_with_events_and_work_authorization(
+                            prompt.to_string().into(),
+                            vec![],
+                            vec![],
+                            None,
+                            tx,
+                            Some(work.clone()),
+                        )
+                        .await
+                        .expect("governed run");
+                    while let Ok(event) = rx.try_recv() {
+                        if matches!(event, crate::AgentEvent::CompactionCompleted { .. }) {
+                            completed += 1;
+                        }
+                    }
+                }
+                let summaries = client.summaries.lock().unwrap().clone();
+                assert_eq!(
+                    summaries.len(),
+                    2,
+                    "revoked={revoked}: one stale summary, one more"
+                );
+                assert_eq!(
+                    summaries[0], summaries[1],
+                    "revoked={revoked}: the same compaction operation"
+                );
+                let observed: Vec<_> = observer
+                    .observed()
+                    .iter()
+                    .map(|observation| {
+                        (
+                            observation.surface().clone(),
+                            observation.outcome(),
+                            observation.disposition(),
+                        )
+                    })
+                    .collect();
+                let compaction = crate::authorization::OperationRefusalSurface::Compaction;
+                let waited = matches!(
+                    observed.first(),
+                    Some((
+                        surface,
+                        outcome,
+                        crate::authorization::OperationRefusalDisposition::WaitedForOwnerChange {
+                            settled: true,
+                            ..
+                        },
+                    )) if *surface == compaction && *outcome == reprepare_outcome()
+                );
+                assert!(
+                    waited,
+                    "revoked={revoked}: a wait after the stale read: {observed:?}"
+                );
+                if revoked {
+                    assert_eq!(completed, 0, "the revoked summary skips the compaction");
+                    assert_eq!(
+                        observed.get(1),
+                        Some(&(
+                            compaction,
+                            OperationRefused::new(OperationRefusalKind::Denied).into(),
+                            crate::authorization::OperationRefusalDisposition::CompactionSkipped,
+                        )),
+                        "the owners' current refusal: {observed:?}"
+                    );
+                } else {
+                    assert_eq!(completed, 1, "the compaction completed");
+                    assert_eq!(observed.len(), 1, "{observed:?}");
+                }
+            }
+        }
+
         /// The host's operation refusal observer sees the model request's
         /// wait for an owner change, with the refused operation, its run and
         /// session, and how long it waited; the rebuild that follows was
@@ -39456,14 +39639,23 @@ mod tests {
             assert_completed_without_failure(&mut run.events);
         }
 
-        /// Without a change in progress the refusal rebuilds once and then
-        /// goes to the controller: the host sees both decisions, for the
-        /// refused operation, and nothing for the feedback request that was
-        /// authorized.
+        /// Stale reads that keep coming with no change in progress are each
+        /// waited after, as the call's free rebuilds; once those are spent,
+        /// the refusal rebuilds once and then goes to the controller. The
+        /// host sees every decision, for the refused operation, and nothing
+        /// for the feedback request that was authorized.
         #[cfg(feature = "workspace-tests")]
         #[tokio::test(start_paused = true)]
         async fn the_host_observes_the_rebuild_and_the_controller_feedback() {
-            let policy = ChurnPolicy::new([ChurnStep::Stale, ChurnStep::Stale, ChurnStep::Allow]);
+            use crate::authorization::OperationRefusalDisposition as Disposition;
+            let policy = ChurnPolicy::new([
+                ChurnStep::Stale,
+                ChurnStep::Stale,
+                ChurnStep::Stale,
+                ChurnStep::Stale,
+                ChurnStep::Stale,
+                ChurnStep::Allow,
+            ]);
             let client = ChurnClient::new(std::time::Duration::ZERO);
             let observer = Arc::new(RecordingObserver::default());
             let run = run_churn_observed(&policy, &client, None, Some(Arc::clone(&observer))).await;
@@ -39476,28 +39668,33 @@ mod tests {
                 .observed()
                 .iter()
                 .map(|observation| {
-                    (
-                        observation.operation_id().cloned(),
-                        observation.surface().clone(),
-                        observation.outcome(),
-                        observation.disposition(),
-                    )
+                    assert_eq!(
+                        observation.surface(),
+                        &crate::authorization::OperationRefusalSurface::ModelRequest
+                    );
+                    assert_eq!(observation.outcome(), reprepare_outcome());
+                    let disposition = match observation.disposition() {
+                        Disposition::WaitedForOwnerChange { settled: true, .. } => "waited",
+                        Disposition::WaitedForOwnerChange { settled: false, .. } => "not settled",
+                        Disposition::Rebuilt => "rebuilt",
+                        Disposition::ControllerFeedback => "controller feedback",
+                        other => panic!("{other:?}"),
+                    };
+                    (observation.operation_id().cloned(), disposition)
                 })
                 .collect();
             assert_eq!(
                 observed,
                 [
-                    crate::authorization::OperationRefusalDisposition::Rebuilt,
-                    crate::authorization::OperationRefusalDisposition::ControllerFeedback,
+                    "waited",
+                    "waited",
+                    "waited",
+                    "not settled",
+                    "rebuilt",
+                    "not settled",
+                    "controller feedback",
                 ]
-                .map(|disposition| {
-                    (
-                        Some(refused.clone()),
-                        crate::authorization::OperationRefusalSurface::ModelRequest,
-                        reprepare_outcome(),
-                        disposition,
-                    )
-                })
+                .map(|disposition| (Some(refused.clone()), disposition))
             );
         }
 

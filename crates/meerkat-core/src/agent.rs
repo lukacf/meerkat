@@ -8121,6 +8121,8 @@ mod governed_operation_tests {
         /// Whether a stale read's change revokes the work's authority.
         revokes: bool,
         revoked: AtomicBool,
+        /// Whether the work's decisions require a model review (R2).
+        reviewed: bool,
         prepares: std::sync::atomic::AtomicUsize,
     }
 
@@ -8199,7 +8201,11 @@ mod governed_operation_tests {
 
     impl PreparedOperationAuthorization for StaleReadPrepared {
         fn review_tier(&self) -> crate::authorization::OperationReviewTier {
-            crate::authorization::OperationReviewTier::R1
+            if self.facts.reviewed {
+                crate::authorization::OperationReviewTier::R2
+            } else {
+                crate::authorization::OperationReviewTier::R1
+            }
         }
 
         fn check_current(
@@ -8345,6 +8351,103 @@ mod governed_operation_tests {
                 facts.prepares.load(Ordering::SeqCst),
                 2,
                 "revokes={revokes}: read stale, then prepared again after it"
+            );
+        }
+        assert_certified_not_dispatched(rows);
+    }
+
+    /// A model reviewer that allows every candidate and counts its reviews.
+    /// During its first review another actor's owner change completes, so
+    /// the reviewed decision is stale, and the change after it is met by the
+    /// next preparation's read: the review's currentness check prepares the
+    /// decision again and that read is stale, with no change in progress.
+    struct StaleAfterReview {
+        facts: Arc<StaleReadFacts>,
+        reviews: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl crate::approval::review::OperationReviewer for StaleAfterReview {
+        async fn review(
+            &self,
+            _candidate: &crate::approval::review::ReviewCandidate<'_>,
+        ) -> Result<crate::approval::review::ReviewVerdict, crate::approval::review::ReviewerFailure>
+        {
+            if self.reviews.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.facts.complete_change(false);
+                self.facts.stale_reads.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(crate::approval::review::ReviewVerdict::Allow)
+        }
+    }
+
+    /// The review's currentness check after a verdict reads stale after an
+    /// owner change that completed: it pauses one backoff step and checks
+    /// again. A change that superseded the reviewed decision is then
+    /// reviewed once more for the current decision and entered once; one
+    /// that revoked the call's authority refuses it with the owners' current
+    /// answer (`Denied`, certified not dispatched).
+    ///
+    /// RED on the base: the stale read retired the review as an authority
+    /// change and refused the call with `reprepare_required` in both cases.
+    #[tokio::test(start_paused = true)]
+    async fn a_reviewed_entry_rebuilds_after_a_stale_read_whose_change_completed() {
+        let mut rows: Vec<CertifiedRow> = Vec::new();
+        for revokes in [false, true] {
+            let facts = Arc::new(StaleReadFacts {
+                revokes,
+                reviewed: true,
+                ..StaleReadFacts::default()
+            });
+            let reviewer = Arc::new(StaleAfterReview {
+                facts: Arc::clone(&facts),
+                reviews: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let context = stale_read_context(&facts).with_operation_review(Some(Arc::new(
+                crate::approval::review::BoundOperationReview::new(
+                    Arc::clone(&reviewer) as Arc<dyn crate::approval::review::OperationReviewer>,
+                    crate::approval::ApprovalService::new(),
+                    std::time::Duration::from_secs(30),
+                ),
+            )));
+            let dispatcher = Arc::new(Reviewed(SourceKindDispatcher::default()));
+            let result = fenced(&dispatcher, "read_file", &context).await;
+            assert_eq!(
+                facts.sequence.load(Ordering::SeqCst),
+                4,
+                "revokes={revokes}: two changes, both completed"
+            );
+            if revokes {
+                assert_eq!(
+                    reviewer.reviews.load(Ordering::SeqCst),
+                    1,
+                    "reviewed once, never again"
+                );
+                rows.push((
+                    "reviewed entry after a revoking change",
+                    result,
+                    dispatcher.0.0.load(Ordering::SeqCst),
+                    OperationRefusalKind::Denied,
+                ));
+                continue;
+            }
+            assert!(
+                result
+                    .as_ref()
+                    .is_ok_and(|outcome| !outcome.result.is_error),
+                "the current decision is reviewed once more, then entered: {:?}",
+                refusal_and_data(&result).map(|(_, data)| data)
+            );
+            assert_eq!(
+                reviewer.reviews.load(Ordering::SeqCst),
+                2,
+                "reviewed again for the current decision, never by reusing the first allow"
+            );
+            assert_eq!(
+                dispatcher.0.0.load(Ordering::SeqCst),
+                1,
+                "the body ran once"
             );
         }
         assert_certified_not_dispatched(rows);

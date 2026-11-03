@@ -479,6 +479,99 @@ async fn offered_new_targets_pass_native_construction_preview_without_writes() {
     assert!(startup.persistence.is_none());
 }
 
+// A GitHub Copilot account configured once, by a `[copilot]` section. Core
+// lowers it into the account's three routes. The token variable stays unset:
+// no credential is read, requested or stored.
+const COPILOT_SECTION: &str =
+    "source = {kind = \"env\", env = \"CONNECT_COPILOT_SECTION_TOKEN\"}\n";
+
+fn copilot_routes(realm: &meerkat_core::RealmId) -> Vec<meerkat_core::AuthBindingRef> {
+    ["copilot_anthropic", "copilot_gemini", "copilot_openai"]
+        .into_iter()
+        .map(|route| meerkat_core::AuthBindingRef {
+            realm: realm.clone(),
+            binding: BindingId::parse(route).unwrap(),
+            profile: None,
+            origin: BindingOrigin::Configured,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn copilot_section_routes_are_configured_targets() {
+    let dir = tempfile::tempdir().unwrap();
+    let selected = storage(dir.path());
+    let own = crate::realm::config_source(&selected)
+        .unwrap()
+        .config_doc_path(&selected.locator.realm);
+    std::fs::create_dir_all(own.parent().unwrap()).unwrap();
+    std::fs::write(
+        &own,
+        format!("[realm.provider-control.copilot]\n{COPILOT_SECTION}"),
+    )
+    .unwrap();
+    let mut startup = startup(dir.path()).await;
+    let routes = copilot_routes(&selected.locator.realm);
+    assert_eq!(configured_choices(&startup).unwrap(), routes);
+    // The browser presentation offers the routes as configured targets, each
+    // with its own family's models, and no first target next to them.
+    let choices = target::catalog(&mut startup).await.unwrap();
+    for route in &routes {
+        assert!(
+            choices
+                .iter()
+                .any(|c| c.target.as_ref().is_some_and(|t| t.auth_binding == *route)),
+            "{route:?} is not offered"
+        );
+    }
+    assert!(choices.iter().all(|c| {
+        c.target
+            .as_ref()
+            .is_some_and(|t| t.backend.provider == c.provider)
+    }));
+    assert!(startup.persistence.is_none());
+}
+
+#[tokio::test]
+async fn copilot_section_added_during_review_refuses_first_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut startup = startup(dir.path()).await;
+    let (bridge, _messages, _retire) = bridge();
+    let choices = target::catalog(&mut startup).await.unwrap();
+    let choice = choices
+        .iter()
+        .find(|c| c.enabled && c.provider == meerkat_core::Provider::OpenAI && c.auth == "api_key")
+        .unwrap();
+    let prepared = target::prepare(&mut startup, choice).await.unwrap();
+    let own = crate::realm::config_source(&startup.storage)
+        .unwrap()
+        .config_doc_path(&startup.storage.locator.realm);
+    let before = std::fs::read(&own).ok();
+    // The account is then configured once, in the global document the realm
+    // inherits. The realm has model targets, so no first target is added.
+    let global = startup
+        .storage
+        .layout
+        .user_rkat_root()
+        .unwrap()
+        .join("config.toml");
+    std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+    std::fs::write(
+        &global,
+        format!("[realm.global.copilot]\n{COPILOT_SECTION}"),
+    )
+    .unwrap();
+    assert!(target::prepare(&mut startup, choice).await.is_err());
+    assert!(prepared.commit(&mut startup, &bridge).await.is_err());
+    assert_eq!(std::fs::read(&own).ok(), before);
+    startup.config = crate::realm::read_config(&startup.storage).await.unwrap();
+    assert_eq!(
+        configured_choices(&startup).unwrap(),
+        copilot_routes(&meerkat_core::RealmId::global())
+    );
+    assert!(startup.persistence.is_none());
+}
+
 #[test]
 fn initialization_timer_refuses_platform_overflow_without_panicking() {
     let now = tokio::time::Instant::now();

@@ -92,14 +92,16 @@
 // like its code.
 //
 // Long rows first. The rows of the Clippy, main unit, closure-tests and
-// feature-check lanes take 1-17 minutes on hosted runners, and a push makes
-// about a hundred jobs ready at once for an account-wide pool of about 40
-// runners, which take queued jobs in no reliable order: a long row picked
-// late set the run's wall time. Each of those lanes is planned in two waves
-// (waves): the rows that took WAVE_FIRST_SECONDS or more on a green run, or
-// were never measured, start right after this classification; the rest
-// also wait for ci.yml's stagger job, a short sleep that lets the first
-// wave take runners first. The measurements are ROW_DURATIONS
+// feature-check lanes take 1-50 minutes on hosted runners, and a
+// whole-workspace push makes about 170 jobs ready within minutes for an
+// account-wide pool of about 40 runners, which take queued jobs in no
+// reliable order: a long row picked late set the run's wall time. Each of
+// those lanes is planned in two waves (waves): the rows that took
+// WAVE_FIRST_SECONDS or more on a green run, or were never measured, start
+// right after this classification; the rest also wait for ci.yml's stagger
+// job, a short sleep that lets the first wave take runners first. The
+// closure check's product parts (closure_check_rows), each a job of its
+// own, start with the first wave too. The measurements are ROW_DURATIONS
 // (--row-durations), regenerated from green runs with
 // scripts/ci-row-durations.mjs; a stale entry only moves a row between
 // waves, never out of the plan. A row is measured under its rowKey, its name
@@ -672,8 +674,16 @@ export const INTEGRATION_SUITES = [
 export const ARCHIVED_UNIT_LANES = [{ package: "meerkat-mob", partitions: 2 }];
 
 // Long rows first (see the header): a row measured at this many seconds or
-// more, or never measured, is in the first wave.
-export const WAVE_FIRST_SECONDS = 480;
+// more, or never measured, is in the first wave. 900 since the 0.9.9
+// release. Its green runs measured 75 of 127 rows at 480 s or more and 52 at
+// 900 s or more: of the 114 two-wave rows of its release push, 73 or 51
+// start first, beside about 33 single first-wave jobs (the TLC shards among
+// them), for an account-wide pool of about 40 runners. Replaying the jobs
+// and the free runners of the 0.9.9 main pushes 41594713659 and 41608949055
+// through a queue model, the closure check's parts in the first wave and
+// this table finished the runs about 3-10 percent sooner at 900 s than they
+// did, and about 2-3 percent sooner than at 480 s.
+export const WAVE_FIRST_SECONDS = 900;
 export const ROW_DURATIONS = "scripts/ci-row-durations.json";
 // The lanes planned in two waves, by their key in ROW_DURATIONS. A main
 // unit row may carry a unit row's measurement: a push runs the unit lane's
@@ -1086,6 +1096,15 @@ function featureChecks(shards, byName) {
   // (one invocation over the shard, 534-796 s cold on #1763's workspace run)
   // and its other rows (variants and Make matrix rows, up to ~1000 s cold).
   // In one job they reached 1568 s, over the pull-request lane budget.
+  // The widest Bazel library or binary feature set of a Clippy chain head
+  // (MOB_CHAIN_CLIPPY_HEADS) is a third job of its own (`<head> widest set`),
+  // one command: it compiles the whole meerkat-mob chain under the head's
+  // production features and was most of its shard's matrix job. meerkat-rpc's
+  // took 25m02s of the rpc+9 matrix job's 46m23s on main push 41594713659
+  // (930 s of its 1159 s on 41608949055), and rkat's 22m08s of the rkat+5
+  // matrix job's 29m40s on 41608949055 (1290-1436 s on main pushes
+  // 41279425443 and 41308182453, whose rkat+5 matrix jobs took 53-59 of
+  // their 60 minutes).
   return shards.flatMap((shard) => {
     const pkgs = shard.packages.map((name) => byName.get(name));
     const bazel = bazelTestRow(pkgs, sets);
@@ -1093,23 +1112,34 @@ function featureChecks(shards, byName) {
     const add = (args) => {
       if (args && !commands.includes(args)) commands.push(args);
     };
+    const widestJobs = [];
     for (const pkg of pkgs) {
-      for (const variant of sets.get(pkg.name).variants) {
-        add([
+      const variants = sets.get(pkg.name).variants;
+      const widest = MOB_CHAIN_CLIPPY_HEADS.includes(pkg.name)
+        ? variants.reduce((best, variant) => (best === null || variant.features.length > best.features.length ? variant : best), null)
+        : null;
+      for (const variant of variants) {
+        const args = [
           `-p ${pkg.name}`,
           "--no-default-features",
           ...(variant.features.length > 0 ? [`--features ${variant.features.join(",")}`] : []),
           ...(variant.lib ? ["--lib"] : []),
           ...(variant.bins ? ["--bins"] : []),
-        ].join(" "));
+        ].join(" ");
+        if (variant === widest && variant.features.length > 0) {
+          widestJobs.push({ name: `${shortName(pkg.name)} widest set`, packages: [pkg.name], commands: [args] });
+        } else {
+          add(args);
+        }
       }
       for (const row of makeRows) {
-        if (row.package === pkg.name) add(row.args);
+        if (row.package === pkg.name && !widestJobs.some((job) => job.commands.includes(row.args))) add(row.args);
       }
     }
     return [
       { name: `${shard.name} bazel set`, packages: shard.packages, commands: bazel ? [bazel] : [] },
       { name: `${shard.name} matrix`, packages: shard.packages, commands },
+      ...widestJobs,
     ].filter((job) => job.commands.length > 0);
   });
 }
@@ -2931,6 +2961,22 @@ function plan(args) {
   result.closure_flags = byProduct(result.closure)
     .map(([, names]) => names.map((name) => `-p ${name}`).join(" "))
     .join(" ; ");
+  // Each part is a job of its own (closure_check_rows, the closure-check
+  // job's matrix), and the parts run in parallel. Each part checks the
+  // workspace crates it reaches under its own features, so one job that ran
+  // the parts one after another shared only the external crates whose
+  // features matched (sccache serves those to a part's own job in its first
+  // few minutes); it was the longest job of a workspace push, Core's,
+  // Meta's and Connect's parts taking 5m44s, 15m02s and 18m25s on main push
+  // 41594713659 (cancelled at its 40-minute timeout five seconds after the
+  // last part finished) and 7m24s, 18m51s and 24m46s on 41608949055 (51m49s
+  // in all, 86 percent of its 60-minute timeout, and the end of that run).
+  result.closure_check_rows = byProduct(result.closure).map(([product, names]) => ({
+    name: `${product}, ${names.length} crates`,
+    product,
+    packages: names,
+    package_flags: names.map((name) => `-p ${name}`).join(" "),
+  }));
   result.closure_beyond_packages = result.closure.filter((name) => !result.packages.includes(name));
   // The compile-only checks of the closure, and the two exact-profile lanes
   // (governed JSONL compiles meerkat-rpc's lib test, the confinement lane
@@ -3398,6 +3444,18 @@ function githubOutput(result) {
   scalar("closure_count", String(result.closure.length));
   scalar("closure_flags", result.closure_flags);
   scalar("closure_check", String(result.closure_check));
+  // One closure-check job per product's part; a placeholder keeps fromJSON
+  // well-formed for a plan without a closure, whose job `if:` skips it.
+  const closureCheckRows = result.closure_check_rows ?? [];
+  scalar("closure_check_count", String(closureCheckRows.length));
+  scalar(
+    "closure_check_matrix",
+    JSON.stringify({
+      include: closureCheckRows.length > 0
+        ? closureCheckRows.map((row) => ({ name: row.name, product: row.product, packages: row.package_flags }))
+        : [{ name: "none", product: "none", packages: "" }],
+    }),
+  );
   scalar("rustdoc", String(result.rustdoc));
   scalar("rustdoc_flags", result.rustdoc_flags ?? "");
   scalar("core_changed", String(result.core_changed));

@@ -821,7 +821,7 @@ mod tests {
 
     /// A store that refuses every append while it is down, and any append of
     /// more than `cap` events (a request size limit), keeping the ids it
-    /// accepts and the largest request it was sent.
+    /// accepts, the largest request it was sent and how many it was sent.
     #[derive(Clone)]
     struct CappedStore(Arc<CappedState>);
 
@@ -829,6 +829,7 @@ mod tests {
         cap: usize,
         down: AtomicBool,
         largest_request: std::sync::atomic::AtomicUsize,
+        calls: std::sync::atomic::AtomicUsize,
         persisted: Mutex<Vec<String>>,
     }
 
@@ -838,6 +839,7 @@ mod tests {
                 cap,
                 down: AtomicBool::new(true),
                 largest_request: std::sync::atomic::AtomicUsize::new(0),
+                calls: std::sync::atomic::AtomicUsize::new(0),
                 persisted: Mutex::new(Vec::new()),
             }))
         }
@@ -853,6 +855,10 @@ mod tests {
         fn largest_request(&self) -> usize {
             self.0.largest_request.load(Ordering::SeqCst)
         }
+
+        fn calls(&self) -> usize {
+            self.0.calls.load(Ordering::SeqCst)
+        }
     }
 
     impl EventLogStore for CappedStore {
@@ -861,6 +867,7 @@ mod tests {
             events: Vec<PersistedEvent>,
         ) -> Pin<Box<dyn Future<Output = Result<(), EventLogError>> + Send + '_>> {
             Box::pin(async move {
+                self.0.calls.fetch_add(1, Ordering::SeqCst);
                 self.0
                     .largest_request
                     .fetch_max(events.len(), Ordering::SeqCst);
@@ -925,6 +932,53 @@ mod tests {
         );
     }
 
+    /// While the retry buffer drops events at its cap, a longer wait only
+    /// loses more of them: the flush asks the store again within one flush
+    /// interval, still one request at a time. The wait used to keep doubling
+    /// to 30 s while each arriving event pushed out an older one, so a store
+    /// that recovered just after a refusal was asked again up to 30 s later,
+    /// and the events dropped in that time were lost.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_store_that_recovers_while_events_drop_at_the_cap_is_asked_within_an_interval() {
+        let store = CappedStore::down_with_cap(4);
+        let handle = start_event_log(
+            EventLogConfig {
+                store: Box::new(store.clone()),
+                filter: None,
+                batch_size: 4,
+                flush_interval: Duration::from_secs(1),
+            },
+            None,
+        );
+        // 100 events a second: the wait reaches 30 s after about 31 s of
+        // refusals, and the retry buffer reaches its cap after about 41 s.
+        let outage = Duration::from_secs(62);
+        let started = tokio::time::Instant::now();
+        let mut n = 0;
+        while started.elapsed() < outage {
+            ingest_module_event(&handle, &format!("evt-cap-{n}")).await;
+            n += 1;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let asked_while_down = store.calls();
+        store.recover();
+        let recovered_at = tokio::time::Instant::now();
+        while store.persisted().is_empty() && recovered_at.elapsed() < Duration::from_secs(40) {
+            ingest_module_event(&handle, &format!("evt-cap-{n}")).await;
+            n += 1;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let asked_again_after = recovered_at.elapsed();
+        assert!(
+            asked_again_after <= Duration::from_secs(2),
+            "the recovered store was asked again {asked_again_after:?} after it recovered, while events were dropping at the cap; the wait is one flush interval (1 s)"
+        );
+        assert!(
+            asked_while_down <= 62,
+            "the failing store was asked {asked_while_down} times in a 62 s outage: at most once per flush interval"
+        );
+    }
+
     #[test]
     fn the_retry_wait_doubles_from_the_flush_interval_up_to_its_cap() {
         let second = Duration::from_secs(1);
@@ -977,7 +1031,8 @@ mod tests {
     /// A flush the store refuses part way keeps the refused request and every
     /// later event buffered, in order. The store took events, so the refusal
     /// counts as the first in a row: the wait starts again at the interval.
-    #[tokio::test]
+    /// The clock is paused, so the wait has not passed when the row looks.
+    #[tokio::test(start_paused = true)]
     async fn a_flush_refused_part_way_keeps_the_rest_in_order() {
         let taker = Arc::new(TakesFirstAppend::default());
         let store: Arc<dyn EventLogStore> = taker.clone();

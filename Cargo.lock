@@ -4028,7 +4028,6 @@ dependencies = [
  "meerkat-mob-mcp",
  "meerkat-models",
  "meerkat-providers",
- "meerkat-rpc",
  "meerkat-runtime",
  "meerkat-session",
  "meerkat-sqlite",

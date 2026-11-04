@@ -207,6 +207,10 @@ pub struct DeclaredEntry {
     /// none, and a `constructed` one by activating its held construction
     /// ([`super::MobHandle::settle_identity_preparation`]).
     pub preparation: crate::identity::IdentityPreparationMode,
+    /// What the spec carries of the identity's member build: the build its
+    /// host composed, or the identity's lifecycle facts only. No member is
+    /// built from facts only ([`DeclaredBuild::FactsOnly`]).
+    pub build: DeclaredBuild,
 }
 
 impl DeclaredEntry {
@@ -218,7 +222,16 @@ impl DeclaredEntry {
             spec,
             held_creation: false,
             preparation: crate::identity::IdentityPreparationMode::None,
+            build: DeclaredBuild::Composed,
         }
+    }
+
+    /// What the spec carries of the identity's member build
+    /// ([`Self::build`]).
+    #[must_use]
+    pub fn with_build(mut self, build: DeclaredBuild) -> Self {
+        self.build = build;
+        self
     }
 
     /// The host's preparation of the identity before its first seat
@@ -238,6 +251,28 @@ impl DeclaredEntry {
         self.held_creation = held_creation;
         self
     }
+}
+
+/// What a declaration carries of its identity's member build
+/// ([`DeclaredEntry::build`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeclaredBuild {
+    /// The spec is the identity's member build as its host composed it: a
+    /// verdict that seats or rotates the identity's member builds the member
+    /// from it.
+    #[default]
+    Composed,
+    /// The spec carries the identity's lifecycle facts (its identity, role,
+    /// runtime mode, and placement or binding) and none of its member build.
+    /// A verdict that would seat or rotate its member (an owed seat, a
+    /// rotation onto a fresh session, a first-boot `Fresh` request's fresh
+    /// life) takes no member step and answers
+    /// [`DeclaredEntryOutcome::BuildRequired`]. Every other verdict answers
+    /// as for a composed declaration, since it builds nothing from the spec:
+    /// a kept member, a restamp on the member's own session (which keeps the
+    /// build inputs its seat recorded), a hold, a refusal.
+    FactsOnly,
 }
 
 /// A host's one-shot first-boot request for one identity
@@ -345,6 +380,13 @@ pub enum DeclaredEntryOutcome {
     /// that is busy, or whose spawn, wake or retirement is in flight, or a
     /// store that cannot serve now): nothing of it was done.
     Deferred { reason: MobError },
+    /// The identity's verdict seats or rotates its member, and its
+    /// declaration carried the identity's lifecycle facts only
+    /// ([`DeclaredBuild::FactsOnly`]): no member step was taken, so a
+    /// first-boot request that the seat or the fresh life would carry out is
+    /// not carried out. Its declaration was decided as any other's. The host
+    /// declares the identity again with its composed build.
+    BuildRequired,
     /// Refused, typed: nothing of it was written.
     Refused { refusal: DeclaredEntryRefusal },
     /// Left as it is, for a typed note: a quiet steady state, not a refusal,

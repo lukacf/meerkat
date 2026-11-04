@@ -767,6 +767,34 @@ fn authenticated_original_waits_for_a_held_source_collection_instead_of_refusing
     });
 }
 
+// Hold `lock` on another thread until released, run `wait` on this thread once
+// the lock is held, then release and join the holder on every path. A wait
+// that returns without its release (for example without pausing), and a
+// panic, drop the release sender, which ends the holder's wait as well.
+fn with_released_holder<L: Send, T>(
+    lock: &std::sync::Mutex<L>,
+    wait: impl FnOnce(&std::sync::mpsc::Sender<()>, &std::sync::mpsc::Receiver<()>) -> T,
+) -> T {
+    let (held, holding) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let (freed, free) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let holder = scope.spawn(move || {
+            let guard = lock.lock().unwrap();
+            held.send(()).unwrap();
+            let _ = released.recv();
+            drop(guard);
+            let _ = freed.send(());
+        });
+        holding.recv().unwrap();
+        let release = release;
+        let answer = wait(&release, &free);
+        drop(release);
+        holder.join().unwrap();
+        answer
+    })
+}
+
 // The wait shared by both native readers (retained_custody and
 // authenticated_original): a reader descheduled across its deadline while the
 // holder releases must not read at the next attempt. It answers unavailable,
@@ -774,22 +802,12 @@ fn authenticated_original_waits_for_a_held_source_collection_instead_of_refusing
 #[test]
 fn source_wait_never_reads_after_its_deadline() {
     let lock = std::sync::Mutex::new(());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
-    let (held, holding) = std::sync::mpsc::channel();
-    let (release, released) = std::sync::mpsc::channel::<()>();
-    let (freed, free) = std::sync::mpsc::channel();
     let mut pauses = 0;
-    let answer = std::thread::scope(|scope| {
-        let shared = &lock;
-        let holder = scope.spawn(move || {
-            let guard = shared.lock().unwrap();
-            held.send(()).unwrap();
-            released.recv().unwrap();
-            drop(guard);
-            freed.send(()).unwrap();
-        });
-        holding.recv().unwrap();
-        let answer = super::wait_for_lock(&lock, deadline, |_| {
+    let answer = with_released_holder(&lock, |release, free| {
+        // The deadline starts once the lock is held, never before the
+        // holder's handshake.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        super::wait_for_lock(&lock, deadline, |_| {
             pauses += 1;
             if pauses == 1 {
                 // Descheduled across the deadline: the holder releases
@@ -801,9 +819,7 @@ fn source_wait_never_reads_after_its_deadline() {
                 }
             }
         })
-        .map(drop);
-        holder.join().unwrap();
-        answer
+        .map(drop)
     });
     assert_eq!(pauses, 1);
     assert_eq!(
@@ -811,6 +827,20 @@ fn source_wait_never_reads_after_its_deadline() {
         Err(ControllerReadinessFailure::PolicyUnavailable),
         "a reader past its deadline answers unavailable, even with the lock free"
     );
+}
+
+// A wait whose deadline passed before its first attempt answers at once,
+// without pausing, so it never releases the holder itself: the harness still
+// releases and joins it.
+#[test]
+fn source_wait_past_its_deadline_releases_its_holder() {
+    let lock = std::sync::Mutex::new(());
+    let mut pauses = 0;
+    let answer = with_released_holder(&lock, |_, _| {
+        super::wait_for_lock(&lock, std::time::Instant::now(), |_| pauses += 1).map(drop)
+    });
+    assert_eq!(pauses, 0, "an expired wait never pauses");
+    assert_eq!(answer, Err(ControllerReadinessFailure::PolicyUnavailable));
 }
 
 // Hold the source collection on another thread for `hold`, then run `check`

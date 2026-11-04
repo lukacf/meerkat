@@ -925,7 +925,7 @@ async fn core_realizes_an_adopted_member_as_a_durable_identity_member() {
 
 /// Adopt an existing member's declaration through Core's identity intent
 /// rows, as a host does. The intent row is committed when this returns.
-async fn adopt_existing_member(
+pub(super) async fn adopt_existing_member(
     handle: &MobHandle,
     member: &AgentIdentity,
     session: &SessionId,

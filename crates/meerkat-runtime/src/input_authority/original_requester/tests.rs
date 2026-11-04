@@ -822,6 +822,44 @@ async fn a_rebind_with_another_controller_selection_is_refused_and_recorded() {
     );
 }
 
+/// The host's custody of originals is first-writer-wins. A binder holding no
+/// record of a delivery (a second binder over the same host, as after its own
+/// record was dropped) mints from the host's current answer; an association
+/// that differs from the one the host enrolled first is refused
+/// `enrollment_conflict`, never enrolled over the first, and the refusal is
+/// recorded and answered again without another host read.
+#[tokio::test]
+async fn a_differing_mint_after_custody_loss_is_refused_enrollment_conflict() {
+    let host = ScriptedHost::new(owner_grant());
+    let request = governed_request("delivery-1");
+    let delivery_work = request.delivery_work.clone();
+    let first = bind(&binder(&host), request).await.expect("first bind");
+    host.answer(Answer::Grant {
+        basis: "reissued-owner-delegation",
+        controller: "receiver",
+    });
+    let without_record = binder(&host);
+    for attempt in 0..2 {
+        assert_eq!(
+            without_record
+                .bind_peer_ingress(governed_request("delivery-1"))
+                .await
+                .expect_err("a differing association is refused"),
+            PeerIngressBindRefusal::Refused(PeerIngressBindDenial::EnrollmentConflict),
+            "attempt {attempt}"
+        );
+    }
+    assert_eq!(
+        host.reads(),
+        2,
+        "the recorded refusal answers the second attempt"
+    );
+    assert!(
+        host.enrolled(&delivery_work).as_ref() == Some(&first),
+        "the first enrollment stands"
+    );
+}
+
 /// A bind dropped while the host's read is in flight leaves nothing minted,
 /// enrolled or recorded: the next bind of the delivery is answered as if it
 /// were the first.

@@ -381,13 +381,20 @@ pub fn member_id_for_name(name: &str) -> std::borrow::Cow<'_, str> {
 /// [`ENCODED_MEMBER_ID_MARKER`], or what follows the marker is no escape
 /// production).
 pub fn name_for_member_id(member_id: &str) -> std::borrow::Cow<'_, str> {
-    match member_id
-        .strip_prefix(ENCODED_MEMBER_ID_MARKER)
-        .and_then(unescape_member_name)
-    {
+    match decode_member_id(member_id) {
         Some(name) => std::borrow::Cow::Owned(name),
         None => std::borrow::Cow::Borrowed(member_id),
     }
+}
+
+/// The name an encoded member id spells ([`member_id_for_name`]): `None`
+/// when `member_id` does not begin with [`ENCODED_MEMBER_ID_MARKER`], or
+/// what follows the marker is no escape production, which no encoding
+/// produced. The one decoder of the encoding.
+pub(crate) fn decode_member_id(member_id: &str) -> Option<String> {
+    member_id
+        .strip_prefix(ENCODED_MEMBER_ID_MARKER)
+        .and_then(unescape_member_name)
 }
 
 /// Monotonically increasing generation counter for a mob member.

@@ -95,13 +95,13 @@ use std::time::Duration;
 use meerkat_core::host_store::{FenceToken, HostStoreError};
 
 pub use realm::{
-    ArmedScopes, ScopeCell, ScopeDelta, ScopeFamily, ScopeGuard, ScopeId, ScopeState, SpiRealm,
-    SpiRealmConfig,
+    ArmedScopes, PoisonedScope, ScopeCell, ScopeDelta, ScopeFamily, ScopeGuard, ScopeId,
+    ScopeState, SpiRealm, SpiRealmConfig,
 };
 pub use runtime::{RUNTIME_FAMILY, SpiRuntimeStore};
 pub use session::SpiSessionStore;
 
-use super::RuntimeStoreError;
+use super::{RefusedScope, RuntimeStoreError};
 
 /// Why a host store adapter refused or failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -114,6 +114,10 @@ pub enum SpiError {
     /// refuses every call until the realm is reopened.
     #[error("host store scope {scope} is poisoned: {cause}")]
     ScopePoisoned { scope: String, cause: String },
+    /// A read across the scopes of some families met poisoned ones: it
+    /// refuses until the realm is reopened. Names each with its cause.
+    #[error("{}", PoisonedScopesDisplay(scopes))]
+    ScopesPoisoned { scopes: Vec<PoisonedScope> },
     /// An exclusive acquire met a live holder.
     #[error("host store fence is held by token {holder} for {remaining:?} more")]
     Held {
@@ -147,27 +151,87 @@ pub enum SpiError {
 }
 
 impl SpiError {
-    /// The error a mutating store call answers.
+    /// The error a mutating store call answers. A poisoned realm or scope
+    /// answers its typed refusal ([`Self::into_refusal`]).
     #[must_use]
     pub fn into_write(self) -> RuntimeStoreError {
-        RuntimeStoreError::WriteFailed(self.to_string())
+        match self.into_refusal() {
+            Ok(refusal) => refusal,
+            Err(other) => RuntimeStoreError::WriteFailed(other.to_string()),
+        }
     }
 
-    /// The error a reading store call answers. A host store that could not
-    /// serve now reads as [`RuntimeStoreError::Unavailable`], and data that
-    /// does not decode or fails the host's own integrity check as
-    /// [`RuntimeStoreError::Corrupt`], so a reader can tell an outage a later
-    /// read may get past from state that needs a repair.
+    /// The error a reading store call answers. A poisoned realm or scope
+    /// answers its typed refusal ([`Self::into_refusal`]), a host store that
+    /// could not serve now reads as [`RuntimeStoreError::Unavailable`], and
+    /// data that does not decode or fails the host's own integrity check as
+    /// [`RuntimeStoreError::Corrupt`], so a reader can tell a refusal that
+    /// lasts until the realm reopens and an outage a later read may get past
+    /// from state that needs a repair.
     #[must_use]
     pub fn into_read(self) -> RuntimeStoreError {
+        match self.into_refusal() {
+            Ok(refusal) => refusal,
+            Err(error @ Self::Host(HostStoreError::Unavailable(_))) => {
+                RuntimeStoreError::Unavailable(error.to_string())
+            }
+            Err(error @ (Self::Corrupt(_) | Self::Host(HostStoreError::Corrupt(_)))) => {
+                RuntimeStoreError::Corrupt(error.to_string())
+            }
+            Err(other) => RuntimeStoreError::ReadFailed(other.to_string()),
+        }
+    }
+
+    /// The typed refusal a poisoned realm or scope answers until the realm
+    /// is reopened: [`RuntimeStoreError::RealmRefused`] for a realm that lost
+    /// its fence, [`RuntimeStoreError::ScopeRefused`] naming each poisoned
+    /// scope the call needs. Any other error comes back unchanged.
+    fn into_refusal(self) -> Result<RuntimeStoreError, Self> {
         match self {
-            Self::Host(HostStoreError::Unavailable(_)) => {
-                RuntimeStoreError::Unavailable(self.to_string())
+            Self::RealmPoisoned(cause) => Ok(RuntimeStoreError::RealmRefused { cause }),
+            Self::ScopePoisoned { scope, cause } => Ok(RuntimeStoreError::ScopeRefused {
+                scopes: vec![RefusedScope::new(scope, cause)],
+            }),
+            Self::ScopesPoisoned { scopes } => Ok(RuntimeStoreError::ScopeRefused {
+                scopes: scopes
+                    .into_iter()
+                    .map(|poisoned| RefusedScope::new(poisoned.id.to_string(), poisoned.cause))
+                    .collect(),
+            }),
+            other => Err(other),
+        }
+    }
+}
+
+/// The scopes of a [`SpiError::ScopesPoisoned`], each with its cause.
+struct PoisonedScopesDisplay<'a>(&'a [PoisonedScope]);
+
+impl std::fmt::Display for PoisonedScopesDisplay<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            [] => f.write_str("a host store scope is poisoned"),
+            [only] => write!(
+                f,
+                "host store scope {} is poisoned: {}",
+                only.id, only.cause
+            ),
+            several => {
+                f.write_str("host store scopes ")?;
+                for (index, scope) in several.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{}", scope.id)?;
+                }
+                f.write_str(" are poisoned (")?;
+                for (index, scope) in several.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str("; ")?;
+                    }
+                    write!(f, "{}: {}", scope.id, scope.cause)?;
+                }
+                f.write_str(")")
             }
-            Self::Corrupt(_) | Self::Host(HostStoreError::Corrupt(_)) => {
-                RuntimeStoreError::Corrupt(self.to_string())
-            }
-            other => RuntimeStoreError::ReadFailed(other.to_string()),
         }
     }
 }

@@ -571,12 +571,13 @@ pub use completion::{
     CompletionWaitError,
 };
 pub use delivery_inbox::{
-    ContinuationKeyClaim, KeyedSubmitOutcome, RuntimeDeliveryAcknowledgement, RuntimeDeliveryError,
-    RuntimeDeliveryId, RuntimeDeliveryInbox, RuntimeDeliveryKind, RuntimeDeliveryOwnerAlreadyArmed,
-    RuntimeDeliveryOwnership, RuntimeDeliveryReceipt, RuntimeDeliveryRecipient,
-    RuntimeDeliveryRecipientGroupOutcome, RuntimeDeliveryRecipientOutcome,
-    RuntimeDeliveryRecipientState, RuntimeDeliveryRecord, RuntimeDeliveryRefusalReason,
-    RuntimeDeliveryStatus, RuntimeDeliverySubmission, delivery_digest_hex,
+    ContinuationKeyClaim, KeyedSubmitOutcome, RuntimeDeliveryAcknowledgement,
+    RuntimeDeliveryBacklog, RuntimeDeliveryError, RuntimeDeliveryId, RuntimeDeliveryInbox,
+    RuntimeDeliveryKind, RuntimeDeliveryOwnerAlreadyArmed, RuntimeDeliveryOwnership,
+    RuntimeDeliveryReceipt, RuntimeDeliveryRecipient, RuntimeDeliveryRecipientGroupOutcome,
+    RuntimeDeliveryRecipientOutcome, RuntimeDeliveryRecipientState, RuntimeDeliveryRecord,
+    RuntimeDeliveryRefusalReason, RuntimeDeliveryStatus, RuntimeDeliverySubmission,
+    delivery_digest_hex,
 };
 pub use driver::{EphemeralRuntimeDriver, PersistentRuntimeDriver, PostAdmissionSignal};
 pub use exact_operation::{
@@ -1191,14 +1192,15 @@ pub use store::{
     PreparedRuntimeSessionCommitOutcome, PreparedRuntimeSessionCommitResult,
     PreparedWholeBlobProvisionalTail, PreparedWholeBlobRewriteBoundary,
     PreparedWholeBlobRewriteStoreParts, PreparedWholeBlobRunRebase,
-    PreparedWholeBlobRunRebaseStoreParts, RecoveryCommitStatus, RuntimeDeliveryAuthorityCasOutcome,
+    PreparedWholeBlobRunRebaseStoreParts, RecoveryCommitStatus, RefusedScope,
+    RuntimeDeliveryAuthorityCasOutcome, RuntimeDeliveryAuthorityListing,
     RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord, RuntimeSessionAuthority,
     RuntimeSessionPersistenceProfile, RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence,
     RuntimeStoreWriteFenceOutcome, SerializedSessionSnapshot, ServiceCallAuditBatch,
-    ServiceCallAuditKey, ServiceCallAuditRecord, VerifiedCommittedWholeBlobPayload,
-    WholeBlobCommittedTranscriptFacts, WholeBlobProvisionalTailAuthority,
-    WholeBlobRunRebaseOutcome, WholeBlobSessionImport, WholeBlobStoreAuthority,
-    reuse_or_load_committed_whole_blob_snapshot,
+    ServiceCallAuditKey, ServiceCallAuditRecord, UnavailableRuntime,
+    VerifiedCommittedWholeBlobPayload, WholeBlobCommittedTranscriptFacts,
+    WholeBlobProvisionalTailAuthority, WholeBlobRunRebaseOutcome, WholeBlobSessionImport,
+    WholeBlobStoreAuthority, reuse_or_load_committed_whole_blob_snapshot,
 };
 #[cfg(feature = "sqlite-store")]
 pub use store::{

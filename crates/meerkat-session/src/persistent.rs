@@ -127,10 +127,13 @@ fn activation_store_error_to_session_error(error: RuntimeStoreError) -> SessionE
 
 /// Map a committed-WholeBlob read failure to the typed session error hosts
 /// classify on: the audited-endpoint divergence means "this session needs the
-/// sanctioned repair"; a store that could not serve now and stored data that
-/// does not decode keep their typed store error (`SessionError::Store`), so a
-/// classifier tells an outage a later read may get past from state that
-/// needs a repair; everything else stays an internal agent error.
+/// sanctioned repair"; a store that could not serve now, stored data that
+/// does not decode, and a store that refuses until its realm is reopened (a
+/// host store whose scope of the session, or whose realm, is poisoned) keep
+/// their typed store error (`SessionError::Store`), so a classifier tells an
+/// outage a later read may get past from state that needs a repair and from
+/// a refusal that no read gets past until the reopen; everything else stays
+/// an internal agent error.
 fn whole_blob_read_error_to_session_error(
     session_id: &SessionId,
     role: &str,
@@ -145,8 +148,57 @@ fn whole_blob_read_error_to_session_error(
         error @ (RuntimeStoreError::Unavailable(_) | RuntimeStoreError::Corrupt(_)) => {
             SessionError::Store(Box::new(error))
         }
+        other => refusal_or_internal_error(other, |other| {
+            format!("failed to load {role} for session {session_id}: {other}")
+        }),
+    }
+}
+
+/// A store refusal that lasts until the host store realm is reopened
+/// ([`RuntimeStoreError::is_refused_until_reopen`]) keeps its typed store
+/// error (`SessionError::Store`): the layers above answer it without reading
+/// again (a member status read) or end on it (a wait), and never retry it as
+/// an outage. Any other store failure becomes the internal agent error
+/// `describe` writes.
+fn refusal_or_internal_error(
+    error: RuntimeStoreError,
+    describe: impl FnOnce(&RuntimeStoreError) -> String,
+) -> SessionError {
+    if error.is_refused_until_reopen() {
+        SessionError::Store(Box::new(error))
+    } else {
+        SessionError::Agent(AgentError::InternalError(describe(&error)))
+    }
+}
+
+/// Map a failed read of a HeadCanonical session's boundary authority: a
+/// store refusal until the realm is reopened keeps its typed store error
+/// ([`refusal_or_internal_error`]).
+fn head_canonical_authority_read_error(
+    session_id: &SessionId,
+    role: &str,
+    error: RuntimeStoreError,
+) -> SessionError {
+    refusal_or_internal_error(error, |error| {
+        format!("failed to load {role} HeadCanonical authority for session {session_id}: {error}")
+    })
+}
+
+/// Map a failed read of a session's committed snapshot under its
+/// provisional tail: a store refusal until the realm is reopened keeps its
+/// typed store error, and any other failure becomes an internal agent error.
+fn committed_snapshot_under_tail_read_error(
+    session_id: &SessionId,
+    error: meerkat_runtime::recovery::DurableTailRecoveryError,
+) -> SessionError {
+    match error {
+        meerkat_runtime::recovery::DurableTailRecoveryError::Store(error)
+            if error.is_refused_until_reopen() =>
+        {
+            SessionError::Store(Box::new(error))
+        }
         other => SessionError::Agent(AgentError::InternalError(format!(
-            "failed to load {role} for session {session_id}: {other}"
+            "failed to read the committed snapshot of session {session_id} under its provisional tail: {other}"
         ))),
     }
 }
@@ -184,6 +236,38 @@ mod whole_blob_read_error_tests {
             matches!(mapped, SessionError::Agent(AgentError::InternalError(_))),
             "{mapped:?}"
         );
+    }
+
+    /// A committed read that a host store refused because the session's
+    /// scope (or the realm) is poisoned keeps its typed store error too: the
+    /// refusal lasts until the realm is reopened, and only a typed refusal
+    /// lets a status read answer it without reading again, or a wait end on
+    /// it. Before, it was flattened into an internal agent error.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_poisoned_scope_refusal_keeps_its_typed_store_error() {
+        use meerkat_runtime::store::spi::SpiError;
+
+        let session_id = SessionId::new();
+        for error in [
+            SpiError::ScopePoisoned {
+                scope: "rt:poisoned".to_string(),
+                cause: "the store refused the batch".to_string(),
+            }
+            .into_read(),
+            SpiError::RealmPoisoned("fenced out".to_string()).into_read(),
+        ] {
+            let mapped = whole_blob_read_error_to_session_error(&session_id, "session", error);
+            let SessionError::Store(source) = &mapped else {
+                panic!("a refusal until the realm reopens stays a store error: {mapped:?}");
+            };
+            assert!(
+                source
+                    .downcast_ref::<RuntimeStoreError>()
+                    .is_some_and(|error| !matches!(error, RuntimeStoreError::ReadFailed(_))),
+                "the source keeps the typed refusal: {source:?}"
+            );
+        }
     }
 }
 
@@ -6520,11 +6604,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .runtime_store
                     .load_session_boundary_authority(&Self::runtime_id_for_session(id))
                     .await
-                    .map_err(|error| {
-                        SessionError::Agent(AgentError::InternalError(format!(
-                            "failed to load {role} HeadCanonical authority for session {id}: {error}"
-                        )))
-                    })?;
+                    .map_err(|error| head_canonical_authority_read_error(id, role, error))?;
                 let Some(authority) = authority else {
                     return Ok(None);
                 };
@@ -21716,9 +21796,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 {
                     Ok(Some(committed)) => Ok(Some(committed)),
                     Ok(None) => Err(conflict),
-                    Err(error) => Err(SessionError::Agent(AgentError::InternalError(format!(
-                        "failed to read the committed snapshot of session {id} under its provisional tail: {error}"
-                    )))),
+                    Err(error) => Err(committed_snapshot_under_tail_read_error(id, error)),
                 }
             }
             other => other,

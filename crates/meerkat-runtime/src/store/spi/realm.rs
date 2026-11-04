@@ -65,7 +65,10 @@
 //! head's commit id) before a scope's next version is written, and a
 //! poisoned scope writes no next version at all. A batch whose outcome stays
 //! unknown is remembered as such, so a later re-acquire does not read it as
-//! another writer's.
+//! another writer's. The realm keeps every poisoned scope with its cause
+//! ([`SpiRealm::poisoned_scopes`]), and a read across many scopes refuses
+//! only while a scope of a family it reads is poisoned
+//! ([`SpiRealm::check_cross_scope_read_of`]).
 //!
 //! # Cancellation
 //!
@@ -80,7 +83,7 @@
 use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -267,6 +270,18 @@ impl std::fmt::Display for ScopeId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}", self.family.tag, self.key)
     }
+}
+
+/// A poisoned scope ([`SpiRealm::poisoned_scopes`]): it refuses every call
+/// until the realm is reopened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PoisonedScope {
+    /// The scope.
+    pub id: ScopeId,
+    /// Why it was poisoned: the failure of the batch that touched it, or
+    /// the rule a call broke.
+    pub cause: String,
 }
 
 /// One scope's lock and journal state.
@@ -596,7 +611,11 @@ pub struct SpiRealm {
     /// on the scope settles it.
     uncertain: StdMutex<HashMap<(ScopeKind, String), Vec<Option<ScopeVersion>>>>,
     realm_poison: StdMutex<Option<String>>,
-    poisoned_scopes: AtomicUsize,
+    /// Every poisoned scope, with its cause: a scope enters once, when it is
+    /// poisoned, and stays until the realm is reopened. A read across many
+    /// scopes checks only the families it reads
+    /// ([`Self::check_cross_scope_read_of`]).
+    poisoned: StdMutex<BTreeMap<ScopeId, String>>,
     cells: StdMutex<HashMap<ScopeId, Arc<ScopeCell>>>,
     listed: StdMutex<HashMap<String, Vec<ListedHead>>>,
     /// Families claimed so far, with the refusal of a claim that failed.
@@ -839,7 +858,7 @@ impl SpiRealm {
             known_heads: StdMutex::new(HashMap::new()),
             uncertain: StdMutex::new(HashMap::new()),
             realm_poison: StdMutex::new(None),
-            poisoned_scopes: AtomicUsize::new(0),
+            poisoned: StdMutex::new(BTreeMap::new()),
             cells: StdMutex::new(HashMap::new()),
             listed: StdMutex::new(HashMap::new()),
             claimed: StdMutex::new(HashMap::new()),
@@ -913,7 +932,33 @@ impl SpiRealm {
     /// Whether any scope is poisoned.
     #[must_use]
     pub fn has_poisoned_scopes(&self) -> bool {
-        self.poisoned_scopes.load(Ordering::Acquire) > 0
+        !lock(&self.poisoned).is_empty()
+    }
+
+    /// Every poisoned scope, in scope order, with its cause. A scope stays
+    /// poisoned until the realm is reopened.
+    #[must_use]
+    pub fn poisoned_scopes(&self) -> Vec<PoisonedScope> {
+        lock(&self.poisoned)
+            .iter()
+            .map(|(id, cause)| PoisonedScope {
+                id: id.clone(),
+                cause: cause.clone(),
+            })
+            .collect()
+    }
+
+    /// The poisoned scopes of `family`, in key order, with their causes.
+    #[must_use]
+    pub fn poisoned_scopes_of(&self, family: ScopeFamily) -> Vec<PoisonedScope> {
+        lock(&self.poisoned)
+            .iter()
+            .filter(|(id, _)| id.family == family)
+            .map(|(id, cause)| PoisonedScope {
+                id: id.clone(),
+                cause: cause.clone(),
+            })
+            .collect()
     }
 
     /// Refuse when the realm is poisoned.
@@ -925,15 +970,54 @@ impl SpiRealm {
     }
 
     /// Refuse a cross-scope read while the realm or any scope is poisoned:
-    /// a poisoned scope's memory may be ahead of the host.
+    /// a poisoned scope's memory may be ahead of the host. The conservative
+    /// form, for a read that may depend on a scope of any family; an
+    /// adapter names the families a read depends on with
+    /// [`Self::check_cross_scope_read_of`].
+    ///
+    /// # Errors
+    /// [`SpiError::RealmPoisoned`], or [`SpiError::ScopesPoisoned`] naming
+    /// every poisoned scope.
     pub fn check_cross_scope_read(&self) -> Result<(), SpiError> {
         self.check_realm()?;
-        if self.has_poisoned_scopes() {
-            return Err(SpiError::RealmPoisoned(
-                "a scope is poisoned; cross-scope reads refuse until the realm is reopened".into(),
-            ));
+        let poisoned = self.poisoned_scopes();
+        if poisoned.is_empty() {
+            Ok(())
+        } else {
+            Err(SpiError::ScopesPoisoned { scopes: poisoned })
         }
-        Ok(())
+    }
+
+    /// Refuse a read across every scope of `families` while the realm, or a
+    /// scope of one of those families, is poisoned: that scope's memory may
+    /// differ from the host, and the read answers from memory.
+    ///
+    /// A scope of another family cannot change what such a read answers. A
+    /// scope's memory changes only under its own lock, in a call that
+    /// commits before releasing it, or the scope is poisoned, and a call that
+    /// touches memory outside the scopes it locked poisons the scope it
+    /// touched (or the realm, when that scope is busy). So a read of these
+    /// families' memory never depends on another family's poisoned scope,
+    /// and is answered while one exists.
+    ///
+    /// # Errors
+    /// [`SpiError::RealmPoisoned`], or [`SpiError::ScopesPoisoned`] naming
+    /// the poisoned scopes of `families`.
+    pub fn check_cross_scope_read_of(&self, families: &[ScopeFamily]) -> Result<(), SpiError> {
+        self.check_realm()?;
+        let poisoned: Vec<PoisonedScope> = lock(&self.poisoned)
+            .iter()
+            .filter(|(id, _)| families.contains(&id.family))
+            .map(|(id, cause)| PoisonedScope {
+                id: id.clone(),
+                cause: cause.clone(),
+            })
+            .collect();
+        if poisoned.is_empty() {
+            Ok(())
+        } else {
+            Err(SpiError::ScopesPoisoned { scopes: poisoned })
+        }
     }
 
     /// How many commits settle slowly now, as a watch. A commit counts from
@@ -1269,7 +1353,7 @@ impl SpiRealm {
     fn poison_scope(&self, state: &mut ScopeState, cause: &str) {
         if state.poison.is_none() {
             state.poison = Some(cause.to_string());
-            self.poisoned_scopes.fetch_add(1, Ordering::AcqRel);
+            lock(&self.poisoned).insert(state.id.clone(), cause.to_string());
             tracing::error!(scope = %state.id, %cause, "host store scope poisoned; it refuses until the realm is reopened");
         }
     }

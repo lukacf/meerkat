@@ -44,7 +44,7 @@ use meerkat_runtime::{
     ColdDeliveryOwnership, DeliveryGenerationReader, HostingCapability, HostingClaim,
     HostingRefused, KEPT_DELIVERY_READER_IDLE, LogicalRuntimeId, RetainedNotificationRegistration,
     RuntimeDeliveryError, RuntimeDeliveryInbox, RuntimeDeliveryKind,
-    RuntimeDeliveryOwnerAlreadyArmed, RuntimeDeliveryOwnership,
+    RuntimeDeliveryOwnerAlreadyArmed, RuntimeDeliveryOwnership, UnavailableRuntime,
 };
 use tokio::sync::watch;
 
@@ -290,7 +290,9 @@ pub struct RuntimeDeliveryPass {
     /// that names them.
     pub blocked_sessions: Vec<SessionId>,
     /// Delivery runtimes whose rows stayed pending after this pass, including
-    /// continuation addresses no session serves yet.
+    /// continuation addresses no session serves yet, and runtimes the store
+    /// cannot answer for until it is reopened (a host store whose scope of
+    /// the runtime is poisoned), each also named in `failures`.
     pub blocked_runtimes: Vec<LogicalRuntimeId>,
     /// Failures observed this pass, in order.
     pub failures: Vec<String>,
@@ -444,6 +446,7 @@ impl RuntimeDeliveryOwner {
             answered_sweeps: 0,
             cold,
             awaiting: HashMap::new(),
+            unavailable: Vec::new(),
             stop: Some(stop_rx),
             owed_round: None,
         }));
@@ -805,6 +808,13 @@ struct OwnerLoop {
     /// served here, or cold while this process is the cold-delivery owner
     /// (its claim attempt then decides).
     awaiting: HashMap<LogicalRuntimeId, AwaitingWait>,
+    /// Delivery runtimes the store cannot answer for until it is reopened
+    /// (a host store whose scope of the runtime is poisoned), with the
+    /// store's refusal, as the last reconcile read them, by runtime id. No
+    /// drain reaches them: a drain would only meet the refusal. Every pass
+    /// reports them blocked and names the refusal, and the next reconcile
+    /// reads them again.
+    unavailable: Vec<UnavailableRuntime>,
     /// The round of the host's owed continuations in progress, if any.
     owed_round: Option<OwedRound>,
 }
@@ -1086,7 +1096,16 @@ async fn run_owner(mut owner: OwnerLoop) {
                 None => {}
             }
             pass.blocked_sessions = blocked.values().flatten().cloned().collect();
-            pass.blocked_runtimes = blocked.keys().cloned().collect();
+            pass.blocked_runtimes = blocked
+                .keys()
+                .cloned()
+                .chain(
+                    owner
+                        .unavailable
+                        .iter()
+                        .map(|unavailable| unavailable.runtime_id.clone()),
+                )
+                .collect();
             pass.applies_cold_deliveries = owner.cold.applies_cold_deliveries();
             // Report a failure set once, not on every retry of the same rows.
             if !pass.failures.is_empty() && pass.failures != reported_failures {
@@ -1300,18 +1319,20 @@ async fn run_pass(
         if let Ok(current) = owner.read_delivery_generation(GenerationRead::Read).await {
             owner.last_delivery_generation = Some(current);
         }
-        match owner
-            .ownership
-            .inbox()
-            .runtimes_with_pending_deliveries()
-            .await
-        {
-            Ok(found) => {
+        match owner.ownership.inbox().runtime_delivery_backlog().await {
+            Ok(backlog) => {
                 // The pass below re-records every runtime still waiting.
                 owner
                     .awaiting
-                    .retain(|runtime_id, _| found.contains(runtime_id));
-                runtimes.extend(found);
+                    .retain(|runtime_id, _| backlog.pending.contains(runtime_id));
+                // A runtime the store cannot answer for is no drain's to
+                // retry: it leaves the blocked set and is reported from the
+                // owner's own until a reconcile no longer names it.
+                for unavailable in &backlog.unavailable {
+                    blocked.remove(&unavailable.runtime_id);
+                }
+                owner.unavailable = backlog.unavailable;
+                runtimes.extend(backlog.pending);
             }
             Err(error) => {
                 reconcile_failed = true;
@@ -1342,8 +1363,19 @@ async fn run_pass(
         );
     }
     runtimes.extend(due);
-    let mut seen = HashSet::new();
+    let mut seen: HashSet<LogicalRuntimeId> = owner
+        .unavailable
+        .iter()
+        .map(|unavailable| unavailable.runtime_id.clone())
+        .collect();
     runtimes.retain(|runtime_id| seen.insert(runtime_id.clone()));
+    for unavailable in &owner.unavailable {
+        pass.failures.push(format!(
+            "delivery runtime {} is unavailable until the store is reopened, and its rows \
+             stay pending: {}",
+            unavailable.runtime_id, unavailable.refusal
+        ));
+    }
 
     // Delivering calls into the host, which can wait: the kept reader's
     // connection closes first, so maintenance never waits on a delivery. The

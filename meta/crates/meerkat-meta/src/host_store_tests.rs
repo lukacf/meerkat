@@ -5114,3 +5114,49 @@ async fn a_builder_roster_member_delegates_on_a_host_store_realm() {
     assert_eq!(stored, vec![ROOT_MOB_STORAGE_KEY.to_string()]);
     stop(runtime).await;
 }
+
+/// A poisoned scope leaves the realm ready: the realm keeps serving every
+/// call that does not need that scope, so the readiness probe reports the
+/// scope and stays ready, and the realm's reads of other families (the
+/// session catalog listing behind `sessions/list`) answer. Only a poisoned
+/// realm, a lost fence, makes the probe not ready. Before, any poisoned
+/// scope made the probe not ready, and a host restarted the whole process
+/// for one degraded document or member.
+#[tokio::test]
+async fn readiness_stays_ready_and_names_the_poisoned_scope() {
+    let fixture = Fixture::new();
+    let host = fixture.process();
+    let provider = fixture
+        .open_with(&host, failing_fast())
+        .await
+        .expect("open");
+    let documents = provider.realm.documents();
+    documents
+        .write("cursor/mob-a", Some(b"first".to_vec()))
+        .await
+        .expect("the first write");
+    host.fail_next_commits(1);
+    documents
+        .write("cursor/mob-a", Some(b"second".to_vec()))
+        .await
+        .expect_err("the store fails the batch");
+
+    let readiness = provider.readiness();
+    assert!(
+        readiness.scope_poisoned && readiness.realm_poisoned.is_none(),
+        "{readiness:?}"
+    );
+    assert!(
+        readiness.is_ready(),
+        "a poisoned scope leaves the realm ready: {readiness:?}"
+    );
+    let catalog = provider
+        .realm
+        .runtime_store()
+        .list_runtime_session_catalog_entries(meerkat_core::SessionFilter::default())
+        .await;
+    assert!(
+        catalog.is_ok(),
+        "the session catalog listing answers while a document scope is poisoned: {catalog:?}"
+    );
+}

@@ -462,6 +462,9 @@ mod configured_parent;
 #[path = "helper_report_preparation_tests.rs"]
 mod legacy_preparation;
 
+#[path = "service_task_churn_tests.rs"]
+mod service_task_churn;
+
 #[path = "warm_service_issuance_tests.rs"]
 mod warm_service_issuance;
 

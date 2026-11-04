@@ -453,6 +453,11 @@ impl InstalledServiceTaskSource {
             )
             .map_err(|error| shared_task_refusal("prepare.helper_selection", error))?;
         // This exact call owns disclosure. No historical request is a permit.
+        #[cfg(test)]
+        owner
+            .host
+            .originals
+            .observe_service_task_stage_for_test("prepare.authorization");
         context.check_tool_authorization(call, plan)
             .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"prepare.authorization"}}"#))
             .map_err(authorization_error)?;
@@ -474,6 +479,11 @@ impl InstalledServiceTaskSource {
                 .member
                 .clone(),
         };
+        #[cfg(test)]
+        owner
+            .host
+            .originals
+            .observe_service_task_stage_for_test("prepare.service_task");
         let task = owner
             .host
             .originals
@@ -499,6 +509,11 @@ impl InstalledServiceTaskSource {
         } else {
             task
         };
+        #[cfg(test)]
+        owner
+            .host
+            .originals
+            .observe_service_task_stage_for_test("prepare.final_authorization");
         context.check_tool_authorization(call, plan)
             .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"prepare.final_authorization"}}"#))
             .map_err(authorization_error)?;

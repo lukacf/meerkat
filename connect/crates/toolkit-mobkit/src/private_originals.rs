@@ -546,6 +546,20 @@ pub trait ServiceInstallationReadback: Send + Sync {
 
 #[cfg(test)]
 type HelperControllerAppended = Arc<dyn Fn(&[GrantLineageRef]) + Send + Sync>;
+#[cfg(test)]
+type ServiceTaskStageProbe = Box<dyn Fn(&'static str) + Send + Sync>;
+
+#[cfg(test)]
+impl PrivateOriginals {
+    pub(crate) fn observe_service_task_stage_for_test(&self, stage: &'static str) {
+        if let Some(probe) = self.service_task_stage_for_test.get() {
+            probe(stage);
+        }
+    }
+    pub(crate) fn probe_service_task_stages_for_test(&self, probe: ServiceTaskStageProbe) {
+        assert!(self.service_task_stage_for_test.set(probe).is_ok());
+    }
+}
 
 pub struct PrivateOriginals {
     // Observes only a completed controller append, outside its native reservation.
@@ -555,6 +569,10 @@ pub struct PrivateOriginals {
     review_observations: Arc<crate::installed_host::review_diagnostics::ReviewObservations>,
     #[cfg(test)]
     pub(crate) metadata_probe: OnceLock<Arc<recovery_probe::MetadataRecoveryProbe>>,
+    // Observes each stage a service task preparation reaches, so a control
+    // can act exactly at one of its checks. It decides nothing.
+    #[cfg(test)]
+    service_task_stage_for_test: OnceLock<ServiceTaskStageProbe>,
     // A helper control's emulated dispatch tool deadline, and each reason a
     // helper's rebind stopped (setup_helpers).
     #[cfg(test)]
@@ -806,6 +824,8 @@ impl PrivateOriginals {
             custody_recovery: Default::default(),
             #[cfg(test)]
             metadata_probe: OnceLock::new(),
+            #[cfg(test)]
+            service_task_stage_for_test: OnceLock::new(),
             #[cfg(test)]
             helper_tool_deadline_for_test: OnceLock::new(),
             #[cfg(test)]

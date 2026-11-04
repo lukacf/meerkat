@@ -226,7 +226,12 @@ async fn read_member_status(
             return MemberStatusRead::NotMaterialized;
         }
         #[cfg(test)]
-        core_status_reads::record(session_id);
+        {
+            core_status_reads::record(session_id);
+            if core_status_reads::unanswered(session_id) {
+                return MemberStatusRead::NoAnswer;
+            }
+        }
         // The binding only routes the observation. Fresh typed status
         // must still prove that this exact session is idle.
         let Ok(status) = crate::member_status_observation::observe_member_status_until(
@@ -259,10 +264,11 @@ async fn read_member_status(
 /// row counts when it requires that a member's status is not read.
 #[cfg(test)]
 pub(crate) mod core_status_reads {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::{LazyLock, Mutex, PoisonError};
 
     static READS: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Default::default);
+    static UNANSWERED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
 
     pub(super) fn record(session_id: &str) {
         *READS
@@ -280,6 +286,23 @@ pub(crate) mod core_status_reads {
             .get(session_id)
             .copied()
             .unwrap_or_default()
+    }
+
+    /// Answer every later status read of `session_id` with nothing, as when
+    /// the bounded read runs out of time: the refresh gate reads
+    /// `StatusUnknown`. The read still counts.
+    pub(crate) fn leave_unanswered(session_id: &str) {
+        UNANSWERED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(session_id.to_string());
+    }
+
+    pub(super) fn unanswered(session_id: &str) -> bool {
+        UNANSWERED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(session_id)
     }
 }
 

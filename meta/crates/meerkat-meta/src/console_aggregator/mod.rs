@@ -10585,6 +10585,7 @@ mod tests {
         scripted_reads: Arc<std::sync::Mutex<std::collections::VecDeque<ScriptedHistoryRead>>>,
         scripted_application_reads:
             Arc<std::sync::Mutex<std::collections::VecDeque<ScriptedApplicationRead>>>,
+        refused_event_sessions: Arc<std::sync::Mutex<BTreeSet<String>>>,
     }
 
     #[derive(Clone)]
@@ -10644,7 +10645,24 @@ mod tests {
                 scripted_application_reads: Arc::new(std::sync::Mutex::new(
                     std::collections::VecDeque::new(),
                 )),
+                refused_event_sessions: Arc::new(std::sync::Mutex::new(BTreeSet::new())),
             }
+        }
+
+        /// Refuse every later event subscription of `session_id`, as a
+        /// session with no live actor (its store scope refused) is refused.
+        pub(super) fn refuse_session_events(&self, session_id: &SessionId) {
+            self.refused_event_sessions
+                .lock()
+                .expect("refused event sessions lock")
+                .insert(session_id.to_string());
+        }
+
+        fn session_events_refused(&self, session_id: &SessionId) -> bool {
+            self.refused_event_sessions
+                .lock()
+                .expect("refused event sessions lock")
+                .contains(&session_id.to_string())
         }
 
         pub(super) fn script_history(&self, reads: impl IntoIterator<Item = ScriptedHistoryRead>) {
@@ -10861,6 +10879,11 @@ mod tests {
             &self,
             id: &SessionId,
         ) -> Result<EventStream, StreamError> {
+            if self.session_events_refused(id) {
+                return Err(StreamError::NotFound(format!(
+                    "session {id} has no live actor"
+                )));
+            }
             SessionService::subscribe_session_events(self.inner.as_ref(), id).await
         }
 
@@ -11196,6 +11219,11 @@ mod tests {
             &self,
             session_id: &SessionId,
         ) -> Result<EventStream, StreamError> {
+            if self.session_events_refused(session_id) {
+                return Err(StreamError::NotFound(format!(
+                    "session {session_id} has no live actor"
+                )));
+            }
             meerkat_mob::MobSessionService::subscribe_session_events(
                 self.inner.as_ref(),
                 session_id,

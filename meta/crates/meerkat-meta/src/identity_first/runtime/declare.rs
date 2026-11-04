@@ -39,7 +39,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use super::super::bridge::{
     BridgeError, DeclaredIdentity, DeclaredIdentityAnswer, DeclaredRosterRequest,
@@ -537,3 +539,7 @@ fn declaration_not_applied(error: BridgeError) -> IdentityRuntimeError {
         detail: error.to_string(),
     }
 }
+
+#[cfg(test)]
+#[path = "declare_tests.rs"]
+mod tests;

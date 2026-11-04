@@ -70,12 +70,12 @@ use meerkat_meta::identity_first::contracts::{
 use meerkat_meta::identity_first::{
     AgentAddressability, AgentBuildContext, AgentBuildDraft, AgentIdentity, CheckpointVersion,
     ContinuityGeneration, ContinuityRecord, ContinuityResolveState, ContinuityStore,
-    ContinuityStoreError, CustomizerError, DurabilityPolicy, DurableAgentSpec, FencingToken,
-    FirstBootManifest, FirstBootRow, FirstBootRowKind, FirstBootWait, IdentityFirstRuntimeContext,
-    IdentityRuntime, IdentityRuntimeConfig, IdentityRuntimeError, LeaseAcquireResult, LeaseError,
-    LeaseGrant, LeaseProvider, LeaseRenewResult, ManagedPeerEdge, RestoreFlowResult,
-    RestoreOutcome, RosterContext, RosterError, SessionBridge, SessionSnapshot, TopologyContext,
-    TopologyError,
+    ContinuityStoreError, CustomizerError, DeclaredIdentityAnswer, DurabilityPolicy,
+    DurableAgentSpec, FencingToken, FirstBootManifest, FirstBootRow, FirstBootRowKind,
+    FirstBootWait, IdentityFirstRuntimeContext, IdentityRuntime, IdentityRuntimeConfig,
+    IdentityRuntimeError, LeaseAcquireResult, LeaseError, LeaseGrant, LeaseProvider,
+    LeaseRenewResult, ManagedPeerEdge, RestoreFlowResult, RestoreOutcome, RosterContext,
+    RosterError, SessionBridge, SessionSnapshot, TopologyContext, TopologyError,
 };
 use meerkat_meta::mob_composition_manifest::persistent_mob_storage;
 use meerkat_meta::mob_handle_runtime::SessionCreatedContext;
@@ -291,6 +291,40 @@ impl AgentCustomizer for NoopCustomizer {
         _spec: &DurableAgentSpec,
         _draft: &mut AgentBuildDraft,
     ) -> Result<(), CustomizerError> {
+        Ok(())
+    }
+
+    async fn after_create(
+        &self,
+        _identity: &AgentIdentity,
+        _session_id: &SessionId,
+        _context: &SessionCreatedContext,
+    ) -> Result<(), CustomizerError> {
+        Ok(())
+    }
+}
+
+/// An installed customizer that counts the member builds it composes.
+#[derive(Default)]
+struct CountingCustomizer {
+    builds: AtomicUsize,
+}
+
+impl CountingCustomizer {
+    fn builds(&self) -> usize {
+        self.builds.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl AgentCustomizer for CountingCustomizer {
+    async fn customize_build(
+        &self,
+        _context: &AgentBuildContext,
+        _spec: &DurableAgentSpec,
+        _draft: &mut AgentBuildDraft,
+    ) -> Result<(), CustomizerError> {
+        self.builds.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -3702,5 +3736,176 @@ async fn reprofile_after_restart_is_handled_on_the_first_pass() {
          session at its generation"
     );
     boot.assert_continuity_and_leases_unread();
+    boot.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Registration declares the identity in Core's mob
+// ---------------------------------------------------------------------------
+
+/// Registering an identity declares it in Core's mob. Core seats an
+/// identity it holds no member for Dormant, and the host's customizer
+/// composes the member build once, because Core needed it. Registering it
+/// again declares its lifecycle facts alone: Core keeps the member, writes
+/// nothing, and no customizer runs.
+///
+/// RED (`RED-1b-cache-only.patch`): `register` records the spec without
+/// declaring it, and the first answer is `RecordedOnly`.
+/// RED (`RED-1b-always-compose.patch`): the first round declares the
+/// composed build, and registering again calls the customizer a second time.
+#[tokio::test(flavor = "multi_thread")]
+async fn registration_declares_the_identity_and_core_seats_it_dormant_then_keeps_it() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let mob_id = unique_mob_id("register-declares");
+    let alice = id("team:alice");
+
+    let boot = Boot::start(&state, &mob_id, &[]).await;
+    boot.compile(&[]).await;
+    let customizer = Arc::new(CountingCustomizer::default());
+    boot.runtime()
+        .set_agent_customizer(Some(customizer.clone() as Arc<dyn AgentCustomizer>))
+        .await;
+
+    let answer = boot
+        .runtime()
+        .register(spec("team:alice"))
+        .await
+        .expect("Core answers the declaration");
+    let DeclaredIdentityAnswer::Seated { session_id, .. } = &answer else {
+        panic!("Core seats an identity it holds no member for: {answer:?}");
+    };
+    let seated = boot.core_last_binding(&alice).await;
+    assert!(seated.live, "Core holds alice's member: {seated:?}");
+    assert!(
+        seated.marked,
+        "the seat carries the durable-identity marker: {seated:?}"
+    );
+    assert_eq!(
+        seated.session.as_ref(),
+        Some(session_id),
+        "the answer names the seat's session"
+    );
+    assert!(
+        boot.core_member_unloaded(&alice),
+        "the seat materializes nothing"
+    );
+    assert_eq!(
+        customizer.builds(),
+        1,
+        "Core needed the member build once: the customizer composed it"
+    );
+
+    let again = boot
+        .runtime()
+        .register(spec("team:alice"))
+        .await
+        .expect("Core answers the declaration");
+    assert!(matches!(again, DeclaredIdentityAnswer::Kept), "{again:?}");
+    assert_eq!(
+        customizer.builds(),
+        1,
+        "an identity Core keeps is declared with its lifecycle facts alone: no customizer runs"
+    );
+    assert_eq!(
+        boot.core_last_binding(&alice).await,
+        seated,
+        "registering it again writes nothing"
+    );
+    boot.stop().await;
+}
+
+/// A declaration Core refuses registers nothing. A raw member a host
+/// spawned under the identity's member id with no legacy mark holds the
+/// name, so Core refuses the identity (`NameHeldByWorker`): the identity
+/// stays unregistered and Core's member is untouched.
+///
+/// RED (`RED-1b-records-refused.patch`): every answer registers the spec,
+/// and the refused identity is registered.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_registration_core_refuses_registers_nothing() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let mob_id = unique_mob_id("register-refused");
+    let bob = id("team:bob");
+
+    let boot = Boot::start(&state, &mob_id, &[]).await;
+    boot.compile(&[]).await;
+    let session = boot
+        .spawn_core_member(&bob, "MARKER-RAW-BOB", BTreeMap::new())
+        .await;
+    let raw = boot.core_last_binding(&bob).await;
+
+    let answer = boot
+        .runtime()
+        .register(spec("team:bob"))
+        .await
+        .expect("Core answers the declaration");
+    assert!(
+        matches!(
+            answer,
+            DeclaredIdentityAnswer::Refused {
+                refusal: meerkat_mob::DeclaredEntryRefusal::NameHeldByWorker
+            }
+        ),
+        "{answer:?}"
+    );
+    assert!(
+        matches!(
+            boot.runtime().registered_spec(&bob).await,
+            Err(IdentityRuntimeError::UnknownIdentity(_))
+        ),
+        "a refused declaration registers nothing"
+    );
+    assert_eq!(raw.session, Some(session));
+    assert_eq!(
+        boot.core_last_binding(&bob).await,
+        raw,
+        "Core's raw member is untouched"
+    );
+    boot.stop().await;
+}
+
+/// A door acts for a declared identity with its entry's custody. Once
+/// alice is declared, Core holds her member id as a declared identity
+/// entry, and a spawn of that name without custody is refused as a raw
+/// spawn taking a declared name. A delivery to alice after Core retired her
+/// member is admitted: the door that wakes her carries the custody.
+///
+/// RED (`RED-1a-no-custody.patch`): the doors never ask for custody, and
+/// the delivery is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_door_wakes_a_declared_identity_whose_member_core_retired() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let mob_id = unique_mob_id("register-custody");
+    let alice = id("team:alice");
+
+    let boot = Boot::start(&state, &mob_id, &[]).await;
+    boot.compile(&[]).await;
+    let answer = boot
+        .runtime()
+        .register(spec("team:alice"))
+        .await
+        .expect("Core answers the declaration");
+    assert!(
+        matches!(answer, DeclaredIdentityAnswer::Seated { .. }),
+        "{answer:?}"
+    );
+    let seated = boot.core_last_binding(&alice).await;
+    boot.retire_core_member(&alice).await;
+    assert!(
+        !boot.core_last_binding(&alice).await.live,
+        "control: Core holds no live member for alice"
+    );
+
+    boot.send(&alice, "A first turn after the retirement.")
+        .await;
+    let woken = boot.core_last_binding(&alice).await;
+    assert!(woken.live, "the door woke alice: {woken:?}");
+    assert!(
+        woken.generation > seated.generation,
+        "the door seated a new incarnation: {woken:?} after {seated:?}"
+    );
     boot.stop().await;
 }

@@ -912,7 +912,7 @@ mod tests {
         }
         store.recover();
         // Two minutes is far past every retry a backoff schedules here.
-        tokio::time::sleep(Duration::from_secs(120)).await;
+        tokio::time::sleep(Duration::from_mins(2)).await;
         assert_eq!(
             store.persisted(),
             ids,

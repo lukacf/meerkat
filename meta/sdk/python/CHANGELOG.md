@@ -1,4 +1,4 @@
-# Changelog — meerkat-meta (Python SDK)
+# Changelog: meerkat-meta (Python SDK)
 
 All notable changes to the Python SDK are documented here.
 

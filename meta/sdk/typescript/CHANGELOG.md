@@ -1,4 +1,4 @@
-# Changelog — @rkat/meta-sdk (TypeScript SDK)
+# Changelog: @rkat/meta-sdk (TypeScript SDK)
 
 ## Unreleased
 

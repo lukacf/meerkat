@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Meta Forge 0.3.1 installs the matched Meta 0.9.10 and Toolkit/Connect 0.9.10
-selection. Build and Resume now check the saved guide within the same writer
-reservation that publishes the build.
+Meta 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10 and Connect
+0.9.10, released together) and pins Core `=0.9.10`. Meta Forge 0.3.1 ships
+with it and installs the matched Meta 0.9.10, Connect 0.9.10 and Connect
+Python SDK (`meerkat-toolkit`) 0.9.10 set. Its Build and Resume now check the
+saved guide within the same writer reservation that publishes the build.
 
 Forge 0.3.1 is part of the Meerkat 0.9.10 release and is the first Forge
 release from this repository: tag `meta-installer-v0.3.1`, with packages named
@@ -17,12 +19,23 @@ release from this repository: tag `meta-installer-v0.3.1`, with packages named
 Releases up to Forge 0.3.0 stay in `lukacf/meerkat-meta` (tags
 `forge-v<version>`, packages `meta-forge-<version>-<target>.zip`). Three
 selections stay as in Forge 0.3.0: the Guide runs Meta 0.9.3 with Core 0.9.3,
-agent teams pin the published Meta 0.9.6 runtime, and the protected
-application receiver keeps its Meta 0.9.7 SDK tuple. Acceptance is per target:
-each package is accepted only on evidence for that exact package, and the
-`linux-x86_64` evidence does not stand in for `macos-arm64`.
+agent teams pin the published Meta 0.9.6 runtime, and the application receiver
+keeps the Meta 0.9.7 SDK. Each target's package is released on its own
+verification.
 
 ### Upgrade
+
+- Meta 0.9.10 pins Core `=0.9.10`: a host that embeds Meta moves Meta and
+  Core to 0.9.10 together (Meta 0.9.9 pinned Core `=0.9.9`).
+
+- Core 0.9.10 fixes that reach Meta gateways are listed in Core's CHANGELOG:
+  the restart recovery of live voice delegations with dormant members (a
+  gateway composes it when `openai_live`, `experimental_live` or
+  `console_voice` is registered), the peer address of dormant members in
+  roster reads, governed operations that no longer refuse after a completed
+  grant change, a refusal met at a tool's own effect entry before any effect,
+  which now reads as not dispatched (`tool_invoked: false`), and per-tool
+  timeouts (`[tools.tool_timeouts]`) that accept duration strings.
 
 - An application that Forge 0.3.0 prepared with its Connect gateway (0.9.5 on
   Linux, 0.9.4 on macOS) is prepared again at its next install step. Forge
@@ -91,10 +104,12 @@ each package is accepted only on evidence for that exact package, and the
   for applications without a connection setup helper. Forge 0.3.0 selected
   Meta 0.9.7 with Toolkit 0.9.5 on Linux x86_64 and Meta 0.9.4 with Toolkit
   0.9.4 on macOS arm64.
+
 - Forge 0.3.1 accepts the Meta 0.9.10 and Toolkit 0.9.10 SDK wheels in a
   selected Meta and Toolkit SDK pair, besides the releases it accepted
   before. The Toolkit wheel's `native-host` extra must still require exactly
   the selected Meta version.
+
 - Forge 0.3.1 downloads a Meta release after 0.9.7 from this repository's
   `meta-v<version>` release, and 0.9.7 or earlier from `lukacf/meerkat-meta`'s
   `v<version>` release as before: both for the pinned agent team runtime and
@@ -166,6 +181,14 @@ each package is accepted only on evidence for that exact package, and the
   until the process restarts. Use an event log store that takes 4096 events
   in one append, or restart the process when `event_log_flush_failure`
   error events keep coming after the store is back.
+
+- `meta/compact_member` after a failed turn: when the forced maintenance turn
+  ends in a definite failure (a provider error, a rate limit, or a request
+  that compaction could not shrink), the temporary compaction threshold (1024
+  tokens by default) stays on the member, durably, and every later
+  `compact_member` on that identity is refused as busy until the gateway
+  restarts. After a failed `compact_member`, call `meta/respawn` for the
+  identity, then restart the gateway.
 
 ## [0.9.9] - 2026-11-03
 

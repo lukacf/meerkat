@@ -1471,12 +1471,23 @@ pub(crate) fn legacy_roster_member(binding: &super::MemberBinding) -> LegacyRost
     }
 }
 
+/// Whether a roster that lists the member `binding` holds adopts it as an
+/// identity entry, as the host's own adoption does
+/// ([`super::MobHandle::adopt_legacy_identity_entry`]): the spawn row of the
+/// member's incarnation carries either legacy mark.
+pub(crate) fn listed_legacy_member(binding: &super::MemberBinding) -> bool {
+    legacy_roster_member(binding).either()
+}
+
 /// Whether a complete roster that no longer lists the member `binding`
 /// holds adopts it, so its seal unlists the entry and retires the member: no
 /// host's intent row names the identity (readable or not), and the spawn row
 /// of the member's incarnation carries both legacy marks. A member with one
 /// mark only is left as it is: a host's own member (a raw spawn the host
-/// labelled, or a member the host marked and keeps).
+/// labelled, or a member the host marked and keeps). The one rule of the
+/// complete apply's unlisted adoption: its scan applies it, and its
+/// adoption applies it again to the binding and intent rows it reads before
+/// MobMachine decides.
 pub(crate) fn unlisted_legacy_member(binding: &super::MemberBinding) -> bool {
     !matches!(
         binding.identity_management(),

@@ -967,4 +967,171 @@ tier = \"r2\"\n";
             .expect("the next writer is admitted at the settled generation");
         assert_eq!(next.generation, 2);
     }
+
+    /// The records a host's administration recorder received.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[derive(Default)]
+    struct RecordedAdministrations(std::sync::Mutex<Vec<crate::AdministrationRecord>>);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl RecordedAdministrations {
+        fn take(&self) -> Vec<crate::AdministrationRecord> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl crate::AdministrationRecorder for RecordedAdministrations {
+        fn record(&self, record: crate::AdministrationRecord) {
+            self.0.lock().unwrap().push(record);
+        }
+    }
+
+    /// The administrator a host authenticated, in its own trust domain.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn administrator() -> crate::PrincipalRef {
+        crate::PrincipalRef::in_domain(
+            crate::PrincipalKind::Human,
+            "admin-7",
+            crate::TrustDomainId::new("console-idp").unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Admits its host's authenticated administrator, logged in at
+    /// `login`, stating them on the admission with the host's recorder.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct StatingAdmission {
+        recorder: Arc<RecordedAdministrations>,
+        login: &'static str,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl crate::AdministrationEntry for StatingAdmission {
+        fn enter(&self) -> Result<crate::EnteredAdministration, crate::AdministrationEntryRefusal> {
+            let administrator = crate::AdministeringPrincipal::new(administrator())
+                .unwrap()
+                .with_authentication_scope(
+                    &crate::approval::consent::HostAuthenticationScope::new(self.login),
+                );
+            Ok(crate::EnteredAdministration::admitted().administered_by(
+                administrator,
+                Arc::clone(&self.recorder) as Arc<dyn crate::AdministrationRecorder>,
+            ))
+        }
+    }
+
+    /// An admitted config write settles one typed record to the recorder on
+    /// its admission: the administrator, the digest of their login, the
+    /// patch and the generation it published, committed. The patched values
+    /// are not recorded.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn config_write_admission_settles_to_the_host_recorder() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = ConfigRuntime::new(
+            Arc::new(crate::config_store::FileConfigStore::new(
+                temp.path().join("config.toml"),
+                *crate::model_profile::test_catalog::TEST_CATALOG,
+            )),
+            temp.path().join("config_state.json"),
+        );
+        let recorder = Arc::new(RecordedAdministrations::default());
+        let entry = StatingAdmission {
+            recorder: Arc::clone(&recorder),
+            login: "login-1",
+        };
+
+        let snapshot = runtime
+            .patch_entered(ConfigDelta(json!({ "max_tokens": 4321 })), Some(0), &entry)
+            .await
+            .expect("admitted write");
+        assert_eq!(snapshot.generation, 1);
+        let records = recorder.take();
+        assert_eq!(records.len(), 1, "one record per admission");
+        let record = &records[0];
+        assert_eq!(record.administrator, administrator());
+        assert_eq!(
+            record.authentication_scope_digest,
+            Some(crate::approval::consent::HostAuthenticationScope::new("login-1").digest())
+        );
+        assert_eq!(
+            record.change,
+            Some(crate::AdministeredChange::ConfigPatch {
+                realm: None,
+                generation: 1,
+            })
+        );
+        assert_eq!(record.outcome, crate::AdministrationOutcome::Committed);
+        assert!(
+            !serde_json::to_string(record).unwrap().contains("4321"),
+            "the patched value is not recorded"
+        );
+    }
+
+    /// An admitted write whose caller stops waiting before it settles still
+    /// settles its record, once the write settles, committed.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn config_write_admission_settles_to_the_host_recorder_after_the_caller_stopped_waiting()
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let (published, on_published) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let runtime = Arc::new(ConfigRuntime::new(
+            Arc::new(HeldAfterPublish {
+                inner: crate::config_store::FileConfigStore::new(
+                    temp.path().join("config.toml"),
+                    *crate::model_profile::test_catalog::TEST_CATALOG,
+                ),
+                published: std::sync::Mutex::new(Some(published)),
+                release: std::sync::Mutex::new(Some(released)),
+            }),
+            temp.path().join("config_state.json"),
+        ));
+        let recorder = Arc::new(RecordedAdministrations::default());
+        let caller = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            let entry = StatingAdmission {
+                recorder: Arc::clone(&recorder),
+                login: "login-1",
+            };
+            async move {
+                runtime
+                    .patch_entered(ConfigDelta(json!({ "max_tokens": 512 })), Some(0), &entry)
+                    .await
+            }
+        });
+
+        on_published.await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(
+            recorder.take().is_empty(),
+            "nothing is recorded before the write settles"
+        );
+
+        let _ = release.send(());
+        let records = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let records = recorder.take();
+                if !records.is_empty() {
+                    return records;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the settled write is recorded");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].change,
+            Some(crate::AdministeredChange::ConfigPatch {
+                realm: None,
+                generation: 1,
+            })
+        );
+        assert_eq!(records[0].outcome, crate::AdministrationOutcome::Committed);
+        assert_eq!(runtime.get().await.unwrap().generation, 1);
+    }
 }

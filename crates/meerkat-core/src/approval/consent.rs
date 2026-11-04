@@ -11528,4 +11528,82 @@ mod tests {
         assert_eq!(decided.status, ApprovalStatus::Approved);
         assert_eq!(w.spend(&id), Ok(()));
     }
+
+    /// Two people with the same subject from two trust domains (two token
+    /// issuers), each deciding in a login of their own, stay apart in the
+    /// stored consent rows: each row keeps its decider's qualified principal
+    /// and the digest of the login the decision was made in, never the login
+    /// itself. The decision's actor stays the bare id, the display
+    /// projection every Core checks against the approver at load.
+    #[tokio::test]
+    async fn consent_decision_keeps_qualified_actor_and_scope() {
+        use sha2::Digest as _;
+
+        let store = Arc::new(InMemoryApprovalStore::new());
+        let w = world_with(
+            ApprovalService::with_store(Arc::clone(&store) as Arc<dyn ApprovalStore>)
+                .expect("approval service"),
+        );
+        let decide = |id: &ApprovalId, issuer: &str, login: &str| {
+            let approver = AuthenticatedApprover::new(
+                PrincipalRef::in_domain(
+                    PrincipalKind::Human,
+                    "lead-1",
+                    TrustDomainId::new(issuer).expect("domain"),
+                )
+                .expect("principal"),
+                ApprovalAssurance::PersonAuthenticated,
+            )
+            .expect("qualified approver")
+            .with_authentication_scope(HostAuthenticationScope::new(login));
+            w.approvals
+                .decide_consent(
+                    id,
+                    AuthenticatedConsentDecision {
+                        approver,
+                        decision: ApprovalDecision::Approve,
+                        reason: None,
+                    },
+                )
+                .expect("an eligible decision commits")
+        };
+        let first = w.request(&w.check()).await;
+        let second = w.request(&w.check()).await;
+        decide(&first, "issuer-a", "login-a");
+        decide(&second, "issuer-b", "login-b");
+
+        // The rows as the store holds them, in their stored (serde) form.
+        let stored = |id: &ApprovalId| {
+            serde_json::to_value(store.get(id).expect("store read").expect("stored row"))
+                .expect("encode")
+        };
+        let digest = |login: &str| format!("sha256:{:x}", sha2::Sha256::digest(login.as_bytes()));
+        let (a, b) = (stored(&first), stored(&second));
+        for (row, issuer, login) in [(&a, "issuer-a", "login-a"), (&b, "issuer-b", "login-b")] {
+            let approver = &row["consent"]["approver"];
+            assert_eq!(approver["principal"]["id"], "lead-1");
+            assert_eq!(
+                approver["principal"]["qualification"],
+                serde_json::json!({"kind": "qualified", "trust_domain_id": issuer}),
+                "the decider's trust domain is kept"
+            );
+            assert_eq!(
+                approver["authentication_scope_digest"],
+                digest(login),
+                "the login the decision was made in is kept as its digest"
+            );
+            assert!(
+                !row.to_string().contains(login),
+                "the login itself is never stored"
+            );
+            assert_eq!(
+                row["decision"]["actor"], "lead-1",
+                "the actor stays the bare id"
+            );
+        }
+        assert_ne!(
+            a["consent"]["approver"], b["consent"]["approver"],
+            "the same subject from two issuers stays apart"
+        );
+    }
 }

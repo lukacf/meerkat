@@ -9501,6 +9501,187 @@ async fn profile_updates_are_refused_typed_and_write_nothing() {
         .unwrap();
 }
 
+/// The records a host's administration recorder received.
+#[derive(Default)]
+struct RecordedAdministrations(parking_lot::Mutex<Vec<meerkat_core::AdministrationRecord>>);
+
+impl meerkat_core::AdministrationRecorder for RecordedAdministrations {
+    fn record(&self, record: meerkat_core::AdministrationRecord) {
+        self.0.lock().push(record);
+    }
+}
+
+/// The administrator a host authenticated, in its own trust domain.
+fn fixture_administrator() -> meerkat_core::PrincipalRef {
+    meerkat_core::PrincipalRef::in_domain(
+        meerkat_core::PrincipalKind::Human,
+        "admin-7",
+        meerkat_core::TrustDomainId::new("console-idp").unwrap(),
+    )
+    .unwrap()
+}
+
+/// A host's entry check that admits its authenticated administrator,
+/// logged in at `login`, and states them on the admission with the host's
+/// recorder.
+struct StatingEntry {
+    recorder: Arc<RecordedAdministrations>,
+    login: &'static str,
+}
+
+impl meerkat_core::AdministrationEntry for StatingEntry {
+    fn enter(
+        &self,
+    ) -> Result<meerkat_core::EnteredAdministration, meerkat_core::AdministrationEntryRefusal> {
+        let administrator = meerkat_core::AdministeringPrincipal::new(fixture_administrator())
+            .unwrap()
+            .with_authentication_scope(
+                &meerkat_core::approval::consent::HostAuthenticationScope::new(self.login),
+            );
+        Ok(
+            meerkat_core::EnteredAdministration::admitted().administered_by(
+                administrator,
+                Arc::clone(&self.recorder) as Arc<dyn meerkat_core::AdministrationRecorder>,
+            ),
+        )
+    }
+}
+
+/// Each profile update the host admitted with a stated administrator
+/// settles one typed record to the recorder on its admission: the
+/// administrator, the digest of their login, the slot's install, replace or
+/// removal, and its committed outcome. A refused update records nothing, and
+/// no record carries the client secret.
+#[tokio::test]
+async fn client_profile_admission_settles_to_the_host_recorder() {
+    let method = McpOAuthClientAuthMethod::ClientSecretPost;
+    let (base, state) = spawn_fixed_client_fixture(method).await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "fixed-recorded");
+    let redirect = authority
+        .registered_redirect_uri(&target, &registered_base())
+        .unwrap();
+    let profile = |client: &str| {
+        McpOAuthClientProfile::new(
+            base.clone(),
+            client,
+            redirect.clone(),
+            method,
+            McpOAuthClientSecret::new(FIXED_CLIENT_SECRET),
+        )
+    };
+    let recorder = Arc::new(RecordedAdministrations::default());
+    let stating = |login: &'static str| {
+        Arc::new(StatingEntry {
+            recorder: Arc::clone(&recorder),
+            login,
+        }) as Arc<dyn meerkat_core::AdministrationEntry>
+    };
+
+    authority
+        .install_client_profile_entered(
+            &target,
+            profile("client-a"),
+            Some(&registered_base()),
+            stating("login-1"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        client_profile_refusal(
+            authority
+                .replace_client_profile_entered(
+                    &target,
+                    profile("client-b"),
+                    Some(&registered_base()),
+                    Arc::new(RefuseEntry)
+                )
+                .await
+        ),
+        McpOAuthClientProfileRefusal::NotAdmitted(
+            meerkat_core::AdministrationEntryRefusal::NotAdministrator
+        )
+    );
+    authority
+        .replace_client_profile_entered(
+            &target,
+            profile("client-b"),
+            Some(&registered_base()),
+            stating("login-2"),
+        )
+        .await
+        .unwrap();
+    authority
+        .remove_client_profile_entered(&target, stating("login-3"))
+        .await
+        .unwrap();
+
+    let records = std::mem::take(&mut *recorder.0.lock());
+    assert_eq!(
+        records.len(),
+        3,
+        "one record per admitted update, none for the refused one"
+    );
+    let scoped = target.scoped_to(authority.realm()).unwrap();
+    let (realm, server, server_url, slot) = (
+        scoped.realm().cloned(),
+        "fixed-recorded".to_owned(),
+        format!("{base}/mcp"),
+        scoped
+            .auth_binding_ref()
+            .unwrap()
+            .binding
+            .as_str()
+            .to_owned(),
+    );
+    let expected = [
+        (
+            meerkat_core::AdministeredChange::McpOauthClientProfileInstall {
+                realm: realm.clone(),
+                server: server.clone(),
+                server_url: server_url.clone(),
+                slot: slot.clone(),
+            },
+            "login-1",
+        ),
+        (
+            meerkat_core::AdministeredChange::McpOauthClientProfileReplace {
+                realm: realm.clone(),
+                server: server.clone(),
+                server_url: server_url.clone(),
+                slot: slot.clone(),
+            },
+            "login-2",
+        ),
+        (
+            meerkat_core::AdministeredChange::McpOauthClientProfileRemove {
+                realm,
+                server,
+                server_url,
+                slot,
+            },
+            "login-3",
+        ),
+    ];
+    for (record, (change, login)) in records.iter().zip(expected) {
+        assert_eq!(record.administrator, fixture_administrator());
+        assert_eq!(
+            record.authentication_scope_digest,
+            Some(meerkat_core::approval::consent::HostAuthenticationScope::new(login).digest())
+        );
+        assert_eq!(record.change, Some(change));
+        assert_eq!(
+            record.outcome,
+            meerkat_core::AdministrationOutcome::Committed
+        );
+    }
+    let rendered = serde_json::to_string(&records).unwrap();
+    assert!(
+        !rendered.contains(FIXED_CLIENT_SECRET),
+        "the client secret never reaches a record"
+    );
+}
+
 /// Without a profile nothing changes: a dynamically registered credential
 /// stores no profile, and its token requests are a public client's. A
 /// profile installed later leaves it alone: it keeps refreshing as the

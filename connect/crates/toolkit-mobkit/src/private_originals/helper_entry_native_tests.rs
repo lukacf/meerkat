@@ -508,8 +508,8 @@ async fn exercise_helper_reprepare(mode: DeliveryMode) {
             assert_eq!(fault.helper_policy_changed.load(Ordering::SeqCst), 1,
                 "the actual native first return must be same-session PolicyChanged");
             assert_eq!(fault.accepted.load(Ordering::SeqCst), 0);
-            assert_eq!(fault.publication_changes.load(Ordering::SeqCst), 1,
-                "the real controller-admission observation was invalidated once");
+            assert_eq!(fault.publication_changes.load(Ordering::SeqCst), 2,
+                "the real controller-admission observation and its one in-place re-read were each invalidated once");
             assert!(fault.helper_admission_change.lock().unwrap().is_none(),
                 "the actual policy callback consumed the exact helper fault");
             assert!(acquisition_approved::native_history(history.as_ref(), &helper_session).await.is_empty());
@@ -596,7 +596,7 @@ async fn exercise_helper_reprepare(mode: DeliveryMode) {
             }
             let always = matches!(mode, DeliveryMode::HelperPolicyChangesAlways);
             assert_eq!(fault.helper_policy_changed.load(Ordering::SeqCst), if always { 2 } else { 1 });
-            assert_eq!(fault.publication_changes.load(Ordering::SeqCst), if always { 2 } else { 1 });
+            assert_eq!(fault.publication_changes.load(Ordering::SeqCst), if always { 4 } else { 2 });
             let accepted = matches!(mode,
                 DeliveryMode::HelperPolicyChangesOnce | DeliveryMode::HelperPolicyChangesThenUnresolved);
             assert_eq!(fault.accepted.load(Ordering::SeqCst), usize::from(accepted));

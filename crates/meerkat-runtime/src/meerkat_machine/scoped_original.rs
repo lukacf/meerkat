@@ -1314,8 +1314,10 @@ impl ScopedOriginalIngress {
 /// cancelled, refuses; a source owner that cannot say now is unavailable,
 /// and one whose admission of the original is still pending is not yet
 /// ready ([`ControllerReadinessFailure::OriginalAdmissionPending`]). Outside
-/// an exclusion, an owner change published while the original's mandate is
-/// resolved is a changed policy
+/// an exclusion, a read of the original's mandate that met an owner change
+/// is made once more in place when that change has completed
+/// ([`LocalGrantAuthority::owner_change_in_progress`] names none); a change
+/// still in progress, or another one, is a changed policy
 /// ([`ControllerReadinessFailure::PolicyChanged`]), as at admission.
 pub fn require_source_original_live(
     grants: &LocalGrantAuthority,
@@ -1354,7 +1356,8 @@ pub fn require_source_original_live(
 /// executor and represented subject. Other bases are the host invocation
 /// policy's, consulted by its own owner. Admission, a retained resume and
 /// [`require_source_original_live`] all resolve the original's own mandate
-/// here, and a refusal is classified by [`lineage_refusal`].
+/// here, each lineage in one read ([`read_lineage`]), and a refusal is
+/// classified by [`lineage_refusal`].
 pub(super) fn resolve_original_basis(
     grants: &LocalGrantAuthority,
     basis: &WorkAuthorityBasis,
@@ -1362,9 +1365,10 @@ pub(super) fn resolve_original_basis(
     represented_subject: Option<&PrincipalRef>,
 ) -> Result<(), NativeAdmissionError> {
     for lineage in meerkat_authorization::grant_policy::admission_grant_lineages(basis) {
-        grants
-            .resolve_lineage_observed(lineage, executor, represented_subject)
-            .map_err(lineage_refusal)?;
+        read_lineage(grants, || {
+            grants.resolve_lineage_observed(lineage, executor, represented_subject)
+        })
+        .map_err(lineage_refusal)?;
     }
     Ok(())
 }
@@ -1378,8 +1382,8 @@ pub(super) fn resolve_original_basis(
 /// operation: each operation of the work is narrowed by every contributor's
 /// current ceiling ([`contributor_operation_ceiling`]) and still requires the
 /// work's own authority. Other bases are the host invocation policy's,
-/// consulted by its own owner. A refusal is classified by
-/// [`lineage_refusal`].
+/// consulted by its own owner. Each lineage is one read ([`read_lineage`]),
+/// and a refusal is classified by [`lineage_refusal`].
 pub(super) fn require_contributor_live(
     grants: &LocalGrantAuthority,
     basis: &WorkAuthorityBasis,
@@ -1388,11 +1392,30 @@ pub(super) fn require_contributor_live(
         // The leaf-own read of `require_live_lineage`, in the form that keeps
         // an owner change apart from the owner's refusals. Only its outcome
         // is used: each operation reads the ceiling itself.
-        grants
-            .resolve_lineage_ceiling_observed(lineage)
+        read_lineage(grants, || grants.resolve_lineage_ceiling_observed(lineage))
             .map_err(lineage_refusal)?;
     }
     Ok(())
+}
+
+/// One grant-lineage read of admission, a retained resume or
+/// [`require_source_original_live`], each its own observation of the grant
+/// publication. A read that met an owner change is made once more from the
+/// owners when that change has completed
+/// ([`LocalGrantAuthority::owner_change_in_progress`] names none as the read
+/// answers), as controller admission makes its read once more. Nothing
+/// waits: a change still in progress, or another one met by the second read,
+/// keeps its answer ([`LineageResolutionRefusal::Changed`]).
+fn read_lineage<T>(
+    grants: &LocalGrantAuthority,
+    read: impl Fn() -> Result<T, LineageResolutionRefusal>,
+) -> Result<T, LineageResolutionRefusal> {
+    match read() {
+        Err(LineageResolutionRefusal::Changed) if grants.owner_change_in_progress().is_none() => {
+            read()
+        }
+        answer => answer,
+    }
 }
 
 /// Bind one authenticated original to its final governed input: set the
@@ -1433,9 +1456,10 @@ fn refused(kind: OperationRefusalKind) -> NativeAdmissionError {
 
 /// The admission answer for a grant lineage that admission (or a retained
 /// resume) could not resolve. Each lineage is read in an observation of its
-/// own, with no enclosing one to rebuild, yet an owner change published
-/// during that read is a change of policy, not an owner that cannot say
-/// now: asking again may succeed
+/// own, with no enclosing one to rebuild, and made once more in place when
+/// the owner change it met has completed ([`read_lineage`]). A change it
+/// still meets is a change of policy, not an owner that cannot say now:
+/// asking again may succeed
 /// ([`ControllerReadinessFailure::PolicyChanged`], as controller admission
 /// answers a change it meets). The owner's own refusals keep their answers
 /// ([`grant_refusal`]): a denial refuses, and a poisoned or retired

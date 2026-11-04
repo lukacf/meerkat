@@ -162,7 +162,6 @@ rust_test(
     deps = [
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
-        "//crates/meerkat-llm-core:meerkat_llm_core",
         "//crates/meerkat-models:meerkat_models",
     ] + all_crate_deps(
         package_name = "crates/meerkat-llm-core",

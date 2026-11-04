@@ -9,10 +9,10 @@
 //! `meerkat-client` alongside per-provider crates. The `meerkat` facade
 //! re-exports the public surface so downstream SDKs continue to work.
 
-// Without `workspace-tests` (the published package: `cargo package` strips
-// the self dev-dependency that enables it) the unit tests that need the
-// workspace compile out, and the test helpers only they use go unused. The
-// workspace build turns the feature on and keeps both lints.
+// Without `workspace-tests` (the published package, whose test command
+// leaves it off) the unit tests that need the workspace compile out, and
+// the test helpers only they use go unused. The workspace's test builds
+// turn the feature on and keep both lints.
 #![cfg_attr(
     all(test, not(feature = "workspace-tests")),
     allow(dead_code, unused_imports)

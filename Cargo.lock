@@ -3566,7 +3566,6 @@ dependencies = [
  "indexmap",
  "meerkat-contracts",
  "meerkat-core",
- "meerkat-llm-core",
  "meerkat-models",
  "parking_lot",
  "reqwest 0.12.28",

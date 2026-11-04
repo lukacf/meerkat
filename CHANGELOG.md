@@ -52,6 +52,21 @@ them.
 
 ### Breaking
 
+- Behaviour-only (not measured by the gate): `meerkat-mob`:
+  `MobHandle::apply_declared_roster` with a complete roster also adopts a
+  member the roster does not list when the member's spawn row carries both
+  legacy marks (the durable-identity continuity marker and the
+  `agent_identity` label naming the member's own identity) and no host's
+  identity intent row names it, so its seal unlists the entry and retires
+  the member, as it retires any unlisted entry's member (cause `Unlisted`,
+  answered in `DeclaredRosterOutcome::unlisted`). A member a host seated
+  under its identity before identity entries existed, whose identity the
+  roster dropped before the host first applied it, was left serving as a
+  worker. A member with one mark only, a host-adopted identity, and every
+  member a partial roster does not list are left as they are, as before.
+  Make a complete roster list every identity whose member the host keeps;
+  see the upgrading guide.
+
 - `meerkat-core`, `meerkat-llm-core`: a GitHub Copilot account configured
   once, and account models (see Added). `RealmConfigSection` gains the
   public field `copilot: Option<CopilotAccountConfig>`, so code that builds
@@ -175,13 +190,15 @@ them.
   opened read-only, so another storage doctor counts by the same rule.
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
-  identity's member build (`DeclaredEntry::build`, `DeclaredBuild`):
-  `Composed` (the default, as before) or `FactsOnly`, the identity's
-  lifecycle facts with none of its build. No member is ever built from
-  facts only: a verdict that would seat the identity, rotate its member
-  onto a fresh session or start its first-boot fresh life answers
-  `DeclaredEntryOutcome::BuildRequired` and takes no member step (an
-  archived session record and a first-boot request are kept), and the host
+  identity's member build (`DeclaredEntry::build`, set with
+  `DeclaredEntry::with_build`, a `DeclaredBuild`): `Composed` (the
+  default, as before) or `FactsOnly`, the identity's lifecycle facts with
+  none of its build. No member is ever built from facts only: a verdict
+  that would seat the identity, rotate its member onto a fresh session or
+  start its first-boot fresh life answers
+  `DeclaredEntryOutcome::BuildRequired` and takes no member step (the
+  first-boot request is kept, and so is an archived session record on a
+  session service that keeps durable member sessions), and the host
   declares the identity again with its composed build. Every other verdict
   answers as before. A host whose member builds are costly to compose
   (a customizer per identity) composes only the identities it expects the
@@ -195,16 +212,6 @@ them.
   member ids are this encoding.
 
 ### Changed
-
-- `meerkat-mob`: a complete declared roster also adopts a member it does not
-  list when the member's spawn row carries both legacy marks (the
-  durable-identity continuity marker and the `agent_identity` label naming
-  the member) and no host's identity intent row names it, so its seal
-  unlists the entry and retires the member, as it retires any unlisted
-  entry's member. A member a host seated under its identity before identity
-  entries existed, whose identity the roster dropped before the host first
-  applied it, was left serving as a worker. A member with one mark only,
-  and a host-adopted identity, are left as they are, as before.
 
 - A session on a zero-config Copilot route, or on a route of a
   `[realm.<realm>.copilot]` account, carries the route's account as its
@@ -225,11 +232,14 @@ them.
 - `meerkat-mob`: the legacy adoption reads a member's `agent_identity`
   label in the one encoding of a name into a member id
   (`ids::member_id_for_name`): a label naming the identity a member id
-  encodes (`team:alice` on the member `mk--team_calice`) marks the member
-  as a legacy member, as a label spelling the member id itself always did.
-  A declared apply that listed such a member, a member labelled with an
-  identity no member id can spell, refused it `NameHeldByWorker`, and a
-  host that labelled a raw member of that name could not have it adopted.
+  encodes (`team:alice` on the member `mk--team_calice`, `mk--ops` on the
+  member `mk--mk--ops`) marks the member as a legacy member, as a label
+  spelling the member id itself always did. The label is read trimmed, and
+  an empty label or one in the generated runtime-alias namespace (`rt:`)
+  names no member. A declared apply that listed such a member without the
+  durable-identity marker, a member labelled with an identity no member id
+  can spell, refused it `NameHeldByWorker`, and a host that labelled a raw
+  member of that name could not have it adopted.
 
 - `meerkat-rpc`: a session's runtime loop no longer waits forever on the
   turn-finalization boundary that its own turn holds. A turn that

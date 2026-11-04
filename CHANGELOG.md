@@ -107,6 +107,17 @@ them.
   (`AuthCredentialIdentity::from_auth_binding`) and ran with provider-native
   tools on (`ProviderNativeToolPolicy::Inherit`). See Changed.
 
+- Behaviour-only (not measured by the gate): `meerkat-runtime`:
+  `DecisionExecutorLoop::start` no longer refuses a second executor of a
+  decision kind with `DecisionError::ExecutorHeld`. The loop starts without
+  the kind, executes none of its decisions
+  (`DecisionPassOutcome::KindNotClaimed`), and takes the kind over once the
+  other executor ends. A 0.9.10 executor and a 0.9.11 loop never execute on
+  one store at once: beside a 0.9.10 executor a loop executes nothing until
+  that executor ends, and a 0.9.10 executor is refused at start beside a
+  running loop. Upgrade every process that executes decisions on one store
+  together. See Changed.
+
 ### Added
 
 - `meerkat-runtime`: `decision::DecisionExecutorLoop`, the one executor of a
@@ -160,10 +171,12 @@ them.
   (`SqliteDecisionStore::executor_kind_lock_path`) and a shared one on
   `approval_decisions.executor.lock`, so a whole-store claim and the claims
   of kinds exclude each other across processes.
-- `meerkat-runtime`: `DurableDecisionService::claim_executor_kind`, and
+- `meerkat-runtime`: `DurableDecisionService::claim_executor_kind`,
   `DecisionExecutorPass::unclaimed`: each registered kind whose claim the
   pass could not take, with the refusal (`DecisionError::ExecutorHeld` while
-  another executor holds the kind or the whole store).
+  another executor holds the kind or the whole store), and
+  `DecisionPassOutcome::KindNotClaimed`, the outcome of a decision of such a
+  kind, which another executor executes.
 
 - GitHub Copilot configured once: `[realm.<realm>.copilot]` states a Copilot
   account's credential source once (`source`, an `env` or
@@ -281,13 +294,8 @@ them.
   one store each execute their own kinds. A kind another executor holds is
   not executed: the loop starts without it, each pass lists it as unclaimed
   and asks for its claim again, and the loop takes the kind over once that
-  executor ends. `DecisionExecutorLoop::start` no longer refuses a second
-  loop with `DecisionError::ExecutorHeld`, and refuses a candidate launch
-  whatever kinds it registers. A 0.9.10 executor and a 0.9.11 one never
-  execute on one store at once: beside a 0.9.10 executor a loop executes
-  nothing until it ends, and a 0.9.10 executor is refused at start beside a
-  running loop. Upgrade every process that executes decisions on one store
-  together.
+  executor ends. `DecisionExecutorLoop::start` refuses a candidate launch
+  whatever kinds it registers. See Breaking for the change to `start`.
 
 ### Deprecated
 

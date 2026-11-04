@@ -268,7 +268,7 @@ function fixturePackage(name, { product = "core", deps = [], fixture = false, ki
 // core <- runtime <- integration-tests, meta, auth-core; sqlite alone.
 const FIXTURE_PACKAGES = [
   fixturePackage("meerkat-core"),
-  fixturePackage("meerkat-sqlite", { tests: ["lock_sources", "feature_only", "e2e_fast_lane"] }),
+  fixturePackage("meerkat-sqlite", { tests: ["lock_sources", "feature_only", "e2e_fast_lane", "live_smoke"] }),
   fixturePackage("meerkat-runtime", { deps: ["meerkat-core"], tests: ["runtime_contracts"] }),
   fixturePackage("meerkat-auth-core", { deps: ["meerkat-core"] }),
   fixturePackage("meerkat-integration-tests", { deps: ["meerkat-runtime"], fixture: true, tests: ["e2e_fast_lane"] }),
@@ -304,7 +304,7 @@ function fixtureContext({ lane = parseTlcLane(FIXTURE_LANE) } = {}) {
     testTargetsFor: (name, path) => {
       const match = new RegExp(`^${dirOf(name)}/tests/([a-z0-9_]+)\\.rs$`).exec(path);
       if (!match || !packages.get(name).targets.some((target) => target.name === match[1] && target.kind.includes("test"))) return null;
-      return [{ name: match[1], requiredFeatures: match[1] === "feature_only" ? ["slow-tests"] : [] }];
+      return [{ name: match[1], requiredFeatures: match[1] === "feature_only" ? ["slow-tests"] : match[1] === "live_smoke" ? ["integration-real-tests"] : [] }];
     },
     profileSelects: (profile, binary) => profile === TEST_PROFILE && binary.binary !== "e2e_fast_lane",
   };
@@ -406,11 +406,18 @@ check("a test-target change runs that target only", () => {
 
 check("narrowed targets take their required features, and leave profile-excluded lanes to their rows", () => {
   const push = pushPlan({ mode: "packages", rust_changed: true, packages: ["meerkat-sqlite"], closure: ["meerkat-sqlite"], shards: [] });
-  const paths = ["crates/meerkat-sqlite/tests/feature_only.rs", "crates/meerkat-sqlite/tests/e2e_fast_lane.rs", "crates/meerkat-sqlite/tests/lock_sources.rs"];
+  const paths = [
+    "crates/meerkat-sqlite/tests/feature_only.rs",
+    "crates/meerkat-sqlite/tests/e2e_fast_lane.rs",
+    "crates/meerkat-sqlite/tests/lock_sources.rs",
+    "crates/meerkat-sqlite/tests/live_smoke.rs",
+  ];
   const selection = selectCommands({ paths, push, pr: NO_PR, ctx: fixtureContext() });
   const tests = lines(selection, "tests");
   assert.ok(tests.includes(nextest(`-p meerkat-sqlite --features slow-tests --test feature_only --test lock_sources --profile ${TEST_PROFILE} --no-tests=fail`)));
   assert.ok(selection.notes.some((note) => note.includes("meerkat-sqlite --test e2e_fast_lane: the ci-integration profile leaves it to its own lane")));
+  assert.ok(selection.notes.some((note) => note.includes("meerkat-sqlite --test live_smoke needs integration-real-tests (live provider credentials): not run")));
+  assert.ok(!tests.some((line) => line.includes("live_smoke") || line.includes("integration-real-tests")), "a live-provider target is named, not run");
   assert.ok(!tests.some((line) => line.includes("--test lock_sources --profile ci-pr")), "the narrowed run covers the whole-checkout reader of the same target");
 });
 

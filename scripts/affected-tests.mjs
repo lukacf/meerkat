@@ -60,7 +60,8 @@
 // src/ are not narrowed (a cfg(test) module cannot be told from library code
 // without compiling it), nor is a non-Rust file under tests/ (library code can
 // include it), nor any package of a whole-workspace, lock-scoped or
-// product-wide plan.
+// product-wide plan. A narrowed target behind a live-provider feature
+// (LIVE_ONLY_FEATURES) is named, not run, as the planner treats such a reader.
 //
 // Generated files and TLC. The generators run first, and TLC follows the
 // specs: the machines and compositions whose specs/ files changed, the
@@ -591,7 +592,7 @@ export function selectCommands({ paths, push, pr, ctx }) {
   const inClosure = new Set(closure);
   const seedSet = new Set(seeds);
   for (const [name, targets] of narrowed) {
-    notes.push(`${name}: only test targets changed; runs ${targets.map((target) => target.name).join(", ")} without reverse dependencies`);
+    notes.push(`${name}: only test targets changed (${targets.map((target) => target.name).join(", ")}); no reverse dependency runs`);
   }
 
   // Clippy: the push plan's rows, CI's closure check beyond them, wasm.
@@ -618,6 +619,13 @@ export function selectCommands({ paths, push, pr, ctx }) {
     if (inClosure.has(name)) continue;
     const kept = targets.filter((target) => {
       if (specialBinaries.has(`${name}::${target.name}`)) return false;
+      // A target behind a live-provider feature needs credentials and runs in
+      // no CI lane, as the planner treats such a reader.
+      const live = target.requiredFeatures.filter((feature) => LIVE_ONLY_FEATURES.includes(feature));
+      if (live.length > 0) {
+        notes.push(`${name} --test ${target.name} needs ${live.join(", ")} (live provider credentials): not run`);
+        return false;
+      }
       if (ctx.profileSelects(TEST_PROFILE, { kind: "test", binary: target.name, package: name })) return true;
       notes.push(`${name} --test ${target.name}: the ${TEST_PROFILE} profile leaves it to its own lane (see .config/nextest.toml)`);
       return false;

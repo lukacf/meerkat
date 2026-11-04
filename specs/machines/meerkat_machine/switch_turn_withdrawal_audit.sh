@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
-# Bounded TLC audit of the withdrawal of a failed until-changed switch-turn
-# (AbortUntilChangedSwitchTurnReconfigure).
+# Bounded TLC audit of the settlement of an until-changed switch-turn: the
+# withdrawal of a failed one (AbortUntilChangedSwitchTurnReconfigure), the
+# refusal of a second one while one is pending, and the completion in every
+# phase the session can reach in the reconfigure gap.
 #
 # usage: switch_turn_withdrawal_audit.sh <max-steps> [--mutants] [extra tlc args...]
 #
 # Derives the TLC config from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then adds the audit's finite
 # model values (one session, one input, two requests, the model names and the
-# stop reason), its two action properties and its step bound, and checks them
-# over the whole bounded space. It then reruns the same space once per
+# stop reason), its four action properties and its step bound, and checks
+# them over the whole bounded space. It then reruns the same space once per
 # reachability witness, with that witness's negation as an extra action
 # property, and requires TLC to report exactly that violation, so the
-# properties are not vacuous. With --mutants it then seeds four defects into
-# a copy of the generated model (an abort that records a terminal, an abort
+# properties are not vacuous. With --mutants it then seeds six defects into a
+# copy of the generated model (an abort that records a terminal, an abort
 # that erases the inputs' phases, an abort without its pending-request guard,
-# an abort that keeps its request's approval entry) and requires TLC to
-# refuse each with the property it breaks. An anchor this script expects but
-# cannot find fails the run. Each TLC run is held to the canonical lane's
-# per-run cap (tlc_run_cap.sh) and fails closed as TLC INCOMPLETE.
+# an abort that keeps its request's approval entry, an accept without its
+# pending-switch guard, a completion that keeps the old baseline) and
+# requires TLC to refuse each with the property it breaks. An anchor this
+# script expects but cannot find fails the run. Each TLC run is held to the
+# canonical lane's per-run cap (tlc_run_cap.sh) and fails closed as TLC
+# INCOMPLETE.
 set -euo pipefail
 
 usage="usage: switch_turn_withdrawal_audit.sh <max-steps> [--mutants] [extra tlc args...]"
@@ -65,7 +69,9 @@ write_cfg() {
   AuditMaxSteps = ${max_steps}" "${cfg}"
   replace_exact_line "INVARIANTS" "PROPERTIES
   AuditAbortWithdrawsOnlyTheRequest
-  AuditAbortOnlyForThePendingRequest${extra}
+  AuditAbortOnlyForThePendingRequest
+  AuditPendingSwitchEndsOnlyWithItsRequest
+  AuditCompleteSettlesTheRequest${extra}
 INVARIANTS" "${cfg}"
   replace_exact_line "  CiStateConstraint" "  AuditStateConstraint" "${cfg}"
   printf 'CHECK_DEADLOCK FALSE\n' >> "${cfg}"
@@ -110,7 +116,7 @@ if [[ "${safety_status}" != "0" ]] \
   exit 1
 fi
 
-for witness in QueuedInputKept StoppedWithdrawn; do
+for witness in QueuedInputKept StoppedWithdrawn ConflictRefused StoppedCompleted; do
   cfg="${work_dir}/witness-${witness}.cfg"
   write_cfg "${cfg}" "
   NotAuditWitness${witness}"
@@ -128,14 +134,19 @@ done
 
 if [[ "${run_mutants}" == "true" ]]; then
   # Shared edit helpers for the mutants: each mutant's python edit runs after
-  # this prelude, rewrites every abort arm of the copied model.tla in place
-  # and must find each anchor it names.
+  # this prelude, rewrites every arm of one family (the abort arms unless it
+  # names another) of the copied model.tla in place and must find each anchor
+  # it names.
   read -r -d '' mutant_prelude <<'PY' || true
 import os, re
 path = os.environ["MODEL"]
 text = open(path).read()
 ABORT_ARMS = ["AbortUntilChangedSwitchTurnReconfigure" + phase
               for phase in ("Idle", "Attached", "Running", "Retired", "Stopped")]
+COMPLETE_ARMS = ["CompleteUntilChangedSwitchTurnReconfigure" + phase
+                 for phase in ("Idle", "Attached", "Running", "Retired", "Stopped")]
+ACCEPT_ARMS = ["RequestUntilChangedSwitchTurnAccepted" + phase
+               for phase in ("Idle", "Attached", "Running")]
 
 def _replace_body(arm, edit):
     global text
@@ -144,8 +155,8 @@ def _replace_body(arm, edit):
     start, end = found[0].start(), found[0].end()
     text = text[:start] + edit(text[start:end]) + text[end:]
 
-def frame_with(var, assignment):
-    """Every abort arm assigns `var`; its frame keeps each other variable."""
+def frame_with(var, assignment, arms=ABORT_ARMS):
+    """Every arm assigns `var`; its frame keeps each other variable."""
     def edit(body):
         lines = body.split("\n")
         hits = [i for i, line in enumerate(lines)
@@ -160,22 +171,22 @@ def frame_with(var, assignment):
         lines[hits[0]] = ("    /\\ " + var + "' = " + assignment + "\n"
                           "    /\\ UNCHANGED << " + ", ".join(kept) + " >>")
         return "\n".join(lines)
-    for arm in ABORT_ARMS:
+    for arm in arms:
         _replace_body(arm, edit)
 
-def keep_var(var):
-    """Every abort arm leaves `var` as it was instead of updating it."""
+def keep_var(var, arms=ABORT_ARMS):
+    """Every arm leaves `var` as it was instead of updating it."""
     def edit(body):
         lines = body.split("\n")
         hits = [i for i, line in enumerate(lines) if line.startswith("    /\\ " + var + "' = ")]
         assert len(hits) == 1, f"expected one update of {var}, found {len(hits)}"
         lines[hits[0]] = "    /\\ " + var + "' = " + var
         return "\n".join(lines)
-    for arm in ABORT_ARMS:
+    for arm in arms:
         _replace_body(arm, edit)
 
-def drop_guard(needle):
-    """Delete the one guard line of every abort arm that contains `needle`."""
+def drop_guard(needle, arms=ABORT_ARMS):
+    """Delete the one guard line of every arm that contains `needle`."""
     def edit(body):
         lines = body.split("\n")
         hits = [i for i, line in enumerate(lines)
@@ -183,7 +194,7 @@ def drop_guard(needle):
         assert len(hits) == 1, f"expected one guard with {needle!r}, found {len(hits)}"
         del lines[hits[0]]
         return "\n".join(lines)
-    for arm in ABORT_ARMS:
+    for arm in arms:
         _replace_body(arm, edit)
 
 def save():
@@ -232,5 +243,16 @@ PY
   mutate abort_keeps_approval \
     "Error: Action property AuditAbortWithdrawsOnlyTheRequest is violated" \
     'keep_var("model_routing_approval_phases")' "$@"
+  # An accept without its pending-switch guard: a second request would
+  # replace another request's pending switch, which could then neither
+  # complete nor withdraw.
+  mutate accept_replaces_pending \
+    "Error: Action property AuditPendingSwitchEndsOnlyWithItsRequest is violated" \
+    'drop_guard("model_routing_pending_switch_request_id", ACCEPT_ARMS)' "$@"
+  # A completion that keeps the old baseline: a switch completed in a
+  # stopped session would leave the baseline behind its applied model.
+  mutate complete_keeps_baseline \
+    "Error: Action property AuditCompleteSettlesTheRequest is violated" \
+    'keep_var("model_routing_baseline_model", COMPLETE_ARMS)' "$@"
 fi
 echo "switch-turn withdrawal audit passed at model_step_count <= ${max_steps}"

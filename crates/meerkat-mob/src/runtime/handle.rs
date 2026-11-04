@@ -10451,63 +10451,29 @@ impl MobHandle {
         let Some(store) = self.identity_member.as_ref() else {
             return Ok(census);
         };
-        // The present seated identities' labels and profile, against their
-        // member's last seat row below.
+        // The rows are counted by the rule the store readers count them by
+        // ([`super::IdentityRecordRows`]); the present seated identities'
+        // labels and profile are kept, against their member's last seat row
+        // below.
         let mut seats = Vec::new();
-        let mut after = None;
-        loop {
-            let page = store
-                .scan_created_identity_rows(
-                    self.mob_id(),
-                    after.as_ref(),
-                    crate::store::IDENTITY_INTENT_SCAN_PAGE_MAX,
-                )
-                .await?;
-            for (identity, observation) in &page.observations {
-                census.created_rows += 1;
-                match observation {
-                    crate::identity::CreatedIdentityObservation::Created(record) => {
-                        match &record.presence {
-                            crate::identity::CreatedIdentityPresence::Present => {
-                                if seated.contains(identity)
-                                    && let Some(spec) = &record.spec
-                                {
-                                    seats.push((
-                                        identity.clone(),
-                                        spec.labels.clone(),
-                                        spec.profile.clone(),
-                                    ));
-                                }
-                            }
-                            crate::identity::CreatedIdentityPresence::PendingPreparation {
-                                ..
-                            } => {}
-                            crate::identity::CreatedIdentityPresence::Removed => {
-                                census.tombstones += 1;
-                            }
-                            crate::identity::CreatedIdentityPresence::Archived { .. } => {
-                                census.archived += 1;
-                            }
-                        }
-                    }
-                    crate::identity::CreatedIdentityObservation::Unreadable { .. } => {
-                        census.unreadable += 1;
-                    }
+        let rows = super::IdentityRecordRows::scan(
+            store.as_ref(),
+            self.mob_id(),
+            |identity, observation| {
+                if let crate::identity::CreatedIdentityObservation::Created(record) = observation
+                    && record.presence == crate::identity::CreatedIdentityPresence::Present
+                    && seated.contains(identity)
+                    && let Some(spec) = &record.spec
+                {
+                    seats.push((identity.clone(), spec.labels.clone(), spec.profile.clone()));
                 }
-            }
-            match page.next {
-                None => break,
-                Some(next) if after.as_ref().is_none_or(|current| &next > current) => {
-                    after = Some(next);
-                }
-                Some(_) => {
-                    return Err(MobError::Internal(format!(
-                        "the created identity scan of mob '{}' returned a non-advancing cursor",
-                        self.mob_id()
-                    )));
-                }
-            }
-        }
+            },
+        )
+        .await?;
+        census.created_rows = rows.created_rows;
+        census.archived = rows.archived;
+        census.tombstones = rows.tombstones;
+        census.unreadable = rows.unreadable;
         if !seats.is_empty() {
             let rows = self.last_spawn_rows().await?;
             census.seats_stale = seats

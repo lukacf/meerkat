@@ -18,13 +18,18 @@ pub use in_memory::{
     InMemoryMobSpecStore, InMemoryRealmProfileStore, InMemoryTemporaryCouncilStore,
 };
 pub use realm_profile::{RealmProfileStore, StoredRealmProfile};
+#[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
+#[doc(hidden)]
+pub use sqlite::{
+    IDENTITY_CENSUS_TEST_MOB, IDENTITY_CENSUS_TEST_OTHER_MOB, ParkedStoreReadForTest,
+    StoreReadReleaseForTest, park_next_store_read_for_test, seed_identity_census_rows_for_test,
+};
 #[cfg(all(test, feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub(crate) use sqlite::{IDENTITY_RUNTIME_WRITE_FENCE_WAIT, identity_fence_test_hooks};
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use sqlite::{MemberBindingStoreRead, read_member_binding_store_at};
-#[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
-#[doc(hidden)]
-pub use sqlite::{ParkedStoreReadForTest, StoreReadReleaseForTest, park_next_store_read_for_test};
+pub(crate) use sqlite::{
+    MemberBindingStoreRead, read_identity_record_rows_at, read_member_binding_store_at,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use sqlite::{
     SqliteForkedParticipantStore, SqliteMobEventStore, SqliteMobIdentityStatusStore,

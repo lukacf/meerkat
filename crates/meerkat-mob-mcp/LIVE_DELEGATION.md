@@ -58,6 +58,14 @@ not the separate Responses/function-bridge execution contract.
   as Responses operations. A cold restore does not restore a live transport;
   generated reconciliation fences completed recovered work as late and
   permanently ineligible for provider delivery.
+- Restart recovery never wakes a member. A member session the runtime holds no
+  registration for at start (a member left dormant by lazy restore, an
+  identity whose first wake is deferred, a released materialization) is not
+  read: its operations stay in the session's durable machine state and are
+  captured once, when the runtime registers the session again (the member's
+  wake) or when the first live channel is prepared on it, whichever comes
+  first, and then reconciled like any other. Live channel preparation waits
+  for the start-up capture of the registered sessions for at most 30 seconds.
 - Existing-member execution requires a local runtime-backed member and rejects
   member construction overrides. Unsupported admission fails explicitly; there
   is no fallback fork or direct `internal_turn` path.

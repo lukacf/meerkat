@@ -16,8 +16,8 @@
 # checks that every ratchet the agent gate selects for a sample change has a
 # CI step the plan selects for that change on both events, and checks that
 # the manual hook keeps the agent gate's ratchets and runs no Clippy and no
-# tests. CI runs it (make ci-lanes-selftest, in Format + governance), and it
-# needs no Python package beyond the standard library.
+# tests. CI runs it (make ci-lanes-selftest, in the CI lane classifier
+# selftest job), and it needs no Python package beyond the standard library.
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"

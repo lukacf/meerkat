@@ -222,8 +222,11 @@ AuthMachine lifecycle, status, and logout shared. Meerkat queries the signed-in
 account's `/models` endpoint and rejects a known-unavailable model/dialect
 before dispatch. If discovery is temporarily unavailable, auth still succeeds
 and the request is attempted normally. A known-unavailable error includes the
-compatible model IDs observed for that account; IDs outside Meerkat's built-in
-catalog also require a normal `[models.<id>]` configuration entry.
+compatible model IDs observed for that account. An ID outside Meerkat's
+built-in catalog runs when the request names a route of the account: the
+account's model list defines it, protocol and limits included (see
+[GitHub Copilot configured once](#github-copilot-configured-once)); a
+`[models.<id>]` entry for it still works, and wins.
 
 The device sign-in's routes send a Copilot token that Meerkat obtains from the
 GitHub sign-in by a token exchange and replaces before it expires. A temporary
@@ -538,6 +541,97 @@ has not run yet, so these answers are not yet observed live:
 - whether a fine-grained token works on Copilot Individual plans at all (one
   public report shows a 401).
 </Note>
+
+### GitHub Copilot configured once
+
+The account can also be configured with one section instead of the nine
+backend, auth and binding tables above. `[realm.<realm>.copilot]` states once
+where the account's routes read the GitHub token:
+
+```toml
+[realm.global.copilot]
+source = { kind = "env", env = "COPILOT_GITHUB_TOKEN", fallback = ["GH_TOKEN", "GITHUB_TOKEN"] }
+# or a resolver the host registered:
+# source = { kind = "external_resolver", handle = "copilot-token" }
+# optional client identity headers, as in a copilot backend's options:
+# options = { integration_id = "enterprise-approved" }
+```
+
+The realm then has the account's three routes, `copilot_openai`,
+`copilot_anthropic` and `copilot_gemini`, on its `github_copilot` credential
+account, each with `auth_method = "github_copilot_token"` over that source:
+the routes the tables above declare, under the same names, so
+`rkat auth test`, `rkat auth status`, `rkat auth logout` and
+`--auth-binding global:copilot_anthropic` work as before, and `realm/get`
+lists them. The realm lists (`rkat auth realms`, `realm/list` and
+`GET /realms`) count a realm's explicit tables only, so they show no
+backends, auth profiles or bindings for a realm configured only by the
+section. No route has a default model. Like the explicit tables, they are
+the realm's routes for their providers: with no other binding of a provider in
+the realm, a request for a catalog model of that provider that names no
+binding runs on the account, before an API key variable.
+
+The section reads an `env` or an `external_resolver` source only. A secret in
+config, a stored token, a credential command and the device sign-in use the
+explicit tables. A realm configures its account one way: the section next to a
+table that declares one of its routes, or next to another binding on its
+`github_copilot` account, is refused when the realm loads, and both
+`rkat auth login copilot` forms refuse a `[realm.global]` that has the
+section. A section in another realm is another account: `[realm.team.copilot]`
+configures `team:account:github_copilot`.
+
+Choosing a model:
+
+- A model of Meerkat's catalog runs on the account's route of its provider. A
+  request that names any route of the account is served on the account's
+  route of the model's provider; a request that also names a provider keeps
+  the strict check.
+- A model only your account lists (no catalog row, no `[models.<id>]` entry)
+  runs when the request names any route of the account:
+
+  ```bash
+  export COPILOT_GITHUB_TOKEN="<GitHub token with Copilot access>"
+  COPILOT_MODEL="<a model id your Copilot account lists>"
+  rkat run --auth-binding global:copilot_openai --model "$COPILOT_MODEL" "Summarize this change"
+  ```
+
+  The build asks the account's model list about the model, after the route
+  has looked the account up. The endpoints Copilot lists for the model choose
+  the protocol, never its vendor: a model on `/v1/messages` runs on the
+  Anthropic Messages wire, otherwise a model on `/responses` or
+  `/chat/completions` runs on the OpenAI wire, Responses first. The session
+  moves to the account's route of that protocol, whichever route of the
+  account it named. The model's limits come from the same list: its context
+  window, prompt limit and output limit, and whether it takes images. Tool
+  calls, streaming, structured outputs and thinking budgets are checked
+  against the list on every request, as for every Copilot model. Nothing
+  about the model is stored: a resumed session asks the account again.
+- A request that names no binding cannot reach such a model: the account is
+  asked only on a route the request names. Without a provider the request is
+  refused as before ("cannot infer provider from model"); with one it is
+  refused after its credential resolves
+  (`model '<provider>:<id>' is absent from the effective model registry`), or
+  by that resolution's own error. Name a route of the account as above. A
+  live model switch or a fallback target to such a model, and any live
+  reconfigure of a session that runs one (a provider parameter or binding
+  change too), need a `[models.<id>]` entry.
+
+A model only the account defines is refused before any model request is
+made, and no other route or credential is tried in its place:
+
+| What happened | Refusal |
+|---|---|
+| The account's model list does not name the model, or the account's policy disables it | `account model refused`: the credential does not offer the model, followed by the ids it offers |
+| The account offers the model on no endpoint Meerkat speaks | `account model refused`: offered on no endpoint Meerkat speaks |
+| The account's model discovery failed | `account model refused`: the model list is not available; retry once it loads |
+| The account has no route for the model's protocol (explicit tables without it) | the credential account has no route for that provider |
+
+A `[models.<id>]` entry keeps owning its model: the account is never asked
+about it, and its `provider` still decides the route. To move from the
+explicit tables to the section, remove the `copilot_openai`,
+`copilot_anthropic` and `copilot_gemini` tables of the realm and add the
+section with the same source; the route names and the account stay, so
+sessions that name the routes resume on them.
 
 ### Use the binding
 

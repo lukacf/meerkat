@@ -167,12 +167,19 @@ impl ObservedBridge {
                     association.candidate().target.context.as_str(),
                     session_id.to_string()
                 );
+                // A change held in progress is met by native's one read; it
+                // makes no in-place re-read while a change is in progress.
+                let reads = if matches!(self.fault.mode, DeliveryMode::HelperPolicyChangeHeld(_)) {
+                    1
+                } else {
+                    NATIVE_CONTROLLER_ADMISSION_READS
+                };
                 assert!(
                     self.fault
                         .helper_admission_change
                         .lock()
                         .unwrap()
-                        .replace(association)
+                        .replace((association, reads))
                         .is_none()
                 );
                 Some(AdmissionChangeArm(self.fault.clone()))
@@ -182,15 +189,6 @@ impl ObservedBridge {
         let real = self
             .delegate_governed_delivery(runtime_id, session_id, input, custody, internal)
             .await;
-        // The reprepare controls' change only has to be in progress through
-        // native's check: once native answered, it ends before the control
-        // goes on. A HelperPolicyChangeHeld control ends its own.
-        if !matches!(self.fault.mode, DeliveryMode::HelperPolicyChangeHeld(_)) {
-            let fault = self.fault.clone();
-            tokio::task::spawn_blocking(move || fault.end_held_changes())
-                .await
-                .unwrap();
-        }
         self.fault.helper_returns.fetch_add(1, Ordering::SeqCst);
         // Only closed native result fields are retained. The adapter neither
         // creates a refusal nor substitutes the desired reason for another one.
@@ -294,11 +292,6 @@ impl ObservedBridge {
     }
 }
 
-/// How long the helper reprepare controls' policy change stays in progress:
-/// past Core's enclosing currentness check, and over before a control lets
-/// the refused attempt go on.
-const HELPER_POLICY_CHANGE_HOLD: std::time::Duration = std::time::Duration::from_millis(100);
-
 /// Scope the one exact helper admission fault to its actual bridge call,
 /// including cancellation before the operation owner consumes it.
 struct AdmissionChangeArm(Arc<DeliveryFault>);
@@ -308,10 +301,21 @@ impl Drop for AdmissionChangeArm {
     }
 }
 
-/// Forward the real policy unchanged, then hold a real owner change in
-/// progress across its enclosing native admission observation. The earlier
-/// source/grant lookups remain unblocked. Native detects the change and
-/// produces the actual typed refusal.
+/// The controller-admission reads of one native admission. Since 0.9.10 a
+/// read that met an owner change which has completed is made once more in
+/// place (`LocalGrantAuthority::observe_controller_admission` in
+/// meerkat-authorization's grants/mod.rs), and the answer of that second read
+/// stands: native admission answers `PolicyChanged` for a change met by both
+/// reads, as under back-to-back changes.
+const NATIVE_CONTROLLER_ADMISSION_READS: usize = 2;
+
+/// Forward the real policy unchanged, then invalidate its enclosing native
+/// admission observation, and the one in-place re-read of it too, so that
+/// the admission meets back-to-back changes. The helper wait controls'
+/// HelperPolicyChangeHeld instead holds one real owner change in progress
+/// across that observation. The earlier source/grant lookups remain
+/// unblocked. Native detects the changed stamp and produces the actual typed
+/// refusal.
 pub(super) struct AdmissionChangingOwner {
     pub inner: Arc<dyn OperationPolicyOwner>,
     pub fault: Arc<DeliveryFault>,
@@ -329,25 +333,23 @@ impl OperationPolicyOwner for AdmissionChangingOwner {
             .authorize_controller_admission(association, facts, now_ms)?;
         let selected = {
             let mut selected = self.fault.helper_admission_change.lock().unwrap();
-            if selected.as_ref() == Some(association) {
-                selected.take();
-                true
-            } else {
-                false
+            match selected.as_mut() {
+                Some((armed, reads)) if *armed == *association => {
+                    *reads -= 1;
+                    if *reads == 0 {
+                        selected.take();
+                    }
+                    true
+                }
+                _ => false,
             }
         };
-        if selected {
-            // No semantic policy fact is changed. A real owner change begins
-            // after the genuine policy read and stays in progress, on its own
-            // thread, through Core's enclosing currentness check: Core now
-            // rebuilds a view after a completed change, so only a change still
-            // in progress makes native admission answer PolicyChanged. It
-            // stays for the mode's hold, or briefly; no lock or writer crosses
-            // an await.
-            let hold = match self.fault.mode {
-                DeliveryMode::HelperPolicyChangeHeld(hold) => hold,
-                _ => HELPER_POLICY_CHANGE_HOLD,
-            };
+        if selected && let DeliveryMode::HelperPolicyChangeHeld(hold) = self.fault.mode {
+            // No semantic policy fact is changed either: a real owner change
+            // begins after the genuine policy read and stays in progress, on
+            // its own thread, through Core's enclosing currentness check, for
+            // the mode's hold or until the control ends it. No lock or writer
+            // crosses an await.
             let publication = self.publication.clone();
             let (began, beginning) = std::sync::mpsc::channel();
             let (end, ending) = std::sync::mpsc::channel::<()>();
@@ -364,6 +366,23 @@ impl OperationPolicyOwner for AdmissionChangingOwner {
             };
             counter.fetch_add(1, Ordering::SeqCst);
             self.fault.held_changes.lock().unwrap().push((end, held));
+        } else if selected {
+            // No semantic policy fact is changed. This bounded fault advances
+            // the actual stamp after its genuine policy read, before Core's
+            // enclosing currentness check. No lock or writer crosses an await.
+            match self.publication.try_begin_owner_change() {
+                Ok(change) => {
+                    drop(change);
+                    self.fault
+                        .publication_changes
+                        .fetch_add(1, Ordering::SeqCst);
+                }
+                Err(_) => {
+                    self.fault
+                        .publication_change_failures
+                        .fetch_add(1, Ordering::SeqCst);
+                }
+            }
         }
         Ok(allowance)
     }

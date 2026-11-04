@@ -137,7 +137,14 @@ impl Case {
         identities: [Option<&str>; 2],
         physical: Option<&str>,
     ) -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        // The physical fence admits only a private (0700) artifact directory.
+        // Set this owned root's mode instead of inheriting it from the process
+        // umask, which concurrent tests share and must not change.
+        let directory = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
         let root = directory.path().canonicalize().unwrap();
         let python = PathBuf::from(
             std::env::var_os("TOOLKIT_SHARED_TEST_PYTHON")

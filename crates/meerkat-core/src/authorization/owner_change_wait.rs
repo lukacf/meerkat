@@ -27,6 +27,12 @@
 //! to rebuild ran nothing, so it takes the same wait as a stale read: a hold
 //! that ended before the step read it is no ordinary refusal there, and the
 //! step pauses one backoff step and rebuilds, as one of its free rebuilds.
+//! A fenced tool dispatch's prepared entry and its entry stagings (the root
+//! staging, the call-level policy gate's and a dispatch issuance's) prepare a
+//! stale decision again through such an observation of the work's own
+//! publication, so their refusal to rebuild is a stale read that ran nothing
+//! too: they take the same wait and rebuild, as free rebuilds of the
+//! dispatch attempt.
 //! This is shell synchronization: no machine input changes.
 
 use crate::time_compat::{DeadlineInstant, Duration};

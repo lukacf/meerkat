@@ -106,9 +106,10 @@ impl OperationRefusalOutcome {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationRefusalDisposition {
-    /// Waited for an owner change in progress on the work's own publication
-    /// (bounded): for `waited_ms`, and whether the change settled so the
-    /// operation may rebuild.
+    /// Waited after a refusal to rebuild (bounded): for an owner change in
+    /// progress on the work's own publication, or, after a stale read with
+    /// none in progress, one backoff step. For `waited_ms`, and whether the
+    /// wait settled so the operation may rebuild.
     WaitedForOwnerChange { waited_ms: u64, settled: bool },
     /// Rebuilt the model request once from current owners.
     Rebuilt,

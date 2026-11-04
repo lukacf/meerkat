@@ -35,6 +35,263 @@ them.
 
 ## [Unreleased]
 
+### Highlights
+
+- GitHub Copilot configured once. A `[realm.<realm>.copilot]` section
+  states a Copilot account's token source once (an `env` or
+  `external_resolver` source) in place of nine backend, auth and binding
+  tables: the realm gets the account's `copilot_openai`,
+  `copilot_anthropic` and `copilot_gemini` routes in token mode, under the
+  names the explicit tables use. Account models: a request that names a
+  route of a Copilot account can run a model only the account lists (no
+  catalog row, no `[models.<id>]` entry), with the protocol and limits
+  from the account's model list; a model the account does not offer is
+  refused before any model request, and no other route or credential is
+  tried. See Added and Breaking, and Known limitations for Meerkat
+  Connect.
+
+### Breaking
+
+- `meerkat-core`, `meerkat-llm-core`: a GitHub Copilot account configured
+  once, and account models (see Added). `RealmConfigSection` gains the
+  public field `copilot: Option<CopilotAccountConfig>`, so code that builds
+  it literally must set it (`None` keeps the previous behaviour).
+  `ProviderBindingError` (meerkat-core) gains
+  `CopilotAccountRouteConflict { route }` and
+  `CopilotAccountSourceUnsupported { source_kind }`, and `FactoryError`
+  (meerkat-llm-core) gains `AccountModel(Box<AccountModelRefusal>)` (a
+  refusal converts into it with `From`), each appended last, so an
+  exhaustive match needs their arms.
+
+- Behaviour-only (not measured by the gate): `meerkat`:
+  `resolve_create_session_model` serves a model on the route of its
+  provider that shares the named binding's credential account. A request
+  that names a route of a GitHub Copilot account and a model of another
+  provider family, and no provider, now resolves to the account's route of
+  that family (the resolution's `auth_binding` is that route, not the
+  binding the request named), where it failed with
+  `CreateSessionModelResolutionError::ProviderModelMismatch` (or
+  `ConfiguredProviderModelMismatch` for a configured model). An account
+  with two routes of that family refuses it as ambiguous
+  (`CreateSessionModelResolutionError::AuthBinding`). A request that also
+  names a provider, and an account with no route of the model's provider
+  (every account but a Copilot one), keep the mismatch error.
+
+- Behaviour-only (not measured by the gate): `meerkat`: a session that
+  `AgentFactory` builds on a zero-config GitHub Copilot route
+  (`global:copilot_openai`, `global:copilot_anthropic` or
+  `global:copilot_gemini`) carries the route's account,
+  `global:account:github_copilot`, as its credential identity
+  (`SessionLlmRequestPolicy::credential_identity`), and runs with
+  provider-native tools off (`ProviderNativeToolPolicy::DisableAll`), as on
+  an explicit Copilot route. A session on a route of a
+  `[realm.<realm>.copilot]` account (see Added) does the same with that
+  account. In 0.9.9 a zero-config route's session carried the binding
+  itself as its credential identity
+  (`AuthCredentialIdentity::from_auth_binding`) and ran with provider-native
+  tools on (`ProviderNativeToolPolicy::Inherit`). See Changed.
+
+### Added
+
+- GitHub Copilot configured once: `[realm.<realm>.copilot]` states a Copilot
+  account's credential source once (`source`, an `env` or
+  `external_resolver` source; optional `options`, the client identity
+  headers), and the realm gets the account's three routes,
+  `copilot_openai`, `copilot_anthropic` and `copilot_gemini`, on its
+  `github_copilot` credential account in token mode
+  (`github_copilot_token`), as if their nine tables were written out. The
+  section next to an explicit table of one of its routes, or next to
+  another binding on its account, is refused, and so is a source the
+  routes do not read (a secret in config, a stored token, a credential
+  command); `rkat auth login copilot` refuses a `[realm.global]` that has
+  the section. A session on one of the routes carries the account as its
+  credential identity and runs with provider-native tools off, as on the
+  explicit tables. The zero-config routes are the same lowering of the
+  default source. For hosts and embedders:
+  `meerkat_core::CopilotAccountConfig` and `RealmConfigSection::copilot`
+  (see Breaking).
+
+- Copilot account models: on a route of a GitHub Copilot account, a model
+  the registry does not define (no catalog row, no `[models.<id>]` entry) is
+  defined for the build by the account's model list. The endpoints the
+  account lists for the model choose its protocol, never its vendor:
+  `/v1/messages` is the Anthropic Messages wire, otherwise `/responses`
+  (first) or `/chat/completions` the OpenAI wire, and the session runs on
+  the account's route of that protocol, whichever route of the account the
+  request named. Its context window, prompt and output limits and image
+  input come from the list; nothing about the model is stored, and a resume
+  asks the account again. A model the account does not offer, offers on no
+  endpoint Meerkat speaks, or cannot list (its discovery failed) is refused
+  before any model request (`FactoryError::AccountModel`), and no other
+  route or credential is tried. A request that names no binding still
+  cannot reach such a model: name any route of the account, for example
+  `rkat run --auth-binding global:copilot_openai --model <id> "..."`. A live
+  model switch or a fallback target to such a model, and any live
+  reconfigure of a session that runs one, need a `[models.<id>]` entry. For
+  hosts and embedders:
+  `ProviderRuntime::account_model` (provided; `AccountModelLookup::NotReported`
+  by default), `ProviderRuntimeRegistry::account_model`,
+  `AccountModelLookup` and `AccountModelRefusal` (meerkat-llm-core);
+  `CopilotModelOffering::{enabled, protocol_provider, registry_definition}`,
+  `CopilotModelSnapshot::{offered_model_ids, account_model}` and
+  `CopilotRuntime::account_model` (meerkat-copilot). (#1991)
+
+- `meerkat-authorization`: `LocalGrantAuthority::owner_change_in_progress`,
+  the owner change in progress on the grant authority's publication: a
+  published change that has not completed, or a reservation of the
+  publication's writer held now that has not published. It mirrors
+  `WorkAuthorization::owner_change_in_progress` for a caller that holds the
+  grant authority rather than a work and, like it, is a waiting hint only,
+  never a permission. Native admission reads it to tell a change that has
+  completed from one still in progress (see Fixed).
+
+### Changed
+
+- A session on a zero-config Copilot route, or on a route of a
+  `[realm.<realm>.copilot]` account, carries the route's account as its
+  credential identity, the identity its connection and lease always used,
+  and runs with provider-native tools off, as an explicit Copilot route
+  does. A zero-config route's session carried the binding as its credential
+  identity before, so a provider switch or a fallback target did not stay
+  on the account.
+
+### Fixed
+
+- `meerkat-rpc`: a session's runtime loop no longer waits forever on the
+  turn-finalization boundary that its own turn holds. A turn that
+  materializes a staged session (the first turn of an immediate
+  `session/create`, or the first `turn/start` of a deferred session) or
+  rebuilds a cold one checks that the session's executor still serves. When
+  an unregister of the session began during that turn, the check took a
+  path that asks for the boundary again, so the loop waited on itself, the
+  unregister waited for the loop, and every caller joined to the unregister
+  waited with them. An immediate `session/create` whose first agent build
+  failed (for example a scoped tool grant gate refused with
+  `tool_grant_gate_refused`) could stay unanswered, because its completion
+  cleanup unregisters the session while the loop retries the failed turn.
+  The check now answers the loop's own turn with the typed
+  teardown-in-progress refusal (`UnregisterInProgress`); the loop hands its
+  executor off, and the unregister and its callers complete. A stuck session
+  logged "unregister is still waiting for the runtime loop to hand off the
+  exact executor" every 5 s and "staged run has not begun executing" every
+  two minutes. Affects 0.8.22 through 0.9.9: `rkat-rpc`, the Python and
+  TypeScript SDKs that drive it, `rkat mob deploy --surface rpc`, and other
+  hosts of `meerkat_rpc::SessionRuntime`.
+
+- `meerkat-store`: `FileApprovalStore` now creates its files private (0600)
+  on Unix regardless of the process umask, so consumers that verify private
+  decision files no longer refuse stores created under the common 022/002
+  umask. A store file an older version left readable by others becomes
+  private on its next commit.
+
+- `meerkat-core`: a governed tool call refused at its own effect entry
+  (`ToolDispatchContext::enter_reviewed_effect`, or a ticket or governed
+  operation entering through it) before any effect of the call entered now
+  reaches the model as certified not dispatched (`tool_invoked: false`), as
+  a refusal met before the dispatcher was invoked always did. The model
+  read the same refusal two ways depending on where an owner change
+  landed: met by the fenced dispatch or the call-level execution policy
+  gate it read `false`, met one check later by the tool's effect entry,
+  after the gate handed the call on and still before the tool's body, it
+  read `"unknown"`. The entry now certifies its refusal while no effect of
+  the dispatch entered, that is while no earlier entry of the call passed
+  and no governed step of it ran its operation; a later entry's refusal,
+  and one met outside a fenced dispatch, still make no claim.
+  Behaviour change: `OperationRefused::dispatch()` of such a refusal is
+  `NotDispatched`, so a comparison with `OperationRefused::new(kind)` no
+  longer matches it (compare `kind()` and `dispatch()`). A tool that runs
+  an effect of its own before its effect entry forwards the entry's
+  refusal as `OperationRefused::new(refusal.kind())`. Affects 0.9.4
+  through 0.9.9.
+
+- `meerkat-mob`: a Dormant member reads with its peer id and transport key in
+  every roster and member-list read (`MobHandle::get_member`, `roster`,
+  `list_all_members`, `list_members` and the member lists built on it, the
+  `mob_list_members` tool's included), as a live member does. A member seated
+  Dormant while its mob ran (a fresh `seat_dormant_members` seat, or the next
+  incarnation of a rotation or a same-session respawn) read with neither
+  until its first wake, although MobMachine recorded its endpoint at the
+  seat, while a member restored Dormant at a restart, or released after it
+  ran, read with them. A member seated and not materialized now reads with
+  the peer id and transport key of the endpoint MobMachine records for it,
+  the endpoint `member_peer_endpoint` answers and its wake presents, and the
+  read wakes nothing. A member on network comms has no recorded endpoint
+  until its first wake registers one, and reads with none until then, as
+  before.
+
+- `meerkat-core`: a governed tool dispatch no longer refuses a call because
+  another actor's owner change completed while the dispatch read the work's
+  authorization publication. Its prepared entry and its entry stagings (the
+  root staging, the call-level execution policy gate's and a dispatch
+  issuance's) waited only for a change still in progress, so a read that
+  waited for an owner's lock while a change held it (for example during a
+  concurrent call's grant issuance on the same publication) ended stale with
+  none in progress, and the call answered `operation_refused` with
+  `{"kind": "reprepare_required", "tool_invoked": false}`. They now take the
+  wait after a stale read (`OwnerChangeChurn::wait_after_stale_read`): with
+  no change in progress they pause 1 ms and prepare again from the owners,
+  as one of the dispatch attempt's free rebuilds, within the existing bounds
+  (3 free rebuilds and 2 s per waiting state, inside the tool's timeout).
+  The rebuilt decision is current, or its refusal is the owners' current
+  answer, typed as before: a call whose authority the change revoked is
+  refused with that answer (`denied`). Shell synchronization only: no
+  machine input, wire type or error variant changes.
+
+- `meerkat-core`, `meerkat-tools`: the rest of Core's governed operations
+  no longer settle a stale read as their outcome when the owner change that
+  made it stale had already completed. A model request, a compaction
+  summary, a review's currentness check after its verdict and the
+  `web_search` helper's model request waited only for a change still in
+  progress, so such a read took the ordinary path at once: a model request
+  rebuilt once and, when that read was stale too, sent the controller
+  feedback request with a refusal notice, a compaction summary skipped its
+  compaction, a review was retired as an authority change and the call
+  refused with `reprepare_required`, and the search answered
+  `reprepare_required`. They now take the wait after a stale read too, within
+  the same bounds, and rebuild: a model request keeps its operation and saves
+  its own rebuild for after its free rebuilds, and a review whose decision a
+  completed change superseded is reviewed once more for the current decision.
+  A host's operation refusal observer sees `WaitedForOwnerChange` where it
+  saw `Rebuilt` and `ControllerFeedback` for such a model request;
+  `WaitedForOwnerChange` now also names the pause after a stale read with no
+  change in progress.
+
+- `meerkat-authorization`, `meerkat-runtime`: native admission no longer
+  refuses governed input as a changed policy because an owner change
+  completed while it read the grant publication. Its reads (controller
+  admission, `GrantBackedWorkPolicy::validate_controller_admission`, and a
+  scoped original's own mandate and named contributors' liveness in
+  `ScopedOriginalIngress`, which `require_source_original_live` and the
+  retained-resume checks share) each observed the publication once and never
+  rebuilt. A read that waited for an owner's lock while a change held it (for
+  example during a concurrent grant issuance) ended stale with no change in
+  progress, and admission answered `ControllerReadinessUnavailable` with
+  `PolicyChanged`. When the change it met has completed
+  (`LocalGrantAuthority::owner_change_in_progress` names none), each such read
+  is now made once more in place from the owners, as a grant-backed
+  preparation rebuilds once: the input is admitted while its authority holds,
+  and refused with the owners' current answer (`InputRefused` with `Denied`)
+  when the change revoked it. Admission still never waits, because it runs
+  inside the session's ingress transaction: a change still in progress, or
+  another one met by the second read (back-to-back changes), answers
+  `PolicyChanged` as before. A host that submits again after `PolicyChanged`
+  waits first, outside its own locks, with a bounded
+  `OwnerChangeChurn::wait_after_stale_read`, then resubmits once.
+
+### Known limitations
+
+- Meerkat Connect: its provider setup and first-target setup read a
+  realm's explicit tables only, so they do not yet list the routes a
+  `[realm.<realm>.copilot]` section declares (see Added), and a realm whose
+  Copilot account is configured only by the section can look unconfigured
+  there. Use the explicit Copilot tables with Connect until a later
+  release. With the explicit tables, Connect can offer each of the three
+  Copilot routes as a target for a model of one provider family, and the
+  session runs on the account's route of the model's family whichever is
+  chosen, on the same credential (see Breaking): choosing `copilot_openai`
+  for an Anthropic model runs on `copilot_anthropic`, so the chosen
+  target's name is not the route the session runs on.
+
 ## [0.9.9] - 2026-11-03
 
 ### Highlights

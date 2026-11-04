@@ -627,6 +627,36 @@ impl CopilotRuntime {
             .as_ref()
             .map(|unavailable| unavailable.retryable.clone())
     }
+
+    /// What the model list of `connection`'s Copilot account states about
+    /// `model`, which the model registry does not define
+    /// ([`CopilotModelSnapshot::account_model`]). The list is the one the
+    /// account state behind the connection holds, loaded when the route
+    /// resolved; while it holds none (the account's model discovery has not
+    /// answered), the list defines no model, and the model is refused as
+    /// unavailable.
+    pub fn account_model(
+        &self,
+        connection: &meerkat_llm_core::provider_runtime::ResolvedConnection,
+        model: &str,
+    ) -> meerkat_llm_core::provider_runtime::AccountModelLookup {
+        use meerkat_llm_core::provider_runtime::{AccountModelLookup, AccountModelRefusal};
+
+        let snapshot = self.connection_state(connection).and_then(|state| {
+            state
+                .cache
+                .read()
+                .as_ref()
+                .and_then(|cached| cached.models.clone())
+        });
+        match snapshot {
+            Some(snapshot) => snapshot.account_model(&connection.credential_identity, model),
+            None => AccountModelLookup::Refused(AccountModelRefusal::ModelsUnavailable {
+                credential: connection.credential_identity.clone(),
+                model: model.to_string(),
+            }),
+        }
+    }
 }
 
 fn resolve_route_for_state(
@@ -4894,6 +4924,106 @@ mod tests {
         assert_eq!(
             observed.lock().as_slice(),
             ["https://first.example.test", "https://second.example.test"]
+        );
+    }
+
+    /// The account model of a resolved Copilot route comes from the model
+    /// list its account state holds: a listed model is offered under the
+    /// family of its protocol, an unlisted one is refused naming the ids the
+    /// account offers, and while no list is loaded the list defines no
+    /// model.
+    #[tokio::test]
+    async fn account_model_reads_the_resolved_accounts_model_list() {
+        use meerkat_llm_core::provider_runtime::{AccountModelLookup, AccountModelRefusal};
+
+        let runtime = CopilotRuntime::new();
+        let (auth_binding, binding) = validated_binding();
+        let (env, _) = resolver_environment(&auth_binding).await;
+        let persistence_id = env
+            .provider_auth_persistence()
+            .expect("test persistence")
+            .authority_id();
+        let state = runtime
+            .account_state(
+                persistence_id,
+                binding.credential_identity(),
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::DeviceSignIn,
+            )
+            .expect("account state");
+        let snapshot = CopilotModelSnapshot::from_models(vec![crate::CopilotModel {
+            id: "account-model-1".to_string(),
+            vendor: Some("ExampleVendor".to_string()),
+            name: None,
+            version: None,
+            model_picker_enabled: None,
+            capabilities: crate::CopilotModelCapabilities::default(),
+            policy: None,
+            supported_endpoints: vec![CopilotEndpoint::Responses],
+        }])
+        .expect("model snapshot");
+        *state.cache.write() = Some(CachedCopilotToken {
+            generation: 1,
+            token: "derived".to_string(),
+            source_generation: 1,
+            source_expires_at: None,
+            refresh_at: Utc::now() + Duration::hours(1),
+            expires_at: Utc::now() + Duration::hours(2),
+            api_base: "https://first.example.test".to_string(),
+            models: Some(Arc::new(snapshot)),
+            model_discovery_refresh_at: None,
+            identity: None,
+            exchange_unavailable: None,
+        });
+        let authorizer = Arc::new(CopilotAuthorizer {
+            state: Arc::clone(&state),
+            binding: binding.clone(),
+            env,
+            transport: Arc::new(ScriptedTransport::new([])),
+        });
+        let connection = meerkat_llm_core::provider_runtime::ResolvedConnection {
+            provider: Provider::OpenAI,
+            backend: binding.backend(),
+            backend_profile: binding.backend_profile().clone(),
+            credential_identity: binding.credential_identity().clone(),
+            auth_lease: Arc::new(
+                meerkat_llm_core::provider_runtime::DynamicLease::from_authorizer(
+                    authorizer,
+                    AuthMetadata::default(),
+                    crate::GITHUB_COPILOT_AUTHORIZER_LABEL,
+                ),
+            ),
+        };
+        runtime.accounts.lock().insert(
+            CopilotAccountCacheKey {
+                persistence_id,
+                credential_identity: binding.credential_identity().clone(),
+            },
+            Arc::downgrade(&state),
+        );
+        let credential = binding.credential_identity().clone();
+
+        match runtime.account_model(&connection, "account-model-1") {
+            AccountModelLookup::Offered(definition) => {
+                assert_eq!(definition.provider, Provider::OpenAI);
+            }
+            other => panic!("the listed model is offered: {other:?}"),
+        }
+        assert_eq!(
+            runtime.account_model(&connection, "absent-model"),
+            AccountModelLookup::Refused(AccountModelRefusal::NotOffered {
+                credential: credential.clone(),
+                model: "absent-model".to_string(),
+                available: vec!["account-model-1".to_string()],
+            })
+        );
+        state.cache.write().as_mut().expect("cache").models = None;
+        assert_eq!(
+            runtime.account_model(&connection, "account-model-1"),
+            AccountModelLookup::Refused(AccountModelRefusal::ModelsUnavailable {
+                credential,
+                model: "account-model-1".to_string(),
+            })
         );
     }
 
@@ -9579,6 +9709,100 @@ mod tests {
                 .await
                 .expect("a route over the same source still shares the account");
             assert_eq!(harness.transport.request_count(), 2);
+        }
+
+        /// The connection a provider runtime builds for `binding` over
+        /// `resolved`.
+        fn copilot_connection(
+            binding: &ValidatedBinding,
+            resolved: &CopilotResolvedAuth,
+        ) -> meerkat_llm_core::provider_runtime::ResolvedConnection {
+            meerkat_llm_core::provider_runtime::ResolvedConnection {
+                provider: binding.provider(),
+                backend: binding.backend(),
+                backend_profile: binding.backend_profile().clone(),
+                credential_identity: binding.credential_identity().clone(),
+                auth_lease: Arc::new(
+                    meerkat_llm_core::provider_runtime::DynamicLease::from_authorizer(
+                        resolved.authorizer(),
+                        resolved.metadata().clone(),
+                        crate::GITHUB_COPILOT_AUTHORIZER_LABEL,
+                    ),
+                ),
+            }
+        }
+
+        /// A fresh runtime holds no account state. The first build of a model
+        /// only the account defines resolves its route first, which looks the
+        /// account up and loads its model list, and only then reads the list:
+        /// the model is offered on the first resolution, and reading the list
+        /// makes no request of its own.
+        #[tokio::test]
+        async fn a_fresh_runtime_defines_an_account_model_once_its_route_resolves() {
+            use meerkat_llm_core::provider_runtime::AccountModelLookup;
+
+            let harness = Harness::new([Ok(svc_bot()), Ok(models_response())]);
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("fresh-runtime"));
+            let binding = token_binding(CopilotProviderRoute::OpenAi, env_source());
+            let resolved = harness
+                .runtime
+                .resolve(&binding, &harness.operator.env)
+                .await
+                .expect("the first resolution looks the account up and lists its models");
+            assert_eq!(
+                harness.transport.request_count(),
+                2,
+                "the identity lookup and the model list"
+            );
+            let connection = copilot_connection(&binding, &resolved);
+            match harness.runtime.account_model(&connection, "claude-test") {
+                AccountModelLookup::Offered(definition) => {
+                    assert_eq!(definition.provider, Provider::Anthropic);
+                }
+                other => panic!("the listed model is offered on the first resolution: {other:?}"),
+            }
+            assert_eq!(
+                harness.transport.request_count(),
+                2,
+                "reading the list makes no request"
+            );
+        }
+
+        /// The model list defines no model only when the account's model
+        /// discovery failed: GitHub answers the identity lookup and the
+        /// model list fails with a server error, so the route still resolves
+        /// (a looked-up token serves without its list), and a model only the
+        /// list could define is refused as unavailable, typed.
+        #[tokio::test]
+        async fn an_account_model_is_unavailable_only_after_its_model_list_failed() {
+            use meerkat_llm_core::provider_runtime::{AccountModelLookup, AccountModelRefusal};
+
+            let harness = Harness::new([
+                Ok(svc_bot()),
+                Ok(json_response(
+                    503,
+                    serde_json::json!({"message": "service unavailable"}),
+                )),
+            ]);
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("listing-fails"));
+            let binding = token_binding(CopilotProviderRoute::OpenAi, env_source());
+            let resolved = harness
+                .runtime
+                .resolve(&binding, &harness.operator.env)
+                .await
+                .expect("a looked-up token resolves without its model list");
+            let connection = copilot_connection(&binding, &resolved);
+            assert_eq!(
+                harness.runtime.account_model(&connection, "claude-test"),
+                AccountModelLookup::Refused(AccountModelRefusal::ModelsUnavailable {
+                    credential: account_identity(),
+                    model: "claude-test".to_string(),
+                })
+            );
         }
 
         /// The device sign-in still requires its stored token, and names the

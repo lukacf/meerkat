@@ -69,6 +69,9 @@ pub(crate) async fn present(
             ..Default::default()
         };
         let selected = match resolve_create_session_model(&startup.config, request.clone()) {
+            // Core's account affinity runs a shared credential account's route
+            // of the model's family; this target's session would not run on it.
+            Ok(selected) if selected.auth_binding.as_ref() != Some(&reference) => continue,
             Ok(selected) => selected,
             Err(CreateSessionModelResolutionError::ProviderModelMismatch(_)) => continue,
             Err(error) => {

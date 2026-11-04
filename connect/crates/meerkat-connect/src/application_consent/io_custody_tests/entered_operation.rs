@@ -56,7 +56,7 @@ impl AgentToolDispatcher for EnteredSqliteProbe {
 }
 
 async fn exercise(cancel: bool) {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_root();
     let root = temp.path().canonicalize().unwrap();
     let owner = ApplicationConsentOwner::create(&root, identity()).unwrap();
     let publication = Arc::new(PublicationPause {

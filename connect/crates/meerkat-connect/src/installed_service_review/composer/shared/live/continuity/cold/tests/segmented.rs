@@ -225,7 +225,7 @@ async fn positive_segmented_predecessor_child() {
 
 #[tokio::test]
 async fn segmented_r5_settles_real_exited_owner_and_repeats_without_new_convergence() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::application_consent::tests::private_root();
     let root = temp.path().canonicalize().unwrap();
     let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
         .args([

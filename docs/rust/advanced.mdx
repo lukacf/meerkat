@@ -545,7 +545,14 @@ report an owner change that one of their grant-lineage reads meets (the
 original's own mandate, or a named contributor's liveness) as
 `ControllerReadinessFailure::PolicyChanged` (wire kind `policy_changed`), and a
 later attempt may pass. `require_source_original_live` meets one only outside
-an exclusion of owner changes.
+an exclusion of owner changes. Each of these reads, and controller admission's
+own, is first made once more in place when the change it met has completed
+(`LocalGrantAuthority::owner_change_in_progress` names none). Admission never
+waits, because it runs inside the session's ingress transaction, so a change
+still in progress, or back-to-back changes, still answer `policy_changed`. A
+host that submits again waits first, outside its own locks, with a bounded
+`meerkat_core::authorization::OwnerChangeChurn::wait_after_stale_read`, then
+resubmits once.
 
 The job delivery drain treats a continuation the runtime is not ready to admit
 the same way. `retained_admission_outcome` maps it to

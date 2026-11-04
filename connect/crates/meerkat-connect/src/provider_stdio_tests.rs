@@ -611,3 +611,81 @@ async fn private_provider_retirement_joins_entered_native_save_without_continuat
     assert!(result.unwrap().is_none());
     fixture.assert_writes(1).await;
 }
+
+#[tokio::test]
+async fn private_provider_targets_are_the_routes_their_sessions_run_on() {
+    // A GitHub Copilot account configured by the explicit tables a token
+    // login writes, or once by a `[copilot]` section. Its token variable
+    // stays unset, so the prompt lists the configured targets.
+    let source = json!({"kind":"env","env":"CONNECT_COPILOT_SECTION_TOKEN"});
+    let mut tables = json!({"backend":{},"auth":{},"binding":{}});
+    for provider in ["openai", "anthropic", "gemini"] {
+        let route = format!("copilot_{provider}");
+        tables["backend"][&route] = json!({"provider":provider,"backend_kind":"copilot"});
+        tables["auth"][&route] = json!({"provider":provider,
+            "auth_method":"github_copilot_token","source":source});
+        tables["binding"][&route] = json!({"backend_profile":route,"auth_profile":route,
+            "credential_account":"github_copilot"});
+    }
+    let route = |binding: &str| AuthBindingRef {
+        realm: meerkat_core::RealmId::parse("work").unwrap(),
+        binding: BindingId::parse(binding).unwrap(),
+        profile: None,
+        origin: BindingOrigin::Configured,
+    };
+    let request = |binding: &str| CreateSessionModelResolutionRequest {
+        model: Some("claude-opus-5-5".into()),
+        auth_binding: Some(route(binding)),
+        ..Default::default()
+    };
+    for section in [tables, json!({"copilot":{"source":source}})] {
+        let root = tempfile::tempdir().unwrap();
+        let storage = crate::RealmOptions {
+            context_root: root.path().to_owned(),
+            state_root: Some(root.path().join("state")),
+            user_config_root: Some(root.path().join("home")),
+        }
+        .resolve("work")
+        .unwrap();
+        let path = crate::realm::config_source(&storage)
+            .unwrap()
+            .config_doc_path(&storage.locator.realm);
+        FileConfigStore::new(path, meerkat_models::canonical())
+            .patch(ConfigDelta(json!({"realm":{"work":section}})))
+            .await
+            .unwrap();
+        let mut startup =
+            SessionStartup::open_with_provider_store(storage, root.path().join("credentials"))
+                .await
+                .unwrap();
+        let (bridge, mut prompts, _retire) = PromptBridge::channel();
+        let actor = async {
+            let exchange = prompt(&mut prompts, "provider_target").await;
+            let listed: Vec<String> = exchange.prompt["choices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|choice| choice["target"]["binding"].as_str().unwrap().to_owned())
+                .collect();
+            answer(exchange, PromptAnswer::Cancel);
+            listed
+        };
+        let (result, listed) = tokio::join!(
+            present(&mut startup, request("copilot_anthropic"), bridge),
+            actor
+        );
+        assert!(result.unwrap().is_none());
+        // Core's account affinity runs the account's route of the model's
+        // family. A listed route's session runs on that route itself.
+        for binding in &listed {
+            let native =
+                resolve_create_session_model(&startup.config, request(binding.as_str())).unwrap();
+            assert_eq!(
+                native.auth_binding,
+                Some(route(binding.as_str())),
+                "listed {binding} runs on another route"
+            );
+        }
+        assert_eq!(listed, ["copilot_anthropic"]);
+    }
+}

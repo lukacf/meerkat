@@ -28,7 +28,7 @@ fn native(root: &Path) -> (Arc<MeerkatMachine>, Arc<dyn RuntimeStore>) {
 
 #[test]
 fn consent_provenance_process_local_remains_selected_but_cannot_bind_recovery_claim() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_root();
     let root = temp.path().canonicalize().unwrap();
     let owner = ApplicationConsentOwner::create(&root, identity()).unwrap();
     let machine =
@@ -57,7 +57,7 @@ fn consent_provenance_process_local_remains_selected_but_cannot_bind_recovery_cl
 
 #[tokio::test]
 async fn consent_provenance_reopen_requires_same_issuer_domain_session_and_real_claim_owner() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_root();
     let root = temp.path().canonicalize().unwrap();
     let (machine, store) = native(&root);
     let session = meerkat_core::SessionId::new();

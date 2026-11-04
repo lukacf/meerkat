@@ -293,10 +293,14 @@ uniform payload:
 
 - `data.kind` is the closed refusal kind: `reprepare_required`, `denied` or
   `malformed_facts`.
-- `data.tool_invoked` is `false` only when Core refused the call before it
-  invoked the tool's dispatcher, so no tool code ran. It is `"unknown"` when
-  the refusal came back from the dispatcher (the tool may have had an effect
-  before a later governed step refused) or from a mob member's upcall.
+- `data.tool_invoked` is `false` only when Core refused the call before the
+  tool's body ran: before it invoked the tool's dispatcher, or at the tool's
+  own effect entry (`ToolDispatchContext::enter_reviewed_effect`) while no
+  effect of the call had entered. Both read the same, wherever the owner
+  change that refused the call landed. It is `"unknown"` when the refusal
+  came back from the tool after an effect of the call entered (the tool may
+  have had an effect before a later governed step refused), from the tool's
+  own code, or from a mob member's upcall.
 - Neither field is a permission or evidence of one. They name no owner,
   policy, principal or audit record; a refusal never grants a replay, and a
   new call is a new operation with fresh admission.
@@ -304,7 +308,8 @@ uniform payload:
 Owners that could not decide return `operation_authorization_unavailable`,
 with no `data`. A dispatcher layer that runs tool code before it delegates
 must not forward an inner `tool_invoked: false`: it returns
-`OperationRefused::new(refusal.kind())` instead, which reads `"unknown"`.
+`OperationRefused::new(refusal.kind())` instead, which reads `"unknown"`. A
+leaf that runs an effect of its own before its effect entry is such a layer.
 
 ## Observe refusal dispositions
 
@@ -768,7 +773,15 @@ bounds.
   retained-resume check (`ScopedRetainedResume`) and
   `require_source_original_live` called outside an exclusion of owner changes
   answer a change one of those reads meets with readiness `PolicyChanged` as
-  well. A review read, which reads its material once by design, refuses as
+  well. Each of these admission reads, controller admission's included, is
+  first made once more in place when the change it met has completed:
+  `LocalGrantAuthority::owner_change_in_progress` (a waiting hint that mirrors
+  `WorkAuthorization::owner_change_in_progress`, never a permission) names
+  none. Admission never waits, because it runs inside the session's ingress
+  transaction, so a change still in progress, or back-to-back changes, still
+  answer `PolicyChanged`. A host that submits again waits first, outside its
+  own locks, with a bounded `OwnerChangeChurn::wait_after_stale_read`, then
+  resubmits once. A review read, which reads its material once by design, refuses as
   stale (`ToolError::AuthorizationRefused`
   with `ReprepareRequired`) instead of an unavailable review context, and a
   fresh attempt reads it again. `AgentInstallationGrant` reports a change it
@@ -834,11 +847,16 @@ bounds.
   `ToolDispatchContext::remaining_tool_time`, the tool time a fenced dispatch
   has left) and at a compaction summary (past the bounds the refusal still
   fails its compaction). A free rebuild runs only once no change is in
-  progress. When the body entry or the gate's staging waits out a change after
-  recording its `Entry` record, it records another for the decision checked
-  after the wait. The gate's check point runs on the decision checked after
-  its wait, but the gate's own code already ran: a reviewed tool whose
-  decision changed while the gate waited settles as `review_unsatisfied`
+  progress. Every one of these waits, those of the dispatch's root staging
+  and a dispatch issuance's staging, and a review's currentness check after
+  its verdict, is `wait_after_stale_read`: a refusal to rebuild there is a
+  stale read of the work's own publication that ran nothing, so when the
+  change that made it stale had already completed they pause 1 ms and
+  rebuild, as one of the same free rebuilds. When the body entry or the gate's
+  staging waits out a change after recording its `Entry` record, it records
+  another for the decision checked after the wait. The gate's check point runs on the decision
+  checked after its wait, but the gate's own code already ran: a reviewed tool
+  whose decision changed while the gate waited settles as `review_unsatisfied`
   (`context_changed`) and is not reviewed again.
 - A governed step takes the work owners' exclusion without waiting
   (`WorkAuthorization::run_if_current_within`, `run_entered_if_current_within`

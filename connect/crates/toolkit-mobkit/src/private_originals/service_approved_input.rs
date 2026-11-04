@@ -5,6 +5,7 @@
 use super::*;
 use crate::original_ingress::OriginalCancellationSource;
 use meerkat_runtime::meerkat_machine::{AuthenticatedOriginalSource, OriginalDisposition};
+use meerkat_runtime::stack_relief::box_in_own_frame;
 use meerkat_toolkit::request::NativeOriginalTask;
 
 pub(super) mod application;
@@ -236,9 +237,13 @@ impl PrivateOriginals {
         observation: Option<meerkat_toolkit::setup::ApprovedServiceAttachmentObservation>,
         member: Option<&PrivateServiceGrantRef>,
     ) -> Result<(), PrivateOriginalError> {
-        self.record_cancelled_source_set(reference, failure, observation, member)
-            .await
-            .map(|_| ())
+        // The census and shared-preparation leave make this one of the largest
+        // futures here; every wrapper and caller would otherwise embed it.
+        box_in_own_frame(|| {
+            self.record_cancelled_source_set(reference, failure, observation, member)
+        })
+        .await
+        .map(|_| ())
     }
 
     /// The existing cancellation owner returns its actual completed census.
@@ -310,9 +315,10 @@ impl PrivateOriginals {
             },
             |stored| {
                 let selected = failed_key.as_ref().is_some_and(|key| key == &stored.key);
-                self.persist_source_cancellation_with_failure(stored,
+                // The writer holds two decoded records; keep it out of the census.
+                box_in_own_frame(move || self.persist_source_cancellation_with_failure(stored,
                     if selected { failure } else { None }, if selected { observation } else { None },
-                    if selected { member } else { None })
+                    if selected { member } else { None }))
             },
         ).await.map_err(|error| match error {
             OriginalWriterError::WrongOwner => PrivateOriginalError::Denied,
@@ -355,7 +361,7 @@ impl PrivateOriginals {
                 // Durable cancellation/leave is not physical stop completion.
                 // The same source's live resource must detach this member and
                 // join a last-member stop before cancellation is acknowledged.
-                self.leave_cancelled_shared_resource(&stored, member, last)
+                box_in_own_frame(|| self.leave_cancelled_shared_resource(&stored, member, last))
                     .await?;
             }
         }
@@ -1699,10 +1705,10 @@ impl PrivateOriginals {
             if stored.data.schema != SOURCE_SCHEMA {
                 continue;
             }
-            had_unavailable_records |= self
-                .step_service_input_with_attachment(store, &stored)
-                .await
-                .is_err();
+            had_unavailable_records |=
+                box_in_own_frame(|| self.step_service_input_with_attachment(store, &stored))
+                    .await
+                    .is_err();
             // Only actual host closure ends the worker. An unavailable row is
             // revisited on a later sweep while this page's cursor advances.
             self.service_input_host_current()?;
@@ -1728,17 +1734,19 @@ impl PrivateOriginals {
                 &canonical_json(&record.event).map_err(|_| PrivateOriginalError::Conflict)?,
             ),
         };
+        // Large writers and readers below are built in their own frames, so
+        // this poll frame does not reserve every branch's future at once.
         if let Some(ancestor) = self.cancelled_task_ancestor(&record).await? {
             self.record_task_group_cancelled(&ancestor).await?;
             self.retire_service_attachment(&reference, task).await;
-            self.compensate_rejected_batch(&reference).await?;
+            box_in_own_frame(|| self.compensate_rejected_batch(&reference)).await?;
             self.reject_service_continuation(&reference).await?;
             return Ok(ServiceInputStep::Done);
         }
         if record.operation_cancelled {
             self.record_task_group_cancelled(&reference).await?;
             self.retire_service_attachment(&reference, task).await;
-            self.compensate_rejected_batch(&reference).await?;
+            box_in_own_frame(|| self.compensate_rejected_batch(&reference)).await?;
             self.reject_service_continuation(&reference).await?;
             return Ok(ServiceInputStep::Done);
         }
@@ -1749,7 +1757,7 @@ impl PrivateOriginals {
             // this exact canonical read releases retained service admission.
             self.acknowledge_service_submission(&reference, stored)?;
             self.retire_service_attachment(&reference, task).await;
-            self.settle_service_continuation(&record).await?;
+            box_in_own_frame(|| self.settle_service_continuation(&record)).await?;
             return Ok(ServiceInputStep::Done);
         }
         // Already admitted or uncertain native B keeps its exact pending
@@ -1759,14 +1767,18 @@ impl PrivateOriginals {
             // The existing source row supplies the exact pre-submission Input;
             // native proves historical admission under its actual actor owners.
             // NotAdmitted and unavailable observations never fall through to submit.
-            let Some(restored) = self.restore_service_admission(&reference).await? else {
+            let Some(restored) =
+                box_in_own_frame(|| self.restore_service_admission(&reference)).await?
+            else {
                 return Err(PrivateOriginalError::Unavailable);
             };
             // Every native phase remains historical admission only. Neither
             // this projection nor source promotion is task completion or resume.
             let _native_phase = restored.phase;
-            self.record_service_admission(stored, &record, &reference, restored.admission)
-                .await?;
+            box_in_own_frame(|| {
+                self.record_service_admission(stored, &record, &reference, restored.admission)
+            })
+            .await?;
             return Ok(ServiceInputStep::Done);
         }
         if observed.is_none() && !self.service_task_submission_current(&record).await? {
@@ -1782,7 +1794,7 @@ impl PrivateOriginals {
             }
             return Ok(ServiceInputStep::Done);
         }
-        self.reserve_service_continuation(stored).await?;
+        box_in_own_frame(|| self.reserve_service_continuation(stored)).await?;
         Ok(ServiceInputStep::Continue {
             record: Box::new(record),
             reference,
@@ -1811,10 +1823,10 @@ impl PrivateOriginals {
         store: &Arc<SqliteStore>,
         stored: &StoredRecord,
     ) -> Result<(), PrivateOriginalError> {
-        let result = self
-            .enter_service_input_with_attachment(store, stored)
-            .await;
-        self.settle_service_step_refusal(stored, result).await
+        // Both steps are large futures; keep them out of this poll frame.
+        let result =
+            box_in_own_frame(|| self.enter_service_input_with_attachment(store, stored)).await;
+        box_in_own_frame(|| self.settle_service_step_refusal(stored, result)).await
     }
 
     async fn enter_service_input_with_attachment(
@@ -1822,11 +1834,12 @@ impl PrivateOriginals {
         store: &Arc<SqliteStore>,
         stored: &StoredRecord,
     ) -> Result<(), PrivateOriginalError> {
+        // Each step below is a large future; build each in its own frame.
         let ServiceInputStep::Continue {
             record,
             reference,
             observed,
-        } = self.prepare_service_input(stored).await?
+        } = box_in_own_frame(|| self.prepare_service_input(stored)).await?
         else {
             return Ok(());
         };
@@ -1837,25 +1850,26 @@ impl PrivateOriginals {
         let observed = match observed {
             Some(observed) => observed,
             None => {
-                if !self
-                    .ensure_service_attachment(store, &reference, task)
+                if !box_in_own_frame(|| self.ensure_service_attachment(store, &reference, task))
                     .await?
                 {
                     return Ok(());
                 }
                 let submission = self.service_instruction(&record, &reference).await?;
-                let Some(context) = self.recheck_service_attachments(&reference, task).await?
+                let Some(context) =
+                    box_in_own_frame(|| self.recheck_service_attachments(&reference, task)).await?
                 else {
                     return Ok(());
                 };
                 // Existing native submission/source custody remains the only
                 // B admission path. No attachment observation promotes B.
-                self.submit_ready_service_set(submission, task.clone(), context)
-                    .await?
+                box_in_own_frame(|| {
+                    self.submit_ready_service_set(submission, task.clone(), context)
+                })
+                .await?
             }
         };
-        self.publish_service_input(stored, &record, &reference, observed)
-            .await
+        box_in_own_frame(|| self.publish_service_input(stored, &record, &reference, observed)).await
     }
 
     // These existing controls isolate native admission/source publication from

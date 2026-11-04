@@ -89,7 +89,7 @@ async fn selected_application_review_follows_actual_driver_selection_and_close()
 }
 
 async fn held_case(review_selected: bool) {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::application_consent::tests::private_root();
     let root = directory.path().canonicalize().unwrap();
     let plan = plan(&root);
     let bytes = toolkit_package::canonical_json(&plan).unwrap();

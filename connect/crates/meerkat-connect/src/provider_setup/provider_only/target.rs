@@ -214,13 +214,12 @@ fn first(
     }
     let chain = RealmChain::resolve(config, realm)
         .map_err(|e| ConnectError::native("Resolve provider inheritance", e))?;
-    if chain.realms().iter().any(|r| {
-        config
-            .realm
-            .get(r.as_str())
-            .is_some_and(|s| !s.binding.is_empty() || s.default_binding.is_some())
-    }) {
-        return Err(invalid("Native targets changed; reopen provider choices"));
+    for owner in chain.realms() {
+        if realm_connection_set(config, owner)?
+            .is_some_and(|set| !set.bindings.is_empty() || set.default_binding.is_some())
+        {
+            return Err(invalid("Native targets changed; reopen provider choices"));
+        }
     }
     Ok(())
 }

@@ -752,7 +752,7 @@ fn association_selection_preserves_exact_owner_session_and_closed_source_bytes()
         private_originals::PrivateOriginalRef,
     };
     use toolkit_package::Id;
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::application_consent::tests::private_root();
     let root = directory.path().canonicalize().unwrap();
     let realm = RealmLocator {
         state_root: root.clone(),
@@ -1031,7 +1031,7 @@ fn consent_owner(root: &Path) -> Arc<crate::application_consent::ApplicationCons
 
 #[tokio::test]
 async fn consent_owner_selection_is_frozen_before_native_capture() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::application_consent::tests::private_root();
     let root = directory.path().canonicalize().unwrap();
     let issuer = consent_owner(&root);
     let store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
@@ -1083,8 +1083,14 @@ fn check_consent_artifact_linkage(
     root: &Path,
 ) {
     use meerkat_core::session_hosting::HostingPaths;
+    use std::os::unix::fs::DirBuilderExt;
     let issuer_root = root.join("issuer-fixture");
-    std::fs::create_dir(&issuer_root).unwrap();
+    // The consent issuer refuses a parent with group or other access. Create
+    // this owned directory 0700 instead of inheriting the process umask.
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&issuer_root)
+        .unwrap();
     let issuer = consent_owner(&issuer_root);
     let native_root = root.join("native-provenance");
     std::fs::create_dir_all(native_root.join("hosting")).unwrap();
@@ -1224,7 +1230,7 @@ fn check_consent_artifact_linkage(
 
 #[tokio::test]
 async fn abandoned_selection_freezes_before_capture_without_assuming_unbound_capacity() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::application_consent::tests::private_root();
     let root = directory.path().canonicalize().unwrap();
     let owner = consent_owner(&root);
     let raw = b"inert selected association bytes";

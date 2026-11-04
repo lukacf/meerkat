@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Meta Forge 0.3.1 installs the matched Meta 0.9.10 and Toolkit/Connect 0.9.10
+selection. Build and Resume now check the saved guide within the same writer
+reservation that publishes the build.
+
+Forge 0.3.1 is part of the Meerkat 0.9.10 release and is the first Forge
+release from this repository: tag `meta-installer-v0.3.1`, with packages named
+`meta-installer-0.3.1-<target>.zip` for `linux-x86_64` and `macos-arm64`.
+Releases up to Forge 0.3.0 stay in `lukacf/meerkat-meta` (tags
+`forge-v<version>`, packages `meta-forge-<version>-<target>.zip`). Three
+selections stay as in Forge 0.3.0: the Guide runs Meta 0.9.3 with Core 0.9.3,
+agent teams pin the published Meta 0.9.6 runtime, and the protected
+application receiver keeps its Meta 0.9.7 SDK tuple. Acceptance is per target:
+each package is accepted only on evidence for that exact package, and the
+`linux-x86_64` evidence does not stand in for `macos-arm64`.
+
+### Upgrade
+
+- An application that Forge 0.3.0 prepared with its Connect gateway (0.9.5 on
+  Linux, 0.9.4 on macOS) is prepared again at its next install step. Forge
+  0.3.1 and Connect 0.9.10 bind an activation's policy bundle as
+  `policy-v1:sha256:<manifest digest>`, and an activation bound in the
+  earlier form is not current.
+
+### Changed
+
+- Forge 0.3.1 selects Meta 0.9.10 with Toolkit 0.9.10 and the Connect 0.9.10
+  gateway for applications on both targets, and the Meta 0.9.10 `rpc_gateway`
+  for applications without a connection setup helper. Forge 0.3.0 selected
+  Meta 0.9.7 with Toolkit 0.9.5 on Linux x86_64 and Meta 0.9.4 with Toolkit
+  0.9.4 on macOS arm64.
+- Forge 0.3.1 accepts the Meta 0.9.10 and Toolkit 0.9.10 SDK wheels in a
+  selected Meta and Toolkit SDK pair, besides the releases it accepted
+  before. The Toolkit wheel's `native-host` extra must still require exactly
+  the selected Meta version.
+- Forge 0.3.1 downloads a Meta release after 0.9.7 from this repository's
+  `meta-v<version>` release, and 0.9.7 or earlier from `lukacf/meerkat-meta`'s
+  `v<version>` release as before: both for the pinned agent team runtime and
+  for the gateway an ordinary application package installs
+  (`install_gateway.py`). Both refuse a version that is not exactly
+  major.minor.patch. The archive and checksum names are unchanged, and an
+  install receipt keeps its fields.
+
+### Fixed
+
+- Build and Resume check the saved guide within the same writer reservation
+  that publishes the build: the final comparison with the saved guide, the
+  service check and the build's publication run inside one SQLite writer
+  reservation on the guide store, with no wait between the check and the
+  publication. Before, a guide change saved while a build was being submitted
+  could still start the builder from the earlier read. A busy, missing or
+  unreadable store refuses the build at once, and a refused build starts
+  nothing.
+
 ## [0.9.9] - 2026-11-03
 
 ### Breaking
@@ -104,13 +157,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (see Changed).
 
 - A rollback to Meta 0.9.7 (on Core 0.9.8) or Meta 0.9.6 (on Core 0.9.7)
-  does not resume a gateway whose own mob recorded an operator instruction:
-  the mob's journal holds rows at mob event schema 10, which Core 0.9.8 and
-  0.9.7 refuse, so the gateway's mob does not start, and neither does any
-  other mob of that realm. Before such a rollback, run `rkat storage doctor`
-  on the current release and destroy, or move out of the mob root, every mob
-  database it lists under `operator-instruction-mob-events`, as Core's
-  CHANGELOG describes in its Upgrade notes.
+  does not read what operator instructions wrote. A session written at
+  session envelope 5 (one that holds an operator-instruction fact, or an
+  instruction activation row that a rewrite moved or whose body a
+  compaction or prune retired) is refused until a roll-forward, so its
+  identity does not resume. A mob whose journal holds rows at mob event
+  schema 10 is refused too, and so is every other mob of that realm: a
+  gateway whose own mob recorded an operator instruction does not start its
+  mob. Take the census of both on the current release before such a
+  rollback. On a Meta state directory `rkat storage doctor` covers neither:
+  it does not read `runtime.sqlite`, where the sessions live, or
+  `event_log.sqlite3`, the gateway's own mob journal. Its
+  `schema-from-the-future` error for `sessions.sqlite3` (ledger domain
+  `session-store` at version 999999) is expected: that file is the retired
+  stamp `meta_gateway storage-migrate-native` leaves for 0.9.3 to refuse.
+  Meta's storage doctor (`meta/storage/doctor`) gains a supported census of
+  both in 0.9.10. Until then, run two read-only queries with the `sqlite3`
+  shell (`sqlite3 -readonly <file> "<query>"`) on a state directory in the
+  default disk layout:
+  - the sessions at envelope 5, on `runtime.sqlite` (`meta/status_identity`
+    names the `session_id` of each identity):
+
+    ```sql
+    SELECT session_id FROM session_heads WHERE version = 5
+    UNION
+    SELECT session_id FROM sessions
+     WHERE session_id NOT IN (SELECT session_id FROM session_heads)
+       AND json_extract(CAST(session_json AS TEXT), '$.version') = 5;
+    ```
+
+  - the mob events at schema 10, on `event_log.sqlite3` and on each child
+    mob database under `mobs/` that has a `mob_events` table:
+
+    ```sql
+    SELECT count(*) FROM mob_events
+     WHERE json_extract(CAST(event_json AS TEXT), '$.schema_version') = 10;
+    ```
+
+  Destroy, or move out of the mob root, each child mob database that counts
+  rows, as Core's CHANGELOG describes in its Upgrade notes. The gateway's
+  own journal is not a child mob database: a gateway whose own journal
+  counts rows does not start its mob on those releases.
 
 - The lifecycle side effects of identities (the customizer's `after_create`,
   the host's retirement hook, the distillation of a retired session, the exit

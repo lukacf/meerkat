@@ -250,6 +250,16 @@
                 ]
               },
               {
+                "group": "Meta Forge",
+                "pages": [
+                  "meta/forge/introduction",
+                  "meta/forge/quickstart",
+                  "meta/forge/concepts",
+                  "meta/forge/reference",
+                  "meta/forge/troubleshooting"
+                ]
+              },
+              {
                 "group": "Core concepts",
                 "pages": [
                   "meta/concepts/modules",

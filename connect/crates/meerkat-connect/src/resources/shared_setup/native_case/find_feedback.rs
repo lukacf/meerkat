@@ -376,8 +376,10 @@ impl Case {
                 if result.is_error && certified_reprepare(result) {
                     // Only a staged call refused because its publication
                     // changed under it: the settled audit's last refusal is
-                    // ReprepareRequired on a completed change, and the Find's
-                    // tool effect was never entered.
+                    // ReprepareRequired on a completed change, met before the
+                    // Find's effect. Core also certifies a refusal at the
+                    // effect entry's own final check, before any effect: the
+                    // entry is then followed at once by that refusal.
                     let last_refusal = history
                         .iter()
                         .filter_map(|r| match &r.observation.observation {
@@ -392,14 +394,23 @@ impl Case {
                                 && read.live_sequence.is_some_and(|live| live > read.publication_sequence)),
                         "a certified reprepare Find must be refused on a completed publication change"
                     );
-                    assert!(
-                        !history.iter().any(|r| matches!(
+                    let effect_entry = history.iter().position(|r| {
+                        matches!(
                             r.observation.observation,
                             AuditObservation::Entry {
                                 boundary: Some(meerkat_core::OperationEntryBoundary::ToolEffect)
                             }
+                        )
+                    });
+                    assert!(
+                        effect_entry.is_none_or(|at| matches!(
+                            history.get(at + 1).map(|r| &r.observation.observation),
+                            Some(AuditObservation::Refused {
+                                reason: meerkat_core::OperationRefusalKind::ReprepareRequired,
+                                ..
+                            })
                         )),
-                        "a certified pre-entry refusal never entered the Find's tool effect"
+                        "a certified refusal is met before the Find's effect, at most at its entry's final check"
                     );
                 } else if result.is_error {
                     assert!(canonical_unavailable(result));

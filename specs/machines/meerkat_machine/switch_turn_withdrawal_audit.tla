@@ -17,20 +17,25 @@
 \* while another one is pending is refused, and the pending switch ends only
 \* through its own request's completion or abort. A reconfigured switch
 \* completes in whatever phase the session reached in the gap, a stop
-\* included, and records its target as the routing baseline.
+\* included, and records its target as the routing baseline. No refusal
+\* records a denial under the pending switch's id, and no accept stages a
+\* request under an id that holds a denial, so a refused request stays
+\* refused and the retry that finishes a pending switch is never denied.
 \*
 \* This audit keeps the generated MeerkatMachine model unchanged and drives,
 \* for one session, one input and two requests, the initialization, the
 \* registration and the routing baseline, then in any order the accepted
 \* until-changed request (with and without an approval), its refusal while
-\* another request is pending, the input's admission and queueing, the
-\* runtime stop and the executor exit, the input's abandonment in Idle and
-\* Stopped, and the completion and the abort in every phase each declares.
-\* Nothing here attaches, runs or retires the session, so only their Idle
-\* and Stopped arms fire; all phases of an arm share one generated body.
-\* Properties:
+\* another request is pending, the refusal of a finite request while a
+\* switch is pending, the input's admission and queueing, the runtime stop
+\* and the executor exit, the input's abandonment in Idle and Stopped, and
+\* the completion and the abort in every phase each declares. Nothing here
+\* attaches, runs or retires the session, so only their Idle and Stopped arms
+\* fire; all phases of an arm share one generated body. Properties:
 \*
 \*   every generated invariant of ci.cfg (kept);
+\*   AuditNoDenialUnderThePendingSwitch (invariant): the pending switch's id
+\*     holds no denial;
 \*   AuditAbortWithdrawsOnlyTheRequest (action property): an abort clears
 \*     the pending switch and removes exactly its request's approval
 \*     entries, and leaves the phase, the switch terminals and denials, the
@@ -50,13 +55,15 @@
 \* expected violations, so the properties are not vacuous: an approved
 \* request withdrawn in Idle while another caller's input is queued, a
 \* request withdrawn in Stopped after a stop abandoned that input, a request
-\* refused while another one is pending, and a request completed in Stopped.
-\* With --mutants the runner also checks that six seeded defects are
-\* refused: an abort that records a terminal, an abort that erases the
-\* inputs' phases (as the whole-state restore it replaced did), an abort
-\* without its pending-request guard, an abort that keeps its request's
-\* approval entry, an accept without its pending-switch guard, and a
-\* completion that keeps the old baseline.
+\* refused while another one is pending, a finite request refused while the
+\* other one is pending, and a request completed in Stopped. With --mutants
+\* the runner also checks that eight seeded defects are refused: an abort
+\* that records a terminal, an abort that erases the inputs' phases (as the
+\* whole-state restore it replaced did), an abort without its
+\* pending-request guard, an abort that keeps its request's approval entry,
+\* an accept without its pending-switch guard, a completion that keeps the
+\* old baseline, an accept without its denied-request guard, and a finite
+\* refusal without its pending-request guard.
 \*
 \* The TLC config is DERIVED from the generated ci.cfg on every run by
 \* switch_turn_withdrawal_audit.sh.
@@ -78,6 +85,11 @@ AuditRequest(r, approval) ==
 \* The refusal of a request while another one is pending.
 AuditConflict(r) ==
     RequestUntilChangedSwitchTurnPendingConflictIdle(r, AuditTarget, TRUE, FALSE, TRUE, FALSE, None, FALSE, TRUE)
+
+\* The refusal of a finite request while a switch is pending (the scoped
+\* conflict: nothing here sets a turn or an operation override).
+AuditFiniteConflict(r) ==
+    RequestFiniteSwitchTurnScopedConflictIdle(r, AuditTarget, 1, TRUE, FALSE, TRUE, FALSE, None, FALSE, TRUE)
 
 \* The completion in every phase it declares.
 AuditComplete(r) ==
@@ -105,6 +117,7 @@ AuditPrefix ==
 AuditGap ==
     \/ \E r \in AuditRequests, approval \in BOOLEAN : AuditRequest(r, approval)
     \/ \E r \in AuditRequests : AuditConflict(r)
+    \/ \E r \in AuditRequests : AuditFiniteConflict(r)
     \/ /\ AuditInput \notin DOMAIN input_phases
        /\ ResolveAdmissionPlanDefaultQueueKindIdle(AuditInput, None, None, "Prompt", None, "Ordinary", "InTurnEligible", FALSE, None, FALSE, FALSE, FALSE)
     \/ QueueAcceptedIdle(AuditInput)
@@ -122,6 +135,14 @@ AuditNext ==
 AuditSpec == Init /\ [][AuditNext]_vars
 
 AuditStateConstraint == model_step_count <= AuditMaxSteps
+
+\* The pending switch's id holds no denial: no refusal records one under it,
+\* and no accept stages an id that holds one, so the retry that finishes a
+\* pending switch is never answered as denied.
+AuditNoDenialUnderThePendingSwitch ==
+    \A r \in AuditRequests :
+        model_routing_pending_switch_request_id = Some(r)
+            => r \notin DOMAIN model_routing_switch_denials
 
 \* An abort withdraws exactly what its request staged: the pending switch and
 \* the request's approval entries. It records no terminal and leaves the
@@ -209,6 +230,9 @@ AuditWitnessStoppedWithdrawnStep ==
 \* A request is refused while another one is pending.
 AuditWitnessConflictRefusedStep ==
     \E r \in AuditRequests : AuditConflict(r)
+\* A finite request is refused while the other one is pending.
+AuditWitnessFiniteConflictRefusedStep ==
+    \E r \in AuditRequests : AuditFiniteConflict(r)
 \* A request completes in Stopped after a stop in its gap.
 AuditWitnessStoppedCompletedStep ==
     \E r \in AuditRequests : CompleteUntilChangedSwitchTurnReconfigureStopped(r)
@@ -216,5 +240,6 @@ AuditWitnessStoppedCompletedStep ==
 NotAuditWitnessQueuedInputKept == [][~AuditWitnessQueuedInputKeptStep]_vars
 NotAuditWitnessStoppedWithdrawn == [][~AuditWitnessStoppedWithdrawnStep]_vars
 NotAuditWitnessConflictRefused == [][~AuditWitnessConflictRefusedStep]_vars
+NotAuditWitnessFiniteConflictRefused == [][~AuditWitnessFiniteConflictRefusedStep]_vars
 NotAuditWitnessStoppedCompleted == [][~AuditWitnessStoppedCompletedStep]_vars
 ====

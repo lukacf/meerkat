@@ -1,27 +1,29 @@
 #!/usr/bin/env bash
 # Bounded TLC audit of the settlement of an until-changed switch-turn: the
 # withdrawal of a failed one (AbortUntilChangedSwitchTurnReconfigure), the
-# refusal of a second one while one is pending, and the completion in every
-# phase the session can reach in the reconfigure gap.
+# refusal of a second one while one is pending, the refusal of a finite one
+# while a switch is pending, and the completion in every phase the session
+# can reach in the reconfigure gap.
 #
 # usage: switch_turn_withdrawal_audit.sh <max-steps> [--mutants] [extra tlc args...]
 #
 # Derives the TLC config from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then adds the audit's finite
 # model values (one session, one input, two requests, the model names and the
-# stop reason), its four action properties and its step bound, and checks
-# them over the whole bounded space. It then reruns the same space once per
-# reachability witness, with that witness's negation as an extra action
-# property, and requires TLC to report exactly that violation, so the
-# properties are not vacuous. With --mutants it then seeds six defects into a
-# copy of the generated model (an abort that records a terminal, an abort
+# stop reason), its invariant, its four action properties and its step bound,
+# and checks them over the whole bounded space. It then reruns the same space
+# once per reachability witness, with that witness's negation as an extra
+# action property, and requires TLC to report exactly that violation, so the
+# properties are not vacuous. With --mutants it then seeds eight defects into
+# a copy of the generated model (an abort that records a terminal, an abort
 # that erases the inputs' phases, an abort without its pending-request guard,
 # an abort that keeps its request's approval entry, an accept without its
-# pending-switch guard, a completion that keeps the old baseline) and
-# requires TLC to refuse each with the property it breaks. An anchor this
-# script expects but cannot find fails the run. Each TLC run is held to the
-# canonical lane's per-run cap (tlc_run_cap.sh) and fails closed as TLC
-# INCOMPLETE.
+# pending-switch guard, a completion that keeps the old baseline, an accept
+# without its denied-request guard, a finite refusal without its
+# pending-request guard) and requires TLC to refuse each with the property
+# or invariant it breaks. An anchor this script expects but cannot find fails
+# the run. Each TLC run is held to the canonical lane's per-run cap
+# (tlc_run_cap.sh) and fails closed as TLC INCOMPLETE.
 set -euo pipefail
 
 usage="usage: switch_turn_withdrawal_audit.sh <max-steps> [--mutants] [extra tlc args...]"
@@ -72,7 +74,8 @@ write_cfg() {
   AuditAbortOnlyForThePendingRequest
   AuditPendingSwitchEndsOnlyWithItsRequest
   AuditCompleteSettlesTheRequest${extra}
-INVARIANTS" "${cfg}"
+INVARIANTS
+  AuditNoDenialUnderThePendingSwitch" "${cfg}"
   replace_exact_line "  CiStateConstraint" "  AuditStateConstraint" "${cfg}"
   printf 'CHECK_DEADLOCK FALSE\n' >> "${cfg}"
 }
@@ -116,7 +119,7 @@ if [[ "${safety_status}" != "0" ]] \
   exit 1
 fi
 
-for witness in QueuedInputKept StoppedWithdrawn ConflictRefused StoppedCompleted; do
+for witness in QueuedInputKept StoppedWithdrawn ConflictRefused FiniteConflictRefused StoppedCompleted; do
   cfg="${work_dir}/witness-${witness}.cfg"
   write_cfg "${cfg}" "
   NotAuditWitness${witness}"
@@ -147,6 +150,8 @@ COMPLETE_ARMS = ["CompleteUntilChangedSwitchTurnReconfigure" + phase
                  for phase in ("Idle", "Attached", "Running", "Retired", "Stopped")]
 ACCEPT_ARMS = ["RequestUntilChangedSwitchTurnAccepted" + phase
                for phase in ("Idle", "Attached", "Running")]
+FINITE_CONFLICT_ARMS = ["RequestFiniteSwitchTurnScopedConflict" + phase
+                        for phase in ("Idle", "Attached", "Running")]
 
 def _replace_body(arm, edit):
     global text
@@ -254,5 +259,19 @@ PY
   mutate complete_keeps_baseline \
     "Error: Action property AuditCompleteSettlesTheRequest is violated" \
     'keep_var("model_routing_baseline_model", COMPLETE_ARMS)' "$@"
+  # An accept without its denied-request guard: a request refused while
+  # another one was pending, retried once that one completed, would be
+  # staged under an id that holds a denial, and its retry would be answered
+  # as denied while it stayed pending.
+  mutate accept_stages_denied_request \
+    "Error: Invariant AuditNoDenialUnderThePendingSwitch is violated" \
+    'drop_guard("DOMAIN model_routing_switch_denials", ACCEPT_ARMS)' "$@"
+  # A finite refusal without its pending-request guard: a finite request
+  # with the pending switch's id would record a denial under it. The
+  # needle names only that guard, not the scoped-conflict guard, which
+  # reads the pending switch's id too.
+  mutate finite_refusal_denies_pending_request \
+    "Error: Invariant AuditNoDenialUnderThePendingSwitch is violated" \
+    'drop_guard("model_routing_pending_switch_request_id # Some(request_id)", FINITE_CONFLICT_ARMS)' "$@"
 fi
 echo "switch-turn withdrawal audit passed at model_step_count <= ${max_steps}"

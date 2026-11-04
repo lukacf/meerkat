@@ -2949,32 +2949,76 @@ async fn a_partial_roster_adopts_no_unlisted_legacy_member() {
 
 /// A member a host adopted (its identity intent row names it) is the
 /// host's, whatever its marks: a complete roster that does not list it
-/// leaves it as it is, though its spawn row carries both legacy marks.
+/// leaves it as it is, though its spawn row carries both legacy marks. An
+/// adoption needs a persistent session runtime and states the member's
+/// labels, so Core realizes the adopted member again with both marks.
 ///
 /// RED (`RED-F1-intent-ignored-r3.patch`): drop the intent row from the
 /// adoption's observation: the host-adopted member is adopted, unlisted and
 /// retired.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_complete_roster_leaves_an_unlisted_host_adopted_member_with_both_marks() {
-    let mob = ApplyMob::new("apply-unlisted-host-adopted").await;
-    mob.handle
-        .spawn_spec(durably_marked(identity_labelled("adopted", "adopted")))
+    let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let service = Arc::new(meerkat_session::PersistentSessionService::new(
+        PersistentMockBuilder,
+        16,
+        session_store,
+        runtime_store,
+        blob_store,
+    ));
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "apply-unlisted-host-adopted"),
+        storage.clone(),
+    )
+    .with_session_service(service)
+    .create()
+    .await
+    .expect("create the mob");
+    let spec = durably_marked(identity_labelled("adopted", "adopted"));
+    let labels = spec.labels.clone();
+    handle
+        .spawn_spec(spec)
         .await
         .expect("a member with both legacy marks");
-    let session = mob.session("adopted").await;
-    super::member_history::adopt_existing_member(&mob.handle, &id("adopted"), &session, "worker")
-        .await;
+    let session = handle
+        .resolve_bridge_session_id(&id("adopted"))
+        .await
+        .expect("a session-backed member");
+    super::member_history::adopt_existing_labelled_member(
+        &handle,
+        &id("adopted"),
+        &session,
+        "worker",
+        labels,
+    )
+    .await;
+    super::member_history::await_adoption_convergence(&handle, &id("adopted")).await;
 
-    let outcome = mob
-        .apply(DeclaredRoster::complete([declared("kept")]))
-        .await;
+    let outcome = tokio::time::timeout(STEP, handle.apply_declared_roster(empty_roster()))
+        .await
+        .expect("the apply answers")
+        .expect("the apply runs");
     assert!(outcome.unlisted.is_empty(), "{outcome:?}");
     assert!(
-        mob.is_member("adopted").await,
+        handle
+            .list_members()
+            .await
+            .iter()
+            .any(|member| member.agent_identity == id("adopted")),
         "the host's member keeps serving"
     );
+    let journal = storage
+        .events
+        .poll(0, usize::MAX)
+        .await
+        .expect("read the journal");
     assert!(
-        !retirement_causes(&mob.journal().await)
+        !retirement_causes(&journal)
             .iter()
             .any(|(_, cause)| *cause == Some(MemberRetirementCause::Unlisted)),
         "nothing is unlisted"
@@ -3209,7 +3253,24 @@ async fn a_complete_roster_retires_an_unlisted_placed_legacy_member_through_its_
     scripted.script_member_identity("placed", placement::member_identity_of(&member));
     scripted.bind_member_endpoint("placed", Arc::clone(&member));
     let responder = placement::spawn_scripted_member_turn_responder(member);
-    let controlling = placement::create_controlling_mob("apply-placed-legacy").await;
+    // The apply reads the members' binding history from the identity store
+    // paired with the event store, which the fixture's custom composition
+    // leaves out.
+    let controlling = placement::create_controlling_mob_with_storage(
+        "apply-placed-legacy",
+        |events, mut storage, _custom| {
+            let paired = InMemoryMobIdentityStore::paired_with_event_store(
+                events,
+                Arc::new(crate::store::SystemMobIdentityStoreClock),
+            );
+            let identity: Arc<dyn MobIdentityStore> = Arc::new(paired.clone());
+            let identity_member: Arc<dyn crate::store::MobIdentityMemberStore> = Arc::new(paired);
+            storage.identity = Arc::clone(&identity);
+            storage.identity_member = Some(identity_member);
+            (storage, identity)
+        },
+    )
+    .await;
     let report = controlling.bind_scripted(&scripted).await;
     controlling
         .handle

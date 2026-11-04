@@ -837,7 +837,9 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     CoverageClaims::none()
                         .transitions(&[
                             "AdoptLegacyIdentityEntryAdopted",
+                            "AdoptLegacyIdentityEntryAdoptedUnlisted",
                             "AdoptLegacyIdentityEntryNameHeldByWorker",
+                            "AdoptLegacyIdentityEntryRetireUnadopted",
                             "AdoptLegacyIdentityEntryNotAdoptable",
                             "AdoptLegacyIdentityEntryStaleObservation",
                             "AdoptLegacyIdentityEntryNotSeated",

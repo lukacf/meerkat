@@ -32023,13 +32023,13 @@ impl MobActor {
                 MobCommand::AdoptLegacyIdentityEntry {
                     agent_identity,
                     generation,
-                    legacy_roster_member,
+                    observation,
                     reply_tx,
                 } => {
                     let result = Box::pin(self.adopt_legacy_identity_entry(
                         agent_identity,
                         generation,
-                        legacy_roster_member,
+                        observation,
                     ))
                     .await;
                     let _ = reply_tx.send(result);

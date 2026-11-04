@@ -434,21 +434,40 @@ pub enum DeclaredEntryNote {
 }
 
 /// What the seal did with one Declared entry the complete roster does not
-/// list ([`DeclaredRosterOutcome::unlisted`]).
+/// list, or the apply with one unlisted legacy member
+/// ([`DeclaredRosterOutcome::unlisted`]).
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum UnlistedEntryOutcome {
     /// Its member was retired (the journal records the cause
     /// [`super::MemberRetirementCause::Unlisted`]), and the end of the
-    /// retirement ended the entry.
+    /// retirement ended the entry. An unlisted legacy member placed on a
+    /// member host, or bound to no session, is retired at its incarnation
+    /// through the ordinary retirement without becoming an entry: its
+    /// retirement records no cause, and its name is left free (no entry, no
+    /// tombstone).
     Retired,
     /// No member held it: the entry was removed at once.
     Removed,
     /// Its member's retirement failed: the entry stays marked, and the next
     /// complete apply retires it again. For a legacy member the complete
-    /// roster does not list, its adoption failed: it stays a member, no
-    /// entry, and the next complete apply tries the adoption again.
+    /// roster does not list, its adoption or its retirement failed: it stays
+    /// a member, no entry, and the next complete apply decides it again.
     Failed { error: MobError },
+    /// An unlisted legacy member (both marks, no host's intent row) that
+    /// MobMachine neither adopted nor retired, for `reason`. It stays as it
+    /// is, and the next complete apply decides it again.
+    NotAdopted { reason: NotAdoptedReason },
+}
+
+/// Why MobMachine neither adopted nor retired an unlisted legacy member
+/// ([`UnlistedEntryOutcome::NotAdopted`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NotAdoptedReason {
+    /// The member's retirement started already, and its end ends the
+    /// member.
+    Retiring,
 }
 
 /// The answer of [`super::MobHandle::apply_declared_roster`].
@@ -810,11 +829,16 @@ impl super::MobHandle {
     /// - A legacy member listed under its own name is adopted as an entry
     ///   first ([`Self::adopt_legacy_identity_entry`]); a worker holding a
     ///   listed name refuses that identity alone. A complete roster also
-    ///   adopts a member it does not list whose spawn row carries both legacy
+    ///   offers MobMachine each member it does not list whose spawn row
+    ///   carries a legacy mark, and MobMachine decides: a member with both
     ///   marks (the durable-identity continuity marker and the legacy
-    ///   identity label naming it) and that no host's intent row names, so
-    ///   its seal unlists the entry and retires the member; a member with
-    ///   one mark only is left as it is.
+    ///   identity label naming it) that no host's intent row names is
+    ///   adopted, so the seal unlists the entry and retires the member, or,
+    ///   placed on a member host or bound to no session, retired at its
+    ///   incarnation without becoming an entry
+    ///   ([`UnlistedEntryOutcome::Retired`]); one retiring already is
+    ///   answered [`UnlistedEntryOutcome::NotAdopted`]; a member with one
+    ///   mark only, or one a host's intent row names, is left as it is.
     /// - No member is built from a declaration of the identity's lifecycle
     ///   facts only ([`DeclaredBuild::FactsOnly`]): a verdict that would seat
     ///   it, rotate its member onto a fresh session, migrate it to another
@@ -846,8 +870,8 @@ impl super::MobHandle {
     /// does not list whose member is seated is retired (its start row records
     /// the cause [`super::MemberRetirementCause::Unlisted`]), and the end of
     /// the retirement ends the entry; one no member holds is removed at once.
-    /// A worker is never unlisted, but for an unlisted legacy member the
-    /// complete roster adopted first (above), and neither is a created entry.
+    /// A worker is never unlisted, but for an unlisted legacy member
+    /// MobMachine adopted first (above), and neither is a created entry.
     /// An entry whose member's retirement started for another reason is left
     /// to it: the entry outlives that retirement, unseated, and a later
     /// complete apply removes it. An entry whose spawn is still in flight is
@@ -1134,27 +1158,41 @@ impl super::MobHandle {
                 outcome.entries.insert(identity, failure_outcome(error));
             }
         }
-        // A complete roster also adopts the members it does not list that
-        // carry both legacy marks and no host's intent row, so its seal
-        // unlists them and retires their members: members a host seated
-        // under their identities before identity entries existed, whose
-        // identities the roster dropped before this build first applied it.
-        // A member with one mark only is a host's own, left as it is. The
-        // scan reads the history the intent rows came with; the adoption
-        // applies the same rule to its own read before MobMachine decides.
+        // A complete roster also offers MobMachine each member it does not
+        // list that carries a legacy mark: members a host seated under their
+        // identities before identity entries existed, whose identities the
+        // roster dropped before this build first applied it. MobMachine
+        // decides from the adoption's own observation (both marks and no
+        // host's intent row): it adopts the member, so the seal unlists the
+        // entry and retires it, or retires one placed or bound to no session
+        // at its incarnation without its adoption, or answers a retiring one
+        // not adoptable; a member with one mark, or one an intent row names,
+        // is a host's own and left as it is.
         if complete {
-            for identity in self.unlisted_legacy_members(history.as_ref(), &listed) {
-                if let Err(error) = self
-                    .adopt_observed_legacy_member(
-                        &identity,
-                        super::identity_entry::unlisted_legacy_member,
-                    )
-                    .await
-                {
-                    outcome
-                        .unlisted
-                        .insert(identity, UnlistedEntryOutcome::Failed { error });
-                }
+            for identity in self.unlisted_legacy_candidates(history.as_ref(), &listed) {
+                let answer = match self.adopt_observed_legacy_member(&identity, false).await {
+                    Ok((generation, mob_dsl::LegacyIdentityEntryAdoptionKind::RetireUnadopted)) => {
+                        match self
+                            .retire_unadopted_legacy_member(&identity, generation)
+                            .await
+                        {
+                            Ok(()) => UnlistedEntryOutcome::Retired,
+                            Err(error) => UnlistedEntryOutcome::Failed { error },
+                        }
+                    }
+                    // The one unlisted legacy member MobMachine does not
+                    // adopt: its retirement started already.
+                    Ok((_, mob_dsl::LegacyIdentityEntryAdoptionKind::NotAdoptable)) => {
+                        UnlistedEntryOutcome::NotAdopted {
+                            reason: NotAdoptedReason::Retiring,
+                        }
+                    }
+                    // Adopted: the seal answers it. Any other verdict leaves
+                    // the member as it is.
+                    Ok(_) => continue,
+                    Err(error) => UnlistedEntryOutcome::Failed { error },
+                };
+                outcome.unlisted.insert(identity, answer);
             }
         }
 
@@ -1481,13 +1519,14 @@ impl super::MobHandle {
         ))
     }
 
-    /// The members a complete roster's seal would leave as they are that it
-    /// adopts first, so the seal unlists them: seated, no identity entry,
-    /// not `listed`, and the last binding of the identity in `history` is
-    /// an unlisted legacy member's
-    /// ([`super::identity_entry::unlisted_legacy_member`]). A mob without an
-    /// identity store has none.
-    fn unlisted_legacy_members(
+    /// The members a complete roster offers MobMachine's legacy adoption:
+    /// seated, no identity entry, not `listed`, and the spawn row of the
+    /// last binding of the identity in `history` carries a legacy mark
+    /// ([`super::identity_entry::LegacyRosterMarks::any`]): a member with
+    /// neither is no legacy member under any of MobMachine's rules.
+    /// MobMachine decides each from the adoption's own observation. A mob
+    /// without an identity store has none.
+    fn unlisted_legacy_candidates(
         &self,
         history: Option<&super::MemberBindingHistory>,
         listed: &BTreeSet<AgentIdentity>,
@@ -1503,11 +1542,57 @@ impl super::MobHandle {
             .map(|identity| AgentIdentity::from(identity.0.as_str()))
             .filter(|identity| {
                 !listed.contains(identity)
-                    && history
-                        .last_binding(identity)
-                        .is_some_and(super::identity_entry::unlisted_legacy_member)
+                    && history.last_binding(identity).is_some_and(|binding| {
+                        super::identity_entry::legacy_roster_member(binding).any()
+                    })
             })
             .collect()
+    }
+
+    /// Retire the unlisted legacy member MobMachine answered
+    /// `RetireUnadopted` for, at the incarnation it decided on
+    /// (`generation`), through the ordinary retirement. A member bound to a
+    /// session (placed on a member host) is retired at its delivery scope,
+    /// captured now: the scope must still name that incarnation, and the
+    /// scoped retirement checks it again in the step that retires the
+    /// member. A member bound to no session has no delivery scope: its
+    /// current incarnation must still be that one, and the retirement
+    /// retires the exact incarnation it reads. A moved incarnation is
+    /// refused retryable, and the next complete apply decides its member
+    /// again.
+    async fn retire_unadopted_legacy_member(
+        &self,
+        identity: &AgentIdentity,
+        generation: Generation,
+    ) -> Result<(), MobError> {
+        let moved = || MobError::LifecycleOperationPending {
+            intent: format!(
+                "retire unlisted legacy member '{identity}': its incarnation changed after \
+                 MobMachine decided its retirement"
+            ),
+        };
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+        let (bound, current) = {
+            let state = self.machine_state_watch_rx.borrow();
+            (
+                state.member_session_bindings.contains_key(&dsl_identity),
+                state
+                    .identity_runtime_generations
+                    .get(&dsl_identity)
+                    .copied(),
+            )
+        };
+        if bound {
+            let scope = self.capture_member_delivery_scope(identity).await?;
+            if scope.generation() != generation {
+                return Err(moved());
+            }
+            return self.retire_at_scope(&scope).await;
+        }
+        if current != Some(mob_dsl::Generation::from_domain(generation)) {
+            return Err(moved());
+        }
+        self.retire(identity.clone()).await
     }
 
     /// MobMachine's verdicts for `declarations`, one chunk per actor step,

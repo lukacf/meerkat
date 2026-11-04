@@ -150,6 +150,23 @@ each package is accepted only on evidence for that exact package, and the
   so scoped tool grants do not apply to Meta members: nothing in Meta's RPC,
   the Console or the Meta SDKs issues, lists or revokes a grant.
 
+- The Console reads the status of a member whose events it cannot follow
+  (its session has no live actor, for example after its store scope was
+  refused) again on every change of its team, and does not wait after a
+  status read that does not answer. A few such members keep it reading
+  their status without pause, which costs CPU and log volume (at DEBUG, one
+  actor log line per read). Keep the team runtime's log at INFO; restarting
+  the gateway clears a refused scope. A host that builds the Console
+  aggregator itself can turn its history backfill off
+  (`session_history_backfill_enabled: false` in `ConsoleAggregatorOptions`).
+- While its store refuses appends, the event log asks the store again for
+  every event that arrives, and it sends its whole retry buffer (up to 4096
+  events) as one append. A store that refuses requests above a size limit
+  can then refuse every later flush, so the event log takes no event again
+  until the process restarts. Use an event log store that takes 4096 events
+  in one append, or restart the process when `event_log_flush_failure`
+  error events keep coming after the store is back.
+
 ## [0.9.9] - 2026-11-03
 
 ### Breaking

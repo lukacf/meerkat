@@ -7,13 +7,16 @@
 //! throughout. A change that outlasts the tool time, or no tool time left at
 //! all, stops the dispatch at ReprepareRequired after one native call; one
 //! that settles within it lets the one rebind go with the same input. Each
-//! control names the exact stop. In this fixture the source's custody recovery
-//! is not selected unless a control selects it: an unenrolled first candidate's
-//! guard is dropped at the refusal, which takes the publication writer and so
-//! waits out a change still in progress before the dispatch's own wait. The
-//! control for a change outlasting the tool time therefore selects the
-//! recovery, as the completed host does: its first candidate is enrolled and
-//! retained, and the dispatch's wait meets the change in progress.
+//! control names the exact stop. Without the source's custody recovery the
+//! helper's first candidate is unenrolled, and its guard, dropped at the
+//! refusal, takes the publication writer and so waits out a change still in
+//! progress before the dispatch's own wait. The control for a change
+//! outlasting the tool time therefore selects the recovery, as the completed
+//! host does: the candidate is enrolled and retained, the dispatch's wait
+//! meets the change in progress, and the joined recovery withdraws the
+//! candidate. Its task is held before its first round until the dispatch has
+//! answered, as the fixture's other recovery controls hold it, so recovery
+//! rounds do not interleave with this foreground.
 use super::*;
 use crate::private_originals::custody_recovery::HandoffPhase;
 use crate::private_originals::governed_submit::SourcePublication;
@@ -22,7 +25,7 @@ async fn exercise_helper_wait(
     hold: Duration,
     tool_time: Duration,
     stop: Option<setup_helpers::HelperRebindStop>,
-    enrolled: bool,
+    selected: bool,
 ) {
     let rebind = stop.is_none();
     let (_connection, _logins, login) = enrolled_login();
@@ -31,12 +34,13 @@ async fn exercise_helper_wait(
         hold,
     )));
     let (fixture, history) = Fixture::for_helper_entry(script.clone(), fault.clone()).await;
+    let mut first_round = selected.then(|| fixture.source.hold_first_custody_round_for_test());
     let custody = std::sync::Mutex::new(None);
     let deadline = tokio::time::Instant::now() + WAIT * 3;
     let checked = std::panic::AssertUnwindSafe(tokio::time::timeout_at(
         deadline,
         Box::pin(async {
-            if enrolled {
+            if selected {
                 // Select the real source task before either first input.
                 fixture
                     .source
@@ -161,51 +165,75 @@ async fn exercise_helper_wait(
                 held.handoffs_for_test().is_empty(),
                 "definite refusal or successful acceptance consumes its Box"
             );
-            // An enrolled first candidate stays retained (a stopped dispatch
-            // released its binder, so its foreground handed it to recovery);
-            // an unenrolled one is not retained.
+            // With the recovery selected the first candidate is enrolled and
+            // stays retained (a stopped dispatch released its binder, so its
+            // foreground handed it to recovery); without it, it is not retained.
             let retained = held.first_custody.lock().unwrap().clone();
-            if enrolled {
+            if selected {
                 let retained = retained.expect("the helper's enrolled first candidate is retained");
+                assert!(retained.handoff.enrolled());
                 if !rebind {
                     assert!(retained.handoff.phase() != HandoffPhase::Foreground);
                 }
                 *custody.lock().unwrap() = Some(Arc::downgrade(&retained));
             } else {
-                assert!(retained.is_none());
+                assert!(
+                    retained.is_none(),
+                    "an unenrolled first candidate is not retained"
+                );
             }
             assert_eq!(fixture.source.helper_sources.lock().unwrap().len(), 1);
         }),
     ))
     .catch_unwind()
     .await;
+    // These owners live outside the cancellable body. Release the held round,
+    // the script and the bridge, then join native and the source's recovery
+    // on every exit.
+    drop(first_round.take());
     script.release_first_response();
     fault.release.add_permits(1);
+    if selected {
+        fixture.source.stop_custody_recovery();
+    }
     let cleanup = fixture.shutdown().await;
+    let recovery = fixture.source.join_custody_recovery().await;
     assert_eq!(fault.publication_change_failures.load(Ordering::SeqCst), 0);
     assert!(cleanup.is_ok(), "{cleanup:?}");
+    assert!(recovery.is_ok(), "{recovery:?}");
     match checked {
         Ok(Ok(())) => {}
         Ok(Err(_)) => panic!("actual helper wait control timed out"),
         Err(payload) => std::panic::resume_unwind(payload),
     }
-    // Withdrawn (a stopped dispatch) or promoted (the rebind), by the
-    // recovery the owners joined.
+    // The recovery joined: it withdrew the stopped dispatch's retained
+    // candidate, which native never admitted, and settled its source attempt.
     let custody = custody.lock().unwrap().take();
-    assert!(
-        custody.is_some() == enrolled,
-        "an enrolled first candidate was retained"
+    assert_eq!(
+        custody.is_some(),
+        selected,
+        "a first candidate is retained exactly when the recovery is selected"
     );
-    assert!(
-        custody.is_none_or(|custody| custody.upgrade().is_none_or(|pending| {
-            pending.handoff.phase() == HandoffPhase::Done
-                && matches!(
-                    pending.publication.lock().unwrap().source,
-                    SourcePublication::Settled { .. }
-                )
-        })),
-        "the helper's source attempt settled once its owners joined"
-    );
+    if let Some(custody) = custody {
+        // Only a control whose dispatch stops selects the recovery.
+        assert!(!rebind);
+        let pending = custody
+            .upgrade()
+            .expect("the helper source still retains its first candidate");
+        assert!(pending.handoff.phase() == HandoffPhase::Done);
+        let publication = pending.publication.lock().unwrap();
+        assert!(publication.native_admission.is_none());
+        assert!(
+            matches!(
+                &publication.source,
+                SourcePublication::Settled {
+                    source_acknowledged: false,
+                    result: Err(error),
+                } if error == "Toolkit permanently withdrew this source attempt"
+            ),
+            "the joined recovery withdrew the helper's refused source attempt"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -12698,6 +12698,16 @@ mod tests {
         (sender, receiver, command)
     }
 
+    /// The receiver's next queue claim, if one is queued.
+    #[cfg(feature = "workspace-tests")]
+    async fn try_claim_queued(
+        receiver: &CommsRuntime,
+    ) -> Option<meerkat_core::PeerIngressQueueClaim> {
+        CoreCommsRuntime::claim_classified_inbox_interaction(receiver)
+            .await
+            .expect("claim surface")
+    }
+
     /// The in-process lane carries the governed origin a send was made with
     /// to the receiver's queue claim unchanged, beside the in-process sender
     /// authentication, for every kind it carries: a message, an
@@ -12718,20 +12728,38 @@ mod tests {
                 // A message, fenced message or request waits on the
                 // receiver's drain, which this row replaces: the send is
                 // aborted once the receiver's claim was read.
-                let send = tokio::spawn(async move {
+                let mut send = tokio::spawn(async move {
                     CoreCommsRuntime::send_with_governed_origin(sender.as_ref(), command, sent)
                         .await
                 });
-                let claim = loop {
-                    if let Some(claim) =
-                        CoreCommsRuntime::claim_classified_inbox_interaction(receiver.as_ref())
-                            .await
-                            .expect("claim surface")
-                    {
-                        break claim;
+                // The claim the send's envelope makes. A send that ends
+                // without one (refused before it enqueues) fails the row at
+                // once with its own result, and a send that stays pending
+                // without enqueueing fails it at the bound.
+                let claim = timeout(Duration::from_secs(30), async {
+                    loop {
+                        if let Some(claim) = try_claim_queued(receiver.as_ref()).await {
+                            break claim;
+                        }
+                        if send.is_finished() {
+                            // The envelope is queued before the send ends, so
+                            // a claim it made is visible by now.
+                            if let Some(claim) = try_claim_queued(receiver.as_ref()).await {
+                                break claim;
+                            }
+                            let result = (&mut send).await;
+                            panic!(
+                                "{kind:?}: the send ended before the receiver held a claim: \
+                                 {result:?}"
+                            );
+                        }
+                        tokio::task::yield_now().await;
                     }
-                    tokio::task::yield_now().await;
-                };
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("{kind:?}: no claim and the send still pending after 30 s")
+                });
                 assert_eq!(
                     claim.sender_authentication(),
                     meerkat_core::PeerIngressSenderAuthentication::InProcess,

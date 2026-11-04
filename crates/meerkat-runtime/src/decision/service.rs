@@ -42,7 +42,9 @@ use super::{DecisionClock, DecisionWriteMode, SystemDecisionClock};
 
 /// Why a decision refused an input. Each is the machine's typed refusal;
 /// the input changed nothing, except [`Self::Expired`], which a touch at or
-/// after the deadline answers with the expiry it recorded.
+/// after the deadline answers with the expiry it recorded, and
+/// [`Self::NotEligible`] from [`DurableDecisionService::authorize_execution`]
+/// with no permit outstanding, which answers the end it recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -71,7 +73,8 @@ pub enum DecisionRefusal {
     /// The decision carries no attested evidence.
     EvidenceRequired,
     /// The decider does not act for the approver id, or is not currently
-    /// eligible.
+    /// eligible. At an authorization: the host refused the party that
+    /// decided, and with no permit outstanding the decision ended refused.
     NotEligible,
     /// The requester tried to decide its own request.
     SelfApproval,
@@ -1175,22 +1178,32 @@ impl DurableDecisionService {
     /// machine's authorization alone: its binding and deadline are the ones
     /// the machine's `ExecutionAuthorized` effect names.
     ///
-    /// `approver` is the host's answer, now, for the approver who decided
-    /// (for an approval this approver already decided: that they were not
-    /// revoked and policy does not forbid them since). Evidence is checked
-    /// when the authorization commits. An approver who is no longer current
-    /// gets no permit: with no permit outstanding the decision ends
+    /// `approver` is the host's answer, now, for the party that decided: the
+    /// human who acted for the approver id, or the reviewer whose verdict
+    /// allowed it (that it was not revoked and policy does not forbid it
+    /// since). Only a refusal says it is no longer current: it gets no
+    /// permit, and with no permit outstanding the decision ends
     /// `execution_refused` (recording [`APPROVER_NOT_CURRENT_REFUSAL`]) and
     /// owes its notice; with one outstanding, the owner settles it first. An
-    /// unsettled answer applies nothing.
+    /// unsettled answer applies nothing, and neither does evidence an owner
+    /// change made stale since the answer (related or not), checked when the
+    /// authorization commits: the call may be made again with a fresh
+    /// answer. A decision with no settled answer expires at its deadline as
+    /// any other does.
+    ///
+    /// For a kind a [`DecisionExecutorLoop`](super::DecisionExecutorLoop)
+    /// executes, only that loop calls this: its settle-first takes a permit
+    /// outstanding when it reads it for one nothing holds.
     ///
     /// # Errors
     /// [`DecisionError::Refused`] with `BindingMismatch`, `NotApproved`,
-    /// `NotEligible` (the approver is no longer current: the decision ended
-    /// refused), `SettlementOwed` (a permit is outstanding and no new one may
-    /// be issued: at or after the deadline, or with the approver no longer
-    /// current) or `Expired` (at or after the deadline, with none: the expiry
-    /// is recorded); [`DecisionError::Unsettled`] for an unsettled answer;
+    /// `NotEligible` (the answer refused the party that decided: the decision
+    /// ended refused), `SettlementOwed` (a permit is outstanding and no new
+    /// one may be issued: at or after the deadline, or with the party
+    /// refused) or `Expired` (at or after the deadline, with none: the expiry
+    /// is recorded); [`DecisionError::Unsettled`] for an unsettled answer,
+    /// evidence no longer current when the authorization commits, or an
+    /// answer of a kind this version does not know (nothing is applied);
     /// [`DecisionError::CandidateLaunch`]; store, clock and unreadable-row
     /// failures.
     pub fn authorize_execution(
@@ -1207,9 +1220,17 @@ impl DurableDecisionService {
         let approver_not_current = DecisionReference::new(APPROVER_NOT_CURRENT_REFUSAL)?;
         let mut authorization = Vec::new();
         let row = self.commit_row(decision_id, |loaded, now_ms| {
+            // Only a refusal says the party is no longer current. Evidence an
+            // owner change made stale since the answer, or an answer of a
+            // kind this version does not know, says nothing about it.
             let approver_current = match approver {
-                ConsentEligibilityAnswer::Eligible(evidence) => evidence.check_current().is_ok(),
-                _ => false,
+                ConsentEligibilityAnswer::Eligible(evidence)
+                    if evidence.check_current().is_ok() =>
+                {
+                    true
+                }
+                ConsentEligibilityAnswer::Refused => false,
+                _ => return Err(DecisionError::Unsettled(decision_id.clone())),
             };
             let input = DurableDecisionInput::AuthorizeExecution {
                 operation_id: operation_id.as_str().to_owned(),
@@ -1218,12 +1239,24 @@ impl DurableDecisionService {
                 now_ms,
             };
             let (effects, state) = transition(loaded, input)?;
-            let refused = effects
+            let ended = effects
                 .iter()
                 .any(|effect| matches!(effect, DurableDecisionEffect::ExecutionRefused { .. }));
+            // An authorization ends a decision only for a party that is no
+            // longer current (`NotEligible`); an end for another cause has no
+            // refusal to record here, and fails closed.
+            let execution_refusal = match (ended, refusal_of(&effects)) {
+                (false, _) => None,
+                (true, Some(DecisionRefusal::NotEligible)) => Some(approver_not_current.clone()),
+                (true, _) => {
+                    return Err(DecisionError::Machine(format!(
+                        "decision {decision_id}: an authorization ended it for another cause"
+                    )));
+                }
+            };
             let next = successor(loaded, state, |row| {
-                if refused {
-                    row.execution_refusal = Some(approver_not_current.clone());
+                if let Some(refusal) = execution_refusal {
+                    row.execution_refusal = Some(refusal);
                 }
             });
             let step = Step::of(&effects, next);
@@ -1282,7 +1315,9 @@ impl DurableDecisionService {
     /// settles with [`Self::release_execution`] (or [`Self::close_refused`]).
     /// The caller asserts that no live executor holds a permit object for
     /// this decision (one executor per decision): a settlement by id clears
-    /// that holder's permit, and a commit it then makes is orphaned.
+    /// that holder's permit, and a commit it then makes is orphaned. For a
+    /// kind a [`DecisionExecutorLoop`](super::DecisionExecutorLoop)
+    /// executes, only that loop calls this.
     ///
     /// Settle first: before anything else for the decision, the executor
     /// reads its own record of the operation, and calls this only when no
@@ -1369,7 +1404,9 @@ impl DurableDecisionService {
     /// settles with [`Self::close_refused`] (or [`Self::release_execution`]).
     /// The caller asserts that no live executor holds a permit object for
     /// this decision (one executor per decision): a settlement by id clears
-    /// that holder's permit, and a commit it then makes is orphaned.
+    /// that holder's permit, and a commit it then makes is orphaned. For a
+    /// kind a [`DecisionExecutorLoop`](super::DecisionExecutorLoop)
+    /// executes, only that loop calls this.
     ///
     /// Settle first: before anything else for the decision, the executor
     /// reads its own record of the operation, and calls this only when no

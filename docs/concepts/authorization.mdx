@@ -251,16 +251,18 @@ owner then executes the held request at most once.
   is a decision that carries one, even after a valid presentation was
   recorded.
 - **Execution once.** The owner executes an approved decision under an
-  execution permit, issued only before the deadline and only while the
-  approver who decided is still current (not revoked, and not forbidden by
-  policy since; the host's evidence is checked when the authorization
-  commits), and settles it: executed, released (the decision stays approved)
-  or permanently refused. An approver who is no longer current gets no
-  permit: the decision ends refused, records `approver_not_current`, and owes
-  its notice. A permit already outstanding is settled first, so a commit made
-  under it still counts. A permit outstanding at the deadline holds the
-  decision until its settlement. Without one, an approved decision expires at
-  its deadline and never runs after it.
+  execution permit, issued only before the deadline and only while the party
+  who decided is still current (not revoked, and not forbidden by policy
+  since; a login's natural expiry is not a revocation), and settles it:
+  executed, released (the decision stays approved) or permanently refused. A
+  party the host refuses gets no permit: the decision ends refused, records
+  `approver_not_current`, and owes its notice. An answer the host cannot give
+  now, or evidence an owner change made stale before the authorization
+  commits, decides nothing, and the host is asked again. A permit already
+  outstanding is settled first, so a commit made under it still counts. A
+  permit outstanding at the deadline holds the decision until its
+  settlement. Without one, an approved decision expires at its deadline and
+  never runs after it.
 - **One executor.** `DecisionExecutorLoop` executes the approved decisions of
   a store, through one registered executor per decision kind. It holds the
   store's executor claim while it runs (for the SQLite file, an OS lock on
@@ -268,10 +270,12 @@ owner then executes the held request at most once.
   ends), so a second executor of the store, in this process or another, is
   refused at start, and a candidate launch starts none. It keeps the three
   obligations the machine cannot see: one executor per decision; after a
-  commit, the only settlement is recording it; and after a restart it settles
-  first, from the owner's own record of the operation.
+  commit, the only settlement is recording it; and after a restart or a
+  dropped pass it settles first, from the owner's own record of the
+  operation, which reports every commit that can still land.
 - **One notice.** An ended decision whose requester can be told owes it one
-  notice, settled by its delivery receipt.
+  notice, settled by its delivery receipt. A delivery whose receipt was not
+  recorded is made again, so the owner delivers idempotently.
 
 Decisions live in their own file beside the approval records,
 `approval_decisions.sqlite3` under the store path, created by the first hold;

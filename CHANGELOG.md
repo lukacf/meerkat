@@ -203,19 +203,26 @@ them.
   once and settles its permit (`Committed`, `Released`, or `Refused` with
   the owner's typed reference), and delivers owed notices. Each decision's
   outcome is reported (`DecisionPassOutcome`), with `Deferred` for an
-  unsettled approver answer, an unreadable executor record or an
+  unsettled approver answer (or evidence no longer current when the
+  authorization commits), an unreadable executor record or an
   undelivered notice. `DecisionExecutorLoop::start` claims the store's
   executor role and refuses a second loop (`DecisionError::ExecutorHeld`), a
-  candidate launch and two executors of one kind.
+  candidate launch and two executors of one kind. A pass, and an
+  executor's `execute` with it, may be dropped at any await: nothing the
+  execution started may commit afterwards unless `committed` reports it,
+  and the next pass settles its permit first. Notices are delivered at
+  least once.
 - `meerkat-runtime`: `DurableDecisionService::claim_executor`, and
-  `DecisionError::Unsettled(DecisionId)` (the approver answer was unsettled;
-  nothing was applied) and `DecisionError::ExecutorHeld`.
+  `DecisionError::Unsettled(DecisionId)` (no settled answer for the party
+  that decided: nothing was applied, and the call may be made again) and
+  `DecisionError::ExecutorHeld`.
   `APPROVER_NOT_CURRENT_REFUSAL` names the execution refusal a decision
   records when its approver is no longer current.
 - `meerkat-core`: `approval::decision::DecisionExecutorClaim` and the
   provided method `DecisionStore::claim_executor`. The default refuses (a
-  store that cannot keep the role exclusive has no executor);
-  `InMemoryDecisionStore` keeps the claim among the owners that share it.
+  store that cannot keep the role exclusive has no executor), so a
+  `DecisionStore` wrapper forwards it; `InMemoryDecisionStore` keeps the
+  claim among the owners that share it.
 - `meerkat-store`: `SqliteDecisionStore` claims the executor role with an
   OS lock on `approval_decisions.executor.lock` beside the database
   (`SqliteDecisionStore::executor_lock_path`,
@@ -240,16 +247,18 @@ them.
   documents and the WholeBlob documents.
 
 - `meerkat-runtime`, `meerkat-machine-schema`: `DurableDecisionMachine`
-  issues an execution permit only while the approver who decided is still
-  current. An authorization for an approver who is no longer current (the
-  answer refused, or its evidence stale when the authorization commits)
-  issues no permit: with no permit outstanding the decision ends
-  `execution_refused`, records `approver_not_current` and owes its notice;
-  with one outstanding nothing changes and `SettlementOwed` is answered,
-  so the owner settles it first and a commit made under it still records
-  executed. An unsettled answer applies nothing. The hand-written audit
-  checks `AuditPermitOnlyForCurrentApprover` with two new witnesses and
-  three new mutants.
+  issues an execution permit only while the party who decided is still
+  current. An authorization the host's answer refuses issues no permit:
+  with no permit outstanding the decision ends `execution_refused`, records
+  `approver_not_current` and owes its notice; with one outstanding nothing
+  changes and `SettlementOwed` is answered, so the owner settles it first
+  and a commit made under it still records executed. Only a refusal ends a
+  decision: an unsettled answer, evidence an owner change made stale before
+  the authorization commits (related or not) and an answer of a kind the
+  service does not know apply nothing and answer `DecisionError::Unsettled`,
+  so the host is asked again. The hand-written audit checks
+  `AuditPermitOnlyForCurrentApprover` with two new witnesses and three new
+  mutants.
 
 ### Fixed
 

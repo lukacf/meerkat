@@ -43,12 +43,13 @@ use meerkat_core::approval::decision::{
 ///   time. A release or a refusal after a commit would let the decision
 ///   expire, or end refused, while the committed operation seals its
 ///   consent.
-/// - **Settle first on recovery.** After a restart, or after a settlement
-///   call that failed, the permit object is gone and the decision still
-///   waits. Before anything else for that decision, the executor reads its
-///   own record of the operation: a landed commit is recorded with
-///   `record_executed`; only when no commit landed does it release
-///   ([`DurableDecisionService::release_after_restart`]) or refuse
+/// - **Settle first on recovery.** After a restart, a dropped execution or
+///   a settlement call that failed, the permit object is gone and the
+///   decision still waits. Before anything else for that decision, the
+///   executor reads its own record of the operation, which reports every
+///   commit that can still land under the permit: a landed commit is
+///   recorded with `record_executed`; only when no commit landed does it
+///   release ([`DurableDecisionService::release_after_restart`]) or refuse
 ///   ([`DurableDecisionService::close_refused_after_restart`]) the
 ///   outstanding permit.
 ///

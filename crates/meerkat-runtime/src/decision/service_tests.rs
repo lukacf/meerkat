@@ -1621,13 +1621,13 @@ fn an_approver_who_is_no_longer_current_gets_no_permit() {
 
 /// Evidence that is no longer current when the authorization commits (an
 /// owner change published since the answer, related or not) says nothing
-/// about the approver: it applies nothing, as an unsettled answer does, with
-/// no permit outstanding and with one. A current answer then authorizes. An
-/// answer that does not decide the outcome still applies: at the deadline
-/// the expiry is recorded.
+/// about the party that decided: it applies nothing and the call may be
+/// made again, as for an unsettled answer, with no permit outstanding, with
+/// one, and at the deadline, whose expiry a read then records as for any
+/// decision. A current answer authorizes.
 #[test]
 fn evidence_no_longer_current_at_the_commit_applies_nothing() {
-    let (_store, clock, service) = fixture();
+    let (store, clock, service) = fixture();
     let rendering = rendering();
     let decision_id = approved_subject(&service, &rendering, "subject:stale");
     let at_deadline = approved_subject(&service, &rendering, "subject:deadline");
@@ -1664,17 +1664,13 @@ fn evidence_no_longer_current_at_the_commit_applies_nothing() {
         .expect("executed");
 
     clock.set(DEADLINE);
-    assert_eq!(
-        refusal(
-            &service
-                .authorize_execution(&at_deadline, &operation_id(), &request_digest(), &stale())
-                .expect_err("the deadline answers first")
-        ),
-        DecisionRefusal::Expired
-    );
+    let due = store.stored(&at_deadline);
+    unsettled(&service, &at_deadline);
+    assert_eq!(store.stored(&at_deadline), due, "nothing applied");
     assert_eq!(
         service.get(&at_deadline).expect("read").state.phase,
-        DecisionPhase::Expired
+        DecisionPhase::Expired,
+        "a read records the expiry"
     );
 }
 

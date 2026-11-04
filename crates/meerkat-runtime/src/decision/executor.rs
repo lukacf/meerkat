@@ -1,9 +1,10 @@
 //! [`DecisionExecutorLoop`]: the one executor of a decision store.
 //!
 //! The owner of each decision kind of a store registers a
-//! [`DecisionExecutor`]; the loop is the only caller of the execution and
-//! settlement calls of [`DurableDecisionService`] for those kinds, and it
-//! keeps the obligations [`DecisionExecutionPermit`] states:
+//! [`DecisionExecutor`]; for those kinds the loop is the only caller of the
+//! execution and settlement calls of [`DurableDecisionService`] (the host
+//! makes none of its own), and it keeps the obligations
+//! [`DecisionExecutionPermit`] states:
 //!
 //! - **One executor per decision.** The loop holds the store's executor
 //!   claim for its lifetime ([`DurableDecisionService::claim_executor`]): a
@@ -14,15 +15,21 @@
 //!   recorded executed; when that record fails, the permit stays outstanding
 //!   and the next pass settles it first.
 //! - **Settle first.** Within a pass the loop settles every permit it
-//!   authorizes before it moves on, so a permit a store records as
-//!   outstanding when a pass reads it has no live holder. The loop asks the
-//!   executor's own record whether a commit landed under it before anything
-//!   else: a landed commit is recorded executed, and only a permit with no
-//!   commit is released.
+//!   authorizes before it moves on. A permit a store records as outstanding
+//!   when a pass reads it was left by an earlier executor, an earlier pass
+//!   that was dropped, or a settlement call that failed, and nothing holds
+//!   it any more: an execution whose future is dropped commits nothing after
+//!   the drop that the executor's own record does not report
+//!   ([`DecisionExecutor::execute`]). The loop asks that record whether a
+//!   commit landed under the permit before anything else: a landed commit is
+//!   recorded executed, and only a permit with no commit is released.
 //!
-//! The approver who decided must still be current when the permit is
-//! issued: the host answers through [`DecisionApproverCurrentness`], and a
-//! decision whose approver is no longer current ends refused with no permit.
+//! The party that decided must still be current when the permit is issued:
+//! the host answers through [`DecisionApproverCurrentness`], and a decision
+//! whose party the host refuses ends refused with no permit. An answer the
+//! host cannot give now, or evidence an owner change made stale before the
+//! authorization committed, decides nothing: the decision is asked for again
+//! at a later pass.
 //!
 //! A host drives passes ([`DecisionExecutorLoop::pass`]): once at start,
 //! after it records a decision, and on a timer for the deadlines. A pass
@@ -73,6 +80,13 @@ pub trait DecisionExecutor: Send + Sync {
     /// ([`DecisionExecutionPermit::binds`]), before its deadline
     /// ([`DecisionExecutionPermit::admits_commit_at`]), and seals its
     /// consent ([`DecisionExecutionPermit::consent`]).
+    ///
+    /// The returned future may be dropped at any await (the host drops the
+    /// pass). Nothing it started may commit after that unless
+    /// [`Self::committed`] reports the commit: commit inline, or make the
+    /// effect idempotent on the decision's operation id and have
+    /// [`Self::committed`] read it. The next pass settles the permit from
+    /// that record first, and executes again only when it reports no commit.
     async fn execute(
         &self,
         decision: &StoredDecision,
@@ -80,7 +94,9 @@ pub trait DecisionExecutor: Send + Sync {
     ) -> DecisionExecution;
 
     /// Whether a commit landed for `decision` under its outstanding permit,
-    /// read from the executor's own record of the operation only.
+    /// read from the executor's own record of the operation only. `false`
+    /// only when no commit can land under that permit any more: the permit
+    /// is released, and the decision may execute again.
     async fn committed(
         &self,
         decision: &StoredDecision,
@@ -88,18 +104,25 @@ pub trait DecisionExecutor: Send + Sync {
 
     /// Deliver the notice `decision` owes its requester: its receipt
     /// (admitted, or failed terminally), or `None` when it cannot be
-    /// delivered now and is asked again at a later pass.
+    /// delivered now and is asked again at a later pass. A delivery whose
+    /// receipt was not recorded is asked again too, so a notice is delivered
+    /// at least once: deliver it idempotently per decision.
     async fn deliver_notice(
         &self,
         decision: &StoredDecision,
     ) -> Option<ApprovalConsentDeliveryState>;
 }
 
-/// The host's current answer for the approver who decided a decision.
+/// The host's current answer for the party that decided a decision.
 pub trait DecisionApproverCurrentness: Send + Sync {
-    /// Whether the approver who decided `decision` may still do so: not
-    /// revoked, and not forbidden by policy since. Evidence is checked again
-    /// when the authorization commits; an unsettled answer applies nothing.
+    /// Whether the party that decided `decision` may still do so: the human
+    /// who acted for its approver id or, for a decision its review stage
+    /// allowed, its reviewer (its outcome's evidence names which). Answer for
+    /// the party as it decided, not for its login: a login's natural expiry
+    /// is not a revocation. Refuse only a party revoked or forbidden by
+    /// policy since; that ends the decision. An unsettled answer, or
+    /// evidence no longer current when the authorization commits, applies
+    /// nothing and is asked for again at a later pass.
     fn approver_answer(&self, decision: &StoredDecision) -> ConsentEligibilityAnswer;
 }
 
@@ -107,7 +130,9 @@ pub trait DecisionApproverCurrentness: Send + Sync {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DecisionDeferral {
-    /// The owner of the approver's eligibility could not answer now.
+    /// The owner of the deciding party's eligibility could not answer now,
+    /// its evidence was no longer current when the authorization committed,
+    /// or its answer is of a kind this version does not know.
     ApproverUnsettled,
     /// The executor could not read its own record of the operation.
     RecordUnavailable,
@@ -125,14 +150,15 @@ pub enum DecisionPassOutcome {
     Released,
     /// The owner refused the held request; the decision ended refused.
     ExecutionRefused,
-    /// The approver who decided is no longer current: no permit was issued,
-    /// and the decision ended refused.
+    /// The host refused the party that decided: no permit was issued, and
+    /// the decision ended refused.
     ApproverNotCurrent,
     /// A permit outstanding at the pass, under which a commit had landed:
     /// recorded executed.
     SettledExecuted,
     /// A permit outstanding at the pass, under which no commit had landed:
-    /// released.
+    /// released. At or past the deadline the release records the expiry,
+    /// and the decision owes its notice.
     SettledReleased,
     /// The deadline passed: the expiry was recorded.
     Expired,
@@ -238,6 +264,10 @@ impl DecisionExecutorLoop {
     /// observation (their expiry is recorded), then the owed ones (approved
     /// decisions are settled first and executed; ended ones get their
     /// notice). A decision of a kind with no executor is left as stored.
+    ///
+    /// A pass may be dropped at any await: a permit it issued and did not
+    /// settle stays outstanding, and the next pass, of this loop or the
+    /// next, settles it first.
     pub async fn pass(&mut self) -> DecisionExecutorPass {
         let mut pass = DecisionExecutorPass::default();
         let mut after: Option<String> = None;

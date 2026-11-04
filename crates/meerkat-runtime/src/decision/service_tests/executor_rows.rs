@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use async_trait::async_trait;
+use futures::FutureExt;
 use meerkat_store::approval_decision_store::APPROVAL_DECISIONS_FILE;
 
 use super::*;
@@ -15,13 +16,23 @@ use crate::decision::{
     DecisionExecutorRecordUnavailable, DecisionPassOutcome,
 };
 
+/// Where an interrupted execution waits until its pass is dropped.
+#[derive(Debug, Clone, Copy)]
+enum Interruption {
+    /// Before it commits anything.
+    BeforeTheCommit,
+    /// After its commit, which the owner's record reports.
+    AfterTheCommit,
+}
+
 /// The owner of one decision kind's held requests: answers each execution
 /// from its script for the decision (a commit when none is scripted), keeps
 /// its own record of the commits it made, and delivers notices while it
-/// can.
+/// can. An interrupted execution never returns.
 struct ScriptedOwner {
     kind: DecisionKind,
     scripts: Mutex<BTreeMap<DecisionId, VecDeque<DecisionExecution>>>,
+    interruptions: Mutex<BTreeMap<DecisionId, Interruption>>,
     commits: Mutex<BTreeSet<DecisionId>>,
     record_readable: AtomicBool,
     delivers: AtomicBool,
@@ -33,6 +44,7 @@ impl ScriptedOwner {
         Arc::new(Self {
             kind: DecisionKind::new(kind).expect("kind"),
             scripts: Mutex::default(),
+            interruptions: Mutex::default(),
             commits: Mutex::default(),
             record_readable: AtomicBool::new(true),
             delivers: AtomicBool::new(true),
@@ -56,6 +68,14 @@ impl ScriptedOwner {
             .entry(decision_id.clone())
             .or_default()
             .extend(executions);
+    }
+
+    /// The next execution of `decision_id` waits at `at` and never returns.
+    fn interrupt(&self, decision_id: &DecisionId, at: Interruption) {
+        self.interruptions
+            .lock()
+            .expect("interruptions")
+            .insert(decision_id.clone(), at);
     }
 
     /// A commit this owner made under the decision's permit, recorded in its
@@ -115,6 +135,17 @@ impl DecisionExecutor for ScriptedOwner {
             ),
             "the permit binds the held request"
         );
+        let interruption = self
+            .interruptions
+            .lock()
+            .expect("interruptions")
+            .remove(&decision.decision_id);
+        if let Some(at) = interruption {
+            if matches!(at, Interruption::AfterTheCommit) {
+                self.committed_before_the_stop(&decision.decision_id);
+            }
+            return std::future::pending().await;
+        }
         let execution = self
             .scripts
             .lock()
@@ -462,6 +493,61 @@ async fn a_permit_outstanding_past_the_deadline_settles_into_its_end() {
             (lost, vec![DecisionPassOutcome::NoticeSettled]),
         ])
     );
+}
+
+/// A pass may be dropped at any await, and its execution with it: the
+/// permit stays outstanding, and the next pass settles it first from the
+/// owner's own record. A commit made before the drop is recorded executed
+/// and never made again; an execution dropped before its commit is released
+/// and runs once more.
+#[tokio::test]
+async fn a_dropped_pass_leaves_its_permit_to_the_next_pass() {
+    for (at, settled, runs) in [
+        (
+            Interruption::AfterTheCommit,
+            vec![DecisionPassOutcome::SettledExecuted],
+            1,
+        ),
+        (
+            Interruption::BeforeTheCommit,
+            vec![
+                DecisionPassOutcome::SettledReleased,
+                DecisionPassOutcome::Executed,
+            ],
+            2,
+        ),
+    ] {
+        let (store, _clock, service) = fixture();
+        let rendering = rendering();
+        let decision_id = approved(&service, &rendering);
+        let owner = ScriptedOwner::release();
+        owner.interrupt(&decision_id, at);
+        let mut executor = start(&service, &[&owner], &Approvers::current()).expect("start");
+
+        assert!(
+            executor.pass().now_or_never().is_none(),
+            "{at:?}: the pass is dropped while its execution waits"
+        );
+        let outstanding = store.stored(&decision_id);
+        assert_eq!(outstanding.state.phase, DecisionPhase::Approved, "{at:?}");
+        assert!(
+            outstanding.state.permit_issued,
+            "{at:?}: nothing settled it"
+        );
+
+        let next = executor.pass().await;
+        let expected: Vec<_> = settled
+            .into_iter()
+            .map(|outcome| (decision_id.clone(), outcome))
+            .collect();
+        assert_eq!(next.outcomes, expected, "{at:?}");
+        assert_eq!(
+            store.stored(&decision_id).state.phase,
+            DecisionPhase::Executed,
+            "{at:?}"
+        );
+        assert_eq!(owner.executions().len(), runs, "{at:?}");
+    }
 }
 
 #[tokio::test]

@@ -160,9 +160,10 @@ pub fn decision_is_due(row: &StoredDecision, now_ms: u64) -> bool {
 ///
 /// One executor at a time executes the approved decisions of a store and
 /// settles their permits ([`DecisionStore::claim_executor`]). The claim ends
-/// when this value drops, or when its process ends: an execution permit a
-/// store records as outstanding while no claim is live has no live executor,
-/// so the next executor may settle it first.
+/// when this value drops, or when its process ends. The next executor
+/// settles first each execution permit the store records as outstanding,
+/// from its own record of the operation, which reports every commit that
+/// can still land under it.
 pub struct DecisionExecutorClaim {
     _held: Box<dyn Any + Send + Sync>,
 }

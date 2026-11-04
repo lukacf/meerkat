@@ -10,6 +10,15 @@
 //! driver's inner driver, so they pin the delegation of the step subscription,
 //! not a durable commit.
 //!
+//! A cancellation that observed its input and interrupted the input's run
+//! answers the input observed when the run archives it out of the live ledger
+//! before the cancellation reads again. That row ends the run through the
+//! persistent driver's own cancelled-run realization (durable commit, then
+//! archive) and runs on the real clock: the run's interrupt answers on the
+//! process-owned cleanup runtime, under a tokio-timed acknowledgement bound.
+//! A row the ledger keeps without its generated state is no archive, so an
+//! observed input found that way still answers absent.
+//!
 //! The cancellations' settle deadline is a std-clock instant, which the paused
 //! clock does not move. The paused-clock bound tests therefore cover the read
 //! a timed-out wait falls through to, and the real-clock tests past the bound
@@ -801,5 +810,246 @@ async fn tracked_cancellation_subscribes_under_its_read_lock() {
         crate::tokio::time::Instant::now() - committed,
         Duration::ZERO,
         "the step committed right after the read wakes the tracked cancellation"
+    );
+}
+
+/// An exact-run interrupt that reports its delivery and answers only once the
+/// test releases it, so the test ends the interrupted run while the
+/// cancellation still waits for the interrupt's answer.
+struct HeldRunInterrupt {
+    delivered: std::sync::Mutex<Option<crate::tokio::sync::oneshot::Sender<RunId>>>,
+    release: std::sync::Mutex<Option<crate::tokio::sync::oneshot::Receiver<()>>>,
+}
+
+#[async_trait::async_trait]
+impl meerkat_core::lifecycle::CoreExecutorInterruptHandle for HeldRunInterrupt {
+    async fn hard_cancel_run_if_current(
+        &self,
+        expected_run_id: &RunId,
+        _reason: String,
+    ) -> Result<bool, meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        let delivered = self
+            .delivered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let release = self
+            .release
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(delivered) = delivered {
+            let _ = delivered.send(expected_run_id.clone());
+        }
+        if let Some(release) = release {
+            let _ = release.await;
+        }
+        Ok(true)
+    }
+}
+
+/// Accept one keyed prompt on a persistent session and stage it for
+/// `run_id`, as a runtime loop that starts the run does: the run becomes the
+/// machine's current run and the input is staged with its id.
+async fn input_staged_for_run(
+    machine: &MeerkatMachine,
+    session_id: &SessionId,
+    key: &str,
+    run_id: &RunId,
+) -> InputId {
+    let input = keyed_prompt(key);
+    let input_id = input.id().clone();
+    <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(machine, session_id, input)
+        .await
+        .expect("accept the prompt");
+    take_the_gate_once(machine, session_id).await;
+    let driver = session_driver(machine, session_id).await;
+    let mut driver = driver.lock().await;
+    let crate::meerkat_machine::driver::DriverEntry::Persistent(persistent) = &mut *driver else {
+        panic!("a persistent machine registers a persistent driver")
+    };
+    persistent
+        .contract_begin_run_authority(run_id.clone())
+        .expect("generated Prepare starts the run");
+    persistent
+        .machine_realize_authorized_stage_batch(
+            crate::meerkat_machine::driver::test_authorized_stage_for_run(
+                vec![input_id.clone()],
+                run_id.clone(),
+            ),
+        )
+        .expect("generated StageForRun stages the input for the run");
+    input_id
+}
+
+/// The exact cancellation reads its input staged for a run and interrupts
+/// that run. Before it reads again, the run's cancelled realization abandons
+/// the input as cancelled, commits that terminal and archives the input out
+/// of the live ledger. The cancellation observed its exact input, so it
+/// answers `true`; a later call that never observes the input answers
+/// `false`.
+#[tokio::test]
+async fn exact_cancellation_answers_observed_after_the_run_archives_its_input() {
+    let machine = persistent_machine();
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let run_id = RunId::new();
+    let input_id = input_staged_for_run(
+        &machine,
+        &session_id,
+        "exact-archived-between-passes",
+        &run_id,
+    )
+    .await;
+    let (delivered_tx, delivered_rx) = crate::tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = crate::tokio::sync::oneshot::channel();
+    machine
+        .install_prepared_session_interrupt_handle(
+            &session_id,
+            Arc::new(HeldRunInterrupt {
+                delivered: std::sync::Mutex::new(Some(delivered_tx)),
+                release: std::sync::Mutex::new(Some(release_rx)),
+            }),
+        )
+        .await
+        .expect("install the run's interrupt handle");
+
+    let mut cancel = crate::tokio::spawn({
+        let machine = Arc::clone(&machine);
+        let session_id = session_id.clone();
+        let input_id = input_id.clone();
+        async move {
+            machine
+                .cancel_input_if_present_owned(
+                    &session_id,
+                    &input_id,
+                    "cancelled while its run ends".to_string(),
+                )
+                .await
+        }
+    });
+    // The first pass reads the input staged for the run and interrupts that
+    // run; the interrupt answers only after the release below.
+    let interrupted = crate::tokio::select! {
+        interrupted = delivered_rx => interrupted.expect("the interrupt handle stays installed"),
+        outcome = &mut cancel => {
+            panic!("the cancellation answered before it interrupted the run: {outcome:?}")
+        }
+    };
+    assert_eq!(
+        interrupted, run_id,
+        "the cancellation interrupts its input's exact run"
+    );
+
+    // The interrupted run ends: its cancelled realization abandons the input,
+    // commits the terminal and archives the input, in one driver hold.
+    {
+        let driver = session_driver(&machine, &session_id).await;
+        let mut driver = driver.lock().await;
+        driver
+            .machine_realize_run_cancelled(run_id, vec![input_id.clone()])
+            .await
+            .expect("realize the cancelled run");
+        assert!(
+            driver.as_driver().stored_input_state(&input_id).is_none(),
+            "the cancelled run archived its input out of the live ledger"
+        );
+    }
+    release_tx
+        .send(())
+        .expect("the held interrupt waits for its release");
+
+    let observed = cancel
+        .await
+        .expect("cancellation task")
+        .expect("the cancellation settles once its input is archived");
+    assert!(
+        observed,
+        "an input an earlier pass observed and its run then archived answers true"
+    );
+    let stored =
+        <MeerkatMachine as SessionServiceRuntimeExt>::input_state(&machine, &session_id, &input_id)
+            .await
+            .expect("read the archived input")
+            .expect("the archived input keeps its durable row");
+    assert_eq!(
+        stored.seed.terminal_outcome,
+        Some(crate::input_state::InputTerminalOutcome::Abandoned {
+            reason: crate::input_state::InputAbandonReason::Cancelled,
+        }),
+        "the cancellation took effect: the durable row is the cancelled terminal"
+    );
+
+    assert!(
+        !machine
+            .cancel_input_if_present_owned(&session_id, &input_id, "cancelled again".to_string())
+            .await
+            .expect("cancelling the archived input"),
+        "an input no pass of the call observed is absent"
+    );
+}
+
+/// A row the live ledger keeps without its generated lifecycle state was not
+/// archived: when a later pass finds an observed input so, the cancellation
+/// answers `false`, as before an observation carried across passes.
+#[tokio::test(start_paused = true)]
+async fn exact_cancellation_answers_absent_for_a_row_without_its_generated_state() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let input_id = input_between_steps(&machine, &session_id, "exact-forgotten-phase").await;
+
+    let cancel = crate::tokio::spawn({
+        let machine = Arc::clone(&machine);
+        let session_id = session_id.clone();
+        let input_id = input_id.clone();
+        async move {
+            machine
+                .cancel_input_if_present_owned(
+                    &session_id,
+                    &input_id,
+                    "cancelled between steps".to_string(),
+                )
+                .await
+        }
+    });
+    until_parked().await;
+    assert!(
+        !cancel.is_finished(),
+        "the first pass observes the input between steps and waits"
+    );
+
+    // Drop the input's generated phase and keep its ledger row, with no step
+    // signal: the read after the wait's bound finds no live state.
+    {
+        let driver = session_driver(&machine, &session_id).await;
+        let driver = driver.lock().await;
+        let crate::meerkat_machine::driver::DriverEntry::Ephemeral(ephemeral) = &*driver else {
+            panic!("an ephemeral machine registers an ephemeral driver")
+        };
+        ephemeral.forget_input_phase_for_test(&input_id);
+        assert!(
+            driver.as_driver().stored_input_state(&input_id).is_none(),
+            "no live state is read for the input"
+        );
+        assert!(
+            driver.ledger().get(&input_id).is_some(),
+            "the live ledger keeps the input's row"
+        );
+    }
+
+    let answer = cancel
+        .await
+        .expect("cancellation task")
+        .expect("the read after the bound answers");
+    assert!(
+        !answer,
+        "a row kept without its generated state was not archived"
     );
 }

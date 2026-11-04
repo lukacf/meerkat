@@ -18012,7 +18012,17 @@ impl MeerkatMachine {
     ///
     /// Returns `true` when the exact input was observed (including already
     /// terminal) and `false` when its runtime attachment is gone or the input
-    /// is absent.
+    /// is absent. An observation carries across the passes of one call: a
+    /// pass that finds no row for the input in the live ledger answers `true`
+    /// when an earlier pass of the same call read the input there, since a
+    /// row leaves that ledger only when its input's terminal is archived
+    /// after its durable commit (an interrupted run can finalize and archive
+    /// its input before the next pass reads). Both reads go through the
+    /// driver captured at the start of the call, still the session's driver,
+    /// under the session mutation gate. An input no pass of the call
+    /// observed answers `false` when absent, as does a row the ledger keeps
+    /// without its generated lifecycle state, and a missing, destroyed or
+    /// replaced attachment answers `false` whatever an earlier pass observed.
     pub async fn cancel_input_if_present(
         &self,
         session_id: &SessionId,
@@ -18072,9 +18082,19 @@ impl MeerkatMachine {
             };
             Arc::downgrade(&entry.driver)
         };
+        // Whether a pass of this call has read the exact input in the live
+        // ledger. A pass reads the ledger only while it holds the session
+        // mutation gate for the captured driver, after finding that driver
+        // still the session's, so only such a pass sets or consults it.
+        let mut observed = false;
+        let mut pass: u32 = 0;
         loop {
             enum Action {
-                Missing,
+                // `ledger_row`: the live ledger still holds the input's row,
+                // whose generated lifecycle state is gone.
+                Missing {
+                    ledger_row: bool,
+                },
                 Settled,
                 DrainTerminal {
                     completions: crate::meerkat_machine::driver::SharedCompletionRegistry,
@@ -18092,6 +18112,7 @@ impl MeerkatMachine {
                 CancelRun(meerkat_core::RunId),
                 Retry,
             }
+            pass += 1;
 
             let Some(driver) = attached_driver.upgrade() else {
                 return Ok(false);
@@ -18132,8 +18153,12 @@ impl MeerkatMachine {
                 // Subscribed under the driver before the read: a lifecycle
                 // step committed after it is a change on this receiver.
                 let input_transitions = driver_guard.subscribe_input_transitions();
-                let action = match driver_guard.as_driver().stored_input_state(input_id) {
-                    None => Action::Missing,
+                let stored = driver_guard.as_driver().stored_input_state(input_id);
+                observed |= stored.is_some();
+                let action = match stored {
+                    None => Action::Missing {
+                        ledger_row: driver_guard.ledger().get(input_id).is_some(),
+                    },
                     Some(stored) if stored.seed.terminal_outcome.is_some() => {
                         // A read that starts after the settle deadline (the
                         // one after a wait that reached it) waits for
@@ -18183,7 +18208,26 @@ impl MeerkatMachine {
             };
 
             match action {
-                Action::Missing => return Ok(false),
+                Action::Missing { ledger_row } => {
+                    // A row leaves the live ledger only when its input's
+                    // terminal is archived after its durable commit. An
+                    // input an earlier pass observed and whose row is gone
+                    // therefore reached its terminal: the cancellation met
+                    // its exact input. An input no pass observed is absent,
+                    // and a row kept without its generated state was not
+                    // archived.
+                    let answer = observed && !ledger_row;
+                    tracing::debug!(
+                        %session_id,
+                        %input_id,
+                        pass,
+                        observed,
+                        ledger_row,
+                        answer,
+                        "exact-input cancellation found no live input state"
+                    );
+                    return Ok(answer);
+                }
                 Action::Settled => return Ok(true),
                 Action::DrainTerminal {
                     completions,

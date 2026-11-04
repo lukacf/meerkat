@@ -53,6 +53,9 @@ export interface JwtAuthConfig {
   readonly issuer: string | null;
   readonly audience: string | null;
   readonly leewaySeconds: number;
+  /** `"personal"` when every token names one person; without it the console
+   *  treats these tokens as a shared account that never decides. */
+  readonly accounts: "personal" | "shared" | null;
   toDict(): Record<string, unknown>;
 }
 
@@ -62,6 +65,7 @@ export function jwt(
     issuer?: string;
     audience?: string;
     leewaySeconds?: number;
+    accounts?: "personal" | "shared";
   },
 ): JwtAuthConfig {
   const config = {
@@ -69,6 +73,7 @@ export function jwt(
     issuer: options?.issuer ?? null,
     audience: options?.audience ?? null,
     leewaySeconds: options?.leewaySeconds ?? 60,
+    accounts: options?.accounts ?? null,
     toDict() {
       return jwtAuthConfigToDict(config);
     },
@@ -85,5 +90,6 @@ export function jwtAuthConfigToDict(
     issuer: config.issuer,
     audience: config.audience,
     leeway_seconds: config.leewaySeconds,
+    ...(config.accounts === null ? {} : { accounts: config.accounts }),
   };
 }

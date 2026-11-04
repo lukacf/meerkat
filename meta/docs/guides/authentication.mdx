@@ -137,6 +137,16 @@ its historical behaviour. The recorded discovery document names the real key
 source (the fetched `jwks_uri`, or `inline` for `jwks_json`), so a public
 issuer's host can never read as the HS256 development host.
 
+**Shared and personal accounts.** A front that signs everyone in as one
+account mints every holder of its password the same `sub`. The console cannot
+tell those people apart, so it never treats such a token as a person: the
+caller is identified as its principal, can act as today, but never decides an
+approval and never owns a personal account. A `provider: "jwt"` configuration
+counts as shared unless it declares `"accounts": "personal"`, which a front
+that mints one token per person sets. `provider: "oidc"` tokens name persons
+unless the configuration declares `"accounts": "shared"`. Any other value is
+refused. `meta/console/whoami` reports the result as `actor.kind`.
+
 The result is the fixed trusted snapshot described next: the console does not
 refetch the JWKS, so an issuer key rotation needs a restart of the host (or a
 refreshable `JwksCache` on the host's own front, see below). Google rotates its
@@ -155,6 +165,7 @@ TrustedOidcRuntimeConfig {
     jwks_json: jwks_json_text,
     audience: "meerkat-console".to_string(),
     require_verified_email: false,
+    shared_account_tokens: false,
 }
 ```
 

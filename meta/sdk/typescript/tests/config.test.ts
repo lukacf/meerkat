@@ -128,6 +128,14 @@ describe("auth.jwtAuthConfigToDict", () => {
     assert.equal(dict.issuer, "iss");
     assert.equal(dict.audience, "aud");
   });
+
+  it("states accounts only when set", () => {
+    assert.equal("accounts" in auth.jwtAuthConfigToDict(auth.jwt("key")), false);
+    const dict = auth.jwtAuthConfigToDict(
+      auth.jwt("key", { accounts: "personal" }),
+    );
+    assert.equal(dict.accounts, "personal");
+  });
 });
 
 // ---------------------------------------------------------------------------

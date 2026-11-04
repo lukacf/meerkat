@@ -2095,6 +2095,7 @@ mod tests {
                 jwks_json: r#"{"keys":[]}"#.to_string(),
                 audience: "gateway-stream-tests".to_string(),
                 require_verified_email: false,
+                shared_account_tokens: false,
             },
             console: crate::decisions::ConsolePolicy {
                 require_app_auth: false,

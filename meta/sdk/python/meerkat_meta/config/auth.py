@@ -28,15 +28,21 @@ class JwtAuthConfig:
     issuer: str | None = None
     audience: str | None = None
     leeway_seconds: int = 60
+    # "personal" when every token names one person; without it the console
+    # treats these tokens as a shared account that never decides.
+    accounts: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        config: dict[str, Any] = {
             "provider": "jwt",
             "shared_secret": self.shared_secret,
             "issuer": self.issuer,
             "audience": self.audience,
             "leeway_seconds": self.leeway_seconds,
         }
+        if self.accounts is not None:
+            config["accounts"] = self.accounts
+        return config
 
 
 def google(client_id: str, **kwargs: Any) -> GoogleAuthConfig:

@@ -20285,6 +20285,7 @@ message = "review"
                 jwks_json: r#"{"keys":[{"kid":"kid-current","kty":"oct","alg":"HS256","k":"cGhhc2U3LXRydXN0ZWQtY3VycmVudC1zZWNyZXQ"}]}"#.to_string(),
                 audience: "meerkat-console".to_string(),
                 require_verified_email: true,
+                shared_account_tokens: false,
             },
             console: crate::ConsolePolicy {
                 require_app_auth: true,
@@ -29353,6 +29354,7 @@ mod console_viewer_resolver_tests {
                 jwks_json: r#"{"keys":[{"kid":"kid-current","kty":"oct","alg":"HS256","k":"cGhhc2U3LXRydXN0ZWQtY3VycmVudC1zZWNyZXQ"}]}"#.to_string(),
                 audience: "meerkat-console".to_string(),
                 require_verified_email: true,
+                shared_account_tokens: false,
             },
             console: crate::ConsolePolicy {
                 require_app_auth,
@@ -29906,6 +29908,7 @@ mod console_human_admission_tests {
                 jwks_json: r#"{"keys":[{"kid":"kid-current","kty":"oct","alg":"HS256","k":"cGhhc2U3LXRydXN0ZWQtY3VycmVudC1zZWNyZXQ"}]}"#.to_string(),
                 audience: "meerkat-console".to_string(),
                 require_verified_email: false,
+                shared_account_tokens: false,
             },
             console: crate::ConsolePolicy {
                 require_app_auth: true,
@@ -30294,6 +30297,7 @@ mod console_human_admission_tests {
                 jwks_json: r#"{"keys":[{"kid":"kid-current","kty":"oct","alg":"HS256","k":"cGhhc2U3LXRydXN0ZWQtY3VycmVudC1zZWNyZXQ"}]}"#.to_string(),
                 audience: "persistent-gateway".to_string(),
                 require_verified_email: false,
+                shared_account_tokens: false,
             },
             console: crate::ConsolePolicy {
                 require_app_auth: true,

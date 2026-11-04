@@ -152,7 +152,8 @@ pub enum SpiError {
 
 impl SpiError {
     /// The error a mutating store call answers. A poisoned realm or scope
-    /// answers its typed refusal ([`Self::into_refusal`]).
+    /// answers its typed refusal ([`RuntimeStoreError::RealmRefused`] or
+    /// [`RuntimeStoreError::ScopeRefused`]).
     #[must_use]
     pub fn into_write(self) -> RuntimeStoreError {
         match self.into_refusal() {
@@ -162,8 +163,9 @@ impl SpiError {
     }
 
     /// The error a reading store call answers. A poisoned realm or scope
-    /// answers its typed refusal ([`Self::into_refusal`]), a host store that
-    /// could not serve now reads as [`RuntimeStoreError::Unavailable`], and
+    /// answers its typed refusal ([`RuntimeStoreError::RealmRefused`] or
+    /// [`RuntimeStoreError::ScopeRefused`]), a host store that could not
+    /// serve now reads as [`RuntimeStoreError::Unavailable`], and
     /// data that does not decode or fails the host's own integrity check as
     /// [`RuntimeStoreError::Corrupt`], so a reader can tell a refusal that
     /// lasts until the realm reopens and an outage a later read may get past

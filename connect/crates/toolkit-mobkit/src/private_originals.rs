@@ -555,6 +555,9 @@ pub struct PrivateOriginals {
     review_observations: Arc<crate::installed_host::review_diagnostics::ReviewObservations>,
     #[cfg(test)]
     pub(crate) metadata_probe: OnceLock<Arc<recovery_probe::MetadataRecoveryProbe>>,
+    // A helper control's emulated dispatch tool deadline (setup_helpers).
+    #[cfg(test)]
+    helper_tool_deadline_for_test: OnceLock<tokio::time::Instant>,
     custody_recovery: custody_recovery::CustodyRecovery,
     scope: StoreScope,
     store: Arc<dyn ToolkitStore>,
@@ -798,6 +801,8 @@ impl PrivateOriginals {
             custody_recovery: Default::default(),
             #[cfg(test)]
             metadata_probe: OnceLock::new(),
+            #[cfg(test)]
+            helper_tool_deadline_for_test: OnceLock::new(),
             scope,
             store,
             owner,

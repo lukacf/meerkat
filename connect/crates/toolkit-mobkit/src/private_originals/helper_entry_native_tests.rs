@@ -12,6 +12,8 @@ type Fixture = FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilde
 
 #[path = "custody_recovery_helper_tests.rs"]
 mod custody_recovery_helper_tests;
+#[path = "helper_wait_native_tests.rs"]
+mod helper_wait_native_tests;
 
 pub(super) fn enrolled_login() -> (
     tokio::sync::watch::Sender<bool>,

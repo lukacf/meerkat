@@ -95,7 +95,8 @@ impl ObservedBridge {
             | DeliveryMode::HelperPolicyChangesAlways
             | DeliveryMode::HelperPolicyChangesThenUnresolved
             | DeliveryMode::HelperPolicyChangesThenRetirement
-            | DeliveryMode::HelperPolicyChangesThenDeadline => {}
+            | DeliveryMode::HelperPolicyChangesThenDeadline
+            | DeliveryMode::HelperPolicyChangeHeld(_) => {}
             DeliveryMode::HoldAccepted | DeliveryMode::HoldHelperAcceptedReply => {
                 // Native admission is real and its reply is retained unchanged.
                 // IdentityRuntime owns the entry permit and finishes it only
@@ -320,7 +321,26 @@ impl OperationPolicyOwner for AdmissionChangingOwner {
                 false
             }
         };
-        if selected {
+        if selected && let DeliveryMode::HelperPolicyChangeHeld(hold) = self.fault.mode {
+            // No semantic policy fact is changed either: a real owner change
+            // begins after the genuine policy read and stays in progress, on
+            // its own thread, through Core's enclosing currentness check.
+            let publication = self.publication.clone();
+            let (began, beginning) = std::sync::mpsc::channel();
+            let held = std::thread::spawn(move || {
+                let change = publication.try_begin_owner_change();
+                let _ = began.send(change.is_ok());
+                std::thread::sleep(hold);
+                drop(change);
+            });
+            let counter = if beginning.recv().unwrap_or(false) {
+                &self.fault.publication_changes
+            } else {
+                &self.fault.publication_change_failures
+            };
+            counter.fetch_add(1, Ordering::SeqCst);
+            self.fault.held_changes.lock().unwrap().push(held);
+        } else if selected {
             // No semantic policy fact is changed. This bounded fault advances
             // the actual stamp after its genuine policy read, before Core's
             // enclosing currentness check. No lock or writer crosses an await.

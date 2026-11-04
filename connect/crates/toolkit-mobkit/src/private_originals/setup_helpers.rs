@@ -797,29 +797,20 @@ impl PrivateOriginals {
                 }
                 reprepared = true;
                 // The publication changed under native admission's check. On
-                // the Find dispatch, wait that change out with Core's bounded
-                // stale-read wait, within the dispatch's remaining tool time
-                // and the source deadline, holding no guard, before the one
-                // rebind; a change that will not settle still ends the wait.
+                // the Find dispatch the one rebind goes only after that change
+                // is waited out and everything it relies on is current again
+                // (helper_rebind_after_wait); otherwise the dispatch stops at
+                // ReprepareRequired. An expired source deadline stays the
+                // denial checked above, and without a dispatch the one rebind
+                // is immediate, as before.
                 if let (Some(context), Some(churn)) = (dispatch, churn.as_mut())
-                    && let Some(work) = context.work_authorization()
+                    && tokio::time::Instant::now() < source_deadline
+                    && !self
+                        .helper_rebind_after_wait(prepared, context, churn, source_deadline)
+                        .await
+                    && tokio::time::Instant::now() < source_deadline
                 {
-                    let request =
-                        source_deadline.saturating_duration_since(tokio::time::Instant::now());
-                    let budget = context
-                        .remaining_tool_time()
-                        .map_or(request, |tool| tool.min(request));
-                    if !budget.is_zero() {
-                        let _settled = churn
-                            .wait_after_stale_read(
-                                work.authorization().as_ref(),
-                                Some(budget),
-                                "toolkit.setup_helper.submission",
-                                None,
-                            )
-                            .await
-                            .settled();
-                    }
+                    return Ok(SetupHelperSubmission::ReprepareRequired);
                 }
                 continue;
             }
@@ -852,6 +843,64 @@ impl PrivateOriginals {
                 PrivateOriginalSubmission::NativeOutcomeUnavailable
             }
         }))
+    }
+
+    /// The Find dispatch's wait before its helper's one rebind: Core's bounded
+    /// stale-read wait for the changed publication, holding no guard, within
+    /// the dispatch's remaining tool time and the source deadline (never
+    /// reset). True only when the dispatch has its work authority, budget was
+    /// left for the wait, the wait settled, budget is still left, and the
+    /// helper's source still admits work with its admitted helper work and
+    /// selection current.
+    async fn helper_rebind_after_wait(
+        &self,
+        prepared: &PreparedHelperController,
+        context: &ToolDispatchContext,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
+        source_deadline: tokio::time::Instant,
+    ) -> bool {
+        let remaining = || {
+            let request = source_deadline.saturating_duration_since(tokio::time::Instant::now());
+            let tool = context.remaining_tool_time();
+            #[cfg(test)]
+            let tool = self.helper_tool_time_for_test(tool);
+            tool.map_or(request, |tool| tool.min(request))
+        };
+        let Some(work) = context.work_authorization() else {
+            return false;
+        };
+        let budget = remaining();
+        !budget.is_zero()
+            && churn
+                .wait_after_stale_read(
+                    work.authorization().as_ref(),
+                    Some(budget),
+                    "toolkit.setup_helper.submission",
+                    None,
+                )
+                .await
+                .settled()
+            && !remaining().is_zero()
+            && self.with_new_work_admission(|| ()).is_ok()
+            && self.owner.check_admitted_helper(&prepared.admitted).is_ok()
+            && self
+                .require_helper_selection(prepared.admitted.selection())
+                .is_ok()
+    }
+
+    /// A control's emulated dispatch tool deadline: Core sets a dispatch's
+    /// tool time only inside its own fenced dispatch, so a control bounds the
+    /// helper's wait by this instant as well.
+    #[cfg(test)]
+    fn helper_tool_time_for_test(
+        &self,
+        tool: Option<std::time::Duration>,
+    ) -> Option<std::time::Duration> {
+        let Some(deadline) = self.helper_tool_deadline_for_test.get() else {
+            return tool;
+        };
+        let emulated = deadline.saturating_duration_since(tokio::time::Instant::now());
+        Some(tool.map_or(emulated, |tool| tool.min(emulated)))
     }
 }
 

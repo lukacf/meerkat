@@ -105,6 +105,9 @@ pub(crate) enum DeliveryMode {
     HelperPolicyChangesThenUnresolved,
     HelperPolicyChangesThenRetirement,
     HelperPolicyChangesThenDeadline,
+    // The first helper admission instead finds a real owner change still in
+    // progress, held this long from another thread.
+    HelperPolicyChangeHeld(std::time::Duration),
 }
 
 impl DeliveryMode {
@@ -116,6 +119,7 @@ impl DeliveryMode {
                 | Self::HelperPolicyChangesThenUnresolved
                 | Self::HelperPolicyChangesThenRetirement
                 | Self::HelperPolicyChangesThenDeadline
+                | Self::HelperPolicyChangeHeld(_)
         )
     }
 }
@@ -135,6 +139,7 @@ struct DeliveryFault {
     helper_admission_change: Mutex<Option<InputAuthorityAssociation>>,
     publication_changes: AtomicUsize,
     publication_change_failures: AtomicUsize,
+    held_changes: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 impl DeliveryFault {
     fn new(mode: DeliveryMode) -> Self {
@@ -153,6 +158,7 @@ impl DeliveryFault {
             helper_admission_change: Mutex::new(None),
             publication_changes: AtomicUsize::new(0),
             publication_change_failures: AtomicUsize::new(0),
+            held_changes: Mutex::new(Vec::new()),
         }
     }
 }

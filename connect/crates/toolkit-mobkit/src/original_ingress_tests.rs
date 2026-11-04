@@ -615,6 +615,123 @@ fn source_settlement_promotes_exact_custody_but_cold_restore_does_not() {
     drop(pending);
 }
 
+// A native reader of retained custody (Core's ingress check and operation
+// ceilings) can meet the in-memory source collection while another owner
+// holds it for a short synchronous section. That is contention, not a
+// policy answer: the reader waits for the holder, within a bound.
+fn admitted_original(
+    dir: &Path,
+) -> (
+    Arc<ToolkitOriginalOwner>,
+    Arc<RetainedToolkitOriginal>,
+    QualifiedIngressNamespace,
+    OriginalWorkRef,
+) {
+    let owner = initialized(&dir.join("grants"));
+    let base = base(&owner);
+    let a = enroll(&owner, claims("a", &base), "a-child");
+    assert!(Arc::ptr_eq(
+        &owner.record_candidate(&a).unwrap().admit().unwrap(),
+        &a
+    ));
+    let namespace = a.association.candidate().ingress_namespace.clone();
+    let work = a.association.candidate().original_work.clone();
+    (owner, a, namespace, work)
+}
+
+#[test]
+fn retained_custody_waits_for_a_held_source_collection_instead_of_refusing() {
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (owner, _a, namespace, work) = admitted_original(dir.path());
+    assert!(matches!(
+        owner.retained_custody(&namespace, &work),
+        Ok(RetainedCustody::Retained(_))
+    ));
+    let (held, holding) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let holder = scope.spawn(|| {
+            let originals = owner.originals.lock().unwrap();
+            held.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(originals);
+        });
+        holding.recv().unwrap();
+        let answer = owner.retained_custody(&namespace, &work);
+        assert!(
+            matches!(answer, Ok(RetainedCustody::Retained(_))),
+            "a held source collection is waited for, not answered unavailable: {answer:?}"
+        );
+        holder.join().unwrap();
+    });
+}
+
+#[test]
+fn retained_custody_stays_unavailable_on_a_poisoned_source_collection() {
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (owner, _a, namespace, work) = admitted_original(dir.path());
+    let poisoned = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let _originals = owner.originals.lock().unwrap();
+                panic!("controlled source collection poison");
+            })
+            .join()
+    });
+    assert!(poisoned.is_err());
+    assert!(owner.originals.is_poisoned());
+    let started = std::time::Instant::now();
+    assert!(matches!(
+        owner.retained_custody(&namespace, &work),
+        Err(ControllerReadinessFailure::PolicyUnavailable)
+    ));
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(500),
+        "poison answers unavailable at once, without waiting"
+    );
+}
+
+#[test]
+fn retained_custody_waits_at_most_its_bound_and_then_answers_unavailable() {
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (owner, _a, namespace, work) = admitted_original(dir.path());
+    let bound = meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+    let (held, holding) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let holder = scope.spawn(|| {
+            let originals = owner.originals.lock().unwrap();
+            held.send(()).unwrap();
+            std::thread::sleep(bound + std::time::Duration::from_millis(1500));
+            drop(originals);
+        });
+        holding.recv().unwrap();
+        let started = std::time::Instant::now();
+        let answer = owner.retained_custody(&namespace, &work);
+        let waited = started.elapsed();
+        assert!(
+            matches!(answer, Err(ControllerReadinessFailure::PolicyUnavailable)),
+            "a holder that outlasts the bound is answered unavailable: {answer:?}"
+        );
+        assert!(
+            waited >= bound,
+            "the reader waits up to its bound: {waited:?}"
+        );
+        assert!(
+            waited < bound + std::time::Duration::from_millis(1000),
+            "and never past it: {waited:?}"
+        );
+        holder.join().unwrap();
+    });
+}
+
 pub(crate) fn private_event(label: &str) -> crate::private_originals::PrivateAuthenticatedEvent {
     use crate::private_originals::{PrivateAuthenticatedEvent, PrivateSourceEvidence};
     let sha256 = evidence(label)

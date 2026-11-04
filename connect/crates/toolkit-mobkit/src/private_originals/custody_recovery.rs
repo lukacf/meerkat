@@ -821,6 +821,13 @@ impl PrivateOriginals {
         self.custody_recovery.stop();
     }
 
+    /// Select this source's custody recovery without starting its task, so a
+    /// control reads enrolled readiness with no recovery round running.
+    #[cfg(test)]
+    pub(super) fn select_custody_recovery_for_test(&self) {
+        self.custody_recovery.control.state.lock().unwrap().selected = true;
+    }
+
     /// A cancelled join leaves the exact task and its entered transactions
     /// retained. Stop does not claim native cancellation or source terminality.
     pub(crate) async fn join_custody_recovery(&self) -> Result<(), PrivateOriginalError> {
@@ -1667,6 +1674,9 @@ impl PrivateOriginals {
         progress
     }
 }
+
+#[cfg(test)]
+mod readiness_tests;
 
 #[cfg(test)]
 mod admission_tests {

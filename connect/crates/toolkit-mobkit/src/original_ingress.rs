@@ -2589,7 +2589,7 @@ impl ToolkitOriginalOwner {
     }
 
     #[cfg(test)]
-    fn record_candidate(
+    pub(crate) fn record_candidate(
         self: &Arc<Self>,
         original: &Arc<RetainedToolkitOriginal>,
     ) -> Result<PendingToolkitOriginal, OriginalWriterError> {

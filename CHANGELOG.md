@@ -49,6 +49,14 @@ them.
   refused before any model request, and no other route or credential is
   tried. See Added and Breaking.
 
+- One poisoned host store scope no longer refuses store-wide reads
+  realm-wide. Each such read now depends only on the scope families it
+  reads, and a call a poisoned scope refuses answers the typed
+  `RuntimeStoreError::ScopeRefused { scopes }`, naming each refused scope
+  with its poison cause. The recovery-work scan answers, listing a
+  poisoned runtime as holding work. Affects 0.9.5 through 0.9.9. See
+  Breaking, Added, Changed and Fixed.
+
 ### Breaking
 
 - `meerkat-runtime`, `meerkat-machine-schema`, `meerkat-machine-kernels`:
@@ -657,6 +665,22 @@ them.
   delegations cannot finish (for example, a mob restore that keeps failing)
   is refused after 30 seconds with an error that names it, where it waited
   without limit. Treat it as retryable once the mob restores.
+
+- A poisoned host store scope (see Breaking): a session read the store
+  refuses until its realm is reopened answers `SessionError::Store`, whose
+  `SessionError::code` is `SESSION_STORE_ERROR` (was `AGENT_ERROR`);
+  `meerkat_core::service::transport::jsonrpc_code` answers `-32006` for it
+  (was `-32000`), and a wire error built from it carries `INTERNAL_ERROR`
+  (was `AGENT_ERROR`). The HTTP status stays 500, and a session method's
+  JSON-RPC error over `rkat-rpc` is `INTERNAL_ERROR` either way. `MobHandle`
+  waits on a member whose session the store refuses end with
+  `MobError::SessionError`, carrying the store's typed refusal, and
+  `RuntimeDeliveryInbox::pending_delivery_total` and
+  `runtimes_with_pending_deliveries` refuse typed while a runtime scope is
+  poisoned. Meerkat Meta's `HostStoreReadiness::is_ready()` no longer counts
+  a scope-only poison: a probe that must keep the earlier rule checks
+  `readiness.is_ready() && !readiness.scope_poisoned`, and
+  `HostStoreReadiness::poisoned_scopes` is new (see Meta's changelog).
 
 ### Known limitations
 

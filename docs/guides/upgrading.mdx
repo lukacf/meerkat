@@ -182,6 +182,45 @@ compiles, but the default disables what it carries:
 - a `DecisionStore` wrapper: `claim_executor`. Its default refuses, so no
   `DecisionExecutorLoop` starts over the wrapper (`DecisionError::Unavailable`).
 
+### A poisoned host store scope
+
+One poisoned host store scope no longer refuses store-wide reads realm-wide:
+each such read now depends only on the scope families it reads. A call that
+a poisoned scope or a poisoned realm refuses answers the typed
+`RuntimeStoreError::ScopeRefused { scopes }`, naming each refused scope with
+its poison cause, or `RuntimeStoreError::RealmRefused { cause }`, where it
+answered `ReadFailed` or `WriteFailed` with the refusal's text. Behaviour
+changes for a poisoned scope:
+
+- A committed session read that the store refuses until its realm is
+  reopened surfaces as `SessionError::Store`: its `SessionError::code` is
+  `SESSION_STORE_ERROR` (was `AGENT_ERROR`).
+- `meerkat_core::service::transport::jsonrpc_code` answers `-32006` for it
+  (was `-32000`).
+- A wire error built from it (`WireError::from`) carries `INTERNAL_ERROR`,
+  JSON-RPC `-32603` (was `AGENT_ERROR`, `-32013`).
+- The HTTP status stays 500, and a session method's JSON-RPC error over
+  `rkat-rpc` (and the `rkat` exit status) is `INTERNAL_ERROR` either way.
+- `MobHandle::wait_one`, `wait_all`, `wait_for_kickoff_complete` and
+  `wait_for_members_kickoff_complete` end with `MobError::SessionError`,
+  carrying the store's typed refusal, when a member they wait on is not
+  final and the store refuses its session. They polled that member's status
+  until the caller gave up, a kickoff wait until its timeout.
+- `RuntimeDeliveryInbox::pending_delivery_total` and
+  `runtimes_with_pending_deliveries` answer while only scopes of other
+  families are poisoned, and refuse with
+  `RuntimeDeliveryError::Store(RuntimeStoreError::ScopeRefused { .. })`
+  while a runtime scope is poisoned.
+- Meta: `HostStoreReadiness::is_ready()` no longer counts a scope-only
+  poison; a poisoned realm still makes it not ready.
+  `HostStoreReadiness::poisoned_scopes`, every poisoned scope with its
+  cause, is new.
+
+**Do:** a caller that matched `ReadFailed` or `WriteFailed` for these
+refusals matches the new variants; one that only formats the error keeps
+compiling. A Meta probe that must keep the earlier rule checks
+`readiness.is_ready() && !readiness.scope_poisoned`.
+
 ### New
 
 - **GitHub Copilot configured once.** A `[realm.<realm>.copilot]` section

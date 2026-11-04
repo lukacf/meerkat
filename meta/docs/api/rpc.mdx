@@ -1229,6 +1229,28 @@ never dispatched again. A replay waits for that evidence as long as
 startup the gateway settles, from evidence only, the unsettled sends among
 the newest console frames whose input was admitted.
 
+### `meta/console/whoami`
+
+Who the console acts as for the calling request, derived from the connection
+alone: the token the console verified, or none on an open console. Takes no
+params. Read-only, so a read-only console serves it too.
+
+| Result field | Type | Description |
+|--------------|------|-------------|
+| `actor.kind` | `string` | `person` (a verified token of a human: an OIDC issuer and `sub`), `service` (a service token: an `svc:` principal or a service actor), `token_principal` (a verified token that names no human) or `anonymous` (an open console's caller without a verified token) |
+| `actor.principal` | `string` or `null` | The caller's own principal (the email, or the `sub` when the token carries no email); `null` for `anonymous` |
+| `actor.assurance` | `string` or `null` | `person_authenticated` for `person`, `service_credential` for `service`, otherwise `null` |
+| `posture` | `string` | `enforced` (the console verifies every caller) or `open` (callers without a token are admitted) |
+| `login_expires_at_ms` | `integer` or `null` | The first instant the console refuses the caller's token: its `exp` plus the verifier's 30 s leeway, in milliseconds since the epoch; `null` without a token or an `exp` |
+| `can_administer` | `boolean` | Whether the caller may edit the access configuration; `false` without an access controller |
+| `approver_ids` | `string[]` | The approver ids the caller holds through the access configuration's `approvers` bindings |
+| `caller_scope` | `string` | An opaque digest of the caller the console resolved; stable for one caller across its tokens, and shared by every anonymous caller of an open console |
+
+On an open console with an access controller, a caller that volunteers a
+verified token is identified (and an anonymous caller is bound by every deny
+rule that names a subject or a group; see
+[Access control](/concepts/access-control)).
+
 ### `meta/console/recover_send`
 
 Recover the caller's own console send: its acceptance as it is now and what

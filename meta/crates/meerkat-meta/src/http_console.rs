@@ -167,7 +167,53 @@ struct ConsoleHttpAuthContext {
     verification: Option<crate::runtime::ConsoleCallerVerification>,
 }
 
+/// Who the Console acts as for one request, derived from the connection
+/// alone: the token the Console verified, or none on an open Console. No
+/// request field names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsoleActorKind {
+    /// A verified human token: an OIDC issuer and `sub`.
+    Person,
+    /// A verified service token (`svc:` principal or service actor).
+    Service,
+    /// A verified token that names no human (no `sub`).
+    TokenPrincipal,
+    /// A caller of an open Console without a verified token.
+    Anonymous,
+}
+
+impl ConsoleActorKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Person => "person",
+            Self::Service => "service",
+            Self::TokenPrincipal => "token_principal",
+            Self::Anonymous => "anonymous",
+        }
+    }
+
+    /// The authentication assurance the Console established for this kind
+    /// of caller; a token that names no human claims none.
+    fn assurance(self) -> Option<meerkat_core::ApprovalAssurance> {
+        match self {
+            Self::Person => Some(meerkat_core::ApprovalAssurance::PersonAuthenticated),
+            Self::Service => Some(meerkat_core::ApprovalAssurance::ServiceCredential),
+            Self::TokenPrincipal | Self::Anonymous => None,
+        }
+    }
+}
+
 impl ConsoleHttpAuthContext {
+    /// Who the Console acts as for this request.
+    fn actor_kind(&self) -> ConsoleActorKind {
+        match (&self.human, &self.principal) {
+            (Some(_), _) => ConsoleActorKind::Person,
+            (None, Some(_)) if self.service_identity => ConsoleActorKind::Service,
+            (None, Some(_)) => ConsoleActorKind::TokenPrincipal,
+            (None, None) => ConsoleActorKind::Anonymous,
+        }
+    }
+
     /// The scope this caller's console sends are deduplicated in: the
     /// verified human (issuer and subject) when there is one, else the
     /// authenticated principal with its trust source, else the open
@@ -1230,6 +1276,78 @@ fn attach_console_send_dedupe(experience: &mut Value, aggregator: Option<&MetaCo
     }
 }
 
+/// `meta/console/whoami`: who the Console acts as for this request. Only
+/// the caller's own principal appears; the approver ids are the ones its
+/// access snapshot holds.
+fn console_whoami_rpc(
+    decisions: &RuntimeDecisionState,
+    auth: &ConsoleHttpAuthContext,
+    request: &JsonRpcRequest,
+) -> Value {
+    use crate::gateway_composition::ConsoleAuthPosture;
+    let response_id = request.id.clone().unwrap_or(Value::Null);
+    let kind = auth.actor_kind();
+    let posture = match ConsoleAuthPosture::of(decisions) {
+        ConsoleAuthPosture::Open => "open",
+        ConsoleAuthPosture::Enforced => "enforced",
+        ConsoleAuthPosture::ClosedToEveryCaller => "closed",
+    };
+    // The first instant the Console refuses the caller's token: its `exp`
+    // plus the verifier's leeway. `None` without a token or an `exp`.
+    let login_expires_at_ms = auth
+        .verification
+        .as_ref()
+        .and_then(crate::runtime::ConsoleCallerVerification::refused_from)
+        .and_then(|instant| instant.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
+    let (can_administer, approver_ids) = match &auth.access_view {
+        Some(view) => (
+            view.can_administer(),
+            view.held_approver_ids().into_iter().collect::<Vec<_>>(),
+        ),
+        None => (false, Vec::new()),
+    };
+    response_value(
+        response_id,
+        Some(json!({
+            "actor": {
+                "kind": kind.as_str(),
+                "principal": auth.principal,
+                "assurance": kind.assurance(),
+            },
+            "posture": posture,
+            "login_expires_at_ms": login_expires_at_ms,
+            "can_administer": can_administer,
+            "approver_ids": approver_ids,
+            "caller_scope": console_caller_scope(&auth.send_scope()),
+        })),
+        None,
+    )
+}
+
+/// An opaque, stable digest of the caller the Console resolved for a
+/// request, from its send scope: the verified human (issuer and subject),
+/// the principal with its trust source, or the open Console's one anonymous
+/// caller. The same caller always gets the same digest.
+fn console_caller_scope(scope: &ConsoleSendScope) -> String {
+    use sha2::{Digest, Sha256};
+    let caller = match scope {
+        ConsoleSendScope::Human { issuer, subject } => json!(["human", issuer, subject]),
+        ConsoleSendScope::Principal {
+            principal,
+            provider,
+            issuer,
+        } => json!(["principal", principal, provider, issuer]),
+        ConsoleSendScope::Anonymous | ConsoleSendScope::Unscoped => json!(["anonymous"]),
+    };
+    let digest = Sha256::digest(
+        json!(["meta-console-caller-v1", caller])
+            .to_string()
+            .as_bytes(),
+    );
+    format!("console-caller:v1:{digest:x}")
+}
+
 /// Storage keys are opaque projections of the authenticated runtime/principal.
 /// Anonymous consoles form an explicit shared local account. The browser also
 /// includes its gateway base URL, and custom hosts can supply a stricter scope.
@@ -1308,6 +1426,10 @@ pub async fn console_rpc_handler(
     if request_method == crate::rpc::CONSOLE_REVOKE_SESSIONS_METHOD {
         let response =
             console_revoke_sessions_rpc(&state, &auth_context, read_only, &parsed_request);
+        return (StatusCode::OK, Json::<Value>(response));
+    }
+    if request_method == crate::rpc::CONSOLE_WHOAMI_METHOD {
+        let response = console_whoami_rpc(&state.decisions, &auth_context, &parsed_request);
         return (StatusCode::OK, Json::<Value>(response));
     }
     if matches!(
@@ -9613,6 +9735,7 @@ async fn handle_console_aggregator_rpc(
         "meta/capabilities" => {
             let mut methods = vec![
                 "meta/capabilities",
+                crate::rpc::CONSOLE_WHOAMI_METHOD,
                 "meta/console/list_identities",
                 "meta/console/inspect_identity",
                 "meta/console/query_timeline",
@@ -10029,6 +10152,7 @@ async fn handle_console_runtime_rpc_with_visibility(
             let mut methods = vec![
                 "meta/status",
                 "meta/capabilities",
+                crate::rpc::CONSOLE_WHOAMI_METHOD,
                 "meta/list_members",
                 "meta/get_member",
                 "meta/find_members",

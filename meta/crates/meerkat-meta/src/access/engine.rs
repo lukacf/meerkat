@@ -8,8 +8,10 @@ use super::model::{AccessControlConfig, AccessEffect, AccessRule, action_pattern
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AccessPrincipal {
     /// Authenticated subject (email or token `sub`). `None` means the
-    /// request was admitted without app auth (open console); such callers
-    /// only match rules with no subject/group constraints.
+    /// request was admitted without app auth (open console). Such a caller
+    /// may be any person: it matches every rule without subject or group
+    /// constraints and every deny rule that has them, and no allow rule
+    /// that has them.
     pub subject: Option<String>,
     /// Resolved group memberships for the subject.
     pub groups: BTreeSet<String>,
@@ -82,17 +84,19 @@ fn subject_matches(rule: &AccessRule, principal: &AccessPrincipal) -> bool {
     if rule.subjects.is_empty() && rule.groups.is_empty() {
         return true;
     }
-    // `subjects: ["*"]` matches any *authenticated* subject. It does NOT
-    // match the anonymous principal: an anonymous caller only matches rules
-    // with no subject/group constraints at all (see `AccessPrincipal.subject`
-    // and the resource selectors, where `"*"` likewise never matches an
-    // absent attribute). This keeps `subjects:["*"]` from silently granting
-    // unauthenticated callers on an open console.
-    if let Some(subject) = principal.subject.as_deref()
-        && rule
-            .subjects
-            .iter()
-            .any(|candidate| candidate == "*" || candidate == subject)
+    // An anonymous caller of an open console may be any person, including
+    // one a rule names. A deny rule with subject or group constraints binds
+    // it, so leaving out a token never escapes a deny. An allow rule with
+    // them never grants it, `subjects: ["*"]` included: `"*"` matches any
+    // *authenticated* subject, as `"*"` in the resource selectors never
+    // matches an absent attribute.
+    let Some(subject) = principal.subject.as_deref() else {
+        return matches!(rule.effect, AccessEffect::Deny);
+    };
+    if rule
+        .subjects
+        .iter()
+        .any(|candidate| candidate == "*" || candidate == subject)
     {
         return true;
     }

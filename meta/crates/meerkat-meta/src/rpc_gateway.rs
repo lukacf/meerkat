@@ -20076,6 +20076,17 @@ external_addressable = true
              runtime_options.console_require_app_auth = false for an explicitly open local console"
         );
     }
+    if crate::gateway_composition::ConsoleAuthPosture::of(&decision_state)
+        == crate::gateway_composition::ConsoleAuthPosture::Open
+        && crate::parse_jwks_json(&decision_state.trusted_oidc.jwks_json).is_ok()
+    {
+        tracing::warn!(
+            "runtime_options.console_require_app_auth = false overrides the trusted issuer of \
+             runtime_options.auth_config: the console admits callers without a token as one \
+             anonymous caller, and identifies a caller that volunteers a verified token only \
+             where an access controller is configured"
+        );
+    }
     let viewer_resolver = runtime.console_viewer_resolver(&decision_state);
     let send_precheck = runtime.console_send_precheck(&decision_state);
     let request_bound = crate::unified_runtime::http::ReferenceAppRequestBound::default();

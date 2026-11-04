@@ -959,8 +959,8 @@ async fn assert_structural_sse_excludes_and_includes_cursor(
     }
 }
 
-/// Anonymous callers (open console) only match rules with no subject
-/// constraints: visible/sendable only what those rules grant.
+/// Anonymous callers (open console) are granted only by rules with no
+/// subject constraints: visible/sendable only what those rules grant.
 fn anonymous_router_only_config() -> AccessControlConfig {
     AccessControlConfig {
         approvers: Default::default(),

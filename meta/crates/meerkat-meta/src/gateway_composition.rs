@@ -652,8 +652,10 @@ impl std::fmt::Display for HttpBindPolicyError {
                  the launch acknowledges the exposure with allow_remote \
                  (runtime_options.allow_remote = true on rpc_gateway; the allow_remote init param, \
                  --allow-remote, or META_HTTP_ALLOW_REMOTE=1 on meta_gateway). allow_remote is \
-                 an exposure acknowledgement, not an auth mechanism: pass it only with an \
-                 authenticating proxy in front of this listener"
+                 an exposure acknowledgement, not an auth mechanism: without app auth the \
+                 console treats every caller as one anonymous caller, even behind a proxy that \
+                 signs people in. To tell people apart, configure auth_config so the console \
+                 verifies each person's token"
             ),
         }
     }
@@ -694,14 +696,17 @@ pub fn warn_on_non_loopback_bind(
         ConsoleAuthPosture::ClosedToEveryCaller => {
             "the console requires app auth but trusts no key (refuses every caller)"
         }
-        ConsoleAuthPosture::Open => "the console is OPEN (no app auth)",
+        ConsoleAuthPosture::Open => {
+            "the console is OPEN (no app auth): every caller is one anonymous caller, even \
+             behind a proxy that signs people in"
+        }
     };
     tracing::warn!(
         %bound,
         "{surface} HTTP listener is bound to a NON-LOOPBACK address; {console_auth}; every route \
          on this listener (console, JSON-RPC, blobs, SSE, live) is reachable by anyone who can \
-         reach {bound}. Bind 127.0.0.1 (the default) unless an authenticating proxy fronts this \
-         listener"
+         reach {bound}. Bind 127.0.0.1 (the default) unless people must reach it from other \
+         hosts, and configure auth_config to tell them apart"
     );
 }
 

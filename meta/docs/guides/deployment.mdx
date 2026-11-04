@@ -141,8 +141,11 @@ is bootstrapped, unless one of two things is true in its admission-time state:
 2. **The launch acknowledges the exposure with `allow_remote`.** This is the
    same word and the same rule as `--allow-remote` on `rkat-rpc --tcp` and
    `rkat mob host --listen-tcp` in Meerkat: an explicit transport-exposure
-   opt-in, not an auth mechanism. Pass it only when an authenticating proxy
-   fronts the listener.
+   opt-in, not an auth mechanism. Without app auth the console treats every
+   caller as one anonymous caller, even behind a proxy that signs people in.
+   To tell people apart, configure `auth_config` so the console verifies each
+   person's token (a proxy can forward its sign-in token as
+   `Authorization: Bearer`).
 
 `rpc_gateway` applies its `runtime_options.auth_config` before this check.
 `meta_gateway` accepts the same JWT/OIDC shape as top-level `auth_config`,

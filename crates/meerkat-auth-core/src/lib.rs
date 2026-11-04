@@ -13,10 +13,10 @@
 //!
 //! Deferral §3 B2 split (2026-04-18): extracted from `meerkat-providers`.
 
-// Without `workspace-tests` (the published package: `cargo package` strips
-// the self dev-dependency that enables it) the unit tests that need the
-// workspace compile out, and the test helpers only they use go unused. The
-// workspace build turns the feature on and keeps both lints.
+// Without `workspace-tests` (the published package, whose test command
+// leaves it off) the unit tests that need the workspace compile out, and
+// the test helpers only they use go unused. The workspace's test builds
+// turn the feature on and keep both lints.
 #![cfg_attr(
     all(test, not(feature = "workspace-tests")),
     allow(dead_code, unused_imports)

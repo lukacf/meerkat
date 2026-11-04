@@ -193,7 +193,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//crates/meerkat-auth-core:meerkat_auth_core",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-llm-core:meerkat_llm_core",
         "//crates/meerkat-runtime:meerkat_runtime_test_support",

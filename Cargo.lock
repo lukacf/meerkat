@@ -3151,7 +3151,6 @@ dependencies = [
  "indexmap",
  "jsonwebtoken",
  "keyring",
- "meerkat-auth-core",
  "meerkat-core",
  "meerkat-llm-core",
  "meerkat-runtime",

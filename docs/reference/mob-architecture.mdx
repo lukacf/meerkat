@@ -436,12 +436,15 @@ retires the member. One placed on a member host, or bound to no session, is
 never an entry: it is retired without its adoption (`RetireUnadopted`),
 through the ordinary retirement at the incarnation MobMachine decided on (at
 its delivery scope when it is bound to a session), with no cause recorded,
-and its name is left free. One whose retirement started already is answered
-`NotAdopted` (`NotAdoptedReason::Retiring`), and its own retirement ends it.
-A member with one mark only, or one a host adopted, is left as it is, and a
-partial roster offers no member it does not list. A dormant seat never takes
-an identity hosted on its first use or awaiting its held creation
-(`MobError::WiringError`).
+and its name is left free. One bound to no session is retired at the
+incarnation current in the retirement's own step, once a check found it still
+the one decided on, so a respawn between the two is retired in its place; a
+later roster that lists the identity seats it again. One whose retirement
+started already is answered `NotAdopted` (`NotAdoptedReason::Retiring`), and
+its own retirement ends it. A member with one mark only, or one a host
+adopted, is left as it is, and a partial roster offers no member it does not
+list. A dormant seat never takes an identity hosted on its first use or
+awaiting its held creation (`MobError::WiringError`).
 
 A complete roster is sealed after its last chunk (`SealDeclaredRoster`):
 every Declared entry it does not list is unlisted (never a created entry, nor

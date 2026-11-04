@@ -1556,10 +1556,11 @@ impl super::MobHandle {
     /// captured now: the scope must still name that incarnation, and the
     /// scoped retirement checks it again in the step that retires the
     /// member. A member bound to no session has no delivery scope: its
-    /// current incarnation must still be that one, and the retirement
-    /// retires the exact incarnation it reads. A moved incarnation is
-    /// refused retryable, and the next complete apply decides its member
-    /// again.
+    /// current incarnation must still be that one when this reads it, and
+    /// the retirement retires the incarnation current in its own step, so a
+    /// respawn between the two is retired in its place (a later roster that
+    /// lists the identity seats it again). A moved incarnation is refused
+    /// retryable, and the next complete apply decides its member again.
     async fn retire_unadopted_legacy_member(
         &self,
         identity: &AgentIdentity,

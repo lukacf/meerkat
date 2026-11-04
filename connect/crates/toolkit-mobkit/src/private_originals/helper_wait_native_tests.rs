@@ -6,13 +6,14 @@
 //! it only inside its own fenced dispatch); the source deadline stays live
 //! throughout. A change that outlasts the tool time, or no tool time left at
 //! all, stops the dispatch at ReprepareRequired after one native call; one
-//! that settles within it lets the one rebind go with the same input. The
-//! source's custody recovery is selected, as the completed host selects it,
-//! so the helper's first candidate is enrolled and retained: its refusal drops
-//! no source guard (an unenrolled candidate's guard drop would take the
-//! publication writer and wait out the change before the dispatch's own
-//! wait). Each control names the exact stop, and the helper's source attempt
-//! is settled once the owners joined.
+//! that settles within it lets the one rebind go with the same input. Each
+//! control names the exact stop. In this fixture the source's custody recovery
+//! is not selected unless a control selects it: an unenrolled first candidate's
+//! guard is dropped at the refusal, which takes the publication writer and so
+//! waits out a change still in progress before the dispatch's own wait. The
+//! control for a change outlasting the tool time therefore selects the
+//! recovery, as the completed host does: its first candidate is enrolled and
+//! retained, and the dispatch's wait meets the change in progress.
 use super::*;
 use crate::private_originals::custody_recovery::HandoffPhase;
 use crate::private_originals::governed_submit::SourcePublication;
@@ -21,6 +22,7 @@ async fn exercise_helper_wait(
     hold: Duration,
     tool_time: Duration,
     stop: Option<setup_helpers::HelperRebindStop>,
+    enrolled: bool,
 ) {
     let rebind = stop.is_none();
     let (_connection, _logins, login) = enrolled_login();
@@ -34,13 +36,15 @@ async fn exercise_helper_wait(
     let checked = std::panic::AssertUnwindSafe(tokio::time::timeout_at(
         deadline,
         Box::pin(async {
-            // Select the real source task before either first input.
-            fixture
-                .source
-                .start_custody_recovery(
-                    fixture.native.mob_runtime().continuation_source_announcer(),
-                )
-                .unwrap();
+            if enrolled {
+                // Select the real source task before either first input.
+                fixture
+                    .source
+                    .start_custody_recovery(
+                        fixture.native.mob_runtime().continuation_source_announcer(),
+                    )
+                    .unwrap();
+            }
             let helper_session = fault.helper_session.get().unwrap().clone();
             let (_prepared, _parent) = acquisition_approved::select_reviewed_setup(&fixture).await;
             let first = fixture.submit().await;
@@ -152,18 +156,19 @@ async fn exercise_helper_wait(
                 held.handoffs_for_test().is_empty(),
                 "definite refusal or successful acceptance consumes its Box"
             );
-            // The enrolled first candidate stays retained; a stopped dispatch
-            // released its binder, so its foreground handed it to recovery.
-            let retained = held
-                .first_custody
-                .lock()
-                .unwrap()
-                .clone()
-                .expect("the helper's enrolled first candidate is retained");
-            if !rebind {
-                assert!(retained.handoff.phase() != HandoffPhase::Foreground);
+            // An enrolled first candidate stays retained (a stopped dispatch
+            // released its binder, so its foreground handed it to recovery);
+            // an unenrolled one is not retained.
+            let retained = held.first_custody.lock().unwrap().clone();
+            if enrolled {
+                let retained = retained.expect("the helper's enrolled first candidate is retained");
+                if !rebind {
+                    assert!(retained.handoff.phase() != HandoffPhase::Foreground);
+                }
+                *custody.lock().unwrap() = Some(Arc::downgrade(&retained));
+            } else {
+                assert!(retained.is_none());
             }
-            *custody.lock().unwrap() = Some(Arc::downgrade(&retained));
             assert_eq!(fixture.source.helper_sources.lock().unwrap().len(), 1);
         }),
     ))
@@ -181,15 +186,19 @@ async fn exercise_helper_wait(
     }
     // Withdrawn (a stopped dispatch) or promoted (the rebind), by the
     // recovery the owners joined.
-    let custody = custody.lock().unwrap().take().unwrap();
+    let custody = custody.lock().unwrap().take();
     assert!(
-        custody.upgrade().is_none_or(|pending| {
+        custody.is_some() == enrolled,
+        "an enrolled first candidate was retained"
+    );
+    assert!(
+        custody.is_none_or(|custody| custody.upgrade().is_none_or(|pending| {
             pending.handoff.phase() == HandoffPhase::Done
                 && matches!(
                     pending.publication.lock().unwrap().source,
                     SourcePublication::Settled { .. }
                 )
-        }),
+        })),
         "the helper's source attempt settled once its owners joined"
     );
 }
@@ -197,9 +206,10 @@ async fn exercise_helper_wait(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn helper_change_outlasting_the_tool_time_stops_after_one_native_call() {
     Box::pin(exercise_helper_wait(
-        Duration::from_secs(3),
+        Duration::from_millis(800),
         Duration::from_millis(300),
         Some(setup_helpers::HelperRebindStop::WaitUnsettled),
+        true,
     ))
     .await;
 }
@@ -207,9 +217,10 @@ async fn helper_change_outlasting_the_tool_time_stops_after_one_native_call() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn helper_with_no_tool_time_left_stops_after_one_native_call() {
     Box::pin(exercise_helper_wait(
-        Duration::from_secs(1),
+        Duration::from_millis(300),
         Duration::ZERO,
         Some(setup_helpers::HelperRebindStop::NoBudget),
+        false,
     ))
     .await;
 }
@@ -220,6 +231,7 @@ async fn helper_change_settling_within_the_tool_time_rebinds_once() {
         Duration::from_secs(1),
         Duration::from_secs(10),
         None,
+        false,
     ))
     .await;
 }

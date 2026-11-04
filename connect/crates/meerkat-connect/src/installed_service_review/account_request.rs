@@ -512,11 +512,17 @@ impl RequestTool {
         if let Some(refreshed) = current.check_tool_authorization(call, plan)? {
             current = refreshed;
         }
-        let task = task.map_err(|error| match error {
-            toolkit_mobkit::private_originals::PrivateOriginalError::Unavailable => unavailable(),
-            toolkit_mobkit::private_originals::PrivateOriginalError::Conflict
-            | toolkit_mobkit::private_originals::PrivateOriginalError::Denied => {
-                ToolError::access_denied(call.name)
+        let task = task.map_err(|error| {
+            use toolkit_mobkit::{
+                installed_host::acquisition::ServiceTaskError,
+                private_originals::PrivateOriginalError,
+            };
+            match error {
+                ServiceTaskError::Refused(PrivateOriginalError::Unavailable) => unavailable(),
+                ServiceTaskError::Refused(
+                    PrivateOriginalError::Conflict | PrivateOriginalError::Denied,
+                ) => ToolError::access_denied(call.name),
+                ServiceTaskError::ReprepareRequired => ServiceTaskError::reprepare_required(),
             }
         })?;
         if let Some(task) = &task {

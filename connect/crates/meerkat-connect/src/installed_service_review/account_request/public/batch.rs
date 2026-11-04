@@ -145,7 +145,13 @@ pub(super) async fn dispatch(
         .ok_or_else(|| ToolError::access_denied(call.name))?
         .prepare_public_service(call, &current, plan)
         .await
-        .map_err(|_| unavailable())?
+        .map_err(|error| {
+            use toolkit_mobkit::installed_host::acquisition::ServiceTaskError;
+            match error {
+                ServiceTaskError::Refused(_) => unavailable(),
+                ServiceTaskError::ReprepareRequired => ServiceTaskError::reprepare_required(),
+            }
+        })?
         .ok_or_else(|| ToolError::access_denied(call.name))?;
     require_captured_consumer(call.name, &proposal.agent, &task)?;
     // This new set shape deliberately uses one real protected Console review.

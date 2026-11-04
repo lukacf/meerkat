@@ -2,8 +2,8 @@
 //! locally; the configured producer child below supplies correlated A targets.
 //! Neither fixture is a Console approval or account-provider interaction.
 use super::*;
-use crate::installed_host::acquisition::InstalledServiceTaskSource;
 use crate::installed_host::acquisition::InstalledSetupSelection;
+use crate::installed_host::acquisition::{InstalledServiceTaskSource, ServiceTaskError};
 use crate::private_originals::InstalledServiceTask;
 use futures::StreamExt;
 use meerkat_core::{AgentToolDispatcher, ToolCallView, ToolDispatchContext, ToolResult};
@@ -26,7 +26,7 @@ enum ReportPreparation {
 struct ReportPreparationRequest {
     source: InstalledServiceTaskSource,
     kind: ReportPreparation,
-    reply: tokio::sync::oneshot::Sender<Result<Option<InstalledServiceTask>, PrivateOriginalError>>,
+    reply: tokio::sync::oneshot::Sender<Result<Option<InstalledServiceTask>, ServiceTaskError>>,
 }
 
 pub(super) struct Report {
@@ -82,7 +82,7 @@ impl Report {
         &self,
         source: &InstalledServiceTaskSource,
         kind: ReportPreparation,
-    ) -> Result<InstalledServiceTask, PrivateOriginalError> {
+    ) -> Result<InstalledServiceTask, ServiceTaskError> {
         assert!(!self.leaf.released.load(Ordering::SeqCst));
         let (reply, received) = tokio::sync::oneshot::channel();
         assert!(
@@ -101,7 +101,7 @@ impl Report {
         received
             .await
             .expect("held report dispatch must settle preparation")?
-            .ok_or(PrivateOriginalError::Unavailable)
+            .ok_or(ServiceTaskError::Refused(PrivateOriginalError::Unavailable))
     }
 }
 
@@ -285,7 +285,7 @@ impl ReportLeaf {
                     );
                 }
                 let result = match context.check_tool_authorization(call, plan) {
-                    Err(_) => Err(PrivateOriginalError::Denied),
+                    Err(_) => Err(PrivateOriginalError::Denied.into()),
                     Ok(_) => match request.kind {
                         ReportPreparation::Software => {
                             request.source.prepare_software(call, context, plan).await

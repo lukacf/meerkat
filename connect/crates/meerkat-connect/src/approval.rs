@@ -351,19 +351,20 @@ pub struct ApprovalPresenter {
 // projection carries no retry or settlement authority.
 fn service_task_failure(
     name: &str,
-    error: toolkit_mobkit::private_originals::PrivateOriginalError,
+    error: impl Into<toolkit_mobkit::installed_host::acquisition::ServiceTaskError>,
 ) -> ToolError {
-    match error {
-        toolkit_mobkit::private_originals::PrivateOriginalError::Unavailable => {
-            ToolError::unavailable(
-                name,
-                meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
-            )
-        }
-        toolkit_mobkit::private_originals::PrivateOriginalError::Denied
-        | toolkit_mobkit::private_originals::PrivateOriginalError::Conflict => {
-            ToolError::access_denied(name)
-        }
+    use toolkit_mobkit::{
+        installed_host::acquisition::ServiceTaskError, private_originals::PrivateOriginalError,
+    };
+    match error.into() {
+        ServiceTaskError::Refused(PrivateOriginalError::Unavailable) => ToolError::unavailable(
+            name,
+            meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
+        ),
+        ServiceTaskError::Refused(
+            PrivateOriginalError::Denied | PrivateOriginalError::Conflict,
+        ) => ToolError::access_denied(name),
+        ServiceTaskError::ReprepareRequired => ServiceTaskError::reprepare_required(),
     }
 }
 
@@ -381,13 +382,19 @@ impl LocalApprovals {
             .ok_or_else(|| ToolError::access_denied(call.name))?
             .reserve_shared_entry(call, context, plan, member)
             .await
-            .map_err(|error| match error {
-                toolkit_mobkit::private_originals::PrivateOriginalError::Unavailable => {
-                    ToolError::OperationAuthorizationUnavailable
-                }
-                toolkit_mobkit::private_originals::PrivateOriginalError::Denied
-                | toolkit_mobkit::private_originals::PrivateOriginalError::Conflict => {
-                    ToolError::access_denied(call.name)
+            .map_err(|error| {
+                use toolkit_mobkit::{
+                    installed_host::acquisition::ServiceTaskError,
+                    private_originals::PrivateOriginalError,
+                };
+                match error {
+                    ServiceTaskError::Refused(PrivateOriginalError::Unavailable) => {
+                        ToolError::OperationAuthorizationUnavailable
+                    }
+                    ServiceTaskError::Refused(
+                        PrivateOriginalError::Denied | PrivateOriginalError::Conflict,
+                    ) => ToolError::access_denied(call.name),
+                    ServiceTaskError::ReprepareRequired => ServiceTaskError::reprepare_required(),
                 }
             })
     }

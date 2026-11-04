@@ -10,7 +10,7 @@ pub(crate) use enrollment::AcquisitionToolBinding;
 pub use enrollment::InstalledAcquisitionTools;
 mod task_approval;
 mod workflow_calls;
-pub use task_approval::InstalledServiceTaskSource;
+pub use task_approval::{InstalledServiceTaskSource, ServiceTaskError};
 pub(crate) mod recovery;
 mod results;
 #[cfg(feature = "test-support")]

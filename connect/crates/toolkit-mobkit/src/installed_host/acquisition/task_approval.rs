@@ -12,21 +12,62 @@ use toolkit_store::EffectKey;
 pub struct InstalledServiceTaskSource {
     pub(super) selected: Weak<Mutex<AcquisitionBootstrap>>,
 }
+
+/// A refusal of a service task entry point. `Refused` is the source owner's
+/// own answer. `ReprepareRequired` is this exact call's current authorization
+/// check refusing to rebuild after its bounded waits for owner changes on the
+/// work's own publication: Core's typed answer, no verdict, and never a
+/// denial or unavailability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ServiceTaskError {
+    #[error(transparent)]
+    Refused(#[from] PrivateOriginalError),
+    #[error("service task authorization must be prepared again")]
+    ReprepareRequired,
+}
+
+impl ServiceTaskError {
+    /// The tool projection of [`Self::ReprepareRequired`]: Core's typed
+    /// refusal to rebuild, which claims nothing about whether the call
+    /// dispatched. A `Refused` answer keeps its caller's own projection.
+    pub fn reprepare_required() -> meerkat_core::ToolError {
+        meerkat_core::ToolError::AuthorizationRefused {
+            refusal: meerkat_core::authorization::OperationRefused::new(
+                meerkat_core::authorization::OperationRefusalKind::ReprepareRequired,
+            ),
+        }
+    }
+}
+
 // Diagnostic labels describe only this failed boundary, never authority or retry permission.
 pub(super) fn shared_task_refusal(
     stage: &'static str,
     error: PrivateOriginalError,
 ) -> PrivateOriginalError {
-    let kind = match error {
-        PrivateOriginalError::Denied => "denied",
-        PrivateOriginalError::Unavailable => "unavailable",
-        PrivateOriginalError::Conflict => "conflict",
-    };
+    emit_shared_task_refusal(
+        stage,
+        match error {
+            PrivateOriginalError::Denied => "denied",
+            PrivateOriginalError::Unavailable => "unavailable",
+            PrivateOriginalError::Conflict => "conflict",
+        },
+    );
+    error
+}
+fn service_task_refusal(stage: &'static str, error: ServiceTaskError) -> ServiceTaskError {
+    match error {
+        ServiceTaskError::Refused(error) => shared_task_refusal(stage, error).into(),
+        ServiceTaskError::ReprepareRequired => {
+            emit_shared_task_refusal(stage, "reprepare_required");
+            error
+        }
+    }
+}
+fn emit_shared_task_refusal(stage: &'static str, kind: &'static str) {
     eprintln!(
         "{{\"event\":\"toolkit_shared_dispatch_refused\",\"stage\":\"{stage}\",\"kind\":\"{kind}\"}}"
     );
     crate::original_ingress::shared_entry_diagnostics::emit(stage, None, Some(kind));
-    error
 }
 impl InstalledAcquisition {
     /// Current workflow custody supplies G independently of the static helper
@@ -170,7 +211,7 @@ impl InstalledServiceTaskSource {
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
         selection: &meerkat_toolkit::setup::SharedPreparationSelection,
         resource: Arc<dyn crate::private_originals::SharedPreparationResource>,
-    ) -> Result<crate::private_originals::InstalledSharedPreparation, PrivateOriginalError> {
+    ) -> Result<crate::private_originals::InstalledSharedPreparation, ServiceTaskError> {
         let task = self
             .prepare_selected(call, context, plan, None)
             .await?
@@ -205,11 +246,11 @@ impl InstalledServiceTaskSource {
         context: &ToolDispatchContext,
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
         member: Option<&crate::private_originals::InstalledSharedPreparation>,
-    ) -> Result<crate::private_originals::InstalledSharedEntry, PrivateOriginalError> {
+    ) -> Result<crate::private_originals::InstalledSharedEntry, ServiceTaskError> {
         let task = self
             .prepare_selected(call, context, plan, None)
             .await
-            .map_err(|error| shared_task_refusal("reserve.prepare", error))?
+            .map_err(|error| service_task_refusal("reserve.prepare", error))?
             .ok_or_else(|| {
                 shared_task_refusal("reserve.task_missing", PrivateOriginalError::Unavailable)
             })?;
@@ -225,10 +266,9 @@ impl InstalledServiceTaskSource {
         if let Err(error) = context.check_tool_authorization(call, plan) {
             // No private transport command has been prepared on this path.
             entry.settle_unentered()?;
-            return Err(shared_task_refusal(
-                "reserve.authorization",
-                authorization_error(error),
-            ));
+            return Err(
+                shared_task_refusal("reserve.authorization", authorization_error(error)).into(),
+            );
         }
         Ok(entry)
     }
@@ -240,9 +280,9 @@ impl InstalledServiceTaskSource {
         context: &ToolDispatchContext,
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
         member: &crate::private_originals::InstalledSharedPreparation,
-    ) -> Result<serde_json::Value, PrivateOriginalError> {
+    ) -> Result<serde_json::Value, ServiceTaskError> {
         if call.name != "setup_stop" {
-            return Err(PrivateOriginalError::Denied);
+            return Err(PrivateOriginalError::Denied.into());
         }
         let task = self
             .prepare_selected(call, context, plan, None)
@@ -251,7 +291,7 @@ impl InstalledServiceTaskSource {
         context
             .check_tool_authorization(call, plan)
             .map_err(authorization_error)?;
-        task.leave_shared_preparation(member).await
+        Ok(task.leave_shared_preparation(member).await?)
     }
     pub async fn complete_shared_preparation(
         &self,
@@ -259,9 +299,9 @@ impl InstalledServiceTaskSource {
         context: &ToolDispatchContext,
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
         member: &crate::private_originals::InstalledSharedPreparation,
-    ) -> Result<(), PrivateOriginalError> {
+    ) -> Result<(), ServiceTaskError> {
         if call.name != "setup_selected_install" {
-            return Err(PrivateOriginalError::Denied);
+            return Err(PrivateOriginalError::Denied.into());
         }
         let task = self
             .prepare_selected(call, context, plan, None)
@@ -270,7 +310,7 @@ impl InstalledServiceTaskSource {
         context
             .check_tool_authorization(call, plan)
             .map_err(authorization_error)?;
-        task.complete_shared_preparation(member).await
+        Ok(task.complete_shared_preparation(member).await?)
     }
     pub async fn prepare(
         &self,
@@ -278,7 +318,7 @@ impl InstalledServiceTaskSource {
         context: &ToolDispatchContext,
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
         agent: &str,
-    ) -> Result<Option<InstalledServiceTask>, PrivateOriginalError> {
+    ) -> Result<Option<InstalledServiceTask>, ServiceTaskError> {
         self.prepare_selected(call, context, plan, Some(agent))
             .await
     }
@@ -290,7 +330,7 @@ impl InstalledServiceTaskSource {
         call: ToolCallView<'_>,
         context: &ToolDispatchContext,
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
-    ) -> Result<Option<InstalledServiceTask>, PrivateOriginalError> {
+    ) -> Result<Option<InstalledServiceTask>, ServiceTaskError> {
         self.prepare_selected(call, context, plan, None).await
     }
     /// Public service review may select this member's already configured setup
@@ -301,7 +341,7 @@ impl InstalledServiceTaskSource {
         call: ToolCallView<'_>,
         context: &ToolDispatchContext,
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
-    ) -> Result<Option<InstalledServiceTask>, PrivateOriginalError> {
+    ) -> Result<Option<InstalledServiceTask>, ServiceTaskError> {
         self.prepare_selected_with_setup(call, context, plan, None, true)
             .await
     }
@@ -312,7 +352,7 @@ impl InstalledServiceTaskSource {
         call: ToolCallView<'_>,
         context: &ToolDispatchContext,
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
-    ) -> Result<Option<InstalledServiceTask>, PrivateOriginalError> {
+    ) -> Result<Option<InstalledServiceTask>, ServiceTaskError> {
         self.prepare_selected(call, context, plan, None).await
     }
     async fn prepare_selected(
@@ -321,7 +361,7 @@ impl InstalledServiceTaskSource {
         context: &ToolDispatchContext,
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
         proposed_agent: Option<&str>,
-    ) -> Result<Option<InstalledServiceTask>, PrivateOriginalError> {
+    ) -> Result<Option<InstalledServiceTask>, ServiceTaskError> {
         self.prepare_selected_with_setup(call, context, plan, proposed_agent, false)
             .await
     }
@@ -332,7 +372,7 @@ impl InstalledServiceTaskSource {
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
         proposed_agent: Option<&str>,
         select_setup: bool,
-    ) -> Result<Option<InstalledServiceTask>, PrivateOriginalError> {
+    ) -> Result<Option<InstalledServiceTask>, ServiceTaskError> {
         let selected = self.selected.upgrade().ok_or_else(|| {
             shared_task_refusal(
                 "prepare.selected_missing",

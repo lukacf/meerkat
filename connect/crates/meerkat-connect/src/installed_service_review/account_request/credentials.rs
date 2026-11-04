@@ -294,11 +294,17 @@ pub(super) async fn dispatch(
         current = refreshed;
     }
     let task = prepared
-        .map_err(|error| match error {
-            toolkit_mobkit::private_originals::PrivateOriginalError::Unavailable => unavailable(),
-            toolkit_mobkit::private_originals::PrivateOriginalError::Denied
-            | toolkit_mobkit::private_originals::PrivateOriginalError::Conflict => {
-                ToolError::access_denied(call.name)
+        .map_err(|error| {
+            use toolkit_mobkit::{
+                installed_host::acquisition::ServiceTaskError,
+                private_originals::PrivateOriginalError,
+            };
+            match error {
+                ServiceTaskError::Refused(PrivateOriginalError::Unavailable) => unavailable(),
+                ServiceTaskError::Refused(
+                    PrivateOriginalError::Denied | PrivateOriginalError::Conflict,
+                ) => ToolError::access_denied(call.name),
+                ServiceTaskError::ReprepareRequired => ServiceTaskError::reprepare_required(),
             }
         })?
         .ok_or_else(|| ToolError::access_denied(call.name))?;

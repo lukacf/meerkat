@@ -3461,6 +3461,22 @@ default_binding = "local"
                 .status();
             other_routes.push((path, status == reqwest::StatusCode::FORBIDDEN));
         }
+        // The health summary names members, so it answers only the hosts
+        // the console serves.
+        let mut summaries = Vec::new();
+        for host in [
+            format!("rebound.example.net:{port}"),
+            format!("127.0.0.1:{port}"),
+        ] {
+            let status = client
+                .get(format!("{base}/healthz"))
+                .header(reqwest::header::HOST, host.as_str())
+                .header(reqwest::header::ACCEPT, "application/json")
+                .send()
+                .await?
+                .status();
+            summaries.push((host, status.as_u16()));
+        }
         let _ = composition.shutdown(server, || async {}, || async {}).await;
         assert_eq!(
             answers,
@@ -3477,6 +3493,13 @@ default_binding = "local"
                 ("/console", true),
                 ("/mob/events", true),
                 ("/healthz", false)
+            ]
+        );
+        assert_eq!(
+            summaries,
+            vec![
+                (format!("rebound.example.net:{port}"), 403),
+                (format!("127.0.0.1:{port}"), 200),
             ]
         );
         Ok(())

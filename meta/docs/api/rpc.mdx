@@ -1010,10 +1010,13 @@ moves to the fresh session:
   session's transcript keeps that round; a run the hard cancel ended closes
   with Core's notice that it was interrupted and its input not requeued.
 - **Every input still queued** on the member (a send, a dispatch, an admitted
-  keyed send, a peer message or reply, a scheduled turn) never runs, on the
-  retired session or the fresh one. It ends with terminal `cancelled` and
-  completion `runtime_terminated` (reason `member retire`) in a terminal batch
-  of its own. A keyed send Core had not admitted yet reads `stranded`.
+  keyed send, a peer message or reply, a scheduled turn) is cancelled by the
+  retirement before the runtime starts it, and none moves to the fresh
+  session. It ends with terminal `cancelled` and completion
+  `runtime_terminated` (reason `member retire`) in a terminal batch of its
+  own. Should the runtime already have started one, that run is cancelled as
+  the run in flight is. A keyed send Core had not admitted yet reads
+  `stranded`.
 
 These terminals are durable in the retired session's input ledger. The reset
 answer names none of them. What a sender sees depends on how it sent:

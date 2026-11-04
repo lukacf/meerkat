@@ -1753,10 +1753,11 @@ class MetaRuntime:
 
         The reset is not refused while the member has work in flight, as
         ``retire`` is. It cancels the run in flight (terminal ``cancelled``,
-        not requeued) and ends every input still queued on the member without
-        running it (terminal ``cancelled``, completion
-        ``runtime_terminated``); nothing moves to the fresh session, and the
-        answer names none of them. A tracked turn settles ``failed``
+        not requeued) and cancels every input still queued on the member
+        before the runtime starts it (terminal ``cancelled``, completion
+        ``runtime_terminated``; one already started is cancelled as the run
+        in flight is); nothing moves to the fresh session, and the answer
+        names none of them. A tracked turn settles ``failed``
         (``turn_result``), a keyed send's admitted pair reads ``cancelled``
         (``send_status``), and an unkeyed, untracked send has no per-input
         read: a ``wait_for_completion`` on its baseline ends

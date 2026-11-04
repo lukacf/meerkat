@@ -185,6 +185,38 @@ mod whole_blob_read_error_tests {
             "{mapped:?}"
         );
     }
+
+    /// A committed read that a host store refused because the session's
+    /// scope (or the realm) is poisoned keeps its typed store error too: the
+    /// refusal lasts until the realm is reopened, and only a typed refusal
+    /// lets a status read answer it without reading again, or a wait end on
+    /// it. Before, it was flattened into an internal agent error.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_poisoned_scope_refusal_keeps_its_typed_store_error() {
+        use meerkat_runtime::store::spi::SpiError;
+
+        let session_id = SessionId::new();
+        for error in [
+            SpiError::ScopePoisoned {
+                scope: "rt:poisoned".to_string(),
+                cause: "the store refused the batch".to_string(),
+            }
+            .into_read(),
+            SpiError::RealmPoisoned("fenced out".to_string()).into_read(),
+        ] {
+            let mapped = whole_blob_read_error_to_session_error(&session_id, "session", error);
+            let SessionError::Store(source) = &mapped else {
+                panic!("a refusal until the realm reopens stays a store error: {mapped:?}");
+            };
+            assert!(
+                source
+                    .downcast_ref::<RuntimeStoreError>()
+                    .is_some_and(|error| !matches!(error, RuntimeStoreError::ReadFailed(_))),
+                "the source keeps the typed refusal: {source:?}"
+            );
+        }
+    }
 }
 
 /// Re-read budget for observation loads racing a head-canonical writer:

@@ -3190,3 +3190,6 @@ fn a_read_error_keeps_unavailable_and_corrupt_typed() {
         RuntimeStoreError::WriteFailed(_)
     ));
 }
+
+/// What one poisoned scope refuses, and what it leaves serving.
+mod poison_radius;

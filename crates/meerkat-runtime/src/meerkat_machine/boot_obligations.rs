@@ -441,6 +441,81 @@ mod tests {
         );
     }
 
+    /// A host store realm with one poisoned runtime scope still answers the
+    /// boot's scan, observed: the poisoned runtime is an obligation (its
+    /// facts cannot be trusted, so it holds recovery work and may hold a
+    /// pending delivery), and every healthy runtime answers as its memory
+    /// holds it. Before, both reads refused, and every mob boot over the
+    /// realm planned every member as holding work.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_poisoned_runtime_is_an_obligation_and_the_scan_stays_observed() {
+        use crate::store::spi::test_host::TestHost;
+        use crate::store::spi::{SpiRealm, SpiRealmConfig, SpiRuntimeStore};
+
+        let host = Arc::new(TestHost::new());
+        let realm = SpiRealm::open(Arc::clone(&host) as _, SpiRealmConfig::default())
+            .await
+            .expect("the realm opens");
+        let store: Arc<dyn RuntimeStore> =
+            Arc::new(SpiRuntimeStore::open(realm).await.expect("the store opens"));
+        let input = |state| {
+            InputStatePersistenceRecord::from_machine_snapshot(state).expect("a machine snapshot")
+        };
+        let working = LogicalRuntimeId::new("boot-obligations-working");
+        store
+            .persist_input_state(
+                &working,
+                &input(StoredInputState::new_accepted(InputId::new())),
+            )
+            .await
+            .expect("a nonterminal input lands");
+        let delivered = LogicalRuntimeId::new("boot-obligations-delivered");
+        RuntimeDeliveryInbox::new(Arc::clone(&store))
+            .submit(
+                &delivered,
+                RuntimeDeliverySubmission::new(
+                    RuntimeDeliveryId::new("boot-obligations-delivery").unwrap(),
+                    RuntimeDeliveryKind::JobTerminal,
+                    "boot-obligations-job",
+                    1,
+                    "boot-obligations-interaction",
+                    b"payload".to_vec(),
+                )
+                .unwrap(),
+            )
+            .await
+            .expect("a delivery lands");
+        let doomed = LogicalRuntimeId::new("boot-obligations-doomed");
+        host.faults.lock().unwrap().conflict = 1;
+        assert!(
+            store
+                .persist_input_state(
+                    &doomed,
+                    &input(StoredInputState::new_accepted(InputId::new()))
+                )
+                .await
+                .is_err(),
+            "the store refuses the batch, and the runtime's scope is poisoned"
+        );
+
+        let obligations = MeerkatMachine::persistent_without_blobs(store)
+            .unwrap()
+            .boot_recovery_obligations()
+            .await
+            .expect("the scan answers");
+        assert_eq!(
+            obligations,
+            RuntimeBootObligations {
+                recovery_work: RuntimeRecoveryWork::Observed(HashSet::from([
+                    working,
+                    doomed.clone(),
+                ])),
+                pending_deliveries: HashSet::from([delivered, doomed]),
+            }
+        );
+    }
+
     #[tokio::test]
     async fn boot_obligation_scan_machine_returns_a_failed_read() {
         let store = Arc::new(InMemoryRuntimeStore::new());

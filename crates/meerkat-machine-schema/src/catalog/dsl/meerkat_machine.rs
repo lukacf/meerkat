@@ -14179,6 +14179,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "transcript_carried" { target_carries_transcript }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "approval_satisfied" { !requires_approval || (approval_available && !approval_denied) }
+            // A retry of the pending request itself stages it again, so a
+            // caller that abandoned the request inside its reconfigure can
+            // finish it. Another request's pending switch is a conflict
+            // (RequestUntilChangedSwitchTurnPendingConflict).
+            guard "no_other_pending_switch" {
+                self.model_routing_pending_switch_request_id == None
+                || self.model_routing_pending_switch_request_id == Some(request_id)
+            }
             update {
                 if requires_approval {
                     self.model_routing_approval_phases.insert(request_id, RoutingApprovalPhase::Approved);
@@ -14232,6 +14240,34 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
             emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::DeniedDuringApproval }
             emit ModelRoutingApprovalTerminalized { approval_id: request_id, phase: RoutingApprovalPhase::Denied }
+        }
+
+        // An until-changed request that arrives while another switch is
+        // pending is refused with the conflict a finite request meets: it
+        // would otherwise replace the pending switch, whose own reconfigure
+        // could then neither complete nor withdraw. Declared after the
+        // approval arms, so an approval refusal still answers first, as it
+        // does for a finite request. A retry of the pending request itself is
+        // accepted again (RequestUntilChangedSwitchTurnAccepted); a denial
+        // recorded under its id would answer that request's caller as denied.
+        transition RequestUntilChangedSwitchTurnPendingConflict {
+            per_phase [Idle, Attached, Running]
+            on input RequestUntilChangedSwitchTurn {
+                request_id, target_model, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                approval_reason, realtime_detach_allowed, target_carries_transcript
+            }
+            guard "transcript_carried" { target_carries_transcript }
+            guard "pending_switch_conflict" {
+                self.model_routing_pending_switch_request_id != None
+                && self.model_routing_pending_switch_request_id != Some(request_id)
+            }
+            update {
+                self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
+                self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::ScopedOverrideConflict);
+            }
+            to Idle
+            emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::ScopedOverrideConflict }
         }
 
         transition CompleteUntilChangedSwitchTurnReconfigure {

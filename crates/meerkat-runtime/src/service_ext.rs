@@ -249,6 +249,14 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
         ))
     }
 
+    /// Switch a session's model, for a number of turns or until changed.
+    ///
+    /// An until-changed switch stays pending while its LLM reconfigure runs,
+    /// and a switch that reaches the session while another one is pending is
+    /// denied (`ScopedOverrideConflict`). Dropping the returned future before
+    /// it resolves can leave the switch pending: later switches are then
+    /// denied until the same request (the same `request_id`) is retried or
+    /// the session is reloaded.
     async fn request_switch_turn(
         &self,
         _session_id: &SessionId,

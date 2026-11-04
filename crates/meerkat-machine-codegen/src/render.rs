@@ -546,6 +546,12 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     "AbortUntilChangedSwitchTurnReconfigureRunning",
     "AbortUntilChangedSwitchTurnReconfigureRetired",
     "AbortUntilChangedSwitchTurnReconfigureStopped",
+    // An until-changed switch-turn refused while another switch is pending
+    // (0.9.10): declared beside its siblings in the catalog for first-match
+    // dispatch, emitted here after every published variant.
+    "RequestUntilChangedSwitchTurnPendingConflictIdle",
+    "RequestUntilChangedSwitchTurnPendingConflictAttached",
+    "RequestUntilChangedSwitchTurnPendingConflictRunning",
 ];
 
 // Append-only emission tails for the other machines, whose public

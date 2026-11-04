@@ -93,8 +93,10 @@ them.
 
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-runtime`: the
   MeerkatMachine gains the failure arm of an until-changed switch-turn
-  reconfigure (see Fixed). `MeerkatMachineInput` (meerkat-machine-schema and
-  meerkat-runtime) and the kernel `generated::meerkat` `Input` gain
+  reconfigure, and the refusal of an until-changed switch-turn while another
+  switch is pending (see Fixed). `MeerkatMachineInput`
+  (meerkat-machine-schema and meerkat-runtime) and the kernel
+  `generated::meerkat` `Input` gain
   `AbortUntilChangedSwitchTurnReconfigure { request_id }`, and
   `MeerkatMachineInputVariant` (meerkat-machine-schema and meerkat-runtime),
   `MeerkatMachineRuntimeInternalInput` (meerkat-runtime) and the kernel
@@ -103,8 +105,11 @@ them.
   `AbortUntilChangedSwitchTurnReconfigureIdle`,
   `AbortUntilChangedSwitchTurnReconfigureAttached`,
   `AbortUntilChangedSwitchTurnReconfigureRunning`,
-  `AbortUntilChangedSwitchTurnReconfigureRetired` and
-  `AbortUntilChangedSwitchTurnReconfigureStopped`. Every new variant is
+  `AbortUntilChangedSwitchTurnReconfigureRetired`,
+  `AbortUntilChangedSwitchTurnReconfigureStopped`,
+  `RequestUntilChangedSwitchTurnPendingConflictIdle`,
+  `RequestUntilChangedSwitchTurnPendingConflictAttached` and
+  `RequestUntilChangedSwitchTurnPendingConflictRunning`. Every new variant is
   appended last, so no existing variant's implicit discriminant moves. Every
   enum named here is exhaustive, so a downstream exhaustive match needs the
   new arms, or a wildcard arm.
@@ -379,6 +384,19 @@ them.
   which fails before the gate is released, withdraws through the same
   input. The caller still gets the reconfigure's error. Affects 0.6.0
   through 0.9.9.
+
+- `meerkat-runtime`: a model switch that lasts until changed, requested
+  while another switch was pending, replaced the pending switch. A pending
+  until-changed switch could then neither complete nor be withdrawn, so its
+  caller got an error although its reconfigure had applied, and a finite
+  switch waiting for its next turn was dropped although its caller had been
+  told it applied. Such a request is now denied with
+  `SwitchTurnDenialReason::ScopedOverrideConflict`, as a finite switch
+  requested while another switch is pending already is, and so is a model
+  change a run requested when it is realized while a switch is pending. A
+  retry of the pending request itself (the same `request_id`) is accepted,
+  so a caller that dropped its request while the reconfigure ran can
+  finish it. Affects 0.6.0 through 0.9.9.
 
 ### Known limitations
 

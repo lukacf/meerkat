@@ -91,6 +91,11 @@ them.
   (`AuthCredentialIdentity::from_auth_binding`) and ran with provider-native
   tools on (`ProviderNativeToolPolicy::Inherit`). See Changed.
 
+- `meerkat-core`: consent decisions keep the login they were decided in
+  (see Changed). `ApprovalConsentApprover` gains the public field
+  `authentication_scope_digest: Option<Sha256Digest>`, so code that builds
+  it literally must set it (`None` records no login, as before).
+
 ### Added
 
 - GitHub Copilot configured once: `[realm.<realm>.copilot]` states a Copilot
@@ -174,6 +179,27 @@ them.
   doctor's operator-instruction census readers over a connection the caller
   opened read-only, so another storage doctor counts by the same rule.
 
+- Credential and configuration administration admissions settle a typed
+  record to a recorder the host supplies. A host's `AdministrationEntry`
+  can state, on the admission it grants, the administrator it
+  authenticated (`EnteredAdministration::administered_by`, with an
+  `AdministeringPrincipal`: a qualified principal and optionally the digest
+  of their login) and its `AdministrationRecorder`. When the update
+  settles, its owner hands the recorder one `AdministrationRecord`, also
+  after the caller stopped waiting: the administrator, the login digest,
+  what changed (`AdministeredChange`: an MCP service secret set or removed,
+  an MCP OAuth client profile installed, replaced or removed, or a realm
+  configuration patch and the generation it published), whether it
+  committed or its outcome is unknown (`AdministrationOutcome`), and when.
+  The `_entered` forms record this way: `set_mcp_service_secret_entered`,
+  `remove_mcp_service_secret_entered`, the `_client_profile_entered`
+  updates, `ConfigRuntime::patch_entered` and
+  `McpRealmPersistTarget::add_entered`. No record carries a value or
+  secret, and Core keeps no copy: the host keeps it in its own audit. An
+  admission that states no administrator records nothing.
+  `HostAuthenticationScope::digest` is the one login digest form (`sha256:`
+  and the lowercase hex SHA-256 of the scope's text).
+
 ### Changed
 
 - A session on a zero-config Copilot route, or on a route of a
@@ -189,6 +215,13 @@ them.
   (`runtime_session_authority.boundary_head_json`), which carry the session
   envelope of the head they committed, beside the head rows, the head-less
   documents and the WholeBlob documents.
+
+- Consent decisions record a digest of the login they were decided in:
+  `consent.approver.authentication_scope_digest`, the digest of the decision
+  event's `HostAuthenticationScope`, never the scope itself. The qualified
+  decider stays in `consent.approver.principal`, which tells apart two trust
+  domains that issue the same id; `decision.actor` stays the bare id. A row
+  decided earlier reads with no digest (see Upgrade notes).
 
 ### Fixed
 
@@ -358,6 +391,16 @@ them.
   the same runtime attachment. An input the call never observed, a
   missing, destroyed or replaced attachment, and a row the ledger keeps
   without its lifecycle state still answer `false`.
+
+### Upgrade notes
+
+- Consent rows and a rollback: a Core that predates
+  `consent.approver.authentication_scope_digest` still opens the approval
+  store and reads every row (it ignores the field, and the decision's actor
+  is still the approver's id, which it checks at load), but the rows it
+  writes lack the field, and `FileApprovalStore` rewrites every row on each
+  write, so its first write drops the login digests recorded until then.
+  Nothing else changes for it.
 
 ### Known limitations
 

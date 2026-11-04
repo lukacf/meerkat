@@ -555,9 +555,12 @@ pub struct PrivateOriginals {
     review_observations: Arc<crate::installed_host::review_diagnostics::ReviewObservations>,
     #[cfg(test)]
     pub(crate) metadata_probe: OnceLock<Arc<recovery_probe::MetadataRecoveryProbe>>,
-    // A helper control's emulated dispatch tool deadline (setup_helpers).
+    // A helper control's emulated dispatch tool deadline, and each reason a
+    // helper's rebind stopped (setup_helpers).
     #[cfg(test)]
     helper_tool_deadline_for_test: OnceLock<tokio::time::Instant>,
+    #[cfg(test)]
+    helper_rebind_stops_for_test: Mutex<Vec<setup_helpers::HelperRebindStop>>,
     custody_recovery: custody_recovery::CustodyRecovery,
     scope: StoreScope,
     store: Arc<dyn ToolkitStore>,
@@ -803,6 +806,8 @@ impl PrivateOriginals {
             metadata_probe: OnceLock::new(),
             #[cfg(test)]
             helper_tool_deadline_for_test: OnceLock::new(),
+            #[cfg(test)]
+            helper_rebind_stops_for_test: Mutex::new(Vec::new()),
             scope,
             store,
             owner,

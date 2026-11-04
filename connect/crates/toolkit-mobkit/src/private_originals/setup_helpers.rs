@@ -845,13 +845,9 @@ impl PrivateOriginals {
         }))
     }
 
-    /// The Find dispatch's wait before its helper's one rebind: Core's bounded
-    /// stale-read wait for the changed publication, holding no guard, within
-    /// the dispatch's remaining tool time and the source deadline (never
-    /// reset). True only when the dispatch has its work authority, budget was
-    /// left for the wait, the wait settled, budget is still left, and the
-    /// helper's source still admits work with its admitted helper work and
-    /// selection current.
+    /// The Find dispatch's wait before its helper's one rebind. True when the
+    /// rebind may go; otherwise the reason it stops ([`HelperRebindStop`]) is
+    /// written as a static diagnostic.
     async fn helper_rebind_after_wait(
         &self,
         prepared: &PreparedHelperController,
@@ -859,6 +855,41 @@ impl PrivateOriginals {
         churn: &mut meerkat_core::authorization::OwnerChangeChurn,
         source_deadline: tokio::time::Instant,
     ) -> bool {
+        let Some(stop) = self
+            .helper_rebind_stop(prepared, context, churn, source_deadline)
+            .await
+        else {
+            return true;
+        };
+        {
+            use std::io::Write as _;
+            let diagnostic = serde_json::json!({
+                "event": "toolkit_helper_rebind_stopped",
+                "cause": stop.label(),
+            });
+            let _ = writeln!(std::io::stderr().lock(), "{diagnostic}");
+        }
+        #[cfg(test)]
+        self.helper_rebind_stops_for_test
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(stop);
+        false
+    }
+
+    /// Core's bounded stale-read wait for the changed publication, holding no
+    /// guard, within the dispatch's remaining tool time and the source deadline
+    /// (never reset), and then the checks the rebind relies on. None only when
+    /// the dispatch has its work authority, budget was left for the wait, the
+    /// wait settled, budget is still left, and the helper's source still admits
+    /// work with its admitted helper work and selection current.
+    async fn helper_rebind_stop(
+        &self,
+        prepared: &PreparedHelperController,
+        context: &ToolDispatchContext,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
+        source_deadline: tokio::time::Instant,
+    ) -> Option<HelperRebindStop> {
         let remaining = || {
             let request = source_deadline.saturating_duration_since(tokio::time::Instant::now());
             let tool = context.remaining_tool_time();
@@ -867,25 +898,44 @@ impl PrivateOriginals {
             tool.map_or(request, |tool| tool.min(request))
         };
         let Some(work) = context.work_authorization() else {
-            return false;
+            return Some(HelperRebindStop::NoWorkAuthority);
         };
         let budget = remaining();
-        !budget.is_zero()
-            && churn
-                .wait_after_stale_read(
-                    work.authorization().as_ref(),
-                    Some(budget),
-                    "toolkit.setup_helper.submission",
-                    None,
-                )
-                .await
-                .settled()
-            && !remaining().is_zero()
-            && self.with_new_work_admission(|| ()).is_ok()
-            && self.owner.check_admitted_helper(&prepared.admitted).is_ok()
-            && self
-                .require_helper_selection(prepared.admitted.selection())
-                .is_ok()
+        if budget.is_zero() {
+            return Some(HelperRebindStop::NoBudget);
+        }
+        if !churn
+            .wait_after_stale_read(
+                work.authorization().as_ref(),
+                Some(budget),
+                "toolkit.setup_helper.submission",
+                None,
+            )
+            .await
+            .settled()
+        {
+            return Some(HelperRebindStop::WaitUnsettled);
+        }
+        if remaining().is_zero() {
+            return Some(HelperRebindStop::BudgetSpent);
+        }
+        if self.with_new_work_admission(|| ()).is_err() {
+            return Some(HelperRebindStop::SourceClosed);
+        }
+        if self
+            .owner
+            .check_admitted_helper(&prepared.admitted)
+            .is_err()
+        {
+            return Some(HelperRebindStop::HelperNotCurrent);
+        }
+        if self
+            .require_helper_selection(prepared.admitted.selection())
+            .is_err()
+        {
+            return Some(HelperRebindStop::SelectionNotCurrent);
+        }
+        None
     }
 
     /// A control's emulated dispatch tool deadline: Core sets a dispatch's
@@ -901,6 +951,39 @@ impl PrivateOriginals {
         };
         let emulated = deadline.saturating_duration_since(tokio::time::Instant::now());
         Some(tool.map_or(emulated, |tool| tool.min(emulated)))
+    }
+}
+
+/// Why a Find dispatch's helper stops at ReprepareRequired instead of taking
+/// its one rebind after a same-session PolicyChanged, in the order checked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HelperRebindStop {
+    /// The dispatch has no work authorization to wait with.
+    NoWorkAuthority,
+    /// No tool time or source time was left for the wait.
+    NoBudget,
+    /// The changed publication did not settle within that budget.
+    WaitUnsettled,
+    /// The wait settled with no budget left for the rebind.
+    BudgetSpent,
+    /// The helper's source no longer admits work.
+    SourceClosed,
+    /// The admitted helper work is no longer current.
+    HelperNotCurrent,
+    /// The helper's selection is no longer current.
+    SelectionNotCurrent,
+}
+impl HelperRebindStop {
+    fn label(self) -> &'static str {
+        match self {
+            Self::NoWorkAuthority => "no_work_authority",
+            Self::NoBudget => "no_budget",
+            Self::WaitUnsettled => "wait_unsettled",
+            Self::BudgetSpent => "budget_spent",
+            Self::SourceClosed => "source_closed",
+            Self::HelperNotCurrent => "helper_not_current",
+            Self::SelectionNotCurrent => "selection_not_current",
+        }
     }
 }
 

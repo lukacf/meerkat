@@ -12,7 +12,12 @@
 use super::*;
 use crate::private_originals::custody_recovery::HandoffPhase;
 
-async fn exercise_helper_wait(hold: Duration, tool_time: Duration, rebind: bool) {
+async fn exercise_helper_wait(
+    hold: Duration,
+    tool_time: Duration,
+    stop: Option<setup_helpers::HelperRebindStop>,
+) {
+    let rebind = stop.is_none();
     let (_connection, _logins, login) = enrolled_login();
     let script = acquisition_denial::Script::paused_for_helper_entry();
     let fault = Arc::new(DeliveryFault::new(DeliveryMode::HelperPolicyChangeHeld(
@@ -121,6 +126,11 @@ async fn exercise_helper_wait(hold: Duration, tool_time: Duration, rebind: bool)
                 );
             }
             assert_eq!(fault.helper_policy_changed.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                *fixture.source.helper_rebind_stops_for_test.lock().unwrap(),
+                Vec::from_iter(stop),
+                "the dispatch stopped for exactly this reason, or rebound"
+            );
             assert_eq!(fault.accepted.load(Ordering::SeqCst), usize::from(rebind));
             let rows =
                 acquisition_approved::native_history(history.as_ref(), &helper_session).await;
@@ -171,7 +181,7 @@ async fn helper_change_outlasting_the_tool_time_stops_after_one_native_call() {
     Box::pin(exercise_helper_wait(
         Duration::from_secs(3),
         Duration::from_millis(300),
-        false,
+        Some(setup_helpers::HelperRebindStop::WaitUnsettled),
     ))
     .await;
 }
@@ -181,7 +191,7 @@ async fn helper_with_no_tool_time_left_stops_after_one_native_call() {
     Box::pin(exercise_helper_wait(
         Duration::from_secs(1),
         Duration::ZERO,
-        false,
+        Some(setup_helpers::HelperRebindStop::NoBudget),
     ))
     .await;
 }
@@ -191,7 +201,7 @@ async fn helper_change_settling_within_the_tool_time_rebinds_once() {
     Box::pin(exercise_helper_wait(
         Duration::from_secs(1),
         Duration::from_secs(10),
-        true,
+        None,
     ))
     .await;
 }

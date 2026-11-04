@@ -95,6 +95,18 @@ each package is accepted only on evidence for that exact package, and the
   could still start the builder from the earlier read. A busy, missing or
   unreadable store refuses the build at once, and a refused build starts
   nothing.
+- The event log no longer asks a failing store again for every event that
+  arrives. After a refused append it waits before it asks again: the flush
+  interval, doubled for each further refusal in a row, up to 30 seconds (or
+  the flush interval when that is longer). The flush at shutdown still runs
+  at once. While it waits, events stay buffered in order, and the oldest are
+  dropped only past the 4096-event limit, as before.
+- The event log sends at most `batch_size` events per append, retries
+  included, oldest first. It used to send its whole retry buffer as one
+  append, so once an outage grew the buffer past what the store takes in one
+  request, the store refused every later flush and took no event again. A
+  refused append and every later event stay buffered in order for the next
+  flush.
 
 ## [0.9.9] - 2026-11-03
 

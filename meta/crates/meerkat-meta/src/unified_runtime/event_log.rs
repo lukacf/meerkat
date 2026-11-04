@@ -101,6 +101,12 @@ pub trait EventLogStore: Send + Sync {
     /// buffer is full (see [`EventLogConfig::batch_size`]): the drain waits
     /// for room rather than dropping events, and the console projection it
     /// also feeds waits with it.
+    ///
+    /// A batch carries at most [`EventLogConfig::batch_size`] events, retries
+    /// included, oldest first. After a failed append the engine waits before
+    /// it calls again: the flush interval, doubled for each further failed
+    /// flush in a row, up to 30 seconds (or the flush interval when that is
+    /// longer). The events wait in its retry buffer meanwhile, in order.
     fn append_batch(
         &self,
         events: Vec<PersistedEvent>,
@@ -124,7 +130,9 @@ pub struct EventLogConfig {
     /// Optional filter — return `true` to persist, `false` to skip.
     /// If `None`, all events are persisted.
     pub filter: Option<EventFilter>,
-    /// Number of events to buffer before flushing to storage.
+    /// Number of events to buffer before flushing to storage, and the most
+    /// events one [`EventLogStore::append_batch`] call carries: a retry
+    /// buffer larger than this drains in batches of this size, oldest first.
     /// Default: 64.
     ///
     /// The intake buffer in front of the flush holds four batches (at least
@@ -269,6 +277,11 @@ async fn until_intake_closed(mut closed: watch::Receiver<bool>) {
 /// loss is preferable to OOM.
 const EVENT_LOG_RETRY_BUFFER_CAP: usize = 4096;
 
+/// Longest wait between two appends to a store that refuses them, unless the
+/// flush interval is longer. The first wait is the flush interval, and each
+/// further refused flush in a row doubles it.
+const EVENT_LOG_RETRY_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
 /// Start the event log ingestion engine. Returns a handle for the runtime
 /// and spawns a background flush task.
 pub(crate) fn start_event_log(
@@ -323,6 +336,7 @@ async fn run_flush_loop(
     error_hook: Option<super::ErrorHook>,
 ) {
     let mut batch: Vec<PersistedEvent> = Vec::with_capacity(batch_size);
+    let mut retry = FlushRetry::new(flush_interval);
     let mut interval = tokio::time::interval(flush_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -338,8 +352,14 @@ async fn run_flush_loop(
                         }
                         let persisted = to_persisted(&seq, &envelope);
                         batch.push(persisted);
-                        if batch.len() >= batch_size {
-                            flush_batch(&store, &mut batch, &error_hook).await;
+                        if retry.failing() {
+                            // While a refused flush waits out its backoff,
+                            // the retry buffer grows here: bound it here.
+                            retry.dropped += enforce_retry_cap(&mut batch);
+                        }
+                        if batch.len() >= batch_size && retry.due() {
+                            flush_batch(&store, &mut batch, batch_size, &mut retry, &error_hook)
+                                .await;
                         }
                     }
                     None => {
@@ -347,20 +367,87 @@ async fn run_flush_loop(
                         // If this final flush fails, events on the floor
                         // are unrecoverable; the error hook fires so
                         // operators see it.
+                        // It does not wait out an earlier refusal's backoff.
                         if !batch.is_empty() {
-                            flush_batch(&store, &mut batch, &error_hook).await;
+                            flush_batch(&store, &mut batch, batch_size, &mut retry, &error_hook)
+                                .await;
                         }
                         break;
                     }
                 }
             }
             _ = interval.tick() => {
-                if !batch.is_empty() {
-                    flush_batch(&store, &mut batch, &error_hook).await;
+                if !batch.is_empty() && retry.due() {
+                    flush_batch(&store, &mut batch, batch_size, &mut retry, &error_hook).await;
                 }
             }
         }
     }
+}
+
+/// When the flush may ask the store again after appends it refused.
+struct FlushRetry {
+    /// The flush interval: the wait after the first refused flush.
+    interval: Duration,
+    /// Flushes refused in a row.
+    failures: u32,
+    /// No append before this instant; `None` while the store takes them.
+    not_before: Option<tokio::time::Instant>,
+    /// Events dropped at [`EVENT_LOG_RETRY_BUFFER_CAP`] since the last
+    /// report.
+    dropped: usize,
+}
+
+impl FlushRetry {
+    fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            failures: 0,
+            not_before: None,
+            dropped: 0,
+        }
+    }
+
+    /// Whether the last flush was refused: the buffer is a retry buffer.
+    fn failing(&self) -> bool {
+        self.failures > 0
+    }
+
+    /// Whether the flush may ask the store now.
+    fn due(&self) -> bool {
+        self.not_before
+            .is_none_or(|at| tokio::time::Instant::now() >= at)
+    }
+
+    /// The store took every buffered event: the next flush asks at once.
+    fn succeeded(&mut self) {
+        self.failures = 0;
+        self.not_before = None;
+    }
+
+    /// The store refused a flush: the wait before the next one. A flush that
+    /// got events into the store before the refusal counts as the first
+    /// refusal in a row.
+    fn refused(&mut self, made_progress: bool) -> Duration {
+        if made_progress {
+            self.failures = 0;
+        }
+        self.failures = self.failures.saturating_add(1);
+        let wait = flush_retry_wait(self.interval, self.failures);
+        self.not_before = Some(tokio::time::Instant::now() + wait);
+        wait
+    }
+}
+
+/// The wait after `failures` refused flushes in a row: the flush interval,
+/// doubled for each refusal after the first, at most
+/// [`EVENT_LOG_RETRY_BACKOFF_MAX`] (or the flush interval when that is
+/// longer).
+fn flush_retry_wait(interval: Duration, failures: u32) -> Duration {
+    let doublings = failures.saturating_sub(1).min(16);
+    interval
+        .saturating_mul(1 << doublings)
+        .min(EVENT_LOG_RETRY_BACKOFF_MAX.max(interval))
 }
 
 /// Drop the oldest events from a retry buffer when it exceeds
@@ -389,40 +476,68 @@ fn to_persisted(seq: &AtomicU64, envelope: &EventEnvelope<UnifiedEvent>) -> Pers
     }
 }
 
+/// Send the buffered events to the store in requests of at most
+/// `batch_size` events, oldest first, until the buffer is empty or the store
+/// refuses a request. The refused request and every event after it stay
+/// buffered, in order, for the next flush, and `retry` says when that may ask
+/// the store again.
 async fn flush_batch(
     store: &Arc<dyn EventLogStore>,
     batch: &mut Vec<PersistedEvent>,
+    batch_size: usize,
+    retry: &mut FlushRetry,
     error_hook: &Option<super::ErrorHook>,
 ) {
-    let events = std::mem::take(batch);
-    if let Err(err) = store.append_batch(events.clone()).await {
-        // Restore the failed batch so the next tick / arrival retries
-        // — silent loss on transient store errors was the prior bug.
-        // Bound the retry buffer so a persistently-failing store can't
-        // drive meta OOM.
-        let mut restored = events;
-        restored.append(batch); // events that arrived after the failure
-        let dropped = enforce_retry_cap(&mut restored);
-        *batch = restored;
-
-        let msg = if dropped > 0 {
-            format!(
-                "event log flush failed: {err}; dropped {dropped} oldest events to bound the retry buffer at {EVENT_LOG_RETRY_BUFFER_CAP}"
-            )
-        } else {
-            format!("event log flush failed: {err}; will retry")
-        };
-        let event = super::types::ErrorEvent::EventLogFlushFailure { error: msg };
-        // Third fire point with its own hook Option, so it needs the same
-        // default sink: a flush failure nobody is listening for is still a
-        // flush failure.
-        super::log_error_event(&event, error_hook.is_some());
-        if let Some(hook) = error_hook {
-            let hook = hook.clone();
-            tokio::spawn(async move {
-                let () = hook(event).await;
-            });
+    let mut sent = 0;
+    let mut refusal = None;
+    while sent < batch.len() {
+        let end = batch.len().min(sent.saturating_add(batch_size));
+        match store.append_batch(batch[sent..end].to_vec()).await {
+            Ok(()) => sent = end,
+            Err(err) => {
+                refusal = Some(err);
+                break;
+            }
         }
+    }
+    // Only what the store took leaves the buffer: silent loss on transient
+    // store errors was the prior bug.
+    batch.drain(..sent);
+    let msg = match refusal {
+        None => {
+            retry.succeeded();
+            let dropped = std::mem::take(&mut retry.dropped);
+            if dropped == 0 {
+                return;
+            }
+            format!(
+                "event log dropped {dropped} oldest events to bound the retry buffer at {EVENT_LOG_RETRY_BUFFER_CAP} while the store refused appends"
+            )
+        }
+        Some(err) => {
+            // Bound the retry buffer so a persistently failing store can't
+            // drive meta OOM.
+            let dropped = std::mem::take(&mut retry.dropped) + enforce_retry_cap(batch);
+            let wait = retry.refused(sent > 0);
+            if dropped > 0 {
+                format!(
+                    "event log flush failed: {err}; dropped {dropped} oldest events to bound the retry buffer at {EVENT_LOG_RETRY_BUFFER_CAP}; will retry in {wait:?}"
+                )
+            } else {
+                format!("event log flush failed: {err}; will retry in {wait:?}")
+            }
+        }
+    };
+    let event = super::types::ErrorEvent::EventLogFlushFailure { error: msg };
+    // Third fire point with its own hook Option, so it needs the same
+    // default sink: a flush failure nobody is listening for is still a
+    // flush failure.
+    super::log_error_event(&event, error_hook.is_some());
+    if let Some(hook) = error_hook {
+        let hook = hook.clone();
+        tokio::spawn(async move {
+            let () = hook(event).await;
+        });
     }
 }
 
@@ -500,18 +615,21 @@ mod tests {
         });
         let store: Arc<dyn EventLogStore> = flaky.clone();
         let mut batch = vec![sample_event("a"), sample_event("b")];
+        // Called directly, each flush asks the store: the backoff it records
+        // holds back only the flush loop.
+        let mut retry = FlushRetry::new(Duration::from_secs(1));
 
         // First flush — fails. Batch must remain non-empty (events
         // pushed back into the retry buffer).
-        flush_batch(&store, &mut batch, &None).await;
+        flush_batch(&store, &mut batch, 64, &mut retry, &None).await;
         assert_eq!(batch.len(), 2, "events must be retained on flush failure");
 
         // Second flush — fails again. Still retained.
-        flush_batch(&store, &mut batch, &None).await;
+        flush_batch(&store, &mut batch, 64, &mut retry, &None).await;
         assert_eq!(batch.len(), 2);
 
         // Third flush — succeeds. Batch drained, events persisted.
-        flush_batch(&store, &mut batch, &None).await;
+        flush_batch(&store, &mut batch, 64, &mut retry, &None).await;
         assert!(batch.is_empty(), "batch must drain on successful flush");
 
         assert_eq!(*flaky.attempts.lock().expect("attempts"), 3);
@@ -805,6 +923,85 @@ mod tests {
             "no append carried more than batch_size events: largest {}",
             store.largest_request()
         );
+    }
+
+    #[test]
+    fn the_retry_wait_doubles_from_the_flush_interval_up_to_its_cap() {
+        let second = Duration::from_secs(1);
+        let waits: Vec<Duration> = (1..=7).map(|n| flush_retry_wait(second, n)).collect();
+        assert_eq!(waits, [1, 2, 4, 8, 16, 30, 30].map(Duration::from_secs));
+        assert_eq!(flush_retry_wait(second, u32::MAX), Duration::from_secs(30));
+        assert_eq!(
+            flush_retry_wait(Duration::from_secs(45), 3),
+            Duration::from_secs(45),
+            "a flush interval longer than the cap is the wait"
+        );
+    }
+
+    /// A store that takes its first append and refuses every later one.
+    #[derive(Default)]
+    struct TakesFirstAppend {
+        calls: std::sync::atomic::AtomicUsize,
+        persisted: Mutex<Vec<String>>,
+    }
+
+    impl EventLogStore for TakesFirstAppend {
+        fn append_batch(
+            &self,
+            events: Vec<PersistedEvent>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), EventLogError>> + Send + '_>> {
+            Box::pin(async move {
+                if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                    return Err(
+                        Box::new(std::io::Error::other("the store refused the append"))
+                            as Box<dyn std::error::Error + Send>,
+                    );
+                }
+                self.persisted
+                    .lock()
+                    .expect("persisted")
+                    .extend(events.into_iter().map(|event| event.id));
+                Ok(())
+            })
+        }
+
+        fn query(
+            &self,
+            _query: EventQuery,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<PersistedEvent>, EventLogError>> + Send + '_>>
+        {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+    }
+
+    /// A flush the store refuses part way keeps the refused request and every
+    /// later event buffered, in order. The store took events, so the refusal
+    /// counts as the first in a row: the wait starts again at the interval.
+    #[tokio::test]
+    async fn a_flush_refused_part_way_keeps_the_rest_in_order() {
+        let taker = Arc::new(TakesFirstAppend::default());
+        let store: Arc<dyn EventLogStore> = taker.clone();
+        let mut batch: Vec<PersistedEvent> =
+            (0..5).map(|n| sample_event(&format!("evt-{n}"))).collect();
+        let mut retry = FlushRetry::new(Duration::from_secs(1));
+        retry.refused(false);
+        retry.refused(false);
+
+        flush_batch(&store, &mut batch, 2, &mut retry, &None).await;
+        let buffered = |batch: &[PersistedEvent]| -> Vec<String> {
+            batch.iter().map(|event| event.id.clone()).collect()
+        };
+        assert_eq!(
+            taker.persisted.lock().expect("persisted").clone(),
+            ["evt-0", "evt-1"]
+        );
+        assert_eq!(buffered(&batch), ["evt-2", "evt-3", "evt-4"]);
+        assert_eq!(retry.failures, 1);
+        assert!(!retry.due(), "the next flush waits");
+
+        flush_batch(&store, &mut batch, 2, &mut retry, &None).await;
+        assert_eq!(buffered(&batch), ["evt-2", "evt-3", "evt-4"]);
+        assert_eq!(retry.failures, 2);
     }
 
     #[test]

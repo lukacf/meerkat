@@ -879,6 +879,15 @@ ownership is retained with recovery evidence rather than reconstructed from the
 host's current policy. Compose the returned coordinator into the same shared
 context-mirror/activation host as the default coordinator.
 
+After a restart, the coordinator reconciles each voice delegation the previous
+process left, once, without resubmitting it, and it never wakes a member to do
+so. A member that is not materialized at start (the default under lazy restore,
+`member_restore: on_demand`) has its delegations reconciled when it is woken, or
+before the first voice channel opened on it, whichever comes first. A voice
+channel open waits for the start-up pass over the materialized members only; if
+that pass cannot complete (for example, a mob restore that keeps failing), the
+open is refused after 30 seconds instead of waiting.
+
 ### Transcript rows while the member's turn runs
 
 A live channel commits its transcript rows (the user's finalized speech, the

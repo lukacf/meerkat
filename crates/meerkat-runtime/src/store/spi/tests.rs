@@ -1460,7 +1460,7 @@ mod source_guard {
 
     /// The 1-based line of `at`.
     pub(super) fn line(code: &[u8], at: usize) -> usize {
-        code[..at].iter().filter(|&&byte| byte == b'\n').count() + 1
+        code[..at].split(|&byte| byte == b'\n').count()
     }
 }
 

@@ -2466,10 +2466,15 @@ async fn a_refused_member_is_not_reread_on_other_members_changes() -> ConsoleLog
 
     // 100 changes of the mob that touch only the peer: each status read of
     // the idle peer records its observation, which publishes machine state.
+    // Each change waits for a read it caused and for the session's backfill
+    // to end, so no change lands while a pass for the session still runs (a
+    // pass in flight takes over the re-drive such a change wakes).
+    let inner = fixture.aggregator.inner.clone();
     let mut changes = handle.machine_state_changes();
     let _ = futures::FutureExt::now_or_never(changes.changed());
     let mut published = 0;
     for _ in 0..100 {
+        let before = reads();
         handle.member_status(peer).await?;
         if matches!(
             futures::FutureExt::now_or_never(changes.changed()),
@@ -2477,14 +2482,22 @@ async fn a_refused_member_is_not_reread_on_other_members_changes() -> ConsoleLog
         ) {
             published += 1;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        let read_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        while reads() == before && tokio::time::Instant::now() < read_deadline {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        let idle_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !inner.targeted_session_backfills.lock().await.is_empty() {
+            if tokio::time::Instant::now() >= idle_deadline {
+                return Err("the refused member's backfill did not end within 10 s".into());
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
     }
     assert!(
         published >= 50,
         "the peer's status reads change the mob's state ({published} of 100 did)"
     );
-    // Give a re-drive woken by the last change time to read.
-    tokio::time::sleep(Duration::from_millis(300)).await;
     let reads = reads();
     assert!(
         reads <= 2,

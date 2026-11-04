@@ -897,6 +897,7 @@ regen-schemas:
 release-doctor:
 	@echo "$(GREEN)Checking release environment...$(NC)"
 	@scripts/test-release-npm-publish-preflight.sh
+	@$(PYTHON) -I scripts/test_release_registry_preflight.py
 	@scripts/test-release-doctor-workflow-contract.sh
 	@scripts/test-release-find-prebuild.sh
 	@scripts/test-release-require-standalone-green.sh

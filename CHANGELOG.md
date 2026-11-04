@@ -91,6 +91,22 @@ them.
   (`AuthCredentialIdentity::from_auth_binding`) and ran with provider-native
   tools on (`ProviderNativeToolPolicy::Inherit`). See Changed.
 
+- `meerkat-runtime`, `meerkat-machine-schema`, `meerkat-machine-kernels`:
+  durable decisions check the approver who decided at execution (see
+  Changed). `DurableDecisionService::authorize_execution` takes a fourth
+  parameter, `approver: &ConsentEligibilityAnswer`, the host's answer for
+  the approver who decided; pass `ConsentEligibilityAnswer::Eligible` with
+  current evidence to keep the previous behaviour.
+  `DurableDecisionInput::AuthorizeExecution` (meerkat-runtime
+  `decision::dsl` and meerkat-machine-schema
+  `catalog::dsl::durable_decision`) and the kernel
+  `generated::durable_decision::inputs::AuthorizeExecution` gain the public
+  field `approver_current: bool`, so code that builds them literally must
+  set it. The kernel `generated::durable_decision::TransitionId` gains
+  `AuthorizeExecutionRefusedApproverRevoked` and
+  `AuthorizeExecutionRefusedRevokedSettlementOwed`, appended last, so an
+  exhaustive match needs their arms.
+
 ### Added
 
 - GitHub Copilot configured once: `[realm.<realm>.copilot]` states a Copilot
@@ -174,6 +190,39 @@ them.
   doctor's operator-instruction census readers over a connection the caller
   opened read-only, so another storage doctor counts by the same rule.
 
+- `meerkat-runtime`: `decision::DecisionExecutorLoop`, the one executor of a
+  decision store's registered kinds. A host registers one
+  `DecisionExecutor` per decision kind (execute a held request under its
+  permit, read its own record of whether a commit landed, deliver the
+  requester notice) and a `DecisionApproverCurrentness` (its answer for the
+  approver who decided), then drives `pass()`: at start, after it records a
+  decision, and on a timer. A pass reads the due and owed pages only. It
+  records the expiries its due page shows, settles every permit outstanding
+  when it reads it first (a landed commit is recorded executed, a permit
+  with no commit is released), executes each approved decision at most
+  once and settles its permit (`Committed`, `Released`, or `Refused` with
+  the owner's typed reference), and delivers owed notices. Each decision's
+  outcome is reported (`DecisionPassOutcome`), with `Deferred` for an
+  unsettled approver answer, an unreadable executor record or an
+  undelivered notice. `DecisionExecutorLoop::start` claims the store's
+  executor role and refuses a second loop (`DecisionError::ExecutorHeld`), a
+  candidate launch and two executors of one kind.
+- `meerkat-runtime`: `DurableDecisionService::claim_executor`, and
+  `DecisionError::Unsettled(DecisionId)` (the approver answer was unsettled;
+  nothing was applied) and `DecisionError::ExecutorHeld`.
+  `APPROVER_NOT_CURRENT_REFUSAL` names the execution refusal a decision
+  records when its approver is no longer current.
+- `meerkat-core`: `approval::decision::DecisionExecutorClaim` and the
+  provided method `DecisionStore::claim_executor`. The default refuses (a
+  store that cannot keep the role exclusive has no executor);
+  `InMemoryDecisionStore` keeps the claim among the owners that share it.
+- `meerkat-store`: `SqliteDecisionStore` claims the executor role with an
+  OS lock on `approval_decisions.executor.lock` beside the database
+  (`SqliteDecisionStore::executor_lock_path`,
+  `DECISION_EXECUTOR_LOCK_EXTENSION`), exclusive across opens and
+  processes and released when its process ends. Creating the lock file is
+  the claim's only write.
+
 ### Changed
 
 - A session on a zero-config Copilot route, or on a route of a
@@ -189,6 +238,18 @@ them.
   (`runtime_session_authority.boundary_head_json`), which carry the session
   envelope of the head they committed, beside the head rows, the head-less
   documents and the WholeBlob documents.
+
+- `meerkat-runtime`, `meerkat-machine-schema`: `DurableDecisionMachine`
+  issues an execution permit only while the approver who decided is still
+  current. An authorization for an approver who is no longer current (the
+  answer refused, or its evidence stale when the authorization commits)
+  issues no permit: with no permit outstanding the decision ends
+  `execution_refused`, records `approver_not_current` and owes its notice;
+  with one outstanding nothing changes and `SettlementOwed` is answered,
+  so the owner settles it first and a commit made under it still records
+  executed. An unsettled answer applies nothing. The hand-written audit
+  checks `AuditPermitOnlyForCurrentApprover` with two new witnesses and
+  three new mutants.
 
 ### Fixed
 

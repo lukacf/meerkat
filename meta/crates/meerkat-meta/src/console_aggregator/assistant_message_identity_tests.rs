@@ -2560,3 +2560,64 @@ async fn a_status_unknown_member_is_reread_only_after_its_backoff() -> ConsoleLo
     handle.stop().await?;
     Ok(())
 }
+
+/// The wait before a member's status is read again after unanswered reads in
+/// a row: 1 s, doubled for each further one, at most 30 s.
+#[test]
+fn the_status_unknown_backoff_doubles_from_one_second_to_thirty() {
+    let waits = (1..=7).map(status_unknown_backoff_wait).collect::<Vec<_>>();
+    assert_eq!(waits, [1, 2, 4, 8, 16, 30, 30].map(Duration::from_secs));
+    assert_eq!(
+        status_unknown_backoff_wait(u32::MAX),
+        Duration::from_secs(30)
+    );
+}
+
+/// An unanswered status read holds the member's next read back for its
+/// backoff, and a further one in a row doubles it. A pass that asked for no
+/// status keeps the backoff, it ends at its instant, and an answered read
+/// starts the next one from 1 s again.
+#[tokio::test(start_paused = true)]
+async fn an_answered_status_read_ends_the_status_read_backoff() {
+    use assistant_history_refresh::AssistantHistoryRefreshGate as Gate;
+    let aggregator = MetaConsoleAggregator::new(Arc::new(InMemoryConsoleLogStore::new()));
+    let inner = &aggregator.inner;
+    let key = (
+        uuid::Uuid::new_v4(),
+        RUNTIME.to_string(),
+        "agent-backoff".to_string(),
+        "session-backoff".to_string(),
+    );
+    let start = tokio::time::Instant::now();
+    assert_eq!(status_read_not_before(inner, &key), None);
+    note_status_read(inner, &key, Gate::StatusUnknown);
+    assert_eq!(
+        status_read_not_before(inner, &key),
+        Some(start + Duration::from_secs(1))
+    );
+    note_status_read(inner, &key, Gate::StatusUnknown);
+    assert_eq!(
+        status_read_not_before(inner, &key),
+        Some(start + Duration::from_secs(2)),
+        "a further unanswered read in a row doubles the wait"
+    );
+    note_status_read(inner, &key, Gate::PositiveOnly);
+    assert_eq!(
+        status_read_not_before(inner, &key),
+        Some(start + Duration::from_secs(2)),
+        "a pass that asked for no status keeps the backoff"
+    );
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(
+        status_read_not_before(inner, &key),
+        None,
+        "the backoff ends at its instant"
+    );
+    note_status_read(inner, &key, Gate::Settled);
+    note_status_read(inner, &key, Gate::StatusUnknown);
+    assert_eq!(
+        status_read_not_before(inner, &key),
+        Some(tokio::time::Instant::now() + Duration::from_secs(1)),
+        "after an answered read the next unanswered one waits 1 s again"
+    );
+}

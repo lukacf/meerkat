@@ -107,6 +107,18 @@ each package is accepted only on evidence for that exact package, and the
   request, the store refused every later flush and took no event again. A
   refused append and every later event stay buffered in order for the next
   flush.
+- The console no longer reads a member's status again on every change of
+  its team when it cannot follow that member's events (the member's session
+  has no live actor, for example after its store scope was refused). It
+  reads it again once the member's own state changes, and its periodic sweep
+  still covers it. Before, every change of any member, an answered status
+  read of another member included, read such a member's status again, so a
+  few such members kept the console reading their status without pause.
+- After a status read that does not answer, the console waits before it
+  reads that member's status again: 1 second, doubled for each further such
+  read in a row, up to 30 seconds, for its re-check and its periodic sweep
+  alike. An answered read ends the wait. Before, the re-check read the
+  status again on the next change of any member.
 
 ## [0.9.9] - 2026-11-03
 

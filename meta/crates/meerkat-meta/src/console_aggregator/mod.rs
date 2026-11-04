@@ -231,6 +231,10 @@ struct AggregatorInner {
     status_unknown_redrives: std::sync::Mutex<BTreeSet<(uuid::Uuid, String, String, String)>>,
     #[cfg(test)]
     status_unknown_redrive_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Retry keys whose last status reads did not answer, with when their
+    /// member's status may be read again ([`StatusUnknownBackoff`]).
+    status_unknown_backoff:
+        std::sync::Mutex<BTreeMap<(uuid::Uuid, String, String, String), StatusUnknownBackoff>>,
     /// Retry keys with a queued moved-boundary re-drive: a completed pass whose
     /// session's committed boundary moved during its read re-reads once at
     /// the new boundary instead of waiting for a discovery tick and
@@ -972,6 +976,7 @@ impl MetaConsoleAggregator {
                 status_unknown_redrives: std::sync::Mutex::new(BTreeSet::new()),
                 #[cfg(test)]
                 status_unknown_redrive_tasks: std::sync::Mutex::new(Vec::new()),
+                status_unknown_backoff: std::sync::Mutex::new(BTreeMap::new()),
                 moved_boundary_redrives: std::sync::Mutex::new(BTreeSet::new()),
                 #[cfg(test)]
                 moved_boundary_redrive_tasks: std::sync::Mutex::new(Vec::new()),
@@ -1064,6 +1069,7 @@ impl MetaConsoleAggregator {
                 status_unknown_redrives: std::sync::Mutex::new(BTreeSet::new()),
                 #[cfg(test)]
                 status_unknown_redrive_tasks: std::sync::Mutex::new(Vec::new()),
+                status_unknown_backoff: std::sync::Mutex::new(BTreeMap::new()),
                 moved_boundary_redrives: std::sync::Mutex::new(BTreeSet::new()),
                 #[cfg(test)]
                 moved_boundary_redrive_tasks: std::sync::Mutex::new(Vec::new()),
@@ -1318,6 +1324,11 @@ impl MetaConsoleAggregator {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|(_, key, _, _)| key != &runtime_key);
         self.inner
+            .status_unknown_backoff
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(_, key, _, _), _| key != &runtime_key);
+        self.inner
             .member_provenance_searches
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1487,6 +1498,11 @@ impl MetaConsoleAggregator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|(_, key, _, _)| key != runtime_key);
+        self.inner
+            .status_unknown_backoff
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(_, key, _, _), _| key != runtime_key);
         self.inner
             .member_provenance_searches
             .lock()
@@ -6773,8 +6789,18 @@ where
         }
         // A complete read is not a commit barrier. An eligible refresh must
         // observe fresh typed idle status and no pending commit before reading.
-        let assistant_refresh_gate =
-            observe_refresh(&entry, &record, &session_id, assistant_refresh_requested).await;
+        // A member whose last status reads did not answer is not asked again
+        // before its backoff ends: the pass stays unsettled without a read.
+        let assistant_refresh_gate = if assistant_refresh_requested
+            && status_read_not_before(&inner, &assistant_retry_key).is_some()
+        {
+            assistant_history_refresh::AssistantHistoryRefreshGate::StatusUnknown
+        } else {
+            let gate =
+                observe_refresh(&entry, &record, &session_id, assistant_refresh_requested).await;
+            note_status_read(&inner, &assistant_retry_key, gate);
+            gate
+        };
         let assistant_history_settled = matches!(
             assistant_refresh_gate,
             assistant_history_refresh::AssistantHistoryRefreshGate::Settled
@@ -7444,15 +7470,6 @@ fn spawn_session_history_backfill_target(
     });
 }
 
-/// Re-drive a retained assistant-history retry whose gate read found no fresh
-/// typed status (`StatusUnknown`): the bounded status read did not answer, for
-/// example under contention, while the member may already be idle. An idle
-/// member emits no run or commit event of its own, so without this only the
-/// discovery tick would retry it. One waiter per retry key wakes on the
-/// member's next event or the primary mob's next machine-state change and
-/// runs one targeted backfill; the retained retry key makes that pass request
-/// the assistant refresh again. The discovery loop stays the backup (a
-/// member outside the primary mob, or a mob with no further activity).
 /// One spawned or armed session-history backfill job. It counts from the
 /// moment it is spawned, before its task first runs, until it finishes, so a
 /// convergence wait started right after registration already sees the
@@ -7531,6 +7548,22 @@ fn arm_moved_boundary_redrive(
     drop(task);
 }
 
+/// Re-drive a retained assistant-history retry whose gate read found the
+/// member unsettled with nothing of its own to re-drive it: no fresh typed
+/// status (`StatusUnknown`: the bounded status read did not answer, for
+/// example under contention, while the member may already be idle), or work
+/// still landing (`Draining`, `Running`). An idle member emits no run or
+/// commit event of its own, so without this only the discovery tick would
+/// retry it. One waiter per retry key wakes on the member's next event or the
+/// primary mob's next machine-state change and runs one targeted backfill; the
+/// retained retry key makes that pass request the assistant refresh again.
+/// A member with no events to follow (its session has no live actor in the
+/// primary mob, or it is no member there) wakes only on a change of its own
+/// state: the changes of other members, an answered status read among them,
+/// say nothing new about it and would re-drive a read of it each. Either way
+/// the pass waits out the member's status-read backoff
+/// ([`status_read_not_before`]). The discovery loop stays the backup (a
+/// member outside the primary mob, or a mob with no further activity).
 fn arm_status_unknown_redrive(
     inner: &Arc<AggregatorInner>,
     retry_key: (uuid::Uuid, String, String, String),
@@ -7556,6 +7589,9 @@ fn arm_status_unknown_redrive(
     // the waiter (otherwise a persisting unknown status would re-drive
     // back-to-back instead of on the next typed change).
     let _ = futures::FutureExt::now_or_never(changes.changed());
+    // The member's own state as this arm sees it, for a waiter that may wake
+    // only on a change of it.
+    let armed_own_state = OwnMemberState::read(&handle, &member);
     let redrive_inner = Arc::clone(inner);
     let activity = BackfillActivity::begin(inner);
     let task = tokio::spawn(async move {
@@ -7573,17 +7609,41 @@ fn arm_status_unknown_redrive(
                 materialized.then(|| BackfillActivity::begin(&redrive_inner)),
             )
         } else {
-            let woke = match handle.subscribe_agent_events(&member).await {
-                Ok(mut events) => tokio::select! {
-                    event = events.next() => event.is_some(),
-                    changed = changes.changed() => changed.is_ok(),
-                },
-                // Not a member of the primary mob (or not live there): the
-                // mob's own changes still wake it.
-                Err(_) => changes.changed().await.is_ok(),
-            };
-            (woke, Some(activity))
+            match handle.subscribe_agent_events(&member).await {
+                Ok(mut events) => {
+                    let woke = tokio::select! {
+                        event = events.next() => event.is_some(),
+                        changed = changes.changed() => changed.is_ok(),
+                    };
+                    (woke, Some(activity))
+                }
+                // Not live in the primary mob (its session actor is gone, or
+                // it is no member there): only a change of its own state can
+                // make a read of it say more. Like the wait above, this one
+                // owes no backfill until then.
+                Err(_) => {
+                    drop(activity);
+                    let changed = wait_for_own_member_change(
+                        &handle,
+                        &member,
+                        &armed_own_state,
+                        &mut changes,
+                    )
+                    .await;
+                    (
+                        changed,
+                        changed.then(|| BackfillActivity::begin(&redrive_inner)),
+                    )
+                }
+            }
         };
+        // Whatever woke it, a member whose status reads did not answer is
+        // not asked again before its backoff ends.
+        if woke {
+            while let Some(not_before) = status_read_not_before(&redrive_inner, &retry_key) {
+                tokio::time::sleep_until(not_before).await;
+            }
+        }
         redrive_inner
             .status_unknown_redrives
             .lock()
@@ -7623,6 +7683,119 @@ async fn wait_for_member_materialized(
         }
     }
     true
+}
+
+/// A member's own state in its mob's published machine state, read without
+/// a command to the mob's actor: its identity entry (standing, Broken fact,
+/// host preparation, rotation in flight) and whether it is materialized in
+/// this process.
+#[derive(PartialEq, Eq)]
+struct OwnMemberState {
+    entry: Option<meerkat_mob::IdentityEntryRead>,
+    unmaterialized: bool,
+}
+
+impl OwnMemberState {
+    fn read(handle: &MobHandle, member: &AgentIdentity) -> Self {
+        Self {
+            entry: handle.identity_entry(member).ok(),
+            unmaterialized: handle.member_unmaterialized(member),
+        }
+    }
+}
+
+/// Wait until `member`'s own state differs from `armed`: a change of another
+/// member never ends the wait. `false` when the mob's machine state stops
+/// changing first (its actor is gone).
+async fn wait_for_own_member_change(
+    handle: &MobHandle,
+    member: &AgentIdentity,
+    armed: &OwnMemberState,
+    changes: &mut meerkat_mob::MobMachineStateChanges,
+) -> bool {
+    loop {
+        if changes.changed().await.is_err() {
+            return false;
+        }
+        if OwnMemberState::read(handle, member) != *armed {
+            return true;
+        }
+    }
+}
+
+/// The wait before a member's status is read again after a read that did
+/// not answer; each further such read in a row doubles it.
+const STATUS_UNKNOWN_BACKOFF_FIRST: Duration = Duration::from_secs(1);
+/// The longest wait between two reads of a member's status that did not
+/// answer.
+const STATUS_UNKNOWN_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// How long a member's status stays unread after reads that did not answer.
+#[derive(Debug, Clone, Copy)]
+struct StatusUnknownBackoff {
+    /// Status reads in a row that did not answer.
+    unknown_reads: u32,
+    /// No pass reads the member's status before this instant.
+    not_before: tokio::time::Instant,
+}
+
+/// The wait after `unknown_reads` status reads in a row that did not answer:
+/// 1 s, doubled for each such read after the first, at most 30 s.
+fn status_unknown_backoff_wait(unknown_reads: u32) -> Duration {
+    STATUS_UNKNOWN_BACKOFF_FIRST
+        .saturating_mul(1 << unknown_reads.saturating_sub(1).min(16))
+        .min(STATUS_UNKNOWN_BACKOFF_MAX)
+}
+
+/// Record what a pass's status read of `key` found. A read that did not
+/// answer (`StatusUnknown`) leaves the member's status unread for the next
+/// backoff wait; an answered read ends the backoff. A pass that asked for no
+/// status (`PositiveOnly`) changes nothing.
+fn note_status_read(
+    inner: &AggregatorInner,
+    key: &(uuid::Uuid, String, String, String),
+    gate: assistant_history_refresh::AssistantHistoryRefreshGate,
+) {
+    use assistant_history_refresh::AssistantHistoryRefreshGate as Gate;
+    let mut backoff = inner
+        .status_unknown_backoff
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match gate {
+        Gate::PositiveOnly => {}
+        Gate::StatusUnknown => {
+            let unknown_reads = backoff
+                .get(key)
+                .map_or(0, |backoff| backoff.unknown_reads)
+                .saturating_add(1);
+            backoff.insert(
+                key.clone(),
+                StatusUnknownBackoff {
+                    unknown_reads,
+                    not_before: tokio::time::Instant::now()
+                        + status_unknown_backoff_wait(unknown_reads),
+                },
+            );
+        }
+        Gate::Pending | Gate::Draining | Gate::Running | Gate::Settled => {
+            backoff.remove(key);
+        }
+    }
+}
+
+/// The instant before which `key`'s status is not read again, while a
+/// backoff after an unanswered read runs; `None` when it may be read now.
+fn status_read_not_before(
+    inner: &AggregatorInner,
+    key: &(uuid::Uuid, String, String, String),
+) -> Option<tokio::time::Instant> {
+    inner
+        .status_unknown_backoff
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(key)
+        .map(|backoff| backoff.not_before)
+        .filter(|not_before| *not_before > tokio::time::Instant::now())
 }
 
 async fn run_targeted_session_history_backfill(

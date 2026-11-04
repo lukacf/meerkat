@@ -77,7 +77,9 @@ pub(super) enum AssistantHistoryRefreshGate {
     /// deadline elapsed or it failed) or carried no run state, or the run
     /// state itself is unknown. Treated like `Pending`, but an idle member
     /// emits no event of its own that would re-drive it, so the backfill arms
-    /// a re-drive on the next typed change.
+    /// a re-drive on the next typed change. The member's status is then not
+    /// read for 1 s, doubled for each further such read in a row up to 30 s:
+    /// a pass in that time reads `StatusUnknown` without asking.
     StatusUnknown,
     /// The member is idle on this session but its durable work has not
     /// landed: inputs are still queued, staged or awaiting their boundary

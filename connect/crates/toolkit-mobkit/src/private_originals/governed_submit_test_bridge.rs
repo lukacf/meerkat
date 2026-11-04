@@ -182,6 +182,15 @@ impl ObservedBridge {
         let real = self
             .delegate_governed_delivery(runtime_id, session_id, input, custody, internal)
             .await;
+        // The reprepare controls' change only has to be in progress through
+        // native's check: once native answered, it ends before the control
+        // goes on. A HelperPolicyChangeHeld control ends its own.
+        if !matches!(self.fault.mode, DeliveryMode::HelperPolicyChangeHeld(_)) {
+            let fault = self.fault.clone();
+            tokio::task::spawn_blocking(move || fault.end_held_changes())
+                .await
+                .unwrap();
+        }
         self.fault.helper_returns.fetch_add(1, Ordering::SeqCst);
         // Only closed native result fields are retained. The adapter neither
         // creates a refusal nor substitutes the desired reason for another one.
@@ -341,10 +350,11 @@ impl OperationPolicyOwner for AdmissionChangingOwner {
             };
             let publication = self.publication.clone();
             let (began, beginning) = std::sync::mpsc::channel();
+            let (end, ending) = std::sync::mpsc::channel::<()>();
             let held = std::thread::spawn(move || {
                 let change = publication.try_begin_owner_change();
                 let _ = began.send(change.is_ok());
-                std::thread::sleep(hold);
+                let _ = ending.recv_timeout(hold);
                 drop(change);
             });
             let counter = if beginning.recv().unwrap_or(false) {
@@ -353,7 +363,7 @@ impl OperationPolicyOwner for AdmissionChangingOwner {
                 &self.fault.publication_change_failures
             };
             counter.fetch_add(1, Ordering::SeqCst);
-            self.fault.held_changes.lock().unwrap().push(held);
+            self.fault.held_changes.lock().unwrap().push((end, held));
         }
         Ok(allowance)
     }

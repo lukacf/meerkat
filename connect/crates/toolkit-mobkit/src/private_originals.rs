@@ -561,6 +561,8 @@ pub struct PrivateOriginals {
     helper_tool_deadline_for_test: OnceLock<tokio::time::Instant>,
     #[cfg(test)]
     helper_rebind_stops_for_test: Mutex<Vec<setup_helpers::HelperRebindStop>>,
+    #[cfg(test)]
+    helper_rebind_stopped_for_test: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     custody_recovery: custody_recovery::CustodyRecovery,
     scope: StoreScope,
     store: Arc<dyn ToolkitStore>,
@@ -808,6 +810,8 @@ impl PrivateOriginals {
             helper_tool_deadline_for_test: OnceLock::new(),
             #[cfg(test)]
             helper_rebind_stops_for_test: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            helper_rebind_stopped_for_test: Mutex::new(None),
             scope,
             store,
             owner,

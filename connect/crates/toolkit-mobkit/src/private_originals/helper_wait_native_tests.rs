@@ -107,15 +107,20 @@ async fn exercise_helper_wait(
                 .helper_operation_deadline(held.original().association())
                 .unwrap()
                 .unwrap();
+            // A change still in progress after the dispatch stopped would
+            // reach the Original's turn: end it exactly at the stop.
+            let ending = fault.clone();
+            *fixture
+                .source
+                .helper_rebind_stopped_for_test
+                .lock()
+                .unwrap() = Some(Box::new(move || ending.end_held_changes()));
             fault.release.add_permits(1);
             fixture.finish(&first).await.unwrap();
-            let changes = std::mem::take(&mut *fault.held_changes.lock().unwrap());
-            for change in changes {
-                tokio::task::spawn_blocking(move || change.join())
-                    .await
-                    .unwrap()
-                    .unwrap();
-            }
+            let ending = fault.clone();
+            tokio::task::spawn_blocking(move || ending.end_held_changes())
+                .await
+                .unwrap();
             let now_ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -206,7 +211,7 @@ async fn exercise_helper_wait(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn helper_change_outlasting_the_tool_time_stops_after_one_native_call() {
     Box::pin(exercise_helper_wait(
-        Duration::from_millis(800),
+        Duration::from_secs(5),
         Duration::from_millis(300),
         Some(setup_helpers::HelperRebindStop::WaitUnsettled),
         true,

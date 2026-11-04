@@ -139,9 +139,17 @@ struct DeliveryFault {
     helper_admission_change: Mutex<Option<InputAuthorityAssociation>>,
     publication_changes: AtomicUsize,
     publication_change_failures: AtomicUsize,
-    held_changes: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    held_changes: Mutex<Vec<(std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>)>>,
 }
 impl DeliveryFault {
+    /// End every held owner change now and join its thread.
+    fn end_held_changes(&self) {
+        let held = std::mem::take(&mut *self.held_changes.lock().unwrap());
+        for (end, thread) in held {
+            let _ = end.send(());
+            thread.join().unwrap();
+        }
+    }
     fn new(mode: DeliveryMode) -> Self {
         Self {
             mode,

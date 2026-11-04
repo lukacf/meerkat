@@ -870,10 +870,20 @@ impl PrivateOriginals {
             let _ = writeln!(std::io::stderr().lock(), "{diagnostic}");
         }
         #[cfg(test)]
-        self.helper_rebind_stops_for_test
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(stop);
+        {
+            self.helper_rebind_stops_for_test
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(stop);
+            let stopped = self
+                .helper_rebind_stopped_for_test
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(stopped) = stopped {
+                stopped();
+            }
+        }
         false
     }
 

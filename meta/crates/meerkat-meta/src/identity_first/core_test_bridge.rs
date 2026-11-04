@@ -15,9 +15,11 @@
 //! [`CoreReadsBridge::with_deliveries`] admits a delivery to a live member on
 //! its current session, as Core's delivery does.
 //! [`CoreReadsBridge::fail_history_reads`] places a fault on chosen reads of
-//! Core's member history, and [`CoreReadsBridge::refuse_release_of`] has
-//! Core refuse a member's release, retryably, as Core does while the member
-//! is being woken or has work in flight. Its member lifecycle journal reads
+//! Core's member history, [`CoreReadsBridge::refuse_release_of`] has Core
+//! refuse a member's release, retryably, as Core does while the member is
+//! being woken or has work in flight, and
+//! [`CoreReadsBridge::refuse_retire_of`] has Core fail a member's
+//! retirement, as a store fault does. Its member lifecycle journal reads
 //! answer once its members keep the journal
 //! ([`CoreTestMembers::keep_journal`]);
 //! [`CoreReadsBridge::refuse_journal_pages`],
@@ -210,6 +212,9 @@ pub(crate) struct CoreReadsBridge {
     release_refusals: Mutex<BTreeSet<AgentIdentity>>,
     /// Each release this bridge carried out, in order.
     releases: Mutex<Vec<AgentIdentity>>,
+    /// The identities whose member's retirement Core fails
+    /// ([`Self::refuse_retire_of`]). Empty: every retirement goes ahead.
+    retire_refusals: Mutex<BTreeSet<AgentIdentity>>,
     /// Set by [`Self::refuse_journal_pages`].
     journal_pages_refused: AtomicBool,
     /// Set by [`Self::refuse_binding_reads`].
@@ -298,6 +303,15 @@ impl CoreReadsBridge {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(identity);
+    }
+
+    /// From now on, Core fails the retirement of `identity`'s member, as a
+    /// store fault does: the member stays live, and nothing changes for it.
+    pub(crate) fn refuse_retire_of(&self, identity: &AgentIdentity) {
+        self.retire_refusals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(identity.clone());
     }
 
     /// Each release this bridge carried out, in order. A refused release is
@@ -521,7 +535,26 @@ impl SessionBridge for CoreReadsBridge {
         })
     }
 
+    /// Core retires the live incarnation `runtime_id` names. The retirement
+    /// of a member [`Self::refuse_retire_of`] names fails, and changes
+    /// nothing.
     async fn retire_member(&self, runtime_id: &AgentRuntimeId) -> Result<(), BridgeError> {
+        let refused = self
+            .retire_refusals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        for identity in &refused {
+            if self
+                .core
+                .live_member(identity)?
+                .is_some_and(|live| live.agent_runtime_id == *runtime_id)
+            {
+                return Err(BridgeError::Mob(format!(
+                    "Core could not retire {identity}'s member (test fault)"
+                )));
+            }
+        }
         self.core.retire(runtime_id);
         Ok(())
     }

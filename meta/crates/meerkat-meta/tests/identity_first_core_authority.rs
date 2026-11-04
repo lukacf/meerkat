@@ -40,7 +40,14 @@
 //!   whose roster lists its identity: the same session and transcript at a
 //!   higher Core generation, now marked; such a member of an identity the
 //!   roster dropped is retired; a host-adopted member is neither respawned
-//!   nor retired, and a second boot changes nothing.
+//!   nor retired, and a second boot changes nothing;
+//! - a member the host spawned under an identity's member id, which the
+//!   roster never declared, is the host's whatever its labels: no roster
+//!   pass retires it;
+//! - a roster that moved an identity to another profile while the process
+//!   was down is handled by the first pass after the restart: Core lets the
+//!   member's previous role go, and the identity stays seated on its
+//!   session.
 //!
 //! Every assertion reads Core directly (the mob handle's roster), so no test
 //! can pass by agreeing with a Meta copy of the same fact.
@@ -88,6 +95,14 @@ external_addressable = true
 runtime_mode = "turn_driven"
 
 [profiles.personal.tools]
+comms = true
+
+[profiles.personal_next]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "turn_driven"
+
+[profiles.personal_next.tools]
 comms = true
 "#;
 
@@ -1007,6 +1022,44 @@ impl Boot {
                     continuity_key: identity.as_str().to_string(),
                 },
             live: binding.is_live(),
+        }
+    }
+
+    /// Core wakes `identity`'s seated member, as an operator does through
+    /// the mob, with no Meta verb.
+    async fn wake_core_member(&self, identity: &AgentIdentity) {
+        let core_identity =
+            meerkat_meta::member_comms_id::roster_member_id_for_identity(identity.as_str());
+        self.unified
+            .mob_handle()
+            .ensure_member_live(&core_identity)
+            .await
+            .unwrap_or_else(|error| panic!("Core wakes {identity}'s member: {error}"));
+    }
+
+    /// Whether Core holds `identity`'s member seated with nothing loaded
+    /// (unmaterialized). Reading it wakes nothing. `false` for a loaded
+    /// member and for an identity Core holds no member for.
+    fn core_member_unloaded(&self, identity: &AgentIdentity) -> bool {
+        let core_identity =
+            meerkat_meta::member_comms_id::roster_member_id_for_identity(identity.as_str());
+        self.unified
+            .mob_handle()
+            .member_unmaterialized(&core_identity)
+    }
+
+    /// Wait (bounded) until Core holds `identity`'s member seated with
+    /// nothing loaded. `false` when it still does not at the deadline.
+    async fn wait_core_member_unloaded(&self, identity: &AgentIdentity) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if self.core_member_unloaded(identity) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            sleep(Duration::from_millis(50)).await;
         }
     }
 
@@ -3537,6 +3590,117 @@ async fn the_roster_compile_never_respawns_or_retires_a_host_adopted_member() {
          {respawned:?}"
     );
     assert_eq!(respawned.session, Some(bob_session), "onto its session");
+    boot.assert_continuity_and_leases_unread();
+    boot.stop().await;
+}
+
+/// A member the host spawns directly on the mob under an identity's member
+/// id, with Meta's `agent_identity` label naming that identity, is the
+/// host's: the roster never declared the identity, and Meta writes that
+/// label on the members it seats but never reads it to decide anything. A
+/// roster pass that does not list the identity leaves the member as the host
+/// made it, in the running process and in the first pass after a restart.
+/// The pass used to take the label as the roster's custody and retire the
+/// member.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_raw_spawn_labelled_agent_identity_and_unlisted_is_not_retired() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let mob_id = unique_mob_id("raw-labelled-unlisted");
+    let alice = id("personal:alice");
+    let bob = id("personal:bob");
+    let roster = vec![spec("personal:alice")];
+
+    let boot = Boot::start(&state, &mob_id, &roster).await;
+    boot.compile(&roster).await;
+    let session = boot
+        .spawn_core_member(
+            &bob,
+            "MARKER-RAW-LABELLED-2-ECHO",
+            BTreeMap::from([
+                ("agent_identity".to_string(), bob.as_str().to_string()),
+                ("profile_name".to_string(), "personal".to_string()),
+            ]),
+        )
+        .await;
+    let spawned = boot.core_last_binding(&bob).await;
+    assert!(
+        spawned.live && !spawned.marked && spawned.session.as_ref() == Some(&session),
+        "control: Core holds the host's labelled member live and unmarked: {spawned:?}"
+    );
+
+    boot.compile(&roster).await;
+    assert_eq!(
+        boot.core_last_binding(&bob).await,
+        spawned,
+        "a roster pass must not retire a member the host spawned under an identity's member \
+         id that the roster never declared, whatever its labels"
+    );
+    assert!(
+        boot.core_member_generation(&alice).await.is_some(),
+        "the listed identity stays a member"
+    );
+    boot.stop().await;
+
+    let boot = Boot::start(&state, &mob_id, &roster).await;
+    boot.compile(&roster).await;
+    assert_eq!(
+        boot.core_last_binding(&bob).await,
+        spawned,
+        "the first pass after a restart leaves the host's labelled member as it is too"
+    );
+    boot.assert_continuity_and_leases_unread();
+    boot.stop().await;
+}
+
+/// A roster that moved an identity to another profile while the process
+/// was down is handled by the first pass after the restart, as by every
+/// later pass. Core restored the member seated under its previous role, and
+/// a wake loaded it there before the pass. With no declared migration the
+/// pass lets the previous role go (Core releases the member, so that role
+/// does not keep answering) and moves nothing: the identity stays seated on
+/// its session at its generation, its wakes held until the host declares the
+/// move. The pass used to skip the release while it held no registered spec,
+/// which is every first pass after a restart, and left the member loaded
+/// under its previous role.
+#[tokio::test(flavor = "multi_thread")]
+async fn reprofile_after_restart_is_handled_on_the_first_pass() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let mob_id = unique_mob_id("reprofile-restart");
+    let alice = id("personal:alice");
+    let roster = vec![spec("personal:alice")];
+    let moved = vec![DurableAgentSpec {
+        profile: ProfileName::from("personal_next"),
+        ..spec("personal:alice")
+    }];
+
+    let boot = Boot::start(&state, &mob_id, &roster).await;
+    boot.compile(&roster).await;
+    boot.send(&alice, "A first turn.").await;
+    boot.stop().await;
+
+    let boot = Boot::start(&state, &mob_id, &moved).await;
+    boot.wake_core_member(&alice).await;
+    let woken = boot.core_last_binding(&alice).await;
+    assert!(
+        woken.live && !boot.core_member_unloaded(&alice),
+        "control: Core holds the restored member loaded under its previous role before the \
+         pass: {woken:?}"
+    );
+
+    boot.compile(&moved).await;
+    assert!(
+        boot.wait_core_member_unloaded(&alice).await,
+        "the first pass after the restart must let the member's previous role go: Core still \
+         holds it loaded under that role"
+    );
+    assert_eq!(
+        boot.core_last_binding(&alice).await,
+        woken,
+        "with no declared migration the pass moves nothing: the identity stays seated on its \
+         session at its generation"
+    );
     boot.assert_continuity_and_leases_unread();
     boot.stop().await;
 }

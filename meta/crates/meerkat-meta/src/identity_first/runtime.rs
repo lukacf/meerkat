@@ -61,6 +61,8 @@ use crate::memory::records::{
 mod build_preparation;
 mod lifecycle_projection;
 mod records;
+#[cfg(test)]
+mod roster_pass_tests;
 mod seat;
 pub(crate) use records::host_pending_members_before_build;
 use seat::SeatFollowUp;

@@ -92,6 +92,18 @@ The report covers:
   operator-instruction events at mob event schema 10
   (`operator-instruction-mob-events`). A host-store realm keeps its documents
   and mob events in the host's store, which the disk sweep does not read
+- what a rollback to a release before 0.9.9 does not read in each per-mob
+  database: its identity-store rows of schema version 2 or later, the rows
+  of store-owned identities and the tombstones of removed names
+  (`identity-store-rows`, with the counts only: the total, and the archived,
+  tombstone and unreadable ones). The mob crate's read-only reader counts
+  them, by the rule a running mob's census counts by, in an `rkat` built
+  with mob support (the default)
+
+A Meta gateway's state directory is not a realm: diagnose it with Meta's
+storage doctor (`meta/storage/doctor`), which from Meta 0.9.10 reports the
+same three rollback findings for the files a Meta gateway keeps (see
+[Downgrading to 0.9.8](/guides/upgrading#downgrading-to-0-9-8)).
 
 Exit status is `0` when there are no error-severity findings and `1` when
 errors are present. Warnings and informational findings alone do not make the

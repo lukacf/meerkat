@@ -853,7 +853,7 @@ class InputsTests(unittest.TestCase):
         self.refused(rename("/catalog.json"), "unsafe")
         self.refused(rename("product/.catalog.json"), "unsafe")
         for url in ("https://example.com/x", "http://github.com/lukacf/meerkat-meta/releases/download/x",
-                    URL + "x?y", URL + "x#sha256=1", URL + "../x", "https://github.com/lukacf/meerkat-toolkit/x"):
+                    URL + "x?y", URL + "x#sha256=1", URL + "../x", "https://github.com/lukacf/other-repository/x"):
             self.refused(lambda entry, _, url=url: entry["files"]["product/catalog.json"].__setitem__("url", url),
                          "allowlisted")
         self.refused(lambda entry, _: entry["files"]["product/assembly.json"].__setitem__("path", "installer/x.json"),

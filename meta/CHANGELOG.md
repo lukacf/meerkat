@@ -30,6 +30,42 @@ each package is accepted only on evidence for that exact package, and the
   `policy-v1:sha256:<manifest digest>`, and an activation bound in the
   earlier form is not current.
 
+### Added
+
+- The storage doctor (`meta/storage/doctor`, and the console's read method)
+  takes the rollback census of a state directory: what a rollback to a
+  release on Core 0.9.8 or earlier (Meta 0.9.7 or earlier) does not read,
+  counted read-only by Core's own rules, as three Info findings with the
+  counts only (no session id, identity or mob name):
+  - `operator-instruction-envelope`: the sessions of `runtime.sqlite`
+    written at session envelope 5, which such a release refuses until a
+    roll-forward, so their identities do not resume there;
+  - `operator-instruction-mob-events`: the events at mob event schema 10 in
+    the directory's own mob journal (`event_log.sqlite3`) and in each child
+    mob's journal under `mobs/`. Such a release does not start a mob whose
+    journal holds any, and stops restoring every mob of the directory at
+    it;
+  - `identity-store-rows`: the identity-store rows of schema version 2 and
+    later (store-owned identities and the tombstones of removed names,
+    with the archived and unreadable ones counted apart) in the same mob
+    stores, which such a release does not read and this release has no
+    step to delete.
+
+  Each census reports one finding for the state directory with its total,
+  0 included, and one for each file that counts above 0 or could not be
+  counted, whose `path` names the file. The findings use Core's finding
+  codes; the doctor's result shape is unchanged, so no SDK changes: the
+  TypeScript SDK passes unknown codes through and the Python SDK returns
+  the raw result. This is the supported census the 0.9.9 upgrade notes
+  promised in place of the read-only queries.
+
+- `meta_gateway identity-census --json` reports `identity_store_rows`: the
+  identity-store rows of schema version 2 and later in the directory's mob
+  store (`created_rows`, `archived`, `tombstones`, `unreadable`), counted by
+  Core's read-only reader, or `null` when the directory has no durable mob
+  store. The text report prints the same counts. The format stays
+  `meerkat-meta.identity-census` version 1: the field is additive.
+
 ### Changed
 
 - Forge 0.3.1 selects Meta 0.9.10 with Toolkit 0.9.10 and the Connect 0.9.10
@@ -15649,7 +15685,7 @@ reading a silent-but-working phase as a hung one.
   (idle-retire reaping, no continuity record).
 - `mobkit/capabilities` on both dispatchers now carries a top-level
   `identity_first` flag — the zero-flag-day migration signal consumers gate
-  on (meerkat-studio contract point 5).
+  on (a downstream console consumer's contract point 5).
 
 ### Fixed
 
@@ -15679,7 +15715,7 @@ reading a silent-but-working phase as a hung one.
 
 ### Added
 
-- Identity-first gateway mode (meerkat-studio ask K0): `identity_first: true`
+- Identity-first gateway mode (downstream ask K0): `identity_first: true`
   on `mobkit_gateway` init boots the durable-identity substrate — continuity
   records + lease-fenced embodiment (default providers constructed from the
   existing store paths), resume-first restore with the Broken-identity
@@ -15700,13 +15736,13 @@ reading a silent-but-working phase as a hung one.
   honored, default `warn`) and logs a version-stamped startup line.
   Previously the binary dropped every tracing event in the process —
   runtime failures, console internal-error logs, and the schedule claim
-  watchdog's stall diagnosis were all invisible; meerkat-studio root-caused
+  watchdog's stall diagnosis were all invisible; a downstream app root-caused
   their opaque K1/K2 failures to exactly this gap on the child gateways
   their app spawns. `rpc_gateway` already had the subscriber.
 
 ### Added
 
-- Mob-wide, revival-surviving external-tools seam (meerkat-studio ask K4):
+- Mob-wide, revival-surviving external-tools seam (downstream ask K4):
   `MobBootstrapSpec::with_default_external_tools_provider` forwards to
   meerkat-mob's per-spawn provider, so tools attached there survive member
   respawn/revival — unlike the per-spawn `SpawnMemberSpec.external_tools`
@@ -15716,7 +15752,7 @@ reading a silent-but-working phase as a hung one.
 ### Changed
 
 - Console JSON-RPC internal errors now carry the real failure reason on the
-  wire (meerkat-studio ask K2): `message` and `data.detail` hold the error
+  wire (downstream ask K2): `message` and `data.detail` hold the error
   chain instead of an opaque `{"error":"internal_error"}` (the kind marker is
   kept for existing clients). This deliberately reverses the earlier
   redaction posture for THIS surface: every caller that reaches these
@@ -15727,14 +15763,14 @@ reading a silent-but-working phase as a hung one.
   covers the intermittent mob-spawn 500s reported as K3 wherever they
   originate on mobkit's surface.
 - The meerkat family is now exact-pinned (`=0.7.18`) in Cargo.toml
-  (meerkat-studio ask K5): the compatible meerkat version is declared, not
+  (downstream ask K5): the compatible meerkat version is declared, not
   archaeologized from Cargo.lock at release tags.
 
 ### Known issues
 
 - `mobkit/retire_member` / `mobkit/respawn_member` fail for never-ran
   members on persistent session services and strand them in `retiring`
-  (meerkat-studio K1) — root-caused upstream (ask 20,
+  (downstream ask K1), root-caused upstream (ask 20,
   docs/design/upstream-asks.md): the ArchiveSession disposal step NotFounds
   on a member that never committed a runtime snapshot. Repro ships as an
   `#[ignore]`d test in `tests/studio_k_asks.rs`; the fix lands with the next

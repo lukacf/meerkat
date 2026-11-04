@@ -51,6 +51,30 @@
 //! validation and can refuse; a refusing document is itself a reportable
 //! fact, carried with its error string). [`DoctorOptions::verbose`] adds one
 //! finding per censused session.
+//!
+//! # Rollback census
+//!
+//! What a rollback of the directory to a release on Core 0.9.8 or earlier
+//! (Meta 0.9.7 or earlier) does not read, counted read-only by Core's own
+//! rules, so the counts are the ones Core's reads take:
+//!
+//! - [`FINDING_OPERATOR_INSTRUCTION_ENVELOPE`]: the sessions of
+//!   `runtime.sqlite` written at the operator-instruction session envelope
+//!   (`meerkat_store::doctor::operator_instruction_envelope_sessions`);
+//! - [`FINDING_OPERATOR_INSTRUCTION_MOB_EVENTS`]: the events at the
+//!   operator-instruction mob event schema in the directory's own mob
+//!   journal and in each child mob's journal under `mobs/`
+//!   (`meerkat_store::doctor::operator_instruction_mob_events`);
+//! - [`FINDING_IDENTITY_STORE_ROWS`]: the identity-store rows of schema
+//!   version 2 and later in the same mob stores
+//!   (`meerkat_mob::MobStorage::read_identity_record_rows`).
+//!
+//! Each census reports one finding for the state directory (its `path`) with
+//! the total, 0 included, and one more for each file that counts above 0 or
+//! could not be counted (its `path` is that file). Every finding is Info and
+//! carries counts only, never a session id, an identity or a mob name, so the
+//! census never fails the doctor. The census ignores the identity filter:
+//! these stores carry no identity column it could narrow by.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -183,6 +207,25 @@ pub const FINDING_FIRST_BOOT_ROW_PENDING: &str = "first-boot-row-pending";
 pub const FINDING_CONSOLE_NON_EXPIRING_PRINCIPAL: &str = "console-non-expiring-principal";
 /// The Console's session fence record exists but cannot be read.
 pub const FINDING_CONSOLE_SESSION_RECORD_UNREADABLE: &str = "console-session-record-unreadable";
+/// The rollback census of the sessions in `runtime.sqlite` written at the
+/// operator-instruction session envelope, which a release on Core 0.9.8 or
+/// earlier refuses (see the module docs' rollback census). Info, counts
+/// only. Core's code and census rule, shared with `rkat storage doctor`.
+pub const FINDING_OPERATOR_INSTRUCTION_ENVELOPE: &str =
+    meerkat_store::doctor::FINDING_OPERATOR_INSTRUCTION_ENVELOPE;
+/// The rollback census of the mob events at the operator-instruction mob
+/// event schema in the state directory's own mob journal and its child mob
+/// journals, which a release on Core 0.9.8 or earlier refuses (see the
+/// module docs' rollback census). Info, counts only. Core's code and census
+/// rule, shared with `rkat storage doctor`.
+pub const FINDING_OPERATOR_INSTRUCTION_MOB_EVENTS: &str =
+    meerkat_store::doctor::FINDING_OPERATOR_INSTRUCTION_MOB_EVENTS;
+/// The rollback census of the identity-store rows of schema version 2 and
+/// later in the state directory's own mob store and its child mob stores,
+/// which a release on Core 0.9.8 or earlier does not read (see the module
+/// docs' rollback census). Info, counts only. Core's code, shared with
+/// `rkat storage doctor`; Core's mob store reader counts the rows.
+pub const FINDING_IDENTITY_STORE_ROWS: &str = meerkat_store::doctor::FINDING_IDENTITY_STORE_ROWS;
 /// Internal doctor failure (the sweep task itself failed).
 pub const FINDING_DOCTOR_INTERNAL: &str = "doctor-internal";
 
@@ -636,6 +679,8 @@ fn sweep_state_dir(
     sweep_blob_root(state_dir, out);
 
     sweep_first_boot_manifest(state_dir, out);
+
+    census_rollback(state_dir, out);
 
     // Gateway-home artifacts, reported when materialized inside a scoped
     // root (the meta_gateway XDG home is itself a valid root to pass).
@@ -2100,30 +2145,401 @@ fn sweep_first_boot_manifest(state_dir: &Path, out: &mut StorageDiagnosis) {
 }
 
 /// Core's member history of the mob store at `mob_store`, read on a thread
-/// of its own: Core's reader is async, this sweep is synchronous, and its
-/// caller may already run inside a runtime. The reader opens the store
-/// read-only and never creates it.
+/// of its own ([`block_on_core_read`]). The reader opens the store read-only
+/// and never creates it.
 fn read_member_binding_history_blocking(
     mob_store: &Path,
 ) -> Result<meerkat_mob::MemberBindingHistory, String> {
     let mob_store = mob_store.to_path_buf();
-    let reader = std::thread::Builder::new()
-        .name("storage-doctor-member-history".to_string())
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| format!("starting the member history reader failed: {error}"))?;
-            runtime
-                .block_on(meerkat_mob::MobStorage::read_member_binding_history(
-                    &mob_store,
-                ))
+    block_on_core_read(
+        "storage-doctor-member-history",
+        "the member history reader",
+        move || async move {
+            meerkat_mob::MobStorage::read_member_binding_history(&mob_store)
+                .await
                 .map_err(|error| error.to_string())
+        },
+    )
+}
+
+/// Run one of Core's async store reads to its end on a thread of its own,
+/// on a current-thread runtime: Core's readers are async, this sweep is
+/// synchronous, and its caller may already run inside a runtime. `reader`
+/// names the read in the errors of the thread itself.
+fn block_on_core_read<T, F, Fut>(thread_name: &str, reader: &str, read: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    let starting = format!("starting {reader} failed");
+    let panicked = format!("{reader} panicked");
+    let thread = std::thread::Builder::new()
+        .name(thread_name.to_string())
+        .spawn({
+            let starting = starting.clone();
+            move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| format!("{starting}: {error}"))?;
+                runtime.block_on(read())
+            }
         })
-        .map_err(|error| format!("starting the member history reader failed: {error}"))?;
-    reader
-        .join()
-        .unwrap_or_else(|_| Err("the member history reader panicked".to_string()))
+        .map_err(|error| format!("{starting}: {error}"))?;
+    thread.join().unwrap_or_else(|_| Err(panicked))
+}
+
+/// The releases that do not read what the rollback census counts, as its
+/// findings name them: inside a sentence, and at its start.
+const ROLLBACK_TARGET: &str = "a release on Core 0.9.8 or earlier (Meta 0.9.7 or earlier)";
+const ROLLBACK_TARGET_SENTENCE: &str = "A release on Core 0.9.8 or earlier (Meta 0.9.7 or earlier)";
+
+/// The rollback census of one state directory (see the module docs): the
+/// sessions at the operator-instruction envelope, then, over the
+/// directory's own mob store and its child mob journals, the events at the
+/// operator-instruction mob event schema and the identity-store rows of
+/// schema version 2 and later. Read-only, Info, counts only.
+fn census_rollback(state_dir: &Path, out: &mut StorageDiagnosis) {
+    census_operator_instruction_envelope(state_dir, out);
+    let stores = RollbackCensusStores::of(state_dir);
+    census_operator_instruction_mob_events(state_dir, &stores, out);
+    census_identity_store_rows(state_dir, &stores, out);
+}
+
+/// The mob stores the rollback census reads.
+struct RollbackCensusStores {
+    /// The directory's own mob store, found as the migration's census finds
+    /// it (the gateways' `event_log.sqlite3`, or an embedded application's
+    /// store under the name its composition manifest gives): `Ok(None)` for
+    /// in-memory mob storage, and `Err` with why it could not be found.
+    own: Result<Option<PathBuf>, String>,
+    /// Each child mob's journal under the child root (not its realm-scoped
+    /// profile or custody database).
+    children: Vec<PathBuf>,
+}
+
+impl RollbackCensusStores {
+    fn of(state_dir: &Path) -> Self {
+        Self {
+            own: crate::storage_migrate_native::census::state_dir_mob_store(state_dir),
+            children: crate::child_mob_storage::child_mob_databases(state_dir)
+                .into_iter()
+                .filter(|database| {
+                    crate::child_mob_storage::ChildMobDatabase::classify(database)
+                        == crate::child_mob_storage::ChildMobDatabase::MobEventLog
+                })
+                .collect(),
+        }
+    }
+
+    /// Every store found, the directory's own first (marked `true`).
+    fn found(&self) -> Vec<(PathBuf, bool)> {
+        let own = match &self.own {
+            Ok(Some(own)) => Some((own.clone(), true)),
+            Ok(None) | Err(_) => None,
+        };
+        own.into_iter()
+            .chain(self.children.iter().map(|child| (child.clone(), false)))
+            .collect()
+    }
+}
+
+/// The note that a census total is partial, when `uncounted` files (named
+/// `what`) could not be counted; empty otherwise.
+fn partial_note(uncounted: usize, what: &str) -> String {
+    if uncounted == 0 {
+        String::new()
+    } else {
+        format!("; {uncounted} {what} could not be counted, so the total is partial")
+    }
+}
+
+/// The census of the sessions in `runtime.sqlite` written at the
+/// operator-instruction envelope, by Core's census rule.
+fn census_operator_instruction_envelope(state_dir: &Path, out: &mut StorageDiagnosis) {
+    let envelope =
+        meerkat_core::generated::session_persistence_version_authority::session_envelope_version_for_document(
+            true,
+        );
+    let runtime = state_dir.join(crate::storage_layout::RUNTIME_DB_FILE_NAME);
+    let (sessions, uncounted) = if runtime.is_file() {
+        match count_operator_instruction_sessions(&runtime) {
+            Ok(0) => (0, 0),
+            Ok(sessions) => {
+                out.findings.push(
+                    StorageFinding::new(
+                        FindingSeverity::Info,
+                        FINDING_OPERATOR_INSTRUCTION_ENVELOPE,
+                        format!(
+                            "{sessions} session(s) of this runtime store at session envelope \
+                             {envelope}: {ROLLBACK_TARGET} refuses each of them until a \
+                             roll-forward"
+                        ),
+                    )
+                    .with_path(runtime.clone()),
+                );
+                (sessions, 0)
+            }
+            Err(error) => {
+                out.findings.push(
+                    StorageFinding::new(
+                        FindingSeverity::Info,
+                        FINDING_OPERATOR_INSTRUCTION_ENVELOPE,
+                        format!(
+                            "the sessions of this runtime store at session envelope {envelope} \
+                             could not be counted: {error}"
+                        ),
+                    )
+                    .with_path(runtime.clone()),
+                );
+                (0, 1)
+            }
+        }
+    } else {
+        (0, 0)
+    };
+    let mut message = format!(
+        "operator-instruction census: {sessions} session(s) of runtime.sqlite at session \
+         envelope {envelope}"
+    );
+    if !runtime.is_file() {
+        message.push_str(" (the state directory holds no runtime.sqlite)");
+    }
+    if sessions > 0 {
+        message.push_str(&format!(
+            ". A session is written at envelope {envelope} once its document holds \
+             operator-instruction entries (or the recorded instruction state), a rewrite record \
+             that moved an instruction activation row, or a retired instruction activation \
+             body; {ROLLBACK_TARGET} refuses such a session until a roll-forward, so its \
+             identity does not resume after a rollback to such a release"
+        ));
+    }
+    message.push_str(&partial_note(uncounted, "runtime store"));
+    out.findings.push(
+        StorageFinding::new(
+            FindingSeverity::Info,
+            FINDING_OPERATOR_INSTRUCTION_ENVELOPE,
+            message,
+        )
+        .with_path(state_dir.to_path_buf()),
+    );
+}
+
+/// The sessions of the runtime store at `db_path` at the
+/// operator-instruction envelope, in one read snapshot.
+fn count_operator_instruction_sessions(db_path: &Path) -> Result<usize, String> {
+    let conn = meerkat_sqlite::open(db_path, meerkat_sqlite::ConnectionProfile::ReadOnly)
+        .map_err(|error| error.to_string())?;
+    let snapshot = conn
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
+    meerkat_store::doctor::operator_instruction_envelope_sessions(&snapshot)
+        .map(|sessions| sessions.len())
+        .map_err(|error| error.to_string())
+}
+
+/// The census of the mob events at the operator-instruction mob event
+/// schema, by Core's census rule.
+fn census_operator_instruction_mob_events(
+    state_dir: &Path,
+    stores: &RollbackCensusStores,
+    out: &mut StorageDiagnosis,
+) {
+    let schema = meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION;
+    let mut total = 0_u64;
+    let mut counted = 0_usize;
+    let mut with_events = 0_usize;
+    let mut uncounted = 0_usize;
+    if let Err(detail) = &stores.own {
+        uncounted += 1;
+        out.findings.push(
+            StorageFinding::new(
+                FindingSeverity::Info,
+                FINDING_OPERATOR_INSTRUCTION_MOB_EVENTS,
+                format!(
+                    "the state directory's own mob journal could not be found, so it was not \
+                     counted: {detail}"
+                ),
+            )
+            .with_path(state_dir.to_path_buf()),
+        );
+    }
+    for (journal, own) in stores.found() {
+        let message = match count_operator_instruction_mob_events(&journal) {
+            Ok(0) => {
+                counted += 1;
+                continue;
+            }
+            Ok(events) => {
+                counted += 1;
+                with_events += 1;
+                total += events;
+                if own {
+                    format!(
+                        "the state directory's own mob journal holds {events} event(s) at mob \
+                         event schema {schema}: its mob recorded operator instructions, and \
+                         {ROLLBACK_TARGET} does not start that mob. The journal is not in mobs/: \
+                         removing it removes the whole mob, so a rollback to such a release is \
+                         not available without losing the mob"
+                    )
+                } else {
+                    format!(
+                        "this child mob's journal holds {events} event(s) at mob event schema \
+                         {schema}: the mob recorded operator instructions, and {ROLLBACK_TARGET} \
+                         refuses this journal and stops restoring every child mob of the state \
+                         directory at it. Destroy the mob, or move this database out of mobs/, \
+                         before a rollback to such a release"
+                    )
+                }
+            }
+            Err(error) => {
+                uncounted += 1;
+                format!(
+                    "the events of this mob journal at mob event schema {schema} could not be \
+                     counted: {error}"
+                )
+            }
+        };
+        out.findings.push(
+            StorageFinding::new(
+                FindingSeverity::Info,
+                FINDING_OPERATOR_INSTRUCTION_MOB_EVENTS,
+                message,
+            )
+            .with_path(journal),
+        );
+    }
+    let mut message = format!(
+        "operator-instruction census: {total} mob event(s) at mob event schema {schema} in \
+         {with_events} of {counted} mob journal(s)"
+    );
+    if total > 0 {
+        message.push_str(&format!(
+            ". {ROLLBACK_TARGET_SENTENCE} refuses a journal that holds them and stops \
+             restoring every mob of the state directory at it; each such journal has a finding \
+             of its own"
+        ));
+    }
+    message.push_str(&partial_note(uncounted, "mob journal(s)"));
+    out.findings.push(
+        StorageFinding::new(
+            FindingSeverity::Info,
+            FINDING_OPERATOR_INSTRUCTION_MOB_EVENTS,
+            message,
+        )
+        .with_path(state_dir.to_path_buf()),
+    );
+}
+
+/// The events of the mob journal at `db_path` at the operator-instruction
+/// mob event schema.
+fn count_operator_instruction_mob_events(db_path: &Path) -> Result<u64, String> {
+    let conn = meerkat_sqlite::open(db_path, meerkat_sqlite::ConnectionProfile::ReadOnly)
+        .map_err(|error| error.to_string())?;
+    meerkat_store::doctor::operator_instruction_mob_events(&conn).map_err(|error| error.to_string())
+}
+
+/// The census of the identity-store rows of schema version 2 and later,
+/// counted by Core's mob store reader.
+fn census_identity_store_rows(
+    state_dir: &Path,
+    stores: &RollbackCensusStores,
+    out: &mut StorageDiagnosis,
+) {
+    let mut total = meerkat_mob::IdentityRecordRows::default();
+    let mut counted = 0_usize;
+    let mut with_rows = 0_usize;
+    let mut uncounted = 0_usize;
+    if let Err(detail) = &stores.own {
+        uncounted += 1;
+        out.findings.push(
+            StorageFinding::new(
+                FindingSeverity::Info,
+                FINDING_IDENTITY_STORE_ROWS,
+                format!(
+                    "the state directory's own mob store could not be found, so it was not \
+                     counted: {detail}"
+                ),
+            )
+            .with_path(state_dir.to_path_buf()),
+        );
+    }
+    let found = stores.found();
+    let paths: Vec<PathBuf> = found.iter().map(|(path, _)| path.clone()).collect();
+    let rows = match count_identity_store_rows(paths) {
+        Ok(rows) => rows,
+        Err(error) => found.iter().map(|_| Err(error.clone())).collect(),
+    };
+    for ((store, _), rows) in found.into_iter().zip(rows) {
+        let message = match rows {
+            Ok(rows) if rows.created_rows == 0 => {
+                counted += 1;
+                continue;
+            }
+            Ok(rows) => {
+                counted += 1;
+                with_rows += 1;
+                total += rows;
+                format!(
+                    "{} identity-store row(s) of schema version 2 or later in this mob store ({} \
+                     archived, {} tombstone(s), {} unreadable): {ROLLBACK_TARGET} does not read \
+                     them",
+                    rows.created_rows, rows.archived, rows.tombstones, rows.unreadable
+                )
+            }
+            Err(error) => {
+                uncounted += 1;
+                format!("the identity-store rows of this mob store could not be counted: {error}")
+            }
+        };
+        out.findings.push(
+            StorageFinding::new(FindingSeverity::Info, FINDING_IDENTITY_STORE_ROWS, message)
+                .with_path(store),
+        );
+    }
+    let mut message = format!(
+        "identity-store census: {} row(s) of schema version 2 or later in {with_rows} of \
+         {counted} mob store(s): {} archived, {} tombstone(s), {} unreadable",
+        total.created_rows, total.archived, total.tombstones, total.unreadable
+    );
+    if total.created_rows > 0 {
+        message.push_str(&format!(
+            ". These are the rows of store-owned identities and the tombstones of removed \
+             names: {ROLLBACK_TARGET} does not read them, and this release has no step that \
+             deletes them, so a rollback to such a release is not supported while the total is \
+             above 0"
+        ));
+    }
+    message.push_str(&partial_note(uncounted, "mob store(s)"));
+    out.findings.push(
+        StorageFinding::new(FindingSeverity::Info, FINDING_IDENTITY_STORE_ROWS, message)
+            .with_path(state_dir.to_path_buf()),
+    );
+}
+
+/// The identity-store rows of each mob store in `stores`, summed over its
+/// mobs, read by Core's read-only reader on a thread of its own
+/// ([`block_on_core_read`]), in order.
+fn count_identity_store_rows(
+    stores: Vec<PathBuf>,
+) -> Result<Vec<Result<meerkat_mob::IdentityRecordRows, String>>, String> {
+    block_on_core_read(
+        "storage-doctor-identity-rows",
+        "the identity-store row reader",
+        move || async move {
+            let mut counted = Vec::with_capacity(stores.len());
+            for store in &stores {
+                counted.push(
+                    meerkat_mob::MobStorage::read_identity_record_rows(store)
+                        .await
+                        .map(|mobs| mobs.into_values().sum::<meerkat_mob::IdentityRecordRows>())
+                        .map_err(|error| error.to_string()),
+                );
+            }
+            Ok(counted)
+        },
+    )
 }
 
 #[cfg(test)]
@@ -3342,5 +3758,353 @@ mod tests {
         std::fs::write(&record, "not a record").unwrap();
         let unreadable = diagnose_state_dir_blocking(&scope(&[tmp.path()]), None);
         assert!(codes(&unreadable).contains(&FINDING_CONSOLE_SESSION_RECORD_UNREADABLE));
+    }
+
+    // -----------------------------------------------------------------
+    // Rollback census
+    // -----------------------------------------------------------------
+
+    fn census_envelope() -> u32 {
+        meerkat_core::generated::session_persistence_version_authority::session_envelope_version_for_document(
+            true,
+        )
+    }
+
+    /// The session-bearing tables of a runtime store the envelope census
+    /// reads, as Core's census reads them, without rows.
+    fn create_census_runtime_tables(path: &Path) -> Connection {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_heads (session_id TEXT PRIMARY KEY, version INTEGER);
+             CREATE TABLE sessions (session_id TEXT PRIMARY KEY, session_json BLOB);
+             CREATE TABLE runtime_session_authority (
+                 runtime_id TEXT PRIMARY KEY, session_id TEXT, boundary_head_json BLOB);
+             CREATE TABLE runtime_whole_blob_authority (
+                 runtime_id TEXT PRIMARY KEY, session_id TEXT, blob_sha256 TEXT);
+             CREATE TABLE runtime_whole_blob_bodies (
+                 blob_sha256 TEXT PRIMARY KEY, session_snapshot BLOB);
+             CREATE TABLE runtime_whole_blob_provisional_tails (
+                 runtime_id TEXT PRIMARY KEY, session_id TEXT, candidate_blob_sha256 TEXT);",
+        )
+        .unwrap();
+        conn
+    }
+
+    /// A runtime store with a session at the operator-instruction envelope in
+    /// each source the census reads (a head row, a head-less document, a
+    /// committed boundary head, a WholeBlob body, a provisional tail's
+    /// candidate body: 5 sessions), and sessions it leaves out (a head row and
+    /// a body at the envelope before, and a document at the envelope that a
+    /// head row at the envelope before shadows).
+    fn write_census_runtime_store(path: &Path) {
+        let envelope = census_envelope();
+        let conn = create_census_runtime_tables(path);
+        let document = |version: u32| format!(r#"{{"version":{version},"messages":[]}}"#);
+        for (session, version) in [
+            ("s-head-at", envelope),
+            ("s-head-before", envelope - 1),
+            ("s-shadowed", envelope - 1),
+        ] {
+            conn.execute(
+                "INSERT INTO session_heads (session_id, version) VALUES (?1, ?2)",
+                rusqlite::params![session, version],
+            )
+            .unwrap();
+        }
+        for session in ["s-headless-at", "s-shadowed"] {
+            conn.execute(
+                "INSERT INTO sessions (session_id, session_json) VALUES (?1, ?2)",
+                rusqlite::params![session, document(envelope).as_bytes()],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO runtime_session_authority (runtime_id, session_id, boundary_head_json) \
+             VALUES ('rt:session:s-boundary-at', 's-boundary-at', ?1)",
+            rusqlite::params![document(envelope).as_bytes()],
+        )
+        .unwrap();
+        for (blob, version) in [
+            ("body-at", envelope),
+            ("body-before", envelope - 1),
+            ("candidate-at", envelope),
+        ] {
+            conn.execute(
+                "INSERT INTO runtime_whole_blob_bodies (blob_sha256, session_snapshot) \
+                 VALUES (?1, ?2)",
+                rusqlite::params![blob, document(version).as_bytes()],
+            )
+            .unwrap();
+        }
+        for (session, blob) in [("s-blob-at", "body-at"), ("s-blob-before", "body-before")] {
+            conn.execute(
+                "INSERT INTO runtime_whole_blob_authority (runtime_id, session_id, blob_sha256) \
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![format!("rt:session:{session}"), session, blob],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO runtime_whole_blob_provisional_tails \
+             (runtime_id, session_id, candidate_blob_sha256) \
+             VALUES ('rt:session:s-tail-at', 's-tail-at', 'candidate-at')",
+            [],
+        )
+        .unwrap();
+    }
+
+    /// Append raw events at mob event schema `versions` to the journal of the
+    /// mob store at `path`.
+    fn append_mob_events(path: &Path, versions: &[u32]) {
+        let conn = Connection::open(path).unwrap();
+        for (index, version) in versions.iter().enumerate() {
+            let stored = format!(r#"{{"schema_version":{version},"event":{{}}}}"#);
+            conn.execute(
+                "INSERT INTO mob_events (cursor, mob_id, event_json) VALUES (?1, 'mob', ?2)",
+                rusqlite::params![index as i64 + 1, stored.as_bytes()],
+            )
+            .unwrap();
+        }
+    }
+
+    /// Every regular file under `dir` with its length and modification time,
+    /// SQLite's `-wal`/`-shm` sidecars left out: a read-only open of a WAL
+    /// database may touch those, never a database or any other file.
+    fn file_facts(dir: &Path) -> BTreeMap<PathBuf, (u64, std::time::SystemTime)> {
+        let mut facts = BTreeMap::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(next) = pending.pop() {
+            for entry in std::fs::read_dir(&next).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                if name.ends_with("-wal") || name.ends_with("-shm") {
+                    continue;
+                }
+                let metadata = std::fs::metadata(&path).unwrap();
+                facts.insert(path, (metadata.len(), metadata.modified().unwrap()));
+            }
+        }
+        facts
+    }
+
+    /// The findings of `code`, as (path, message); each must be Info.
+    fn census_findings(diagnosis: &StorageDiagnosis, code: &str) -> Vec<(PathBuf, String)> {
+        diagnosis
+            .findings
+            .iter()
+            .filter(|finding| finding.code == code)
+            .map(|finding| {
+                assert_eq!(finding.severity, FindingSeverity::Info, "{finding:#?}");
+                (
+                    finding
+                        .path
+                        .clone()
+                        .expect("a census finding names its path"),
+                    finding.message.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// Row (RED): the rollback census of a state directory counts, by Core's
+    /// rules, what a release on Core 0.9.8 or earlier does not read: the 5
+    /// sessions of runtime.sqlite at the operator-instruction envelope (one in
+    /// each source); the 3 mob events at the operator-instruction mob event
+    /// schema, 2 in the directory's own journal and 1 in a child mob's
+    /// journal; and the identity-store rows of the identity census sample in
+    /// the directory's own mob store (10 rows: 1 archived, 2 tombstones, 4
+    /// unreadable), the child's realm-profile database left out. Each census
+    /// reports its total for the directory and one finding per file that
+    /// counts above 0, all Info and counts only, and the doctor changes no
+    /// file.
+    ///
+    /// RED on the old tree: the doctor takes no rollback census.
+    #[test]
+    fn the_rollback_census_counts_a_state_directory_and_writes_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path();
+        let schema = meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION;
+        let envelope = census_envelope();
+        let event_log = state.join("event_log.sqlite3");
+        meerkat_mob::seed_identity_census_rows_for_test(&event_log).unwrap();
+        append_mob_events(&event_log, &[schema - 1, schema, schema]);
+        let children = state.join("mobs");
+        std::fs::create_dir_all(&children).unwrap();
+        let child = children.join("mob--child.db");
+        drop(meerkat_mob::MobStorage::persistent(&child).unwrap());
+        append_mob_events(&child, &[schema]);
+        // Not a mob journal: rows here are not counted.
+        meerkat_mob::seed_identity_census_rows_for_test(
+            &children.join(crate::child_mob_storage::REALM_PROFILE_DATABASE),
+        )
+        .unwrap();
+        let runtime = state.join("runtime.sqlite");
+        write_census_runtime_store(&runtime);
+        let before = file_facts(state);
+
+        let diagnosis = diagnose_state_dir_blocking(&scope(&[state]), None);
+
+        assert_eq!(file_facts(state), before, "the doctor changes no file");
+        let envelope_findings = census_findings(&diagnosis, FINDING_OPERATOR_INSTRUCTION_ENVELOPE);
+        assert_eq!(envelope_findings.len(), 2, "{envelope_findings:#?}");
+        assert_eq!(envelope_findings[0].0, runtime);
+        assert!(
+            envelope_findings[0].1.starts_with(&format!(
+                "5 session(s) of this runtime store at session envelope {envelope}:"
+            )),
+            "{envelope_findings:#?}"
+        );
+        assert_eq!(envelope_findings[1].0, state);
+        assert!(
+            envelope_findings[1].1.starts_with(&format!(
+                "operator-instruction census: 5 session(s) of runtime.sqlite at session \
+                 envelope {envelope}. "
+            )),
+            "{envelope_findings:#?}"
+        );
+
+        let event_findings = census_findings(&diagnosis, FINDING_OPERATOR_INSTRUCTION_MOB_EVENTS);
+        assert_eq!(event_findings.len(), 3, "{event_findings:#?}");
+        assert_eq!(event_findings[0].0, event_log);
+        assert!(
+            event_findings[0].1.starts_with(&format!(
+                "the state directory's own mob journal holds 2 event(s) at mob event schema \
+                 {schema}:"
+            )),
+            "{event_findings:#?}"
+        );
+        assert_eq!(event_findings[1].0, child);
+        assert!(
+            event_findings[1].1.starts_with(&format!(
+                "this child mob's journal holds 1 event(s) at mob event schema {schema}:"
+            )),
+            "{event_findings:#?}"
+        );
+        assert_eq!(event_findings[2].0, state);
+        assert!(
+            event_findings[2].1.starts_with(&format!(
+                "operator-instruction census: 3 mob event(s) at mob event schema {schema} in \
+                 2 of 2 mob journal(s). "
+            )),
+            "{event_findings:#?}"
+        );
+
+        let row_findings = census_findings(&diagnosis, FINDING_IDENTITY_STORE_ROWS);
+        assert_eq!(row_findings.len(), 2, "{row_findings:#?}");
+        assert_eq!(row_findings[0].0, event_log);
+        assert!(
+            row_findings[0].1.starts_with(
+                "10 identity-store row(s) of schema version 2 or later in this mob store (1 \
+                 archived, 2 tombstone(s), 4 unreadable):"
+            ),
+            "{row_findings:#?}"
+        );
+        assert_eq!(row_findings[1].0, state);
+        assert!(
+            row_findings[1].1.starts_with(
+                "identity-store census: 10 row(s) of schema version 2 or later in 1 of 2 mob \
+                 store(s): 1 archived, 2 tombstone(s), 4 unreadable. "
+            ),
+            "{row_findings:#?}"
+        );
+        assert!(
+            row_findings[1]
+                .1
+                .contains("is not supported while the total is above 0"),
+            "{row_findings:#?}"
+        );
+
+        // Counts only: no session id, identity or mob name.
+        for (_, message) in envelope_findings
+            .iter()
+            .chain(&event_findings)
+            .chain(&row_findings)
+        {
+            for name in [
+                "s-head-at",
+                "s-boundary-at",
+                "s-tail-at",
+                "store-present",
+                "roster-removed",
+                meerkat_mob::IDENTITY_CENSUS_TEST_MOB,
+                meerkat_mob::IDENTITY_CENSUS_TEST_OTHER_MOB,
+                "mob--child",
+            ] {
+                assert!(!message.contains(name), "{name} in {message}");
+            }
+        }
+    }
+
+    /// Row (RED): an empty state directory, and a fresh one whose stores hold
+    /// nothing a rollback refuses, each read 0 in every census, in one Info
+    /// finding per census for the directory and none per file, and the
+    /// doctor reports no warning or error for them.
+    ///
+    /// RED on the old tree: the doctor takes no rollback census.
+    #[test]
+    fn an_empty_or_fresh_state_directory_counts_zero_without_a_warning() {
+        let empty = tempfile::tempdir().unwrap();
+        let fresh = tempfile::tempdir().unwrap();
+        drop(meerkat_mob::MobStorage::persistent(fresh.path().join("event_log.sqlite3")).unwrap());
+        std::fs::create_dir_all(fresh.path().join("mobs")).unwrap();
+        drop(
+            meerkat_mob::MobStorage::persistent(fresh.path().join("mobs").join("mob--fresh.db"))
+                .unwrap(),
+        );
+        drop(create_census_runtime_tables(
+            &fresh.path().join("runtime.sqlite"),
+        ));
+        let schema = meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION;
+        let envelope = census_envelope();
+        for (state, stores, runtime_note) in [
+            (
+                empty.path(),
+                0,
+                " (the state directory holds no runtime.sqlite)",
+            ),
+            (fresh.path(), 2, ""),
+        ] {
+            let diagnosis = diagnose_state_dir_blocking(&scope(&[state]), None);
+            let loud: Vec<&StorageFinding> = diagnosis
+                .findings
+                .iter()
+                .filter(|finding| finding.severity != FindingSeverity::Info)
+                .collect();
+            assert!(loud.is_empty(), "{}: {loud:#?}", state.display());
+            for (code, message) in [
+                (
+                    FINDING_OPERATOR_INSTRUCTION_ENVELOPE,
+                    format!(
+                        "operator-instruction census: 0 session(s) of runtime.sqlite at \
+                         session envelope {envelope}{runtime_note}"
+                    ),
+                ),
+                (
+                    FINDING_OPERATOR_INSTRUCTION_MOB_EVENTS,
+                    format!(
+                        "operator-instruction census: 0 mob event(s) at mob event schema \
+                         {schema} in 0 of {stores} mob journal(s)"
+                    ),
+                ),
+                (
+                    FINDING_IDENTITY_STORE_ROWS,
+                    format!(
+                        "identity-store census: 0 row(s) of schema version 2 or later in 0 of \
+                         {stores} mob store(s): 0 archived, 0 tombstone(s), 0 unreadable"
+                    ),
+                ),
+            ] {
+                assert_eq!(
+                    census_findings(&diagnosis, code),
+                    vec![(state.to_path_buf(), message)],
+                    "{}",
+                    state.display()
+                );
+            }
+        }
     }
 }

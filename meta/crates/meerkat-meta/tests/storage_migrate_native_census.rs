@@ -2881,12 +2881,19 @@ async fn the_offline_identity_census_reads_a_native_directory_and_writes_nothing
         [
             "format",
             "identities",
+            "identity_store_rows",
             "mob_store",
             "mob_store_note",
             "refusal",
             "state_dir",
             "version"
         ]
+    );
+    // The gateway's store holds no identity-store row of schema version 2
+    // or later: nothing an SDK host can call writes one.
+    assert_eq!(
+        json["identity_store_rows"],
+        serde_json::json!({"created_rows": 0, "archived": 0, "tombstones": 0, "unreadable": 0})
     );
     assert_eq!(
         keys(&json["identities"][0]),
@@ -2962,7 +2969,46 @@ async fn the_offline_identity_census_names_in_memory_identities_with_null_facts(
             })
         );
     }
+    assert_eq!(report.identity_store_rows, None);
     let json = serde_json::to_value(&report).expect("report json");
     assert_eq!(json["mob_store"], serde_json::Value::Null);
     assert!(json["mob_store_note"].is_string(), "{json:#}");
+    assert_eq!(json["identity_store_rows"], serde_json::Value::Null);
+}
+
+/// Row (RED): the offline identity census counts the mob store's
+/// identity-store rows of schema version 2 and later by Core's rule, summed
+/// over the mobs the store holds: on a native directory whose store holds
+/// the identity census sample, `identity_store_rows` reads 10 rows, 1
+/// archived, 2 tombstones and 4 unreadable, and the census writes nothing
+/// in the directory.
+///
+/// RED on the old tree: the report has no `identity_store_rows`.
+#[tokio::test]
+async fn the_offline_identity_census_counts_the_identity_store_rows() {
+    let dir = tempfile::tempdir().expect("state dir");
+    let mob_store = dir.path().join("event_log.sqlite3");
+    meerkat_mob::seed_identity_census_rows_for_test(&mob_store).expect("seed the rows");
+    let before = every_file(dir.path());
+
+    let report = identity_census_offline(dir.path(), None).await;
+
+    assert_eq!(report.refusal, None, "{report:#?}");
+    assert_eq!(report.mob_store, Some(mob_store), "{report:#?}");
+    let rows = report.identity_store_rows.expect("the rows are counted");
+    assert_eq!(
+        (
+            rows.created_rows,
+            rows.archived,
+            rows.tombstones,
+            rows.unreadable
+        ),
+        (10, 1, 2, 4),
+        "{report:#?}"
+    );
+    assert_eq!(
+        serde_json::to_value(&report).expect("report json")["identity_store_rows"],
+        serde_json::json!({"created_rows": 10, "archived": 1, "tombstones": 2, "unreadable": 4})
+    );
+    assert_eq!(every_file(dir.path()), before, "the census wrote nothing");
 }

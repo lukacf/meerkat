@@ -34,7 +34,7 @@ type ConversationRichContentProps = {
   markdownUrlPolicy?: MarkdownUrlPolicy;
   richStyle?: "default" | "streaming";
   Icon?: IconRenderer | null;
-  // Default true preserves meerkat-studio's display normalization; the Meta
+  // Default true preserves an embedding app's display normalization; the Meta
   // console passes false for faithful rendering of raw agent text (pairs with
   // the parse-side `displayNormalization` option).
   displayNormalization?: boolean;

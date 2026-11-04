@@ -17,7 +17,7 @@ from launchkit.runtime_selection import MetaToolkitRuntimeTarget
 
 
 STOCK_GUIDE_ID = "b1301764-2559-41c4-99de-d2a0f2bae3af"
-_ARTIFACTS = Path("/Users/luka/.codex/worktrees/58af/meerkat-mobkit/installer/.artifacts")
+_ARTIFACTS = Path("installer/.artifacts")
 _STOCK = _ARTIFACTS / "release09-stock-console-20261010"
 _ACQUISITION = _STOCK / "acquisition-selection-v2"
 _VIEWER = _STOCK / "viewer-policy-selection-v2"

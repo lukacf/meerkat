@@ -12,7 +12,11 @@
 //!   lifecycle-terminal, both from one observation of Core's runtime store;
 //! - whether the identity owes its host a held completion (its
 //!   held-completion mark, read by the identity runtime's rule) and its
-//!   pending first-boot row.
+//!   pending first-boot row;
+//! - and, for the directory as a whole, the mob store's identity-store rows
+//!   of schema version 2 and later, which a release on Core 0.9.8 or
+//!   earlier does not read, counted with Core's read-only reader by Core's
+//!   rule ([`IdentityStoreRows`]).
 //!
 //! The directory is never written, and no database in it is opened: the
 //! census copies its top-level files (all but SQLite's shared-memory indexes,
@@ -170,12 +174,50 @@ pub struct IdentityCensusReport {
     /// Why every binding fact is null when the directory has no durable mob
     /// store ([`IN_MEMORY_MOB_STORE_NOTE`]); `None` otherwise.
     pub mob_store_note: Option<&'static str>,
+    /// The identity-store rows of schema version 2 and later in the mob
+    /// store ([`IdentityStoreRows`]); `None` when the directory has no
+    /// durable mob store. The child mobs' stores are not read here: the
+    /// storage doctor (`meta/storage/doctor`) counts them too.
+    pub identity_store_rows: Option<IdentityStoreRows>,
     /// One entry per identity the directory names (Core's durable bindings,
     /// the continuity records, the first-boot manifest's rows and the
     /// held-completion marks), in identity order.
     pub identities: Vec<IdentityCensusEntry>,
     /// Why the census refused the directory; `identities` is then empty.
     pub refusal: Option<IdentityCensusRefusal>,
+}
+
+/// The identity-store rows of schema version 2 and later in a mob store,
+/// summed over its mobs and counted by Core's read-only reader
+/// ([`meerkat_mob::MobStorage::read_identity_record_rows`]) by the rule
+/// Core's identity record census counts by: the rows of store-owned
+/// identities (present, pending their host's preparation or archived), the
+/// tombstones of removed names, and rows this build cannot read. Core 0.9.8
+/// and earlier do not read them, and this release has no step that deletes
+/// them: above 0, the directory has no supported rollback to a release on
+/// Core 0.9.8 or earlier (Meta 0.9.7 or earlier). Counts only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct IdentityStoreRows {
+    /// Every such row.
+    pub created_rows: usize,
+    /// Rows of archived store-owned identities.
+    pub archived: usize,
+    /// Tombstones: the rows of removed names, of either custody.
+    pub tombstones: usize,
+    /// Rows this build cannot read.
+    pub unreadable: usize,
+}
+
+impl From<meerkat_mob::IdentityRecordRows> for IdentityStoreRows {
+    fn from(rows: meerkat_mob::IdentityRecordRows) -> Self {
+        Self {
+            created_rows: rows.created_rows,
+            archived: rows.archived,
+            tombstones: rows.tombstones,
+            unreadable: rows.unreadable,
+        }
+    }
 }
 
 impl IdentityCensusReport {
@@ -186,6 +228,7 @@ impl IdentityCensusReport {
             state_dir: state_dir.to_path_buf(),
             mob_store: None,
             mob_store_note: None,
+            identity_store_rows: None,
             identities: Vec::new(),
             refusal: None,
         }
@@ -290,14 +333,30 @@ pub async fn identity_census_offline(
     let history = match state_dir_mob_store(copy) {
         Ok(Some(mob_store)) => {
             report.mob_store = mob_store.file_name().map(|name| state_dir.join(name));
-            match meerkat_mob::MobStorage::read_member_binding_history(&mob_store).await {
-                Ok(history) => Some(history),
+            let history =
+                match meerkat_mob::MobStorage::read_member_binding_history(&mob_store).await {
+                    Ok(history) => history,
+                    Err(error) => {
+                        return report.refused(IdentityCensusRefusal::MobStorageUnreadable {
+                            detail: error.to_string(),
+                        });
+                    }
+                };
+            // The store's identity-store rows, counted by Core's rule on the
+            // same copy.
+            match meerkat_mob::MobStorage::read_identity_record_rows(&mob_store).await {
+                Ok(mobs) => {
+                    report.identity_store_rows = Some(IdentityStoreRows::from(
+                        mobs.into_values().sum::<meerkat_mob::IdentityRecordRows>(),
+                    ));
+                }
                 Err(error) => {
                     return report.refused(IdentityCensusRefusal::MobStorageUnreadable {
                         detail: error.to_string(),
                     });
                 }
             }
+            Some(history)
         }
         Ok(None) => {
             report.mob_store_note = Some(IN_MEMORY_MOB_STORE_NOTE);

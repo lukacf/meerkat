@@ -195,6 +195,24 @@ pub const FINDING_OPERATOR_INSTRUCTION_ENVELOPE: &str = "operator-instruction-en
 /// listed mob or moves its database out of the mob root. Informational.
 /// The census reads the per-mob databases on disk (`mobs/<name>.db`).
 pub const FINDING_OPERATOR_INSTRUCTION_MOB_EVENTS: &str = "operator-instruction-mob-events";
+/// A mob store's identity-store rows of schema version 2 and later: the rows
+/// of store-owned identities (present, pending their host's preparation or
+/// archived), the tombstones of removed names of either custody, and rows
+/// this build cannot read. A release before 0.9.9 does not read them (Core
+/// 0.9.8 reads each such identity as unreadable and refuses every new
+/// identity-first adoption in the mob, and does not open a mob storage on a
+/// host store that holds one), and this release has no step that deletes
+/// them, so a mob that holds any has no supported downgrade to such a
+/// release. Informational, with the counts only.
+///
+/// The rows are counted by the mob crate's reader
+/// (`meerkat_mob::MobStorage::read_identity_record_rows`), which owns the
+/// row rule and which this crate, below it in the crate graph, cannot call:
+/// the disk sweep here never emits the finding. `rkat storage doctor` (built
+/// with mob support) adds one per mob database (`mobs/<name>.db`) that holds
+/// such rows, and Meta's storage doctor reports it for a Meta state
+/// directory under the same code.
+pub const FINDING_IDENTITY_STORE_ROWS: &str = "identity-store-rows";
 /// Durable rows or documents the storage census could not measure. The
 /// footprint findings exclude them, so the report says *unknown* instead of
 /// implying the unmeasured bytes are healthy.
@@ -1901,6 +1919,20 @@ fn mob_events_at_schema(conn: &Connection, schema_version: u32) -> Result<u64, r
     Ok(count)
 }
 
+/// How many events of one mob database's journal (its `mob_events` table)
+/// are written at the operator-instruction mob event schema
+/// ([`meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION`]): the
+/// census behind [`FINDING_OPERATOR_INSTRUCTION_MOB_EVENTS`], over a
+/// connection the caller opened read-only. A database without a journal
+/// counts 0. An event that does not decode as a stored mob event is not
+/// counted; the mob store's own reads report it. It only reads.
+pub fn operator_instruction_mob_events(conn: &Connection) -> Result<u64, rusqlite::Error> {
+    mob_events_at_schema(
+        conn,
+        meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION,
+    )
+}
+
 /// Census of one mob database's operator-instruction events: a mob that
 /// recorded operator instructions journals them at
 /// [`meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION`], which a
@@ -1918,7 +1950,7 @@ fn census_operator_instruction_mob_events(
     else {
         return;
     };
-    let count = match mob_events_at_schema(&conn, schema_version) {
+    let count = match operator_instruction_mob_events(&conn) {
         Ok(count) => count,
         Err(error) => {
             diagnosis.findings.push(
@@ -1957,12 +1989,30 @@ fn census_operator_instruction_mob_events(
 }
 
 /// The sessions of one database written at the operator-instruction
-/// envelope: head rows by their indexed `version`, head-less documents by
-/// their envelope, and a runtime store's WholeBlob documents (each session's
-/// committed body, and the candidate body of a run's provisional tail) by
-/// their envelope. Snapshot rows from before the WholeBlob authority predate
-/// the envelope and are not read.
-fn operator_instruction_envelope_sessions(
+/// envelope (`session_envelope_version_for_document(true)`), by session id:
+/// the census behind [`FINDING_OPERATOR_INSTRUCTION_ENVELOPE`], over a
+/// connection the caller opened read-only (inside one read transaction, so
+/// the sources below are read from one snapshot). It reads a session store's
+/// head rows by their indexed `version` and its head-less documents by their
+/// envelope, and a runtime store's committed boundary heads and WholeBlob
+/// documents (each session's committed body, and the candidate body of a
+/// run's provisional tail) by their envelope; a source whose table the
+/// database does not hold is skipped. Snapshot rows from before the
+/// WholeBlob authority predate the envelope and are not read. It only reads.
+pub fn operator_instruction_envelope_sessions(
+    conn: &Connection,
+) -> Result<BTreeSet<String>, rusqlite::Error> {
+    sessions_at_envelope(
+        conn,
+        meerkat_core::generated::session_persistence_version_authority::session_envelope_version_for_document(
+            true,
+        ),
+    )
+}
+
+/// The sessions of one database written at `envelope` (see
+/// [`operator_instruction_envelope_sessions`]).
+fn sessions_at_envelope(
     conn: &Connection,
     envelope: u32,
 ) -> Result<BTreeSet<String>, rusqlite::Error> {
@@ -1985,6 +2035,14 @@ fn operator_instruction_envelope_sessions(
         } else {
             "SELECT session_id, session_json FROM sessions ORDER BY session_id"
         });
+    }
+    // A runtime store's committed boundary head carries the envelope of the
+    // head it committed.
+    if table_exists(conn, "runtime_session_authority")? {
+        documents.push(
+            "SELECT session_id, boundary_head_json FROM runtime_session_authority \
+             ORDER BY session_id",
+        );
     }
     if table_exists(conn, "runtime_whole_blob_bodies")? {
         if table_exists(conn, "runtime_whole_blob_authority")? {
@@ -2059,7 +2117,7 @@ fn census_operator_instruction_envelopes(
         meerkat_core::generated::session_persistence_version_authority::session_envelope_version_for_document(
             true,
         );
-    let sessions = match operator_instruction_envelope_sessions(conn, envelope) {
+    let sessions = match operator_instruction_envelope_sessions(conn) {
         Ok(sessions) => sessions,
         Err(error) => {
             diagnosis.findings.push(
@@ -5121,6 +5179,69 @@ mod tests {
             "the finding says which realm kinds the census covers: {}",
             listed.message
         );
+    }
+
+    /// A runtime store's committed boundary head carries the envelope of the
+    /// head it committed: the census lists a session whose boundary head is
+    /// at the operator-instruction envelope, and only that one, through the
+    /// public census reader a Meta state directory's doctor shares.
+    ///
+    /// RED on the old tree: the census does not read boundary heads.
+    #[tokio::test]
+    async fn committed_boundary_heads_at_the_operator_instruction_envelope_are_listed() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "boundary-envelopes", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+        let plain_id = Session::new().id().clone();
+        let instructed_id = Session::new().id().clone();
+        let envelope =
+            meerkat_core::generated::session_persistence_version_authority::session_envelope_version_for_document(
+                true,
+            );
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE runtime_session_authority (
+                    runtime_id TEXT PRIMARY KEY, authority_version INTEGER, session_id TEXT,
+                    store_revision INTEGER, boundary_head_json BLOB,
+                    committed_head_token TEXT)",
+            )
+            .unwrap();
+            for (id, version) in [(&plain_id, envelope - 1), (&instructed_id, envelope)] {
+                let head = format!(r#"{{"id":"{id}","version":{version},"message_count":0}}"#);
+                conn.execute(
+                    "INSERT INTO runtime_session_authority (runtime_id, authority_version, \
+                     session_id, store_revision, boundary_head_json, committed_head_token) \
+                     VALUES (?1, 1, ?2, 1, ?3, 'token')",
+                    rusqlite::params![format!("rt:session:{id}"), id.to_string(), head.as_bytes()],
+                )
+                .unwrap();
+            }
+        }
+
+        let census = {
+            let conn = meerkat_sqlite::open(&db_path, meerkat_sqlite::ConnectionProfile::ReadOnly)
+                .unwrap();
+            operator_instruction_envelope_sessions(&conn).unwrap()
+        };
+        assert_eq!(
+            census,
+            BTreeSet::from([instructed_id.to_string()]),
+            "only the session whose boundary head is at envelope {envelope}"
+        );
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+        let listed = finding(&diagnosis, FINDING_OPERATOR_INSTRUCTION_ENVELOPE)
+            .expect("operator-instruction envelope finding");
+        assert_eq!(listed.severity, FindingSeverity::Info);
+        assert!(
+            listed.message.contains("1 session(s)"),
+            "{}",
+            listed.message
+        );
+        assert!(listed.message.contains(&instructed_id.to_string()));
+        assert!(!listed.message.contains(&plain_id.to_string()));
     }
 
     /// Before a rollback an operator needs the mobs a release without

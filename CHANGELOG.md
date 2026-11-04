@@ -145,6 +145,35 @@ them.
   never a permission. Native admission reads it to tell a change that has
   completed from one still in progress (see Fixed).
 
+- `meerkat-mob`: `MobStorage::read_identity_record_rows` counts the
+  identity-store rows of schema version 2 and later of a mob store at a
+  path, per mob, with no running mob: the rows
+  `MobHandle::identity_record_census()` counts (the rows of store-owned
+  identities, the tombstones of removed names, and rows this build cannot
+  read), read by the same created identity scan and counted by the same
+  rule, into the new `IdentityRecordRows` (`created_rows`, `archived`,
+  `tombstones`, `unreadable`). It opens the file read-only, so it is safe on
+  the store of a running mob, never creates, migrates or otherwise writes
+  it, and refuses a missing store or a schema it does not read with the
+  typed `IdentityRecordRowsReadError`. `MobStorage::identity_record_rows`
+  counts the storage's own mob the same way through the storage, a host
+  store's included. Each mob in the answer has no supported downgrade to a
+  release before 0.9.9: those releases do not read these rows, and this
+  release has no step that deletes them. `IdentityRecordRows` implements
+  `AddAssign` and `Sum`, for a total over a file's mobs.
+
+- `rkat`, `meerkat-store`: `rkat storage doctor` reports the identity-store
+  rows of schema version 2 and later of each mob database (`mobs/<name>.db`)
+  that holds any, as an Info finding `identity-store-rows`
+  (`meerkat_store::doctor::FINDING_IDENTITY_STORE_ROWS`) with the counts
+  only: the total, and how many are archived, tombstones and unreadable.
+  The mob crate's reader counts them, read-only; a database it cannot count
+  gets an Info finding saying so. The doctor still exits 0 on Info findings.
+  `meerkat_store::doctor::operator_instruction_envelope_sessions` and
+  `meerkat_store::doctor::operator_instruction_mob_events` expose the
+  doctor's operator-instruction census readers over a connection the caller
+  opened read-only, so another storage doctor counts by the same rule.
+
 ### Changed
 
 - A session on a zero-config Copilot route, or on a route of a
@@ -154,6 +183,12 @@ them.
   does. A zero-config route's session carried the binding as its credential
   identity before, so a provider switch or a fallback target did not stay
   on the account.
+
+- `meerkat-store`: the `operator-instruction-envelope` census also reads a
+  runtime store's committed boundary heads
+  (`runtime_session_authority.boundary_head_json`), which carry the session
+  envelope of the head they committed, beside the head rows, the head-less
+  documents and the WholeBlob documents.
 
 ### Fixed
 
@@ -277,6 +312,38 @@ them.
   `PolicyChanged` as before. A host that submits again after `PolicyChanged`
   waits first, outside its own locks, with a bounded
   `OwnerChangeChurn::wait_after_stale_read`, then resubmits once.
+
+- `meerkat-core`: `[tools.tool_timeouts]` entries accept humantime duration
+  strings, as the field's documentation said (`my_tool = "840s"`, `"14m"`,
+  `"1h 2m"`). Releases through 0.9.9 read only serde's `{ secs, nanos }`
+  table there, so the string form failed the whole config load. Each entry
+  now takes either form: the table loads exactly as before, and a string
+  that is not a duration is a config error naming its key
+  (`tools.tool_timeouts.<tool>`), never a default. Zero and negative values
+  follow the table form: `"0s"` is a zero timeout and a negative value is
+  refused. Meerkat still writes the table form, also when a config patch
+  (`config/patch`, `rkat config patch`) sets a string, so a config written by
+  this release stays readable by 0.9.9 and 0.9.8 if a host rolls back. A
+  string written into a config file by hand loads only on 0.9.10 and later.
+
+- `meerkat-mob-mcp`: restart recovery of live voice delegations no longer
+  stalls on mob members that are not materialized. At start, the live
+  delegation coordinator (`openai-live` feature) recovers the delegations a
+  previous process left by reading each member's session. A member that is
+  seated but not materialized has no runtime registration: the default under
+  lazy restore (`member_restore: on_demand`), an identity whose first wake is
+  deferred, or a member whose materialization was released. Reading it
+  failed, so the whole recovery retried every second for as long as any
+  member stayed dormant, logging "ClientContext restart inventory capture
+  remains pending" at 1 Hz, and a live channel opened on that host waited for
+  the recovery with no limit. Recovery now skips such a member without waking
+  it. Its delegations stay durable and are recovered once, when the member is
+  woken, or before the first live channel opened on it, whichever comes
+  first. A live channel open waits at most 30 seconds for the recovery and is
+  otherwise refused with an error that names it. A recovery step that keeps
+  failing warns on its 1st, 2nd, 4th, 8th and later power-of-two failures
+  instead of every second. Affects hosts up to 0.9.9 that compose the live
+  delegation coordinator with lazily restored members.
 
 ### Known limitations
 
@@ -4074,15 +4141,19 @@ them.
   stops at the first such mob database, so every mob of that realm fails to
   restore and every mob verb answers that error; a Meta gateway whose own mob
   recorded an operator instruction does not resume its mob. Before any
-  downgrade to 0.9.8 or 0.9.7, run `rkat storage doctor` on 0.9.9, then
-  destroy each mob listed under `operator-instruction-mob-events`, or move
-  its database (`mobs/<name>.db` in the realm's state directory, the path
-  the finding names) out of that directory, before the older binary starts.
-  The doctor reads the mob databases on disk only: for a realm on a host
-  store, look in the host's store for mob events at schema 10. A member
-  session that recorded its snapshot is written at session envelope 5, which
-  the older binary refuses session by session (the
-  `operator-instruction-envelope` finding lists them).
+  downgrade of a realm to 0.9.8 or 0.9.7, run `rkat storage doctor` on 0.9.9,
+  then destroy each mob listed under `operator-instruction-mob-events`, or
+  move its database (`mobs/<name>.db` in the realm's state directory, the
+  path the finding names) out of that directory, before the older binary
+  starts. The doctor reads the mob databases on disk only: for a realm on a
+  host store, look in the host's store for mob events at schema 10. A Meta
+  gateway's state directory is not a realm this doctor reads (it reads
+  neither `runtime.sqlite` nor the gateway's own mob journal,
+  `event_log.sqlite3`): Meta's storage doctor (`meta/storage/doctor`) takes
+  that census from Meta 0.9.10, and the upgrade guide gives read-only
+  queries for Meta 0.9.9. A member session that recorded its snapshot is
+  written at session envelope 5, which the older binary refuses session by
+  session (the `operator-instruction-envelope` finding lists them).
 
 - A session's grant gate is recorded in its tooling metadata, which a binary
   older than scoped tool grants does not read: such a binary resumes a gated
@@ -38595,12 +38666,12 @@ policy with its release gate.
   them, and compaction rewrites the head so shrunken context is durable —
   saving a long session no longer serializes the full transcript on every
   turn.
-- Mob member revival completeness (studio M2): reviving a stopped member
+- Mob member revival completeness (downstream ask M2): reviving a stopped member
   recomposes its per-spawn external tools from the durable spawn spec
   (spawn/respawn/dispose threading plus cold-restore seeding), and
   `MemberSpawnedEvent` durably carries `effective_profile_override` so
   roster replay restores the member's effective profile instead of `None`.
-- Restart-first-class terminal status (studio M4): `session/input_status`
+- Restart-first-class terminal status (downstream ask M4): `session/input_status`
   and `session/input_state` answer from durable runtime rows without
   requiring a live registration — a fresh host process can report terminal
   outcomes for work finished before the restart, with zero wire-shape
@@ -38622,7 +38693,7 @@ policy with its release gate.
   delegates to the full canonical load) and
   `MobSessionService::load_persisted_session_metadata` — list/status paths
   read session metadata without deserializing full transcripts.
-- `semver-breaks` release-preflight gate (studio M3): cargo-semver-checks
+- `semver-breaks` release-preflight gate (downstream ask M3): cargo-semver-checks
   runs against the last published crates.io baselines; detected public-API
   breaks fail the release unless declared under a `### Breaking` changelog
   heading. The exact-pin policy in this file's header is the other half of
@@ -38836,7 +38907,7 @@ GitHub-release assets were blocked by a runner disk flake — install
 ### Fixed
 
 - External tool servers staged/connected before the session-authority bind
-  no longer poison the tool surface (meerkat-studio P0 regression on
+  no longer poison the tool surface (a downstream P0 regression on
   0.7.19/0.7.20). 0.7.19's composite bind forwarding delivered the session
   bind to nested MCP adapters for the first time, and the adapter refused
   pre-bind surface facts with a permanently poisoned handle — every
@@ -38895,14 +38966,14 @@ unbricks retire/respawn for created-but-never-run mob members.
 
 Meerkat 0.7.19 hardens the schedule subsystem against poisoned durable rows
 (downstream field incident: one bad row silently starved every schedule), makes
-member cancellation and retire/respawn real for embedders (meerkat-studio P0s),
+member cancellation and retire/respawn real for embedders (downstream P0s),
 and gives library embedders first-class MCP wiring and a durable
 run-reconciliation query.
 
 ### Fixed
 
 - Mid-turn member cancellation no longer crashes the host process
-  (meerkat-studio M1, P0). A boundary handle that re-entered
+  (downstream ask M1, P0). A boundary handle that re-entered
   `MeerkatMachine::cancel_after_boundary` from inside the machine's own
   dispatch — the shape meerkat's own blocked-method error text steered
   embedders into — recursed unboundedly until the tokio worker overflowed
@@ -38914,7 +38985,7 @@ run-reconciliation query.
   `MobSessionService` cancel seams now states that implementations apply
   the cancel to the live agent and must never re-enter the machine.
 - Retire/respawn no longer fails deterministically for session-owned mob
-  members (meerkat-studio K1, P0). Members adopted from a host-owned session
+  members (downstream ask K1, P0). Members adopted from a host-owned session
   service (e.g. embedder console sessions via `ensure_member`) have no
   record in the mob archive authority; disposal escalated that to a fatal
   "authority returned NotFound for registered runtime session" while
@@ -38959,7 +39030,7 @@ run-reconciliation query.
 
 ### Added
 
-- Declarative MCP for library embedders (meerkat-studio M2):
+- Declarative MCP for library embedders (downstream ask M2):
   `SessionBuildOptions::mcp_servers` / `AgentBuildConfig::mcp_servers`
   materialize MCP stdio/HTTP servers into a session-owned router bound to
   the build mode's canonical external-tool surface authority — composing
@@ -38971,7 +39042,7 @@ run-reconciliation query.
   its external child, making session-time late binding reach nested MCP
   adapters. `meerkat::mcp::standalone_router()` is the supported
   constructor for raw-router hosts.
-- Durable run reconciliation (meerkat-studio M4): the machine-owned
+- Durable run reconciliation (downstream ask M4): the machine-owned
   idempotency binding is queryable read-only —
   `SessionServiceRuntimeExt::input_state_by_idempotency_key` returns the
   input's stored state (terminal outcome, resolving run id, boundary
@@ -38980,7 +39051,7 @@ run-reconciliation query.
   idempotency key) with Python (`client.input_state`) and TypeScript
   (`client.inputState`) SDK wrappers, so embedders can delete hand-rolled
   run journals.
-- Versioning and compatibility policy (meerkat-studio M3): documented in
+- Versioning and compatibility policy (downstream ask M3): documented in
   `docs/guides/cd-and-distribution.md` — pre-1.0 patch releases may change
   public APIs, embedders pin exact versions, the only supported crate
   combination is exact version parity, breaking changes land under a

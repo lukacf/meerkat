@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import hashlib
+import io
 from pathlib import Path
 import unittest
 
@@ -203,6 +205,59 @@ class PublishedRegistryTests(unittest.TestCase):
         registries.verify_once("0.8.0", reader=reader, downloader=ARTIFACTS.__getitem__,
                                crate_sha256={"meerkat-meta": digest}, only_crates=True)
         self.assertEqual(seen, ["https://crates.io/api/v1/crates/meerkat-meta/0.8.0"])
+
+    def test_only_crates_success_line_names_only_the_registries_checked(self):
+        """--only-crates checks crates.io alone, but its success line named
+        PyPI and npm too (rc 0 while npm answered 404 for the version)."""
+        digest = artifact_digest("https://crates.example/meerkat-meta-0.8.0.crate", "sha256")
+
+        def crates_only(url: str) -> dict:
+            if "crates.io" not in url:
+                raise AssertionError(f"--only-crates read {url}")
+            return exact_payload(url)
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            registries.verify_with_retries(
+                "0.8.0", attempts=1, reader=crates_only, downloader=exact_artifact,
+                crate_sha256={"meerkat-meta": digest}, only_crates=True,
+            )
+        line = output.getvalue().strip()
+        self.assertEqual(
+            line,
+            "Verified exact registry metadata and checksummed artifacts for meerkat-meta 0.8.0 "
+            "on crates.io (--only-crates: PyPI and npm were not checked)",
+        )
+        for unchecked in ("meta-extension-state", "wheel+sdist", "@rkat/meta-sdk"):
+            self.assertNotIn(unchecked, line)
+
+    def test_full_success_line_names_every_registry(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            registries.verify_with_retries(
+                "0.8.0", attempts=1, reader=exact_payload, downloader=exact_artifact,
+            )
+        self.assertEqual(
+            output.getvalue().strip(),
+            "Verified exact registry metadata and checksummed artifacts for meerkat-meta and "
+            "meta-extension-state 0.8.0 on crates.io, meerkat-meta 0.8.0 wheel+sdist on PyPI, "
+            "and @rkat/meta-sdk 0.8.0 on npm",
+        )
+
+    def test_success_line_follows_the_registries_checked(self):
+        line = registries.success_line("0.8.0", ["crates.io extension-state"], only_crates=True)
+        self.assertIn("for meta-extension-state 0.8.0 on crates.io", line)
+        self.assertNotIn("meerkat-meta 0.8.0", line)
+        self.assertEqual(
+            registries.success_line("0.8.0", ["crates.io", "npm"]),
+            "Verified exact registry metadata and checksummed artifacts for meerkat-meta 0.8.0 "
+            "on crates.io and @rkat/meta-sdk 0.8.0 on npm",
+        )
+
+    def test_a_run_that_checks_no_registry_fails(self):
+        with self.assertRaisesRegex(registries.RegistryVerificationError, "no registry was checked"):
+            registries.verify_once("0.8.0", reader=exact_payload, downloader=exact_artifact,
+                                   crate_sha256={}, only_crates=True)
 
     def test_retry_exhaustion_fails_the_release(self):
         def unavailable(url: str) -> dict:

@@ -123,7 +123,7 @@ default_timeout = "10m"
 max_concurrent = 10
 
 [tools.tool_timeouts]
-shell = { secs = 120, nanos = 0 }
+shell = "2m"
 ```
 
 <Note>
@@ -137,8 +137,12 @@ for the current supported profiles and [native governed embedding](/rust/native-
 for Rust setup.
 </Note>
 
-`default_timeout` accepts humantime strings; per-tool timeout values use
-Serde's duration representation with `secs` and `nanos`.
+`default_timeout` and each per-tool timeout in `[tools.tool_timeouts]` accept
+humantime strings such as `"30s"`, `"2m"` or `"1h 2m"`. A per-tool timeout
+also accepts Serde's duration table, `shell = { secs = 120, nanos = 0 }`,
+which is the form Meerkat writes when it saves a config, a `config patch` that
+sets a string included. Releases before 0.9.10 read only that table form: on
+them, a per-tool timeout string written by hand fails the config load.
 
 `tools.mcp_servers` is also accepted in runtime config, although the CLI's
 user/project MCP convention files are managed separately as described below.

@@ -97,7 +97,7 @@ struct InitParams {
     surface: Option<String>,
     runtime_profile: Option<String>,
     console_read_only: Option<bool>,
-    /// Run this gateway identity-first (meerkat-studio ask K0): durable
+    /// Run this gateway identity-first (downstream ask K0): durable
     /// identities with continuity records, lease-fenced embodiment, and the
     /// tolerant identity lifecycle paths — instead of the session-owned
     /// mob-member surface (where the ask-20 retire/respawn class lives).
@@ -1690,7 +1690,11 @@ const IDENTITY_CENSUS_USAGE: &str = "usage: meta_gateway identity-census --state
      lifecycle-terminal, whether a held completion is owed, and the pending \
      first-boot row. The bindings are read from the directory's mob store \
      the way the gateway's identity views read them; in-memory mob storage \
-     keeps none across a restart, so those facts are null there. Run it on \
+     keeps none across a restart, so those facts are null there. For the \
+     directory, it also counts the mob store's identity-store rows of schema \
+     version 2 or later (store-owned identities and the tombstones of removed \
+     names, archived and unreadable ones counted apart), which a release on \
+     Core 0.9.8 or earlier does not read. Run it on \
      a directory no gateway uses (a copy is fine): a directory a runtime \
      holds is refused, and so is one that is not in the native layout \
      (migrate it with storage-migrate-native first). It writes nothing in \
@@ -1796,6 +1800,14 @@ fn identity_census_text(
     }
     if let Some(note) = report.mob_store_note {
         let _ = writeln!(out, "  note: {note}");
+    }
+    if let Some(rows) = &report.identity_store_rows {
+        let _ = writeln!(
+            out,
+            "  identity-store rows of schema version 2 or later: {} ({} archived, {} \
+             tombstone(s), {} unreadable)",
+            rows.created_rows, rows.archived, rows.tombstones, rows.unreadable
+        );
     }
     for entry in &report.identities {
         let mut line = format!(
@@ -2477,7 +2489,7 @@ fn main() {
     // migration code whose progress reports through tracing; dispatching
     // them ahead of this init dropped every progress line, and a 2026-07
     // production deploy was aborted because a supervisor read the
-    // silent-but-working migration as a hang. Also (meerkat-studio K1/K2):
+    // silent-but-working migration as a hang. Also (downstream asks K1/K2):
     // without any init, runtime failures, console internal-error logs, and
     // the schedule claim watchdog's stall diagnosis all vanish on the child
     // gateways their app spawns. Stderr, never stdout: stdout carries the
@@ -3338,7 +3350,7 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
     })?;
     runtime.set_gateway_peer_keys(peer_keys);
 
-    // Identity-first mode (meerkat-studio ask K0): give this gateway the
+    // Identity-first mode (downstream ask K0): give this gateway the
     // durable-identity substrate — continuity records, lease-fenced
     // embodiment, resume-first restore with the Broken-identity repair task,
     // and the tolerant identity lifecycle paths. Default providers are

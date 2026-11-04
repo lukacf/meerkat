@@ -344,7 +344,8 @@ multiplier = 2.0
   and retry a stream whose answer already arrived. The compaction summary
   call has none of these guards.
 - Tools: `[tools] default_timeout = "10m"`; per tool `[tools.tool_timeouts]
-  shell = { secs = 120, nanos = 0 }` (not humantime). A timed-out tool returns
+  shell = "2m"` (humantime since 0.9.10; Meerkat writes, and earlier releases
+  read only, `{ secs = 120, nanos = 0 }`). A timed-out tool returns
     a `timeout` error result and the run goes on. Since 0.9.1 a call that hits
   its per-call or inactivity timeout first emits `tool_execution_timed_out`
   (with the bound in `timeout_ms`), then its `tool_execution_completed` and

@@ -481,7 +481,7 @@ async fn respawn_member_replaces_member() {
     runtime.shutdown().await;
 }
 
-/// meerkat-studio ask K4: a mob-wide external-tools provider installed via
+/// Downstream ask K4: a mob-wide external-tools provider installed via
 /// `MobBootstrapSpec::with_default_external_tools_provider` must be consulted
 /// at EVERY member materialization — the initial spawn AND the respawn
 /// replacement — unlike the per-spawn `SpawnMemberSpec.external_tools`

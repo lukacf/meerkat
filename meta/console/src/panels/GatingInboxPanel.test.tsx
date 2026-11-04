@@ -1,6 +1,6 @@
 import React from "react";
 import { act, cleanup, fireEvent, render, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GatingInboxPanel } from "./GatingInboxPanel";
 import { createPendingApprovalResource, normalizePendingApproval, type PendingApprovalResource, type PendingApprovalSnapshot } from "../../../packages/console-core/src/pending-approvals";
 import { CONSOLE_RPC_METHODS } from "../lib/contract";
@@ -432,7 +432,15 @@ describe("GatingInboxPanel host-provided attention", () => {
 });
 
 describe("Approvals at a glance (v2)", () => {
-  const now = Date.now();
+  // The panel reads "today" and its day groups from the clock, and these
+  // records sit up to 50 minutes before `now`: pin Date (only) to a local
+  // midday, or a run just after midnight moves some of them into yesterday.
+  const now = new Date("2026-06-10T12:00:00").getTime();
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(now);
+  });
+  afterEach(() => { vi.useRealTimers(); });
   const DAY = 24 * 3_600_000;
   const requestRow = (id: string, action: string, deadlineIn: number, extra: Record<string, unknown> = {}) => normalizePendingApproval({
     pending_id: id, action_id: `action:${id}`, action, actor_id: "billing", risk_tier: "r3",

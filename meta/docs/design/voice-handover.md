@@ -6,19 +6,19 @@ Emergency WIP checkpoint, 2026-09-17. The user requested immediate commit and
 
 ## Start here
 
-- Meta: [PR #408](https://github.com/lukacf/meerkat-meta/pull/408),
-  branch `luka-crnkovicfriis-abk-console-voice-mode`.
+- Meta: [PR #408](https://github.com/lukacf/meerkat-meta/pull/408) and its
+  console voice-mode head branch.
 - All 35 Meerkat dependencies are pinned together to the now-public
   `73a0b869afb872d16b39d9de2ef5bd74e1c4f8a1`, not local filesystem paths.
   Backup ref: `lukacf/meerkat`, branch
   `wip/meta-voice-73a0b869-checkpoint`.
-  Another equivalent ref is `luka-crnkovicfriis-abk-voice-qualified-73a0b869`.
+  Another equivalent ref is a separate working branch at the same commit.
 - That pin includes recovery/close repair, canonical human input, context-first
   assistant attribution, and concurrent summary bootstrap. **It has a confirmed
   post-bootstrap self-echo bug and failed real S99 acceptance.**
 - Newer ordinal/provenance repair and durable test evidence work is **pushed**
-  separately at `ddf52762e279f9e58cb4bf21e665dee46aa187ed` on upstream branch
-  `luka-crnkovicfriis-abk-async-voice-context` (557adda4 plus two late carrier
+  separately at `ddf52762e279f9e58cb4bf21e665dee46aa187ed` on an upstream
+  async voice-context working branch (557adda4 plus two late carrier
   edits; lineage rooted at 73).
   It is incomplete/unqualified; **do not bind Meta to it yet**.
   Read [ASYNC_VOICE_CONTEXT_HANDOFF.md](https://github.com/lukacf/meerkat/blob/ddf52762e279f9e58cb4bf21e665dee46aa187ed/ASYNC_VOICE_CONTEXT_HANDOFF.md).

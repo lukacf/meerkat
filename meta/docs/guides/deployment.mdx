@@ -121,9 +121,10 @@ none was declared) and TypeScript as `rustHttpPublicBaseUrl`.
 
 An open console (sign-in off) answers only requests whose `Host` names a
 loopback name, the listen address or the host of `http_public_base_url`;
-any other host gets 403 `host_not_served`. Health checks (`/healthz`) answer
-any host. Declare `http_public_base_url` when a proxy or another name fronts
-an open console.
+any other host gets 403 `host_not_served`. The plain health check
+(`/healthz`) answers any host; its JSON summary, which names members, answers
+only the hosts above. Declare `http_public_base_url` when a proxy or another
+name fronts an open console.
 
 ### Rust library host: serve the router on your own listener
 

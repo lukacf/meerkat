@@ -4401,7 +4401,7 @@ fn take_expected_caller_scope(params: &mut Value) -> Result<Option<String>, Stri
 /// browser that rebinds its own name to the Console's address cannot drive
 /// the anonymous Console. A request without a `Host` (no browser sends one)
 /// or served by a listener that records no hosts passes.
-async fn refuse_foreign_host(
+pub(crate) async fn refuse_foreign_host(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {

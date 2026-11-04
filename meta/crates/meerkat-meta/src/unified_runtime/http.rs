@@ -44,15 +44,7 @@ async fn healthz_response(
     broken_members: impl std::future::Future<Output = Vec<(meerkat_mob::AgentIdentity, String)>>,
     lifecycle_projection: Option<crate::identity_first::LifecycleProjectionStatus>,
 ) -> axum::response::Response {
-    let wants_json = headers
-        .get(header::ACCEPT)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split(',')
-                .any(|item| item.trim().starts_with("application/json"))
-        });
-    if !wants_json {
+    if !wants_health_summary(&headers) {
         return "ok".into_response();
     }
     let broken_members = broken_members.await;
@@ -98,6 +90,34 @@ async fn healthz_response(
             serde_json::to_value(&lifecycle_projection).unwrap_or(serde_json::Value::Null);
     }
     Json(public_projection).into_response()
+}
+
+/// Whether a `/healthz` request asks for the JSON summary rather than the
+/// plain liveness answer.
+fn wants_health_summary(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|item| item.trim().starts_with("application/json"))
+        })
+}
+
+/// The open Console's Host check on `/healthz`: the plain liveness answer
+/// serves any host, since a container probe names its pod or service rather
+/// than the console, while the JSON summary names members, so it answers
+/// only the hosts the listener serves.
+async fn refuse_foreign_host_for_health_summary(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if wants_health_summary(request.headers()) {
+        crate::http_console::refuse_foreign_host(request, next).await
+    } else {
+        next.run(request).await
+    }
 }
 
 /// Core's broken members on the wire: each member's public alias and
@@ -594,7 +614,8 @@ impl UnifiedRuntime {
         let flow_editor_decisions = decisions.clone();
         // An open Console answers only requests addressed to a host its
         // listener serves (the console's JSON routes check that themselves);
-        // health probes answer whatever host they name.
+        // the plain health probe answers whatever host it names, the health
+        // summary only the served ones.
         let open_console = crate::gateway_composition::ConsoleAuthPosture::of(&decisions)
             == crate::gateway_composition::ConsoleAuthPosture::Open;
         let flow_editor_runtime_catalog = self.mobpack_runtime_catalog_state_snapshot();
@@ -636,6 +657,13 @@ impl UnifiedRuntime {
                 }
             }),
         );
+        let health = if open_console {
+            health.route_layer(axum::middleware::from_fn(
+                refuse_foreign_host_for_health_summary,
+            ))
+        } else {
+            health
+        };
         let console = Router::new()
             .merge(self.build_console_frontend_router())
             .merge(protected_flow_editor_router_with_runtime_catalog(

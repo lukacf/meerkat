@@ -694,6 +694,13 @@ them.
   realm is reopened. There is no in-place recovery of a poisoned scope or
   member yet: reopen the realm (for a Meta gateway, restart it).
 
+- `meerkat-runtime`: when a model switch that lasts until changed
+  (`SwitchTurnDuration::UntilChanged`) fails, an input admitted to the
+  session during the switch can be accepted but never run, and a stop
+  requested in that window can be lost from the session's state. On a
+  persistent session, reloading the session or restarting its host restores
+  the input from its stored record so it runs; retrying the switch does not.
+
 ## [0.9.9] - 2026-11-03
 
 ### Highlights

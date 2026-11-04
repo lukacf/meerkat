@@ -877,8 +877,8 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
     let result = if params.keep_alive {
         // The create answers once its first turn has built the session,
         // and that turn runs on. A turn that ends before its session was
-        // built (a refused scoped tool grant gate, a cancelled request)
-        // answers the create as it answers an immediate create.
+        // built (a refused scoped tool grant gate, for example) answers the
+        // create as it answers an immediate create.
         let mut first_build = runtime.first_build_wait(&session_id);
         let (first_turn_tx, mut first_turn) = tokio::sync::oneshot::channel();
         let runtime_for_turn = Arc::clone(&runtime);
@@ -907,20 +907,27 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
             // Once the session was built the create has answered, and a
             // failure of the turn is only logged.
             if let Err(Err(rpc_err)) = first_turn_tx.send(result) {
-                tracing::error!(
-                    session_id = %sid_for_turn,
-                    error = %rpc_err.code,
-                    "Host-mode session start failed: {}",
-                    rpc_err.message
-                );
+                log_unanswered_first_turn_failure(&sid_for_turn, &rpc_err);
             }
         });
 
-        // The promotion signals the build before the turn can end, so a
-        // turn that ends unsignalled ended before its session was built.
+        // The promotion signals a successful build before it hands the
+        // turn's result on, so with `biased` polling a signalled build wins
+        // whenever it happened. A result that reaches the create unsignalled
+        // is answered as an immediate create answers it: a build that
+        // failed, or a session some other path built.
         tokio::select! {
             biased;
-            () = first_build.built() => {}
+            () = first_build.built() => {
+                // The create answers the build. A turn that already ended
+                // left its result here unread: log a failure as the turn's
+                // task would, and close the channel so that the task logs a
+                // later one itself.
+                first_turn.close();
+                if let Ok(Err(rpc_err)) = first_turn.try_recv() {
+                    log_unanswered_first_turn_failure(&session_id, &rpc_err);
+                }
+            }
             outcome = &mut first_turn => match outcome {
                 // Built by some other path than a promotion.
                 Ok(Ok(_)) => {}
@@ -977,6 +984,20 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
         .realm_id()
         .map(|realm| meerkat_contracts::format_session_ref(&realm, &response.session_id));
     RpcResponse::success(id, response)
+}
+
+/// Log a failure of a `keep_alive` create's first turn that the create does
+/// not answer: it answered once that turn had built the session.
+fn log_unanswered_first_turn_failure(
+    session_id: &meerkat_core::SessionId,
+    rpc_err: &crate::protocol::RpcError,
+) {
+    tracing::error!(
+        session_id = %session_id,
+        error = %rpc_err.code,
+        "Host-mode session start failed: {}",
+        rpc_err.message
+    );
 }
 
 /// Handle `session/list`.

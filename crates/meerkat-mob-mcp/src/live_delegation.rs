@@ -12030,6 +12030,32 @@ mod tests {
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
+    /// A session whose host store scope refuses until the realm is reopened
+    /// settles an outcome append once: every retry would meet the same
+    /// refusal. A store that could not serve now stays transient.
+    #[test]
+    fn a_store_refusal_until_reopen_settles_the_append_once() {
+        use meerkat_core::service::SessionError;
+        use meerkat_runtime::store::{RefusedScope, RuntimeStoreError};
+
+        for refusal in [
+            RuntimeStoreError::ScopeRefused {
+                scopes: vec![RefusedScope::new("rt:refused", "the store refused a batch")],
+            },
+            RuntimeStoreError::RealmRefused {
+                cause: "fenced out".to_string(),
+            },
+        ] {
+            assert!(
+                !session_error_is_transient(&SessionError::Store(Box::new(refusal.clone()))),
+                "{refusal:?}"
+            );
+        }
+        assert!(session_error_is_transient(&SessionError::Store(Box::new(
+            RuntimeStoreError::Unavailable("down".to_string())
+        ))));
+    }
+
     #[tokio::test]
     async fn outcome_projection_retries_transient_append_until_exact_success() {
         let operation_id = OperationId::new();

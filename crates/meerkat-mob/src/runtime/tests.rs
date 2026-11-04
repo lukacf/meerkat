@@ -3656,6 +3656,19 @@ impl MockSessionService {
             .insert(session_id.clone(), Arc::new(refusal));
     }
 
+    /// Let member-status view reads of `session_id` answer again after
+    /// [`Self::refuse_status_view_reads`].
+    #[cfg_attr(
+        any(not(feature = "runtime-adapter"), target_arch = "wasm32"),
+        allow(dead_code)
+    )]
+    fn answer_status_view_reads(&self, session_id: &SessionId) {
+        self.status_view_refusals_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session_id);
+    }
+
     fn take_session_read_failure(&self, session_id: &SessionId) -> bool {
         let mut failures = self
             .session_read_failures_for

@@ -22183,6 +22183,33 @@ mod tests {
     use super::*;
     use crate::ids::Generation;
 
+    /// A store refusal of a member's session read is a typed marker for Rust
+    /// callers and the existing `read_failed` on every wire: the closed wire
+    /// enum maps it there, the domain marker serializes as it in snapshot
+    /// JSON, and `read_failed` reads back as `ReadFailed`, never as the new
+    /// marker. The refusal itself never leaves the process in a snapshot.
+    #[test]
+    fn a_store_refused_preview_is_read_failed_on_the_wire() {
+        assert_eq!(
+            wire_preview_unavailable(MemberPreviewUnavailable::StoreRefused),
+            meerkat_contracts::WireMemberPreviewUnavailable::ReadFailed
+        );
+        assert_eq!(
+            serde_json::to_value(MemberPreviewUnavailable::StoreRefused).expect("serialize"),
+            serde_json::json!("read_failed")
+        );
+        assert_eq!(
+            serde_json::from_value::<MemberPreviewUnavailable>(serde_json::json!("read_failed"))
+                .expect("deserialize"),
+            MemberPreviewUnavailable::ReadFailed
+        );
+        assert!(
+            serde_json::from_value::<MemberPreviewUnavailable>(serde_json::json!("store_refused"))
+                .is_err(),
+            "no wire value reads as the store refusal"
+        );
+    }
+
     /// A durable profile turns a spawn's default ephemeral intent into a
     /// durable identity keyed by the member's identity. An explicit durable
     /// intent keeps its own key, and an ordinary profile changes nothing.

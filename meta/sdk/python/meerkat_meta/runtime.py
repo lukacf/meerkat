@@ -1749,7 +1749,27 @@ class MetaRuntime:
         return await self._rpc("meta/retire", {"identity": identity})
 
     async def reset(self, identity: str) -> Any:
-        """Destructive reset: the identity continues on a fresh session."""
+        """Destructive reset: the identity continues on a fresh session.
+
+        The reset is not refused while the member has work in flight, as
+        ``retire`` is. It cancels the run in flight (terminal ``cancelled``,
+        not requeued) and ends every input still queued on the member without
+        running it (terminal ``cancelled``, completion
+        ``runtime_terminated``); nothing moves to the fresh session, and the
+        answer names none of them. A tracked turn settles ``failed``
+        (``turn_result``), a keyed send's admitted pair reads ``cancelled``
+        (``send_status``), and an unkeyed, untracked send has no per-input
+        read: a ``wait_for_completion`` on its baseline ends
+        ``incarnation_changed``.
+
+        To reset only an idle member, call ``retire`` first: it raises
+        ``IdentityHistoryUnavailableError`` (``kind``
+        ``"identity_wake_retryable"``) while the member is being woken or has
+        work in flight, a queued input included, and interrupts nothing. Once
+        it succeeds, ``reset`` ends no work unless a delivery woke the member
+        in between. Do not decide a reset from rows of Core's runtime store:
+        they are not a supported surface.
+        """
         return await self._rpc("meta/reset", {"identity": identity})
 
     async def activate_member_instruction(

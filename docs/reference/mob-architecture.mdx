@@ -423,15 +423,25 @@ seats); the agent lane is refused `MobError::ScopeDenied`.
 
 A legacy member listed under its own name is adopted first
 (`adopt_legacy_identity_entry`) and then declared as the entry it is. A
-complete roster also adopts each member it does not list whose spawn row
-carries both legacy marks (the durable-identity continuity marker and the
-legacy label naming its own identity) and that no host's intent row names,
-readable or not: the adoption applies that rule again to the member binding
-and intent rows it reads before MobMachine decides. Its seal then unlists the
-entry and retires the member. A member with one mark only, or one a host
-adopted, is left as it is, and a partial roster adopts no member it does not
-list. A dormant seat never takes an identity hosted on its first use or
-awaiting its held creation (`MobError::WiringError`).
+complete roster also offers MobMachine each member it does not list whose
+spawn row carries a legacy mark, with the raw observation of its current
+incarnation read from the member binding history and the intent rows: its
+two legacy marks, that the roster does not list it, and whether a host's
+intent row names it, readable or not. MobMachine decides
+(`AdoptLegacyIdentityEntry`). A member with both legacy marks (the
+durable-identity continuity marker and the legacy label naming its own
+identity) that no host's intent row names is a legacy member. A local one
+bound to a session is adopted, and the seal then unlists the entry and
+retires the member. One placed on a member host, or bound to no session, is
+never an entry: it is retired without its adoption (`RetireUnadopted`),
+through the ordinary retirement at the incarnation MobMachine decided on (at
+its delivery scope when it is bound to a session), with no cause recorded,
+and its name is left free. One whose retirement started already is answered
+`NotAdopted` (`NotAdoptedReason::Retiring`), and its own retirement ends it.
+A member with one mark only, or one a host adopted, is left as it is, and a
+partial roster offers no member it does not list. A dormant seat never takes
+an identity hosted on its first use or awaiting its held creation
+(`MobError::WiringError`).
 
 A complete roster is sealed after its last chunk (`SealDeclaredRoster`):
 every Declared entry it does not list is unlisted (never a created entry, nor
@@ -447,8 +457,11 @@ retires the member; when the spawn fails, the entry is left unseated, and
 that apply removes it. A worker is never unlisted, but for an unlisted
 legacy member the complete roster adopted first (above). The answer names
 each unlisted entry (`DeclaredRosterOutcome::unlisted`: `Retired`, `Removed`,
-or `Failed`, which the next complete apply retries; a failed adoption of an
-unlisted legacy member is answered `Failed` too, and the member stays). Any
+or `Failed`, which the next complete apply retries). It names each unlisted
+legacy member MobMachine did not leave as it is too: `Retired` for one
+retired without its adoption, `NotAdopted` for one whose retirement started
+already, and `Failed` for a failed adoption or retirement, which leaves the
+member as it is for the next complete apply. Any
 other retirement keeps the entry: a host's `retire` of a declared identity
 that stays listed ends its member, and the next apply seats the identity
 again. To take a declared identity out of the roster, unlist it

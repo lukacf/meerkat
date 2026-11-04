@@ -401,7 +401,12 @@ them.
   is accepted, so a caller that dropped its request while the reconfigure
   ran can finish it; an until-changed request that reuses the id of a
   finite switch waiting for its turn is refused with an error and leaves
-  that switch in place. Affects 0.6.0 through 0.9.9.
+  that switch in place. An until-changed request that reuses a pending
+  switch's id and is not approved, or whose target cannot carry the
+  session's transcript, is likewise refused with an error and records
+  nothing: before, it was recorded as denied under that id, so a later
+  approved retry of the request was answered as denied too and the switch
+  stayed pending. Affects 0.6.0 through 0.9.9.
 
 - `meerkat-runtime`: a stop or a retirement that landed after an
   until-changed model switch had reconfigured the session, but before the

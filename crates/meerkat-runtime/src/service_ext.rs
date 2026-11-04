@@ -256,7 +256,9 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
     /// denied (`ScopedOverrideConflict`). Dropping the returned future before
     /// it resolves can leave the switch pending: later switches are then
     /// denied until the same request (the same `request_id`) is retried or
-    /// the session is reloaded. Callers must not make concurrent calls with
+    /// the session is reloaded. A retry that is not approved, or whose
+    /// target cannot carry the session's transcript, fails with an error and
+    /// leaves the switch pending. Callers must not make concurrent calls with
     /// the same `request_id`: the default turn-finalization boundary of
     /// [`SessionLlmReconfigureHost`](crate::SessionLlmReconfigureHost)
     /// is a no-op and does not serialize until-changed switches.

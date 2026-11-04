@@ -14070,6 +14070,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 approval_reason, realtime_detach_allowed, target_carries_transcript
             }
             guard "transcript_not_carried" { !target_carries_transcript }
+            // A request with the pending switch's id is never denied
+            // (RequestUntilChangedSwitchTurnPendingConflict).
+            guard "request_not_pending" { self.model_routing_pending_switch_request_id != Some(request_id) }
             update {
                 self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
                 self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::CapabilityPolicy);
@@ -14215,6 +14218,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "transcript_carried" { target_carries_transcript }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "approval_unavailable" { requires_approval && !approval_available }
+            // A request with the pending switch's id is never denied
+            // (RequestUntilChangedSwitchTurnPendingConflict).
+            guard "request_not_pending" { self.model_routing_pending_switch_request_id != Some(request_id) }
             update {
                 self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
                 self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::ApprovalRequiredButUnavailable);
@@ -14233,6 +14239,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "transcript_carried" { target_carries_transcript }
             guard "approval_denied" { requires_approval && approval_available && approval_denied }
             guard "approval_reason_present" { approval_reason != None }
+            // A request with the pending switch's id is never denied
+            // (RequestUntilChangedSwitchTurnPendingConflict).
+            guard "request_not_pending" { self.model_routing_pending_switch_request_id != Some(request_id) }
             update {
                 self.model_routing_approval_phases.insert(request_id, RoutingApprovalPhase::Denied);
                 self.model_routing_approval_parent_kind.insert(request_id, RoutingApprovalParentKind::SwitchTurn);
@@ -14252,9 +14261,12 @@ macro_rules! meerkat_catalog_machine_dsl {
         // the accept requires, so it never overlaps the approval arms and an
         // approval refusal still answers first, as it does for a finite
         // request. A retry of the pending request itself is accepted again
-        // (RequestUntilChangedSwitchTurnAccepted); a denial recorded under its
-        // id would answer that request's caller as denied. For the same reason
-        // a request that reuses the id of a staged finite switch matches no
+        // (RequestUntilChangedSwitchTurnAccepted), and no arm records a
+        // denial under its id: the denial would answer the retry that
+        // finishes the request as denied, and the switch would stay pending.
+        // A request with the pending switch's id that cannot be accepted (one
+        // not approved, one onto a target that cannot carry the transcript,
+        // or one that reuses the id of a staged finite switch) matches no
         // arm: its caller gets an error and nothing is recorded under the id.
         transition RequestUntilChangedSwitchTurnPendingConflict {
             per_phase [Idle, Attached, Running]

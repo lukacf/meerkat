@@ -132,7 +132,9 @@ struct DeliveryFault {
     helper_controller_lookups: AtomicUsize,
     helper_inputs: Mutex<Vec<serde_json::Value>>,
     helper_policy_changed: AtomicUsize,
-    helper_admission_change: Mutex<Option<InputAuthorityAssociation>>,
+    /// The armed helper admission and how many of its native controller-
+    /// admission reads the fixture still invalidates.
+    helper_admission_change: Mutex<Option<(InputAuthorityAssociation, usize)>>,
     publication_changes: AtomicUsize,
     publication_change_failures: AtomicUsize,
 }

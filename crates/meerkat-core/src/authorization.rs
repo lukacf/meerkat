@@ -1019,18 +1019,21 @@ pub enum OperationRefusalKind {
 }
 
 /// Whether the tool code a refusal's certifier guards ran for the refused
-/// call. Only a core component that sees its own refusal happen before it
-/// invokes that code certifies [`Self::NotDispatched`]; every other refusal
+/// call. Only a core component that sees its own refusal happen before that
+/// code runs certifies [`Self::NotDispatched`]; every other refusal
 /// is [`Self::Unknown`]. Like the kind, neither value is a permission.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefusalDispatch {
     /// No code of the tool that the certifying core component guards ran
     /// for this call: the fenced dispatch refused before it invoked the
-    /// dispatcher, or the execution policy gate before it invoked its inner
-    /// dispatcher. The certification covers only the code below its
-    /// certifier: a dispatcher layer that runs tool code of its own before
-    /// delegating forwards such a refusal as
+    /// dispatcher, the execution policy gate before it invoked its inner
+    /// dispatcher, or a leaf's effect entry
+    /// (`ToolDispatchContext::enter_reviewed_effect`) before the body it
+    /// guards, while no effect of the call had entered. The certification
+    /// covers only the code below its certifier: a dispatcher layer that
+    /// runs tool code of its own before delegating (a leaf that runs an
+    /// effect before its effect entry included) forwards such a refusal as
     /// `OperationRefused::new(refusal.kind())`, which is [`Self::Unknown`].
     NotDispatched,
     /// No certification: the tool code may or may not have run.
@@ -1058,8 +1061,8 @@ impl OperationRefused {
         }
     }
 
-    /// This refusal certified by the core component that met it before it
-    /// invoked the tool code it guards.
+    /// This refusal certified by the core component that met it before the
+    /// tool code it guards ran.
     #[must_use]
     pub(crate) const fn not_dispatched(self) -> Self {
         Self {

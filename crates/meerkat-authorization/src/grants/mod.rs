@@ -84,6 +84,17 @@ pub enum GrantRefusal {
 /// siblings) reports such a change as [`GrantRefusal::Unavailable`], for a
 /// caller whose answer can say neither.
 ///
+/// Native admission (its controller read, and a scoped original's own
+/// mandate and contributor liveness) never waits: it runs inside the
+/// session's ingress transaction. It makes a read that met a change once
+/// more, in place, when that change has completed
+/// ([`LocalGrantAuthority::owner_change_in_progress`] names none), and
+/// answers `PolicyChanged` for a change still in progress or another one met
+/// by that read, as under back-to-back changes. A host that submits again
+/// after `PolicyChanged` waits first, outside its own locks, with a bounded
+/// `meerkat_core::authorization::OwnerChangeChurn::wait_after_stale_read`,
+/// and resubmits once.
+///
 /// Closed by design: a resolution either met a change or the owner refused
 /// it, so a new reason to refuse is a [`GrantRefusal`] variant, never a new
 /// variant here.
@@ -310,9 +321,34 @@ impl LocalGrantAuthority {
 
     /// Keep admission observations on this exact grant owner's publication and
     /// local clock. The caller must not recursively acquire the writer here.
+    ///
+    /// A read that met an owner change answers as stale (`ReprepareRequired`).
+    /// When that change has completed (no change or reservation of the
+    /// writer is in progress as the read answers, as after a read that waited
+    /// for an owner's lock while the change held it), `evaluate` reads once
+    /// more from the owners, as a grant-backed preparation rebuilds once: its
+    /// answer is current, or stale again. Nothing here waits: a change still
+    /// in progress, or a second stale read, is answered at once.
     pub(crate) fn observe_controller_admission<T>(
         &self,
-        evaluate: impl FnOnce(u64) -> Result<T, meerkat_core::OperationAuthorizationError>,
+        evaluate: impl Fn(u64) -> Result<T, meerkat_core::OperationAuthorizationError>,
+    ) -> Result<T, meerkat_core::OperationAuthorizationError> {
+        let answer = self.observe_controller_admission_once(&evaluate);
+        let stale = matches!(
+            &answer,
+            Err(meerkat_core::OperationAuthorizationError::Refused(refusal))
+                if refusal.kind() == meerkat_core::OperationRefusalKind::ReprepareRequired
+        );
+        if stale && self.owner_change_in_progress().is_none() {
+            return self.observe_controller_admission_once(&evaluate);
+        }
+        answer
+    }
+
+    /// One observation of [`Self::observe_controller_admission`].
+    fn observe_controller_admission_once<T>(
+        &self,
+        evaluate: &impl Fn(u64) -> Result<T, meerkat_core::OperationAuthorizationError>,
     ) -> Result<T, meerkat_core::OperationAuthorizationError> {
         use meerkat_core::{OperationAuthorizationError, OperationRefusalKind, OperationRefused};
         let mut known_failure = None;
@@ -985,6 +1021,29 @@ impl LocalGrantAuthority {
                 .map(|_| ())
                 .map_err(|_| GrantRefusal::Denied),
         }
+    }
+
+    /// The owner change in progress on this grant authority's publication,
+    /// if any: a published change that has not completed, or a reservation
+    /// of the publication's writer held now that has not published (an
+    /// issuance before its acknowledged append publishes, a hold of
+    /// [`Self::try_with_owner_changes_excluded`], or an operation's own
+    /// final entry). It mirrors
+    /// [`meerkat_core::authorization::WorkAuthorization::owner_change_in_progress`]
+    /// for a caller that holds this grant authority rather than a work.
+    ///
+    /// A waiting hint only, never a permission and never an observation:
+    /// nothing is decided from it. A read of this authority that met an
+    /// owner change and finds none named here may be made once more from the
+    /// owners (the change it met has completed); a caller that waits does so
+    /// while one is named. `None` while nothing is in progress, and for a
+    /// poisoned, retired or exhausted publication, whose reads stay
+    /// unavailable.
+    #[must_use]
+    pub fn owner_change_in_progress(
+        &self,
+    ) -> Option<meerkat_core::authorization::OwnerChangeInProgress> {
+        self.publication.change_or_reservation_in_progress()
     }
 
     /// Run `operation` while every owner change on this grant authority's

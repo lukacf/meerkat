@@ -1934,9 +1934,11 @@ where
         )));
 
         // Call LLM with empty tools, max_summary_tokens. A summary refused
-        // because an owner change is still in progress on the work's own
-        // publication waits for it (bounded) and asks again under the same
-        // operation; any other refusal fails this compaction as before.
+        // to rebuild is a stale read of the work's own publication: an owner
+        // change still in progress, or one that completed while the summary
+        // request was prepared. It waits after the stale read (bounded: for
+        // the change, or with none one backoff step) and asks again under the
+        // same operation; any other refusal fails this compaction as before.
         let mut owner_change_churn = crate::authorization::OwnerChangeChurn::reporting(wait_report);
         let llm_result = loop {
             let result = client
@@ -1954,15 +1956,15 @@ where
                     refusal.kind() == crate::OperationRefusalKind::ReprepareRequired
                 })
                 && let Some(request) = authorization.as_ref()
-                && let Some(wait) = owner_change_churn
-                    .wait_for_settled_change(
+                && owner_change_churn
+                    .wait_after_stale_read(
                         request.work_authorization().authorization().as_ref(),
                         budget.and_then(crate::budget::Budget::remaining_duration),
                         "compaction_summary",
                         Some(request.operation_id()),
                     )
                     .await
-                && wait.settled()
+                    .settled()
             {
                 continue;
             }

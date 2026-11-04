@@ -174,6 +174,19 @@ them.
   doctor's operator-instruction census readers over a connection the caller
   opened read-only, so another storage doctor counts by the same rule.
 
+- `meerkat-mob`: a declared roster entry says what its spec carries of the
+  identity's member build (`DeclaredEntry::build`, `DeclaredBuild`):
+  `Composed` (the default, as before) or `FactsOnly`, the identity's
+  lifecycle facts with none of its build. No member is ever built from
+  facts only: a verdict that would seat the identity, rotate its member
+  onto a fresh session or start its first-boot fresh life answers
+  `DeclaredEntryOutcome::BuildRequired` and takes no member step (an
+  archived session record and a first-boot request are kept), and the host
+  declares the identity again with its composed build. Every other verdict
+  answers as before. A host whose member builds are costly to compose
+  (a customizer per identity) composes only the identities it expects the
+  apply to seat or rotate, and an unchanged roster composes none.
+
 ### Changed
 
 - A session on a zero-config Copilot route, or on a route of a

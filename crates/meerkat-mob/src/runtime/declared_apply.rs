@@ -17,6 +17,15 @@
 //! failure never fails the pass. An unchanged roster writes nothing: no
 //! journal row, no wake.
 //!
+//! A declaration carries its identity's member build as its host composed
+//! it, or the identity's lifecycle facts only ([`DeclaredBuild`]). No member
+//! is ever built from facts only: a verdict that would seat or rotate such
+//! an identity's member takes no member step and answers
+//! [`DeclaredEntryOutcome::BuildRequired`], and the host declares the
+//! identity again with its composed build. A host whose builds are costly
+//! to compose composes only the identities it expects the apply to seat or
+//! rotate.
+//!
 //! The same verdicts realize a store-owned identity's update
 //! ([`super::MobHandle::update_store_owned_identity`]): a declared apply of
 //! that one identity under created custody, whose declaration step writes
@@ -759,6 +768,11 @@ impl super::MobHandle {
     /// - A legacy member listed under its own name is adopted as an entry
     ///   first ([`Self::adopt_legacy_identity_entry`]); a worker holding a
     ///   listed name refuses that identity alone.
+    /// - No member is built from a declaration of the identity's lifecycle
+    ///   facts only ([`DeclaredBuild::FactsOnly`]): a verdict that would seat
+    ///   it, rotate its member onto a fresh session or start its first-boot
+    ///   fresh life answers [`DeclaredEntryOutcome::BuildRequired`] and takes
+    ///   no member step; the host declares it again with its composed build.
     /// - A store-owned identity's name is left as it is, with a typed note
     ///   ([`DeclaredEntryOutcome::Noted`] with
     ///   [`DeclaredEntryNote::OwnedByStore`]): a quiet steady state that
@@ -1162,6 +1176,16 @@ impl super::MobHandle {
                 // A store-owned update of an archived or pending identity:
                 // its row is the whole change, and no member is acted on.
                 (mob_dsl::IdentityEntryVerdict::RecordOnly, _) => {}
+                // A member is never built from a declaration of facts only:
+                // the seat waits for the host's composed build, and nothing
+                // of the seat is done (an archived session is not let go).
+                (mob_dsl::IdentityEntryVerdict::SeatOwed, _)
+                    if entry.build == DeclaredBuild::FactsOnly =>
+                {
+                    outcome
+                        .entries
+                        .insert(agent_identity, DeclaredEntryOutcome::BuildRequired);
+                }
                 // An unseated identity owed its seat: on a first-boot
                 // request's session, on its archived session, or fresh.
                 (mob_dsl::IdentityEntryVerdict::SeatOwed, request) => {
@@ -1193,6 +1217,13 @@ impl super::MobHandle {
                     | mob_dsl::IdentityEntryVerdict::RoleMigrationHeld,
                     Some(FirstBootRequest::Fresh),
                 ) if self.seated_now(&agent_identity) => {
+                    // The fresh life is a rotation built from the spec.
+                    if entry.build == DeclaredBuild::FactsOnly {
+                        outcome
+                            .entries
+                            .insert(agent_identity, DeclaredEntryOutcome::BuildRequired);
+                        continue;
+                    }
                     let answer = self.fresh_life_of_seated(entry).await;
                     if matches!(answer, DeclaredEntryOutcome::FreshLife { .. }) {
                         outcome
@@ -1742,6 +1773,13 @@ impl super::MobHandle {
                     }
                     Err(error) => failure_outcome(error),
                 }
+            }
+            // The rotation builds the next incarnation from the spec: never
+            // from facts only, and the member is not released for it.
+            mob_dsl::IdentityEntryVerdict::RoleRotate
+                if entry.build == DeclaredBuild::FactsOnly =>
+            {
+                DeclaredEntryOutcome::BuildRequired
             }
             mob_dsl::IdentityEntryVerdict::RoleRotate => {
                 if let Err(error) = self.release_member(identity).await {

@@ -15335,6 +15335,287 @@ async fn until_changed_switch_turn_refused_retry_of_a_pending_request_records_no
     );
 }
 
+/// A finite request that reuses the id of a pending until-changed switch is
+/// not answered as a denial: a denial under the pending switch's id would
+/// answer the retry that finishes it as denied, and the switch would stay
+/// pending. Whichever refusal it would meet (another switch pending, its
+/// approval denied or unavailable, a target that cannot carry the session's
+/// transcript), its caller gets an error and nothing is recorded under the
+/// id; the until-changed request's approved retry then finishes the switch.
+#[tokio::test]
+async fn finite_switch_turn_reusing_a_pending_until_changed_id_records_no_denial() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(until_changed_reconfigure_host(false));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *adapter
+        .test_switch_turn_reconfigure_gap_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, release_rx));
+
+    let request_key = uuid(615).to_string();
+    let abandoned = {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+                &adapter,
+                &session_id,
+                until_changed_switch_request(615),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("the switch-turn reaches its reconfigure gap")
+        .expect("the gap hold reports its entry");
+
+    // The caller drops the switch-turn while it waits in the gap.
+    abandoned.abort();
+    assert!(
+        abandoned
+            .await
+            .expect_err("the abandoned switch-turn does not finish")
+            .is_cancelled()
+    );
+    drop(release_tx);
+
+    let finite_reuse = || {
+        finite_switch_request(
+            615,
+            "turn-target",
+            meerkat_core::image_generation::FiniteScopedTurnDuration::OneTurn,
+        )
+    };
+    let conflicting = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        finite_reuse(),
+    )
+    .await;
+    assert!(
+        matches!(conflicting, Err(RuntimeDriverError::Internal(_))),
+        "a finite request with the pending switch's id is an error, not a conflict denial: {conflicting:?}"
+    );
+
+    let mut denied_reuse = finite_reuse();
+    denied_reuse.approval = ModelRoutingApprovalDisposition::DeniedByUser;
+    denied_reuse.approval_reason =
+        Some(meerkat_core::image_generation::SwitchTurnApprovalReason::CostExceedsThreshold);
+    let denied = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        denied_reuse,
+    )
+    .await;
+    assert!(
+        matches!(denied, Err(RuntimeDriverError::Internal(_))),
+        "a finite request with the pending switch's id whose approval is denied is an error: {denied:?}"
+    );
+
+    let mut unavailable_reuse = finite_reuse();
+    unavailable_reuse.approval = ModelRoutingApprovalDisposition::RequiredButUnavailable;
+    let unavailable = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        unavailable_reuse,
+    )
+    .await;
+    assert!(
+        matches!(unavailable, Err(RuntimeDriverError::Internal(_))),
+        "a finite request with the pending switch's id whose approval is unavailable is an error: {unavailable:?}"
+    );
+
+    // The input a finite request carries when its host reports that the
+    // target cannot carry the session's transcript.
+    let uncarried = adapter
+        .apply_session_dsl_input(
+            &session_id,
+            mm_dsl::MeerkatMachineInput::RequestFiniteSwitchTurn {
+                request_id: request_key.clone(),
+                target_model: "turn-target".to_string(),
+                turns: 1,
+                target_realtime_capable: true,
+                requires_approval: false,
+                approval_available: true,
+                approval_denied: false,
+                approval_reason: None,
+                realtime_detach_allowed: false,
+                target_carries_transcript: false,
+            },
+            "RequestSwitchTurn(finite request onto a target that cannot carry the transcript)",
+        )
+        .await;
+    assert!(
+        uncarried.is_err(),
+        "a finite request with the pending switch's id onto a target that cannot carry the transcript matches no arm"
+    );
+
+    let refused = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the refused requests");
+    assert_eq!(
+        refused.model_routing_pending_switch_request_id,
+        Some(request_key.clone()),
+        "the refused requests leave the until-changed switch pending"
+    );
+    assert_eq!(refused.model_routing_pending_switch_turns, None);
+    assert_eq!(
+        refused.model_routing_pending_switch_target_model.as_deref(),
+        Some("persistent-target")
+    );
+    assert_eq!(
+        refused.model_routing_switch_terminal.get(&request_key),
+        None
+    );
+    assert_eq!(refused.model_routing_switch_denials.get(&request_key), None);
+    assert_eq!(
+        refused.model_routing_approval_phases.get(&request_key),
+        None
+    );
+    assert_eq!(
+        refused
+            .model_routing_switch_approval_reasons
+            .get(&request_key),
+        None
+    );
+
+    let retried = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        until_changed_switch_request(615),
+    )
+    .await
+    .expect("the approved retry is answered");
+    assert!(
+        matches!(
+            retried,
+            meerkat_core::image_generation::SwitchTurnControlResult::Applied { .. }
+        ),
+        "the until-changed request's approved retry finishes it: {retried:?}"
+    );
+    let after = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the approved retry");
+    assert_eq!(after.model_routing_pending_switch_request_id, None);
+    assert_eq!(
+        after
+            .model_routing_switch_terminal
+            .get(&request_key)
+            .copied(),
+        Some(mm_dsl::RoutingSwitchTurnTerminal::PersistentReconfigureApplied)
+    );
+    assert_eq!(
+        after.model_routing_baseline_model.as_deref(),
+        Some("persistent-target")
+    );
+}
+
+/// A retry of a finite switch-turn that waits for its turn is not answered
+/// as a denial: the conflict refusal it met recorded a denial under the
+/// staged switch's id, and answered its caller as denied, although the
+/// switch still activates at the next turn. The retry is an error that
+/// records nothing, and the switch activates as it was accepted.
+#[tokio::test]
+async fn finite_switch_turn_retry_of_a_staged_request_records_no_denial() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(until_changed_reconfigure_host(false));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let request_key = uuid(616).to_string();
+    let finite = || {
+        finite_switch_request(
+            616,
+            "turn-target",
+            meerkat_core::image_generation::FiniteScopedTurnDuration::OneTurn,
+        )
+    };
+    let accepted = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        finite(),
+    )
+    .await
+    .expect("the finite switch-turn is answered");
+    assert!(
+        matches!(
+            accepted,
+            meerkat_core::image_generation::SwitchTurnControlResult::Applied { .. }
+        ),
+        "the finite switch-turn is accepted for the next turn: {accepted:?}"
+    );
+
+    let retried = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        finite(),
+    )
+    .await;
+    assert!(
+        matches!(retried, Err(RuntimeDriverError::Internal(_))),
+        "a retry of the staged finite switch is an error, not a conflict denial: {retried:?}"
+    );
+    let staged = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the retry");
+    assert_eq!(
+        staged.model_routing_pending_switch_request_id,
+        Some(request_key.clone()),
+        "the finite switch stays the pending switch"
+    );
+    assert!(staged.model_routing_pending_switch_turns.is_some());
+    assert_eq!(staged.model_routing_switch_terminal.get(&request_key), None);
+    assert_eq!(staged.model_routing_switch_denials.get(&request_key), None);
+
+    <MeerkatMachine as SessionServiceRuntimeExt>::admit_model_routing_assistant_turn(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("the next assistant turn is admitted");
+    let status = <MeerkatMachine as SessionServiceRuntimeExt>::session_model_routing_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("read the routing status");
+    assert_eq!(
+        status.effective_model.as_str(),
+        "turn-target",
+        "the finite switch activates at the next turn"
+    );
+}
+
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_reports_registered_idle_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());

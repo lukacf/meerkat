@@ -38608,12 +38608,12 @@ policy with its release gate.
   them, and compaction rewrites the head so shrunken context is durable —
   saving a long session no longer serializes the full transcript on every
   turn.
-- Mob member revival completeness (studio M2): reviving a stopped member
+- Mob member revival completeness (downstream ask M2): reviving a stopped member
   recomposes its per-spawn external tools from the durable spawn spec
   (spawn/respawn/dispose threading plus cold-restore seeding), and
   `MemberSpawnedEvent` durably carries `effective_profile_override` so
   roster replay restores the member's effective profile instead of `None`.
-- Restart-first-class terminal status (studio M4): `session/input_status`
+- Restart-first-class terminal status (downstream ask M4): `session/input_status`
   and `session/input_state` answer from durable runtime rows without
   requiring a live registration — a fresh host process can report terminal
   outcomes for work finished before the restart, with zero wire-shape
@@ -38635,7 +38635,7 @@ policy with its release gate.
   delegates to the full canonical load) and
   `MobSessionService::load_persisted_session_metadata` — list/status paths
   read session metadata without deserializing full transcripts.
-- `semver-breaks` release-preflight gate (studio M3): cargo-semver-checks
+- `semver-breaks` release-preflight gate (downstream ask M3): cargo-semver-checks
   runs against the last published crates.io baselines; detected public-API
   breaks fail the release unless declared under a `### Breaking` changelog
   heading. The exact-pin policy in this file's header is the other half of
@@ -38849,7 +38849,7 @@ GitHub-release assets were blocked by a runner disk flake — install
 ### Fixed
 
 - External tool servers staged/connected before the session-authority bind
-  no longer poison the tool surface (meerkat-studio P0 regression on
+  no longer poison the tool surface (a downstream P0 regression on
   0.7.19/0.7.20). 0.7.19's composite bind forwarding delivered the session
   bind to nested MCP adapters for the first time, and the adapter refused
   pre-bind surface facts with a permanently poisoned handle — every
@@ -38908,14 +38908,14 @@ unbricks retire/respawn for created-but-never-run mob members.
 
 Meerkat 0.7.19 hardens the schedule subsystem against poisoned durable rows
 (downstream field incident: one bad row silently starved every schedule), makes
-member cancellation and retire/respawn real for embedders (meerkat-studio P0s),
+member cancellation and retire/respawn real for embedders (downstream P0s),
 and gives library embedders first-class MCP wiring and a durable
 run-reconciliation query.
 
 ### Fixed
 
 - Mid-turn member cancellation no longer crashes the host process
-  (meerkat-studio M1, P0). A boundary handle that re-entered
+  (downstream ask M1, P0). A boundary handle that re-entered
   `MeerkatMachine::cancel_after_boundary` from inside the machine's own
   dispatch — the shape meerkat's own blocked-method error text steered
   embedders into — recursed unboundedly until the tokio worker overflowed
@@ -38927,7 +38927,7 @@ run-reconciliation query.
   `MobSessionService` cancel seams now states that implementations apply
   the cancel to the live agent and must never re-enter the machine.
 - Retire/respawn no longer fails deterministically for session-owned mob
-  members (meerkat-studio K1, P0). Members adopted from a host-owned session
+  members (downstream ask K1, P0). Members adopted from a host-owned session
   service (e.g. embedder console sessions via `ensure_member`) have no
   record in the mob archive authority; disposal escalated that to a fatal
   "authority returned NotFound for registered runtime session" while
@@ -38972,7 +38972,7 @@ run-reconciliation query.
 
 ### Added
 
-- Declarative MCP for library embedders (meerkat-studio M2):
+- Declarative MCP for library embedders (downstream ask M2):
   `SessionBuildOptions::mcp_servers` / `AgentBuildConfig::mcp_servers`
   materialize MCP stdio/HTTP servers into a session-owned router bound to
   the build mode's canonical external-tool surface authority — composing
@@ -38984,7 +38984,7 @@ run-reconciliation query.
   its external child, making session-time late binding reach nested MCP
   adapters. `meerkat::mcp::standalone_router()` is the supported
   constructor for raw-router hosts.
-- Durable run reconciliation (meerkat-studio M4): the machine-owned
+- Durable run reconciliation (downstream ask M4): the machine-owned
   idempotency binding is queryable read-only —
   `SessionServiceRuntimeExt::input_state_by_idempotency_key` returns the
   input's stored state (terminal outcome, resolving run id, boundary
@@ -38993,7 +38993,7 @@ run-reconciliation query.
   idempotency key) with Python (`client.input_state`) and TypeScript
   (`client.inputState`) SDK wrappers, so embedders can delete hand-rolled
   run journals.
-- Versioning and compatibility policy (meerkat-studio M3): documented in
+- Versioning and compatibility policy (downstream ask M3): documented in
   `docs/guides/cd-and-distribution.md` — pre-1.0 patch releases may change
   public APIs, embedders pin exact versions, the only supported crate
   combination is exact version parity, breaking changes land under a

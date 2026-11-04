@@ -1,8 +1,8 @@
-// meerkat-studio K-asks regression suite (K1 repro + K2 transparency).
+// Downstream K-asks regression suite (K1 repro + K2 transparency).
 //
 // K1: meta/retire_member + meta/respawn_member on members of a
 // multi-member crew created via meta/ensure_member. Works on the ephemeral
-// session service; on the persistent chain (studio's construction:
+// session service; on the persistent chain (the reporter's construction:
 // FactoryAgentBuilder -> PersistentSessionService -> MobBootstrapSpec ->
 // UnifiedRuntime) BOTH used to fail for never-ran members: disposal completed
 // but the ArchiveSession step's authority lookup NotFounded (no runtime
@@ -169,7 +169,7 @@ comms = true
     );
 }
 
-/// Studio's actual construction chain: FactoryAgentBuilder →
+/// The reporter's actual construction chain: FactoryAgentBuilder →
 /// PersistentSessionService → MobBootstrapSpec → UnifiedRuntime, then a
 /// 3-member crew via meta/ensure_member and per-member retire/respawn.
 #[tokio::test]
@@ -259,17 +259,17 @@ comms = true
     assert!(
         retire.get("error").is_none(),
         "retire_member on a persistent ensure_member crew must succeed \
-         (meerkat-studio K1); error: {retire}"
+         (downstream ask K1); error: {retire}"
     );
 
     assert!(
         respawn.get("error").is_none(),
         "respawn_member on a persistent ensure_member crew must succeed \
-         (meerkat-studio K1); error: {respawn}"
+         (downstream ask K1); error: {respawn}"
     );
 }
 
-/// meerkat-studio ask K2: a console JSON-RPC internal error must carry the
+/// Downstream ask K2: a console JSON-RPC internal error must carry the
 /// real failure reason on the wire — `message` and `data.detail` — never a
 /// bare `{"error":"internal_error"}`. Uses an operation that fails
 /// deterministically regardless of upstream fixes: respawning a member that
@@ -340,7 +340,7 @@ comms = true
     );
 }
 
-/// meerkat-studio ask K0: the identity-first gateway surface. Same persistent
+/// Downstream ask K0: the identity-first gateway surface. Same persistent
 /// construction chain and the same three RPCs that fail on the session-owned
 /// surface (the `#[ignore]`d test above) — but with the identity-first
 /// substrate attached, retire and respawn of NEVER-RAN members succeed:
@@ -564,7 +564,7 @@ comms = true
     );
 
     // Capabilities advertise the doctrine flag — consumers gate their
-    // migration on it (studio contract point 5).
+    // migration on it (downstream contract point 5).
     let caps = rpc(&app, "meta/capabilities", json!({})).await;
     assert_eq!(
         caps["result"]["identity_first"],

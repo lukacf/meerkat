@@ -240,7 +240,7 @@ export function safeConsoleHref(value: string): string | null {
 
 export interface RenderConversationInlineMarkdownOptions {
   // Display normalization rewrites/strips peer-protocol tokens and tidies
-  // punctuation for meerkat-studio's conversational surface. Consumers that
+  // punctuation for an embedding app's conversational surface. Consumers that
   // need faithful rendering of raw agent text (e.g. the Meta console)
   // disable it — matching the parse-side `displayNormalization` option.
   displayNormalization?: boolean;
@@ -747,7 +747,7 @@ export interface ConversationRichParseOptions {
   /**
    * Apply the display-text normalization layer (legacy placeholder cleanup,
    * machine peer-token scrubbing, steering-prompt rewrites, punctuation
-   * tidying) before parsing. Defaults to true — the meerkat-studio desktop
+   * tidying) before parsing. Defaults to true; an embedding app's
    * transcript relies on it. Consumers that do their own envelope handling
    * on the parsed output (e.g. the meta console adapters) should pass
    * `{ displayNormalization: false }` to parse the text faithfully.

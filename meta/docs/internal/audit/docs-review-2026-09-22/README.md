@@ -33,7 +33,7 @@ Publication note (2026-09-22): the release owner cherry-picked these commits ont
 
 - MobKit baseline: `af82b6b3ab34faed9bf3e962d148d55f10dcd1dc` (0.8.39; direct Meerkat pins 0.8.40).
 - Prior MobKit corrections: `01435e7ccda5e925fc2cf9f462327bdae9584d07`, not merged into this baseline; its applicable missing corrections are included.
-- User-supplied Meerkat audit branch: `luka-crnkovicfriis-abk-documentation-accuracy-audit`, pinned for this review at `bdb53a24f7a1ac048fe91a328f82e161e00a2b95`. It is contextual evidence, not authority over this checkout's pinned runtime or a claim of published documentation.
+- User-supplied Meerkat documentation-accuracy audit branch, pinned for this review at `bdb53a24f7a1ac048fe91a328f82e161e00a2b95`. It is contextual evidence, not authority over this checkout's pinned runtime or a claim of published documentation.
 
 ## Verification and boundaries
 

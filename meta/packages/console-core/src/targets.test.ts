@@ -7,7 +7,7 @@ import {
 } from "./targets";
 
 // Dual-runner: meta's console gates bundle this file with esbuild and run it
-// under `node --test`; the meerkat-studio desktop app picks it up with vitest
+// under `node --test`; an embedding desktop app picks it up with vitest
 // (globals enabled). Resolve the registrar for whichever runner is active.
 type TestFn = (name: string, fn: () => void | Promise<void>) => void;
 const nodeTestModule = "node:test";

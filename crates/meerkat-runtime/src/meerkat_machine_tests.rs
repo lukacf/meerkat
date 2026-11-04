@@ -22637,7 +22637,7 @@ mod stop_teardown_coordinator_class {
     }
 }
 
-/// Ask 21c defensive class tests (meerkat-studio P0): runtime-owned post-stop
+/// Ask 21c defensive class tests (downstream P0): runtime-owned post-stop
 /// cleanup that re-enters the machine to unregister the exact executor
 /// attachment must never run while the
 /// runtime-loop task holds the session mutation gate — that is a
@@ -24410,7 +24410,7 @@ async fn exact_run_boundary_cancel_remains_admitted_after_unregister_drain_begin
         .expect("first apply should still be blocked");
 }
 
-/// M1 regression (meerkat-studio P0): a boundary handle that (wrongly)
+/// M1 regression (downstream P0): a boundary handle that (wrongly)
 /// re-enters `MeerkatMachine::cancel_after_boundary` from inside the
 /// machine's own dispatch used to recurse unboundedly — each lap re-staged
 /// the unguarded CancelAfterBoundary self-loop, re-emitted the

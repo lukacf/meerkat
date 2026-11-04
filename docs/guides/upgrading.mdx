@@ -126,7 +126,8 @@ and back up the state root as the steps above say.
   first run that applies them. Every other session stays at envelope 4 and
   still reads on 0.9.8. `rkat storage doctor` on 0.9.9 lists the sessions at
   envelope 5 (`operator-instruction-envelope`) and the mobs 0.9.8 cannot
-  restore (`operator-instruction-mob-events`).
+  restore (`operator-instruction-mob-events`) of a Core realm; for a Meta
+  state directory, see [Downgrading to 0.9.8](#downgrading-to-0-9-8).
 
 ### Breaking changes and what to do
 
@@ -652,9 +653,10 @@ schema_version=10; expected 9"), and their realm restore (the mob roots of
 the rkat CLI, RPC and MCP hosts) stops at the first such mob, so every mob of
 that realm fails to restore and every mob verb answers the error. A Meta
 gateway whose own mob recorded an operator instruction does not resume its
-mob. Before any downgrade to 0.9.8 or 0.9.7:
+mob. Before any downgrade of a realm to 0.9.8 or 0.9.7 (for a Meta state
+directory, see below):
 
-1. Run `rkat storage doctor` on 0.9.9.
+1. Run `rkat storage doctor` on 0.9.9 or later.
 2. For each mob listed under `operator-instruction-mob-events`, destroy the
    mob, or move its database (`mobs/<name>.db` in the realm's state
    directory, the path the finding names) out of that directory.
@@ -673,10 +675,22 @@ not read `runtime.sqlite`, where Meta keeps its sessions, or
 `schema-from-the-future` error for `sessions.sqlite3` (ledger domain
 `session-store` at version 999999) is expected: that file is the retired
 stamp that `meta_gateway storage-migrate-native` leaves for Meta 0.9.3 to
-refuse. Meta's storage doctor (`meta/storage/doctor`) gains a supported
-census of both in Meta 0.9.10. Until then, on a state directory in the
-default disk layout, take it with two read-only queries
-(`sqlite3 -readonly <file> "<query>"`):
+refuse. From Meta 0.9.10, Meta's storage doctor (`meta/storage/doctor`)
+takes this census of a state directory, read-only, as Info findings that
+carry counts only:
+
+- `operator-instruction-envelope`: the sessions of `runtime.sqlite` at
+  envelope 5;
+- `operator-instruction-mob-events`: the mob events at schema 10, in the
+  gateway's own journal and in each child mob's journal under `mobs/`;
+- `identity-store-rows`: the identity-store rows of schema version 2 or
+  later in the same mob stores (see below).
+
+Each reports one finding for the state directory with its total, 0
+included, and one for each file that counts above 0 or could not be
+counted, whose `path` names the file. On Meta 0.9.9, take the first two with
+two read-only queries (`sqlite3 -readonly <file> "<query>"`) on a state
+directory in the default disk layout:
 
 - the sessions at envelope 5, on `runtime.sqlite` (`meta/status_identity`
   names the `session_id` of each identity):
@@ -699,7 +713,10 @@ default disk layout, take it with two read-only queries
 
 Destroy, or move out of `mobs/`, each child mob database that counts rows.
 The gateway's own journal is not in `mobs/`: a gateway whose own journal
-counts rows does not start its mob on Meta 0.9.7 or 0.9.6.
+counts rows does not start its mob on Meta 0.9.7 or 0.9.6. On Meta 0.9.9,
+nothing an SDK host can call writes an identity-store row of schema
+version 2, so such a host has none to count; a Rust host counts its mob's
+with `MobHandle::identity_record_census()`.
 
 Durable decisions live in their own file, `approval_decisions.sqlite3`,
 beside `approvals.json` under the store path; 0.9.9 creates it with the first
@@ -772,6 +789,15 @@ rebuilds such a member from its seat row; a respawn with the row's labels,
 Change receipts are rows of the identity store's receipts table under keys
 0.9.8 never asks for.
 
+From 0.9.10 the rows are also counted with no running mob, by the same
+rule, read-only. `MobStorage::read_identity_record_rows` counts a store
+file's rows per mob (`IdentityRecordRows`: `created_rows`, `archived`,
+`tombstones`, `unreadable`), and `MobStorage::identity_record_rows` counts a
+storage's mob, a host store's included. `rkat storage doctor` reports them
+for each mob database that holds any, and Meta's storage doctor for a Meta
+state directory, as the Info finding `identity-store-rows` with the counts
+only.
+
 0.9.8 reads WorkGraph items whose evidence withdraws earlier evidence, but it
 ignores `withdraws` and drops the field when it rewrites such an item (any
 mutation of the item, including a host sweep such as a lease-expiry
@@ -791,8 +817,10 @@ compaction, or a system-row prune with
 activation body (or a fork child that copied such a row), and one in which
 a rewrite moved an instruction activation row to another offset. 0.9.8 refuses such a session;
 `rkat storage doctor` lists them (Info finding
-`operator-instruction-envelope`) before you roll back. Every other session
-stays at envelope 4 and reads on 0.9.8 unchanged.
+`operator-instruction-envelope`) before you roll back, and on a Meta state
+directory Meta's storage doctor counts them under the same code from Meta
+0.9.10. Every other session stays at envelope 4 and reads on 0.9.8
+unchanged.
 
 0.9.8 does not read a session's scoped tool grant gate, which 0.9.9 records
 in the session's tooling metadata: 0.9.8 resumes a gated session with its

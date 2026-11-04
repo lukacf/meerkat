@@ -499,6 +499,134 @@ pub struct IdentityRecordCensus {
     pub seats_stale: usize,
 }
 
+/// The row counts of [`IdentityRecordCensus`]: one mob's rows of schema
+/// version 2 and later in its identity store, counted with no running mob,
+/// of a store file ([`crate::MobStorage::read_identity_record_rows`]) or of a
+/// storage ([`crate::MobStorage::identity_record_rows`]), by the rule
+/// [`super::MobHandle::identity_record_census`] counts a running mob's rows
+/// by. It carries the row counts only: the census's other counts
+/// (`preparations_open`, `constructions_held`, `seats_stale`) read a running
+/// mob's machine state and journal, which a store read does not, so they are
+/// not reported as zeros nothing read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IdentityRecordRows {
+    /// Every row of schema version 2 and later: store-owned identities
+    /// present, pending their host's preparation or archived, removed names
+    /// of either custody (tombstones), and rows this build cannot read. A mob
+    /// that holds any has no supported downgrade to a release before 0.9.9
+    /// (see [`IdentityRecordCensus::created_rows`]).
+    pub created_rows: usize,
+    /// Rows of archived store-owned identities.
+    pub archived: usize,
+    /// Tombstones: the rows of removed names, of either custody.
+    pub tombstones: usize,
+    /// Rows this build cannot read.
+    pub unreadable: usize,
+}
+
+impl IdentityRecordRows {
+    /// Count one row of the created identity scan, as the census counts it:
+    /// every row counts in `created_rows`; a removed name's row is also a
+    /// tombstone, an archived identity's row also archived, and a row this
+    /// build cannot read also unreadable.
+    pub(crate) fn count_row(&mut self, observation: &crate::identity::CreatedIdentityObservation) {
+        self.created_rows += 1;
+        match observation {
+            crate::identity::CreatedIdentityObservation::Created(record) => {
+                match &record.presence {
+                    crate::identity::CreatedIdentityPresence::Removed => self.tombstones += 1,
+                    crate::identity::CreatedIdentityPresence::Archived { .. } => self.archived += 1,
+                    crate::identity::CreatedIdentityPresence::Present
+                    | crate::identity::CreatedIdentityPresence::PendingPreparation { .. } => {}
+                }
+            }
+            crate::identity::CreatedIdentityObservation::Unreadable { .. } => {
+                self.unreadable += 1;
+            }
+        }
+    }
+
+    /// Count every row of `mob_id`'s created identity scan through `store`,
+    /// page by page, showing each row to `visit` as it is counted. A store
+    /// read that fails fails the count: a row the store may hold is never
+    /// counted as absent.
+    pub(crate) async fn scan(
+        store: &dyn crate::store::MobIdentityMemberStore,
+        mob_id: &MobId,
+        mut visit: impl FnMut(&AgentIdentity, &crate::identity::CreatedIdentityObservation),
+    ) -> Result<Self, crate::store::MobStoreError> {
+        let mut rows = Self::default();
+        let mut after = None;
+        loop {
+            let page = store
+                .scan_created_identity_rows(
+                    mob_id,
+                    after.as_ref(),
+                    crate::store::IDENTITY_INTENT_SCAN_PAGE_MAX,
+                )
+                .await?;
+            for (identity, observation) in &page.observations {
+                rows.count_row(observation);
+                visit(identity, observation);
+            }
+            match page.next {
+                None => return Ok(rows),
+                Some(next) if after.as_ref().is_none_or(|current| &next > current) => {
+                    after = Some(next);
+                }
+                Some(_) => {
+                    return Err(crate::store::MobStoreError::Internal(format!(
+                        "the created identity scan of mob '{mob_id}' returned a non-advancing \
+                         cursor"
+                    )));
+                }
+            }
+        }
+    }
+}
+
+impl std::ops::AddAssign for IdentityRecordRows {
+    fn add_assign(&mut self, other: Self) {
+        self.created_rows += other.created_rows;
+        self.archived += other.archived;
+        self.tombstones += other.tombstones;
+        self.unreadable += other.unreadable;
+    }
+}
+
+impl std::iter::Sum for IdentityRecordRows {
+    fn sum<I: Iterator<Item = Self>>(rows: I) -> Self {
+        rows.fold(Self::default(), |mut total, rows| {
+            total += rows;
+            total
+        })
+    }
+}
+
+/// Why [`crate::MobStorage::read_identity_record_rows`] or
+/// [`crate::MobStorage::identity_record_rows`] refused or failed to count a
+/// mob store's identity-store rows. The readers never create, migrate or
+/// otherwise write a store, whatever the outcome.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum IdentityRecordRowsReadError {
+    /// No store exists at the path.
+    #[error("no mob store exists at {}", path.display())]
+    StoreMissing { path: std::path::PathBuf },
+    /// The file is not a mob store this build reads: it carries no mob
+    /// schema, a schema from a newer build, or a schema this build does not
+    /// recognize.
+    #[error("{} is not a mob store this build reads: {detail}", path.display())]
+    ForeignSchema {
+        path: std::path::PathBuf,
+        detail: String,
+    },
+    /// The store could not be read.
+    #[error("mob store read failed: {0}")]
+    Read(#[from] crate::store::MobStoreError),
+}
+
 /// The counts of [`super::MobHandle::identity_census`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]

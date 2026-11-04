@@ -145,6 +145,35 @@ them.
   never a permission. Native admission reads it to tell a change that has
   completed from one still in progress (see Fixed).
 
+- `meerkat-mob`: `MobStorage::read_identity_record_rows` counts the
+  identity-store rows of schema version 2 and later of a mob store at a
+  path, per mob, with no running mob: the rows
+  `MobHandle::identity_record_census()` counts (the rows of store-owned
+  identities, the tombstones of removed names, and rows this build cannot
+  read), read by the same created identity scan and counted by the same
+  rule, into the new `IdentityRecordRows` (`created_rows`, `archived`,
+  `tombstones`, `unreadable`). It opens the file read-only, so it is safe on
+  the store of a running mob, never creates, migrates or otherwise writes
+  it, and refuses a missing store or a schema it does not read with the
+  typed `IdentityRecordRowsReadError`. `MobStorage::identity_record_rows`
+  counts the storage's own mob the same way through the storage, a host
+  store's included. Each mob in the answer has no supported downgrade to a
+  release before 0.9.9: those releases do not read these rows, and this
+  release has no step that deletes them. `IdentityRecordRows` implements
+  `AddAssign` and `Sum`, for a total over a file's mobs.
+
+- `rkat`, `meerkat-store`: `rkat storage doctor` reports the identity-store
+  rows of schema version 2 and later of each mob database (`mobs/<name>.db`)
+  that holds any, as an Info finding `identity-store-rows`
+  (`meerkat_store::doctor::FINDING_IDENTITY_STORE_ROWS`) with the counts
+  only: the total, and how many are archived, tombstones and unreadable.
+  The mob crate's reader counts them, read-only; a database it cannot count
+  gets an Info finding saying so. The doctor still exits 0 on Info findings.
+  `meerkat_store::doctor::operator_instruction_envelope_sessions` and
+  `meerkat_store::doctor::operator_instruction_mob_events` expose the
+  doctor's operator-instruction census readers over a connection the caller
+  opened read-only, so another storage doctor counts by the same rule.
+
 ### Changed
 
 - A session on a zero-config Copilot route, or on a route of a
@@ -154,6 +183,12 @@ them.
   does. A zero-config route's session carried the binding as its credential
   identity before, so a provider switch or a fallback target did not stay
   on the account.
+
+- `meerkat-store`: the `operator-instruction-envelope` census also reads a
+  runtime store's committed boundary heads
+  (`runtime_session_authority.boundary_head_json`), which carry the session
+  envelope of the head they committed, beside the head rows, the head-less
+  documents and the WholeBlob documents.
 
 ### Fixed
 
@@ -290,6 +325,25 @@ them.
   (`config/patch`, `rkat config patch`) sets a string, so a config written by
   this release stays readable by 0.9.9 and 0.9.8 if a host rolls back. A
   string written into a config file by hand loads only on 0.9.10 and later.
+
+- `meerkat-mob-mcp`: restart recovery of live voice delegations no longer
+  stalls on mob members that are not materialized. At start, the live
+  delegation coordinator (`openai-live` feature) recovers the delegations a
+  previous process left by reading each member's session. A member that is
+  seated but not materialized has no runtime registration: the default under
+  lazy restore (`member_restore: on_demand`), an identity whose first wake is
+  deferred, or a member whose materialization was released. Reading it
+  failed, so the whole recovery retried every second for as long as any
+  member stayed dormant, logging "ClientContext restart inventory capture
+  remains pending" at 1 Hz, and a live channel opened on that host waited for
+  the recovery with no limit. Recovery now skips such a member without waking
+  it. Its delegations stay durable and are recovered once, when the member is
+  woken, or before the first live channel opened on it, whichever comes
+  first. A live channel open waits at most 30 seconds for the recovery and is
+  otherwise refused with an error that names it. A recovery step that keeps
+  failing warns on its 1st, 2nd, 4th, 8th and later power-of-two failures
+  instead of every second. Affects hosts up to 0.9.9 that compose the live
+  delegation coordinator with lazily restored members.
 
 - `meerkat-runtime`: an exact-input cancellation
   (`MeerkatMachine::cancel_input_if_present`) that raced its input's own
@@ -4101,15 +4155,19 @@ them.
   stops at the first such mob database, so every mob of that realm fails to
   restore and every mob verb answers that error; a Meta gateway whose own mob
   recorded an operator instruction does not resume its mob. Before any
-  downgrade to 0.9.8 or 0.9.7, run `rkat storage doctor` on 0.9.9, then
-  destroy each mob listed under `operator-instruction-mob-events`, or move
-  its database (`mobs/<name>.db` in the realm's state directory, the path
-  the finding names) out of that directory, before the older binary starts.
-  The doctor reads the mob databases on disk only: for a realm on a host
-  store, look in the host's store for mob events at schema 10. A member
-  session that recorded its snapshot is written at session envelope 5, which
-  the older binary refuses session by session (the
-  `operator-instruction-envelope` finding lists them).
+  downgrade of a realm to 0.9.8 or 0.9.7, run `rkat storage doctor` on 0.9.9,
+  then destroy each mob listed under `operator-instruction-mob-events`, or
+  move its database (`mobs/<name>.db` in the realm's state directory, the
+  path the finding names) out of that directory, before the older binary
+  starts. The doctor reads the mob databases on disk only: for a realm on a
+  host store, look in the host's store for mob events at schema 10. A Meta
+  gateway's state directory is not a realm this doctor reads (it reads
+  neither `runtime.sqlite` nor the gateway's own mob journal,
+  `event_log.sqlite3`): Meta's storage doctor (`meta/storage/doctor`) takes
+  that census from Meta 0.9.10, and the upgrade guide gives read-only
+  queries for Meta 0.9.9. A member session that recorded its snapshot is
+  written at session envelope 5, which the older binary refuses session by
+  session (the `operator-instruction-envelope` finding lists them).
 
 - A session's grant gate is recorded in its tooling metadata, which a binary
   older than scoped tool grants does not read: such a binary resumes a gated

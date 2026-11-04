@@ -149,6 +149,12 @@ const CLIENT_CONTEXT_RESTART_RETRY_DELAY: std::time::Duration =
     std::time::Duration::from_millis(25);
 const CLIENT_CONTEXT_RESTART_RETRY_MAX_DELAY: std::time::Duration =
     std::time::Duration::from_secs(1);
+/// How long a live channel's preparation waits for the startup ClientContext
+/// restart inventory before it is refused. A dormant member never holds that
+/// inventory back: only a Mob restore or an inventory read that keeps failing
+/// reaches this bound.
+const CLIENT_CONTEXT_RESTART_PREPARE_BOUND: std::time::Duration =
+    std::time::Duration::from_secs(30);
 
 type ActiveChannelKey = (SessionId, meerkat_core::LiveChannelId);
 
@@ -1180,9 +1186,19 @@ pub struct ExperimentalResponsesRestartReport {
 #[non_exhaustive]
 pub enum ExperimentalClientContextRestartDisposition {
     InFlight,
-    Reconciled { completed: bool },
+    Reconciled {
+        completed: bool,
+    },
     AlreadyReconciled,
-    Broken { reason: String },
+    Broken {
+        reason: String,
+    },
+    /// The source member's session has no runtime registration in this
+    /// process: the member is dormant again (its materialization was
+    /// released). The operation stays in the session's durable machine state
+    /// and is observed again once the member is materialized; observing it
+    /// never wakes the member.
+    SourceUnmaterialized,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1744,6 +1760,11 @@ pub struct ExperimentalLiveDelegationCoordinator {
     bound_channels: BoundChannelMap,
     client_context_restart_reconciler_armed: Arc<std::sync::atomic::AtomicBool>,
     client_context_restart_inventory_ready: Arc<ClientContextRestartInventoryReady>,
+    /// Test observation of every report a ClientContext restart pass
+    /// returned, in order.
+    #[cfg(test)]
+    client_context_restart_observations:
+        Arc<std::sync::Mutex<Vec<ExperimentalClientContextRestartReport>>>,
     /// Test observation of every result routed to the post-close merge, as
     /// (operation id, result text).
     #[cfg(test)]
@@ -1768,6 +1789,16 @@ struct ClientContextRestartInventoryEntry {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ClientContextRestartInventory {
     entries: Vec<ClientContextRestartInventoryEntry>,
+    /// Member sessions the capture did not read: MeerkatMachine holds no
+    /// registration for them in this process. Their members are seated but
+    /// not materialized (dormant under lazy restore, an identity whose first
+    /// wake is deferred, a released materialization), and reading them is
+    /// never a reason to wake them. Their ClientContext operations stay in
+    /// the sessions' durable machine state and are captured, exactly once,
+    /// when MeerkatMachine holds the session registered again: by the
+    /// reconciler once the member is materialized, or by the preparation of
+    /// the first live channel on the session, whichever comes first.
+    deferred: Vec<SessionId>,
 }
 
 impl ClientContextRestartInventory {
@@ -1777,12 +1808,88 @@ impl ClientContextRestartInventory {
             .iter()
             .any(|entry| &entry.session_id == session_id && &entry.operation_id == operation_id)
     }
+
+    #[cfg(test)]
+    fn defers(&self, session_id: &SessionId) -> bool {
+        self.deferred.contains(session_id)
+    }
 }
 
+/// The ClientContext restart inventory of one coordinator.
+///
+/// A session's inventory is fixed before this coordinator can prepare its
+/// first live channel on it, so an operation admitted on a new channel is
+/// never taken for one a previous process left. The startup capture fixes it
+/// for every member session MeerkatMachine holds registered, then releases
+/// channel preparation ([`Self::publish_startup_inventory`]). Each session
+/// it deferred is fixed under the ledger lock, once, by whichever captures it
+/// first: the reconciler once the member is materialized, or the preparation
+/// of a channel on the session ([`Self::capture_deferred`]).
 #[derive(Default)]
 struct ClientContextRestartInventoryReady {
     ready: std::sync::atomic::AtomicBool,
     changed: tokio::sync::Notify,
+    deferred: tokio::sync::Mutex<ClientContextRestartDeferredLedger>,
+    /// A channel's preparation captured a deferred session; its operations
+    /// wait in the ledger. The permit it stores wakes a reconciler that was
+    /// not waiting yet.
+    deferred_captured: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct ClientContextRestartDeferredLedger {
+    /// Deferred sessions nothing captured yet. Every member a lazy restore
+    /// leaves dormant is here, and each attachment checks them all, so one
+    /// lookup must not scan the rest.
+    pending: std::collections::BTreeSet<SessionId>,
+    /// Operations of captured deferred sessions the reconciler has not
+    /// taken yet.
+    captured: Vec<ClientContextRestartInventoryEntry>,
+}
+
+/// What [`ClientContextRestartInventoryReady::capture_deferred`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientContextRestartDeferredCapture {
+    /// The session is not deferred: the startup capture read it, a capture
+    /// took it since, or it was no member session at the startup capture.
+    NotDeferred,
+    /// The session is deferred and MeerkatMachine still holds no
+    /// registration for it: nothing was read.
+    Unregistered,
+    /// The session was captured now, with this many operations.
+    Captured { operations: usize },
+}
+
+/// Why restart reconciliation refused a live channel's preparation. The
+/// activation seam carries it as text; its kind is decided here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClientContextRestartPrepareRefusal {
+    /// The startup inventory was not captured within the bound: a Mob restore
+    /// or an inventory read keeps failing, and the reconciler warns with its
+    /// cause. Nothing was prepared; a later open can succeed.
+    InventoryPending { waited: std::time::Duration },
+    /// The startup capture deferred the session and it cannot be captured
+    /// now. Nothing was prepared.
+    DeferredSessionUnavailable {
+        session_id: SessionId,
+        reason: String,
+    },
+}
+
+impl std::fmt::Display for ClientContextRestartPrepareRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InventoryPending { waited } => write!(
+                f,
+                "live channel preparation refused: the ClientContext restart inventory was not captured within {} ms (a Mob restore or an inventory read keeps failing)",
+                waited.as_millis()
+            ),
+            Self::DeferredSessionUnavailable { session_id, reason } => write!(
+                f,
+                "live channel preparation refused: the ClientContext restart inventory of session {session_id} cannot be captured: {reason}"
+            ),
+        }
+    }
 }
 
 impl ClientContextRestartInventoryReady {
@@ -1804,6 +1911,129 @@ impl ClientContextRestartInventoryReady {
                 return;
             }
             changed.await;
+        }
+    }
+
+    /// [`Self::wait`] for at most `bound`, refused typed past it.
+    async fn wait_bounded(
+        &self,
+        bound: std::time::Duration,
+    ) -> Result<(), ClientContextRestartPrepareRefusal> {
+        tokio::time::timeout(bound, self.wait())
+            .await
+            .map_err(|_| ClientContextRestartPrepareRefusal::InventoryPending { waited: bound })
+    }
+
+    /// Record the sessions the startup capture deferred, then release channel
+    /// preparation.
+    async fn publish_startup_inventory(&self, deferred: Vec<SessionId>) {
+        self.deferred.lock().await.pending = deferred.into_iter().collect();
+        self.mark_ready();
+    }
+
+    async fn deferred_sessions(&self) -> Vec<SessionId> {
+        self.deferred.lock().await.pending.iter().cloned().collect()
+    }
+
+    #[cfg(test)]
+    async fn has_deferred_sessions(&self) -> bool {
+        !self.deferred.lock().await.pending.is_empty()
+    }
+
+    #[cfg(test)]
+    async fn take_captured(&self) -> Vec<ClientContextRestartInventoryEntry> {
+        self.take_captured_and_pending().await.0
+    }
+
+    /// Take the operations captured since the last take, and whether a
+    /// deferred session is still pending, under one lock. Read apart, a
+    /// capture between the two reads would be left behind by a reconciler
+    /// that took nothing and then found nothing pending.
+    async fn take_captured_and_pending(&self) -> (Vec<ClientContextRestartInventoryEntry>, bool) {
+        let mut ledger = self.deferred.lock().await;
+        (
+            std::mem::take(&mut ledger.captured),
+            !ledger.pending.is_empty(),
+        )
+    }
+
+    /// Capture `session_id` if the startup capture deferred it and nothing
+    /// captured it since: at most once per coordinator. The session is read
+    /// only while MeerkatMachine holds it registered, and under the ledger
+    /// lock, so the reconciler and a channel's preparation never both capture
+    /// it, and no channel is prepared on it before it is captured.
+    async fn capture_deferred<R>(
+        &self,
+        owner: &R,
+        session_id: &SessionId,
+    ) -> Result<ClientContextRestartDeferredCapture, String>
+    where
+        R: ClientContextRestartRecoveryOwner + ?Sized,
+    {
+        let mut ledger = self.deferred.lock().await;
+        if !ledger.pending.contains(session_id) {
+            return Ok(ClientContextRestartDeferredCapture::NotDeferred);
+        }
+        let Some(entries) = owner
+            .capture_registered_client_context_session(session_id)
+            .await?
+        else {
+            return Ok(ClientContextRestartDeferredCapture::Unregistered);
+        };
+        ledger.pending.remove(session_id);
+        let operations = entries.len();
+        ledger.captured.extend(entries);
+        Ok(ClientContextRestartDeferredCapture::Captured { operations })
+    }
+
+    /// [`Self::capture_deferred`] by the preparation of a live channel on
+    /// `session_id`. The operations it captures wait in the ledger for the
+    /// reconciler, so a capture wakes the reconciler's wait, or its next one.
+    async fn capture_deferred_before_channel<R>(
+        &self,
+        owner: &R,
+        session_id: &SessionId,
+    ) -> Result<ClientContextRestartDeferredCapture, String>
+    where
+        R: ClientContextRestartRecoveryOwner + ?Sized,
+    {
+        let capture = self.capture_deferred(owner, session_id).await;
+        if matches!(
+            capture,
+            Ok(ClientContextRestartDeferredCapture::Captured { .. })
+        ) {
+            self.deferred_captured.notify_one();
+        }
+        capture
+    }
+}
+
+/// The log level of one failure of a retried restart-reconciliation step.
+/// The first failure of a streak and each failure whose count is a power of
+/// two warn; the others are debug records. A step that keeps failing warns
+/// ever more rarely, at a cadence its failure count sets, not the clock.
+#[derive(Debug, Default)]
+struct RetryWarning {
+    failures: u64,
+}
+
+impl RetryWarning {
+    /// Count one failure; `true` when it warns.
+    fn failed(&mut self) -> bool {
+        self.failures = self.failures.saturating_add(1);
+        self.failures.is_power_of_two()
+    }
+
+    fn reset(&mut self) {
+        self.failures = 0;
+    }
+
+    /// Log one failure of `step` at the level [`Self::failed`] decides.
+    fn log(&mut self, step: &'static str, error: &str) {
+        if self.failed() {
+            tracing::warn!(error, attempts = self.failures, "{step}");
+        } else {
+            tracing::debug!(error, attempts = self.failures, "{step}");
         }
     }
 }
@@ -1829,15 +2059,33 @@ impl ClientContextRestartReconcileTiming {
 trait ClientContextRestartRecoveryOwner: Send + Sync {
     async fn force_mob_restore(&self) -> Result<(), String>;
 
+    /// The startup capture: the operations of every member session
+    /// MeerkatMachine holds registered, and, deferred, every member session
+    /// it holds no registration for. It never reads a deferred session and
+    /// never wakes a member.
     async fn capture_client_context_restart_inventory(
         &self,
     ) -> Result<ClientContextRestartInventory, String>;
+
+    /// The operations of one member session, read only while MeerkatMachine
+    /// holds it registered: `None` when it holds no registration for it,
+    /// before the read or after it (a release raced the read).
+    async fn capture_registered_client_context_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Vec<ClientContextRestartInventoryEntry>>, String>;
 
     async fn observe_client_context_restart_pass(
         &self,
         inventory: &ClientContextRestartInventory,
         observation_bound: std::time::Duration,
     ) -> Result<Vec<ExperimentalClientContextRestartReport>, String>;
+
+    /// MeerkatMachine's notice of each session whose executor attachment
+    /// becomes serving: the materialization (wake) of a member. The
+    /// reconciler keeps it while it waits; it holds no reference to the
+    /// coordinator, and it closes when MeerkatMachine is gone.
+    fn session_attachments(&self) -> tokio::sync::watch::Receiver<u64>;
 }
 
 async fn run_client_context_restart_reconciler<R>(
@@ -1848,6 +2096,7 @@ async fn run_client_context_restart_reconciler<R>(
     R: ClientContextRestartRecoveryOwner + ?Sized + 'static,
 {
     let mut retry_delay = timing.retry_delay;
+    let mut restore_warning = RetryWarning::default();
     loop {
         let Some(current_owner) = owner.upgrade() else {
             return;
@@ -1857,9 +2106,9 @@ async fn run_client_context_restart_reconciler<R>(
         match restore {
             Ok(()) => break,
             Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "ClientContext restart reconciliation could not restore Mob state"
+                restore_warning.log(
+                    "ClientContext restart reconciliation could not restore Mob state",
+                    &error,
                 );
                 tokio::time::sleep(retry_delay).await;
                 retry_delay = retry_delay.saturating_mul(2).min(timing.retry_max_delay);
@@ -1867,8 +2116,15 @@ async fn run_client_context_restart_reconciler<R>(
         }
     }
 
+    // A member session without a runtime registration (a dormant member) is
+    // deferred, never read: the capture does not fail on it and wakes
+    // nothing.
     retry_delay = timing.retry_delay;
-    let mut inventory = loop {
+    let mut capture_warning = RetryWarning::default();
+    let ClientContextRestartInventory {
+        mut entries,
+        deferred,
+    } = loop {
         let Some(current_owner) = owner.upgrade() else {
             return;
         };
@@ -1879,67 +2135,198 @@ async fn run_client_context_restart_reconciler<R>(
         match capture {
             Ok(inventory) => break inventory,
             Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "ClientContext restart inventory capture remains pending"
+                capture_warning.log(
+                    "ClientContext restart inventory capture remains pending",
+                    &error,
                 );
                 tokio::time::sleep(retry_delay).await;
                 retry_delay = retry_delay.saturating_mul(2).min(timing.retry_max_delay);
             }
         }
     };
-    inventory_ready.mark_ready();
+    if !deferred.is_empty() {
+        tracing::debug!(
+            deferred_sessions = deferred.len(),
+            "ClientContext restart inventory deferred the member sessions without a runtime registration until their members are materialized"
+        );
+    }
+    inventory_ready.publish_startup_inventory(deferred).await;
 
+    // Subscribed before the deferred sessions are first checked below, so a
+    // member materialized after that check still wakes the wait.
+    let Some(current_owner) = owner.upgrade() else {
+        return;
+    };
+    let mut attachments = current_owner.session_attachments();
+    drop(current_owner);
+    let mut deferred_warning = RetryWarning::default();
+    let mut scan_warning = RetryWarning::default();
+    let mut capture_retry_delay = timing.retry_delay;
     retry_delay = timing.retry_delay;
+    // The deferred sessions are checked now, and then again only after a
+    // serving attachment (a member may have been materialized) or a failed
+    // capture: never on the in-flight interval of the operations observed.
+    let mut check_deferred = true;
     loop {
-        let Some(current_owner) = owner.upgrade() else {
-            return;
-        };
-        let pass = current_owner
-            .observe_client_context_restart_pass(&inventory, timing.observation_bound)
-            .await;
-        drop(current_owner);
-        match pass {
-            Ok(reports) => {
-                retry_delay = timing.retry_delay;
-                for report in &reports {
-                    if matches!(
-                        report.disposition(),
-                        ExperimentalClientContextRestartDisposition::Broken { .. }
-                    ) {
-                        tracing::warn!(
-                            operation_id = %report.operation_id(),
-                            disposition_reason = "durable_client_context_recovery_broken",
-                            "ClientContext restart reconciliation stopped with durable recovery debt"
-                        );
+        // A deferred session MeerkatMachine holds registered again (its
+        // member was materialized) is captured here, once; the preparation
+        // of a channel on it may have captured it first. The check sees every
+        // attachment committed before it: an attachment is committed after
+        // its session's registration.
+        let mut capture_failed = false;
+        if check_deferred {
+            check_deferred = false;
+            attachments.mark_unchanged();
+            let deferred = inventory_ready.deferred_sessions().await;
+            if !deferred.is_empty() {
+                let Some(current_owner) = owner.upgrade() else {
+                    return;
+                };
+                let mut failure = None;
+                for session_id in &deferred {
+                    match inventory_ready
+                        .capture_deferred(&*current_owner, session_id)
+                        .await
+                    {
+                        Ok(ClientContextRestartDeferredCapture::Captured { operations }) => {
+                            tracing::debug!(
+                                %session_id,
+                                operations,
+                                "ClientContext restart inventory captured a deferred member session once its member was materialized"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(error) => failure = Some(error),
                     }
                 }
-                let in_flight_operations = reports
-                    .iter()
-                    .filter(|report| {
+                drop(current_owner);
+                match failure {
+                    Some(error) => {
+                        capture_failed = true;
+                        deferred_warning.log(
+                            "ClientContext restart capture of a materialized member session remains pending",
+                            &error,
+                        );
+                    }
+                    None => {
+                        deferred_warning.reset();
+                        capture_retry_delay = timing.retry_delay;
+                    }
+                }
+            }
+        }
+        // Taken in one step with the pending check, so an operation a
+        // channel's preparation captured is never left behind.
+        let (taken, deferred_left) = inventory_ready.take_captured_and_pending().await;
+        entries.extend(taken);
+
+        let mut in_flight = false;
+        let mut scan_failed = false;
+        if !entries.is_empty() {
+            let Some(current_owner) = owner.upgrade() else {
+                return;
+            };
+            let pass = current_owner
+                .observe_client_context_restart_pass(
+                    &ClientContextRestartInventory {
+                        entries: entries.clone(),
+                        deferred: Vec::new(),
+                    },
+                    timing.observation_bound,
+                )
+                .await;
+            drop(current_owner);
+            match pass {
+                Ok(reports) => {
+                    scan_warning.reset();
+                    retry_delay = timing.retry_delay;
+                    for report in &reports {
+                        if matches!(
+                            report.disposition(),
+                            ExperimentalClientContextRestartDisposition::Broken { .. }
+                        ) {
+                            tracing::warn!(
+                                operation_id = %report.operation_id(),
+                                disposition_reason = "durable_client_context_recovery_broken",
+                                "ClientContext restart reconciliation stopped with durable recovery debt"
+                            );
+                        }
+                    }
+                    in_flight = reports.iter().any(|report| {
                         matches!(
                             report.disposition(),
                             ExperimentalClientContextRestartDisposition::InFlight
                         )
-                    })
-                    .map(|report| report.operation_id().clone())
-                    .collect::<Vec<_>>();
-                if in_flight_operations.is_empty() {
+                    });
+                    // An operation still in flight is observed again after
+                    // the in-flight delay, one whose source member is dormant
+                    // again once a member is materialized; every other one is
+                    // settled.
+                    entries.retain(|entry| {
+                        reports.iter().any(|report| {
+                            report.operation_id() == &entry.operation_id
+                                && matches!(
+                                    report.disposition(),
+                                    ExperimentalClientContextRestartDisposition::InFlight
+                                        | ExperimentalClientContextRestartDisposition::SourceUnmaterialized
+                                )
+                        })
+                    });
+                }
+                Err(error) => {
+                    scan_failed = true;
+                    scan_warning.log(
+                        "ClientContext restart reconciliation scan remains pending",
+                        &error,
+                    );
+                }
+            }
+        }
+
+        if entries.is_empty() && !deferred_left {
+            return;
+        }
+
+        // A failed scan, an operation in flight and a failed capture each
+        // come back after their own delay.
+        let delay = if scan_failed {
+            let delay = retry_delay;
+            retry_delay = retry_delay.saturating_mul(2).min(timing.retry_max_delay);
+            Some(delay)
+        } else if in_flight {
+            Some(timing.in_flight_delay)
+        } else if capture_failed {
+            let delay = capture_retry_delay;
+            capture_retry_delay = capture_retry_delay
+                .saturating_mul(2)
+                .min(timing.retry_max_delay);
+            Some(delay)
+        } else {
+            None
+        };
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+            // A failed capture is read again; an attachment committed in the
+            // meantime has the deferred sessions checked again.
+            check_deferred = capture_failed || attachments.has_changed().unwrap_or(true);
+            continue;
+        }
+
+        // Everything left waits for a member to be materialized again: wait
+        // for MeerkatMachine's next serving attachment, or for a capture by a
+        // channel's preparation. Nothing polls, and nothing wakes a member.
+        let captured = inventory_ready.deferred_captured.notified();
+        tokio::select! {
+            attached = attachments.changed() => {
+                if attached.is_err() {
+                    // MeerkatMachine is gone: no member is materialized
+                    // again in this process, and the operations left stay
+                    // durable for the next start.
                     return;
                 }
-                inventory
-                    .entries
-                    .retain(|entry| in_flight_operations.contains(&entry.operation_id));
-                tokio::time::sleep(timing.in_flight_delay).await;
+                check_deferred = true;
             }
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "ClientContext restart reconciliation scan remains pending"
-                );
-                tokio::time::sleep(retry_delay).await;
-                retry_delay = retry_delay.saturating_mul(2).min(timing.retry_max_delay);
-            }
+            () = captured => {}
         }
     }
 }
@@ -2057,6 +2444,8 @@ impl ExperimentalLiveDelegationCoordinator {
             client_context_restart_inventory_ready: Arc::new(
                 ClientContextRestartInventoryReady::default(),
             ),
+            #[cfg(test)]
+            client_context_restart_observations: Arc::default(),
             #[cfg(test)]
             post_close_merges: Arc::default(),
             #[cfg(test)]
@@ -2629,6 +3018,61 @@ impl ExperimentalLiveDelegationCoordinator {
         Ok(recovered)
     }
 
+    /// A member session's ClientContext recovery snapshots, read only while
+    /// MeerkatMachine holds the session registered: `None` when it holds no
+    /// registration for it, before the read or after it (a release raced the
+    /// read). Reading never registers the session or wakes its member.
+    async fn registered_live_delegation_snapshots(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Vec<LiveDelegationRecoverySnapshot>>, String> {
+        if !self.runtime.contains_session(session_id).await {
+            return Ok(None);
+        }
+        match self
+            .runtime
+            .live_delegation_recovery_snapshots(session_id)
+            .await
+        {
+            Ok(snapshots) => Ok(Some(snapshots)),
+            Err(error) => {
+                if self.runtime.contains_session(session_id).await {
+                    Err(error.to_string())
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    /// The ClientContext operations of one member session, read only while
+    /// MeerkatMachine holds it registered
+    /// ([`Self::registered_live_delegation_snapshots`]).
+    async fn registered_client_context_operations(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Vec<ClientContextRestartInventoryEntry>>, String> {
+        Ok(self
+            .registered_live_delegation_snapshots(session_id)
+            .await?
+            .map(|snapshots| {
+                snapshots
+                    .iter()
+                    .map(|snapshot| ClientContextRestartInventoryEntry {
+                        session_id: session_id.clone(),
+                        operation_id: snapshot.operation_id().clone(),
+                    })
+                    .collect()
+            }))
+    }
+
+    /// Capture the restart inventory: the ClientContext operations of every
+    /// member session MeerkatMachine holds registered. A member session it
+    /// holds no registration for (its member is seated but not materialized:
+    /// dormant under lazy restore, an identity whose first wake is deferred,
+    /// a released materialization) is deferred, never read, so the capture
+    /// neither fails on it nor wakes it. Its operations stay durable and are
+    /// captured once MeerkatMachine holds the session registered again.
     async fn collect_client_context_restart_inventory(
         &self,
     ) -> Result<ClientContextRestartInventory, String> {
@@ -2641,24 +3085,21 @@ impl ExperimentalLiveDelegationCoordinator {
         let mut seen_sessions = std::collections::HashSet::new();
         for (_, mob_handle) in handles {
             for member in mob_handle.list_members_including_retiring().await {
-                let source_identity = member.agent_identity;
-                let Some(session_id) = mob_handle.resolve_bridge_session_id(&source_identity).await
+                let Some(session_id) = mob_handle
+                    .resolve_bridge_session_id(&member.agent_identity)
+                    .await
                 else {
                     continue;
                 };
                 if !seen_sessions.insert(session_id.clone()) {
                     continue;
                 }
-                let snapshots = self
-                    .runtime
-                    .live_delegation_recovery_snapshots(&session_id)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                for snapshot in snapshots {
-                    inventory.entries.push(ClientContextRestartInventoryEntry {
-                        session_id: session_id.clone(),
-                        operation_id: snapshot.operation_id().clone(),
-                    });
+                let operations = self
+                    .registered_client_context_operations(&session_id)
+                    .await?;
+                match operations {
+                    Some(entries) => inventory.entries.extend(entries),
+                    None => inventory.deferred.push(session_id),
                 }
             }
         }
@@ -2671,11 +3112,16 @@ impl ExperimentalLiveDelegationCoordinator {
     }
 
     /// Reconcile only the ClientContext executor operations captured before
-    /// live channel preparation was released for this process epoch.
+    /// live channel preparation was released for their session in this
+    /// process epoch.
     ///
     /// A channel is revoked only after its exact session/operation identity
-    /// matches the fixed startup inventory. Operations admitted after the
-    /// readiness boundary are invisible to every repeated recovery pass.
+    /// matches the fixed inventory. Operations admitted after a session's
+    /// capture are invisible to every repeated recovery pass. Only the
+    /// sessions the inventory names are read; one MeerkatMachine holds no
+    /// registration for (its member is dormant again) is not read and its
+    /// operations are reported
+    /// [`ExperimentalClientContextRestartDisposition::SourceUnmaterialized`].
     async fn reconcile_client_context_inventory_after_restart(
         &self,
         inventory: &ClientContextRestartInventory,
@@ -2695,19 +3141,34 @@ impl ExperimentalLiveDelegationCoordinator {
         let observe_until = tokio::time::Instant::now() + observation_bound;
         for (_, mob_handle) in handles {
             for member in mob_handle.list_members_including_retiring().await {
-                let source_identity = member.agent_identity;
-                let Some(session_id) = mob_handle.resolve_bridge_session_id(&source_identity).await
+                let Some(session_id) = mob_handle
+                    .resolve_bridge_session_id(&member.agent_identity)
+                    .await
                 else {
                     continue;
                 };
-                if !seen_sessions.insert(session_id.clone()) {
+                if !pending.iter().any(|entry| entry.session_id == session_id)
+                    || !seen_sessions.insert(session_id.clone())
+                {
                     continue;
                 }
-                let snapshots = self
-                    .runtime
-                    .live_delegation_recovery_snapshots(&session_id)
-                    .await
-                    .map_err(|error| error.to_string())?;
+                let Some(snapshots) = self
+                    .registered_live_delegation_snapshots(&session_id)
+                    .await?
+                else {
+                    pending.retain(|entry| {
+                        if entry.session_id != session_id {
+                            return true;
+                        }
+                        recovered.push(ExperimentalClientContextRestartReport {
+                            operation_id: entry.operation_id.clone(),
+                            disposition:
+                                ExperimentalClientContextRestartDisposition::SourceUnmaterialized,
+                        });
+                        false
+                    });
+                    continue;
+                };
                 for snapshot in snapshots {
                     let Some(pending_index) = pending.iter().position(|entry| {
                         entry.session_id == session_id
@@ -2751,6 +3212,9 @@ impl ExperimentalLiveDelegationCoordinator {
                 pending.len()
             ));
         }
+        #[cfg(test)]
+        lock_unpoisoned(&self.client_context_restart_observations)
+            .extend(recovered.iter().cloned());
         Ok(recovered)
     }
 
@@ -3432,6 +3896,37 @@ impl ExperimentalLiveDelegationCoordinator {
         }
     }
 
+    /// Capture `session_id`'s ClientContext restart inventory if the startup
+    /// capture deferred it (its member was not materialized then) and nothing
+    /// captured it since. A channel is being prepared on it, so MeerkatMachine
+    /// holds it registered; refused typed when it does not, or when the
+    /// capture fails, and nothing is prepared then.
+    async fn capture_deferred_session_before_channel(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), ClientContextRestartPrepareRefusal> {
+        let reason = match self
+            .client_context_restart_inventory_ready
+            .capture_deferred_before_channel(self, session_id)
+            .await
+        {
+            Ok(
+                ClientContextRestartDeferredCapture::NotDeferred
+                | ClientContextRestartDeferredCapture::Captured { .. },
+            ) => return Ok(()),
+            Ok(ClientContextRestartDeferredCapture::Unregistered) => {
+                "MeerkatMachine holds no registration for the session".to_string()
+            }
+            Err(reason) => reason,
+        };
+        Err(
+            ClientContextRestartPrepareRefusal::DeferredSessionUnavailable {
+                session_id: session_id.clone(),
+                reason,
+            },
+        )
+    }
+
     async fn prepare_bound_channel(
         &self,
         runtime_binding: meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
@@ -3445,7 +3940,18 @@ impl ExperimentalLiveDelegationCoordinator {
                 "experimental live startup recovery was not armed on a Tokio runtime".to_string(),
             );
         }
-        self.client_context_restart_inventory_ready.wait().await;
+        // The startup capture never waits on a dormant member, so this wait
+        // is short; one that cannot complete (a Mob restore that keeps
+        // failing) refuses the channel after the bound instead of holding it.
+        self.client_context_restart_inventory_ready
+            .wait_bounded(CLIENT_CONTEXT_RESTART_PREPARE_BOUND)
+            .await
+            .map_err(|refusal| refusal.to_string())?;
+        // A session whose member was dormant at the startup capture is
+        // captured now, before this channel can admit its first operation.
+        self.capture_deferred_session_before_channel(runtime_binding.session_id())
+            .await
+            .map_err(|refusal| refusal.to_string())?;
         control
             .active_binding(runtime_binding.session_id())
             .await
@@ -6839,6 +7345,13 @@ impl ClientContextRestartRecoveryOwner for ExperimentalLiveDelegationCoordinator
         ExperimentalLiveDelegationCoordinator::collect_client_context_restart_inventory(self).await
     }
 
+    async fn capture_registered_client_context_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Vec<ClientContextRestartInventoryEntry>>, String> {
+        self.registered_client_context_operations(session_id).await
+    }
+
     async fn observe_client_context_restart_pass(
         &self,
         inventory: &ClientContextRestartInventory,
@@ -6846,6 +7359,10 @@ impl ClientContextRestartRecoveryOwner for ExperimentalLiveDelegationCoordinator
     ) -> Result<Vec<ExperimentalClientContextRestartReport>, String> {
         self.reconcile_client_context_inventory_after_restart(inventory, observation_bound)
             .await
+    }
+
+    fn session_attachments(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.runtime.subscribe_attachment_commits()
     }
 }
 
@@ -7700,6 +8217,8 @@ mod tests {
     ))]
     mod parallel;
 
+    mod dormant_members;
+
     /// Restart reconciliation reports a retirement still running past its
     /// budget (or not yet admitted) as in flight, never as broken.
     #[test]
@@ -8145,7 +8664,18 @@ mod tests {
     enum RestartRecoveryInvocation {
         ForceRestore,
         CaptureInventory,
+        CaptureSession,
         ObservePass,
+    }
+
+    /// The serving attachments the scripted runtime commits: a test bumps
+    /// the generation when a member is materialized.
+    struct ScriptedAttachments(tokio::sync::watch::Sender<u64>);
+
+    impl Default for ScriptedAttachments {
+        fn default() -> Self {
+            Self(tokio::sync::watch::Sender::new(0))
+        }
     }
 
     #[derive(Default)]
@@ -8154,6 +8684,62 @@ mod tests {
         observed_inventories: std::sync::Mutex<Vec<ClientContextRestartInventory>>,
         capture_entered: tokio::sync::Notify,
         observed: tokio::sync::Notify,
+        /// The member sessions the scripted runtime holds registered, with
+        /// their operations.
+        registered: std::sync::Mutex<std::collections::HashMap<SessionId, Vec<OperationId>>>,
+        /// Notified each time a capture finds a session unregistered.
+        found_unregistered: tokio::sync::Notify,
+        attachments: ScriptedAttachments,
+        /// The scripted runtime is gone: its attachment notice is closed.
+        runtime_gone: std::sync::atomic::AtomicBool,
+        /// Session captures that fail before the next one reads.
+        capture_failures: std::sync::atomic::AtomicUsize,
+    }
+
+    impl RestartRecoveryProbe {
+        fn record(&self, invocation: RestartRecoveryInvocation) {
+            self.invocations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(invocation);
+        }
+
+        fn invocations(&self) -> Vec<RestartRecoveryInvocation> {
+            self.invocations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+
+        fn observed_inventories(&self) -> Vec<ClientContextRestartInventory> {
+            self.observed_inventories
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+
+        /// The scripted runtime registers `session_id` with `operations`,
+        /// with no serving attachment committed yet.
+        fn register(&self, session_id: &SessionId, operations: &[OperationId]) {
+            self.registered
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(session_id.clone(), operations.to_vec());
+        }
+
+        /// The scripted runtime registers `session_id` with `operations` and
+        /// commits its serving attachment: its member was materialized.
+        fn materialize(&self, session_id: &SessionId, operations: &[OperationId]) {
+            self.register(session_id, operations);
+            self.commit_attachment();
+        }
+
+        /// A serving attachment the scripted runtime commits.
+        fn commit_attachment(&self) {
+            self.attachments
+                .0
+                .send_modify(|generation| *generation += 1);
+        }
     }
 
     struct ScriptedRestartRecoveryOwner {
@@ -8229,6 +8815,16 @@ mod tests {
                         operation_id,
                     })
                     .collect(),
+                deferred: Vec::new(),
+            }
+        }
+
+        /// A startup inventory that read nothing and deferred `session_id`:
+        /// its member was not materialized at the capture.
+        fn deferring(session_id: &SessionId) -> ClientContextRestartInventory {
+            ClientContextRestartInventory {
+                entries: Vec::new(),
+                deferred: vec![session_id.clone()],
             }
         }
     }
@@ -8236,11 +8832,7 @@ mod tests {
     #[async_trait::async_trait]
     impl ClientContextRestartRecoveryOwner for ScriptedRestartRecoveryOwner {
         async fn force_mob_restore(&self) -> Result<(), String> {
-            self.probe
-                .invocations
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(RestartRecoveryInvocation::ForceRestore);
+            self.probe.record(RestartRecoveryInvocation::ForceRestore);
             self.restore_results
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -8252,10 +8844,7 @@ mod tests {
             &self,
         ) -> Result<ClientContextRestartInventory, String> {
             self.probe
-                .invocations
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(RestartRecoveryInvocation::CaptureInventory);
+                .record(RestartRecoveryInvocation::CaptureInventory);
             if let Some(release) = &self.capture_release {
                 let released = release.notified();
                 tokio::pin!(released);
@@ -8270,16 +8859,51 @@ mod tests {
                 .unwrap_or_else(|| Ok(ClientContextRestartInventory::default()))
         }
 
+        async fn capture_registered_client_context_session(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<Option<Vec<ClientContextRestartInventoryEntry>>, String> {
+            self.probe.record(RestartRecoveryInvocation::CaptureSession);
+            if self
+                .probe
+                .capture_failures
+                .fetch_update(
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                    |failures| failures.checked_sub(1),
+                )
+                .is_ok()
+            {
+                return Err("scripted session read failure".to_string());
+            }
+            let operations = self
+                .probe
+                .registered
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(session_id)
+                .cloned();
+            let Some(operations) = operations else {
+                self.probe.found_unregistered.notify_waiters();
+                return Ok(None);
+            };
+            Ok(Some(
+                operations
+                    .into_iter()
+                    .map(|operation_id| ClientContextRestartInventoryEntry {
+                        session_id: session_id.clone(),
+                        operation_id,
+                    })
+                    .collect(),
+            ))
+        }
+
         async fn observe_client_context_restart_pass(
             &self,
             inventory: &ClientContextRestartInventory,
             _observation_bound: std::time::Duration,
         ) -> Result<Vec<ExperimentalClientContextRestartReport>, String> {
-            self.probe
-                .invocations
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(RestartRecoveryInvocation::ObservePass);
+            self.probe.record(RestartRecoveryInvocation::ObservePass);
             self.probe
                 .observed_inventories
                 .lock()
@@ -8305,6 +8929,19 @@ mod tests {
                         Ok(Vec::new())
                     }
                 })
+        }
+
+        fn session_attachments(&self) -> tokio::sync::watch::Receiver<u64> {
+            if self
+                .probe
+                .runtime_gone
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                let (gone, closed) = tokio::sync::watch::channel(0);
+                drop(gone);
+                return closed;
+            }
+            self.probe.attachments.0.subscribe()
         }
     }
 
@@ -8643,6 +9280,476 @@ mod tests {
             .expect("weakly-owned restart driver exits after coordinator drop")
             .expect("restart driver exits cleanly");
         assert_eq!(Arc::strong_count(&probe), 1);
+    }
+
+    /// A member session MeerkatMachine holds no registration for is deferred
+    /// at the startup capture. The inventory is ready while its member is
+    /// dormant, and the session is read once, after the serving attachment
+    /// that materializes the member; while the member stays dormant nothing
+    /// reads it and no pass runs.
+    #[tokio::test]
+    async fn client_context_restart_captures_a_deferred_session_once_its_member_is_materialized() {
+        let armed = std::sync::atomic::AtomicBool::new(false);
+        let inventory_ready = Arc::new(ClientContextRestartInventoryReady::default());
+        let session_id = SessionId::new();
+        let operation_id = OperationId::new();
+        let (owner, probe) = ScriptedRestartRecoveryOwner::new(
+            vec![Ok(())],
+            vec![Ok(ScriptedRestartRecoveryOwner::deferring(&session_id))],
+            vec![Ok(vec![ScriptedRestartRecoveryOwner::report_for(
+                &operation_id,
+                ExperimentalClientContextRestartDisposition::Reconciled { completed: true },
+            )])],
+            false,
+        );
+        let found_unregistered = probe.found_unregistered.notified();
+        tokio::pin!(found_unregistered);
+        found_unregistered.as_mut().enable();
+        let task = try_arm_client_context_restart_reconciler(
+            &armed,
+            Arc::clone(&owner),
+            Arc::clone(&inventory_ready),
+            immediate_restart_reconcile_timing(),
+        )
+        .expect("arm restart reconciliation");
+        found_unregistered.await;
+        assert!(
+            inventory_ready.is_ready(),
+            "the inventory is ready while the member is dormant"
+        );
+        assert!(
+            !task.is_finished(),
+            "reconciliation still owes the dormant member's operations"
+        );
+
+        probe.materialize(&session_id, std::slice::from_ref(&operation_id));
+        task.await.expect("restart reconciliation completes");
+        assert_eq!(
+            probe.invocations(),
+            vec![
+                RestartRecoveryInvocation::ForceRestore,
+                RestartRecoveryInvocation::CaptureInventory,
+                RestartRecoveryInvocation::CaptureSession,
+                RestartRecoveryInvocation::CaptureSession,
+                RestartRecoveryInvocation::ObservePass,
+            ],
+            "the deferred session is captured after its member's attachment, and no pass ran while it was dormant"
+        );
+        assert_eq!(
+            probe.observed_inventories(),
+            vec![ScriptedRestartRecoveryOwner::inventory(
+                &session_id,
+                std::slice::from_ref(&operation_id),
+            )],
+            "its operation is observed once"
+        );
+        assert_eq!(
+            inventory_ready
+                .capture_deferred(owner.as_ref(), &session_id)
+                .await,
+            Ok(ClientContextRestartDeferredCapture::NotDeferred),
+            "a captured session is never captured again"
+        );
+    }
+
+    /// A captured operation whose source member is dormant again is observed
+    /// again only after a serving attachment: nothing polls a dormant source.
+    #[tokio::test]
+    async fn client_context_restart_observes_a_dormant_source_again_only_after_an_attachment() {
+        let armed = std::sync::atomic::AtomicBool::new(false);
+        let inventory_ready = Arc::new(ClientContextRestartInventoryReady::default());
+        let session_id = SessionId::new();
+        let operation_id = OperationId::new();
+        let (owner, probe) = ScriptedRestartRecoveryOwner::new(
+            vec![Ok(())],
+            vec![Ok(ScriptedRestartRecoveryOwner::inventory(
+                &session_id,
+                std::slice::from_ref(&operation_id),
+            ))],
+            vec![
+                Ok(vec![ScriptedRestartRecoveryOwner::report_for(
+                    &operation_id,
+                    ExperimentalClientContextRestartDisposition::SourceUnmaterialized,
+                )]),
+                Ok(vec![ScriptedRestartRecoveryOwner::report_for(
+                    &operation_id,
+                    ExperimentalClientContextRestartDisposition::Reconciled { completed: true },
+                )]),
+            ],
+            false,
+        );
+        let observed = probe.observed.notified();
+        tokio::pin!(observed);
+        observed.as_mut().enable();
+        let task = try_arm_client_context_restart_reconciler(
+            &armed,
+            Arc::clone(&owner),
+            inventory_ready,
+            immediate_restart_reconcile_timing(),
+        )
+        .expect("arm restart reconciliation");
+        observed.await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            probe.invocations(),
+            vec![
+                RestartRecoveryInvocation::ForceRestore,
+                RestartRecoveryInvocation::CaptureInventory,
+                RestartRecoveryInvocation::ObservePass,
+            ],
+            "a dormant source waits for a member's attachment, with no further pass"
+        );
+        assert!(!task.is_finished());
+
+        probe.commit_attachment();
+        task.await.expect("restart reconciliation completes");
+        assert_eq!(
+            probe.invocations(),
+            vec![
+                RestartRecoveryInvocation::ForceRestore,
+                RestartRecoveryInvocation::CaptureInventory,
+                RestartRecoveryInvocation::ObservePass,
+                RestartRecoveryInvocation::ObservePass,
+            ]
+        );
+    }
+
+    /// A deferred session is captured at most once, by whichever capture
+    /// finds it registered first: the reconciler or a live channel's
+    /// preparation. A capture while it is unregistered reads nothing and
+    /// keeps it deferred.
+    #[tokio::test]
+    async fn a_deferred_session_is_captured_once_by_whichever_capture_comes_first() {
+        let session_id = SessionId::new();
+        let operation_id = OperationId::new();
+        let (owner, probe) = ScriptedRestartRecoveryOwner::new(vec![], vec![], vec![], false);
+        let ledger = ClientContextRestartInventoryReady::default();
+        ledger
+            .publish_startup_inventory(vec![session_id.clone()])
+            .await;
+        assert!(ledger.is_ready());
+        assert_eq!(
+            ledger.capture_deferred(owner.as_ref(), &session_id).await,
+            Ok(ClientContextRestartDeferredCapture::Unregistered)
+        );
+        assert_eq!(
+            ledger.deferred_sessions().await,
+            vec![session_id.clone()],
+            "an unregistered session stays deferred"
+        );
+
+        probe.materialize(&session_id, std::slice::from_ref(&operation_id));
+        let (first, second) = tokio::join!(
+            ledger.capture_deferred(owner.as_ref(), &session_id),
+            ledger.capture_deferred(owner.as_ref(), &session_id),
+        );
+        assert!(
+            matches!(
+                (&first, &second),
+                (
+                    Ok(ClientContextRestartDeferredCapture::Captured { operations: 1 }),
+                    Ok(ClientContextRestartDeferredCapture::NotDeferred)
+                ) | (
+                    Ok(ClientContextRestartDeferredCapture::NotDeferred),
+                    Ok(ClientContextRestartDeferredCapture::Captured { operations: 1 })
+                )
+            ),
+            "exactly one capture reads the session: {first:?} {second:?}"
+        );
+        assert_eq!(
+            ledger.take_captured().await,
+            ScriptedRestartRecoveryOwner::inventory(
+                &session_id,
+                std::slice::from_ref(&operation_id)
+            )
+            .entries
+        );
+        assert!(
+            ledger.take_captured().await.is_empty(),
+            "captured operations are taken once"
+        );
+        assert!(!ledger.has_deferred_sessions().await);
+        assert_eq!(
+            probe
+                .invocations()
+                .into_iter()
+                .filter(|invocation| *invocation == RestartRecoveryInvocation::CaptureSession)
+                .count(),
+            2,
+            "the capture that came second found the session captured and read nothing"
+        );
+    }
+
+    /// Without MeerkatMachine nothing is materialized again in this process:
+    /// a reconciler waiting for a dormant member ends, and the member's
+    /// durable operations are left for the next start.
+    #[tokio::test]
+    async fn client_context_restart_ends_when_the_runtime_is_gone() {
+        let armed = std::sync::atomic::AtomicBool::new(false);
+        let inventory_ready = Arc::new(ClientContextRestartInventoryReady::default());
+        let session_id = SessionId::new();
+        let (owner, probe) = ScriptedRestartRecoveryOwner::new(
+            vec![Ok(())],
+            vec![Ok(ScriptedRestartRecoveryOwner::deferring(&session_id))],
+            vec![],
+            false,
+        );
+        probe
+            .runtime_gone
+            .store(true, std::sync::atomic::Ordering::Release);
+        let task = try_arm_client_context_restart_reconciler(
+            &armed,
+            Arc::clone(&owner),
+            Arc::clone(&inventory_ready),
+            immediate_restart_reconcile_timing(),
+        )
+        .expect("arm restart reconciliation");
+        task.await.expect("restart reconciliation completes");
+        assert_eq!(
+            probe.invocations(),
+            vec![
+                RestartRecoveryInvocation::ForceRestore,
+                RestartRecoveryInvocation::CaptureInventory,
+                RestartRecoveryInvocation::CaptureSession,
+            ]
+        );
+        assert!(
+            inventory_ready.has_deferred_sessions().await,
+            "the dormant member's session stays deferred, never read"
+        );
+    }
+
+    /// A registered deferred session whose read fails is read again after
+    /// the capture backoff, not at the next attachment; it is captured once.
+    #[tokio::test]
+    async fn client_context_restart_retries_a_failed_deferred_capture_after_its_backoff() {
+        let armed = std::sync::atomic::AtomicBool::new(false);
+        let inventory_ready = Arc::new(ClientContextRestartInventoryReady::default());
+        let session_id = SessionId::new();
+        let operation_id = OperationId::new();
+        let (owner, probe) = ScriptedRestartRecoveryOwner::new(
+            vec![Ok(())],
+            vec![Ok(ScriptedRestartRecoveryOwner::deferring(&session_id))],
+            vec![Ok(vec![ScriptedRestartRecoveryOwner::report_for(
+                &operation_id,
+                ExperimentalClientContextRestartDisposition::Reconciled { completed: true },
+            )])],
+            false,
+        );
+        probe.materialize(&session_id, std::slice::from_ref(&operation_id));
+        probe
+            .capture_failures
+            .store(1, std::sync::atomic::Ordering::Release);
+        let task = try_arm_client_context_restart_reconciler(
+            &armed,
+            Arc::clone(&owner),
+            Arc::clone(&inventory_ready),
+            immediate_restart_reconcile_timing(),
+        )
+        .expect("arm restart reconciliation");
+        task.await.expect("restart reconciliation completes");
+        assert_eq!(
+            probe.invocations(),
+            vec![
+                RestartRecoveryInvocation::ForceRestore,
+                RestartRecoveryInvocation::CaptureInventory,
+                RestartRecoveryInvocation::CaptureSession,
+                RestartRecoveryInvocation::CaptureSession,
+                RestartRecoveryInvocation::ObservePass,
+            ]
+        );
+        assert_eq!(
+            probe.observed_inventories(),
+            vec![ScriptedRestartRecoveryOwner::inventory(
+                &session_id,
+                std::slice::from_ref(&operation_id),
+            )]
+        );
+        assert!(!inventory_ready.has_deferred_sessions().await);
+    }
+
+    /// A live channel's preparation that captures a deferred session wakes the
+    /// waiting reconciler, which observes the captured operation without an
+    /// attachment: the session is registered but no attachment is committed.
+    #[tokio::test]
+    async fn a_capture_by_a_channel_preparation_wakes_the_waiting_reconciler() {
+        let armed = std::sync::atomic::AtomicBool::new(false);
+        let inventory_ready = Arc::new(ClientContextRestartInventoryReady::default());
+        let session_id = SessionId::new();
+        let operation_id = OperationId::new();
+        let (owner, probe) = ScriptedRestartRecoveryOwner::new(
+            vec![Ok(())],
+            vec![Ok(ScriptedRestartRecoveryOwner::deferring(&session_id))],
+            vec![Ok(vec![ScriptedRestartRecoveryOwner::report_for(
+                &operation_id,
+                ExperimentalClientContextRestartDisposition::Reconciled { completed: true },
+            )])],
+            false,
+        );
+        let found_unregistered = probe.found_unregistered.notified();
+        tokio::pin!(found_unregistered);
+        found_unregistered.as_mut().enable();
+        let task = try_arm_client_context_restart_reconciler(
+            &armed,
+            Arc::clone(&owner),
+            Arc::clone(&inventory_ready),
+            immediate_restart_reconcile_timing(),
+        )
+        .expect("arm restart reconciliation");
+        found_unregistered.await;
+
+        probe.register(&session_id, std::slice::from_ref(&operation_id));
+        assert_eq!(
+            inventory_ready
+                .capture_deferred_before_channel(owner.as_ref(), &session_id)
+                .await,
+            Ok(ClientContextRestartDeferredCapture::Captured { operations: 1 }),
+            "the preparation captures the session"
+        );
+        task.await.expect("restart reconciliation completes");
+        assert_eq!(
+            probe.invocations(),
+            vec![
+                RestartRecoveryInvocation::ForceRestore,
+                RestartRecoveryInvocation::CaptureInventory,
+                RestartRecoveryInvocation::CaptureSession,
+                RestartRecoveryInvocation::CaptureSession,
+                RestartRecoveryInvocation::ObservePass,
+            ],
+            "the reconciler observed the operation the preparation captured, and read nothing again"
+        );
+        assert_eq!(
+            probe.observed_inventories(),
+            vec![ScriptedRestartRecoveryOwner::inventory(
+                &session_id,
+                std::slice::from_ref(&operation_id),
+            )]
+        );
+    }
+
+    /// While an operation is in flight it is observed on every interval, but
+    /// the deferred sessions are checked again only after a serving
+    /// attachment: a dormant member costs nothing per interval.
+    #[tokio::test]
+    async fn client_context_restart_checks_deferred_sessions_only_after_an_attachment() {
+        let armed = std::sync::atomic::AtomicBool::new(false);
+        let inventory_ready = Arc::new(ClientContextRestartInventoryReady::default());
+        let live_session = SessionId::new();
+        let live_operation = OperationId::new();
+        let dormant_session = SessionId::new();
+        let dormant_operation = OperationId::new();
+        let in_flight = || -> Result<Vec<ExperimentalClientContextRestartReport>, String> {
+            Ok(vec![ScriptedRestartRecoveryOwner::report_for(
+                &live_operation,
+                ExperimentalClientContextRestartDisposition::InFlight,
+            )])
+        };
+        let (owner, probe) = ScriptedRestartRecoveryOwner::new(
+            vec![Ok(())],
+            vec![Ok(ClientContextRestartInventory {
+                deferred: vec![dormant_session.clone()],
+                ..ScriptedRestartRecoveryOwner::inventory(
+                    &live_session,
+                    std::slice::from_ref(&live_operation),
+                )
+            })],
+            vec![
+                in_flight(),
+                in_flight(),
+                in_flight(),
+                Ok(vec![ScriptedRestartRecoveryOwner::report_for(
+                    &live_operation,
+                    ExperimentalClientContextRestartDisposition::Reconciled { completed: true },
+                )]),
+                Ok(vec![ScriptedRestartRecoveryOwner::report_for(
+                    &dormant_operation,
+                    ExperimentalClientContextRestartDisposition::Reconciled { completed: true },
+                )]),
+            ],
+            false,
+        );
+        let task = try_arm_client_context_restart_reconciler(
+            &armed,
+            Arc::clone(&owner),
+            Arc::clone(&inventory_ready),
+            immediate_restart_reconcile_timing(),
+        )
+        .expect("arm restart reconciliation");
+        // Every pass notifies; the fourth settles the live operation, and
+        // nothing runs after it until an attachment.
+        loop {
+            let observed = probe.observed.notified();
+            tokio::pin!(observed);
+            observed.as_mut().enable();
+            let passes = probe
+                .invocations()
+                .into_iter()
+                .filter(|invocation| *invocation == RestartRecoveryInvocation::ObservePass)
+                .count();
+            if passes == 4 {
+                break;
+            }
+            observed.await;
+        }
+        assert_eq!(
+            probe.invocations(),
+            vec![
+                RestartRecoveryInvocation::ForceRestore,
+                RestartRecoveryInvocation::CaptureInventory,
+                RestartRecoveryInvocation::CaptureSession,
+                RestartRecoveryInvocation::ObservePass,
+                RestartRecoveryInvocation::ObservePass,
+                RestartRecoveryInvocation::ObservePass,
+                RestartRecoveryInvocation::ObservePass,
+            ],
+            "the dormant member's session is checked once, not on every in-flight interval"
+        );
+
+        probe.materialize(&dormant_session, std::slice::from_ref(&dormant_operation));
+        task.await.expect("restart reconciliation completes");
+        assert_eq!(
+            probe.invocations(),
+            vec![
+                RestartRecoveryInvocation::ForceRestore,
+                RestartRecoveryInvocation::CaptureInventory,
+                RestartRecoveryInvocation::CaptureSession,
+                RestartRecoveryInvocation::ObservePass,
+                RestartRecoveryInvocation::ObservePass,
+                RestartRecoveryInvocation::ObservePass,
+                RestartRecoveryInvocation::ObservePass,
+                RestartRecoveryInvocation::CaptureSession,
+                RestartRecoveryInvocation::ObservePass,
+            ],
+            "the attachment has the deferred session checked and its operation observed"
+        );
+    }
+
+    /// A failure of a retried restart step warns on the first failure of a
+    /// streak and then ever more rarely, at the failure count's powers of
+    /// two; the rest are debug records.
+    #[test]
+    fn restart_step_warnings_fall_off_by_failure_count() {
+        let mut warning = RetryWarning::default();
+        let warned = (1..=20_u64)
+            .filter(|_| warning.failed())
+            .collect::<Vec<_>>();
+        assert_eq!(warned, vec![1, 2, 4, 8, 16]);
+        warning.reset();
+        assert!(warning.failed(), "a new failure streak warns at once");
+    }
+
+    /// A live channel's wait for the startup inventory is bounded: it is
+    /// refused typed past the bound and passes once the inventory is ready.
+    #[tokio::test(start_paused = true)]
+    async fn a_bounded_inventory_wait_is_refused_typed_until_the_inventory_is_ready() {
+        let ready = ClientContextRestartInventoryReady::default();
+        let bound = std::time::Duration::from_secs(30);
+        assert_eq!(
+            ready.wait_bounded(bound).await,
+            Err(ClientContextRestartPrepareRefusal::InventoryPending { waited: bound })
+        );
+        ready.publish_startup_inventory(Vec::new()).await;
+        assert_eq!(ready.wait_bounded(bound).await, Ok(()));
     }
 
     #[test]

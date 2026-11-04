@@ -3140,6 +3140,13 @@ impl ToolkitOriginalOwner {
         loop {
             if !first {
                 before_round();
+                // Expiry before every round after the first: one deadline
+                // bounds all rounds, so a caller past it begins no change and
+                // applies nothing, and repeated takes of the collection
+                // between rounds never extend it.
+                if std::time::Instant::now() >= deadline {
+                    return Err(OriginalWriterError::Unavailable);
+                }
             }
             first = false;
             {

@@ -1007,16 +1007,18 @@ moves to the fresh session:
   little over two seconds. Its input ends with terminal `cancelled` and
   completion `cancelled`, finalized in the run's own terminal batch, and is
   not requeued. When the run had committed a tool round, the retired
-  session's transcript keeps that round; a run the hard cancel ended closes
-  with Core's notice that it was interrupted and its input not requeued.
+  session's transcript keeps that round and, once the hard cancel ended the
+  run, closes with Core's notice that it was interrupted and its input not
+  requeued; a run that committed nothing leaves nothing in the transcript.
 - **Every input still queued** on the member (a send, a dispatch, an admitted
   keyed send, a peer message or reply, a scheduled turn) is cancelled by the
   retirement before the runtime starts it, and none moves to the fresh
   session. It ends with terminal `cancelled` and completion
   `runtime_terminated` (reason `member retire`) in a terminal batch of its
-  own. Should the runtime already have started one, that run is cancelled as
-  the run in flight is. A keyed send Core had not admitted yet reads
-  `stranded`.
+  own; an input Core still finds pending only when it archives the retired
+  runtime ends `abandoned` instead. Should the runtime already have started
+  one, that run is cancelled as the run in flight is. A keyed send Core had
+  not admitted yet reads `stranded`.
 
 These terminals are durable in the retired session's input ledger. The reset
 answer names none of them. What a sender sees depends on how it sent:
@@ -1024,18 +1026,18 @@ answer names none of them. What a sender sees depends on how it sent:
 | Sender | What it sees |
 |--------|--------------|
 | Tracked (`track_turn: true`) | `meta/turn_result` and `meta/wait_for_turn` settle `failed`; `error` names the cancelled turn or the runtime termination (`member retire`) |
-| Keyed (`idempotency_key`) | `meta/send_status` on the admitted pair reads `current_state: "abandoned"` and `terminal_outcome: "cancelled"`; a replay of the key answers that pair and admits nothing |
+| Keyed (`idempotency_key`) | `meta/send_status` on the admitted pair reads `current_state: "abandoned"` and `terminal_outcome: "cancelled"` (or `"abandoned"`, see above); a replay of the key answers that pair and admits nothing |
 | Unkeyed and untracked | No input id, so no per-input read: a `meta/wait_for_completion` on the send's `completion_baseline` ends `incarnation_changed` |
 | A peer | Nothing: its message was delivered. A request the member had not answered gets no reply, and `send_request` has no built-in timeout |
 
 To reset only an idle member, call `meta/retire` first. It is refused with
 `-32052` (`identity_wake_retryable`) while the member is being woken or has
 work in flight, a queued input included, and it interrupts nothing; retry it
-until it succeeds, then call `meta/reset`, which then ends no work. The one
-residual is a delivery that wakes the member between the two calls (a peer
-message, a scheduled turn, a keyed send Core admits): the reset ends it as
-above. The retire is a release, so a host's retirement hook hears of the
-registration it ended.
+until it succeeds or your own deadline passes. Once it succeeds, call
+`meta/reset`, which then ends no work. The one residual is a delivery that
+wakes the member between the two calls (a peer message, a scheduled turn, a
+keyed send Core admits): the reset ends it as above. The retire is a release,
+so a host's retirement hook hears of the registration it ended.
 
 Do not decide a reset from rows of Core's runtime store (its runtime and
 input-state tables). They are not a supported surface: their encoding can

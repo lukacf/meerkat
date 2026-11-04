@@ -2526,12 +2526,14 @@ export class MetaRuntime {
    * The reset is not refused while the member has work in flight, as `retire`
    * is. It cancels the run in flight (terminal `cancelled`, not requeued) and
    * cancels every input still queued on the member before the runtime starts
-   * it (terminal `cancelled`, completion `runtime_terminated`; one already
-   * started is cancelled as the run in flight is); nothing moves to the fresh
-   * session, and the answer names none of them. A tracked turn settles
-   * `failed` (`turnResult`), a keyed send's admitted pair reads `cancelled`
-   * (`sendStatus`), and an unkeyed, untracked send has no per-input read: a
-   * `waitForCompletion` on its baseline ends `incarnation_changed`.
+   * it (terminal `cancelled`, completion `runtime_terminated`; `abandoned` for
+   * one Core still finds pending only when it archives the retired runtime;
+   * one already started is cancelled as the run in flight is); nothing moves
+   * to the fresh session, and the answer names none of them. A tracked turn
+   * settles `failed` (`turnResult`), a keyed send's admitted pair reads
+   * `cancelled` or `abandoned` (`sendStatus`), and an unkeyed, untracked send
+   * has no per-input read: a `waitForCompletion` on its baseline ends
+   * `incarnation_changed`.
    *
    * To reset only an idle member, call `retire` first: it rejects with
    * `IdentityHistoryUnavailableError` (`kind` `"identity_wake_retryable"`)

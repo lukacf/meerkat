@@ -14790,6 +14790,74 @@ async fn until_changed_switch_turn_completes_after_a_stop_that_follows_its_recon
     );
 }
 
+/// A session unregistered in an until-changed switch-turn's reconfigure gap
+/// fails the reconfigure, and the switch-turn then cannot take the session
+/// mutation gate again. Nothing is left to withdraw, and the caller gets the
+/// reconfigure's own error, not the gate's refusal.
+#[tokio::test]
+async fn until_changed_switch_turn_failure_after_an_unregister_in_its_gap_keeps_its_error() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(until_changed_reconfigure_host(false));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *adapter
+        .test_switch_turn_reconfigure_gap_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, release_rx));
+
+    let switch_turn = {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+                &adapter,
+                &session_id,
+                until_changed_switch_request(608),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("the switch-turn reaches its reconfigure gap")
+        .expect("the gap hold reports its entry");
+
+    // In the gap the session is unregistered.
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("unregister the session while the switch-turn holds no gate");
+
+    release_tx.send(()).expect("release the reconfigure");
+    let switch_error = tokio::time::timeout(Duration::from_secs(5), switch_turn)
+        .await
+        .expect("the switch-turn settles")
+        .expect("the switch-turn task does not panic")
+        .expect_err("the reconfigure of an unregistered session fails");
+    assert!(
+        matches!(switch_error, RuntimeDriverError::Internal(_)),
+        "the caller gets the reconfigure's own error, not the gate's refusal: {switch_error:?}"
+    );
+    assert!(
+        adapter.session_dsl_state(&session_id).await.is_err(),
+        "the session is gone, so nothing is left to withdraw"
+    );
+}
+
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_reports_registered_idle_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());

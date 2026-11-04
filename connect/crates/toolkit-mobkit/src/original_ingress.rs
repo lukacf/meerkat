@@ -3043,8 +3043,10 @@ impl AuthenticatedOriginalSource for ToolkitOriginalOwner {
 }
 
 /// Take `lock` for a synchronous native reader, waiting out a holder until
-/// `deadline`, with `pause` between attempts. Contention past the deadline
-/// and poison answer unavailable.
+/// `deadline`, with `pause` between attempts. The first attempt is immediate;
+/// every later attempt checks the deadline first, so a reader descheduled
+/// across its deadline never reads after it, even when the holder released
+/// meanwhile. Contention past the deadline and poison answer unavailable.
 fn wait_for_lock<T>(
     lock: &std::sync::Mutex<T>,
     deadline: std::time::Instant,
@@ -3065,6 +3067,11 @@ fn wait_for_lock<T>(
         }
         pause(step.min(deadline - now));
         step = (step * 2).min(std::time::Duration::from_millis(1));
+        // Expiry before retry, as Core's owner-change wait checks its
+        // deadline before every read.
+        if std::time::Instant::now() >= deadline {
+            return Err(ControllerReadinessFailure::PolicyUnavailable);
+        }
     }
 }
 

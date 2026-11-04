@@ -781,9 +781,9 @@ needs a crate the package cannot depend on (a cyclic or unpublished
 dev-dependency) is gated on its crate's internal `workspace-tests` feature,
 which only the workspace's own test builds pass (the package's README command
 leaves it off), and the Bazel generator fails a crate that declares the
-feature when its test targets would build without it. Publication does not wait for the census yet: the release
-gate on a passing run at the release commit returns once a nightly run has
-passed and its duration is measured.
+feature when its test targets would build without it. Publication does not
+wait for the census yet: the release gate on a passing run at the release
+commit returns once a nightly run has passed and its duration is measured.
 
 The release tag path requires successful exact-main CI (schema-4 attestation;
 for a maintenance release, the same push CI on `release/<version>`, the

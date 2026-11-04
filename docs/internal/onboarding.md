@@ -93,10 +93,12 @@ make test
 
 For the tests a change affects, see [Affected Tests](#affected-tests).
 
-Use the repository wrapper for a targeted Cargo command:
+Use the repository wrapper for a targeted Cargo command. A test command passes
+the crate's test features, which
+`node scripts/core-workspace-args.mjs --tests -p <crate>` prints:
 
 ```bash
-./scripts/repo-cargo test -p meerkat-core session
+./scripts/repo-cargo test $(node scripts/core-workspace-args.mjs --tests -p meerkat-core) session
 ```
 
 Avoid raw `cargo` and raw `bb` for normal repository work. The wrapper keeps

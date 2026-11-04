@@ -122,12 +122,16 @@ with the features its `[package.metadata.meerkat.standalone-tests]` lists,
 plus `workspace-tests` when it declares that feature. No dev-dependency turns
 them on (a path-only self dev-dependency made the crate's lib test wait for
 its own library), so every test command passes them:
-`node scripts/core-workspace-args.mjs --tests` adds them to a selection
-(`-p NAME` for named crates). The Make targets, the CI planner's rows, the
+`node scripts/core-workspace-args.mjs --tests -p NAME` prints one crate's
+selection with them (`-p meerkat-mob --features test-support`), and `--tests`
+alone prints Core's whole selection with every member's. Use that form, as
+above, for every test command. The Make targets, the CI planner's rows, the
 Cargo aliases and the Bazel generator pass them already. A test build of such
-a crate without them fails to compile in this repository (its `lib.rs`
-canary, armed by `.cargo/config.toml` [env]); the published packages build
-without that configuration.
+a crate without them fails to compile in this repository: its `lib.rs`
+canary, armed by `.cargo/config.toml` [env], stops the build with the exact
+command to run (`cargo test -p NAME --features ...`). Only code generation
+trips it, so `cargo check`, clippy and an editor's check run are unaffected,
+and the published packages build without that configuration.
 
 **The workspace also holds Meerkat Meta (`meta/`) and Meerkat Connect
 (`connect/`).** Cargo unifies features across the packages of one invocation,

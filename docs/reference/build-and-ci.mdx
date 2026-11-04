@@ -33,14 +33,18 @@ A crate's own tests build with its test features: the features its
 `[package.metadata.meerkat.standalone-tests]` lists, plus `workspace-tests`
 when it declares that feature. No dev-dependency turns them on, so a test
 command passes them. `node scripts/core-workspace-args.mjs --tests -p <crate>`
-prints a crate's flags, and `--tests` alone prints Core's whole-workspace
-selection with every member's. The Make targets, the CI lanes and the Cargo
-aliases pass them already. In this repository a test build without them fails
-to compile, instead of leaving the crate's workspace-only tests out:
+prints a crate's selection with them, and `--tests` alone prints Core's
+whole-workspace selection with every member's. Run tests in that form:
 
 ```bash
 ./scripts/repo-cargo nextest run $(node scripts/core-workspace-args.mjs --tests -p meerkat-mob)
 ```
+
+The Make targets, the CI lanes and the Cargo aliases pass them already. In
+this repository a test build without them fails to compile, naming the exact
+command to run, instead of leaving the crate's workspace-only tests out. Only
+code generation trips that check, so `cargo check`, clippy and an editor's
+check run are unaffected.
 
 ## BuildBuddy Opt-In
 

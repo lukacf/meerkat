@@ -291,6 +291,20 @@ them.
   this release stays readable by 0.9.9 and 0.9.8 if a host rolls back. A
   string written into a config file by hand loads only on 0.9.10 and later.
 
+- `meerkat-runtime`: an exact-input cancellation
+  (`MeerkatMachine::cancel_input_if_present`) that raced its input's own
+  finalization no longer reports the input absent although the
+  cancellation took effect. The cancellation reads its input, interrupts
+  the input's run and reads again. On a persistent runtime the run can end
+  in between, abandoning the input as cancelled, committing that terminal
+  and archiving the input out of the live ledger; the second read then
+  found no input and the call answered `false`, the answer for an input it
+  never met. A read that finds no ledger row for the input now answers
+  `true` when an earlier read of the same call observed the input through
+  the same runtime attachment. An input the call never observed, a
+  missing, destroyed or replaced attachment, and a row the ledger keeps
+  without its lifecycle state still answer `false`.
+
 ### Known limitations
 
 - Meerkat Connect: its provider setup and first-target setup read a

@@ -283,6 +283,8 @@ struct ScriptedHost {
     /// The association enrolled per original work: the first one stands.
     enrolled: Mutex<HashMap<String, InputAuthorityAssociation>>,
     enrollments: AtomicUsize,
+    /// Whether `enroll` panics, as a faulty host's custody might.
+    panic_on_enroll: std::sync::atomic::AtomicBool,
 }
 
 impl ScriptedHost {
@@ -294,6 +296,7 @@ impl ScriptedHost {
             release: tokio::sync::Notify::new(),
             enrolled: Mutex::new(HashMap::new()),
             enrollments: AtomicUsize::new(0),
+            panic_on_enroll: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -362,6 +365,10 @@ impl PeerServiceBasis for ScriptedHost {
         request: &PeerServiceRequest,
         association: &InputAuthorityAssociation,
     ) -> Result<Option<Box<dyn NativeInputAdmissionCustody>>, PeerServiceRefusal> {
+        assert!(
+            !self.panic_on_enroll.load(Ordering::SeqCst),
+            "the host's custody failed"
+        );
         self.enrollments.fetch_add(1, Ordering::SeqCst);
         let mut enrolled = self.enrolled.lock().expect("enrolled");
         match enrolled.get(request.delivery_work.as_str()) {
@@ -638,6 +645,39 @@ async fn a_pending_host_answer_records_nothing() {
     ));
     host.answer(owner_grant());
     assert!(bind(&binder, governed_request("delivery-1")).await.is_ok());
+}
+
+/// A host panic in `enroll` ends that bind and records nothing. It poisons the
+/// binder's custody lock but cannot leave the map half-updated, so the binder
+/// recovers the lock: a later bind of the same delivery, and of another, is
+/// bound as before instead of staying pending.
+#[tokio::test]
+async fn a_host_panic_in_enroll_leaves_later_binds_working() {
+    let host = ScriptedHost::new(owner_grant());
+    host.panic_on_enroll.store(true, Ordering::SeqCst);
+    let binder = Arc::new(binder(&host));
+    let panicked = {
+        let binder = Arc::clone(&binder);
+        tokio::spawn(async move {
+            binder
+                .bind_peer_ingress(governed_request("delivery-1"))
+                .await
+        })
+        .await
+    };
+    assert!(
+        panicked.expect_err("the host's enroll panicked").is_panic(),
+        "the bind ended with the host's panic"
+    );
+    host.panic_on_enroll.store(false, Ordering::SeqCst);
+    assert!(
+        bind(&binder, governed_request("delivery-1")).await.is_ok(),
+        "the same delivery is bound after the panic"
+    );
+    assert!(
+        bind(&binder, governed_request("delivery-2")).await.is_ok(),
+        "another delivery is bound after the panic"
+    );
 }
 
 /// A sending work with an original under a host-policy (or service-mandate)

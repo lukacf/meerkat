@@ -35,7 +35,7 @@
 //! holds enrolled differently.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use meerkat_authorization_contracts::constraints::{ExecutionRestrictions, ResourceDomain};
@@ -189,9 +189,9 @@ pub type PeerServiceFuture<'a> = std::pin::Pin<
 ///   accepted (Core enrolls on every bind, verbatim re-binds included), and
 ///   a different one is refused `EnrollmentConflict`, never overwritten, so
 ///   an admitted work's later operations are always checked against the
-///   facts it was admitted with. It is synchronous and bounded, performs no
-///   I/O on a lock Core holds, and never calls back into the binder: Core
-///   calls it under its own custody lock.
+///   facts it was admitted with. It is synchronous and bounded and performs
+///   no I/O on a lock Core holds. Core holds its custody lock across it, so
+///   it must never call back into the binder: a call back deadlocks.
 /// - The custody it returns is settled by native admission exactly once
 ///   (`NotAdmitted` for every refusal of Core's own), as for every bound
 ///   original. It keeps the enrolled original at least as long as the
@@ -250,6 +250,10 @@ pub trait PeerServiceBasis: Send + Sync {
 ///   order, under that lock, with no await. A bind dropped during
 ///   `basis_for` has minted, enrolled and recorded nothing, as a `NotReady`
 ///   answer.
+/// - **Host panics.** A panic in [`PeerServiceBasis::enroll`] ends that bind
+///   (its future panics) with nothing recorded. It cannot leave the custody
+///   map half-updated, so the binder recovers the lock the panic poisoned and
+///   later binds proceed.
 /// - **Supervisor deliveries.** A supervisor-bridge member delivery is not
 ///   this binder's: it goes to the host's own binder when one is set
 ///   ([`Self::with_supervisor_binder`]), else it answers `NotOffered`.
@@ -358,10 +362,11 @@ impl OriginalRequesterPeerBinder {
         let answer = self.basis.basis_for(&service).await;
         // From here on nothing awaits: custody is re-read, and the binding
         // minted, enrolled and recorded, under one lock.
-        let mut custody = self
-            .custody
-            .lock()
-            .map_err(|_| PeerIngressBindRefusal::Unavailable("peer custody poisoned".into()))?;
+        // A host panic in `enroll` poisons this lock but cannot leave the
+        // map half-updated: the sweep and the re-read end before `enroll`,
+        // and the record is one insert after it. So the lock is recovered,
+        // and later binds proceed instead of staying pending.
+        let mut custody = self.custody.lock().unwrap_or_else(PoisonError::into_inner);
         let now = Instant::now();
         custody.retain(|_, record| now.saturating_duration_since(record.at) < self.retention);
         let recorded = custody.get(&key).map(|record| record.answer.clone());
@@ -448,7 +453,7 @@ impl OriginalRequesterPeerBinder {
 
     /// The live record for `key`, if any.
     fn recorded(&self, key: &CustodyKey) -> Option<Answer> {
-        let custody = self.custody.lock().ok()?;
+        let custody = self.custody.lock().unwrap_or_else(PoisonError::into_inner);
         let record = custody.get(key)?;
         (Instant::now().saturating_duration_since(record.at) < self.retention)
             .then(|| record.answer.clone())

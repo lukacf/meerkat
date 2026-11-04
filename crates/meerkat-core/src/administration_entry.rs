@@ -50,21 +50,22 @@ pub trait AdministrationEntry: Send + Sync {
 /// failed with its outcome known or unknown) and only then drops it, so a
 /// host that records its entered operations sees the mutation as entered
 /// until it settles. It authorizes nothing by itself. An admission that
-/// states its administrator ([`Self::administered_by`]) is recorded by the
-/// host's recorder when the mutation settles; Core stores none.
+/// states its administrator ([`Self::administered_by`]) hands the host's
+/// recorder the mutation's record when the owner drops it, before the
+/// host's own guard is released; Core stores none.
 pub struct EnteredAdministration {
     _held: Option<Box<dyn std::any::Any + Send>>,
     administration: Option<StatedAdministration>,
 }
 
-/// What an admission states about its administrator, and where its record
-/// goes.
+/// What an admission states about its administrator, where its record
+/// goes, and what the mutation's owner stated about the mutation since.
 struct StatedAdministration {
     administrator: AdministeringPrincipal,
-    // Read by the record's delivery, which a later change adds.
-    #[allow(dead_code)]
     recorder: Arc<dyn AdministrationRecorder>,
     admitted_at: DateTime<Utc>,
+    change: Option<AdministeredChange>,
+    outcome: Option<AdministrationOutcome>,
 }
 
 impl EnteredAdministration {
@@ -101,6 +102,8 @@ impl EnteredAdministration {
             administrator,
             recorder,
             admitted_at: Utc::now(),
+            change: None,
+            outcome: None,
         });
         self
     }
@@ -112,6 +115,61 @@ impl EnteredAdministration {
             .as_ref()
             .map(|administration| &administration.administrator)
     }
+
+    /// This admission naming `change`, what the admitted mutation changes.
+    /// The mutation's owner names it when it receives the admission, before
+    /// it writes; the record carries it. Without a stated administrator it
+    /// is not kept.
+    #[must_use]
+    pub fn for_change(mut self, change: AdministeredChange) -> Self {
+        if let Some(administration) = &mut self.administration {
+            administration.change = Some(change);
+        }
+        self
+    }
+
+    /// The mutation's owner states how the admitted mutation ended, once it
+    /// knows; the record carries it when the owner drops the admission. An
+    /// admission dropped without it records
+    /// [`AdministrationOutcome::Unknown`].
+    pub fn settle(&mut self, outcome: AdministrationOutcome) {
+        if let Some(administration) = &mut self.administration {
+            administration.outcome = Some(outcome);
+        }
+    }
+}
+
+impl Drop for EnteredAdministration {
+    /// Dropping an admission that states its administrator hands the host's
+    /// recorder the mutation's one record, whichever task drops it last.
+    fn drop(&mut self) {
+        let Some(StatedAdministration {
+            administrator,
+            recorder,
+            admitted_at,
+            change,
+            outcome,
+        }) = self.administration.take()
+        else {
+            return;
+        };
+        let record = AdministrationRecord {
+            administrator: administrator.principal,
+            authentication_scope_digest: administrator.authentication_scope_digest,
+            change,
+            outcome: outcome.unwrap_or(AdministrationOutcome::Unknown),
+            admitted_at,
+            settled_at: Utc::now(),
+        };
+        // The recorder is host code: it never unwinds through the owner that
+        // drops the admission, whose task may be unwinding already.
+        let recorded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            recorder.record(record);
+        }));
+        if recorded.is_err() {
+            tracing::warn!("an administration recorder panicked; the record is lost");
+        }
+    }
 }
 
 impl std::fmt::Debug for EnteredAdministration {
@@ -120,7 +178,9 @@ impl std::fmt::Debug for EnteredAdministration {
         if let Some(administration) = &self.administration {
             debug
                 .field("administrator", &administration.administrator)
-                .field("admitted_at", &administration.admitted_at);
+                .field("admitted_at", &administration.admitted_at)
+                .field("change", &administration.change)
+                .field("outcome", &administration.outcome);
         }
         debug.finish_non_exhaustive()
     }
@@ -301,4 +361,197 @@ pub enum AdministrationEntryRefusal {
     /// The caller's authority could not be established now.
     #[error("the caller's administration could not be established: {0}")]
     Unavailable(String),
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+    use crate::{PrincipalKind, TrustDomainId};
+
+    #[derive(Default)]
+    struct Recorded(std::sync::Mutex<Vec<AdministrationRecord>>);
+
+    impl Recorded {
+        fn take(&self) -> Vec<AdministrationRecord> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    impl AdministrationRecorder for Recorded {
+        fn record(&self, record: AdministrationRecord) {
+            self.0.lock().unwrap().push(record);
+        }
+    }
+
+    fn administrator() -> PrincipalRef {
+        PrincipalRef::in_domain(
+            PrincipalKind::Human,
+            "admin-7",
+            TrustDomainId::new("console-idp").unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn stated(recorder: &Arc<Recorded>) -> EnteredAdministration {
+        EnteredAdministration::admitted().administered_by(
+            AdministeringPrincipal::new(administrator()).unwrap(),
+            Arc::clone(recorder) as Arc<dyn AdministrationRecorder>,
+        )
+    }
+
+    /// An administrator names a trust domain, and its login is kept only as
+    /// the login's digest.
+    #[test]
+    fn an_administrator_is_qualified_and_keeps_only_the_login_digest() {
+        assert_eq!(
+            AdministeringPrincipal::new(
+                PrincipalRef::new(PrincipalKind::Human, "admin-7").unwrap()
+            ),
+            Err(PrincipalContractError::UnqualifiedPrincipal)
+        );
+        let scope = HostAuthenticationScope::new("login-1");
+        let administrator_in_login = AdministeringPrincipal::new(administrator())
+            .unwrap()
+            .with_authentication_scope(&scope);
+        assert_eq!(administrator_in_login.principal(), &administrator());
+        assert_eq!(
+            administrator_in_login.authentication_scope_digest(),
+            Some(&scope.digest())
+        );
+        assert!(!format!("{administrator_in_login:?}").contains("login-1"));
+    }
+
+    /// Dropping an admission that states its administrator records it once,
+    /// with the change and outcome its owner stated; an owner that stated
+    /// neither leaves the outcome unknown. An admission without an
+    /// administrator records nothing.
+    #[test]
+    fn a_stated_admission_records_once_when_dropped() {
+        let recorder = Arc::new(Recorded::default());
+        let change = AdministeredChange::ConfigPatch {
+            realm: None,
+            generation: 3,
+        };
+        let mut settled = stated(&recorder).for_change(change.clone());
+        settled.settle(AdministrationOutcome::Committed);
+        assert!(
+            recorder.take().is_empty(),
+            "nothing is recorded while the admission is held"
+        );
+        drop(settled);
+        drop(stated(&recorder));
+        drop(EnteredAdministration::admitted().for_change(change.clone()));
+
+        let records = recorder.take();
+        assert_eq!(records.len(), 2, "one record per stated admission");
+        assert_eq!(records[0].administrator, administrator());
+        assert_eq!(records[0].change, Some(change));
+        assert_eq!(records[0].outcome, AdministrationOutcome::Committed);
+        assert!(records[0].admitted_at <= records[0].settled_at);
+        assert_eq!(records[1].change, None);
+        assert_eq!(records[1].outcome, AdministrationOutcome::Unknown);
+    }
+
+    /// The host's own guard is still held while its record is delivered,
+    /// and released after it.
+    #[test]
+    fn the_record_is_delivered_before_the_hosts_guard_is_released() {
+        struct Guard(Arc<AtomicBool>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        struct SeesGuard(Arc<AtomicBool>, AtomicBool);
+        impl AdministrationRecorder for SeesGuard {
+            fn record(&self, _record: AdministrationRecord) {
+                self.1
+                    .store(self.0.load(Ordering::SeqCst), Ordering::SeqCst);
+            }
+        }
+        let held = Arc::new(AtomicBool::new(true));
+        let recorder = Arc::new(SeesGuard(Arc::clone(&held), AtomicBool::new(false)));
+        drop(
+            EnteredAdministration::holding(Guard(Arc::clone(&held))).administered_by(
+                AdministeringPrincipal::new(administrator()).unwrap(),
+                Arc::clone(&recorder) as Arc<dyn AdministrationRecorder>,
+            ),
+        );
+        assert!(
+            recorder.1.load(Ordering::SeqCst),
+            "recorded while the guard was held"
+        );
+        assert!(!held.load(Ordering::SeqCst), "the guard is released after");
+    }
+
+    /// A recorder that panics does not unwind through the owner that drops
+    /// the admission.
+    #[test]
+    fn a_panicking_recorder_does_not_unwind_through_the_owner() {
+        struct Panics;
+        impl AdministrationRecorder for Panics {
+            fn record(&self, _record: AdministrationRecord) {
+                panic!("the host's recorder failed");
+            }
+        }
+        let dropped = std::panic::catch_unwind(|| {
+            drop(EnteredAdministration::admitted().administered_by(
+                AdministeringPrincipal::new(administrator()).unwrap(),
+                Arc::new(Panics),
+            ));
+        });
+        assert!(dropped.is_ok(), "the owner did not unwind");
+    }
+
+    /// A host keeps the record as it serializes: snake_case kinds and
+    /// outcomes, and the login only as its digest.
+    #[test]
+    fn the_record_has_a_stable_stored_form() {
+        let at = Utc::now();
+        let record = AdministrationRecord {
+            administrator: administrator(),
+            authentication_scope_digest: Some(HostAuthenticationScope::new("login-1").digest()),
+            change: Some(AdministeredChange::McpOauthClientProfileInstall {
+                realm: None,
+                server: "search".to_owned(),
+                server_url: "https://search.example/mcp".to_owned(),
+                slot: "search-0123".to_owned(),
+            }),
+            outcome: AdministrationOutcome::Committed,
+            admitted_at: at,
+            settled_at: at,
+        };
+        let stored = serde_json::to_value(&record).unwrap();
+        assert_eq!(
+            stored["change"],
+            serde_json::json!({
+                "kind": "mcp_oauth_client_profile_install",
+                "server": "search",
+                "server_url": "https://search.example/mcp",
+                "slot": "search-0123",
+            })
+        );
+        assert_eq!(stored["outcome"], "committed");
+        assert_eq!(
+            stored["authentication_scope_digest"],
+            HostAuthenticationScope::new("login-1").digest().as_str()
+        );
+        assert!(!stored.to_string().contains("login-1"));
+        assert_eq!(
+            serde_json::from_value::<AdministrationRecord>(stored).unwrap(),
+            record
+        );
+        let secret_set = serde_json::to_value(AdministeredChange::McpServiceSecretSet {
+            realm: RealmId::parse("team").unwrap(),
+            server: "search".to_owned(),
+            env: "SEARCH_API_KEY".to_owned(),
+            meaning: "ab".repeat(32),
+        })
+        .unwrap();
+        assert_eq!(secret_set["kind"], "mcp_service_secret_set");
+        assert_eq!(secret_set["realm"], "team");
+    }
 }

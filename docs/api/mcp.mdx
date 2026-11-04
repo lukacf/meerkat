@@ -610,6 +610,20 @@ ask its user.
   the authorization server: its exact redirect, its authentication method and
   its secret. Profiles are a Rust host API: no RPC, REST or SDK method
   installs one.
+
+  Attribution: an entry can state the administrator it admitted on its
+  admission (`EnteredAdministration::administered_by`, with an
+  `AdministeringPrincipal`, a qualified principal and optionally the digest
+  of their login, and the host's `AdministrationRecorder`). When the update
+  settles, its owner hands the recorder one `AdministrationRecord`: the
+  administrator, the login digest, the slot's install, replacement or
+  removal, whether it committed or its outcome is unknown, and when, also
+  after the caller stopped waiting. The `_entered` forms of the realm's MCP
+  service secrets (`set_mcp_service_secret_entered`,
+  `remove_mcp_service_secret_entered`) and of realm configuration writes
+  (`ConfigRuntime::patch_entered`, `McpRealmPersistTarget::add_entered`)
+  record the same way. No record carries a value or secret, and Core keeps
+  no copy: the host keeps the record in its own audit.
 - **Bounded network stages.** No stalled authorization server holds a login,
   its host or the credential. Each network stage of a login or refresh
   (protected resource metadata, authorization-server metadata, account

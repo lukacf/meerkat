@@ -232,7 +232,10 @@ impl ConfigRuntime {
     /// generation publication, and releases them only then: a caller that
     /// stops waiting neither releases them between the two nor abandons the
     /// settlement. Any failure after the admission is
-    /// [`EnteredConfigWriteError::OutcomeUnknown`].
+    /// [`EnteredConfigWriteError::OutcomeUnknown`]. An admission that states
+    /// its administrator is recorded by that task when it releases it
+    /// ([`crate::EnteredAdministration::administered_by`]): the patch and
+    /// the generation it publishes, committed or unknown.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn patch_entered(
         &self,
@@ -256,20 +259,33 @@ impl ConfigRuntime {
                 ConfigRuntimeError::GenerationConflict { expected, current },
             ));
         }
+        let next = current.saturating_add(1);
         let entered = entry
             .enter()
-            .map_err(EnteredConfigWriteError::NotAdmitted)?;
+            .map_err(EnteredConfigWriteError::NotAdmitted)?
+            .for_change(crate::AdministeredChange::ConfigPatch {
+                realm: self.store.metadata().and_then(|metadata| metadata.realm_id),
+                generation: next,
+            });
 
         // No await between the admission and handing the custody to its
         // settling owner.
         let store = Arc::clone(&self.store);
         let state_path = self.state_path.clone();
         let settlement = tokio::spawn(async move {
-            let _custody = (process_guard, file_lock, entered);
-            let updated = store.patch(delta).await?;
-            let next = current.saturating_add(1);
-            write_generation_at(&state_path, next).await?;
-            Ok::<_, ConfigRuntimeError>((updated, next))
+            let mut custody = (process_guard, file_lock, entered);
+            let written = async {
+                let updated = store.patch(delta).await?;
+                write_generation_at(&state_path, next).await?;
+                Ok::<_, ConfigRuntimeError>((updated, next))
+            }
+            .await;
+            custody.2.settle(if written.is_ok() {
+                crate::AdministrationOutcome::Committed
+            } else {
+                crate::AdministrationOutcome::Unknown
+            });
+            written
         });
         let (config, generation) = settlement
             .await

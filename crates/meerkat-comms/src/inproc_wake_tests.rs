@@ -569,6 +569,63 @@ async fn a_route_whose_owner_is_gone_is_mob_unavailable() {
     ));
 }
 
+/// A seated member whose owner is gone is still served by its live route,
+/// and that hand-off keeps the governed origin its sender carried, beside
+/// the in-process sender authentication.
+#[tokio::test]
+async fn an_owner_gone_member_served_by_its_live_route_receives_the_governed_origin() {
+    let registry = InprocRegistry::new();
+    let member = make_keypair();
+    let (inbox, inbox_sender) = open_inbox();
+    let outcome = registry.register_with_meta_in_namespace(
+        "realm",
+        "worker-1".to_string(),
+        member.public_key(),
+        inbox_sender,
+        PeerMeta::default(),
+    );
+    assert!(!outcome.is_rejected(), "{outcome:?}");
+    let owner = ScriptedOwner::new(OnWake::ReadyWithoutRoute);
+    assert!(registry.publish_wake_route("realm", member.public_key(), "worker-1", owner.weak()));
+    drop(owner);
+    let origin =
+        meerkat_core::GovernedSendOrigin::__from_runtime_facts(Arc::new("staged run facts"));
+
+    registry
+        .send_to_pubkey_in_namespace_with_id_wait(
+            "realm",
+            &make_keypair(),
+            &member.public_key(),
+            Uuid::new_v4(),
+            response(),
+            true,
+            BUDGET,
+            Some(origin.clone()),
+        )
+        .await
+        .expect("the live route serves the member whose owner is gone");
+
+    let claim = crate::runtime::comms_runtime::test_peer_ingress_queue_claim(
+        inbox
+            .try_claim_one_classified()
+            .expect("the envelope the live route took"),
+    );
+    assert_eq!(
+        claim.sender_authentication(),
+        meerkat_core::PeerIngressSenderAuthentication::InProcess
+    );
+    assert!(
+        claim
+            .governed_send_origin()
+            .is_some_and(|received| Arc::ptr_eq(
+                received.__runtime_facts(),
+                origin.__runtime_facts()
+            )),
+        "the owner-gone member's claim holds the sender's own origin: {:?}",
+        claim.governed_send_origin()
+    );
+}
+
 /// Retraction is owner-exact: another owner cannot retract a route it did not
 /// publish, and a retracted key is no longer a member here.
 #[test]

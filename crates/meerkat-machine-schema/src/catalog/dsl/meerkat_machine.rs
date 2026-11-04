@@ -14181,11 +14181,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "approval_satisfied" { !requires_approval || (approval_available && !approval_denied) }
             // A retry of the pending request itself stages it again, so a
             // caller that abandoned the request inside its reconfigure can
-            // finish it. Another request's pending switch is a conflict
+            // finish it; only an until-changed switch is taken over that way,
+            // never a finite one staged under the same id. Another request's
+            // pending switch is a conflict
             // (RequestUntilChangedSwitchTurnPendingConflict).
             guard "no_other_pending_switch" {
                 self.model_routing_pending_switch_request_id == None
-                || self.model_routing_pending_switch_request_id == Some(request_id)
+                || (self.model_routing_pending_switch_request_id == Some(request_id)
+                    && self.model_routing_pending_switch_turns == None)
             }
             update {
                 if requires_approval {
@@ -14250,7 +14253,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         // approval refusal still answers first, as it does for a finite
         // request. A retry of the pending request itself is accepted again
         // (RequestUntilChangedSwitchTurnAccepted); a denial recorded under its
-        // id would answer that request's caller as denied.
+        // id would answer that request's caller as denied. For the same reason
+        // a request that reuses the id of a staged finite switch matches no
+        // arm: its caller gets an error and nothing is recorded under the id.
         transition RequestUntilChangedSwitchTurnPendingConflict {
             per_phase [Idle, Attached, Running]
             on input RequestUntilChangedSwitchTurn {

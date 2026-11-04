@@ -397,9 +397,11 @@ them.
   `SwitchTurnDenialReason::ScopedOverrideConflict`, as a finite switch
   requested while another switch is pending already is, and so is a model
   change a run requested when it is realized while a switch is pending. A
-  retry of the pending request itself (the same `request_id`) is accepted,
-  so a caller that dropped its request while the reconfigure ran can
-  finish it. Affects 0.6.0 through 0.9.9.
+  retry of a pending until-changed request itself (the same `request_id`)
+  is accepted, so a caller that dropped its request while the reconfigure
+  ran can finish it; an until-changed request that reuses the id of a
+  finite switch waiting for its turn is refused with an error and leaves
+  that switch in place. Affects 0.6.0 through 0.9.9.
 
 - `meerkat-runtime`: a stop or a retirement that landed after an
   until-changed model switch had reconfigured the session, but before the

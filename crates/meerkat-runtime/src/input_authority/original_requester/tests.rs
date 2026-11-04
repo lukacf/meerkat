@@ -712,6 +712,42 @@ async fn a_sender_with_a_host_policy_basis_is_refused_sender_basis_unbounded() {
     assert_eq!(host.reads(), 0);
 }
 
+/// Every original a sending work stages must narrow it. A work that stages
+/// a grant-based original beside a host-policy one, for the same requester
+/// and in one namespace, is refused `sender_basis_unbounded` as well.
+#[tokio::test]
+async fn a_sending_work_with_one_unbounded_original_is_refused_sender_basis_unbounded() {
+    let host = ScriptedHost::new(owner_grant());
+    let mixed = GovernedPeerOrigin::from_associations([
+        &sender_original("question", "prompts", &[], delegation()),
+        &sender_original(
+            "follow-up",
+            "prompts",
+            &[],
+            WorkAuthorityBasis::HostPolicy {
+                policy: evidence("host-policy"),
+            },
+        ),
+    ])
+    .expect("two staged originals of one requester");
+    assert!(
+        mixed.namespace().is_some(),
+        "one namespace: only the host-policy original refuses it"
+    );
+    let refused = binder(&host)
+        .bind_peer_ingress(request(
+            comms_origin(PeerIngressSenderAuthentication::InProcess, Some(mixed)),
+            "delivery-1",
+        ))
+        .await
+        .expect_err("refused");
+    assert_eq!(
+        refused,
+        PeerIngressBindRefusal::Refused(PeerIngressBindDenial::SenderBasisUnbounded)
+    );
+    assert_eq!(host.reads(), 0);
+}
+
 /// A sending work that names more works than one association may name is
 /// refused `contributor_bound_exceeded`: the bound is the association's own
 /// contributor bound, so no work of the chain is ever dropped to fit.

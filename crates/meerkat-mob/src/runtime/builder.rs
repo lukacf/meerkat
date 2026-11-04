@@ -12014,9 +12014,10 @@ pub(super) struct ResumeRestoreCandidate {
     /// to.
     pub(super) in_turn: bool,
     /// What the member's seat carries to the first build of its unborn
-    /// session ([`super::SeatBuild`]), set on its restore request before the
-    /// customizer is asked. `None` for a member whose session a build
-    /// created.
+    /// session ([`super::SeatBuild`]), or the build a same-session
+    /// successor's row carried to its incarnation's builds, set on its
+    /// restore request before the customizer is asked. `None` for any other
+    /// member whose session a build created.
     pub(super) seat_build: Option<Arc<super::SeatBuild>>,
     /// The role the member's session was last built under, when the
     /// member's incarnation took another one on it (a same-session
@@ -12068,7 +12069,7 @@ fn resume_restore_set(
                 entry: entry.clone(),
                 machine_session_id: machine_session_id.clone(),
                 in_turn: shares_session || member_restore_follows_in_mob_source(entry, mob_id),
-                seat_build: roster.seat_build(&entry.agent_identity),
+                seat_build: roster.next_build(&entry.agent_identity),
                 resume_from_role: roster.resume_from_role(&entry.agent_identity).cloned(),
             })
         })

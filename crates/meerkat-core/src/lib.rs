@@ -349,6 +349,7 @@ pub use image_content::{
     hydrate_messages_for_execution,
 };
 pub use image_generation::*;
+pub use interaction::GovernedSendOrigin;
 pub use interaction::{
     InboxInteraction, InteractionContent, InteractionId, ObjectiveId, PeerIngressAdmission,
     PeerIngressAdmissionDiagnostic, PeerIngressAuthDecision, PeerIngressAuthExemption,

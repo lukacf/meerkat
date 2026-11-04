@@ -55,6 +55,17 @@ fn declared_as(name: &str, role: &str, runtime_mode: crate::MobRuntimeMode) -> D
     DeclaredEntry::new(spec_as(name, role, runtime_mode))
 }
 
+/// `worker_spec(name)` labelled, as a legacy host labels its members, with
+/// the identity it names.
+fn identity_labelled(name: &str, identity: &str) -> SpawnMemberSpec {
+    let mut spec = worker_spec(name);
+    spec.labels = Some(BTreeMap::from([(
+        crate::runtime::identity_entry::LEGACY_IDENTITY_LABEL.to_string(),
+        identity.to_string(),
+    )]));
+    spec
+}
+
 /// A complete roster that lists no identity.
 fn empty_roster() -> DeclaredRoster {
     DeclaredRoster::complete(Vec::<DeclaredEntry>::new())
@@ -2083,6 +2094,99 @@ async fn a_descriptive_facet_change_is_never_a_new_life() {
         mob.materialization("faceted"),
         Some(dsl::MemberMaterializationPhase::Live),
         "the live member keeps serving"
+    );
+}
+
+/// A host that names its identities in a form no member id can spell seats
+/// each under the identity's member id in the one encoding of a name into a
+/// member id, and labels the member with the identity. A legacy member so
+/// seated and so labelled, with no durable-identity marker, is adopted by
+/// the declared apply that lists its member id, and keeps its seat.
+///
+/// RED: compare the label with the member id byte for byte (drop the
+/// encoded comparison from `names_member_id`): the member is no legacy
+/// member, and the apply refuses its name `NameHeldByWorker`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_labelled_with_the_identity_its_id_encodes_is_adopted() {
+    let mob = ApplyMob::new("apply-encoded-label").await;
+    let member_id = crate::ids::member_id_for_name("team:alice").into_owned();
+    mob.handle
+        .spawn_spec(identity_labelled(&member_id, "team:alice"))
+        .await
+        .expect("a legacy host's member, labelled with its identity");
+    let session = mob.session(&member_id).await;
+
+    let outcome = mob
+        .apply(DeclaredRoster::partial([declared(&member_id)]))
+        .await;
+    assert!(
+        matches!(answer(&outcome, &member_id), DeclaredEntryOutcome::Kept),
+        "{outcome:?}"
+    );
+    assert!(
+        matches!(mob.standing(&member_id), Some(EntryStanding::Seated(_))),
+        "the member is adopted as its identity's entry"
+    );
+    assert_eq!(mob.session(&member_id).await, session);
+    assert_eq!(mob.generation(&member_id).await, Some(Generation::new(0)));
+}
+
+/// A raw member a host spawned under an identity's member id refuses that
+/// identity (`NameHeldByWorker`) until the host labels it with the identity
+/// it names, the identity no member id can spell: the next apply adopts
+/// it, on its session.
+///
+/// RED: compare the label with the member id byte for byte (drop the
+/// encoded comparison from `names_member_id`): the labelled member is still
+/// refused `NameHeldByWorker`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_raw_member_is_adopted_once_its_host_labels_it_with_the_identity() {
+    let mob = ApplyMob::new("apply-labelled-raw").await;
+    let member_id = crate::ids::member_id_for_name("team:bob").into_owned();
+    mob.handle
+        .spawn_spec(worker_spec(&member_id))
+        .await
+        .expect("a host's raw member under the identity's member id");
+    let session = mob.session(&member_id).await;
+    let roster = || DeclaredRoster::partial([declared(&member_id)]);
+
+    let refused = mob.apply(roster()).await;
+    assert!(
+        matches!(
+            answer(&refused, &member_id),
+            DeclaredEntryOutcome::Refused {
+                refusal: DeclaredEntryRefusal::NameHeldByWorker
+            }
+        ),
+        "{refused:?}"
+    );
+
+    tokio::time::timeout(STEP, mob.handle.retire(id(&member_id)))
+        .await
+        .expect("the retirement answers")
+        .expect("the host retires its raw member");
+    mob.left(&member_id).await;
+    mob.handle
+        .spawn_spec(
+            identity_labelled(&member_id, "team:bob")
+                .with_resume_bridge_session_id(session.clone()),
+        )
+        .await
+        .expect("the host spawns it again on its session, labelled with the identity");
+
+    let adopted = mob.apply(roster()).await;
+    assert!(
+        matches!(answer(&adopted, &member_id), DeclaredEntryOutcome::Kept),
+        "{adopted:?}"
+    );
+    assert!(
+        matches!(mob.standing(&member_id), Some(EntryStanding::Seated(_))),
+        "the labelled member is adopted as its identity's entry"
+    );
+    assert_eq!(
+        mob.session(&member_id).await,
+        session,
+        "the adoption keeps the session"
     );
 }
 

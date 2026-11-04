@@ -3395,7 +3395,6 @@ dependencies = [
  "indexmap",
  "js-sys",
  "jsonschema",
- "meerkat-core",
  "meerkat-machine-kernels",
  "meerkat-machine-schema",
  "parking_lot",

@@ -960,7 +960,7 @@ impl ToolkitOriginalOwner {
         admitted: &AdmittedHelperWork,
     ) -> Result<Option<HelperNativeBinding>, OriginalWriterError> {
         self.check_canonical_source(store, &admitted.source_scope)?;
-        self.check_admitted_helper(admitted)?;
+        self.check_admitted_helper_outside_change(admitted).await?;
         let key = admitted.source_key()?;
         let Some(saved) = store
             .get(&key)
@@ -973,7 +973,7 @@ impl ToolkitOriginalOwner {
         if saved.key != key || record.facts != admitted.facts {
             return Err(OriginalWriterError::Conflict);
         }
-        self.check_admitted_helper(admitted)?;
+        self.check_admitted_helper_outside_change(admitted).await?;
         match record.state {
             HelperSourceState::ControllerPending => Ok(None),
             HelperSourceState::Bound {
@@ -1420,6 +1420,44 @@ impl ToolkitOriginalOwner {
         self: &Arc<Self>,
         admitted: &AdmittedHelperWork,
     ) -> Result<(), OriginalWriterError> {
+        helper_settlement_result(self.admitted_helper_settlement(admitted)?)
+    }
+
+    /// [`Self::check_admitted_helper`] for an async caller that holds no
+    /// owner change or reservation of the shared publication (the helper
+    /// recovery observation): a held source collection is contention, not an
+    /// answer, so it is waited out with async pauses, within Core's
+    /// owner-change bound, and the complete check runs again. Every other
+    /// answer is check_admitted_helper's, at once.
+    pub(crate) async fn check_admitted_helper_outside_change(
+        self: &Arc<Self>,
+        admitted: &AdmittedHelperWork,
+    ) -> Result<(), OriginalWriterError> {
+        let deadline =
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+        loop {
+            let settlement = self.admitted_helper_settlement(admitted)?;
+            if settlement != HelperSourceSettlement::Contended
+                || tokio::time::Instant::now() >= deadline
+            {
+                return helper_settlement_result(settlement);
+            }
+            tokio::time::sleep_until(std::cmp::min(
+                deadline,
+                tokio::time::Instant::now() + std::time::Duration::from_millis(1),
+            ))
+            .await;
+            // Expiry before the next read, as the bounded waits elsewhere.
+            if tokio::time::Instant::now() >= deadline {
+                return Err(OriginalWriterError::Unavailable);
+            }
+        }
+    }
+
+    fn admitted_helper_settlement(
+        self: &Arc<Self>,
+        admitted: &AdmittedHelperWork,
+    ) -> Result<HelperSourceSettlement, OriginalWriterError> {
         if !Arc::ptr_eq(self, &admitted.owner)
             || !admitted
                 .facts
@@ -1438,7 +1476,9 @@ impl ToolkitOriginalOwner {
         {
             return Err(OriginalWriterError::WrongOwner);
         }
-        self.check_helper_contributors(&admitted.contributor, &admitted.contributors)
+        // Beyond the originating live dispatch all these originals are named
+        // contributors to the child. No own-original exemption survives here.
+        self.observe_helper_sources(&admitted.contributor, &admitted.contributors, &[])
     }
 
     fn check_helper_contributors(
@@ -1461,19 +1501,11 @@ impl ToolkitOriginalOwner {
         contributors: &[Arc<RetainedToolkitOriginal>],
         own_originals: &[Arc<RetainedToolkitOriginal>],
     ) -> Result<(), OriginalWriterError> {
-        match self.observe_helper_sources(contributor, contributors, own_originals)? {
-            HelperSourceSettlement::Admitted => Ok(()),
-            HelperSourceSettlement::Candidate => {
-                #[cfg(test)]
-                eprintln!(
-                    "AA1 failure: stage=source.helper_non_own_custody variant=SourceCustody::Candidate"
-                );
-                Err(OriginalWriterError::Unavailable)
-            }
-            HelperSourceSettlement::Contended | HelperSourceSettlement::CancellationPending => {
-                Err(OriginalWriterError::Unavailable)
-            }
-        }
+        helper_settlement_result(self.observe_helper_sources(
+            contributor,
+            contributors,
+            own_originals,
+        )?)
     }
 
     // This is the same strict source check, with transient observations kept
@@ -1568,6 +1600,23 @@ enum HelperSourceSettlement {
     Candidate,
     Contended,
     CancellationPending,
+}
+
+/// A source check's answer: only Admitted contributor custody is usable.
+fn helper_settlement_result(settlement: HelperSourceSettlement) -> Result<(), OriginalWriterError> {
+    match settlement {
+        HelperSourceSettlement::Admitted => Ok(()),
+        HelperSourceSettlement::Candidate => {
+            #[cfg(test)]
+            eprintln!(
+                "AA1 failure: stage=source.helper_non_own_custody variant=SourceCustody::Candidate"
+            );
+            Err(OriginalWriterError::Unavailable)
+        }
+        HelperSourceSettlement::Contended | HelperSourceSettlement::CancellationPending => {
+            Err(OriginalWriterError::Unavailable)
+        }
+    }
 }
 
 /// Preserve source-owned historical identity verbatim. Do not collapse equal

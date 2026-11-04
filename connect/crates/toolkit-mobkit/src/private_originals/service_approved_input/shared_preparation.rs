@@ -452,9 +452,12 @@ impl InstalledServiceTask {
                             OriginalWriterError::OperationDenied
                         })?;
                 }
-                let entry = self.source.owner.retain_shared_entry(
+                // Under the follow-up's source writer, outside any owner
+                // change: a short hold of the source collection is waited for.
+                let entry = self.source.owner.retain_shared_entry_with(
                     &self.parent_association,
                     member.map(|member| member.preparation_identity()),
+                    crate::original_ingress::CollectionAccess::Wait,
                 ).inspect_err(|_| {
                     eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"reserve.retain_entry"}}"#);
                 })?;

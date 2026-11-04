@@ -108,14 +108,22 @@ impl ToolkitOriginalOwner {
         association: &InputAuthorityAssociation,
         preparation: Option<&str>,
     ) -> Result<Arc<SharedEntry>, OriginalWriterError> {
-        let originals = self
-            .originals
-            .try_lock()
-            .map_err(|error| {
-                eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"workflow.shared_entry.originals_lock","kind":"{}"}}"#,
-                    match &error { std::sync::TryLockError::WouldBlock => "would_block", std::sync::TryLockError::Poisoned(_) => "poisoned" });
-                OriginalWriterError::Unavailable
-            })?;
+        self.retain_shared_entry_with(association, preparation, CollectionAccess::Try)
+    }
+
+    /// [`Self::retain_shared_entry`] taking the source collection as `access`
+    /// says: `Wait` only for a caller under the source writer that holds no
+    /// owner change or reservation of the shared publication.
+    pub(crate) fn retain_shared_entry_with(
+        &self,
+        association: &InputAuthorityAssociation,
+        preparation: Option<&str>,
+        access: CollectionAccess,
+    ) -> Result<Arc<SharedEntry>, OriginalWriterError> {
+        let originals = self.source_collection(access).inspect_err(|_| {
+            eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"workflow.shared_entry.originals_lock","kind":"{}"}}"#,
+                if self.originals.is_poisoned() { "poisoned" } else { "would_block" });
+        })?;
         if !originals
             .iter()
             .filter_map(OriginalRecord::bound)

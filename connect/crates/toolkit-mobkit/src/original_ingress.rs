@@ -1662,17 +1662,21 @@ impl ToolkitOriginalOwner {
         &self,
         association: &InputAuthorityAssociation,
     ) -> Result<(), OriginalWriterError> {
+        self.refuse_cancelled_binding_with(association, CollectionAccess::Try)
+    }
+
+    fn refuse_cancelled_binding_with(
+        &self,
+        association: &InputAuthorityAssociation,
+        access: CollectionAccess,
+    ) -> Result<(), OriginalWriterError> {
         let c = association.candidate();
-        let originals = self.originals.try_lock().map_err(|error| {
-            shared_entry_diagnostics::parent_refusal(match &error {
-                std::sync::TryLockError::WouldBlock => {
-                    shared_entry_diagnostics::ParentCause::OriginalsWouldBlock
-                }
-                std::sync::TryLockError::Poisoned(_) => {
-                    shared_entry_diagnostics::ParentCause::OriginalsPoisoned
-                }
+        let originals = self.source_collection(access).inspect_err(|_| {
+            shared_entry_diagnostics::parent_refusal(if self.originals.is_poisoned() {
+                shared_entry_diagnostics::ParentCause::OriginalsPoisoned
+            } else {
+                shared_entry_diagnostics::ParentCause::OriginalsWouldBlock
             });
-            OriginalWriterError::Unavailable
         })?;
         if let Some(record) = originals
             .iter()
@@ -2110,18 +2114,12 @@ impl ToolkitOriginalOwner {
                 Output = Result<Arc<toolkit_store::StoredRecord>, OriginalWriterError>,
             >,
     {
-        let _mutation = self
-            .mutation
-            .try_lock()
-            .map_err(|_| OriginalWriterError::Unavailable)?;
+        let _mutation = self.cancellation_writer().await?;
         // Compare the selected event with this canonical original before any
         // publication changes. The writer mutex keeps these immutable facts
         // coupled to the later Pending and durable cancellation writes.
         let (binding, prior_source) = {
-            let originals = self
-                .originals
-                .try_lock()
-                .map_err(|_| OriginalWriterError::Unavailable)?;
+            let originals = self.wait_for_collection()?;
             match originals.iter().find(|entry| entry.names(realm, original)) {
                 Some(OriginalRecord::Bound(held)) => (
                     Some(held.association.clone()),
@@ -2137,16 +2135,8 @@ impl ToolkitOriginalOwner {
             }
         };
         let source_record = validate_source(binding.clone(), prior_source).await?;
-        let entries;
-        {
-            let _publication = self
-                .publication
-                .begin_owner_change()
-                .map_err(|_| OriginalWriterError::Unavailable)?;
-            let mut originals = self
-                .originals
-                .try_lock()
-                .map_err(|_| OriginalWriterError::Unavailable)?;
+        let associations = binding.into_iter().collect::<Vec<_>>();
+        let entries = self.change_with_collection(|originals| {
             if let Some(record) = originals
                 .iter_mut()
                 .find(|entry| entry.names(realm, original))
@@ -2167,26 +2157,19 @@ impl ToolkitOriginalOwner {
                     withdrawn_association: None,
                 });
             }
-            entries = self.close_shared_entries(&binding.into_iter().collect::<Vec<_>>())?;
-        }
+            self.close_shared_entries(&associations)
+        })?;
         let cancellation_record = persist(source_record).await?;
-        {
-            let _publication = self
-                .publication
-                .begin_owner_change()
-                .map_err(|_| OriginalWriterError::Unavailable)?;
-            let mut originals = self
-                .originals
-                .try_lock()
-                .map_err(|_| OriginalWriterError::Unavailable)?;
+        self.change_with_collection(|originals| {
             let record = originals
                 .iter_mut()
                 .find(|entry| entry.names(realm, original))
                 .ok_or(OriginalWriterError::Unavailable)?;
             *record.operation_mut() = OriginalOperationDisposition::Cancelled {
-                record: cancellation_record,
+                record: cancellation_record.clone(),
             };
-        }
+            Ok(())
+        })?;
         drop(_mutation);
         Self::drain_shared_entries(entries).await
     }
@@ -2249,16 +2232,25 @@ impl ToolkitOriginalOwner {
     {
         shared_entry_diagnostics::begin_followup(parent);
         let _mutation = self.source_writer().await;
-        shared_entry_diagnostics::check_parent(|| self.refuse_cancelled_binding(parent)).inspect_err(|error| {
-            eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"followup.parent_current"}}"#);
-            shared_entry_diagnostics::emit("followup.parent_current", Some(shared_entry_diagnostics::writer_kind(*error)), None);
+        // Under the source writer and outside any owner change: a short hold
+        // of the source collection is waited for, within the bound.
+        shared_entry_diagnostics::check_parent(|| {
+            self.refuse_cancelled_binding_with(parent, CollectionAccess::Wait)
+        })
+        .inspect_err(|error| {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"followup.parent_current"}}"#
+            );
+            shared_entry_diagnostics::emit(
+                "followup.parent_current",
+                Some(shared_entry_diagnostics::writer_kind(*error)),
+                None,
+            );
         })?;
         {
-            let originals = self.originals.try_lock()
-                .map_err(|_| {
-                    eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"followup.originals_lock","kind":"unavailable"}}"#);
-                    OriginalWriterError::Unavailable
-                })?;
+            let originals = self.wait_for_collection().inspect_err(|_| {
+                eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"followup.originals_lock","kind":"unavailable"}}"#);
+            })?;
             if !originals
                 .iter()
                 .filter_map(OriginalRecord::bound)
@@ -2388,20 +2380,14 @@ impl ToolkitOriginalOwner {
                 Output = Result<Arc<toolkit_store::StoredRecord>, OriginalWriterError>,
             >,
     {
-        let _mutation = self
-            .mutation
-            .try_lock()
-            .map_err(|_| OriginalWriterError::Unavailable)?;
+        let _mutation = self.cancellation_writer().await?;
         let sources = validate_sources().await?;
         if sources.is_empty() {
             return Err(OriginalWriterError::WrongOwner);
         }
         let settled;
         {
-            let originals = self
-                .originals
-                .try_lock()
-                .map_err(|_| OriginalWriterError::Unavailable)?;
+            let originals = self.wait_for_collection()?;
             let mut all_settled = true;
             // Validate the entire group before any publication. The mutation
             // lock keeps group membership and immutable bindings coupled to
@@ -2456,16 +2442,7 @@ impl ToolkitOriginalOwner {
             Self::drain_shared_entries(entries).await?;
             return Ok(sources.into_iter().map(|source| source.record).collect());
         }
-        let entries;
-        {
-            let _publication = self
-                .publication
-                .begin_owner_change()
-                .map_err(|_| OriginalWriterError::Unavailable)?;
-            let mut originals = self
-                .originals
-                .try_lock()
-                .map_err(|_| OriginalWriterError::Unavailable)?;
+        let entries = self.change_with_collection(|originals| {
             for source in &sources {
                 if let Some(record) = originals
                     .iter_mut()
@@ -2490,23 +2467,15 @@ impl ToolkitOriginalOwner {
             }
             // Close the same final-entry gates at validated Pending, before
             // any durable cancellation await. A lost write never reopens them.
-            entries = self.close_shared_entries(&associations)?;
-        }
+            self.close_shared_entries(&associations)
+        })?;
         // The canonical parent is first. This ordering makes a partially
         // persisted cancellation visible to every linked source on cold bind.
         let mut committed = Vec::with_capacity(sources.len());
         for source in &sources {
             committed.push(persist(source.record.clone()).await?);
         }
-        {
-            let _publication = self
-                .publication
-                .begin_owner_change()
-                .map_err(|_| OriginalWriterError::Unavailable)?;
-            let mut originals = self
-                .originals
-                .try_lock()
-                .map_err(|_| OriginalWriterError::Unavailable)?;
+        self.change_with_collection(|originals| {
             for (source, record) in sources.iter().zip(&committed) {
                 let current = originals
                     .iter_mut()
@@ -2516,7 +2485,8 @@ impl ToolkitOriginalOwner {
                     record: record.clone(),
                 };
             }
-        }
+            Ok(())
+        })?;
         drop(_mutation);
         Self::drain_shared_entries(entries).await?;
         Ok(committed)
@@ -3075,6 +3045,17 @@ fn wait_for_lock<T>(
     }
 }
 
+/// How an owner step takes the source collection. `Wait` waits out a holder
+/// within Core's owner-change bound, and is used only on a path that holds no
+/// owner change or reservation of the shared publication. `Try` refuses a held
+/// collection at once: inside an open change, inside a native fence and
+/// wherever the caller already pauses between attempts itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CollectionAccess {
+    Wait,
+    Try,
+}
+
 impl ToolkitOriginalOwner {
     /// The source collection for the synchronous native readers that
     /// authenticate an original and read its retained custody. Its holders
@@ -3094,6 +3075,85 @@ impl ToolkitOriginalOwner {
             std::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
             std::thread::sleep,
         )
+    }
+
+    /// The source collection for this owner's own writers and checks: the
+    /// same bounded wait as the native readers, for the same reason (its
+    /// holders are short synchronous sections that never wait for a lock a
+    /// waiter here holds; the publication writer, the source writer and the
+    /// recovery locks are always taken before it, never under it). A holder
+    /// that outlasts the bound, or a poisoned collection, is unavailable.
+    /// Only for a path that holds no owner change of the shared publication:
+    /// inside one, use [`Self::change_with_collection`].
+    fn wait_for_collection(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, Vec<OriginalRecord>>, OriginalWriterError> {
+        self.wait_for_source_collection()
+            .map_err(|_| OriginalWriterError::Unavailable)
+    }
+
+    fn source_collection(
+        &self,
+        access: CollectionAccess,
+    ) -> Result<std::sync::MutexGuard<'_, Vec<OriginalRecord>>, OriginalWriterError> {
+        match access {
+            CollectionAccess::Wait => self.wait_for_collection(),
+            CollectionAccess::Try => self
+                .originals
+                .try_lock()
+                .map_err(|_| OriginalWriterError::Unavailable),
+        }
+    }
+
+    /// Run `apply` under a new owner change of the shared publication and the
+    /// source collection, taken in that order. Nothing waits while the change
+    /// is open: the collection is only tried inside it. When another owner
+    /// holds the collection, the change ends with no fact changed (Core's
+    /// rule for a contended owner: dropping the guard only invalidates
+    /// observations), the collection is waited for outside any change,
+    /// within Core's owner-change bound, and the change begins again. `apply`
+    /// must not wait or await, and runs at most once.
+    fn change_with_collection<T>(
+        &self,
+        mut apply: impl FnMut(&mut Vec<OriginalRecord>) -> Result<T, OriginalWriterError>,
+    ) -> Result<T, OriginalWriterError> {
+        let deadline =
+            std::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+        loop {
+            {
+                let _publication = self
+                    .publication
+                    .begin_owner_change()
+                    .map_err(|_| OriginalWriterError::Unavailable)?;
+                match self.originals.try_lock() {
+                    Ok(mut originals) => return apply(&mut originals),
+                    Err(std::sync::TryLockError::Poisoned(_)) => {
+                        return Err(OriginalWriterError::Unavailable);
+                    }
+                    Err(std::sync::TryLockError::WouldBlock) => {}
+                }
+            }
+            drop(
+                wait_for_lock(&self.originals, deadline, std::thread::sleep)
+                    .map_err(|_| OriginalWriterError::Unavailable)?,
+            );
+        }
+    }
+
+    /// The source writer for a cancellation, taken before any other guard.
+    /// Another writer holds it across its own durable write, so a
+    /// cancellation waits for that writer, within Core's owner-change bound,
+    /// and then reads every fact afresh under it. A holder that outlasts the
+    /// bound is unavailable, as before, and nothing was changed.
+    async fn cancellation_writer(
+        &self,
+    ) -> Result<tokio::sync::MutexGuard<'_, ()>, OriginalWriterError> {
+        tokio::time::timeout(
+            meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+            self.source_writer(),
+        )
+        .await
+        .map_err(|_| OriginalWriterError::Unavailable)
     }
 
     pub(crate) fn admitted_original_basis(

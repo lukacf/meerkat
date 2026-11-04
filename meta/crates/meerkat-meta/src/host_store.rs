@@ -48,7 +48,7 @@ use meerkat_mob::store::SpiMobStoreHost;
 use meerkat_runtime::store::spi::{SpiError, SpiRealm, SpiRuntimeStore, SpiSessionStore};
 
 pub use meerkat_core::host_store::{AcquireMode, FenceTiming, FenceToken, HostStore};
-pub use meerkat_runtime::store::spi::SpiRealmConfig;
+pub use meerkat_runtime::store::spi::{PoisonedScope, SpiRealmConfig};
 
 use crate::blob_store::{Base64BlobStoreAdapter, BinaryBlobStore};
 use crate::console_aggregator::{ConsoleLogStore, InMemoryConsoleLogStore};
@@ -192,13 +192,19 @@ fn open_error(error: SpiError) -> HostStoreOpenError {
 
 /// Whether a host store realm can serve, for a host's readiness probe.
 ///
-/// A realm that lost its fence, or a scope whose batch failed, refuses until
-/// the process opens the realm again: the host restarts the process. Meta
-/// heals neither in place. Neither does it heal what the build over the
-/// realm found at its start: restored members whose comms identity is
-/// missing on this host, and members Core restored broken. A restart does
-/// not heal those either unless the comms identity directory comes back, so
-/// a host does not tie them to automatic restarts.
+/// A realm that lost its fence refuses every call until the process opens
+/// the realm again: the probe is not ready, and the host restarts the
+/// process. A scope whose batch failed (or whose outcome stayed unknown)
+/// refuses only the calls that need it, until the realm is reopened: the
+/// realm keeps serving every other member and document, so the probe stays
+/// ready and names the scope ([`Self::poisoned_scopes`]). The members and
+/// documents of the named scopes are degraded; the host restarts when
+/// convenient (after a drain) to recover them, not at once. Meta heals
+/// neither in place. Neither does it heal what the build over the realm
+/// found at its start: restored members whose comms identity is missing on
+/// this host, and members Core restored broken. A restart does not heal
+/// those either unless the comms identity directory comes back, so a host
+/// does not tie them to automatic restarts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HostStoreReadiness {
@@ -206,8 +212,13 @@ pub struct HostStoreReadiness {
     /// holds it): every call refuses.
     pub realm_poisoned: Option<String>,
     /// Whether a scope is poisoned: a batch touching it failed, and it
-    /// refuses every call.
+    /// refuses every call that needs it until the realm is reopened.
     pub scope_poisoned: bool,
+    /// Every poisoned scope, with why it was poisoned, in scope order. A
+    /// runtime's scope is `rt:<runtime id>` (its session's runtime); a mob's
+    /// are tagged `mb`, `mbi`, `mbr` and `mbs`; Meta's documents are tagged
+    /// `mx`, and its mob announcements `mxa`.
+    pub poisoned_scopes: Vec<PoisonedScope>,
     /// Whether this writer's self-fence window is open now. A closed window
     /// is not a failure by itself: the next write or renew re-acquires the
     /// fence, and poisons the realm only when another writer holds it.
@@ -226,9 +237,13 @@ pub struct HostStoreReadiness {
 impl HostStoreReadiness {
     fn of(parts: &RealmParts) -> Self {
         let realm = &parts.realm;
+        // Read before `has_poisoned_scopes`: a scope stays poisoned once it
+        // is, so `scope_poisoned` is true whenever this names a scope.
+        let poisoned_scopes = realm.poisoned_scopes();
         Self {
             realm_poisoned: realm.realm_poisoned(),
             scope_poisoned: realm.has_poisoned_scopes(),
+            poisoned_scopes,
             lease_live: realm.lease_is_live(),
             comms_identity_degraded: parts.comms_identity_degraded.load(Ordering::SeqCst),
             broken_members: parts
@@ -239,12 +254,13 @@ impl HostStoreReadiness {
         }
     }
 
-    /// Whether the realm serves: neither the realm nor a scope is poisoned,
-    /// no restored member's comms identity is missing, and no member was
-    /// restored broken.
+    /// Whether the realm serves: it is not poisoned, no restored member's
+    /// comms identity is missing, and no member was restored broken. A
+    /// poisoned scope alone leaves it ready: the realm serves every call
+    /// that does not need that scope, and [`Self::poisoned_scopes`] names
+    /// what is degraded.
     pub fn is_ready(&self) -> bool {
         self.realm_poisoned.is_none()
-            && !self.scope_poisoned
             && !self.comms_identity_degraded
             && self.broken_members.is_empty()
     }

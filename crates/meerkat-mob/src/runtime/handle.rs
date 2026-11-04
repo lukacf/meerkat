@@ -1444,6 +1444,12 @@ pub struct MobMemberSnapshot {
     /// session to observe).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_unavailable: Option<MemberPreviewUnavailable>,
+    /// The store's refusal of the member's session read, when it refuses
+    /// until its realm is reopened (`preview_unavailable` is then
+    /// [`MemberPreviewUnavailable::StoreRefused`]): what a wait on the member
+    /// ends with.
+    #[serde(skip)]
+    pub(crate) store_refusal: Option<meerkat_runtime::store::RuntimeStoreError>,
     /// Machine-recorded remote placement (owning host peer id) for this
     /// member (phase 7, ADJ-P7-2: produced from the `member_placement`
     /// machine fact at the status projection). `None` = local to the
@@ -1501,6 +1507,17 @@ pub enum MemberPreviewUnavailable {
     /// The member is retiring, and a status read of a retiring member is
     /// answered from the mob's machine state without reading its session.
     NotObservedWhileRetiring,
+    /// The store refuses to read the member's session until its realm is
+    /// reopened (a host store whose scope of the session, or whose realm,
+    /// is poisoned). The refusal is recorded: later status reads answer from
+    /// it without reading the session again, and a wait on the member ends
+    /// with it ([`MobHandle::wait_one`]).
+    ///
+    /// Its wire value is `read_failed`, the value a client that predates it
+    /// knows: it serializes as `read_failed`, and nothing deserializes into
+    /// it.
+    #[serde(rename(serialize = "read_failed"), skip_deserializing)]
+    StoreRefused,
 }
 
 /// Machine-owned liveness classification.
@@ -1552,6 +1569,30 @@ impl MobMemberSnapshot {
     ) -> Self {
         self.preview_unavailable = preview_unavailable;
         self
+    }
+
+    pub(crate) fn with_store_refusal(
+        mut self,
+        store_refusal: Option<meerkat_runtime::store::RuntimeStoreError>,
+    ) -> Self {
+        self.store_refusal = store_refusal;
+        self
+    }
+
+    /// The error a wait on this member ends with when it is not final and
+    /// the store refuses its session until the realm is reopened: no later
+    /// status read can observe it otherwise, so polling it would last until
+    /// the reopen. The member's lifecycle is MobMachine's and is left as it
+    /// is; this only ends the caller's wait, with the store's typed refusal.
+    fn store_refused_wait(&self) -> Option<MobError> {
+        if self.is_final {
+            return None;
+        }
+        self.store_refusal.clone().map(|refusal| {
+            MobError::SessionError(meerkat_core::service::SessionError::Store(Box::new(
+                refusal,
+            )))
+        })
     }
 
     /// Convenience accessor for the canonical member identity. Equivalent to
@@ -1751,7 +1792,9 @@ fn wire_preview_unavailable(
         MemberPreviewUnavailable::ObservationDeadline => {
             meerkat_contracts::WireMemberPreviewUnavailable::ObservationDeadline
         }
-        MemberPreviewUnavailable::ReadFailed => {
+        // A store refusal until the realm reopens is a failed read on the
+        // wire, whose closed vocabulary has no value of its own for it.
+        MemberPreviewUnavailable::ReadFailed | MemberPreviewUnavailable::StoreRefused => {
             meerkat_contracts::WireMemberPreviewUnavailable::ReadFailed
         }
         MemberPreviewUnavailable::SessionAbsent => {
@@ -17948,19 +17991,27 @@ impl MobHandle {
                 // The poll uses only the member's status. A Dormant member's
                 // comes from the published machine state, so a poll reads no
                 // Dormant member's session.
-                let status = match self.dormant_member_status_from_machine_state(id) {
-                    Some((status, _)) => status,
-                    None => {
-                        self.member_status(&AgentIdentity::from(id.as_str()))
-                            .await?
-                            .status
-                    }
-                };
+                let (status, store_refused) =
+                    match self.dormant_member_status_from_machine_state(id) {
+                        Some((status, _)) => (status, None),
+                        None => {
+                            let snapshot = self
+                                .member_status(&AgentIdentity::from(id.as_str()))
+                                .await?;
+                            (snapshot.status, snapshot.store_refused_wait())
+                        }
+                    };
                 if !Self::kickoff_wait_is_satisfied(
                     entry,
                     status,
                     &kickoff_snapshot.pending_kickoff_member_ids,
                 ) {
+                    // A member whose session the store refuses until the
+                    // realm reopens cannot be observed resolving its
+                    // kickoff: the wait ends with the refusal.
+                    if let Some(refused) = store_refused {
+                        return Err(refused);
+                    }
                     pending_member_ids.push(id.clone());
                 }
             }
@@ -18144,6 +18195,9 @@ impl MobHandle {
         let snapshot = self
             .member_status(&AgentIdentity::from(agent_identity.as_str()))
             .await?;
+        if let Some(refused) = snapshot.store_refused_wait() {
+            return Err(refused);
+        }
         Ok(snapshot.is_final.then_some(snapshot))
     }
 
@@ -18511,7 +18565,10 @@ impl MobHandle {
     /// The wait polls only each member's status, and a Dormant member's comes
     /// from MobMachine with no read of its session. The returned snapshots are
     /// [`Self::member_status`]'s: one durable-head read per Dormant member per
-    /// call, for its preview and token count.
+    /// call, for its preview and token count. A member whose kickoff is not
+    /// resolved and whose session the store refuses until its realm is
+    /// reopened ends the wait with that refusal (as for [`Self::wait_one`]),
+    /// before its timeout.
     pub async fn wait_for_kickoff_complete(
         &self,
         timeout: Option<Duration>,
@@ -18601,7 +18658,12 @@ impl MobHandle {
 
     /// Wait for a specific member to reach a terminal state, then return its snapshot.
     ///
-    /// Polls canonical member classification until terminal.
+    /// Polls canonical member classification until terminal. A member that
+    /// is not terminal and whose session the store refuses until its realm
+    /// is reopened ([`MemberPreviewUnavailable::StoreRefused`]) ends the wait
+    /// with that refusal: a [`MobError::SessionError`] carrying the store's
+    /// typed refusal as its [`meerkat_core::service::SessionError::Store`]
+    /// source.
     pub async fn wait_one(&self, identity: &AgentIdentity) -> Result<MobMemberSnapshot, MobError> {
         self.wait_one_snapshot(identity).await
     }
@@ -18611,7 +18673,9 @@ impl MobHandle {
     /// One poller reads the members one after another, so a wait over many
     /// members issues one member-status read at a time instead of competing
     /// with itself for the mob's status observation capacity. Snapshots are
-    /// returned in `identities` order; the first failed poll ends the wait.
+    /// returned in `identities` order; the first failed poll ends the wait,
+    /// and so does a member whose session the store refuses until its realm
+    /// is reopened, with that refusal (as for [`Self::wait_one`]).
     pub async fn wait_all(
         &self,
         identities: &[AgentIdentity],
@@ -22119,6 +22183,33 @@ mod tests {
     use super::*;
     use crate::ids::Generation;
 
+    /// A store refusal of a member's session read is a typed marker for Rust
+    /// callers and the existing `read_failed` on every wire: the closed wire
+    /// enum maps it there, the domain marker serializes as it in snapshot
+    /// JSON, and `read_failed` reads back as `ReadFailed`, never as the new
+    /// marker. The refusal itself never leaves the process in a snapshot.
+    #[test]
+    fn a_store_refused_preview_is_read_failed_on_the_wire() {
+        assert_eq!(
+            wire_preview_unavailable(MemberPreviewUnavailable::StoreRefused),
+            meerkat_contracts::WireMemberPreviewUnavailable::ReadFailed
+        );
+        assert_eq!(
+            serde_json::to_value(MemberPreviewUnavailable::StoreRefused).expect("serialize"),
+            serde_json::json!("read_failed")
+        );
+        assert_eq!(
+            serde_json::from_value::<MemberPreviewUnavailable>(serde_json::json!("read_failed"))
+                .expect("deserialize"),
+            MemberPreviewUnavailable::ReadFailed
+        );
+        assert!(
+            serde_json::from_value::<MemberPreviewUnavailable>(serde_json::json!("store_refused"))
+                .is_err(),
+            "no wire value reads as the store refusal"
+        );
+    }
+
     /// A durable profile turns a spawn's default ephemeral intent into a
     /// durable identity keyed by the member's identity. An explicit durable
     /// intent keeps its own key, and an ordinary profile changes nothing.
@@ -22288,6 +22379,7 @@ mod tests {
             lifecycle_capabilities: None,
             non_portable_disabled: None,
             preview_unavailable: None,
+            store_refusal: None,
             registration_refusal: None,
             custody_deferred: None,
         }
@@ -22331,6 +22423,7 @@ mod tests {
             lifecycle_capabilities: None,
             non_portable_disabled: None,
             preview_unavailable: None,
+            store_refusal: None,
             registration_refusal: None,
             custody_deferred: None,
         };
@@ -22376,6 +22469,7 @@ mod tests {
             lifecycle_capabilities: None,
             non_portable_disabled: None,
             preview_unavailable: None,
+            store_refusal: None,
             registration_refusal: None,
             custody_deferred: None,
         };

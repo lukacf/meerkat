@@ -298,12 +298,14 @@ async fn a_poisoned_scope_makes_no_store_call() {
             )
             .await;
         assert!(
-            matches!(&write, Err(RuntimeStoreError::WriteFailed(cause)) if cause.starts_with("host store scope ")),
+            matches!(&write, Err(RuntimeStoreError::ScopeRefused { scopes })
+                if scopes.len() == 1 && scopes[0].scope == "rt:doomed"),
             "{write:?}"
         );
         let read = store.load_input_states(&doomed).await;
         assert!(
-            matches!(&read, Err(RuntimeStoreError::ReadFailed(cause)) if cause.starts_with("host store scope ")),
+            matches!(&read, Err(RuntimeStoreError::ScopeRefused { scopes })
+                if scopes.len() == 1 && scopes[0].scope == "rt:doomed"),
             "{read:?}"
         );
         let commit = commit_one(&realm, &id, row(b"three")).await;
@@ -3368,3 +3370,6 @@ fn a_read_error_keeps_unavailable_and_corrupt_typed() {
         RuntimeStoreError::WriteFailed(_)
     ));
 }
+
+/// What one poisoned scope refuses, and what it leaves serving.
+mod poison_radius;

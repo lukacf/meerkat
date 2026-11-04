@@ -275,6 +275,12 @@ pub(in crate::runtime) enum MemberStatusSessionViewRead {
         genuinely_absent: bool,
     },
     Unavailable(super::super::handle::MemberPreviewUnavailable),
+    /// The store refuses to read the session until its realm is reopened (a
+    /// host store whose scope of the session, or whose realm, is poisoned):
+    /// every later read answers the same, so the observation records the
+    /// refusal ([`MemberStatusViewReads::record_refusal`]) and later
+    /// observations answer from it.
+    StoreRefused(meerkat_runtime::store::RuntimeStoreError),
 }
 
 /// One underlying session-view read, owning everything it reads through.
@@ -301,7 +307,8 @@ struct MemberStatusViewReadEntry {
 }
 
 /// Underlying member-status session-view reads in flight, at most one per
-/// session.
+/// session, and the sessions whose read the store refused until its realm is
+/// reopened.
 ///
 /// A session-view read can outlive the observation that started it: a
 /// durable read may run on a blocking thread that dropping its future does
@@ -312,16 +319,83 @@ struct MemberStatusViewReadEntry {
 /// itself when its read finishes, is orphaned at the drain ceiling, or its
 /// owner is dropped (the owning task aborted at actor exit), so the registry
 /// holds exactly the reads that are being driven.
+///
+/// A refused session is recorded once, with the store's refusal and the
+/// member's projection target it was read for: the refusal lasts until the
+/// realm is reopened, and a realm is reopened by a new process, with a new
+/// actor. A status read of the session for the same target answers from the
+/// record without reading; a read for another target (the member was
+/// rebound, reloaded or woken since) drops the record and reads again, so a
+/// stale refusal is never served.
 #[derive(Clone, Default)]
-pub(in crate::runtime) struct MemberStatusViewReads(
-    Arc<std::sync::Mutex<HashMap<SessionId, MemberStatusViewReadEntry>>>,
-);
+pub(in crate::runtime) struct MemberStatusViewReads {
+    reads: Arc<std::sync::Mutex<HashMap<SessionId, MemberStatusViewReadEntry>>>,
+    refused: Arc<std::sync::Mutex<HashMap<SessionId, RecordedStoreRefusal>>>,
+}
+
+/// A session's read the store refused until its realm is reopened, and the
+/// member's projection target it was read for.
+struct RecordedStoreRefusal {
+    target: super::super::state::MemberStatusProjectionTarget,
+    refusal: meerkat_runtime::store::RuntimeStoreError,
+}
 
 impl MemberStatusViewReads {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<SessionId, MemberStatusViewReadEntry>> {
-        self.0
+        self.reads
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_refused(&self) -> std::sync::MutexGuard<'_, HashMap<SessionId, RecordedStoreRefusal>> {
+        self.refused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The store's refusal of `session_id`, when a read of it for `target`
+    /// was refused until the realm is reopened. A record made for another
+    /// target is dropped, and the session is read again.
+    pub(in crate::runtime) fn recorded_refusal(
+        &self,
+        session_id: &SessionId,
+        target: &super::super::state::MemberStatusProjectionTarget,
+    ) -> Option<meerkat_runtime::store::RuntimeStoreError> {
+        let mut refused = self.lock_refused();
+        match refused.get(session_id) {
+            Some(recorded) if recorded.target == *target => Some(recorded.refusal.clone()),
+            Some(_) => {
+                refused.remove(session_id);
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// Record that the store refused `session_id`, read for `target`, until
+    /// its realm is reopened. Answers whether the record is new (none was
+    /// held for this target), so each refusal is logged once.
+    pub(in crate::runtime) fn record_refusal(
+        &self,
+        session_id: &SessionId,
+        target: &super::super::state::MemberStatusProjectionTarget,
+        refusal: meerkat_runtime::store::RuntimeStoreError,
+    ) -> bool {
+        let mut refused = self.lock_refused();
+        if refused
+            .get(session_id)
+            .is_some_and(|recorded| recorded.target == *target)
+        {
+            return false;
+        }
+        refused.insert(
+            session_id.clone(),
+            RecordedStoreRefusal {
+                target: target.clone(),
+                refusal,
+            },
+        );
+        true
     }
 
     /// Join the read of `session_id` in flight, or become the owner of a new
@@ -789,6 +863,7 @@ impl MobActor {
         match self.member_status_projection_target(&agent_identity) {
             Ok(current_target) if current_target == expected_target => {
                 let preview_unavailable = observation.preview_unavailable;
+                let store_refusal = observation.store_refusal.clone();
                 let result = self
                     .machine_member_material_from_observation(
                         &agent_identity,
@@ -802,6 +877,7 @@ impl MobActor {
                         material
                             .to_snapshot()
                             .with_preview_unavailable(preview_unavailable)
+                            .with_store_refusal(store_refusal)
                     });
                 #[cfg(feature = "runtime-adapter")]
                 let result = match result {

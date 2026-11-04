@@ -10,10 +10,11 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use meerkat_runtime::store::{
     ContinuationAdmission, ContinuationAdmissionOutcome, ContinuationAdmissionTransition,
-    ContinuationKeyBinding, DeliveryGenerationReader, KeyedRuntimeDeliveryCasOutcome,
-    RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord, RuntimeStoreControllerCustody,
-    RuntimeStoreError, RuntimeStoreExecutionClaim, RuntimeStoreExecutionCustody,
-    ServiceCallAuditBatch, ServiceCallAuditKey, ServiceCallAuditRecord,
+    ContinuationKeyBinding, DeliveryGenerationReader, KeyedRuntimeDeliveryCasOutcome, RefusedScope,
+    RuntimeDeliveryAuthorityListing, RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord,
+    RuntimeStoreControllerCustody, RuntimeStoreError, RuntimeStoreExecutionClaim,
+    RuntimeStoreExecutionCustody, ServiceCallAuditBatch, ServiceCallAuditKey,
+    ServiceCallAuditRecord, UnavailableRuntime,
 };
 use meerkat_runtime::{HostingCapability, LogicalRuntimeId, RuntimeStore};
 
@@ -22,6 +23,25 @@ const REFUSAL: &str = "forwarding probe: controller mutation custody";
 /// refuses the scan, and a store that does not answer it boots every member
 /// eagerly.
 const RECOVERY_WORK_RUNTIME: &str = "forwarding-probe-recovery-work";
+/// The runtime the probe names as unavailable in its delivery authority
+/// listing: the trait default answers through the plain listing, which names
+/// none, and a store that does not answer per runtime refuses the whole
+/// listing while one runtime scope is poisoned.
+const UNAVAILABLE_RUNTIME: &str = "forwarding-probe-unavailable";
+
+/// The listing the probe answers per runtime: one unavailable runtime.
+fn probe_delivery_listing() -> RuntimeDeliveryAuthorityListing {
+    RuntimeDeliveryAuthorityListing::new(
+        Vec::new(),
+        vec![UnavailableRuntime::new(
+            LogicalRuntimeId::new(UNAVAILABLE_RUNTIME),
+            RefusedScope::new(
+                format!("rt:{UNAVAILABLE_RUNTIME}"),
+                "forwarding probe: refused until the realm is reopened",
+            ),
+        )],
+    )
+}
 const DELIVERY_GENERATION: u64 = 41;
 /// The probe's commit outcome deadline: neither the trait default
 /// (`DEFAULT_COMMIT_OUTCOME_DEADLINE`) nor the in-memory store's `None`.
@@ -314,6 +334,15 @@ pub(crate) async fn assert_forwards_to(
          Core's boot plan restore every member"
     );
     assert_eq!(
+        store
+            .list_runtime_delivery_authorities_or_unavailable()
+            .await
+            .expect("the inner store's delivery authority listing per runtime"),
+        probe_delivery_listing(),
+        "the inner store's delivery authority listing per runtime: a decorator that keeps the \
+         default refuses the whole backlog while one runtime scope of a host store is poisoned"
+    );
+    assert_eq!(
         probe.calls(),
         vec![
             "execution_custody",
@@ -333,6 +362,7 @@ pub(crate) async fn assert_forwards_to(
             "read_service_call_audit",
             "import_whole_blob_session",
             "list_runtimes_with_recovery_work",
+            "list_runtime_delivery_authorities_or_unavailable",
         ],
         "each method reaches the inner store exactly once"
     );
@@ -388,6 +418,13 @@ mod store_impl {
         ) -> Result<Vec<LogicalRuntimeId>, RuntimeStoreError> {
             self.record("list_runtimes_with_recovery_work");
             Ok(vec![LogicalRuntimeId::new(RECOVERY_WORK_RUNTIME)])
+        }
+
+        async fn list_runtime_delivery_authorities_or_unavailable(
+            &self,
+        ) -> Result<RuntimeDeliveryAuthorityListing, RuntimeStoreError> {
+            self.record("list_runtime_delivery_authorities_or_unavailable");
+            Ok(probe_delivery_listing())
         }
 
         fn try_controller_mutation_custody<'a>(

@@ -60,6 +60,13 @@ impl RecoveryControl {
         }
         tokio::select! { _ = &mut notified => self.enter(), _ = tokio::time::sleep(duration) => self.enter() }
     }
+    /// Test-only: end the current pause, or the next one when none waits, so
+    /// the next sweep starts now. At most one wake is stored. It admits no
+    /// step itself, and a stopped control stays stopped.
+    #[cfg(any(test, feature = "test-support"))]
+    fn wake_for_test(&self) {
+        self.wake.notify_one();
+    }
 }
 
 /// One task per selected host instance. Keeping its JoinHandle behind the
@@ -146,6 +153,28 @@ impl AcquisitionRecovery {
             selected_owner_control: selected.is_some(),
             task,
         })
+    }
+    /// Test-only: wake the same owner's selected control, so its next sweep
+    /// starts now instead of after its pause or backoff. Like observe, this
+    /// calls no enter, starts no work, consumes no handle and changes no
+    /// authority.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn wake_for_test(
+        &self,
+        owner: &InstalledAcquisition,
+    ) -> Result<(), HostLifetimeError> {
+        let selected = owner
+            .transfer_recovery
+            .lock()
+            .map_err(|_| HostLifetimeError::Unavailable)?
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or(HostLifetimeError::Unavailable)?;
+        if !Arc::ptr_eq(&selected, &self.control) {
+            return Err(HostLifetimeError::WrongOwner);
+        }
+        self.control.wake_for_test();
+        Ok(())
     }
     pub(crate) fn prepare_start(&self) -> Result<Handle, HostLifetimeError> {
         if self
@@ -775,6 +804,36 @@ mod tests {
         lifecycle.join().await.unwrap();
         assert!(!started.load(Ordering::SeqCst));
         assert!(!lifecycle.control.pause(Duration::from_secs(60)).await);
+    }
+    #[tokio::test]
+    async fn wake_ends_one_pause_and_never_reopens_a_stopped_control() {
+        let control = Arc::new(RecoveryControl::default());
+        let waiting = tokio::spawn({
+            let control = control.clone();
+            async move { control.pause(Duration::from_secs(60)).await }
+        });
+        control.wake_for_test();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(10), waiting)
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        control.wake_for_test();
+        control.wake_for_test();
+        assert!(control.pause(Duration::from_secs(60)).await);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                control.pause(Duration::from_secs(60))
+            )
+            .await
+            .is_err(),
+            "one stored wake ends one pause only"
+        );
+        control.stop();
+        control.wake_for_test();
+        assert!(!control.pause(Duration::from_secs(60)).await);
     }
     #[tokio::test]
     async fn failed_task_join_never_becomes_a_successful_retry() {

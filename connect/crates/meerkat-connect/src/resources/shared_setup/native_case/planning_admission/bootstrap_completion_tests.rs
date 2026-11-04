@@ -25,7 +25,7 @@ fn in_process_bootstrap_completion_is_one_use_and_recovery_is_joined() {
                 Err(meerkat_mobkit::unified_runtime::BootstrapCompletionUnavailable::AlreadyTaken)));
             assert!(planning.script.calls.lock().unwrap().is_empty());
         }).catch_unwind().await;
-        let cleanup = construction::cleanup_completed_runtime(&mut case).await;
+        let cleanup = case.cleanup_completed_runtime().await;
         if let Err(payload) = body { std::panic::resume_unwind(payload); }
         assert!(cleanup.is_empty(), "actual completion owners must join: {cleanup:?}");
     });
@@ -72,7 +72,7 @@ fn in_process_bootstrap_completion_refuses_foreign_runtime_without_taking_it() {
             foreign_clean = report.cleanup_completed() && matches!(report.mob_terminal_shutdown,
                 meerkat_mobkit::MobTerminalShutdownOutcome::Completed(ref report) if report.is_clean());
         }
-        let cleanup = construction::cleanup_completed_runtime(&mut case).await;
+        let cleanup = case.cleanup_completed_runtime().await;
         if let Err(payload) = body { std::panic::resume_unwind(payload); }
         assert!(foreign_clean, "actual foreign runtime must join");
         assert!(cleanup.is_empty(), "actual completion owners must join: {cleanup:?}");
@@ -95,7 +95,7 @@ fn in_process_bootstrap_completion_refuses_closed_host_without_starting_recovery
             assert!(observed.stopped && !observed.selected_owner_control);
             assert_eq!(observed.task, toolkit_mobkit::installed_host::acquisition::AcquisitionRecoveryTaskObservation::Absent);
         }).catch_unwind().await;
-        let cleanup = construction::cleanup_completed_runtime(&mut case).await;
+        let cleanup = case.cleanup_completed_runtime().await;
         if let Err(payload) = body { std::panic::resume_unwind(payload); }
         assert!(cleanup.is_empty(), "closed actual host must join: {cleanup:?}");
     });

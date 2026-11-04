@@ -1667,6 +1667,15 @@ impl Case {
             .set(tokio::time::Instant::now() + BOUND)
             .unwrap();
         self.approve_independently();
+        // Publish this in-process runtime's actual bootstrap completion, as
+        // production does once its runtime completes. That starts this host's
+        // acquisition recovery owner, whose sweep records the settled shared
+        // preparation and delivers the current member's continuation.
+        self.host
+            .as_ref()
+            .unwrap()
+            .publish_runtime_bootstrap_completed(self.native.as_ref().unwrap())
+            .unwrap();
         let launch = self.launch.as_ref().unwrap().clone();
         launch.create_parent().await;
         let event = |tag: &str| {
@@ -1850,6 +1859,15 @@ impl Case {
         let mut last_readback = None;
         let completed = tokio::time::timeout(BOUND, async {
             loop {
+                // Drive that recovery owner within BOUND: end its pause, so
+                // its next sweep runs now rather than after its backoff, which
+                // grows to a minute while work is pending. The sweep's own
+                // reads decide what it records; the wake seeds no fact.
+                self.host
+                    .as_ref()
+                    .unwrap()
+                    .wake_acquisition_recovery_for_test()
+                    .unwrap();
                 let row = self.preparation().await.unwrap();
                 let completion_present = !row["completion"].is_null();
                 let b_delivered_present = !row_for(&row, "b")["delivered"].is_null();
@@ -1998,6 +2016,39 @@ impl Case {
         }
         failures
     }
+
+    /// Cleanup once the host published its runtime's bootstrap completion:
+    /// its acquisition recovery owner then has a real retained worker. Close
+    /// the actual host first, keep it across native shutdown, and join it
+    /// before dropping it, after a panic as well.
+    async fn cleanup_completed_runtime(&mut self) -> Vec<String> {
+        use meerkat_mobkit::rpc_gateway::{GatewayHostCloseReason, GatewayHostComposition};
+        let host = self.host.take();
+        let mut failures = Vec::new();
+        if let Some(host) = &host
+            && let Err(error) = host.begin_close(GatewayHostCloseReason::Shutdown)
+        {
+            failures.push(format!("host begin close: {error:?}"));
+        }
+        let cleanup = std::panic::AssertUnwindSafe(self.cleanup())
+            .catch_unwind()
+            .await;
+        if let Some(host) = &host
+            && let Err(error) = host.join_close().await
+        {
+            failures.push(format!("host join close: {error:?}"));
+        }
+        match cleanup {
+            Ok(mut cleanup) => {
+                cleanup.extend(failures);
+                cleanup
+            }
+            Err(payload) => {
+                eprintln!("host cleanup error count after unwind: {}", failures.len());
+                std::panic::resume_unwind(payload)
+            }
+        }
+    }
 }
 
 #[test]
@@ -2019,7 +2070,7 @@ fn two_sdk_children_share_one_preparation_and_cancel_independently() {
         if result.is_err() {
             case.retain_failed_audits().await;
         }
-        let cleanup = case.cleanup().await;
+        let cleanup = case.cleanup_completed_runtime().await;
         assert!(
             cleanup.is_empty(),
             "all SDK/native/physical owners must settle: {cleanup:?}"

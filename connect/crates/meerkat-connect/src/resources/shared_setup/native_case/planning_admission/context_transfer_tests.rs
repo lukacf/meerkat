@@ -95,7 +95,7 @@ pub(super) fn complete_bootstrap(case: &Case) {
 
 /// Actual public host construction and two actual Find-owned commits. The
 /// caller retains Case and must join its actual SDK/native owners on every exit,
-/// with `construction::cleanup_completed_runtime` once the runtime completed.
+/// with `Case::cleanup_completed_runtime` once the runtime completed.
 pub(super) async fn prepare(
     case: &mut Case,
     pipes: toolkit_mobkit::private_host::InheritedHostPipes,
@@ -229,7 +229,7 @@ fn run(mutate: bool) {
         let checked = std::panic::AssertUnwindSafe(exercise(&mut case, pipes, mutate))
             .catch_unwind()
             .await;
-        let cleanup = construction::cleanup_completed_runtime(&mut case).await;
+        let cleanup = case.cleanup_completed_runtime().await;
         assert!(
             cleanup.is_empty(),
             "actual SDK and native owners must be joined: {cleanup:?}"
@@ -393,7 +393,7 @@ fn sdk_completed_context_outlives_donor_deadline_but_not_last_live_interest() {
         if let Some(mut hold) = write_hold.take() {
             hold.join();
         }
-        let cleanup = construction::cleanup_completed_runtime(&mut case).await;
+        let cleanup = case.cleanup_completed_runtime().await;
         assert!(
             cleanup.is_empty(),
             "actual SDK/native and SQLite owners must join: {cleanup:?}"

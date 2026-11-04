@@ -473,7 +473,7 @@ fn registered_r2_find_enters_once_per_call_and_commits_real_context_graphs() {
                 control.release.add_permits(8);
                 case.retain_failed_audits().await;
             }
-            let cleanup = construction::cleanup_completed_runtime(&mut case).await;
+            let cleanup = case.cleanup_completed_runtime().await;
             if let Err(panic) = body {
                 eprintln!("entered R2 fixture cleanup error count: {}", cleanup.len());
                 std::panic::resume_unwind(panic);
@@ -553,7 +553,7 @@ fn registered_r3_find_spends_exact_consent_and_preserves_its_committed_graph_aft
                 case.retain_failed_audits().await;
             }
             control.release.add_permits(8);
-            let cleanup = construction::cleanup_completed_runtime(&mut case).await;
+            let cleanup = case.cleanup_completed_runtime().await;
             if let Err(panic) = body {
                 eprintln!("entered R3 fixture cleanup error count: {}", cleanup.len());
                 std::panic::resume_unwind(panic);

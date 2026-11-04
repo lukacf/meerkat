@@ -1007,6 +1007,23 @@ impl ToolkitGatewayHost {
             .map_err(|_| GatewayHostError::Unavailable)
     }
 
+    /// Test-only: wake this host's actual configured acquisition recovery
+    /// owner, so its next sweep starts now instead of after its pause or
+    /// backoff. A test that awaits what a sweep records drives it with this
+    /// under its own bound. It starts no work and changes no authority.
+    #[cfg(feature = "test-support")]
+    pub fn wake_acquisition_recovery_for_test(&self) -> Result<(), GatewayHostError> {
+        let owner = self
+            .acquisition
+            .lock()
+            .map_err(|_| GatewayHostError::Unavailable)?
+            .configured()
+            .ok_or(GatewayHostError::Unavailable)?;
+        self.acquisition_recovery
+            .wake_for_test(&owner)
+            .map_err(|_| GatewayHostError::Unavailable)
+    }
+
     fn with_grant_configuration(
         owner: Arc<NativeHostLifetime>,
         private_closed: PrivateHostClosed,

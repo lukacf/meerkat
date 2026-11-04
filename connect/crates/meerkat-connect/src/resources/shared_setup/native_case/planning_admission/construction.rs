@@ -2,40 +2,6 @@
 //! inputs; only registration and the held report capture native destinations.
 use super::*;
 
-// Recovery has a real retained worker after in-process completion. Keep its
-// actual host across native shutdown and join it before dropping the owner.
-pub(super) async fn cleanup_completed_runtime(case: &mut Case) -> Vec<String> {
-    let host = case.host.take();
-    let mut failures = Vec::new();
-    if let Some(host) = &host
-        && let Err(error) =
-            host.begin_close(meerkat_mobkit::rpc_gateway::GatewayHostCloseReason::Shutdown)
-    {
-        failures.push(format!("planning host begin close: {error:?}"));
-    }
-    let cleanup = std::panic::AssertUnwindSafe(case.cleanup())
-        .catch_unwind()
-        .await;
-    if let Some(host) = &host
-        && let Err(error) = host.join_close().await
-    {
-        failures.push(format!("planning host join close: {error:?}"));
-    }
-    match cleanup {
-        Ok(mut cleanup) => {
-            cleanup.extend(failures);
-            cleanup
-        }
-        Err(payload) => {
-            eprintln!(
-                "planning host cleanup error count after unwind: {}",
-                failures.len()
-            );
-            std::panic::resume_unwind(payload)
-        }
-    }
-}
-
 pub(super) fn inputs() -> PreparedLocalPolicy {
     let mut inputs = prepared_inputs();
     let audience = inputs.native_host.members[0].audience.clone();

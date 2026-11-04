@@ -40,8 +40,13 @@ scripts/release-rust-crates.sh lists.
         - code under a cfg that needs `workspace-tests` is not scanned: the
           package leaves that feature off, so the code never builds there;
         - the declared test features exist and leave `workspace-tests` off,
-          a crate declaring `workspace-tests` gets it on its Bazel unit-test
-          target, and the packaged README.md prints the test command.
+          and the packaged README.md prints the test command;
+        - the crate's test features (the declared ones, and `workspace-tests`
+          when it declares that feature) are on its Bazel unit-test target,
+          its lib.rs carries the test-feature canary over exactly them, and
+          no path-only self dev-dependency turns them on (the workspace's
+          test commands pass them; the edge would make the crate's lib test
+          wait for its own library).
       A flagged line that is not a test escape is listed under the crate's
       `guard_allow` with its reason.
 
@@ -215,24 +220,111 @@ def bazel_unit_test_features(build_text: str, target: str) -> list[str] | None:
     return re.findall(r'"([^"]+)"', features.group(1)) if features else []
 
 
+def test_features(manifest: dict) -> list[str]:
+    """The features every workspace test build of the crate passes: its
+    declared standalone-test features, then `workspace-tests` when it declares
+    that feature (scripts/ci-products.mjs testFeaturesOf)."""
+    declared = list(dict.fromkeys(standalone_features(manifest)))
+    if WORKSPACE_TESTS in (manifest.get("features") or {}):
+        declared.append(WORKSPACE_TESTS)
+    return declared
+
+
 def bazel_workspace_tests_failures(crate: str, manifest: dict, package_root: pathlib.Path) -> list[str]:
-    """A crate that declares `workspace-tests` gets it on its Bazel unit-test
-    target (scripts/generate-bazel-rust-builds.mjs adds every crate's test
-    features to its feature union), or the Bazel lanes silently drop its
-    workspace-only tests."""
-    if WORKSPACE_TESTS not in (manifest.get("features") or {}):
+    """A crate's Bazel unit-test target turns on every test feature of the
+    crate (scripts/generate-bazel-rust-builds.mjs adds them to its feature
+    union), or the Bazel lanes silently drop the tests they gate."""
+    wanted = test_features(manifest)
+    if not wanted:
         return []
     target = f"{crate.replace('-', '_')}_unit_test"
     try:
         build_text = (package_root / "BUILD.bazel").read_text()
     except OSError as err:
-        return [f"{crate}: declares {WORKSPACE_TESTS} but its BUILD.bazel cannot be read: {err}"]
+        return [f"{crate}: has test features but its BUILD.bazel cannot be read: {err}"]
     features = bazel_unit_test_features(build_text, target)
     if features is None:
-        return [f"{crate}: declares {WORKSPACE_TESTS} but BUILD.bazel has no {target}"]
-    if WORKSPACE_TESTS not in features:
-        return [f"{crate}: BUILD.bazel {target} does not enable {WORKSPACE_TESTS}; run make buildbuddy-generate"]
+        return [f"{crate}: has test features but BUILD.bazel has no {target}"]
+    missing = [feature for feature in wanted if feature not in features]
+    if missing:
+        return [f"{crate}: BUILD.bazel {target} does not enable {', '.join(missing)}; run make buildbuddy-generate"]
     return []
+
+
+CANARY_ENV = "MEERKAT_WORKSPACE_TEST_FEATURES"
+# The canary in any whitespace layout (rustfmt splits a long cfg over lines):
+# `#[cfg(...)]` (no `]` inside), then the const assert on the variable and
+# its message.
+CANARY = re.compile(
+    r'#\[cfg\((?P<cfg>[^\]]*)\)\]\s*'
+    r'const _: \(\) = assert!\(\s*'
+    r'option_env!\("' + CANARY_ENV + r'"\)\.is_none\(\),\s*'
+    r'"(?P<message>(?:[^"\\]|\\.)*)"\s*,?\s*'
+    r'\);',
+    re.S,
+)
+
+
+def canary_features(cfg: str) -> list[str] | None:
+    """The features a canary's cfg, `all(test, not(PREDICATE))`, requires,
+    where PREDICATE is `feature = "x"` or `all(feature = "x", ...)`; None for
+    any other cfg. Whitespace is ignored."""
+    compact = re.sub(r"\s+", "", cfg)
+    whole = re.fullmatch(r'all\(test,not\((?P<predicate>.*)\)\)', compact)
+    if not whole:
+        return None
+    predicate = whole.group("predicate")
+    one = re.fullmatch(r'feature="([^"]+)"', predicate)
+    if one:
+        return [one.group(1)]
+    many = re.fullmatch(r'all\((feature="[^"]+"(?:,feature="[^"]+")+),?\)', predicate)
+    if many:
+        return re.findall(r'feature="([^"]+)"', many.group(1))
+    return None
+
+
+def canary_failures(crate: str, manifest: dict, package_root: pathlib.Path) -> list[str]:
+    """A crate with test features carries exactly one test-feature canary in
+    its lib.rs, over exactly those features and naming them in its message: in
+    the repository (.cargo/config.toml [env] sets the variable) a test build
+    without them fails to compile instead of compiling the tests they gate
+    out. A crate without test features carries none."""
+    wanted = test_features(manifest)
+    try:
+        text = (package_root / "src" / "lib.rs").read_text()
+    except OSError as err:
+        return [f"{crate}: has test features but its src/lib.rs cannot be read: {err}"] if wanted else []
+    found = list(CANARY.finditer(text))
+    reads = text.count(f'option_env!("{CANARY_ENV}")')
+    if not wanted:
+        return [f"{crate}: has no test features but its lib.rs carries a test-feature canary"] if reads else []
+    if len(found) != 1 or reads != 1:
+        return [f"{crate}: lib.rs must carry exactly one test-feature canary (cfg(all(test, not(...))) const assert on {CANARY_ENV})"]
+    features = canary_features(found[0].group("cfg"))
+    if features is None or sorted(features) != sorted(wanted):
+        return [f"{crate}: the lib.rs canary requires {features}, not the crate's test features {wanted}"]
+    if f"--features {','.join(wanted)}" not in found[0].group("message"):
+        return [f"{crate}: the lib.rs canary message must name `--features {','.join(wanted)}`"]
+    return []
+
+
+def self_dev_dependency_failures(crate: str, manifest: dict) -> list[str]:
+    """No crate dev-depends on itself: the workspace's test commands pass its
+    test features, and a self edge would make its lib test wait for its own
+    library (and swallow `--features <crate>/<feature>` in non-test builds)."""
+    tables = [manifest.get("dev-dependencies") or {}]
+    for target in (manifest.get("target") or {}).values():
+        tables.append((target or {}).get("dev-dependencies") or {})
+    failures = []
+    for table in tables:
+        for key, spec in table.items():
+            name = spec.get("package", key) if isinstance(spec, dict) else key
+            if name == crate or (isinstance(spec, dict) and spec.get("path") == "."):
+                failures.append(
+                    f"{crate}: dev-depends on itself ({key}); the workspace's test commands pass its test features "
+                    "(scripts/core-workspace-args.mjs --tests)"
+                )
+    return failures
 
 
 def toolchain(root: pathlib.Path) -> str | None:
@@ -575,6 +667,8 @@ def guard(root: pathlib.Path, crates: list[str]) -> int:
             failures.append(f"{crate}: guard_allow {path} {kind} matches nothing (stale entry)")
         failures.extend(published_test_contract_failures(crate, cargo_manifest, package_root, packaged))
         failures.extend(bazel_workspace_tests_failures(crate, cargo_manifest, package_root))
+        failures.extend(canary_failures(crate, cargo_manifest, package_root))
+        failures.extend(self_dev_dependency_failures(crate, cargo_manifest))
         print(f"  {crate:<36}{'FAIL' if any(f.startswith(crate + ':') for f in failures) else 'OK'}")
     for failure in failures:
         print(f"FAIL {failure}", file=sys.stderr)

@@ -29,6 +29,19 @@ planner; without `--run` it prints the commands instead of running them.
 Avoid raw `cargo` for normal repo work. When you need targeted Cargo commands,
 use `./scripts/repo-cargo` so output roots and multi-agent work stay isolated.
 
+A crate's own tests build with its test features: the features its
+`[package.metadata.meerkat.standalone-tests]` lists, plus `workspace-tests`
+when it declares that feature. No dev-dependency turns them on, so a test
+command passes them. `node scripts/core-workspace-args.mjs --tests -p <crate>`
+prints a crate's flags, and `--tests` alone prints Core's whole-workspace
+selection with every member's. The Make targets, the CI lanes and the Cargo
+aliases pass them already. In this repository a test build without them fails
+to compile, instead of leaving the crate's workspace-only tests out:
+
+```bash
+./scripts/repo-cargo nextest run $(node scripts/core-workspace-args.mjs --tests -p meerkat-mob)
+```
+
 ## BuildBuddy Opt-In
 
 Set `MEERKAT_BUILDBUDDY=1` to route the same Make lanes through the BuildBuddy

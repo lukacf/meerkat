@@ -30,6 +30,37 @@
     )
 )]
 
+// Test-feature canary. This crate's tests build with its test features,
+// which no dev-dependency turns on: in this repository every test command
+// passes them (`node scripts/core-workspace-args.mjs --tests -p meerkat`
+// prints them). A test build without them would compile the tests they
+// gate out and pass over fewer tests, so it fails to compile here instead.
+// `.cargo/config.toml` [env] sets MEERKAT_WORKSPACE_TEST_FEATURES for this
+// repository's builds only; the published package builds without it.
+#[cfg(all(
+    test,
+    not(all(
+        feature = "local-authorization",
+        feature = "session-store",
+        feature = "session-compaction",
+        feature = "jsonl-store",
+        feature = "memory-store",
+        feature = "memory-store-session",
+        feature = "comms",
+        feature = "mcp",
+        feature = "skills",
+        feature = "schedule",
+        feature = "workgraph",
+        feature = "atif",
+        feature = "workspace-tests"
+    ))
+))]
+const _: () = assert!(
+    option_env!("MEERKAT_WORKSPACE_TEST_FEATURES").is_none(),
+    "meerkat: this repository's test builds need `--features local-authorization,session-store,session-compaction,jsonl-store,memory-store,memory-store-session,comms,mcp,skills,schedule,workgraph,atif,workspace-tests` \
+     (core-workspace-args.mjs --tests -p meerkat prints them)"
+);
+
 /// ATIF trajectory export vocabulary (feature `atif`). Gated because the facade
 /// only re-exports it; surfaces that export trajectories (`rkat`, `rkat-rpc`)
 /// depend on `meerkat-atif` directly.

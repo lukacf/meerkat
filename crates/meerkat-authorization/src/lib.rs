@@ -16,6 +16,20 @@
     allow(dead_code, unused_imports)
 )]
 
+// Test-feature canary. This crate's tests build with its test features,
+// which no dev-dependency turns on: in this repository every test command
+// passes them (`node scripts/core-workspace-args.mjs --tests -p meerkat-authorization`
+// prints them). A test build without them would compile the tests they
+// gate out and pass over fewer tests, so it fails to compile here instead.
+// `.cargo/config.toml` [env] sets MEERKAT_WORKSPACE_TEST_FEATURES for this
+// repository's builds only; the published package builds without it.
+#[cfg(all(test, not(feature = "workspace-tests")))]
+const _: () = assert!(
+    option_env!("MEERKAT_WORKSPACE_TEST_FEATURES").is_none(),
+    "meerkat-authorization: this repository's test builds need `--features workspace-tests` \
+     (core-workspace-args.mjs --tests -p meerkat-authorization prints them)"
+);
+
 mod audit;
 pub mod clock;
 pub mod grant_policy;

@@ -48,9 +48,9 @@ make test
 # Run fast tests through BuildBuddy/Bazel
 MEERKAT_BUILDBUDDY=1 make test
 
-# Run all tests including doc-tests (SLOW due to doc-test compilation);
-# without a package flag Cargo builds the default members, Core's crates
-./scripts/repo-cargo test
+# Run all tests including doc-tests (SLOW due to doc-test compilation) over
+# Core's crates, with their test features (see Build Efficiency)
+./scripts/repo-cargo test $(node scripts/core-workspace-args.mjs --tests)
 
 # Run deterministic end-to-end lane
 make e2e-fast
@@ -108,14 +108,26 @@ This is a large workspace (50 members). Careless builds waste minutes. Follow th
 # Editing meerkat-mob? Check the mob subtree
 ./scripts/repo-cargo check -p meerkat-mob -p meerkat-mob-mcp
 
-# Running tests for one crate
-./scripts/repo-cargo nextest run -p meerkat-mob
+# Running tests for one crate, with its test features
+./scripts/repo-cargo nextest run $(node scripts/core-workspace-args.mjs --tests -p meerkat-mob)
 
 # Only use workspace-wide commands for final verification (make lint, make
 # test-unit and the other whole-workspace targets select Core's members)
 ./scripts/repo-cargo clippy $(node scripts/core-workspace-args.mjs) -- -D warnings
-./scripts/repo-cargo nextest run $(node scripts/core-workspace-args.mjs) --status-level none --final-status-level fail
+./scripts/repo-cargo nextest run $(node scripts/core-workspace-args.mjs --tests) --status-level none --final-status-level fail
 ```
+
+**Test commands pass the crates' test features.** A crate's own tests build
+with the features its `[package.metadata.meerkat.standalone-tests]` lists,
+plus `workspace-tests` when it declares that feature. No dev-dependency turns
+them on (a path-only self dev-dependency made the crate's lib test wait for
+its own library), so every test command passes them:
+`node scripts/core-workspace-args.mjs --tests` adds them to a selection
+(`-p NAME` for named crates). The Make targets, the CI planner's rows, the
+Cargo aliases and the Bazel generator pass them already. A test build of such
+a crate without them fails to compile in this repository (its `lib.rs`
+canary, armed by `.cargo/config.toml` [env]); the published packages build
+without that configuration.
 
 **The workspace also holds Meerkat Meta (`meta/`) and Meerkat Connect
 (`connect/`).** Cargo unifies features across the packages of one invocation,
@@ -767,9 +779,9 @@ names per target must equal the workspace's minus the files and tests
 `ci/standalone-workspace-only.toml` declares workspace-only. A unit test that
 needs a crate the package cannot depend on (a cyclic or unpublished
 dev-dependency) is gated on its crate's internal `workspace-tests` feature,
-which only the crate's path-only self dev-dependency enables (`cargo package`
-strips it), and the Bazel generator fails a crate that declares the feature
-without that edge. Publication does not wait for the census yet: the release
+which only the workspace's own test builds pass (the package's README command
+leaves it off), and the Bazel generator fails a crate that declares the
+feature when its test targets would build without it. Publication does not wait for the census yet: the release
 gate on a passing run at the release commit returns once a nightly run has
 passed and its duration is measured.
 

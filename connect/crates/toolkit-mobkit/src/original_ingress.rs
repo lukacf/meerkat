@@ -3042,6 +3042,32 @@ impl AuthenticatedOriginalSource for ToolkitOriginalOwner {
     }
 }
 
+/// Take `lock` for a synchronous native reader, waiting out a holder until
+/// `deadline`, with `pause` between attempts. Contention past the deadline
+/// and poison answer unavailable.
+fn wait_for_lock<T>(
+    lock: &std::sync::Mutex<T>,
+    deadline: std::time::Instant,
+    mut pause: impl FnMut(std::time::Duration),
+) -> Result<std::sync::MutexGuard<'_, T>, ControllerReadinessFailure> {
+    let mut step = std::time::Duration::from_micros(20);
+    loop {
+        match lock.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(ControllerReadinessFailure::PolicyUnavailable);
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Err(ControllerReadinessFailure::PolicyUnavailable);
+        }
+        pause(step.min(deadline - now));
+        step = (step * 2).min(std::time::Duration::from_millis(1));
+    }
+}
+
 impl ToolkitOriginalOwner {
     /// The source collection for the synchronous native readers that
     /// authenticate an original and read its retained custody. Its holders
@@ -3056,24 +3082,11 @@ impl ToolkitOriginalOwner {
     fn wait_for_source_collection(
         &self,
     ) -> Result<std::sync::MutexGuard<'_, Vec<OriginalRecord>>, ControllerReadinessFailure> {
-        let deadline =
-            std::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
-        let mut pause = std::time::Duration::from_micros(20);
-        loop {
-            match self.originals.try_lock() {
-                Ok(originals) => return Ok(originals),
-                Err(std::sync::TryLockError::Poisoned(_)) => {
-                    return Err(ControllerReadinessFailure::PolicyUnavailable);
-                }
-                Err(std::sync::TryLockError::WouldBlock) => {}
-            }
-            let now = std::time::Instant::now();
-            if now >= deadline {
-                return Err(ControllerReadinessFailure::PolicyUnavailable);
-            }
-            std::thread::sleep(pause.min(deadline - now));
-            pause = (pause * 2).min(std::time::Duration::from_millis(1));
-        }
+        wait_for_lock(
+            &self.originals,
+            std::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+            std::thread::sleep,
+        )
     }
 
     pub(crate) fn admitted_original_basis(

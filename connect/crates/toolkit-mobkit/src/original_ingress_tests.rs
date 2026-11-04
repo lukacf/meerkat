@@ -767,6 +767,52 @@ fn authenticated_original_waits_for_a_held_source_collection_instead_of_refusing
     });
 }
 
+// The wait shared by both native readers (retained_custody and
+// authenticated_original): a reader descheduled across its deadline while the
+// holder releases must not read at the next attempt. It answers unavailable,
+// as a reader whose holder outlasts the bound does.
+#[test]
+fn source_wait_never_reads_after_its_deadline() {
+    let lock = std::sync::Mutex::new(());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+    let (held, holding) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let (freed, free) = std::sync::mpsc::channel();
+    let mut pauses = 0;
+    let answer = std::thread::scope(|scope| {
+        let shared = &lock;
+        let holder = scope.spawn(move || {
+            let guard = shared.lock().unwrap();
+            held.send(()).unwrap();
+            released.recv().unwrap();
+            drop(guard);
+            freed.send(()).unwrap();
+        });
+        holding.recv().unwrap();
+        let answer = super::wait_for_lock(&lock, deadline, |_| {
+            pauses += 1;
+            if pauses == 1 {
+                // Descheduled across the deadline: the holder releases
+                // meanwhile, so the lock is free at the next attempt.
+                release.send(()).unwrap();
+                free.recv().unwrap();
+                while std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        })
+        .map(drop);
+        holder.join().unwrap();
+        answer
+    });
+    assert_eq!(pauses, 1);
+    assert_eq!(
+        answer,
+        Err(ControllerReadinessFailure::PolicyUnavailable),
+        "a reader past its deadline answers unavailable, even with the lock free"
+    );
+}
+
 pub(crate) fn private_event(label: &str) -> crate::private_originals::PrivateAuthenticatedEvent {
     use crate::private_originals::{PrivateAuthenticatedEvent, PrivateSourceEvidence};
     let sha256 = evidence(label)

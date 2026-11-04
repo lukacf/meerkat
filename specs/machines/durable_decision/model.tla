@@ -949,18 +949,19 @@ ExpireSettledExecutionRefused(now_ms) ==
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
-AuthorizeExecution(arg_operation_id, arg_request_digest, now_ms) ==
+AuthorizeExecution(arg_operation_id, arg_request_digest, approver_current, now_ms) ==
     /\ phase = "Approved"
     /\ (arg_operation_id = operation_id)
     /\ (arg_request_digest = request_digest)
     /\ (now_ms < deadline_at_ms)
+    /\ approver_current
     /\ phase' = "Approved"
     /\ model_step_count' = model_step_count + 1
     /\ permit_issued' = TRUE
     /\ UnchangedFrame_c0495e5e907ed933
 
 
-AuthorizeExecutionAtDeadline(arg_operation_id, arg_request_digest, now_ms) ==
+AuthorizeExecutionAtDeadline(arg_operation_id, arg_request_digest, approver_current, now_ms) ==
     /\ phase = "Approved"
     /\ (arg_operation_id = operation_id)
     /\ (arg_request_digest = request_digest)
@@ -973,7 +974,7 @@ AuthorizeExecutionAtDeadline(arg_operation_id, arg_request_digest, now_ms) ==
     /\ UnchangedFrame_e951506f84a53247
 
 
-AuthorizeExecutionRefusedSettlementOwed(arg_operation_id, arg_request_digest, now_ms) ==
+AuthorizeExecutionRefusedSettlementOwed(arg_operation_id, arg_request_digest, approver_current, now_ms) ==
     /\ phase = "Approved"
     /\ (arg_operation_id = operation_id)
     /\ (arg_request_digest = request_digest)
@@ -984,7 +985,7 @@ AuthorizeExecutionRefusedSettlementOwed(arg_operation_id, arg_request_digest, no
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
-AuthorizeExecutionRefusedBinding(arg_operation_id, arg_request_digest, now_ms) ==
+AuthorizeExecutionRefusedBinding(arg_operation_id, arg_request_digest, approver_current, now_ms) ==
     /\ phase = "Approved"
     /\ (IF (arg_operation_id # operation_id) THEN TRUE ELSE (arg_request_digest # request_digest))
     /\ phase' = "Approved"
@@ -992,42 +993,42 @@ AuthorizeExecutionRefusedBinding(arg_operation_id, arg_request_digest, now_ms) =
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
-AuthorizeExecutionRefusedNotApprovedOpen(arg_operation_id, arg_request_digest, now_ms) ==
+AuthorizeExecutionRefusedNotApprovedOpen(arg_operation_id, arg_request_digest, approver_current, now_ms) ==
     /\ phase = "Open"
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
-AuthorizeExecutionRefusedNotApprovedRejected(arg_operation_id, arg_request_digest, now_ms) ==
+AuthorizeExecutionRefusedNotApprovedRejected(arg_operation_id, arg_request_digest, approver_current, now_ms) ==
     /\ phase = "Rejected"
     /\ phase' = "Rejected"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
-AuthorizeExecutionRefusedNotApprovedExpired(arg_operation_id, arg_request_digest, now_ms) ==
+AuthorizeExecutionRefusedNotApprovedExpired(arg_operation_id, arg_request_digest, approver_current, now_ms) ==
     /\ phase = "Expired"
     /\ phase' = "Expired"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
-AuthorizeExecutionRefusedNotApprovedWithdrawn(arg_operation_id, arg_request_digest, now_ms) ==
+AuthorizeExecutionRefusedNotApprovedWithdrawn(arg_operation_id, arg_request_digest, approver_current, now_ms) ==
     /\ phase = "Withdrawn"
     /\ phase' = "Withdrawn"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
-AuthorizeExecutionRefusedNotApprovedExecuted(arg_operation_id, arg_request_digest, now_ms) ==
+AuthorizeExecutionRefusedNotApprovedExecuted(arg_operation_id, arg_request_digest, approver_current, now_ms) ==
     /\ phase = "Executed"
     /\ phase' = "Executed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
-AuthorizeExecutionRefusedNotApprovedExecutionRefused(arg_operation_id, arg_request_digest, now_ms) ==
+AuthorizeExecutionRefusedNotApprovedExecutionRefused(arg_operation_id, arg_request_digest, approver_current, now_ms) ==
     /\ phase = "ExecutionRefused"
     /\ phase' = "ExecutionRefused"
     /\ model_step_count' = model_step_count + 1
@@ -1460,6 +1461,32 @@ SettleNoticeRefusedNotEndedApproved(delivered) ==
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
+AuthorizeExecutionRefusedApproverRevoked(arg_operation_id, arg_request_digest, approver_current, now_ms) ==
+    /\ phase = "Approved"
+    /\ (arg_operation_id = operation_id)
+    /\ (arg_request_digest = request_digest)
+    /\ (now_ms < deadline_at_ms)
+    /\ ~(approver_current)
+    /\ ~(permit_issued)
+    /\ phase' = "ExecutionRefused"
+    /\ model_step_count' = model_step_count + 1
+    /\ ended_at_ms' = Some(now_ms)
+    /\ notice' = owed_if_due(notice)
+    /\ UnchangedFrame_e951506f84a53247
+
+
+AuthorizeExecutionRefusedRevokedSettlementOwed(arg_operation_id, arg_request_digest, approver_current, now_ms) ==
+    /\ phase = "Approved"
+    /\ (arg_operation_id = operation_id)
+    /\ (arg_request_digest = request_digest)
+    /\ (now_ms < deadline_at_ms)
+    /\ ~(approver_current)
+    /\ permit_issued
+    /\ phase' = "Approved"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_f7d4c4b3385291f4
+
+
 Next ==
     \/ (phase = "Unheld") /\ \E arg_decision_id \in StringValues : \E now_ms \in 0..2 : \E arg_deadline_at_ms \in 0..2 : \E arg_subject_digest \in DecisionDigestValues : \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E arg_requester \in DecisionPartyValues : \E arg_approver_id \in DecisionPartyValues : \E arg_reviewer \in OptionDecisionPartyValues : \E notice_routable \in BOOLEAN : HoldHuman(arg_decision_id, now_ms, arg_deadline_at_ms, arg_subject_digest, arg_operation_id, arg_request_digest, arg_requester, arg_approver_id, arg_reviewer, notice_routable)
     \/ (phase = "Unheld") /\ \E arg_decision_id \in StringValues : \E now_ms \in 0..2 : \E arg_deadline_at_ms \in 0..2 : \E arg_subject_digest \in DecisionDigestValues : \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E arg_requester \in DecisionPartyValues : \E arg_approver_id \in DecisionPartyValues : \E arg_reviewer \in OptionDecisionPartyValues : \E notice_routable \in BOOLEAN : HoldReview(arg_decision_id, now_ms, arg_deadline_at_ms, arg_subject_digest, arg_operation_id, arg_request_digest, arg_requester, arg_approver_id, arg_reviewer, notice_routable)
@@ -1544,16 +1571,16 @@ Next ==
     \/ (phase = "Withdrawn") /\ \E now_ms \in 0..2 : ExpireSettledWithdrawn(now_ms)
     \/ (phase = "Executed") /\ \E now_ms \in 0..2 : ExpireSettledExecuted(now_ms)
     \/ (phase = "ExecutionRefused") /\ \E now_ms \in 0..2 : ExpireSettledExecutionRefused(now_ms)
-    \/ (phase = "Approved") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E now_ms \in 0..2 : AuthorizeExecution(arg_operation_id, arg_request_digest, now_ms)
-    \/ (phase = "Approved") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E now_ms \in 0..2 : AuthorizeExecutionAtDeadline(arg_operation_id, arg_request_digest, now_ms)
-    \/ (phase = "Approved") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E now_ms \in 0..2 : AuthorizeExecutionRefusedSettlementOwed(arg_operation_id, arg_request_digest, now_ms)
-    \/ (phase = "Approved") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E now_ms \in 0..2 : AuthorizeExecutionRefusedBinding(arg_operation_id, arg_request_digest, now_ms)
-    \/ (phase = "Open") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E now_ms \in 0..2 : AuthorizeExecutionRefusedNotApprovedOpen(arg_operation_id, arg_request_digest, now_ms)
-    \/ (phase = "Rejected") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E now_ms \in 0..2 : AuthorizeExecutionRefusedNotApprovedRejected(arg_operation_id, arg_request_digest, now_ms)
-    \/ (phase = "Expired") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E now_ms \in 0..2 : AuthorizeExecutionRefusedNotApprovedExpired(arg_operation_id, arg_request_digest, now_ms)
-    \/ (phase = "Withdrawn") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E now_ms \in 0..2 : AuthorizeExecutionRefusedNotApprovedWithdrawn(arg_operation_id, arg_request_digest, now_ms)
-    \/ (phase = "Executed") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E now_ms \in 0..2 : AuthorizeExecutionRefusedNotApprovedExecuted(arg_operation_id, arg_request_digest, now_ms)
-    \/ (phase = "ExecutionRefused") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E now_ms \in 0..2 : AuthorizeExecutionRefusedNotApprovedExecutionRefused(arg_operation_id, arg_request_digest, now_ms)
+    \/ (phase = "Approved") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E now_ms \in 0..2 : AuthorizeExecution(arg_operation_id, arg_request_digest, TRUE, now_ms)
+    \/ (phase = "Approved") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E approver_current \in BOOLEAN : \E now_ms \in 0..2 : AuthorizeExecutionAtDeadline(arg_operation_id, arg_request_digest, approver_current, now_ms)
+    \/ (phase = "Approved") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E approver_current \in BOOLEAN : \E now_ms \in 0..2 : AuthorizeExecutionRefusedSettlementOwed(arg_operation_id, arg_request_digest, approver_current, now_ms)
+    \/ (phase = "Approved") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E approver_current \in BOOLEAN : \E now_ms \in 0..2 : AuthorizeExecutionRefusedBinding(arg_operation_id, arg_request_digest, approver_current, now_ms)
+    \/ (phase = "Open") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E approver_current \in BOOLEAN : \E now_ms \in 0..2 : AuthorizeExecutionRefusedNotApprovedOpen(arg_operation_id, arg_request_digest, approver_current, now_ms)
+    \/ (phase = "Rejected") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E approver_current \in BOOLEAN : \E now_ms \in 0..2 : AuthorizeExecutionRefusedNotApprovedRejected(arg_operation_id, arg_request_digest, approver_current, now_ms)
+    \/ (phase = "Expired") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E approver_current \in BOOLEAN : \E now_ms \in 0..2 : AuthorizeExecutionRefusedNotApprovedExpired(arg_operation_id, arg_request_digest, approver_current, now_ms)
+    \/ (phase = "Withdrawn") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E approver_current \in BOOLEAN : \E now_ms \in 0..2 : AuthorizeExecutionRefusedNotApprovedWithdrawn(arg_operation_id, arg_request_digest, approver_current, now_ms)
+    \/ (phase = "Executed") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E approver_current \in BOOLEAN : \E now_ms \in 0..2 : AuthorizeExecutionRefusedNotApprovedExecuted(arg_operation_id, arg_request_digest, approver_current, now_ms)
+    \/ (phase = "ExecutionRefused") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E approver_current \in BOOLEAN : \E now_ms \in 0..2 : AuthorizeExecutionRefusedNotApprovedExecutionRefused(arg_operation_id, arg_request_digest, approver_current, now_ms)
     \/ (phase = "Approved") /\ \E now_ms \in 0..2 : ReleaseExecution(now_ms)
     \/ (phase = "Approved") /\ \E now_ms \in 0..2 : ReleaseExecutionAtDeadline(now_ms)
     \/ (phase = "Approved") /\ \E now_ms \in 0..2 : ReleaseExecutionRefusedNotAuthorized(now_ms)
@@ -1604,6 +1631,8 @@ Next ==
     \/ (phase = "ExecutionRefused") /\ \E delivered \in BOOLEAN : SettleNoticeRefusedExecutionRefused(delivered)
     \/ (phase = "Open") /\ \E delivered \in BOOLEAN : SettleNoticeRefusedNotEndedOpen(delivered)
     \/ (phase = "Approved") /\ \E delivered \in BOOLEAN : SettleNoticeRefusedNotEndedApproved(delivered)
+    \/ (phase = "Approved") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E now_ms \in 0..2 : AuthorizeExecutionRefusedApproverRevoked(arg_operation_id, arg_request_digest, FALSE, now_ms)
+    \/ (phase = "Approved") /\ \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E now_ms \in 0..2 : AuthorizeExecutionRefusedRevokedSettlementOwed(arg_operation_id, arg_request_digest, FALSE, now_ms)
     \/ TerminalStutter
 
 unheld_is_empty == (IF (phase # "Unheld") THEN TRUE ELSE ((decision_id = "") /\ (operation_id = "") /\ (deadline_at_ms = 0) /\ (reviewer = None) /\ (stage = "Human") /\ (first_presented_to_approver_at_ms = None) /\ ~(presented_to_reviewer) /\ (evidence_digest = None) /\ (decided_at_ms = None) /\ (ended_at_ms = None) /\ ~(permit_issued) /\ (executed_request_digest = None) /\ (notice = "NotRequired")))

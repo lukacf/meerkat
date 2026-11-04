@@ -457,3 +457,49 @@ fn an_approved_decision_with_no_permit_past_its_deadline_is_due() {
         "past it, while the held one waits for its permit's settlement"
     );
 }
+
+#[test]
+fn the_executor_claim_is_an_os_lock_beside_the_database() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_path = dir.path().join("host");
+    let store = SqliteDecisionStore::in_store_path(&store_path);
+    let lock_path = store.executor_lock_path();
+    assert_eq!(
+        lock_path,
+        store_path.join("approval_decisions.executor.lock")
+    );
+
+    let claim = store
+        .claim_executor()
+        .expect("the first claim creates the store path and the lock file");
+    assert!(lock_path.is_file());
+    assert!(!store.path().exists(), "the claim creates no database");
+    let other_open = SqliteDecisionStore::in_store_path(&store_path);
+    for (holder, what) in [(&store, "the same open"), (&other_open, "another open")] {
+        assert_eq!(
+            holder.claim_executor().map(|_| ()),
+            Err(ApprovalStoreError::Contended),
+            "{what}"
+        );
+    }
+    // Any other holder of the file, as another process is, finds it locked.
+    let foreign = std::fs::File::open(&lock_path).expect("open the lock file");
+    assert!(matches!(
+        foreign.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+
+    drop(claim);
+    foreign
+        .try_lock()
+        .expect("the lock ends when the claim drops");
+    assert_eq!(
+        other_open.claim_executor().map(|_| ()),
+        Err(ApprovalStoreError::Contended),
+        "the OS lock is the claim"
+    );
+    drop(foreign);
+    let _claim = other_open
+        .claim_executor()
+        .expect("free once every holder is gone");
+}

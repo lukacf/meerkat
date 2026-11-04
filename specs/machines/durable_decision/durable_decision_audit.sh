@@ -4,14 +4,15 @@
 # permit and the executed fact, expiry, withdrawal and the requester notice
 # an ended decision owes. An approved decision expires at its deadline unless
 # an execution permit is outstanding: a permit is issued only before the
-# deadline, the executed fact settles it at any time, and a release at or
-# after the deadline records the expiry.
+# deadline and only for an approver who is still current, the executed fact
+# settles it at any time, and a release at or after the deadline records the
+# expiry.
 #
 # usage: durable_decision_audit.sh <max-steps> [--mutants] [extra tlc args...]
 #
 # Derives the TLC config from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then adds the audit's step
-# bound and its fourteen invariants, and checks them over the whole bounded
+# bound and its fifteen invariants, and checks them over the whole bounded
 # space (safety) with TLC coverage: every wrapper in covered_actions below
 # (one per generated arm, a per-phase arm's phases sharing one, and the
 # owner's commit) must generate a successor state, and the space must keep
@@ -43,7 +44,12 @@
 #   - a decision observed before the first presentation refused, then an
 #     approval (DecidedBeforePresentationRefused);
 #   - an approval observed in the same millisecond as the first presentation
-#     (ApprovedAtThePresentation).
+#     (ApprovedAtThePresentation);
+#   - an approver no longer current at the authorization: no permit, and the
+#     decision ends refused (ApproverRevokedEndsRefused);
+#   - an approver no longer current while a permit is outstanding: no new
+#     permit, and the commit made under it settles as executed
+#     (RevokedPermitSettledExecuted).
 # With --mutants it seeds one defect into a copy of the generated model per
 # mutant and requires TLC to refuse each with its property. TLC stops at its
 # first violation and reports only the first violated invariant of a state,
@@ -78,7 +84,11 @@
 #   - a presentation at 0 recorded as the first presentation
 #     (first_presentation_is_a_reading, a generated invariant), and a
 #     decision accepted on a carried presentation at 0
-#     (AuditDecisionFollowsPresentation).
+#     (AuditDecisionFollowsPresentation);
+#   - an authorization that ignores the approver's answer, a refusal for an
+#     approver no longer current that drops the outstanding permit, and one
+#     that keeps the decision approved
+#     (AuditPermitOnlyForCurrentApprover).
 # The executor's obligations are assumed, not checked: the machine records
 # that a permit is outstanding, not who holds it or whether a commit landed.
 # The audit models one executor per decision (one owner drives the permit),
@@ -87,7 +97,8 @@
 # commit record before releasing). AuditCommittedIsSettleable holds only
 # under them: a release after the commit orphans it (hold, approve,
 # authorize, commit, release). DecisionExecutionPermit and the settlement
-# calls of DurableDecisionService state the same obligations.
+# calls of DurableDecisionService state the same obligations, and
+# DecisionExecutorLoop keeps them.
 # An anchor this script expects but cannot find fails the run. Each TLC run is
 # held to the canonical lane's per-run cap (tlc_run_cap.sh) and fails closed
 # as TLC INCOMPLETE.
@@ -116,7 +127,7 @@ trap 'if declare -F tlc_run_cap_reap >/dev/null; then tlc_run_cap_reap; fi; rm -
 # green run found at the lane's bound; a run at a smaller bound is not held
 # to it.
 default_steps=6
-safety_states=36073
+safety_states=42729
 min_distinct_states=$(( safety_states * 9 / 10 ))
 
 # Every wrapper must fire. TLC names an arm after the audit's wrapper, so
@@ -174,6 +185,8 @@ covered_actions=(
   AuditAuthorizeExecutionRefusedSettlementOwed
   AuditAuthorizeExecutionRefusedBinding
   AuditAuthorizeExecutionRefusedNotApproved
+  AuditAuthorizeExecutionRefusedApproverRevoked
+  AuditAuthorizeExecutionRefusedRevokedSettlementOwed
   AuditReleaseExecution
   AuditReleaseExecutionAtDeadline
   AuditReleaseExecutionRefusedNotAuthorized
@@ -222,6 +235,7 @@ audit_invariants=(
   AuditNoPermitAtOrAfterDeadline
   AuditReleaseClearsPermit
   AuditDecisionFollowsPresentation
+  AuditPermitOnlyForCurrentApprover
   AuditCommittedIsSettleable
   AuditFirstPresentationIsTheEarliest
 )
@@ -337,7 +351,8 @@ for witness in HumanApprovalExecutedAndNoticed RetriedAfterRelease ExecutionRefu
   EscalatedThenHumanApproved StaleDigestThenApproved DecideAtDeadlineExpires \
   WithdrawnThenDecideRefused SelfApprovalThenAnotherApproves CommitThenRecordReplayed \
   HoldReplayedAndConflicting PermitAcrossDeadlineExecuted ReleaseAfterDeadlineExpires \
-  AuthorizeAtDeadlineRefused DecidedBeforePresentationRefused ApprovedAtThePresentation; do
+  AuthorizeAtDeadlineRefused DecidedBeforePresentationRefused ApprovedAtThePresentation \
+  ApproverRevokedEndsRefused RevokedPermitSettledExecuted; do
   cfg="${work_dir}/witness-${witness}.cfg"
   write_cfg "${cfg}" "" "
   NotAuditWitness${witness}"
@@ -578,5 +593,25 @@ DecideApproved
 /\ TRUE
 EOF
   mutate decide_carries_untimed AuditDecisionFollowsPresentation "${edits}"
+
+  # An authorization that ignores the host's answer for the approver.
+  cat > "${edits}" <<'EOF'
+AuthorizeExecution
+/\ approver_current
+/\ TRUE
+EOF
+  mutate authorize_ignores_approver AuditPermitOnlyForCurrentApprover "${edits}"
+
+  # A refusal for an approver no longer current that drops the outstanding
+  # permit, and one that keeps the decision approved.
+  frame_update AuthorizeExecutionRefusedRevokedSettlementOwed permit_issued FALSE > "${edits}"
+  mutate revoked_drops_permit AuditPermitOnlyForCurrentApprover "${edits}"
+
+  cat > "${edits}" <<'EOF'
+AuthorizeExecutionRefusedApproverRevoked
+/\ phase' = "ExecutionRefused"
+/\ phase' = "Approved"
+EOF
+  mutate revoked_keeps_approval AuditPermitOnlyForCurrentApprover "${edits}"
 fi
 echo "durable decision audit passed at model_step_count <= ${max_steps}"

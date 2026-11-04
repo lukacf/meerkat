@@ -17,6 +17,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `durable_decision_deadline` — durable_decision_machine.rs::a_touch_at_the_deadline_records_expiry and an_approved_decision_expires_at_its_deadline_unless_a_permit_is_outstanding record the expiry of an open decision at any touch at or after its deadline, let an approved decision with no outstanding permit lapse at its deadline, and hold the expiry off while a permit is outstanding
 - `durable_decision_withdrawal` — durable_decision_machine.rs::withdraw_is_open_only_by_requester_or_host withdraws an open decision by its requester or the host before its deadline and refuses another withdrawer and a decided decision
 - `durable_decision_execution` — durable_decision_machine.rs::execution_is_authorized_only_while_approved_with_the_held_binding, executed_replays_and_a_mismatched_binding_is_refused, a_permit_outstanding_across_the_deadline_settles_executed_or_expired and close_refused_never_follows_executed authorize a permit only for the held binding of an approved decision, record the execution only under an outstanding permit, replay it, release a permit with no commit, and close a permanent refusal
+- `durable_decision_approver_currentness` — durable_decision_machine.rs::an_approver_who_is_no_longer_current_gets_no_permit refuses a permit when the approver who decided is no longer current, ends a decision with no outstanding permit refused with its notice owed, and holds one whose permit is outstanding until its owner settles it
 - `durable_decision_notice` — durable_decision_machine.rs::notice_is_owed_once_at_the_end_for_routable_decisions owes one requester notice at every end of a routable decision, settles it delivered or failed, replays the same receipt and refuses a contradicting one, an unroutable requester's and a notice before the end
 - `durable_decision_terminal_latch` — durable_decision_machine.rs::every_command_class_in_every_phase_is_total_and_only_mutates_where_intended and recover_from_state_refuses_each_torn_shape refuse every input an ended or approved decision does not accept with its typed refusal and a byte-identical state, and refuse a recovered row that breaks any invariant
 
@@ -450,6 +451,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SettleNoticeRefusedNotEndedApproved`
   - anchors: `durable_decision`
   - scenarios: `durable_decision_notice`
+- `AuthorizeExecutionRefusedApproverRevoked`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_approver_currentness`
+- `AuthorizeExecutionRefusedRevokedSettlementOwed`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_approver_currentness`
 
 ### Effects
 - `Held`
@@ -490,13 +497,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `durable_decision_execution`
 - `ExecutionRefused`
   - anchors: `durable_decision`
-  - scenarios: `durable_decision_execution`
+  - scenarios: `durable_decision_execution`, `durable_decision_approver_currentness`
 - `NoticeSettled`
   - anchors: `durable_decision`
   - scenarios: `durable_decision_notice`
 - `Refused`
   - anchors: `durable_decision`
-  - scenarios: `durable_decision_hold`, `durable_decision_human_decision`, `durable_decision_review`, `durable_decision_deadline`, `durable_decision_withdrawal`, `durable_decision_execution`, `durable_decision_notice`, `durable_decision_terminal_latch`
+  - scenarios: `durable_decision_hold`, `durable_decision_human_decision`, `durable_decision_review`, `durable_decision_deadline`, `durable_decision_withdrawal`, `durable_decision_execution`, `durable_decision_approver_currentness`, `durable_decision_notice`, `durable_decision_terminal_latch`
 
 ### Invariants
 - `unheld_is_empty`
@@ -528,7 +535,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `durable_decision_human_decision`, `durable_decision_terminal_latch`
 - `permit_is_outstanding_only_while_approved`
   - anchors: `durable_decision`
-  - scenarios: `durable_decision_execution`, `durable_decision_terminal_latch`
+  - scenarios: `durable_decision_execution`, `durable_decision_approver_currentness`, `durable_decision_terminal_latch`
 - `executed_names_its_held_request`
   - anchors: `durable_decision`
   - scenarios: `durable_decision_execution`, `durable_decision_terminal_latch`
@@ -546,7 +553,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `durable_decision_withdrawal`, `durable_decision_terminal_latch`
 - `ended_decisions_owe_their_notice`
   - anchors: `durable_decision`
-  - scenarios: `durable_decision_notice`, `durable_decision_terminal_latch`
+  - scenarios: `durable_decision_approver_currentness`, `durable_decision_notice`, `durable_decision_terminal_latch`
 
 
 <!-- GENERATED_COVERAGE_END -->

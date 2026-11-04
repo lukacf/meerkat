@@ -586,24 +586,6 @@ impl InstalledWorkflowContextTransfer {
         Ok(())
     }
 
-    pub(crate) fn check_invocation(
-        &self,
-        source: &Arc<PrivateOriginals>,
-        original: &super::super::super::acquisition::AcquisitionOriginal,
-        correlation: &Id,
-        planning: &Arc<InstalledWorkflowPlanning>,
-        backend: &SetupWorkBackend,
-        ceiling: &Ceiling,
-    ) -> Result<(), PrivateOriginalError> {
-        self.check_invocation_observed(source, original, correlation, planning, backend, ceiling)
-            .map_err(|error| match error {
-                WorkflowChildPreparationError::ObservationChanged => {
-                    PrivateOriginalError::Unavailable
-                }
-                WorkflowChildPreparationError::Refused(error) => error,
-            })
-    }
-
     pub(crate) fn check_invocation_observed(
         &self,
         source: &Arc<PrivateOriginals>,
@@ -626,10 +608,8 @@ impl InstalledWorkflowContextTransfer {
         Ok(())
     }
 
-    /// `deadline` is the Find request's source deadline: with the dispatch's
-    /// remaining tool time it bounds the selection read's wait.
-    /// [`Self::check_invocation`] on the Find dispatch: a selection read
-    /// still stale after its rebuild waits with that dispatch's Core churn,
+    /// [`Self::check_invocation_observed`] on the Find dispatch: a selection
+    /// read still stale after its rebuild waits with that dispatch's Core churn,
     /// bounded by the dispatch's remaining tool time and the request deadline,
     /// holding nothing, and reads again, as the dispatch's other binding reads
     /// do. A wait that does not settle within the budget ends as before
@@ -687,6 +667,8 @@ impl InstalledWorkflowContextTransfer {
         }
     }
 
+    /// `deadline` is the Find request's source deadline: with the dispatch's
+    /// remaining tool time it bounds the selection read's wait.
     pub(crate) async fn commit_entered(
         self: &Arc<Self>,
         snapshot: &SetupSnapshot,

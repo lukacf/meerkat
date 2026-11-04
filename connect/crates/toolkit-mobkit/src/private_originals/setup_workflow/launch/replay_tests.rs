@@ -550,21 +550,31 @@ async fn control(
         Ok(result) => result.unwrap_or_else(|_| panic!("bounded {name}")),
         Err(panic) => std::panic::resume_unwind(panic),
     }
-    // Checked while the source still retains its custody, so a retained
-    // attempt cannot pass only because it was dropped with the fixture.
+    let settled = |pending: &PendingOriginalAdmission| {
+        pending.handoff.phase() == HandoffPhase::Done
+            && matches!(
+                &*pending.pending.lock().unwrap(),
+                SourcePublication::Settled { .. }
+            )
+    };
+    // An attempt the recovery owned (enrolled) is checked while the source
+    // still retains it, so it cannot pass only because it was dropped with
+    // the fixture. An unenrolled attempt has no recovery phase to reach.
     for (attempt, custody) in witness.custody.lock().unwrap().iter().enumerate() {
         assert!(
-            custody.upgrade().is_none_or(|pending| {
-                pending.handoff.phase() == HandoffPhase::Done
-                    && matches!(
-                        &*pending.pending.lock().unwrap(),
-                        SourcePublication::Settled { .. }
-                    )
-            }),
-            "{name}: attempt {attempt}'s source custody settled once its owners joined"
+            custody
+                .upgrade()
+                .is_none_or(|pending| !pending.handoff.enrolled() || settled(&pending)),
+            "{name}: attempt {attempt}'s enrolled source custody settled once its owners joined"
         );
     }
     drop(f);
+    for (attempt, custody) in witness.custody.lock().unwrap().iter().enumerate() {
+        assert!(
+            custody.upgrade().is_none_or(|pending| settled(&pending)),
+            "{name}: attempt {attempt}'s source custody settled once its owners joined"
+        );
+    }
     drop(witness);
     assert_eq!(
         Arc::strong_count(&held),

@@ -914,8 +914,9 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
         // The promotion signals a successful build before it hands the
         // turn's result on, so with `biased` polling a signalled build wins
         // whenever it happened. A result that reaches the create unsignalled
-        // is answered as an immediate create answers it: a build that
-        // failed, or a session some other path built.
+        // means no promotion signalled this create: an error (a build that
+        // failed) is answered as an immediate create answers it, and a
+        // success (a session some other path built) answers the placeholder.
         tokio::select! {
             biased;
             () = first_build.built() => {

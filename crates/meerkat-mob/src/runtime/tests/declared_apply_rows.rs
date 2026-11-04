@@ -2468,6 +2468,179 @@ async fn a_mode_restamp_declared_with_facts_only_goes_ahead() {
     assert_eq!(mob.session("restamped").await, session);
 }
 
+/// `name` declared as a turn-driven `role` member whose spec names `desk`
+/// as its context: a build input the member's builds apply.
+fn declared_with_desk(name: &str, role: &str, desk: &str) -> DeclaredEntry {
+    let mut entry = declared_as(name, role, crate::MobRuntimeMode::TurnDriven);
+    entry.spec.context = Some(serde_json::json!({ "desk": desk }));
+    entry
+}
+
+/// The context of the last build that `mob`'s session service ran on
+/// `session`.
+async fn last_build_context(mob: &ApplyMob, session: &SessionId) -> Option<serde_json::Value> {
+    mob.service
+        .recorded_create_requests()
+        .await
+        .into_iter()
+        .rfind(|build| &build.session_id == session)
+        .expect("a build ran on the session")
+        .app_context
+}
+
+/// A role migration seats the member's successor under the new role on the
+/// member's own session, built from the spec's build inputs. Declared with
+/// its lifecycle facts only, the migration takes no member step: the
+/// identity answers `BuildRequired`, and its member keeps its role, its
+/// generation and its session. Declared with its composed build, the same
+/// migration goes ahead.
+///
+/// RED (`RED-P24-facts-only-migrates.patch`): drop the role migration's
+/// facts-only arm: the member is migrated from facts only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_role_migration_declared_with_facts_only_migrates_no_member() {
+    let mob = ApplyMob::new("apply-facts-only-migration").await;
+    let seated = mob
+        .apply(DeclaredRoster::partial([declared("migrating")]))
+        .await;
+    let (session, _) = seated_on(&seated, "migrating").expect("the identity is seated");
+    mob.wake("migrating").await;
+    let moved = |build: DeclaredBuild| {
+        DeclaredRoster::partial([declared_as(
+            "migrating",
+            "lead",
+            crate::MobRuntimeMode::TurnDriven,
+        )
+        .with_build(build)])
+        .with_role_migration("migrating", "worker")
+    };
+
+    let facts_only = mob.apply(moved(DeclaredBuild::FactsOnly)).await;
+    assert!(
+        matches!(
+            answer(&facts_only, "migrating"),
+            DeclaredEntryOutcome::BuildRequired
+        ),
+        "{facts_only:?}"
+    );
+    let member = mob
+        .handle
+        .get_member(&id("migrating"))
+        .await
+        .expect("roster read")
+        .expect("the member is seated");
+    assert_eq!(
+        (member.role.as_str(), member.generation),
+        ("worker", Generation::new(0)),
+        "no member step was taken"
+    );
+    assert_eq!(mob.session("migrating").await, session);
+
+    let migrated = mob
+        .apply_settled(moved(DeclaredBuild::Composed), "migrating")
+        .await;
+    assert!(
+        matches!(
+            answer(&migrated, "migrating"),
+            DeclaredEntryOutcome::RoleMigrated { generation } if *generation == Generation::new(1)
+        ),
+        "{migrated:?}"
+    );
+    assert_eq!(mob.session("migrating").await, session);
+}
+
+/// A role migration carries the spec's build inputs to the successor: its
+/// build on the member's own session, under the new role, applies the
+/// declared context, as a resume of the session built from that spec does,
+/// and never the context the session's earlier build recorded.
+///
+/// RED (`RED-P24-build-not-carried.patch`): the migration's request carries
+/// no build: the successor's build keeps the context the session recorded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_role_migration_carries_its_declared_build_to_the_successor() {
+    let mob = ApplyMob::new("apply-migration-build").await;
+    let seated = mob
+        .apply(DeclaredRoster::partial([declared_with_desk(
+            "migrating",
+            "worker",
+            "north",
+        )]))
+        .await;
+    let (session, _) = seated_on(&seated, "migrating").expect("the identity is seated");
+    mob.wake("migrating").await;
+    assert_eq!(
+        last_build_context(&mob, &session).await,
+        Some(serde_json::json!({ "desk": "north" })),
+        "the first build applies the seat's context"
+    );
+
+    let migrated = mob
+        .apply_settled(
+            DeclaredRoster::partial([declared_with_desk("migrating", "lead", "south")])
+                .with_role_migration("migrating", "worker"),
+            "migrating",
+        )
+        .await;
+    assert!(
+        matches!(
+            answer(&migrated, "migrating"),
+            DeclaredEntryOutcome::RoleMigrated { generation } if *generation == Generation::new(1)
+        ),
+        "{migrated:?}"
+    );
+    mob.wake("migrating").await;
+    assert_eq!(
+        last_build_context(&mob, &session).await,
+        Some(serde_json::json!({ "desk": "south" })),
+        "the successor builds with the declared context"
+    );
+    assert_eq!(mob.session("migrating").await, session);
+}
+
+/// The build a role migration carries is journaled with the successor's
+/// seat: a restart before the successor's first build replays it, and that
+/// build applies the declared context.
+///
+/// RED (`RED-P24-build-not-carried.patch`): the successor's row journals no
+/// build, and its build after the restart keeps the context the session
+/// recorded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_role_migrations_build_reaches_the_successor_after_a_restart() {
+    let mut mob = ApplyMob::new("apply-migration-build-restart").await;
+    let seated = mob
+        .apply(DeclaredRoster::partial([declared_with_desk(
+            "migrating",
+            "worker",
+            "north",
+        )]))
+        .await;
+    let (session, _) = seated_on(&seated, "migrating").expect("the identity is seated");
+    mob.wake("migrating").await;
+    let migrated = mob
+        .apply_settled(
+            DeclaredRoster::partial([declared_with_desk("migrating", "lead", "south")])
+                .with_role_migration("migrating", "worker"),
+            "migrating",
+        )
+        .await;
+    assert!(
+        matches!(
+            answer(&migrated, "migrating"),
+            DeclaredEntryOutcome::RoleMigrated { .. }
+        ),
+        "{migrated:?}"
+    );
+
+    mob.restart().await;
+    mob.wake("migrating").await;
+    assert_eq!(
+        last_build_context(&mob, &session).await,
+        Some(serde_json::json!({ "desk": "south" })),
+        "the replayed successor builds with the declared context"
+    );
+    assert_eq!(mob.generation("migrating").await, Some(Generation::new(1)));
+}
+
 /// A host that names its identities in a form no member id can spell seats
 /// each under the identity's member id in the one encoding of a name into a
 /// member id, and labels the member with the identity. A legacy member so

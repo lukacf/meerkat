@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use meerkat_core::completion_feed::CompletionFeed;
-use meerkat_core::host_store::{AcquireMode, FenceTiming, ScopeKind};
+use meerkat_core::host_store::{AcquireMode, CommitId, FenceTiming, HostStoreError, ScopeKind};
 use meerkat_core::lifecycle::InputId;
 use meerkat_core::ops_lifecycle::{
     CompletionCursorConsumer, OperationId, OperationKind, OperationResult, OperationSource,
@@ -21,6 +21,7 @@ use meerkat_core::{EpochCursorState, RuntimeEpochId};
 use super::codec::{self, RowOp, ScopeHeadV1};
 use super::realm::{
     CHECKPOINT_FACTOR, CHECKPOINT_MIN_BYTES, INLINE_VALUE_LIMIT, LIST_PAGE_HEADS, READ_PAGE_ROWS,
+    commit_retry_pause,
 };
 use super::test_host::{HostCall, TestHost};
 use super::{
@@ -245,6 +246,86 @@ async fn a_failed_batch_poisons_its_scopes_and_nothing_else() {
     );
 }
 
+// A poisoned scope makes no store call: until the realm is reopened, a write
+// or a read of it refuses before any I/O, so it adds nothing to a failing
+// store's load. Through the runtime adapter, and through the realm's own
+// commit (its plan refuses before any batch is built) and body load, as an
+// adapter that commits through the realm directly uses them.
+#[tokio::test]
+async fn a_poisoned_scope_makes_no_store_call() {
+    let host = Arc::new(TestHost::new());
+    let (realm, store) = open(&host).await;
+
+    // A runtime whose first batch the store refused.
+    let doomed = LogicalRuntimeId::new("doomed");
+    host.faults.lock().unwrap().conflict = 1;
+    let refused = store
+        .persist_input_state(
+            &doomed,
+            &persistable(StoredInputState::new_accepted(InputId::new())),
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(RuntimeStoreError::WriteFailed(_))),
+        "{refused:?}"
+    );
+
+    // A scope whose row is on the host, so loading its body reads rows, and
+    // whose next batch the store refused.
+    let id = ScopeId::new(TEST_FAMILY, "poisoned");
+    let row =
+        |value: &[u8]| ScopeDelta::Changes(vec![("row/a".into(), Some(Arc::new(value.to_vec())))]);
+    commit_one(&realm, &id, row(b"one"))
+        .await
+        .expect("the scope lands with a row");
+    host.faults.lock().unwrap().conflict = 1;
+    let refused = commit_one(&realm, &id, row(b"two")).await;
+    assert!(
+        matches!(
+            refused,
+            Err(SpiError::Host(HostStoreError::Conflict { .. }))
+        ),
+        "{refused:?}"
+    );
+
+    let landed = host.commit_count();
+    host.take_calls();
+    for _ in 0..3 {
+        let write = store
+            .persist_input_state(
+                &doomed,
+                &persistable(StoredInputState::new_accepted(InputId::new())),
+            )
+            .await;
+        assert!(
+            matches!(&write, Err(RuntimeStoreError::WriteFailed(cause)) if cause.starts_with("host store scope ")),
+            "{write:?}"
+        );
+        let read = store.load_input_states(&doomed).await;
+        assert!(
+            matches!(&read, Err(RuntimeStoreError::ReadFailed(cause)) if cause.starts_with("host store scope ")),
+            "{read:?}"
+        );
+        let commit = commit_one(&realm, &id, row(b"three")).await;
+        assert!(
+            matches!(commit, Err(SpiError::ScopePoisoned { .. })),
+            "{commit:?}"
+        );
+        let mut guards = realm.lock_scopes(std::slice::from_ref(&id)).await;
+        let body = realm.load_body(&mut guards[0]).await;
+        assert!(
+            matches!(body, Err(SpiError::ScopePoisoned { .. })),
+            "{body:?}"
+        );
+    }
+    let calls = counted_calls(&host);
+    assert!(
+        calls.is_empty(),
+        "a poisoned scope made store calls: {calls:?}"
+    );
+    assert_eq!(host.commit_count(), landed, "nothing more landed");
+}
+
 // Unrun until the candidate's validation.
 #[tokio::test]
 async fn an_unknown_outcome_that_landed_settles_from_the_head() {
@@ -284,6 +365,103 @@ async fn an_unavailable_store_is_retried_with_the_same_commit_id() {
         .await
         .expect("retried within the budget");
     assert_eq!(host.commit_count(), 1);
+}
+
+// Batches that fail together do not retry together. Eight runtimes commit at
+// one instant while the store answers `Unavailable` to the first two attempts
+// of each batch. Each pause is the doubling schedule's (100 ms, then 200 ms),
+// never shorter, so no batch makes more attempts within its retry budget, and
+// at most half longer; and the batches' second attempts do not all come at
+// one instant.
+#[tokio::test(start_paused = true)]
+async fn batches_that_fail_together_do_not_retry_together() {
+    let host = Arc::new(TestHost::new());
+    let (_realm, store) = open(&host).await;
+    let runtimes: Vec<LogicalRuntimeId> = (0..8)
+        .map(|index| LogicalRuntimeId::new(format!("together-{index}")))
+        .collect();
+    let records: Vec<InputStatePersistenceRecord> = runtimes
+        .iter()
+        .map(|_| persistable(StoredInputState::new_accepted(InputId::new())))
+        .collect();
+    host.take_calls();
+    host.faults.lock().unwrap().unavailable = 16;
+    let writes = runtimes
+        .iter()
+        .zip(&records)
+        .map(|(runtime, record)| store.persist_input_state(runtime, record));
+    for written in futures::future::join_all(writes).await {
+        written.expect("each batch lands on its third attempt");
+    }
+    assert_eq!(host.commit_count(), 8, "each batch landed once");
+
+    // Each batch's attempts, in order, by commit id.
+    let mut attempts: BTreeMap<String, Vec<tokio::time::Instant>> = BTreeMap::new();
+    for call in host.take_calls() {
+        if let HostCall::Commit { commit_id, at } = call {
+            attempts.entry(commit_id).or_default().push(at);
+        }
+    }
+    assert_eq!(attempts.len(), 8, "one batch per runtime: {attempts:?}");
+    let started: BTreeSet<tokio::time::Instant> = attempts.values().map(|at| at[0]).collect();
+    assert_eq!(started.len(), 1, "the batches fail together: {attempts:?}");
+    for (commit_id, at) in &attempts {
+        assert_eq!(
+            at.len(),
+            3,
+            "{commit_id}: two failed attempts, then the batch lands"
+        );
+        for (pause, schedule) in [(at[1] - at[0], 100), (at[2] - at[1], 200)] {
+            let schedule = Duration::from_millis(schedule);
+            assert!(
+                pause >= schedule && pause <= schedule + schedule / 2,
+                "{commit_id}: a pause of {pause:?} where the schedule's is {schedule:?}"
+            );
+        }
+    }
+    let second: BTreeSet<Duration> = attempts.values().map(|at| at[1] - at[0]).collect();
+    assert!(
+        second.len() > 1,
+        "batches that fail together retry together: every second attempt came {second:?} after the first"
+    );
+}
+
+// A commit's retry pauses: each is the doubling schedule's (100 ms, doubling
+// up to 3.2 s) lengthened by up to half, never past 3.2 s, so none is shorter
+// than the schedule's and none longer than its longest; one batch pauses the
+// same every time; and the pauses of different batches differ.
+#[test]
+fn commit_retry_pauses_keep_the_schedule_bounds_and_differ_by_batch() {
+    let longest = Duration::from_millis(3200);
+    let ids: Vec<CommitId> = (1..=8)
+        .map(|batch| CommitId::try_new(format!("writer-{batch}")).unwrap())
+        .collect();
+    for id in &ids {
+        let mut schedule = Duration::from_millis(100);
+        for attempt in 1..=20 {
+            let pause = commit_retry_pause(id, attempt);
+            assert!(
+                pause >= schedule && pause <= (schedule + schedule / 2).min(longest),
+                "{id}, attempt {attempt}: a pause of {pause:?} where the schedule's is {schedule:?}"
+            );
+            assert_eq!(
+                pause,
+                commit_retry_pause(id, attempt),
+                "{id}, attempt {attempt}"
+            );
+            schedule = (schedule * 2).min(longest);
+        }
+    }
+    for attempt in 1..=5 {
+        let pauses: BTreeSet<Duration> = ids
+            .iter()
+            .map(|id| commit_retry_pause(id, attempt))
+            .collect();
+        assert!(
+            pauses.len() > 1,
+            "attempt {attempt}: every batch pauses {pauses:?}"
+        );
+    }
 }
 
 // Unrun until the candidate's validation.

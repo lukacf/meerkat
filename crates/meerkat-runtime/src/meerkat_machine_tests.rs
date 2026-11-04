@@ -15079,6 +15079,92 @@ async fn until_changed_switch_turn_is_refused_while_a_finite_switch_waits_for_it
     );
 }
 
+/// A retry of a pending until-changed request finishes it, but an
+/// until-changed request that reuses the id of a staged finite switch never
+/// takes that switch over: no arm accepts it, so the caller gets an error and
+/// nothing is recorded under the id, and the finite switch stays staged and
+/// activates at the next turn.
+#[tokio::test]
+async fn until_changed_switch_turn_reusing_a_staged_finite_id_is_refused() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(until_changed_reconfigure_host(false));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let request_key = uuid(613).to_string();
+    <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        finite_switch_request(
+            613,
+            "turn-target",
+            meerkat_core::image_generation::FiniteScopedTurnDuration::OneTurn,
+        ),
+    )
+    .await
+    .expect("the finite switch-turn is accepted for the next turn");
+
+    let reused = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        until_changed_switch_request(613),
+    )
+    .await;
+    assert!(
+        matches!(reused, Err(RuntimeDriverError::Internal(_))),
+        "an until-changed request that reuses a staged finite switch's id is refused: {reused:?}"
+    );
+    let staged = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the refusal");
+    assert_eq!(
+        staged.model_routing_pending_switch_request_id,
+        Some(request_key.clone()),
+        "the finite switch stays the pending switch"
+    );
+    assert!(staged.model_routing_pending_switch_turns.is_some());
+    assert_eq!(
+        staged.model_routing_pending_switch_target_model.as_deref(),
+        Some("turn-target")
+    );
+    assert_eq!(staged.model_routing_switch_terminal.get(&request_key), None);
+    assert_eq!(staged.model_routing_switch_denials.get(&request_key), None);
+    assert_eq!(
+        staged.model_routing_baseline_model.as_deref(),
+        Some("baseline")
+    );
+
+    <MeerkatMachine as SessionServiceRuntimeExt>::admit_model_routing_assistant_turn(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("the next assistant turn is admitted");
+    let status = <MeerkatMachine as SessionServiceRuntimeExt>::session_model_routing_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("read the routing status");
+    assert_eq!(
+        status.effective_model.as_str(),
+        "turn-target",
+        "the finite switch activates at the next turn"
+    );
+}
+
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_reports_registered_idle_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());

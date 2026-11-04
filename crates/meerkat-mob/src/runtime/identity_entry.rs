@@ -1771,6 +1771,29 @@ mod tests {
         )));
     }
 
+    /// The legacy label names the member when it spells the identity the
+    /// member id encodes, as when it spells the member id itself (both read
+    /// in the one encoding of a name into a member id); another identity's
+    /// name does not, nor does a name that merely resembles the encoding.
+    #[test]
+    fn the_legacy_label_names_the_identity_its_member_id_encodes() {
+        let member_id = crate::ids::member_id_for_name("team:alice").into_owned();
+        assert_eq!(member_id, "mk--team_calice");
+        let labelled = |named: &str| {
+            legacy_roster_member(&binding(
+                &member_id,
+                SpawnContinuityIntent::Ephemeral,
+                Some(named),
+            ))
+        };
+        for named in ["team:alice", "mk--team_calice"] {
+            assert!(labelled(named), "{named}");
+        }
+        for named in ["team:bob", "team_calice", "mk--team_cbob"] {
+            assert!(!labelled(named), "{named}");
+        }
+    }
+
     /// The machine's two verdicts that are not answers (a stale observation
     /// is observed again, a mob that is not running is refused) map to none.
     #[test]

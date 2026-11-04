@@ -14194,6 +14194,161 @@ async fn until_changed_switch_turn_failure_keeps_an_input_admitted_in_its_gap() 
     );
 }
 
+/// A target the host cannot resolve fails an until-changed switch-turn
+/// before its reconfigure runs, with the session mutation gate still held.
+/// The switch-turn caller gets the refusal, generated authority withdraws
+/// the staged request (no pending switch, no terminal, the baseline kept),
+/// and a later switch-turn is admitted instead of meeting a stuck request.
+#[tokio::test]
+async fn until_changed_switch_turn_prepare_failure_withdraws_its_request() {
+    struct UnresolvableTargetHost;
+
+    #[async_trait::async_trait]
+    impl SessionLlmReconfigureHost for UnresolvableTargetHost {
+        async fn hydrate_session_llm_state(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<HydratedSessionLlmState, RuntimeDriverError> {
+            Ok(HydratedSessionLlmState {
+                current_identity: meerkat_core::SessionLlmIdentity {
+                    model: "baseline".to_string(),
+                    provider: meerkat_core::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                },
+                current_visibility_state: Default::default(),
+                current_capability_surface: Some(test_llm_capability_surface(true)),
+                capability_surface_status: SessionLlmCapabilitySurfaceStatus::Resolved,
+                base_tool_names: BTreeSet::new(),
+            })
+        }
+
+        async fn resolve_target_session_llm_identity(
+            &self,
+            _request: &SessionLlmReconfigureRequest,
+            _current_identity: &meerkat_core::SessionLlmIdentity,
+        ) -> Result<crate::ResolvedSessionLlmReconfigure, RuntimeDriverError> {
+            Err(RuntimeDriverError::ValidationFailed {
+                reason: "injected unresolvable target".to_string(),
+            })
+        }
+
+        async fn apply_live_session_llm_identity(
+            &self,
+            _session_id: &SessionId,
+            _identity: &meerkat_core::SessionLlmIdentity,
+            _capability_surface: Option<&SessionLlmCapabilitySurface>,
+        ) -> Result<(), RuntimeDriverError> {
+            Err(RuntimeDriverError::Internal(
+                "an unresolved target is never applied".to_string(),
+            ))
+        }
+
+        async fn apply_live_session_tool_visibility_state(
+            &self,
+            _session_id: &SessionId,
+            _visibility_state: Option<meerkat_core::SessionToolVisibilityState>,
+        ) -> Result<(), RuntimeDriverError> {
+            Err(RuntimeDriverError::Internal(
+                "an unresolved target is never applied".to_string(),
+            ))
+        }
+
+        async fn persist_live_session(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), RuntimeDriverError> {
+            Err(RuntimeDriverError::Internal(
+                "an unresolved target is never persisted".to_string(),
+            ))
+        }
+
+        async fn discard_live_session(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), RuntimeDriverError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(Arc::new(UnresolvableTargetHost));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let request_uuid = uuid(602);
+    let request_key = request_uuid.to_string();
+    let request = SwitchTurnRequest {
+        request_id: meerkat_core::image_generation::SwitchTurnRequestId::new(request_uuid),
+        intent: meerkat_core::image_generation::SwitchTurnIntent {
+            target_model: model("unresolvable-target"),
+            duration: meerkat_core::image_generation::SwitchTurnDuration::UntilChanged,
+            origin: meerkat_core::image_generation::SwitchTurnOrigin::SystemPolicy {
+                reason: meerkat_core::image_generation::SwitchTurnPolicyReason::SafetyHandoff,
+            },
+        },
+        target_realtime: realtime_policy(true),
+        approval: ModelRoutingApprovalDisposition::NotRequired,
+        approval_reason: None,
+    };
+    let error = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        request,
+    )
+    .await
+    .expect_err("an unresolvable target fails the switch-turn");
+    assert!(
+        error.to_string().contains("injected unresolvable target"),
+        "the switch-turn caller gets the target refusal: {error:?}"
+    );
+
+    let state = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the failed switch");
+    assert_eq!(state.model_routing_pending_switch_request_id, None);
+    assert_eq!(state.model_routing_pending_switch_phase, None);
+    assert_eq!(state.model_routing_switch_terminal.get(&request_key), None);
+    assert_eq!(
+        state.model_routing_baseline_model.as_deref(),
+        Some("baseline")
+    );
+
+    // A stuck pending request would deny this as a scoped-override conflict.
+    let next_request = finite_switch_request(
+        603,
+        "turn-target",
+        meerkat_core::image_generation::FiniteScopedTurnDuration::OneTurn,
+    );
+    let next = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        next_request,
+    )
+    .await
+    .expect("a finite switch-turn is decided after the withdrawal");
+    assert!(
+        matches!(
+            next,
+            meerkat_core::image_generation::SwitchTurnControlResult::Applied { .. }
+        ),
+        "the withdrawn request leaves no pending switch behind: {next:?}"
+    );
+}
+
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_reports_registered_idle_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());

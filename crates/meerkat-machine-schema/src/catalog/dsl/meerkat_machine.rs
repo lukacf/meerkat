@@ -7377,6 +7377,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             // boundary applies the gated names a live grant opens.
             ReplaceToolGrantGate { gated: Set<ToolName> },
             ApplyToolGrantOpenSet { open: Set<ToolName> },
+            // A failed until-changed switch-turn reconfigure withdraws the
+            // request it staged, and nothing else
+            // (AbortUntilChangedSwitchTurnReconfigure).
+            AbortUntilChangedSwitchTurnReconfigure { request_id: String },
         }
 
         surface_only [
@@ -14247,6 +14251,33 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit ModelRoutingStatusChanged { topology_epoch: self.model_routing_topology_epoch }
+        }
+
+        // A failed until-changed reconfigure withdraws exactly what its
+        // accepted request staged: the pending switch, and the approval the
+        // request recorded. The shell releases its session mutation gate
+        // while the reconfigure runs, so other inputs may commit in the
+        // meantime (an admitted input, a run, a lifecycle change); this arm
+        // leaves every such fact as it stands and records no terminal, as a
+        // request that never staged. A request that is no longer the pending
+        // one is refused, so nothing another request staged is withdrawn.
+        transition AbortUntilChangedSwitchTurnReconfigure {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AbortUntilChangedSwitchTurnReconfigure { request_id }
+            guard "pending_until_changed_reconfigure" {
+                self.model_routing_pending_switch_request_id == Some(request_id)
+                && self.model_routing_pending_switch_turns == None
+                && self.model_routing_pending_switch_phase == Some(RoutingSwitchTurnPhase::ApplyingPersistentReconfigure)
+            }
+            update {
+                self.model_routing_approval_phases.remove(request_id);
+                self.model_routing_approval_parent_kind.remove(request_id);
+                self.model_routing_pending_switch_request_id = None;
+                self.model_routing_pending_switch_target_model = None;
+                self.model_routing_pending_switch_realtime = None;
+                self.model_routing_pending_switch_phase = None;
+            }
+            to Idle
         }
 
         // Committed cross-run routing handoff lifecycle.

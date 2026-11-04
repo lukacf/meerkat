@@ -539,6 +539,13 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     "SuspendRunForStopFenceGapRunningToAttached",
     "StopCurrentRunForRunResumableIdle",
     "StopCurrentRunForRunResumableAttached",
+    // A failed until-changed switch-turn reconfigure withdraws the request
+    // it staged (0.9.10); its input is declared after every published one.
+    "AbortUntilChangedSwitchTurnReconfigureIdle",
+    "AbortUntilChangedSwitchTurnReconfigureAttached",
+    "AbortUntilChangedSwitchTurnReconfigureRunning",
+    "AbortUntilChangedSwitchTurnReconfigureRetired",
+    "AbortUntilChangedSwitchTurnReconfigureStopped",
 ];
 
 // Append-only emission tails for the other machines, whose public

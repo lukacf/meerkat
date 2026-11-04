@@ -2128,35 +2128,34 @@ impl MeerkatMachine {
                 .map_err(RuntimeControlPlaneError::Internal)?;
             }
             meerkat_core::image_generation::SwitchTurnDuration::UntilChanged => {
-                let previous_dsl_state = self
-                    .stage_session_dsl_input(
-                        session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::RequestUntilChangedSwitchTurn {
-                            request_id: request_key.clone(),
-                            target_model: request.intent.target_model.to_string(),
-                            target_realtime_capable: request.target_realtime.target_realtime_capable,
-                            requires_approval: !matches!(
-                                request.approval,
-                                crate::meerkat_machine_types::ModelRoutingApprovalDisposition::NotRequired
-                            ),
-                            approval_available: !matches!(
-                                request.approval,
-                                crate::meerkat_machine_types::ModelRoutingApprovalDisposition::RequiredButUnavailable
-                            ),
-                            approval_denied: matches!(
-                                request.approval,
-                                crate::meerkat_machine_types::ModelRoutingApprovalDisposition::DeniedByUser
-                            ),
-                            approval_reason: request
-                                .approval_reason
-                                .map(routing_switch_approval_reason),
-                            realtime_detach_allowed: request.target_realtime.allow_realtime_detach,
-                            target_carries_transcript,
-                        },
-                        "RequestSwitchTurn",
-                    )
-                    .await
-                    .map_err(RuntimeControlPlaneError::Internal)?;
+                self.apply_session_dsl_input(
+                    session_id,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::RequestUntilChangedSwitchTurn {
+                        request_id: request_key.clone(),
+                        target_model: request.intent.target_model.to_string(),
+                        target_realtime_capable: request.target_realtime.target_realtime_capable,
+                        requires_approval: !matches!(
+                            request.approval,
+                            crate::meerkat_machine_types::ModelRoutingApprovalDisposition::NotRequired
+                        ),
+                        approval_available: !matches!(
+                            request.approval,
+                            crate::meerkat_machine_types::ModelRoutingApprovalDisposition::RequiredButUnavailable
+                        ),
+                        approval_denied: matches!(
+                            request.approval,
+                            crate::meerkat_machine_types::ModelRoutingApprovalDisposition::DeniedByUser
+                        ),
+                        approval_reason: request
+                            .approval_reason
+                            .map(routing_switch_approval_reason),
+                        realtime_detach_allowed: request.target_realtime.allow_realtime_detach,
+                        target_carries_transcript,
+                    },
+                    "RequestSwitchTurn",
+                )
+                .await
+                .map_err(RuntimeControlPlaneError::Internal)?;
                 let status_state = self.session_dsl_state(session_id).await?;
                 if !status_state
                     .model_routing_switch_denials
@@ -2177,11 +2176,15 @@ impl MeerkatMachine {
                     {
                         Ok(command) => command,
                         Err(err) => {
-                            self.restore_session_dsl_state(session_id, previous_dsl_state)
+                            self.withdraw_failed_until_changed_switch(session_id, &request_key)
                                 .await;
                             return Err(RuntimeControlPlaneError::Internal(err.to_string()));
                         }
                     };
+                    // The reconfigure command takes the session mutation gate
+                    // itself, so it is released here. Inputs other callers
+                    // commit meanwhile are theirs: a failed reconfigure
+                    // withdraws only this request.
                     drop(_mutation_guard.take());
                     #[cfg(test)]
                     {
@@ -2204,7 +2207,7 @@ impl MeerkatMachine {
                         .await?,
                     );
                     if let Err(err) = reconfigure_result {
-                        self.restore_session_dsl_state(session_id, previous_dsl_state)
+                        self.withdraw_failed_until_changed_switch(session_id, &request_key)
                             .await;
                         return Err(RuntimeControlPlaneError::Internal(err.to_string()));
                     }
@@ -2256,6 +2259,40 @@ impl MeerkatMachine {
                 duration: request.intent.duration,
             },
         )
+    }
+
+    /// Withdraw an until-changed switch-turn whose reconfigure failed.
+    ///
+    /// The switch-turn releases the session mutation gate while its
+    /// reconfigure runs, so generated state may hold facts other callers
+    /// committed meanwhile (an admitted input, a run, a lifecycle change).
+    /// Restoring the state read before the request would erase them, so the
+    /// machine's abort arm withdraws only what the accepted request staged.
+    /// A refusal means the pending switch is no longer this request, or the
+    /// session is gone: nothing of this request is left to withdraw, and the
+    /// caller still reports the reconfigure's own error.
+    async fn withdraw_failed_until_changed_switch(
+        &self,
+        session_id: &SessionId,
+        request_key: &str,
+    ) {
+        if let Err(reason) = self
+            .apply_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::AbortUntilChangedSwitchTurnReconfigure {
+                    request_id: request_key.to_owned(),
+                },
+                "AbortUntilChangedSwitchTurnReconfigure",
+            )
+            .await
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                request_id = %request_key,
+                reason = %reason,
+                "a failed until-changed switch-turn had no pending request of its own to withdraw"
+            );
+        }
     }
 
     /// Whether the exact originating run left a committed boundary receipt.

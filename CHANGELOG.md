@@ -359,6 +359,22 @@ them.
   missing, destroyed or replaced attachment, and a row the ledger keeps
   without its lifecycle state still answer `false`.
 
+- `meerkat-runtime`: host store commits that fail together no longer retry
+  together. Core sends a batch whose commit answers `Unavailable`, or
+  `Indeterminate` without having landed, again after a pause that starts at
+  100 ms and doubles up to 3.2 s, within `SpiRealmConfig::commit_retry_budget`
+  (30 s by default). Batches that failed at the same moment, such as the
+  commits of many runtimes during one store outage, paused exactly alike, so
+  the store met every retry of them at the same instants. Each pause below
+  3.2 s is now lengthened by up to half, by an amount derived from the
+  batch's commit id and the attempt number: such batches spread out, and one
+  batch pauses the same on every run. No pause is shorter than before, so
+  this never adds an attempt: with every attempt failing at once, a batch
+  makes at most 14 within the default budget, as before, and about 1.6% of
+  batches now make 13. The budget, the errors that are retried, and the
+  poisoning of the scopes of a batch that does not settle are unchanged.
+  Affects 0.9.5 through 0.9.9.
+
 ### Known limitations
 
 - Meerkat Connect: its provider setup and first-target setup read a

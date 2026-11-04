@@ -341,8 +341,18 @@ impl Script {
                             && operation == "setup_selected_check"
                             && result.tool_use_id == format!("{prefix}-check")
                             && find_feedback::canonical_check_refusal(result);
+                        // Core's certified NotDispatched refusal of a helper
+                        // call's first attempt (the tool did not run, nothing
+                        // was recorded) permits that call's one fresh
+                        // attempt. An uncertified refusal, or a refusal of
+                        // the fresh attempt, still fails the case.
+                        let bounded_retry_feedback =
+                            helper && find_feedback::helper_retry_allowed(result);
                         assert!(
-                            !result.is_error || bounded_find_feedback || bounded_check_feedback,
+                            !result.is_error
+                                || bounded_find_feedback
+                                || bounded_check_feedback
+                                || bounded_retry_feedback,
                             "{prefix}: native call {} refused with {code}: {refusal}",
                             result.tool_use_id
                         );
@@ -446,14 +456,17 @@ impl Script {
             "setup_selected_install",
             "setup_job",
         ];
-        if !has("load") {
+        // Each helper call's current attempt: its one fresh attempt once the
+        // first was refused (only a tolerated refusal gets this far).
+        let load = self.retry_suffix(&prefix, "load");
+        if !has(&load) {
             return call(
-                "load",
+                &load,
                 meerkat_core::tool_catalog::TOOL_CATALOG_LOAD_NAME,
                 json!({"names":names}),
             );
         }
-        Self::require_loaded_catalog(&prefix, get("load"), &names);
+        Self::require_loaded_catalog(&prefix, get(&load), &names);
         let check = self.check_suffix(&prefix);
         if !has(check) {
             assert!(tokio::time::Instant::now() < *self.find_deadline.get().unwrap());
@@ -464,28 +477,31 @@ impl Script {
             );
         }
         let checked = get(check);
-        if !has("install") {
+        let install = self.retry_suffix(&prefix, "install");
+        if !has(&install) {
             return call(
-                "install",
+                &install,
                 "setup_selected_install",
                 json!({
             "validation_id":checked["validation_id"], "effect_sha256":checked["effect_sha256"]}),
             );
         }
-        let installed = get("install");
+        let installed = get(&install);
         let job = installed.get("job").unwrap_or(&installed);
-        if !has("job") {
-            return call("job", "setup_job", json!({"job_id":job["id"]}));
+        let job_call = self.retry_suffix(&prefix, "job");
+        if !has(&job_call) {
+            return call(&job_call, "setup_job", json!({"job_id":job["id"]}));
         }
-        let observed = get("job");
+        let observed = get(&job_call);
         let observed = observed.get("job").unwrap_or(&observed);
         assert_eq!(
             observed["status"], "succeeded",
             "current member readback must succeed"
         );
-        if !has("report") {
+        let report = self.retry_suffix(&prefix, "report");
+        if !has(&report) {
             return call(
-                "report",
+                &report,
                 meerkat_toolkit::setup::SETUP_REPORT,
                 json!({"kind":"unavailable","detail":DETAIL}),
             );

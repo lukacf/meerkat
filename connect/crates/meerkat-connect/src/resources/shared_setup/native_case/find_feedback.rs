@@ -563,6 +563,83 @@ impl Script {
             "check"
         }
     }
+    /// The suffix of a helper call's current attempt: its one fresh attempt
+    /// once its first attempt was refused, otherwise the first.
+    pub(super) fn retry_suffix(&self, prefix: &str, base: &str) -> String {
+        if self
+            .seen_results
+            .lock()
+            .unwrap()
+            .get(&format!("{prefix}-{base}"))
+            .is_some_and(|result| result.is_error)
+        {
+            format!("{base}-fresh")
+        } else {
+            base.to_owned()
+        }
+    }
+}
+
+/// Whether a helper call's result permits its one fresh attempt: Core's
+/// certified NotDispatched refusal (`reprepare_required` with
+/// `tool_invoked: false`, the tool did not run) of the call's first attempt.
+/// An uncertified refusal, any other error, and any refusal of the fresh
+/// attempt do not.
+pub(super) fn helper_retry_allowed(result: &ToolResult) -> bool {
+    !result.tool_use_id.ends_with("-fresh") && certified_reprepare(result)
+}
+
+/// The settled audit of a helper call refused with Core's certified
+/// NotDispatched refusal: one operation targets the call, it holds a
+/// `ReprepareRequired` refusal, and no effect entry of it passed except one
+/// followed at once by that refusal (Core certifies a refusal at the effect
+/// entry's own final check). The tool did not run and nothing was recorded.
+fn certified_retry_proof(
+    records: &[meerkat_authorization_contracts::audit::StoredAuthorizationAuditObservation],
+    call: &str,
+) -> bool {
+    use meerkat_authorization_contracts::audit::{AuditObservation, AuditTarget};
+    let refused = |observation: Option<&AuditObservation>| {
+        matches!(
+            observation,
+            Some(AuditObservation::Refused {
+                reason: meerkat_core::OperationRefusalKind::ReprepareRequired,
+                ..
+            })
+        )
+    };
+    let mut operations = records.iter().filter_map(|record| {
+        let target = match &record.observation.observation {
+            AuditObservation::Prepared { target, .. }
+            | AuditObservation::Refused { target, .. }
+            | AuditObservation::AuthorizationUnavailable { target } => target.as_ref(),
+            _ => return None,
+        };
+        matches!(target, AuditTarget::Tool { call_id, .. } if call_id == call)
+            .then_some(&record.observation.operation_id)
+    });
+    let Some(operation) = operations.next() else {
+        return false;
+    };
+    if operations.any(|other| other != operation) {
+        return false;
+    }
+    let history = records
+        .iter()
+        .filter(|record| &record.observation.operation_id == operation)
+        .map(|record| &record.observation.observation)
+        .collect::<Vec<_>>();
+    history
+        .iter()
+        .any(|observation| refused(Some(*observation)))
+        && history.iter().enumerate().all(|(at, observation)| {
+            !matches!(
+                observation,
+                AuditObservation::Entry {
+                    boundary: Some(meerkat_core::OperationEntryBoundary::ToolEffect)
+                }
+            ) || refused(history.get(at + 1).copied())
+        })
 }
 
 fn exact_check_change(
@@ -632,7 +709,7 @@ impl Case {
             assert!(!seen.get(&checks.last().unwrap().0).unwrap().is_error);
             if checks.len() == 2 {
                 let first = &checks[0].0;
-                assert!(canonical_check_refusal(seen.get(first).unwrap()));
+                let refused = seen.get(first).unwrap();
                 let (scope, run) = inputs
                     .get(first)
                     .expect("actual emitted check input and run");
@@ -644,14 +721,58 @@ impl Case {
                 );
                 // Cleanup has joined native input owners; one existing read, no wait.
                 let audit = self.session_audits(session, &prefix, false).await;
-                assert!(
-                    exact_check_change(&audit, scope, run, first),
-                    "fresh check qualifies only after exact pre-entry PublicationChanged, never denial or an entered effect"
-                );
+                if helper_retry_allowed(refused) {
+                    assert!(
+                        certified_retry_proof(&audit, first),
+                        "a certified check refusal ran nothing and recorded nothing"
+                    );
+                } else {
+                    assert!(canonical_check_refusal(refused));
+                    assert!(
+                        exact_check_change(&audit, scope, run, first),
+                        "fresh check qualifies only after exact pre-entry PublicationChanged, never denial or an entered effect"
+                    );
+                }
+                let certified = helper_retry_allowed(refused);
                 eprintln!(
                     "{}",
                     json!({"event":"sdk_check_settled_proof", "call_id":first,
-                    "fresh_call_id":checks[1].0, "pre_entry_publication_changed":true})
+                    "fresh_call_id":checks[1].0, "certified_not_dispatched":certified,
+                    "pre_entry_publication_changed":!certified})
+                );
+            }
+            // Every other helper call: one fresh attempt only after a
+            // certified NotDispatched refusal of its first, and it succeeded.
+            for base in ["load", "install", "job", "report"] {
+                let fresh = format!("{prefix}-{base}-fresh");
+                if !calls.iter().any(|(key, _, _)| key == &fresh) {
+                    continue;
+                }
+                let first = format!("{prefix}-{base}");
+                assert!(
+                    helper_retry_allowed(
+                        seen.get(&first)
+                            .expect("the refused first attempt is retained")
+                    ),
+                    "{first}: only a certified NotDispatched refusal permits a fresh attempt"
+                );
+                assert!(
+                    !seen
+                        .get(&fresh)
+                        .expect("the fresh attempt's result is retained")
+                        .is_error,
+                    "{fresh}: the one fresh attempt must succeed"
+                );
+                let session = self.audit_sessions.get(&format!("helper-{tag}")).unwrap();
+                let audit = self.session_audits(session, &prefix, false).await;
+                assert!(
+                    certified_retry_proof(&audit, &first),
+                    "{first}: a certified refusal ran nothing and recorded nothing"
+                );
+                eprintln!(
+                    "{}",
+                    json!({"event":"sdk_retry_settled_proof", "call_id":first,
+                    "fresh_call_id":fresh})
                 );
             }
         }
@@ -799,6 +920,76 @@ mod tests {
         }));
         assert!(outcome.is_err());
         assert_eq!(script.calls.lock().unwrap().len(), 1);
+    }
+
+    fn reprepare(call: &str, tool_invoked: Value) -> ToolResult {
+        let unknown = meerkat_core::ops::terminal_tool_outcome_for_error(
+            call,
+            ToolError::AuthorizationRefused {
+                refusal: meerkat_core::OperationRefused::new(
+                    meerkat_core::OperationRefusalKind::ReprepareRequired,
+                ),
+            },
+        )
+        .result;
+        let mut body = serde_json::from_str::<Value>(&unknown.text_content()).unwrap();
+        body["data"]["tool_invoked"] = tool_invoked;
+        ToolResult::new(call.into(), body.to_string(), true)
+    }
+    fn helper_request(results: Vec<ToolResult>) -> LlmRequest {
+        let mut request = request(results);
+        for name in [
+            meerkat_toolkit::setup::SETUP_REPORT,
+            meerkat_core::tool_catalog::TOOL_CATALOG_LOAD_NAME,
+        ] {
+            request.tools.push(Arc::new(ToolDef::new(
+                name,
+                "Existing helper registration in the controlled model fixture",
+                json!({"type":"object"}),
+            )));
+        }
+        request
+    }
+
+    // A helper call's first attempt refused with Core's certified
+    // NotDispatched refusal (the tool did not run) permits that call's one
+    // fresh attempt. An uncertified refusal, and a refusal of the fresh
+    // attempt, still fail the case.
+    #[test]
+    fn only_a_certified_first_helper_refusal_permits_a_fresh_attempt() {
+        let certified = reprepare("a-helper-install", Value::Bool(false));
+        let uncertified = reprepare("a-helper-install", json!("unknown"));
+        let fresh = reprepare("a-helper-install-fresh", Value::Bool(false));
+        assert!(certified_reprepare(&certified) && helper_retry_allowed(&certified));
+        assert!(!certified_reprepare(&uncertified) && !helper_retry_allowed(&uncertified));
+        assert!(certified_reprepare(&fresh) && !helper_retry_allowed(&fresh));
+        let install = |script: &Script, key: &str| {
+            script.calls.lock().unwrap().push((
+                key.into(),
+                "setup_selected_install".into(),
+                json!({}),
+            ));
+        };
+        // The certified first refusal is tolerated: the model goes on.
+        let script = new_script();
+        install(&script, "a-helper-install");
+        let events = script.response(&helper_request(vec![certified.clone()]));
+        assert_eq!(selected(&events), vec!["a-helper-load"]);
+        // An uncertified first refusal fails the case.
+        let script = new_script();
+        install(&script, "a-helper-install");
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            script.response(&helper_request(vec![uncertified]))
+        }));
+        assert!(outcome.is_err(), "an uncertified refusal is not tolerated");
+        // A refusal of the one fresh attempt fails the case.
+        let script = new_script();
+        install(&script, "a-helper-install");
+        install(&script, "a-helper-install-fresh");
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            script.response(&helper_request(vec![certified, fresh]))
+        }));
+        assert!(outcome.is_err(), "a second refusal is not tolerated");
     }
 
     fn event() -> (PrivateAuthenticatedEvent, String) {

@@ -861,6 +861,23 @@ impl<S> FirstFixture<S> {
             .release_original(&original)
             .map_err(|error| error.to_string())
     }
+    /// Hold the source collection on another thread for `hold`, as another
+    /// owner's short section does. Returns once the collection is held.
+    pub(crate) fn hold_source_collection_for(
+        &self,
+        hold: std::time::Duration,
+    ) -> std::thread::JoinHandle<()> {
+        let owner = self.source.owner.clone();
+        let (held, holding) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let originals = owner.lock_originals_for_test();
+            held.send(()).unwrap();
+            std::thread::sleep(hold);
+            drop(originals);
+        });
+        holding.recv().unwrap();
+        holder
+    }
 
     pub(crate) async fn shutdown(&self) -> Result<(), String> {
         shutdown_fixture(&self.native).await

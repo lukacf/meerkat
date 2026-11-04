@@ -502,6 +502,7 @@ enum ResumeCase {
     ClosedHost,
     ClosedBeforeJobRead,
     ReleasedSource,
+    HeldCollection,
 }
 
 async fn applied_case(case: ResumeCase) {
@@ -567,6 +568,13 @@ async fn applied_case(case: ResumeCase) {
             ResumeCase::ReleasedSource => fixture.release_source_custody().unwrap(),
             _ => {}
         }
+        // Another owner holds the source collection for a short section while
+        // the delivery owner's first pass resumes the retained work. The
+        // resume reads the collection natively; a short hold is contention,
+        // not a policy answer, and a row left pending waits for a wake that
+        // names its session.
+        let holder = (case == ResumeCase::HeldCollection)
+            .then(|| fixture.hold_source_collection_for(Duration::from_millis(800)));
         let jobs = Arc::new(MemoryDetachedJobStore::new());
         let host = SessionServiceDeliveryHost::new(&fixture.service, &fixture.machine,
             DetachedJobService::new(jobs.clone()), None).with_continuation_bindings(bindings.clone());
@@ -575,6 +583,21 @@ async fn applied_case(case: ResumeCase) {
             .arm(Arc::new(host)).unwrap();
         owner_passes = Some(handle.subscribe_passes());
         owner_handle = Some(handle);
+        if let Some(holder) = holder {
+            let passes = owner_passes.as_mut().unwrap();
+            let pass = tokio::time::timeout(EVENT_GUARD, async {
+                loop {
+                    let observed = passes.borrow_and_update().clone();
+                    if observed.generation > 0 { break observed; }
+                    passes.changed().await.unwrap();
+                }
+            }).await.expect("native owner publishes the attempted resume");
+            holder.join().unwrap();
+            assert_eq!(pass.applied, 1,
+                "a held source collection is waited for, not answered unavailable: {pass:?}");
+            assert_eq!(pass.refused, 0, "{pass:?}");
+            assert!(pass.blocked_sessions.is_empty(), "{pass:?}");
+        }
         if matches!(case, ResumeCase::ClosedHost | ResumeCase::ClosedBeforeJobRead | ResumeCase::ReleasedSource) {
             let passes = owner_passes.as_mut().unwrap();
             let pass = tokio::time::timeout(EVENT_GUARD, async {
@@ -683,6 +706,11 @@ async fn installed_retained_resume_after_source_release_refuses_without_input() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn installed_retained_resume_closed_before_job_disclosure_stays_pending_without_input() {
     Box::pin(applied_case(ResumeCase::ClosedBeforeJobRead)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn installed_retained_resume_waits_for_a_held_source_collection() {
+    Box::pin(applied_case(ResumeCase::HeldCollection)).await;
 }
 
 #[path = "cold_source_tests.rs"]

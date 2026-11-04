@@ -179,3 +179,61 @@ async fn whoami_caller_scope_is_stable_per_caller() {
     assert_eq!(scope(&bob), scope(&bob_again));
     assert_ne!(scope(&bob), scope(&robot));
 }
+
+/// A token minted with an `auth_config` shared secret (`provider: "jwt"`)
+/// names a shared account, not a person, unless the configuration declares
+/// `accounts: "personal"`: a front with one shared sign-in mints every
+/// holder of its password the same `sub`.
+#[tokio::test]
+async fn shared_account_token_is_a_token_principal() {
+    let issuer = "http://127.0.0.1/meta-gateway";
+    let secret = "shared-front-secret";
+    let decisions = |accounts: Option<&str>| {
+        let mut config = json!({
+            "provider": "jwt",
+            "shared_secret": secret,
+            "issuer": issuer,
+            "audience": "shared-front",
+            "email_allowlist": ["owner@example.test"],
+        });
+        if let Some(accounts) = accounts {
+            config["accounts"] = json!(accounts);
+        }
+        crate::console_auth_config::parse_console_auth_config(&config)
+    };
+    let mint = || {
+        jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+            &json!({
+                "iss": issuer,
+                "aud": "shared-front",
+                "sub": "owner@example.test",
+                "email": "owner@example.test",
+                "email_verified": true,
+                "sid": "login-1",
+                "exp": now_seconds() + 3600,
+            }),
+            &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .expect("signed fixture JWT")
+    };
+    for (accounts, kind) in [(None, "token_principal"), (Some("personal"), "person")] {
+        let mut shared = state();
+        shared.decisions = decisions(accounts).expect("auth config");
+        let answer = console_rpc_as(
+            &console_json_router_with_state(shared),
+            Some(&mint()),
+            WHOAMI,
+            json!({}),
+        )
+        .await;
+        assert_eq!(
+            answer["result"]["actor"]["kind"], kind,
+            "{accounts:?}: {answer}"
+        );
+    }
+    assert!(
+        decisions(Some("everyone")).is_err(),
+        "an unknown accounts value is refused"
+    );
+}

@@ -646,6 +646,167 @@ mod tests {
         );
     }
 
+    /// Ingest one module event through the intake, waiting for room as the
+    /// runtime's event drain does.
+    async fn ingest_module_event(handle: &EventLogHandle, id: &str) {
+        handle
+            .room()
+            .await
+            .expect("the intake hands out room, waiting for it while full")
+            .ingest(EventEnvelope {
+                event_id: id.to_string(),
+                source: "module".to_string(),
+                timestamp_ms: 0,
+                event: UnifiedEvent::Module(crate::types::ModuleEvent {
+                    module: "test-module".into(),
+                    event_type: "x".into(),
+                    payload: serde_json::Value::Null,
+                }),
+            });
+    }
+
+    /// A failing store is not asked again for every event that arrives
+    /// while it fails: after a failed append the flush waits out a backoff
+    /// before it asks the store again. The flush used to re-send the whole
+    /// retry buffer for every event that arrived while the buffer held
+    /// `batch_size` or more, so 100 events arriving within half a second
+    /// made about 101 failing appends.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_failing_store_is_not_called_once_per_arriving_event() {
+        let failing = Arc::new(FlakyStore {
+            failures_remaining: Mutex::new(usize::MAX),
+            persisted: Mutex::new(Vec::new()),
+            attempts: Mutex::new(0),
+        });
+        let handle = start_event_log(
+            EventLogConfig {
+                store: Box::new(SharedStore(failing.clone())),
+                filter: None,
+                batch_size: 4,
+                flush_interval: Duration::from_secs(1),
+            },
+            None,
+        );
+        // The first four events make the first, failing, append. The next
+        // 100 arrive one every 4 ms: all of them within the first half
+        // second.
+        for n in 0..104 {
+            ingest_module_event(&handle, &format!("evt-failing-{n}")).await;
+            tokio::time::sleep(Duration::from_millis(4)).await;
+        }
+        let attempts = *failing.attempts.lock().expect("attempts");
+        assert!(
+            attempts <= 2,
+            "a failing store was asked {attempts} times while 104 events arrived within half a second"
+        );
+    }
+
+    /// A store that refuses every append while it is down, and any append of
+    /// more than `cap` events (a request size limit), keeping the ids it
+    /// accepts and the largest request it was sent.
+    #[derive(Clone)]
+    struct CappedStore(Arc<CappedState>);
+
+    struct CappedState {
+        cap: usize,
+        down: AtomicBool,
+        largest_request: std::sync::atomic::AtomicUsize,
+        persisted: Mutex<Vec<String>>,
+    }
+
+    impl CappedStore {
+        fn down_with_cap(cap: usize) -> Self {
+            Self(Arc::new(CappedState {
+                cap,
+                down: AtomicBool::new(true),
+                largest_request: std::sync::atomic::AtomicUsize::new(0),
+                persisted: Mutex::new(Vec::new()),
+            }))
+        }
+
+        fn recover(&self) {
+            self.0.down.store(false, Ordering::SeqCst);
+        }
+
+        fn persisted(&self) -> Vec<String> {
+            self.0.persisted.lock().expect("persisted").clone()
+        }
+
+        fn largest_request(&self) -> usize {
+            self.0.largest_request.load(Ordering::SeqCst)
+        }
+    }
+
+    impl EventLogStore for CappedStore {
+        fn append_batch(
+            &self,
+            events: Vec<PersistedEvent>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), EventLogError>> + Send + '_>> {
+            Box::pin(async move {
+                self.0
+                    .largest_request
+                    .fetch_max(events.len(), Ordering::SeqCst);
+                if self.0.down.load(Ordering::SeqCst) || events.len() > self.0.cap {
+                    return Err(
+                        Box::new(std::io::Error::other("the store refused the append"))
+                            as Box<dyn std::error::Error + Send>,
+                    );
+                }
+                self.0
+                    .persisted
+                    .lock()
+                    .expect("persisted")
+                    .extend(events.into_iter().map(|event| event.id));
+                Ok(())
+            })
+        }
+
+        fn query(
+            &self,
+            _query: EventQuery,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<PersistedEvent>, EventLogError>> + Send + '_>>
+        {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+    }
+
+    /// After an outage the retry buffer drains in requests of at most
+    /// `batch_size` events, oldest first. The flush used to re-send the whole
+    /// buffer in one append, so once the buffer held more than the store
+    /// takes in one request, no event reached the store again, however
+    /// healthy the store was.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_recovered_store_drains_the_retry_buffer_in_batch_size_requests() {
+        let store = CappedStore::down_with_cap(4);
+        let handle = start_event_log(
+            EventLogConfig {
+                store: Box::new(store.clone()),
+                filter: None,
+                batch_size: 4,
+                flush_interval: Duration::from_secs(1),
+            },
+            None,
+        );
+        let ids: Vec<String> = (0..12).map(|n| format!("evt-outage-{n}")).collect();
+        for id in &ids {
+            ingest_module_event(&handle, id).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        store.recover();
+        // Two minutes is far past every retry a backoff schedules here.
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert_eq!(
+            store.persisted(),
+            ids,
+            "every event buffered during the outage reaches the recovered store, in order"
+        );
+        assert!(
+            store.largest_request() <= 4,
+            "no append carried more than batch_size events: largest {}",
+            store.largest_request()
+        );
+    }
+
     #[test]
     fn enforce_retry_cap_drops_oldest() {
         let mut batch: Vec<PersistedEvent> = (0..(EVENT_LOG_RETRY_BUFFER_CAP + 100))

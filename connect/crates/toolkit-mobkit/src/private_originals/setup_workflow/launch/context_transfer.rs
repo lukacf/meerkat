@@ -626,6 +626,67 @@ impl InstalledWorkflowContextTransfer {
         Ok(())
     }
 
+    /// `deadline` is the Find request's source deadline: with the dispatch's
+    /// remaining tool time it bounds the selection read's wait.
+    /// [`Self::check_invocation`] on the Find dispatch: a selection read
+    /// still stale after its rebuild waits with that dispatch's Core churn,
+    /// bounded by the dispatch's remaining tool time and the request deadline,
+    /// holding nothing, and reads again, as the dispatch's other binding reads
+    /// do. A wait that does not settle within the budget ends as before
+    /// (unavailable).
+    async fn check_invocation_on_dispatch(
+        &self,
+        source: &Arc<PrivateOriginals>,
+        original: &super::super::super::acquisition::AcquisitionOriginal,
+        correlation: &Id,
+        planning: &Arc<InstalledWorkflowPlanning>,
+        backend: &SetupWorkBackend,
+        ceiling: &Ceiling,
+        (context, deadline): (&ToolDispatchContext, tokio::time::Instant),
+    ) -> Result<(), PrivateOriginalError> {
+        let work = context
+            .work_authorization()
+            .ok_or(PrivateOriginalError::Denied)?;
+        let authorization = work.authorization();
+        let mut churn = context.owner_change_churn();
+        let remaining = || {
+            let request = deadline.saturating_duration_since(tokio::time::Instant::now());
+            context
+                .remaining_tool_time()
+                .map_or(request, |tool| tool.min(request))
+        };
+        loop {
+            match self.check_invocation_observed(
+                source,
+                original,
+                correlation,
+                planning,
+                backend,
+                ceiling,
+            ) {
+                Err(WorkflowChildPreparationError::ObservationChanged) => {
+                    let budget = remaining();
+                    if budget.is_zero()
+                        || !churn
+                            .wait_after_stale_read(
+                                authorization.as_ref(),
+                                Some(budget),
+                                "toolkit.workflow.transfer_selection",
+                                None,
+                            )
+                            .await
+                            .settled()
+                        || remaining().is_zero()
+                    {
+                        return Err(PrivateOriginalError::Unavailable);
+                    }
+                }
+                Err(WorkflowChildPreparationError::Refused(error)) => return Err(error),
+                Ok(()) => return Ok(()),
+            }
+        }
+    }
+
     pub(crate) async fn commit_entered(
         self: &Arc<Self>,
         snapshot: &SetupSnapshot,
@@ -636,6 +697,7 @@ impl InstalledWorkflowContextTransfer {
         control: &Arc<RecoveryControl>,
         entered: &meerkat_core::EnteredDispatchOperation,
         review_custody: ReviewCustody,
+        deadline: tokio::time::Instant,
     ) -> Result<WorkflowTransferObservation, PrivateOriginalError> {
         self.commit_selected(
             snapshot,
@@ -646,6 +708,7 @@ impl InstalledWorkflowContextTransfer {
             control,
             commit::CommitEntry::Entered(entered, context),
             review_custody,
+            deadline,
         )
         .await
     }
@@ -660,6 +723,7 @@ impl InstalledWorkflowContextTransfer {
         control: &Arc<RecoveryControl>,
         entry: commit::CommitEntry<'_>,
         review_custody: ReviewCustody,
+        deadline: tokio::time::Instant,
     ) -> Result<WorkflowTransferObservation, PrivateOriginalError> {
         let diagnostic = Arc::new(commit_diagnostic::CommitDiagnostic::new());
         let mut selected_diagnostic = diagnostic.clone();
@@ -678,14 +742,16 @@ impl InstalledWorkflowContextTransfer {
                 let planning = self.planning()?;
                 let request = snapshot.request();
                 stage = "selected_invocation";
-                self.check_invocation(
+                self.check_invocation_on_dispatch(
                     &source,
                     &original,
                     &request.host().correlation,
                     &planning,
                     backend,
                     &request.constraints().ceiling,
-                )?;
+                    (context, deadline),
+                )
+                .await?;
                 stage = "request_membership";
                 let parsed: FindAndInstallRequest = call
                     .parse_args()

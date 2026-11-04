@@ -19,8 +19,13 @@ use crate::input::Input;
 use crate::traits::RuntimeDriverError;
 
 mod governed_origin;
+mod original_requester;
 mod peer_ingress;
 pub use governed_origin::GovernedPeerOrigin;
+pub use original_requester::{
+    DEFAULT_PEER_CUSTODY_RETENTION, OriginalRequesterPeerBinder, PeerServiceBasis,
+    PeerServiceFuture, PeerServiceGrant, PeerServiceRefusal, PeerServiceRequest,
+};
 pub(crate) use peer_ingress::delivery_input_id;
 pub use peer_ingress::{
     PeerIngressBindDenial, PeerIngressBindFuture, PeerIngressBindRefusal, PeerIngressBindRequest,
@@ -992,6 +997,34 @@ pub(crate) fn verify_retained_replay(
             existing_id: state.input_id.clone(),
         }),
     }
+}
+
+/// Bind one original to its final input: set the association and the
+/// original event's raw idempotency key, then bind the trusted ingress
+/// observation and the actual selected controller to exactly that input (the
+/// one body of `bind_scoped_original`, also Core's own peer binder's).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn bind_original_input(
+    mut input: Input,
+    association: InputAuthorityAssociation,
+    event_key: IdempotencyKey,
+    requester: meerkat_core::PrincipalRef,
+    ingress_actor: meerkat_core::PrincipalRef,
+    realm: meerkat_core::connection::RealmId,
+    authentication: meerkat_authorization_contracts::evidence::HistoricalEvidenceRef,
+    controller: meerkat_core::ControllerModelClient,
+) -> Result<Input, RuntimeDriverError> {
+    input.header_mut().authority_association = Some(association);
+    input.header_mut().idempotency_key = Some(event_key);
+    let ingress = NativeIngressContext::from_trusted_ingress(
+        &input,
+        requester,
+        ingress_actor,
+        realm,
+        authentication,
+    )?
+    .with_controller_client(&input, controller)?;
+    input.with_ingress_context(ingress)
 }
 
 /// What a bound original's association must name as its original work.

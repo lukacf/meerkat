@@ -1429,9 +1429,10 @@ pub(crate) fn member_lifecycle_page(
 
 /// The shell's raw observation of a legacy roster member: the spawn row of
 /// the binding's incarnation carries the durable-identity continuity marker,
-/// or the legacy identity label naming the binding's own identity. The one
-/// place a label is read as a lifecycle input; MobMachine decides the
-/// adoption from it ([`super::MobHandle::adopt_legacy_identity_entry`]).
+/// or the legacy identity label naming the binding's own identity
+/// ([`names_member_id`]). The one place a label is read as a lifecycle
+/// input; MobMachine decides the adoption from it
+/// ([`super::MobHandle::adopt_legacy_identity_entry`]).
 pub(crate) fn legacy_roster_member(binding: &super::MemberBinding) -> bool {
     matches!(
         binding.continuity_intent(),
@@ -1439,7 +1440,19 @@ pub(crate) fn legacy_roster_member(binding: &super::MemberBinding) -> bool {
     ) || binding
         .labels()
         .get(LEGACY_IDENTITY_LABEL)
-        .is_some_and(|named| named.as_str() == binding.identity().as_str())
+        .is_some_and(|named| names_member_id(named, binding.identity()))
+}
+
+/// Whether a legacy identity label's value names the identity `member_id`
+/// is the id of: it spells the member id itself, or it names the identity
+/// the member id encodes. Both sides are read in the one encoding of a name
+/// into a member id ([`crate::ids::member_id_for_name`]), so a label that
+/// spells the identity (`team:alice`) and one that spells its member id
+/// (`mk--team_calice`) name the same member.
+fn names_member_id(named: &str, member_id: &AgentIdentity) -> bool {
+    named == member_id.as_str()
+        || crate::ids::member_id_for_name(&crate::ids::name_for_member_id(named))
+            == member_id.as_str()
 }
 
 /// The machine's adoption verdict as the handle's answer; `None` for

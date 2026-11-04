@@ -212,6 +212,15 @@ them.
 
 ### Fixed
 
+- `meerkat-mob`: the legacy adoption reads a member's `agent_identity`
+  label in the one encoding of a name into a member id
+  (`ids::member_id_for_name`): a label naming the identity a member id
+  encodes (`team:alice` on the member `mk--team_calice`) marks the member
+  as a legacy member, as a label spelling the member id itself always did.
+  A declared apply that listed such a member, a member labelled with an
+  identity no member id can spell, refused it `NameHeldByWorker`, and a
+  host that labelled a raw member of that name could not have it adopted.
+
 - `meerkat-rpc`: a session's runtime loop no longer waits forever on the
   turn-finalization boundary that its own turn holds. A turn that
   materializes a staged session (the first turn of an immediate

@@ -1690,7 +1690,11 @@ const IDENTITY_CENSUS_USAGE: &str = "usage: meta_gateway identity-census --state
      lifecycle-terminal, whether a held completion is owed, and the pending \
      first-boot row. The bindings are read from the directory's mob store \
      the way the gateway's identity views read them; in-memory mob storage \
-     keeps none across a restart, so those facts are null there. Run it on \
+     keeps none across a restart, so those facts are null there. For the \
+     directory, it also counts the mob store's identity-store rows of schema \
+     version 2 or later (store-owned identities and the tombstones of removed \
+     names, archived and unreadable ones counted apart), which a release on \
+     Core 0.9.8 or earlier does not read. Run it on \
      a directory no gateway uses (a copy is fine): a directory a runtime \
      holds is refused, and so is one that is not in the native layout \
      (migrate it with storage-migrate-native first). It writes nothing in \
@@ -1796,6 +1800,14 @@ fn identity_census_text(
     }
     if let Some(note) = report.mob_store_note {
         let _ = writeln!(out, "  note: {note}");
+    }
+    if let Some(rows) = &report.identity_store_rows {
+        let _ = writeln!(
+            out,
+            "  identity-store rows of schema version 2 or later: {} ({} archived, {} \
+             tombstone(s), {} unreadable)",
+            rows.created_rows, rows.archived, rows.tombstones, rows.unreadable
+        );
     }
     for entry in &report.identities {
         let mut line = format!(

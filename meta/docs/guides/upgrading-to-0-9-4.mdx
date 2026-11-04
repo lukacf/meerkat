@@ -699,8 +699,13 @@ detected.
   `session_id`, `generation` and `member_id` of Core's last binding, `live`
   and `agent_runtime_id` while the member is live, `runtime_id` (the
   runtime id `runtime.sqlite` holds the session under), `retired`,
-  `held_completion_owed` and the `pending_first_boot_row`. It writes
-  nothing in the directory: it reads copies of the directory's top-level
+  `held_completion_owed` and the `pending_first_boot_row`. Since Meta
+  0.9.10 the report also carries `identity_store_rows` for the directory:
+  the mob store's identity-store rows of schema version 2 and later
+  (`created_rows`, `archived`, `tombstones`, `unreadable`), counted by
+  Core's rule, which a release on Core 0.9.8 or earlier does not read
+  (`null` without a durable mob store). It writes nothing in the
+  directory: it reads copies of the directory's top-level
   files, taken into a temporary directory or under `--scratch-dir`, which
   needs room for them, `runtime.sqlite` included. It refuses a directory a
   runtime holds, and one that is not migrated yet. Exit codes: 0 read, 1

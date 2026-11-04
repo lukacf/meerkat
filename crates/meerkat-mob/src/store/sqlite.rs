@@ -2694,6 +2694,181 @@ fn open_existing_read_connection(path: &Path) -> Result<Connection, MobStoreErro
     Ok(conn)
 }
 
+/// The mob most of [`seed_identity_census_rows_for_test`]'s rows belong to.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub const IDENTITY_CENSUS_TEST_MOB: &str = "census-mob";
+
+/// The mob of [`seed_identity_census_rows_for_test`]'s last row.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub const IDENTITY_CENSUS_TEST_OTHER_MOB: &str = "other-mob";
+
+/// Test-support seam: write the identity census's sample rows into the mob
+/// store at `path`, creating the store when it is absent. Each row goes in
+/// raw, as the SQLite store writes a row (its mob, its identity, no
+/// declaration scope, session or lineage, and its record's JSON), one of
+/// each shape the census tells apart:
+///
+/// - [`IDENTITY_CENSUS_TEST_MOB`]: five rows this build reads (a present
+///   store-owned identity, one pending its host's preparation, an archived
+///   one, a roster removal's tombstone and a store-owned removal's
+///   tombstone), four it cannot read (a later schema version, a row stored
+///   as text, a broken seal, and a row stored under another identity's key),
+///   and two the census does not count (a host-adopted intent's row of
+///   schema version 1, and a row that is not JSON);
+/// - [`IDENTITY_CENSUS_TEST_OTHER_MOB`]: one present store-owned identity.
+///
+/// The census counts 9 rows of the first mob (1 archived, 2 tombstones, 4
+/// unreadable) and 1 row of the second.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn seed_identity_census_rows_for_test(path: &Path) -> Result<(), MobError> {
+    use crate::identity::{
+        CreatedIdentityPresence, CreatedIdentityProvenance, CreatedIdentityRecord,
+        CreatedIdentitySpec, IdentityChangeConsent, IdentityChangeRequester, IdentityEntered,
+        IdentityPolicyOutcome, IdentityRemovalRecord,
+    };
+    use rusqlite::types::Value;
+
+    const AT_MS: u64 = 1_762_200_000_000;
+
+    fn sample_error(error: impl std::fmt::Display) -> MobError {
+        MobError::from(MobStoreError::Internal(format!(
+            "identity census sample row: {error}"
+        )))
+    }
+    fn host() -> IdentityChangeRequester {
+        IdentityChangeRequester::Host {
+            surface: "host".to_string(),
+        }
+    }
+    fn allow() -> IdentityChangeConsent {
+        IdentityChangeConsent::Policy {
+            outcome: IdentityPolicyOutcome::Allow,
+        }
+    }
+    fn store_owned(
+        mob: &str,
+        name: &str,
+        presence: CreatedIdentityPresence,
+    ) -> Result<CreatedIdentityRecord, MobError> {
+        CreatedIdentityRecord::with_spec(
+            MobId::from(mob),
+            CreatedIdentitySpec::new(name, "worker"),
+            1,
+            presence,
+            CreatedIdentityProvenance::new(format!("create-{name}"), AT_MS),
+        )
+        .map_err(sample_error)
+    }
+    fn removal(operation: &str) -> IdentityRemovalRecord {
+        IdentityRemovalRecord::new(operation, AT_MS, host(), allow())
+    }
+    fn to_json(record: &CreatedIdentityRecord) -> Result<serde_json::Value, MobError> {
+        serde_json::to_value(record).map_err(sample_error)
+    }
+    fn blob(value: &serde_json::Value) -> Result<Value, MobError> {
+        serde_json::to_vec(value)
+            .map(Value::Blob)
+            .map_err(sample_error)
+    }
+
+    let mob = IDENTITY_CENSUS_TEST_MOB;
+    let present = || CreatedIdentityPresence::Present;
+    let roster_tombstone = CreatedIdentityRecord::sealed(
+        MobId::from(mob),
+        AgentIdentity::from("roster-removed"),
+        1,
+        CreatedIdentityPresence::Removed,
+        CreatedIdentityProvenance::entered(
+            IdentityEntered::RosterRemoval,
+            "remove-roster-removed",
+            AT_MS,
+            host(),
+            allow(),
+        ),
+    )
+    .and_then(|record| record.with_removal(removal("remove-roster-removed")))
+    .map_err(sample_error)?;
+    let store_tombstone = store_owned(mob, "store-removed", CreatedIdentityPresence::Removed)?
+        .with_removal(removal("remove-store-removed"))
+        .map_err(sample_error)?;
+    let mut later_format = to_json(&store_owned(mob, "later-format", present())?)?;
+    later_format["schema_version"] = serde_json::json!(3);
+    let mut broken_seal = to_json(&store_owned(mob, "broken-seal", present())?)?;
+    broken_seal["authority_digest"] = serde_json::json!(format!("sha256:{}", "0".repeat(64)));
+    let as_text =
+        serde_json::to_string(&store_owned(mob, "non-blob", present())?).map_err(sample_error)?;
+    let rows = [
+        (
+            mob,
+            "store-present",
+            blob(&to_json(&store_owned(mob, "store-present", present())?)?)?,
+        ),
+        (
+            mob,
+            "store-pending",
+            blob(&to_json(&store_owned(
+                mob,
+                "store-pending",
+                CreatedIdentityPresence::PendingPreparation {
+                    attempt: 0,
+                    constructed: false,
+                },
+            )?)?)?,
+        ),
+        (
+            mob,
+            "store-archived",
+            blob(&to_json(&store_owned(
+                mob,
+                "store-archived",
+                CreatedIdentityPresence::Archived {
+                    archived_session: Some(SessionId::new()),
+                },
+            )?)?)?,
+        ),
+        (mob, "roster-removed", blob(&to_json(&roster_tombstone)?)?),
+        (mob, "store-removed", blob(&to_json(&store_tombstone)?)?),
+        (mob, "later-format", blob(&later_format)?),
+        (mob, "non-blob", Value::Text(as_text)),
+        (mob, "broken-seal", blob(&broken_seal)?),
+        // A row sealed for another identity than the key it is stored under.
+        (
+            mob,
+            "key-mismatch",
+            blob(&to_json(&store_owned(mob, "elsewhere", present())?)?)?,
+        ),
+        (
+            mob,
+            "host-adopted",
+            Value::Blob(br#"{"schema_version":1,"mob_id":"census-mob"}"#.to_vec()),
+        ),
+        (mob, "not-json", Value::Blob(b"{not json".to_vec())),
+        (
+            IDENTITY_CENSUS_TEST_OTHER_MOB,
+            "other-present",
+            blob(&to_json(&store_owned(
+                IDENTITY_CENSUS_TEST_OTHER_MOB,
+                "other-present",
+                present(),
+            )?)?)?,
+        ),
+    ];
+    let conn = open_connection(path)?;
+    for (mob_id, identity, record) in rows {
+        conn.execute(
+            "INSERT INTO mob_identity_intents
+                 (mob_id, agent_identity, declaration_scope, session_id, lineage_id, record_json)
+             VALUES (?1, ?2, NULL, NULL, NULL, ?3)",
+            params![mob_id, identity, record],
+        )
+        .map_err(se)?;
+    }
+    Ok(())
+}
+
 /// Test-support seam: the next store operation that opens the mob database
 /// at `path` read-only parks right after its connection opened, before its
 /// first statement, until the returned park is released or dropped. Only a
@@ -4648,65 +4823,352 @@ pub(crate) async fn read_member_binding_store_at(
 fn read_member_binding_store_at_sync(
     path: &Path,
 ) -> Result<MemberBindingStoreRead, crate::runtime::MemberBindingHistoryReadError> {
-    use crate::runtime::MemberBindingHistoryReadError as ReadError;
+    Ok(read_mob_store_file(path, |snapshot| {
+        let events = query_member_binding_events(snapshot)?;
+        let mob_ids = {
+            let mut statement = snapshot
+                .prepare("SELECT DISTINCT mob_id FROM mob_identity_intents")
+                .map_err(se)?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(se)?;
+            rows.map(|row| row.map(MobId::from).map_err(se))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut intent_rows = BTreeMap::new();
+        for mob_id in mob_ids {
+            let rows = query_member_binding_intent_rows(snapshot, &mob_id)?;
+            intent_rows.insert(mob_id, rows);
+        }
+        Ok(MemberBindingStoreRead {
+            events,
+            intent_rows,
+        })
+    })?)
+}
+
+/// Count the identity-store rows of schema version 2 and later of the
+/// persistent mob store at `path`, per mob, with no running mob, for
+/// [`crate::MobStorage::read_identity_record_rows`]: open it read-only (a
+/// missing file is never created), check its schema without migrating it,
+/// and read every mob's created identity scan in one read transaction. Each
+/// row is read by the created identity scan's own page read and counted by
+/// the census's rule ([`crate::runtime::IdentityRecordRows`]). The answer
+/// holds each mob with at least one such row.
+pub(crate) async fn read_identity_record_rows_at(
+    path: PathBuf,
+) -> Result<
+    BTreeMap<MobId, crate::runtime::IdentityRecordRows>,
+    crate::runtime::IdentityRecordRowsReadError,
+> {
+    tokio::task::spawn_blocking(move || read_identity_record_rows_at_sync(&path))
+        .await
+        .map_err(|error| MobStoreError::Internal(format!("sqlite task join failed: {error}")))?
+}
+
+fn read_identity_record_rows_at_sync(
+    path: &Path,
+) -> Result<
+    BTreeMap<MobId, crate::runtime::IdentityRecordRows>,
+    crate::runtime::IdentityRecordRowsReadError,
+> {
+    Ok(read_mob_store_file(path, |snapshot| {
+        // The census scans one mob by its text id (`WHERE mob_id = ?1`): a
+        // row whose mob id is not text is in no mob's census.
+        let mob_ids = {
+            let mut statement = snapshot
+                .prepare(
+                    "SELECT DISTINCT mob_id FROM mob_identity_intents
+                     WHERE typeof(mob_id) = 'text'
+                     ORDER BY mob_id",
+                )
+                .map_err(se)?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(se)?;
+            rows.map(|row| row.map(MobId::from).map_err(se))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut counted = BTreeMap::new();
+        for mob_id in mob_ids {
+            let rows = count_identity_record_rows(snapshot, &mob_id)?;
+            if rows.created_rows > 0 {
+                counted.insert(mob_id, rows);
+            }
+        }
+        Ok(counted)
+    })?)
+}
+
+/// Count every row of `mob_id`'s created identity scan inside the caller's
+/// read transaction, page by page, as
+/// [`crate::runtime::IdentityRecordRows`] counts a store's scan.
+fn count_identity_record_rows(
+    conn: &Connection,
+    mob_id: &MobId,
+) -> Result<crate::runtime::IdentityRecordRows, MobStoreError> {
+    let mut rows = crate::runtime::IdentityRecordRows::default();
+    let mut after: Option<super::IdentityIntentScanCursor> = None;
+    loop {
+        let page = query_created_identities_page(
+            conn,
+            mob_id,
+            after.as_ref(),
+            super::IDENTITY_INTENT_SCAN_PAGE_MAX,
+        )?;
+        for observation in page.observations.values() {
+            rows.count_row(observation);
+        }
+        match page.next {
+            None => return Ok(rows),
+            Some(next) if after.as_ref().is_none_or(|current| &next > current) => {
+                after = Some(next);
+            }
+            Some(_) => {
+                return Err(MobStoreError::Internal(format!(
+                    "the created identity scan of mob '{mob_id}' returned a non-advancing cursor"
+                )));
+            }
+        }
+    }
+}
+
+/// One page of `mob_id`'s created identity rows, read and classified as the
+/// created identity scan reads them
+/// ([`super::MobIdentityStore::scan_created_identities_page`]), over the
+/// caller's connection (inside its read transaction, when it holds one).
+/// `limit` is in `1..=IDENTITY_INTENT_SCAN_PAGE_MAX`; the callers check it.
+fn query_created_identities_page(
+    conn: &Connection,
+    mob_id: &MobId,
+    after: Option<&super::IdentityIntentScanCursor>,
+    limit: usize,
+) -> Result<super::CreatedIdentityScanPage, MobStoreError> {
+    let after_storage_class = after.map(super::IdentityIntentScanCursor::storage_class);
+    let after_identity = after.map(super::IdentityIntentScanCursor::physical_identity);
+    let fetch_limit = i64::try_from(limit.saturating_add(1))
+        .map_err(|_| MobStoreError::Internal("created identity scan limit overflow".to_string()))?;
+    // The prefilter leaves out in SQL only rows the classifier below
+    // never reads as created: a blob row of canonical JSON whose
+    // every top-level `schema_version` member (there may be none) is
+    // an integer below the created schema version, a host-adopted
+    // intent's row. The classifier reads the last such member of a
+    // JSON object as an unsigned integer, so it answers nothing for
+    // those rows. Every other row reaches it as before: a row of
+    // another storage class, a row SQLite does not accept as
+    // canonical JSON, and a row with a `schema_version` member of
+    // any other type or value. A resume then reads the created rows
+    // without reading every intent row of the mob. The CASE runs
+    // `json_each` only over text `json_valid` accepted, so a
+    // malformed row never fails the scan.
+    let created_schema_version = i64::from(crate::identity::CREATED_IDENTITY_SCHEMA_VERSION);
+    let mut stmt = conn
+        .prepare(
+            "SELECT typeof(agent_identity), CAST(agent_identity AS BLOB),
+                    typeof(record_json), CAST(record_json AS BLOB)
+             FROM mob_identity_intents
+             WHERE mob_id = ?1
+               AND (
+                   ?2 IS NULL
+                   OR typeof(agent_identity) > ?2
+                   OR (
+                       typeof(agent_identity) = ?2
+                       AND CAST(agent_identity AS BLOB) > ?3
+                   )
+               )
+               AND CASE
+                   WHEN typeof(record_json) <> 'blob' THEN 1
+                   WHEN NOT json_valid(CAST(record_json AS TEXT)) THEN 1
+                   ELSE EXISTS (
+                       SELECT 1
+                       FROM json_each(CAST(mob_identity_intents.record_json AS TEXT))
+                           AS member
+                       WHERE member.key = 'schema_version'
+                         AND NOT (member.type = 'integer' AND member.value < ?5)
+                   )
+               END
+             ORDER BY typeof(agent_identity), CAST(agent_identity AS BLOB)
+             LIMIT ?4",
+        )
+        .map_err(se)?;
+    let rows = stmt
+        .query_map(
+            params![
+                mob_id.as_str(),
+                after_storage_class,
+                after_identity,
+                fetch_limit,
+                created_schema_version
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            },
+        )
+        .map_err(se)?;
+    let mut selected = rows.collect::<Result<Vec<_>, _>>().map_err(se)?;
+    let has_more = selected.len() > limit;
+    if has_more {
+        selected.pop();
+    }
+    let next = if has_more {
+        let Some((identity_type, identity_bytes, ..)) = selected.last() else {
+            return Err(MobStoreError::Internal(
+                "created identity scan continuation has no returned row".to_string(),
+            ));
+        };
+        Some(super::IdentityIntentScanCursor::new(
+            identity_type.clone(),
+            identity_bytes.clone(),
+        ))
+    } else {
+        None
+    };
+    let mut observations = BTreeMap::new();
+    for (identity_type, identity_bytes, storage_type, bytes) in selected {
+        // A row of another storage class than this build writes is
+        // unreadable for the identity its key names: the intent
+        // readers report it malformed, and its name is reserved,
+        // never read as free.
+        let observation = if storage_type == "blob" {
+            let Some(observation) = crate::identity::classify_created_identity_row(&bytes) else {
+                continue;
+            };
+            observation
+        } else {
+            crate::identity::CreatedIdentityObservation::Unreadable {
+                evidence_digest: identity_raw_evidence_digest(&bytes),
+                detail: format!(
+                    "identity row uses SQLite storage class '{storage_type}', expected \
+                     blob"
+                ),
+            }
+        };
+        // A row whose physical key cannot name its identity, or names
+        // another identity than the row, is unreadable for the
+        // identity the key names.
+        let identity_key =
+            decode_required_identity_text(&identity_type, identity_bytes.clone(), "agent_identity");
+        let identity = AgentIdentity::from(identity_key.clone().unwrap_or_else(|_| {
+            format!(
+                "malformed-physical-identity:{identity_type}:{}",
+                identity_raw_evidence_digest(&identity_bytes)
+            )
+        }));
+        let observation = match observation {
+            crate::identity::CreatedIdentityObservation::Created(record)
+                if identity_key.is_err()
+                    || record.mob_id != *mob_id
+                    || record.agent_identity != identity =>
+            {
+                crate::identity::CreatedIdentityObservation::Unreadable {
+                    evidence_digest: identity_raw_evidence_digest(&bytes),
+                    detail: "created identity row does not match its physical \
+                             mob/identity key"
+                        .to_string(),
+                }
+            }
+            other => other,
+        };
+        observations.insert(identity, observation);
+    }
+    Ok(super::CreatedIdentityScanPage { observations, next })
+}
+
+/// Why a read-only read of a persistent mob store by its path refused or
+/// failed: the cases each path reader's typed error names.
+enum MobStoreFileReadFault {
+    /// No store exists at the path.
+    Missing { path: PathBuf },
+    /// The file is not a mob store this build reads.
+    ForeignSchema { path: PathBuf, detail: String },
+    /// The store could not be read.
+    Read(MobStoreError),
+}
+
+impl From<MobStoreError> for MobStoreFileReadFault {
+    fn from(error: MobStoreError) -> Self {
+        Self::Read(error)
+    }
+}
+
+impl From<MobStoreFileReadFault> for crate::runtime::MemberBindingHistoryReadError {
+    fn from(fault: MobStoreFileReadFault) -> Self {
+        match fault {
+            MobStoreFileReadFault::Missing { path } => Self::StoreMissing { path },
+            MobStoreFileReadFault::ForeignSchema { path, detail } => {
+                Self::ForeignSchema { path, detail }
+            }
+            MobStoreFileReadFault::Read(error) => Self::Read(error),
+        }
+    }
+}
+
+impl From<MobStoreFileReadFault> for crate::runtime::IdentityRecordRowsReadError {
+    fn from(fault: MobStoreFileReadFault) -> Self {
+        match fault {
+            MobStoreFileReadFault::Missing { path } => Self::StoreMissing { path },
+            MobStoreFileReadFault::ForeignSchema { path, detail } => {
+                Self::ForeignSchema { path, detail }
+            }
+            MobStoreFileReadFault::Read(error) => Self::Read(error),
+        }
+    }
+}
+
+/// Read the persistent mob store at `path` with no running mob: open it
+/// read-only (a missing file is never created), check its schema without
+/// migrating it, and run `read` inside one read transaction, so every read
+/// sees the snapshot whose schema the check verified. Nothing here takes a
+/// lease, a fence or a write lock, and nothing is written; a read-only open
+/// of a database in WAL mode may still touch its `-wal`/`-shm` sidecars.
+fn read_mob_store_file<T>(
+    path: &Path,
+    read: impl FnOnce(&Connection) -> Result<T, MobStoreError>,
+) -> Result<T, MobStoreFileReadFault> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ReadError::StoreMissing {
+            return Err(MobStoreFileReadFault::Missing {
                 path: path.to_path_buf(),
             });
         }
         Err(error) => {
-            return Err(ReadError::Read(MobStoreError::ReadFailed(format!(
-                "mob store {} is unavailable: {error}",
-                path.display()
-            ))));
+            return Err(MobStoreFileReadFault::Read(MobStoreError::ReadFailed(
+                format!("mob store {} is unavailable: {error}", path.display()),
+            )));
         }
     }
     let conn = meerkat_sqlite::open(path, meerkat_sqlite::ConnectionProfile::ReadOnly)
-        .map_err(|error| member_binding_store_refusal(path, error))?;
+        .map_err(|error| mob_store_file_refusal(path, error))?;
     let snapshot = conn.unchecked_transaction().map_err(se)?;
     // The schema check runs inside the read transaction, so the reads below
     // see the schema it verified. It refuses and never migrates.
     match meerkat_sqlite::preflight_domain_version(&snapshot, &MOB_DOMAIN) {
         Ok(Some(_)) => {}
         Ok(None) => {
-            return Err(ReadError::ForeignSchema {
+            return Err(MobStoreFileReadFault::ForeignSchema {
                 path: path.to_path_buf(),
                 detail: "the file carries no mob schema".to_string(),
             });
         }
-        Err(error) => return Err(member_binding_store_refusal(path, error)),
+        Err(error) => return Err(mob_store_file_refusal(path, error)),
     }
-    let events = query_member_binding_events(&snapshot)?;
-    let mob_ids = {
-        let mut statement = snapshot
-            .prepare("SELECT DISTINCT mob_id FROM mob_identity_intents")
-            .map_err(se)?;
-        let rows = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(se)?;
-        rows.map(|row| row.map(MobId::from).map_err(se))
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    let mut intent_rows = BTreeMap::new();
-    for mob_id in mob_ids {
-        let rows = query_member_binding_intent_rows(&snapshot, &mob_id)?;
-        intent_rows.insert(mob_id, rows);
-    }
+    let value = read(&snapshot)?;
     snapshot.commit().map_err(se)?;
-    Ok(MemberBindingStoreRead {
-        events,
-        intent_rows,
-    })
+    Ok(value)
 }
 
 /// A store this build does not read is a typed refusal; any other failure is
 /// a read failure.
-fn member_binding_store_refusal(
+fn mob_store_file_refusal(
     path: &Path,
     error: meerkat_sqlite::SqliteStoreError,
-) -> crate::runtime::MemberBindingHistoryReadError {
+) -> MobStoreFileReadFault {
     use meerkat_sqlite::SqliteStoreError as Sqlite;
     match error {
         Sqlite::SchemaFromTheFuture { .. }
@@ -4715,23 +5177,22 @@ fn member_binding_store_refusal(
         | Sqlite::CurrentSchemaMismatch { .. }
         | Sqlite::UnledgeredDomainObjects { .. }
         | Sqlite::LedgerMalformed { .. }
-        | Sqlite::UnsupportedDatabaseFile { .. } => {
-            crate::runtime::MemberBindingHistoryReadError::ForeignSchema {
-                path: path.to_path_buf(),
-                detail: error.to_string(),
-            }
-        }
+        | Sqlite::UnsupportedDatabaseFile { .. } => MobStoreFileReadFault::ForeignSchema {
+            path: path.to_path_buf(),
+            detail: error.to_string(),
+        },
         Sqlite::Sqlite(rusqlite::Error::SqliteFailure(failure, _))
             if failure.code == rusqlite::ErrorCode::NotADatabase =>
         {
-            crate::runtime::MemberBindingHistoryReadError::ForeignSchema {
+            MobStoreFileReadFault::ForeignSchema {
                 path: path.to_path_buf(),
                 detail: "the file is not a SQLite database".to_string(),
             }
         }
-        other => crate::runtime::MemberBindingHistoryReadError::Read(MobStoreError::ReadFailed(
-            format!("mob store {} could not be read: {other}", path.display()),
-        )),
+        other => MobStoreFileReadFault::Read(MobStoreError::ReadFailed(format!(
+            "mob store {} could not be read: {other}",
+            path.display()
+        ))),
     }
 }
 
@@ -6084,149 +6545,7 @@ impl MobIdentityStore for SqliteMobIdentityStore {
         let after = after.cloned();
         run_sqlite_task(self.observer_owner(), move || {
             let conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
-            let after_storage_class = after
-                .as_ref()
-                .map(super::IdentityIntentScanCursor::storage_class);
-            let after_identity = after
-                .as_ref()
-                .map(super::IdentityIntentScanCursor::physical_identity);
-            let fetch_limit = i64::try_from(limit.saturating_add(1)).map_err(|_| {
-                MobStoreError::Internal("created identity scan limit overflow".to_string())
-            })?;
-            // The prefilter leaves out in SQL only rows the classifier below
-            // never reads as created: a blob row of canonical JSON whose
-            // every top-level `schema_version` member (there may be none) is
-            // an integer below the created schema version, a host-adopted
-            // intent's row. The classifier reads the last such member of a
-            // JSON object as an unsigned integer, so it answers nothing for
-            // those rows. Every other row reaches it as before: a row of
-            // another storage class, a row SQLite does not accept as
-            // canonical JSON, and a row with a `schema_version` member of
-            // any other type or value. A resume then reads the created rows
-            // without reading every intent row of the mob. The CASE runs
-            // `json_each` only over text `json_valid` accepted, so a
-            // malformed row never fails the scan.
-            let created_schema_version =
-                i64::from(crate::identity::CREATED_IDENTITY_SCHEMA_VERSION);
-            let mut stmt = conn
-                .prepare(
-                    "SELECT typeof(agent_identity), CAST(agent_identity AS BLOB),
-                            typeof(record_json), CAST(record_json AS BLOB)
-                     FROM mob_identity_intents
-                     WHERE mob_id = ?1
-                       AND (
-                           ?2 IS NULL
-                           OR typeof(agent_identity) > ?2
-                           OR (
-                               typeof(agent_identity) = ?2
-                               AND CAST(agent_identity AS BLOB) > ?3
-                           )
-                       )
-                       AND CASE
-                           WHEN typeof(record_json) <> 'blob' THEN 1
-                           WHEN NOT json_valid(CAST(record_json AS TEXT)) THEN 1
-                           ELSE EXISTS (
-                               SELECT 1
-                               FROM json_each(CAST(mob_identity_intents.record_json AS TEXT))
-                                   AS member
-                               WHERE member.key = 'schema_version'
-                                 AND NOT (member.type = 'integer' AND member.value < ?5)
-                           )
-                       END
-                     ORDER BY typeof(agent_identity), CAST(agent_identity AS BLOB)
-                     LIMIT ?4",
-                )
-                .map_err(se)?;
-            let rows = stmt
-                .query_map(
-                    params![
-                        mob_id.as_str(),
-                        after_storage_class,
-                        after_identity,
-                        fetch_limit,
-                        created_schema_version
-                    ],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, Vec<u8>>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, Vec<u8>>(3)?,
-                        ))
-                    },
-                )
-                .map_err(se)?;
-            let mut selected = rows.collect::<Result<Vec<_>, _>>().map_err(se)?;
-            let has_more = selected.len() > limit;
-            if has_more {
-                selected.pop();
-            }
-            let next = if has_more {
-                let Some((identity_type, identity_bytes, ..)) = selected.last() else {
-                    return Err(MobStoreError::Internal(
-                        "created identity scan continuation has no returned row".to_string(),
-                    ));
-                };
-                Some(super::IdentityIntentScanCursor::new(
-                    identity_type.clone(),
-                    identity_bytes.clone(),
-                ))
-            } else {
-                None
-            };
-            let mut observations = BTreeMap::new();
-            for (identity_type, identity_bytes, storage_type, bytes) in selected {
-                // A row of another storage class than this build writes is
-                // unreadable for the identity its key names: the intent
-                // readers report it malformed, and its name is reserved,
-                // never read as free.
-                let observation = if storage_type == "blob" {
-                    let Some(observation) = crate::identity::classify_created_identity_row(&bytes)
-                    else {
-                        continue;
-                    };
-                    observation
-                } else {
-                    crate::identity::CreatedIdentityObservation::Unreadable {
-                        evidence_digest: identity_raw_evidence_digest(&bytes),
-                        detail: format!(
-                            "identity row uses SQLite storage class '{storage_type}', expected \
-                             blob"
-                        ),
-                    }
-                };
-                // A row whose physical key cannot name its identity, or names
-                // another identity than the row, is unreadable for the
-                // identity the key names.
-                let identity_key = decode_required_identity_text(
-                    &identity_type,
-                    identity_bytes.clone(),
-                    "agent_identity",
-                );
-                let identity = AgentIdentity::from(identity_key.clone().unwrap_or_else(|_| {
-                    format!(
-                        "malformed-physical-identity:{identity_type}:{}",
-                        identity_raw_evidence_digest(&identity_bytes)
-                    )
-                }));
-                let observation = match observation {
-                    crate::identity::CreatedIdentityObservation::Created(record)
-                        if identity_key.is_err()
-                            || record.mob_id != mob_id
-                            || record.agent_identity != identity =>
-                    {
-                        crate::identity::CreatedIdentityObservation::Unreadable {
-                            evidence_digest: identity_raw_evidence_digest(&bytes),
-                            detail: "created identity row does not match its physical \
-                                     mob/identity key"
-                                .to_string(),
-                        }
-                    }
-                    other => other,
-                };
-                observations.insert(identity, observation);
-            }
-            Ok(super::CreatedIdentityScanPage { observations, next })
+            query_created_identities_page(&conn, &mob_id, after.as_ref(), limit)
         })
         .await
     }
@@ -13948,6 +14267,159 @@ mod tests {
             Some("member-text")
         );
         assert!(valid.next.is_none());
+    }
+
+    /// The bytes, length and modification time of the file at `path`: what a
+    /// read-only reader leaves as it found them. SQLite's own `-wal`/`-shm`
+    /// sidecars are other files, which a read-only open of a WAL database may
+    /// touch.
+    fn file_facts(path: &Path) -> (Vec<u8>, u64, std::time::SystemTime) {
+        let metadata = std::fs::metadata(path).unwrap();
+        (
+            std::fs::read(path).unwrap(),
+            metadata.len(),
+            metadata.modified().unwrap(),
+        )
+    }
+
+    fn record_rows(
+        created_rows: usize,
+        archived: usize,
+        tombstones: usize,
+        unreadable: usize,
+    ) -> crate::runtime::IdentityRecordRows {
+        crate::runtime::IdentityRecordRows {
+            created_rows,
+            archived,
+            tombstones,
+            unreadable,
+        }
+    }
+
+    /// Row: the identity census's sample, counted with no running mob. The
+    /// path reader counts each mob's rows of schema version 2 and later in
+    /// one read snapshot: 9 rows of the first mob (1 archived, 2 tombstones,
+    /// 4 unreadable: a later schema version, a row stored as text, a broken
+    /// seal and a row under another identity's key), 1 of the second, so 10,
+    /// 1, 2 and 4 in all; the host-adopted row and the row that is not JSON
+    /// are not counted. The store's own created identity scan, which a
+    /// running mob's census reads, counts the same, and the reader writes
+    /// nothing.
+    ///
+    /// RED on the old tree: no reader counts the rows without a running mob.
+    #[tokio::test]
+    async fn the_identity_row_reader_counts_the_census_sample_per_mob_and_writes_nothing() {
+        let (_dir, path) = temp_db_path();
+        seed_identity_census_rows_for_test(&path).unwrap();
+        let before = file_facts(&path);
+
+        let counted = crate::MobStorage::read_identity_record_rows(&path)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            file_facts(&path),
+            before,
+            "the reader leaves the store as it found it"
+        );
+        assert_eq!(
+            counted,
+            BTreeMap::from([
+                (
+                    MobId::from(IDENTITY_CENSUS_TEST_MOB),
+                    record_rows(9, 1, 2, 4)
+                ),
+                (
+                    MobId::from(IDENTITY_CENSUS_TEST_OTHER_MOB),
+                    record_rows(1, 0, 0, 0)
+                ),
+            ])
+        );
+        assert_eq!(
+            counted
+                .values()
+                .copied()
+                .sum::<crate::runtime::IdentityRecordRows>(),
+            record_rows(10, 1, 2, 4)
+        );
+        let store = SqliteMobStores::open(&path).unwrap().identity_store();
+        for (mob_id, expected) in &counted {
+            let scanned = crate::runtime::IdentityRecordRows::scan(&store, mob_id, |_, _| {})
+                .await
+                .unwrap();
+            assert_eq!(&scanned, expected, "the store's scan of {mob_id}");
+        }
+    }
+
+    /// Row: the path reader refuses a missing store and creates none, and
+    /// refuses a file that is not a mob store this build reads (not SQLite,
+    /// no mob schema, a mob schema from a newer build) and leaves it as it
+    /// was, each typed; a mob store with no row of schema version 2 or later
+    /// answers an empty map.
+    #[tokio::test]
+    async fn the_identity_row_reader_refuses_missing_and_foreign_stores_and_answers_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.db");
+        let refused = crate::MobStorage::read_identity_record_rows(&missing).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(crate::runtime::IdentityRecordRowsReadError::StoreMissing { path })
+                    if path == &missing
+            ),
+            "a missing store is refused typed: {refused:?}"
+        );
+        assert!(!missing.exists(), "the reader never creates a store");
+
+        let not_sqlite = dir.path().join("not-sqlite.db");
+        std::fs::write(&not_sqlite, b"this file is not a SQLite database").unwrap();
+        let no_mob_schema = dir.path().join("no-mob-schema.db");
+        Connection::open(&no_mob_schema)
+            .unwrap()
+            .execute_batch("CREATE TABLE unrelated (value INTEGER);")
+            .unwrap();
+        let future_schema = dir.path().join("future-schema.db");
+        Connection::open(&future_schema)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE meerkat_schema (
+                     domain TEXT PRIMARY KEY,
+                     version INTEGER NOT NULL
+                 );
+                 INSERT INTO meerkat_schema VALUES ('mob', 9999);",
+            )
+            .unwrap();
+        for path in [&not_sqlite, &no_mob_schema, &future_schema] {
+            let before = file_facts(path);
+            let refused = crate::MobStorage::read_identity_record_rows(path).await;
+            assert!(
+                matches!(
+                    &refused,
+                    Err(crate::runtime::IdentityRecordRowsReadError::ForeignSchema {
+                        path: refused_path,
+                        ..
+                    }) if refused_path == path
+                ),
+                "{} is refused as a foreign schema: {refused:?}",
+                path.display()
+            );
+            assert_eq!(
+                file_facts(path),
+                before,
+                "{} is left as it was",
+                path.display()
+            );
+        }
+
+        let empty = dir.path().join("empty.db");
+        drop(open_connection(&empty).unwrap());
+        assert!(
+            crate::MobStorage::read_identity_record_rows(&empty)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a store without such rows answers an empty map"
+        );
     }
 
     /// A created identity entry's row (schema version 2) and every row of a

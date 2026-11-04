@@ -58,5 +58,6 @@ pub use layout_status::{
 };
 pub use offline_identities::{
     IDENTITY_CENSUS_FORMAT, IDENTITY_CENSUS_VERSION, IN_MEMORY_MOB_STORE_NOTE, IdentityCensusEntry,
-    IdentityCensusRefusal, IdentityCensusReport, PendingFirstBootRow, identity_census_offline,
+    IdentityCensusRefusal, IdentityCensusReport, IdentityStoreRows, PendingFirstBootRow,
+    identity_census_offline,
 };

@@ -30,7 +30,6 @@ struct HandoffState {
     foreground_live: bool,
     definite_refusal: bool,
     native_admitted: bool,
-    canonical_readable: bool,
     // Only the enrolled source-recovery span. Native binders and workers
     // independently retain the same entered review through their actual I/O.
     review: Option<crate::review_custody::ReviewCustody>,
@@ -38,6 +37,10 @@ struct HandoffState {
 pub(crate) struct CustodyHandoff {
     enrolled: bool,
     state: Mutex<HandoffState>,
+    // Whether the canonical source row read as Pending. Written only by
+    // canonical_readable, with `state` held and inside an owner change of the
+    // source publication, so pending_readiness reads it without that lock.
+    canonical_readable: std::sync::atomic::AtomicBool,
     observation: Mutex<Option<NativeObservation>>,
     // A completed failed close attempt retains evidence, not active I/O.
     closed_failure: std::sync::atomic::AtomicBool,
@@ -68,9 +71,9 @@ impl CustodyHandoff {
                 foreground_live: true,
                 definite_refusal: false,
                 native_admitted: false,
-                canonical_readable: true,
                 review: enrolled.then(|| review.clone()),
             }),
+            canonical_readable: std::sync::atomic::AtomicBool::new(true),
             observation: Mutex::new(None),
             closed_failure: std::sync::atomic::AtomicBool::new(false),
             last_observation: Mutex::new(None),
@@ -155,60 +158,83 @@ impl CustodyHandoff {
     /// Foreground is bounded by the actual tracked submission and native
     /// owner close. Transfer wakes the existing eight-step, five-second
     /// recovery. Reader timeouts never spend or reset that budget.
+    ///
+    /// Its native reader (retained_custody) holds the source collection, which
+    /// enrollment and acceptance take after the recovery control and the
+    /// invocation lock. So this read takes neither lock: it reads the facts
+    /// their writers keep in single atomic words, under those same locks and
+    /// owner changes. The control word is read before and after the
+    /// invocation's readable fact, and a change between them reads again, so
+    /// one answer always holds all three facts at one instant. Poison of
+    /// either lock stays unavailable.
     pub(crate) fn pending_readiness(
         &self,
     ) -> Result<(), meerkat_core::authorization::ControllerReadinessFailure> {
         use meerkat_core::authorization::ControllerReadinessFailure::PolicyUnavailable;
         let source = self.source.upgrade().ok_or(PolicyUnavailable)?;
-        let control = source
-            .custody_recovery
-            .control
-            .state
-            .try_lock()
-            .map_err(|_| PolicyUnavailable)?;
-        let state = self.state.try_lock().map_err(|_| PolicyUnavailable)?;
-        if !self.enrolled || !control.selected || control.stopped || !state.canonical_readable {
+        let control = &source.custody_recovery.control;
+        let ready = loop {
+            let before = control.readiness();
+            #[cfg(test)]
+            control.between_readiness_reads_for_test();
+            let readable = self
+                .canonical_readable
+                .load(std::sync::atomic::Ordering::Acquire);
+            if control.readiness() == before {
+                break before.selected() && !before.stopped() && readable;
+            }
+        };
+        if !self.enrolled || !ready || control.state.is_poisoned() || self.state.is_poisoned() {
             return Err(PolicyUnavailable);
         }
         Ok(())
     }
+    /// The native read answers the current pending readiness at once while
+    /// this invocation's lock and the recovery control are held: it neither
+    /// waits for them nor answers their contention as unavailable.
     #[cfg(test)]
     pub(super) fn assert_read_is_nonblocking_for_test(
         &self,
         owner: &ToolkitOriginalOwner,
         claims: &meerkat_authorization_contracts::work_association::InputAuthorityAssociationCandidate,
     ) {
+        let source = self.source.upgrade().unwrap();
+        let _control = source.custody_recovery.control.state.lock().unwrap();
         let _state = self.state.lock().unwrap();
-        assert!(
+        assert!(matches!(
             meerkat_runtime::meerkat_machine::AuthenticatedOriginalSource::retained_custody(
                 owner,
                 &claims.ingress_namespace,
                 &claims.original_work
-            )
-            .is_err()
-        );
+            ),
+            Ok(meerkat_runtime::meerkat_machine::RetainedCustody::AdmissionPending)
+        ));
     }
     #[cfg(test)]
     pub(super) fn canonical_readable_for_test(&self) -> bool {
-        self.state.lock().unwrap().canonical_readable
+        self.canonical_readable
+            .load(std::sync::atomic::Ordering::Acquire)
     }
     fn canonical_readable(&self, readable: bool) {
+        use std::sync::atomic::Ordering;
         let Some(source) = self.source.upgrade() else {
             return;
         };
-        let mut state = self
+        // Writers stay serialized by this invocation's lock; the native reader
+        // reads the one atomic fact without it.
+        let _state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.canonical_readable == readable {
+        if self.canonical_readable.load(Ordering::Acquire) == readable {
             return;
         }
         let publication = source.owner.publication();
         match publication.begin_owner_change() {
-            Ok(_publication) => state.canonical_readable = readable,
+            Ok(_publication) => self.canonical_readable.store(readable, Ordering::Release),
             // A failed publication is permanently unavailable. It may fence
             // reads conservatively, but can never restore Pending readiness.
-            Err(_) => state.canonical_readable = false,
+            Err(_) => self.canonical_readable.store(false, Ordering::Release),
         }
     }
     pub(super) fn closed_failure(&self) -> bool {
@@ -332,11 +358,11 @@ impl CustodyHandoff {
                 foreground_live: true,
                 definite_refusal: false,
                 native_admitted: false,
-                canonical_readable: true,
                 // This is the same attempt. Move its recovery hold without
                 // dropping or reacquiring review while source locks are held.
                 review: state.review.take(),
             }),
+            canonical_readable: std::sync::atomic::AtomicBool::new(true),
             observation: Mutex::new(None),
             closed_failure: std::sync::atomic::AtomicBool::new(false),
             last_observation: Mutex::new(
@@ -390,13 +416,14 @@ impl CustodyHandoff {
             .ok_or("Toolkit source owner is unavailable")?;
         // Same order as enrollment: source control before invocation state.
         // Stop and synchronous acceptance linearize here, with no store await.
-        let control = match source.custody_recovery.control.state.lock() {
+        let recovery = &source.custody_recovery.control;
+        let control = match recovery.state.lock() {
             Ok(control) => control,
             Err(error) => {
                 // A panicking earlier publication cannot authorize another
                 // live publication. Preserve this real receipt under close.
-                let mut control = error.into_inner();
-                control.stopped = true;
+                let control = error.into_inner();
+                recovery.mark(ControlReadiness::STOPPED);
                 control
             }
         };
@@ -413,7 +440,7 @@ impl CustodyHandoff {
         // This same short lock excludes withdrawal through synchronous source
         // acknowledgement and the workflow callback. No store await here.
         state.phase = HandoffPhase::Accepted;
-        let result = if control.stopped {
+        let result = if recovery.readiness().stopped() {
             // The exact matching native receipt was retained before this call.
             // It may settle durably, but stop already fenced live publication.
             Err("Native work was admitted after Toolkit host close began".into())
@@ -508,15 +535,34 @@ const ROUND_PAUSE: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 struct ControlState {
-    selected: bool,
     admission_stopped: bool,
-    stopped: bool,
+}
+/// Whether this source's recovery is selected and whether it stopped, in one
+/// word. Each flag is set once and never cleared, only with `state` held
+/// (stop also inside an owner change of the source publication), so a native
+/// reader that must not wait for that lock reads both together.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ControlReadiness(u8);
+impl ControlReadiness {
+    const SELECTED: u8 = 1;
+    const STOPPED: u8 = 2;
+    fn selected(self) -> bool {
+        self.0 & Self::SELECTED != 0
+    }
+    fn stopped(self) -> bool {
+        self.0 & Self::STOPPED != 0
+    }
 }
 #[derive(Default)]
 struct Control {
     state: Mutex<ControlState>,
+    readiness: std::sync::atomic::AtomicU8,
     wake: Notify,
     publication: OnceLock<meerkat_authorization::publication::LocalAuthorizationPublication>,
+    // Runs once between the two control reads of the next pending readiness
+    // read, so a control can race a writer exactly inside that read.
+    #[cfg(test)]
+    between_readiness_reads: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 struct TaskExit(Arc<Control>);
 impl Drop for TaskExit {
@@ -563,10 +609,11 @@ impl CustodyRecovery {
             .state
             .lock()
             .map_err(|_| PrivateOriginalError::Unavailable)?;
-        if control.admission_stopped || control.stopped {
+        let readiness = self.control.readiness();
+        if control.admission_stopped || readiness.stopped() {
             return Err(PrivateOriginalError::Unavailable);
         }
-        register(control.selected)
+        register(readiness.selected())
     }
 
     pub(super) fn changed(&self) {
@@ -588,7 +635,7 @@ impl CustodyRecovery {
         self.control
             .state
             .lock()
-            .map_or(true, |control| control.stopped)
+            .map_or(true, |_control| self.control.readiness().stopped())
     }
 
     fn stop(&self) {
@@ -596,6 +643,25 @@ impl CustodyRecovery {
     }
 }
 impl Control {
+    fn readiness(&self) -> ControlReadiness {
+        ControlReadiness(self.readiness.load(std::sync::atomic::Ordering::Acquire))
+    }
+    /// Set one readiness flag. Callers hold `state`.
+    fn mark(&self, flag: u8) {
+        self.readiness
+            .fetch_or(flag, std::sync::atomic::Ordering::AcqRel);
+    }
+    #[cfg(test)]
+    fn between_readiness_reads_for_test(&self) {
+        let hook = self
+            .between_readiness_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
     fn stop_admitting(&self) -> Result<(), PrivateOriginalError> {
         let mut control = self
             .state
@@ -609,15 +675,16 @@ impl Control {
     // but admit no next round. Full close still runs the existing settlement.
     fn admit_round(&self) -> Option<bool> {
         self.state.lock().map_or(Some(true), |control| {
-            if control.admission_stopped && !control.stopped {
+            let stopped = self.readiness().stopped();
+            if control.admission_stopped && !stopped {
                 None
             } else {
-                Some(control.stopped)
+                Some(stopped)
             }
         })
     }
     fn stop(&self) {
-        let mut control = self
+        let _control = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -629,7 +696,7 @@ impl Control {
             .publication
             .get()
             .map(|publication| publication.begin_owner_change());
-        control.stopped = true;
+        self.mark(ControlReadiness::STOPPED);
         self.wake.notify_waiters();
     }
     async fn pause(&self) {
@@ -669,8 +736,9 @@ impl PrivateOriginals {
     // dropping its sender releases the task for all-exit cleanup too.
     #[cfg(test)]
     pub(super) fn hold_first_custody_round_for_test(&self) -> tokio::sync::oneshot::Sender<()> {
-        let control = self.custody_recovery.control.state.lock().unwrap();
-        assert!(!control.selected && !control.stopped);
+        let _control = self.custody_recovery.control.state.lock().unwrap();
+        let readiness = self.custody_recovery.control.readiness();
+        assert!(!readiness.selected() && !readiness.stopped());
         let (release, held) = tokio::sync::oneshot::channel();
         let mut slot = self.custody_recovery.first_round.lock().unwrap();
         assert!(slot.is_none());
@@ -720,7 +788,7 @@ impl PrivateOriginals {
         announcer: Option<ContinuationSourceAnnouncer>,
     ) -> Result<(), PrivateOriginalError> {
         let handle = Handle::try_current().map_err(|_| PrivateOriginalError::Unavailable)?;
-        let mut control = self
+        let control = self
             .custody_recovery
             .control
             .state
@@ -731,7 +799,8 @@ impl PrivateOriginals {
             .task
             .lock()
             .map_err(|_| PrivateOriginalError::Unavailable)?;
-        if control.stopped || control.selected || task.is_some() {
+        let readiness = self.custody_recovery.control.readiness();
+        if readiness.stopped() || readiness.selected() || task.is_some() {
             return Err(PrivateOriginalError::Unavailable);
         }
         // An entered bootstrap may finish after admission was fenced. Keep
@@ -813,7 +882,9 @@ impl PrivateOriginals {
                 }
             }),
         ))));
-        control.selected = true;
+        self.custody_recovery
+            .control
+            .mark(ControlReadiness::SELECTED);
         Ok(())
     }
 
@@ -825,7 +896,10 @@ impl PrivateOriginals {
     /// control reads enrolled readiness with no recovery round running.
     #[cfg(test)]
     pub(super) fn select_custody_recovery_for_test(&self) {
-        self.custody_recovery.control.state.lock().unwrap().selected = true;
+        let _control = self.custody_recovery.control.state.lock().unwrap();
+        self.custody_recovery
+            .control
+            .mark(ControlReadiness::SELECTED);
     }
 
     /// A cancelled join leaves the exact task and its entered transactions
@@ -1312,13 +1386,13 @@ impl PrivateOriginals {
             return Ok(());
         }
         {
-            let control = self
+            let _control = self
                 .custody_recovery
                 .control
                 .state
                 .lock()
                 .map_err(|_| PrivateOriginalError::Unavailable)?;
-            if control.stopped {
+            if self.custody_recovery.control.readiness().stopped() {
                 entry.close_promoted();
                 return Ok(());
             }
@@ -1374,13 +1448,13 @@ impl PrivateOriginals {
                 &actor.executor_actor_identity(),
                 entry.input(),
                 |admitted| {
-                    let control = self
+                    let _control = self
                         .custody_recovery
                         .control
                         .state
                         .lock()
                         .map_err(|_| PrivateOriginalError::Unavailable)?;
-                    if control.stopped {
+                    if self.custody_recovery.control.readiness().stopped() {
                         return Err(PrivateOriginalError::Unavailable);
                     }
                     let _writer = self
@@ -1686,7 +1760,10 @@ mod admission_tests {
     async fn parked_custody_round_wakes_for_full_close_without_reopening_admission() {
         let recovery = CustodyRecovery::default();
         assert!(!recovery.enroll(Ok).unwrap());
-        recovery.control.state.lock().unwrap().selected = true;
+        {
+            let _control = recovery.control.state.lock().unwrap();
+            recovery.control.mark(ControlReadiness::SELECTED);
+        }
         assert!(recovery.enroll(Ok).unwrap());
         recovery.control.stop_admitting().unwrap();
         assert!(matches!(

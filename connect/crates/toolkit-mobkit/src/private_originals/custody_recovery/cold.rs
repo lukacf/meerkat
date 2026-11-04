@@ -276,14 +276,15 @@ impl PrivateOriginals {
                 &input,
                 |admitted| {
                     observe!(17);
-                    let control = self
+                    let _control = self
                         .custody_recovery
                         .control
                         .state
                         .lock()
                         .map_err(|_| PrivateOriginalError::Unavailable)?;
                     observe!(18);
-                    if !control.selected || control.stopped {
+                    let readiness = self.custody_recovery.control.readiness();
+                    if !readiness.selected() || readiness.stopped() {
                         return Err(PrivateOriginalError::Unavailable);
                     }
                     observe!(19);

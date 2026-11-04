@@ -89,7 +89,8 @@ async fn exercise(order: CloseOrder) {
                 Err(meerkat_runtime::input_authority::NativeAdmissionError::Readiness(
                     meerkat_core::authorization::ControllerReadinessFailure::OriginalAdmissionPending))));
             // A source read has no I/O/native lock dependency: hold the actual
-            // source writer and the handoff lock and require prompt refusal.
+            // source writer, the recovery control and the handoff lock, and
+            // require the prompt current answer, never their contention.
             {
                 let _writer = fixture.owner.source_writer().await;
                 held.handoff.assert_read_is_nonblocking_for_test(&fixture.owner, claims);

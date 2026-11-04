@@ -2928,10 +2928,7 @@ impl AuthenticatedOriginalSource for ToolkitOriginalOwner {
         original: &OriginalWorkRef,
     ) -> Result<Option<AuthenticatedOriginal>, ControllerReadinessFailure> {
         let selected = {
-            let originals = self
-                .originals
-                .try_lock()
-                .map_err(|_| ControllerReadinessFailure::PolicyUnavailable)?;
+            let originals = self.wait_for_source_collection()?;
             originals
                 .iter()
                 .filter_map(OriginalRecord::bound)
@@ -3011,10 +3008,7 @@ impl AuthenticatedOriginalSource for ToolkitOriginalOwner {
         namespace: &QualifiedIngressNamespace,
         original: &OriginalWorkRef,
     ) -> Result<RetainedCustody, ControllerReadinessFailure> {
-        let originals = self
-            .originals
-            .try_lock()
-            .map_err(|_| ControllerReadinessFailure::PolicyUnavailable)?;
+        let originals = self.wait_for_source_collection()?;
         let Some(held) = originals
             .iter()
             .filter_map(OriginalRecord::bound)
@@ -3034,8 +3028,10 @@ impl AuthenticatedOriginalSource for ToolkitOriginalOwner {
                     let settlement = settlement
                         .upgrade()
                         .ok_or(ControllerReadinessFailure::PolicyUnavailable)?;
-                    // Both reads are nonblocking source locks. No native lock,
-                    // storage read or recovery action belongs in this callback.
+                    // Read without the recovery control or invocation lock:
+                    // their holders take this source collection after them.
+                    // No native lock, storage read or recovery action belongs
+                    // in this callback.
                     settlement.pending_readiness()?;
                     Ok(RetainedCustody::AdmissionPending)
                 }
@@ -3047,6 +3043,39 @@ impl AuthenticatedOriginalSource for ToolkitOriginalOwner {
 }
 
 impl ToolkitOriginalOwner {
+    /// The source collection for the synchronous native readers that
+    /// authenticate an original and read its retained custody. Its holders
+    /// are this owner's own short synchronous sections: they never await,
+    /// call back into native or wait for a lock that a native caller holds,
+    /// and the sibling disposition read already takes this lock blocking. So
+    /// a held collection is contention, never a policy answer, and the reader
+    /// waits for the holder. The wait is bounded by Core's owner-change bound
+    /// and then answers unavailable, as before, so no unforeseen holder can
+    /// turn a refusal into a hang. A poisoned collection answers unavailable
+    /// at once.
+    fn wait_for_source_collection(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, Vec<OriginalRecord>>, ControllerReadinessFailure> {
+        let deadline =
+            std::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+        let mut pause = std::time::Duration::from_micros(20);
+        loop {
+            match self.originals.try_lock() {
+                Ok(originals) => return Ok(originals),
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err(ControllerReadinessFailure::PolicyUnavailable);
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {}
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Err(ControllerReadinessFailure::PolicyUnavailable);
+            }
+            std::thread::sleep(pause.min(deadline - now));
+            pause = (pause * 2).min(std::time::Duration::from_millis(1));
+        }
+    }
+
     pub(crate) fn admitted_original_basis(
         &self,
         namespace: &QualifiedIngressNamespace,

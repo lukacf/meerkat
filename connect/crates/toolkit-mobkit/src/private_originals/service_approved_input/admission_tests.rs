@@ -1270,6 +1270,50 @@ async fn shared_entry_reservation_waits_for_source_writer_without_reusing_author
     }
 }
 
+// The reservation's parent and shared-entry checks run under the follow-up's
+// source writer and outside any owner change: a short hold of the source
+// collection by another owner is waited for, not answered as a denied
+// reservation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_entry_reservation_waits_for_a_held_source_collection() {
+    let fixture = ContinuationFixture::for_service_input().await;
+    let result = AssertUnwindSafe(Box::pin(async {
+        let task = persistence_task(&fixture).await;
+        let dispatch = fixture.probe.as_ref().unwrap().captured();
+        tokio::time::timeout(
+            WAIT,
+            fixture
+                .machine
+                .wait_run_settled(&fixture.session, dispatch.retained_work().unwrap().run_id()),
+        )
+        .await
+        .unwrap();
+        let owner = fixture.source.owner.clone();
+        let (held, holding) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let originals = owner.lock_originals_for_test();
+            held.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            drop(originals);
+        });
+        holding.recv().unwrap();
+        let reserved = tokio::time::timeout(WAIT, task.reserve_shared_entry(None))
+            .await
+            .unwrap();
+        holder.join().unwrap();
+        let entry = reserved
+            .expect("a held source collection is waited for, not answered as a denied reservation");
+        entry.settle().unwrap();
+    }))
+    .catch_unwind()
+    .await;
+    let cleanup = fixture.shutdown().await;
+    assert!(cleanup.is_ok(), "{cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn service_task_reads_share_current_selection_while_setup_entry_is_held() {
     use meerkat_toolkit::host_lifetime::control::{

@@ -813,6 +813,305 @@ fn source_wait_never_reads_after_its_deadline() {
     );
 }
 
+// Hold the source collection on another thread for `hold`, then run `check`
+// on this thread while it is held, and answer what `check` answered.
+fn while_collection_held<T>(
+    owner: &ToolkitOriginalOwner,
+    hold: std::time::Duration,
+    check: impl FnOnce() -> T,
+) -> T {
+    let (held, holding) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let holder = scope.spawn(|| {
+            let originals = owner.originals.lock().unwrap();
+            held.send(()).unwrap();
+            std::thread::sleep(hold);
+            drop(originals);
+        });
+        holding.recv().unwrap();
+        let answer = check();
+        holder.join().unwrap();
+        answer
+    })
+}
+
+// A follow-up source checks its admitted parent through the same source
+// collection, under the source writer: a short hold of the collection is
+// waited for, not answered unavailable.
+#[test]
+fn followup_parent_check_waits_for_a_held_source_collection_instead_of_refusing() {
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (owner, a, _namespace, _work) = admitted_original(dir.path());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let followup = || {
+        runtime.block_on(owner.retain_followup_source(&a.association, || async {
+            Ok::<_, OriginalWriterError>("published")
+        }))
+    };
+    assert_eq!(followup(), Ok("published"));
+    let answer = while_collection_held(&owner, std::time::Duration::from_millis(300), followup);
+    assert_eq!(
+        answer,
+        Ok("published"),
+        "a held source collection is waited for, not answered unavailable"
+    );
+}
+
+// The writer-side waits share the readers' bound: a holder that outlasts it
+// is answered unavailable at the bound, and a poisoned collection at once.
+#[test]
+fn followup_parent_check_waits_at_most_its_bound_and_refuses_poison_at_once() {
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (owner, a, _namespace, _work) = admitted_original(dir.path());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let followup = || {
+        let started = std::time::Instant::now();
+        let answer = runtime.block_on(owner.retain_followup_source(&a.association, || async {
+            Ok::<_, OriginalWriterError>("published")
+        }));
+        (answer, started.elapsed())
+    };
+    let bound = meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+    let (answer, waited) = while_collection_held(
+        &owner,
+        bound + std::time::Duration::from_millis(1500),
+        followup,
+    );
+    assert_eq!(answer, Err(OriginalWriterError::Unavailable));
+    assert!(
+        waited >= bound,
+        "the check waits up to its bound: {waited:?}"
+    );
+    assert!(
+        waited < bound + std::time::Duration::from_millis(1000),
+        "and never past it: {waited:?}"
+    );
+    let poisoned = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let _originals = owner.originals.lock().unwrap();
+                panic!("controlled source collection poison");
+            })
+            .join()
+    });
+    assert!(poisoned.is_err());
+    let (answer, waited) = followup();
+    assert_eq!(answer, Err(OriginalWriterError::Unavailable));
+    assert!(
+        waited < std::time::Duration::from_millis(500),
+        "poison answers unavailable at once: {waited:?}"
+    );
+}
+
+async fn cancellable_event(
+    dir: &Path,
+    label: &str,
+) -> (
+    Arc<ToolkitOriginalOwner>,
+    Arc<crate::private_originals::PrivateOriginals>,
+    crate::private_originals::PrivateOriginalRef,
+) {
+    use crate::private_originals::service_grants::tests as access;
+    let owner = initialized(&dir.join("grants"));
+    let adapter = access::adapter(owner.clone(), &dir.join("originals")).await;
+    let event = adapter.retain_event(private_event(label)).await.unwrap();
+    (owner, adapter, event)
+}
+
+// A cancellation takes the source writer before any other guard. Another
+// writer holds it across its own durable write, so the cancellation waits for
+// that writer instead of refusing, and then reads every fact afresh.
+#[tokio::test]
+async fn cancellation_waits_for_a_held_source_writer_instead_of_refusing() {
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (owner, adapter, event) = cancellable_event(dir.path(), "held-writer").await;
+    let writer = owner.source_writer().await;
+    let (cancelled, ()) = tokio::join!(adapter.record_operation_cancelled(&event), async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        drop(writer);
+    });
+    assert_eq!(
+        cancelled,
+        Ok(()),
+        "a held source writer is waited for, not answered unavailable"
+    );
+}
+
+#[tokio::test]
+async fn cancellation_waits_at_most_its_bound_for_the_source_writer() {
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (owner, adapter, event) = cancellable_event(dir.path(), "outlasting-writer").await;
+    let bound = meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+    let writer = owner.source_writer().await;
+    let started = std::time::Instant::now();
+    let cancelled = adapter.record_operation_cancelled(&event).await;
+    let waited = started.elapsed();
+    drop(writer);
+    assert_eq!(
+        cancelled,
+        Err(crate::private_originals::PrivateOriginalError::Unavailable),
+        "a writer that outlasts the bound is answered unavailable"
+    );
+    assert!(
+        waited >= bound,
+        "the cancellation waits up to its bound: {waited:?}"
+    );
+    assert!(
+        waited < bound + std::time::Duration::from_millis(1000),
+        "and never past it: {waited:?}"
+    );
+    // The refused attempt changed nothing: the same cancellation runs once the
+    // writer is free.
+    adapter.record_operation_cancelled(&event).await.unwrap();
+}
+
+// Under the source writer, the cancellation reads and then changes the source
+// collection: a short hold of the collection is waited for there too.
+#[test]
+fn cancellation_waits_for_a_held_source_collection_instead_of_refusing() {
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (owner, adapter, event) =
+        runtime.block_on(cancellable_event(dir.path(), "held-collection"));
+    let answer = while_collection_held(&owner, std::time::Duration::from_millis(300), || {
+        runtime.block_on(adapter.record_operation_cancelled(&event))
+    });
+    assert_eq!(
+        answer,
+        Ok(()),
+        "a held source collection is waited for, not answered unavailable"
+    );
+}
+
+// A cancellation changes the source collection only inside an owner change of
+// the shared publication, and never waits while that change is open. When
+// another owner takes the collection between the cancellation's read and its
+// change, the change ends unchanged, the collection is waited for outside any
+// change, and the change begins again.
+#[test]
+fn cancellation_waits_for_the_collection_outside_any_owner_change() {
+    use toolkit_store::ToolkitStore;
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (owner, a, namespace, work) = admitted_original(dir.path());
+    let store = toolkit_store::SqliteStore::open(dir.path().join("sources.sqlite")).unwrap();
+    let row = Arc::new(
+        runtime
+            .block_on(store.admit(toolkit_store::AdmissionRequest {
+                key: toolkit_store::StoreKey {
+                    realm: "test-realm".into(),
+                    owner: "cancel-source".into(),
+                    id: "cancel-a".into(),
+                },
+                admission_key: "cancel-a".into(),
+                data: toolkit_store::RecordData {
+                    schema: "test.cancellation-change".into(),
+                    version: 1,
+                    body: serde_json::json!({}),
+                },
+                events: vec![],
+                effects: vec![],
+            }))
+            .unwrap()
+            .record()
+            .clone(),
+    );
+    let (grab, grabbed) = std::sync::mpsc::channel::<()>();
+    let (taken, taking) = std::sync::mpsc::channel::<()>();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let (open_at_release, observed) = std::sync::mpsc::channel();
+    let validated = row.clone();
+    // Runs after the cancellation's first read: another owner takes the
+    // collection before the cancellation's change can.
+    let validate = move |_: Option<InputAuthorityAssociation>,
+                         _: Option<Arc<toolkit_store::StoredRecord>>| {
+        grab.send(()).unwrap();
+        taking.recv().unwrap();
+        async move { Ok(validated) }
+    };
+    let answer = std::thread::scope(|scope| {
+        let shared = &owner;
+        let holder = scope.spawn(move || {
+            grabbed.recv().unwrap();
+            let originals = shared.originals.lock().unwrap();
+            taken.send(()).unwrap();
+            released.recv().unwrap();
+            // The cancellation is waiting now; no owner change may be open.
+            open_at_release
+                .send(shared.publication().change_in_progress().is_some())
+                .unwrap();
+            drop(originals);
+        });
+        let (owner, runtime) = (&owner, &runtime);
+        let (realm, original) = (&namespace.realm, &work);
+        let cancel = scope.spawn(move || {
+            runtime.block_on(owner.record_operation_cancelled(
+                realm,
+                original,
+                validate,
+                |stored| async move { Ok(stored) },
+            ))
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        cancel.join().unwrap()
+    });
+    assert!(
+        !observed.recv().unwrap(),
+        "no owner change stays open while the cancellation waits for the collection"
+    );
+    assert_eq!(
+        answer,
+        Ok(()),
+        "a collection taken between the read and the change is waited for, not refused"
+    );
+    assert!(
+        owner
+            .originals
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(OriginalRecord::bound)
+            .any(|held| Arc::ptr_eq(&held.retained, &a)
+                && matches!(
+                    held.operation,
+                    OriginalOperationDisposition::Cancelled { .. }
+                )),
+        "the cancellation applied its change once it could"
+    );
+}
+
 pub(crate) fn private_event(label: &str) -> crate::private_originals::PrivateAuthenticatedEvent {
     use crate::private_originals::{PrivateAuthenticatedEvent, PrivateSourceEvidence};
     let sha256 = evidence(label)
@@ -1422,18 +1721,20 @@ async fn durable_binding_callback_and_original_cancel_share_the_writer_mutex() {
         _ = waiting => {},
         result = &mut binding => panic!("binding escaped the held durable callback: {result:?}"),
     }
-    // The callback has committed its row but not published. Cancellation must
-    // refuse before it can interleave a second durable write/publication.
-    assert!(matches!(
-        adapter.record_operation_cancelled(&reference).await,
-        Err(crate::private_originals::PrivateOriginalError::Unavailable)
-    ));
+    // The callback has committed its row but not published. Cancellation waits
+    // for the source writer the callback holds: it cannot interleave a second
+    // durable write or publication, and it runs once the binding published.
+    let cancelled = adapter.record_operation_cancelled(&reference);
+    tokio::pin!(cancelled);
+    tokio::select! {
+        result = &mut cancelled => panic!(
+            "cancellation returned while the durable callback held the source writer: {result:?}"
+        ),
+        () = tokio::time::sleep(std::time::Duration::from_millis(200)) => {},
+    }
     release.send(()).unwrap();
     let retained = binding.await.unwrap();
-    adapter
-        .record_operation_cancelled(&reference)
-        .await
-        .unwrap();
+    cancelled.await.unwrap();
     assert!(matches!(
         owner.record_candidate(&retained),
         Err(OriginalWriterError::OperationCancelled)

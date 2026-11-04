@@ -532,10 +532,13 @@ of this.
 - Whether the tool ran (0.9.4): `RefusalDispatch` (`NotDispatched`,
   `Unknown`; non-exhaustive) and `OperationRefused::dispatch`. The fenced
   dispatch (and a retained consent attempt) certifies `NotDispatched` for a
-  refusal it meets before it invokes the dispatcher, and the execution policy
-  gate for one before its inner dispatcher; every other refusal is `Unknown`,
-  which makes no claim. A dispatcher layer that runs tool code of its own
-  before delegating forwards `OperationRefused::new(refusal.kind())`.
+  refusal it meets before it invokes the dispatcher, the execution policy
+  gate for one before its inner dispatcher, and a leaf's effect entry
+  (`enter_reviewed_effect`) for one before the body it guards while no
+  effect of the call entered; every other refusal is `Unknown`, which makes
+  no claim. A dispatcher layer that runs tool code of its own before
+  delegating (a leaf that runs an effect before its effect entry included)
+  forwards `OperationRefused::new(refusal.kind())`.
   `OperationRefused` equality now includes the dispatch fact, so compare
   `kind()` and `dispatch()` instead of `OperationRefused::new(kind)`.
 - Audit types (0.9.4): `AuditObservation` is `#[non_exhaustive]`,

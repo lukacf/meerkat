@@ -293,10 +293,14 @@ uniform payload:
 
 - `data.kind` is the closed refusal kind: `reprepare_required`, `denied` or
   `malformed_facts`.
-- `data.tool_invoked` is `false` only when Core refused the call before it
-  invoked the tool's dispatcher, so no tool code ran. It is `"unknown"` when
-  the refusal came back from the dispatcher (the tool may have had an effect
-  before a later governed step refused) or from a mob member's upcall.
+- `data.tool_invoked` is `false` only when Core refused the call before the
+  tool's body ran: before it invoked the tool's dispatcher, or at the tool's
+  own effect entry (`ToolDispatchContext::enter_reviewed_effect`) while no
+  effect of the call had entered. Both read the same, wherever the owner
+  change that refused the call landed. It is `"unknown"` when the refusal
+  came back from the tool after an effect of the call entered (the tool may
+  have had an effect before a later governed step refused), from the tool's
+  own code, or from a mob member's upcall.
 - Neither field is a permission or evidence of one. They name no owner,
   policy, principal or audit record; a refusal never grants a replay, and a
   new call is a new operation with fresh admission.
@@ -304,7 +308,8 @@ uniform payload:
 Owners that could not decide return `operation_authorization_unavailable`,
 with no `data`. A dispatcher layer that runs tool code before it delegates
 must not forward an inner `tool_invoked: false`: it returns
-`OperationRefused::new(refusal.kind())` instead, which reads `"unknown"`.
+`OperationRefused::new(refusal.kind())` instead, which reads `"unknown"`. A
+leaf that runs an effect of its own before its effect entry is such a layer.
 
 ## Observe refusal dispositions
 

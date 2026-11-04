@@ -1532,6 +1532,13 @@ struct ReviewEntryInner {
     /// Entered effects still running (a worker may outlive its dispatch).
     held: usize,
     dispatch_ended: bool,
+    /// An effect of this entry's dispatch entered: a spend at its effect
+    /// entry passed, at any tier (an unreviewed entry spends nothing and
+    /// still enters), or a governed step of the dispatch ran its operation
+    /// without that entry. Until then a refusal the effect entry meets is
+    /// certified not dispatched
+    /// (`ToolDispatchContext::enter_reviewed_effect_held`).
+    effect_entered: bool,
 }
 
 enum ReviewEntryState {
@@ -1594,6 +1601,7 @@ impl ReviewEntry {
             deferred: PendingObservations::default(),
             held: 0,
             dispatch_ended: false,
+            effect_entered: false,
         })))
     }
 
@@ -1636,6 +1644,20 @@ impl ReviewEntry {
             self.0.lock().state,
             ReviewEntryState::Entered(_) | ReviewEntryState::Consumed
         )
+    }
+
+    /// Whether an effect of this entry's dispatch entered: a spend that
+    /// passed, at any tier, or a governed step recorded with
+    /// [`Self::record_effect_entered`]. Reads the entry only.
+    pub(crate) fn effect_entered(&self) -> bool {
+        self.0.lock().effect_entered
+    }
+
+    /// Record that a governed step of this entry's dispatch ran its
+    /// operation without the effect entry (the plain unreviewed path): an
+    /// effect of the dispatch entered.
+    pub(crate) fn record_effect_entered(&self) {
+        self.0.lock().effect_entered = true;
     }
 
     /// Reports settled by a later step of the entered effect, deferred with
@@ -1722,6 +1744,9 @@ impl ReviewEntry {
             inner.state = next;
             inner.deferred.extend(used);
             let result = result.map(|()| {
+                // The leaf goes on to its body: an effect of the dispatch
+                // entered, whatever the tier.
+                inner.effect_entered = true;
                 if fresh_spend {
                     inner.held += 1;
                     ReviewedEntryCustody(Some(self.clone()))

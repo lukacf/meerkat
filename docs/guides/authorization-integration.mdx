@@ -185,8 +185,11 @@ Map typed errors before rendering text:
   tracing stay uniform. `OperationRefused::dispatch` returns the
   `RefusalDispatch` behind `tool_invoked`: `NotDispatched` only when the fenced
   dispatch, a retained consent attempt or the execution policy gate met the
-  refusal before invoking the tool code it guards, otherwise `Unknown`. A
-  dispatcher layer that runs tool code of its own before delegating forwards
+  refusal before invoking the tool code it guards, or a leaf's effect entry
+  (`ToolDispatchContext::enter_reviewed_effect`) met it before the body it
+  guards while no effect of the call had entered; otherwise `Unknown`. A
+  dispatcher layer that runs tool code of its own before delegating (a leaf
+  that runs an effect before its effect entry included) forwards
   `OperationRefused::new(refusal.kind())`. `OperationRefused` equality now
   includes that fact: compare `kind()` and `dispatch()` rather than a value
   built with `OperationRefused::new(kind)`. A mob member upcall keeps carrying

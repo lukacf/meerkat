@@ -184,6 +184,26 @@ them.
   umask. A store file an older version left readable by others becomes
   private on its next commit.
 
+- `meerkat-core`: a governed tool call refused at its own effect entry
+  (`ToolDispatchContext::enter_reviewed_effect`, or a ticket or governed
+  operation entering through it) before any effect of the call entered now
+  reaches the model as certified not dispatched (`tool_invoked: false`), as
+  a refusal met before the dispatcher was invoked always did. The model
+  read the same refusal two ways depending on where an owner change
+  landed: met by the fenced dispatch or the call-level execution policy
+  gate it read `false`, met one check later by the tool's effect entry,
+  after the gate handed the call on and still before the tool's body, it
+  read `"unknown"`. The entry now certifies its refusal while no effect of
+  the dispatch entered, that is while no earlier entry of the call passed
+  and no governed step of it ran its operation; a later entry's refusal,
+  and one met outside a fenced dispatch, still make no claim.
+  Behaviour change: `OperationRefused::dispatch()` of such a refusal is
+  `NotDispatched`, so a comparison with `OperationRefused::new(kind)` no
+  longer matches it (compare `kind()` and `dispatch()`). A tool that runs
+  an effect of its own before its effect entry forwards the entry's
+  refusal as `OperationRefused::new(refusal.kind())`. Affects 0.9.4
+  through 0.9.9.
+
 - `meerkat-mob`: a Dormant member reads with its peer id and transport key in
   every roster and member-list read (`MobHandle::get_member`, `roster`,
   `list_all_members`, `list_members` and the member lists built on it, the

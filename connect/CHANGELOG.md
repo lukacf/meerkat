@@ -20,6 +20,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   change is in progress; a holder that outlasts the bound is still refused as
   unavailable.
 
+- A setup result delivered back to its original through a retained resume no
+  longer stays pending when another task briefly holds the original's source
+  state at that moment. The resume waits for that holder within the same
+  bound.
+
+- A shared setup check whose call meets an authorization change in progress
+  right after the check ran now waits for the change and checks again,
+  instead of being refused. Only the authorization check repeats; the check,
+  its join and its release run once. A change that outlasts the bound is
+  still refused as `operation_refused` with kind `reprepare_required`, and
+  the refusal does not say whether the check ran (`tool_invoked` stays
+  unknown).
+
 - A service task check that meets an authorization change still in progress
   now waits for the change and checks again, instead of refusing the call as
   access denied. Only the check repeats; the task is prepared once. A change

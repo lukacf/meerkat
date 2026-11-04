@@ -338,8 +338,20 @@ impl McpCallContextProvider for SharedSetupCallContext {
             }
             // The private close is serialized with initial dispatch, not the
             // physical worker. Delayed emitted metadata cannot reenter after it.
+            #[cfg(test)]
+            if let Some(pause) = crate::service_install::shared_check_probe::observe(
+                crate::service_install::shared_check_probe::Step::EntryClosing,
+                &monitor.id,
+            ) {
+                tokio::time::sleep(pause).await;
+            }
             peer.close_entry(&token).await?;
             monitor.source.settle().map_err(|_| unavailable())?;
+            #[cfg(test)]
+            crate::service_install::shared_check_probe::observe(
+                crate::service_install::shared_check_probe::Step::EntrySettled,
+                &monitor.id,
+            );
             peer.finish_entry(&token).await
         });
         if monitoring.is_err() {

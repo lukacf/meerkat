@@ -436,6 +436,27 @@ impl LocalApprovals {
             .await
             .map_err(|error| service_task_failure(call.name, error))
     }
+    /// This call's current authorization check after its shared effect ran,
+    /// through the service task source; Core's own answer is returned as it
+    /// gave it. Without a task source it is the plain check.
+    #[cfg(unix)]
+    pub(crate) async fn check_after_shared_effect(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
+        site: &'static str,
+    ) -> Result<Option<ToolDispatchContext>, ToolError> {
+        match self.service_tasks.as_ref() {
+            Some(tasks) => {
+                tasks
+                    .check_after_shared_effect(call, context, plan, churn, site)
+                    .await
+            }
+            None => context.check_tool_authorization(call, plan),
+        }
+    }
     // Exercise the existing per-request deadline after the exact prompt is
     // acknowledged. This is not owner retirement or operation-grant revocation.
     #[cfg(test)]

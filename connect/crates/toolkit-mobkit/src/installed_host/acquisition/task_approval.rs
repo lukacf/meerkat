@@ -113,6 +113,19 @@ async fn check_current_after_owner_change(
     churn: &mut meerkat_core::authorization::OwnerChangeChurn,
     site: &'static str,
 ) -> Result<Option<ToolDispatchContext>, ServiceTaskError> {
+    service_task_check(check_tool_after_owner_change(context, call, plan, churn, site).await)
+}
+
+/// [`check_current_after_owner_change`] with Core's own answer: the same
+/// bounded wait after a refusal to rebuild, and every other answer, and a
+/// refusal to rebuild that outlasts the bounds, returned as Core gave it.
+async fn check_tool_after_owner_change(
+    context: &ToolDispatchContext,
+    call: ToolCallView<'_>,
+    plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
+    churn: &mut meerkat_core::authorization::OwnerChangeChurn,
+    site: &'static str,
+) -> Result<Option<ToolDispatchContext>, meerkat_core::ToolError> {
     loop {
         let checked = context.check_tool_authorization(call, plan);
         if let Err(error) = &checked
@@ -130,7 +143,24 @@ async fn check_current_after_owner_change(
         {
             continue;
         }
-        return service_task_check(checked);
+        return checked;
+    }
+}
+impl InstalledServiceTaskSource {
+    /// This exact call's current authorization check after its effect ran:
+    /// a shared selected check that joined, then released, its physical
+    /// selection. The caller holds no lock, source reservation or owner
+    /// change across it. `churn` is the waiting state the call's checks after
+    /// its effect share, and `site` names the check.
+    pub async fn check_after_shared_effect(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
+        _churn: &mut meerkat_core::authorization::OwnerChangeChurn,
+        _site: &'static str,
+    ) -> Result<Option<ToolDispatchContext>, meerkat_core::ToolError> {
+        context.check_tool_authorization(call, plan)
     }
 }
 impl InstalledAcquisition {

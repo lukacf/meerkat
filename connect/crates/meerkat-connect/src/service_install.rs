@@ -27,6 +27,49 @@ pub(crate) use remote::{PublicServiceSelection, RemoteSelection};
 
 pub(crate) const INSTALL_TOOLS: &[&str] = &["setup_install", "setup_selected_install"];
 pub(crate) const SELECTED_CHECK: &str = "setup_selected_check";
+// Core's owner-change wait sites of a shared selected check's checks after
+// its effect: after the join, and after the release.
+#[cfg(unix)]
+const SHARED_CHECK_JOINED: &str = "connect.shared_check.joined";
+#[cfg(unix)]
+const SHARED_CHECK_RELEASED: &str = "connect.shared_check.released";
+
+/// Test seam: the steps of a shared selected check, by call ID. A control
+/// observes each step and may act at it before the step's next action, or
+/// return a pause for the entry monitor's close.
+#[cfg(all(test, unix))]
+pub(crate) mod shared_check_probe {
+    use std::sync::{Arc, Mutex};
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Step {
+        /// The dispatch returned and its result is being released.
+        Dispatched,
+        /// The selection is joined; the check after it runs next.
+        Joined,
+        /// The check after the join answered current.
+        JoinedChecked,
+        /// The selection is released; the check after it runs next.
+        Released,
+        /// The check after the release answered current.
+        ReleasedChecked,
+        /// The entry monitor is about to close the claimed entry.
+        EntryClosing,
+        /// The entry monitor settled the claimed entry's source.
+        EntrySettled,
+    }
+    type Probe = Arc<dyn Fn(Step, &str) -> Option<std::time::Duration> + Send + Sync>;
+    static PROBE: Mutex<Option<Probe>> = Mutex::new(None);
+    pub(crate) fn install(probe: Probe) {
+        *PROBE.lock().unwrap() = Some(probe);
+    }
+    pub(crate) fn clear() {
+        PROBE.lock().unwrap().take();
+    }
+    pub(crate) fn observe(step: Step, call: &str) -> Option<std::time::Duration> {
+        let probe = PROBE.lock().unwrap().clone();
+        probe.and_then(|probe| probe(step, call))
+    }
+}
 // A native stock grant slot, distinct from this server's saved raw MCP access.
 pub(crate) const CHECKED_INSTALL_ROUTE: &str = "meerkat-connect-checked-installs";
 
@@ -936,6 +979,8 @@ impl CheckedInstalls {
         if outcome.result.is_error {
             return Ok(outcome);
         }
+        #[cfg(test)]
+        shared_check_probe::observe(shared_check_probe::Step::Dispatched, call.id);
         let pending = result_document(call, &outcome)?;
         if pending.get("error").is_some() {
             return Ok(outcome);
@@ -987,7 +1032,18 @@ impl CheckedInstalls {
         let member = approvals
             .join_shared_preparation(call, context, plan, &selected, resource)
             .await?;
-        context.check_tool_authorization(call, plan)?;
+        // The check's effect ran and its selection is joined. The checks
+        // after it hold no lock, publication guard or owner change, and share
+        // one waiting state; a refreshed decision carries to the later check.
+        let mut churn = context.owner_change_churn();
+        #[cfg(test)]
+        shared_check_probe::observe(shared_check_probe::Step::Joined, call.id);
+        let refreshed = approvals
+            .check_after_shared_effect(call, context, plan, &mut churn, SHARED_CHECK_JOINED)
+            .await?;
+        #[cfg(test)]
+        shared_check_probe::observe(shared_check_probe::Step::JoinedChecked, call.id);
+        let current = refreshed.as_ref().unwrap_or(context);
         member
             .check_current()
             .await
@@ -997,7 +1053,13 @@ impl CheckedInstalls {
             .release(&inspected, member.preparation_identity())
             .await
             .map_err(|_| unconfirmed())?;
-        context.check_tool_authorization(call, plan)?;
+        #[cfg(test)]
+        shared_check_probe::observe(shared_check_probe::Step::Released, call.id);
+        approvals
+            .check_after_shared_effect(call, current, plan, &mut churn, SHARED_CHECK_RELEASED)
+            .await?;
+        #[cfg(test)]
+        shared_check_probe::observe(shared_check_probe::Step::ReleasedChecked, call.id);
         let validation = hex(&value, "validation_id", 32)
             .ok_or_else(unconfirmed)?
             .to_owned();

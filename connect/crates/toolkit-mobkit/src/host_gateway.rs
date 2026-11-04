@@ -1024,6 +1024,18 @@ impl ToolkitGatewayHost {
             .map_err(|_| GatewayHostError::Unavailable)
     }
 
+    /// Test-only: the authorization publication this host's private
+    /// originals share, so a control can hold a real owner change open on
+    /// it. It grants nothing and changes no authority.
+    #[cfg(feature = "test-support")]
+    pub fn authorization_publication_for_test(
+        &self,
+    ) -> Option<meerkat_authorization::publication::LocalAuthorizationPublication> {
+        self.private_originals
+            .as_ref()
+            .map(|originals| originals.authorization_publication())
+    }
+
     fn with_grant_configuration(
         owner: Arc<NativeHostLifetime>,
         private_closed: PrivateHostClosed,

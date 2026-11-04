@@ -29,9 +29,9 @@ use crate::identity_first::local_lease::LocalLeaseProvider;
 use crate::identity_first::local_store::LocalContinuityStore;
 use crate::identity_first::runtime::RetiredMemberObserver;
 use crate::identity_first::{
-    AgentAddressability, AgentMemoryConfig, AgentMemoryRuntimeInjector, AgentRuntimeId,
-    DurabilityPolicy, IdentityFirstRuntimeContext, IdentityRuntimeConfig, MutableRosterProvider,
-    RetiredIdentityMember, RosterProvider, SessionSnapshot,
+    AgentAddressability, AgentBuildContext, AgentMemoryConfig, AgentMemoryRuntimeInjector,
+    AgentRuntimeId, DurabilityPolicy, IdentityFirstRuntimeContext, IdentityRuntimeConfig,
+    MutableRosterProvider, RetiredIdentityMember, RosterProvider, SessionSnapshot,
 };
 use crate::memory::distiller::{
     CompactionDiscardSource, DiscardEntry, DistillerClientHandle, DistillerConfig, DistillerEngine,

@@ -35,6 +35,8 @@ them.
 
 ## [Unreleased]
 
+## [0.9.10] - 2026-11-04
+
 ### Highlights
 
 - GitHub Copilot configured once. A `[realm.<realm>.copilot]` section
@@ -42286,7 +42288,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.9...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.10...HEAD
+[0.9.10]: https://github.com/lukacf/meerkat/compare/v0.9.9...v0.9.10
 [0.9.9]: https://github.com/lukacf/meerkat/compare/v0.9.8...v0.9.9
 [0.9.8]: https://github.com/lukacf/meerkat/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/lukacf/meerkat/compare/v0.9.6...v0.9.7

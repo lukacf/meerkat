@@ -31,7 +31,9 @@ the realm's database inventory: the doctor reports the file and its
 `approval_decisions.executor.<kind>.lock` file per decision kind, hold no
 data: each decision executor keeps OS locks on them while it runs, and a
 backup need not copy them. Never delete one while a process runs: a new file
-is a new lock, which a second executor could claim. Keep the store on a local
+is a new lock, which a second executor could claim. The file of a kind no
+executor registers any more stays behind, empty; remove it only while no
+process uses the store. Keep the store on a local
 filesystem, as SQLite needs anyway: on NFS the locks are emulated with POSIX
 record locks, which do not exclude a second claim from the same process.
 

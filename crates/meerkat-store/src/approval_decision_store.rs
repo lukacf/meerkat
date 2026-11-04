@@ -339,7 +339,10 @@ impl SqliteDecisionStore {
     /// file: for `approval_decisions.sqlite3` and the kind `release` it is
     /// `approval_decisions.executor.release.lock`. A kind is a token of
     /// `[a-z0-9._-]`, so every kind names a file of its own, on
-    /// case-insensitive filesystems too.
+    /// case-insensitive filesystems too. A kind is at most 64 bytes, so the
+    /// name fits the common 255-byte limit while the database file's name
+    /// without its extension is at most 176 bytes; past that a claim of a
+    /// long kind cannot create its file, and the executor fails to start.
     #[must_use]
     pub fn executor_kind_lock_path(&self, kind: &DecisionKind) -> PathBuf {
         self.path.with_extension(format!("executor.{kind}.lock"))

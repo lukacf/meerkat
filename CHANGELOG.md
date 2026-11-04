@@ -194,15 +194,16 @@ them.
   `DeclaredEntry::with_build`, a `DeclaredBuild`): `Composed` (the
   default, as before) or `FactsOnly`, the identity's lifecycle facts with
   none of its build. No member is ever built from facts only: a verdict
-  that would seat the identity, rotate its member onto a fresh session or
-  start its first-boot fresh life answers
+  that would seat the identity, rotate its member onto a fresh session,
+  migrate it to another role on its own session or start its first-boot
+  fresh life answers
   `DeclaredEntryOutcome::BuildRequired` and takes no member step (the
   first-boot request is kept, and so is an archived session record on a
   session service that keeps durable member sessions), and the host
   declares the identity again with its composed build. Every other verdict
   answers as before. A host whose member builds are costly to compose
   (a customizer per identity) composes only the identities it expects the
-  apply to seat or rotate, and an unchanged roster composes none.
+  apply to seat, rotate or migrate, and an unchanged roster composes none.
 
 - `meerkat-mob`: the one encoding of a name into a member id,
   `ids::member_id_for_name`, and its inverse `ids::name_for_member_id`
@@ -228,6 +229,14 @@ them.
   documents and the WholeBlob documents.
 
 ### Fixed
+
+- `meerkat-mob`: a declared role migration (`MobHandle::apply_declared_roster`
+  answering `DeclaredEntryOutcome::RoleMigrated`) builds its successor on
+  the member's own session with the declaration's build inputs, as a
+  resume of that session built from the declared spec does, after a
+  restart too. Its successor kept the build inputs the session's earlier
+  builds recorded, so the member ran its new role with, for one, its
+  previous role's context.
 
 - `meerkat-mob`: the legacy adoption reads a member's `agent_identity`
   label in the one encoding of a name into a member id

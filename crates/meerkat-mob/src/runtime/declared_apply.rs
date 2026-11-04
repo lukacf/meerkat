@@ -268,19 +268,22 @@ impl DeclaredEntry {
 #[non_exhaustive]
 pub enum DeclaredBuild {
     /// The spec is the identity's member build as its host composed it: a
-    /// verdict that seats or rotates the identity's member builds the member
-    /// from it.
+    /// verdict that seats, rotates or migrates the identity's member builds
+    /// the member from it (a role migration's successor builds with the
+    /// spec's build inputs on the kept session).
     #[default]
     Composed,
     /// The spec carries the identity's lifecycle facts (its identity, role,
     /// runtime mode, and placement or binding) and none of its member build.
-    /// A verdict that would seat or rotate its member (an owed seat, a
-    /// rotation onto a fresh session, a first-boot `Fresh` request's fresh
-    /// life) takes no member step and answers
+    /// A verdict that would seat, rotate or migrate its member (an owed
+    /// seat, a rotation onto a fresh session, a role migration on the
+    /// member's own session, a first-boot `Fresh` request's fresh life)
+    /// takes no member step and answers
     /// [`DeclaredEntryOutcome::BuildRequired`]. Every other verdict answers
     /// as for a composed declaration, since it builds nothing from the spec:
-    /// a kept member, a restamp on the member's own session (which keeps the
-    /// build inputs its seat recorded), a hold, a refusal.
+    /// a kept member, a runtime-mode restamp on the member's own session
+    /// (which keeps the build inputs its session's builds recorded), a hold,
+    /// a refusal.
     FactsOnly,
 }
 
@@ -401,7 +404,7 @@ pub enum DeclaredEntryOutcome {
     /// that is busy, or whose spawn, wake or retirement is in flight, or a
     /// store that cannot serve now): nothing of it was done.
     Deferred { reason: MobError },
-    /// The identity's verdict seats or rotates its member, and its
+    /// The identity's verdict seats, rotates or migrates its member, and its
     /// declaration carried the identity's lifecycle facts only
     /// ([`DeclaredBuild::FactsOnly`]): no member step was taken, so a
     /// first-boot request that the seat or the fresh life would carry out is
@@ -1831,6 +1834,12 @@ impl super::MobHandle {
             mob_dsl::IdentityEntryVerdict::PreparationPending => {
                 DeclaredEntryOutcome::PreparationPending
             }
+            // A role migration's successor builds under its new role with the
+            // spec's build inputs: never from facts only, and the member is
+            // not released for it.
+            mob_dsl::IdentityEntryVerdict::RoleMigrate if !entry.build.carries_member_build() => {
+                DeclaredEntryOutcome::BuildRequired
+            }
             mob_dsl::IdentityEntryVerdict::RuntimeModeRestamp
             | mob_dsl::IdentityEntryVerdict::RoleMigrate => {
                 // A restamp waits for the member to be idle: the release is
@@ -1839,8 +1848,13 @@ impl super::MobHandle {
                     return failure_outcome(error);
                 }
                 let mut request = super::MemberRespawn::new();
+                // A role migration carries the spec's build inputs to its
+                // successor, whose builds on the kept session apply them; a
+                // restamp of the runtime mode builds nothing from the spec.
                 if verdict == mob_dsl::IdentityEntryVerdict::RoleMigrate {
-                    request = request.with_profile(entry.spec.role_name.clone());
+                    request = request
+                        .with_profile(entry.spec.role_name.clone())
+                        .with_build_inputs(super::SeatBuildInputs::of_spec(&entry.spec));
                 }
                 request = request.with_runtime_mode(runtime_mode);
                 // A store-owned identity's restamp seats its row's labels:

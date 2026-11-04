@@ -545,6 +545,44 @@ struct PendingPromotionPreTurnHook {
     release: Notify,
 }
 
+/// Test-only: holds a staged session's runtime-routed first turn after its
+/// input was admitted and before the staged promotion builds the session
+/// (see [`SessionRuntime::pause_first_turns_before_promotion`]).
+#[cfg(test)]
+pub(crate) struct PrePromotionPause {
+    slot: Arc<StdMutex<Option<Arc<PendingPromotionPreTurnHook>>>>,
+    hook: Arc<PendingPromotionPreTurnHook>,
+}
+
+#[cfg(test)]
+impl PrePromotionPause {
+    /// Resolves once a first turn waits at the pause.
+    pub(crate) async fn reached(&self) {
+        loop {
+            // A `notify_waiters` after this future exists wakes it, polled
+            // or not, so the flag check below cannot miss the turn.
+            let reached = self.hook.reached.notified();
+            if self
+                .hook
+                .reached_flag
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return;
+            }
+            reached.await;
+        }
+    }
+
+    /// Lets the waiting turn go on; later turns pass without a pause.
+    pub(crate) fn release(&self) {
+        *self
+            .slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        self.hook.release.notify_waiters();
+    }
+}
+
 async fn await_guarded_session_cleanup(
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     session_id: SessionId,
@@ -14199,6 +14237,31 @@ impl SessionRuntime {
     #[cfg(test)]
     pub(crate) fn mcp_wire_attempt_count_for_testing(&self) -> usize {
         self.mcp_wire_attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    /// Holds every staged session's runtime-routed first turn after its
+    /// input was admitted and before the promotion builds the session,
+    /// until the returned pause is released.
+    #[cfg(test)]
+    pub(crate) fn pause_first_turns_before_promotion(&self) -> PrePromotionPause {
+        let hook = Arc::new(PendingPromotionPreTurnHook::default());
+        *self
+            .runtime_routed_pre_promotion_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&hook));
+        PrePromotionPause {
+            slot: Arc::clone(&self.runtime_routed_pre_promotion_hook),
+            hook,
+        }
+    }
+
+    /// How many `keep_alive` creates wait for a session's first build.
+    #[cfg(test)]
+    pub(crate) fn first_build_waiter_count_for_testing(&self) -> usize {
+        self.first_build_waiters
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()

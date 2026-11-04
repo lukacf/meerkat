@@ -4063,7 +4063,6 @@ dependencies = [
  "meerkat-machine-dsl",
  "meerkat-machine-kernels",
  "meerkat-machine-schema",
- "meerkat-runtime",
  "meerkat-sqlite",
  "meerkat-store",
  "nix 0.29.0",

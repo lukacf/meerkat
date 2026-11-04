@@ -568,8 +568,13 @@ lists every read and the re-base rule.
   id, or reads the head's commit id.
 - **Failed batch.** A batch the store refuses, or whose outcome stays unknown
   past the retry budget, poisons every scope it touched. Those scopes refuse
-  every later call until the realm is opened again, which reloads them from
-  your store.
+  every later call that needs them, with a typed refusal, until the realm is
+  opened again, which reloads them from your store. Everything else keeps
+  serving: other sessions and mobs, and the reads across sessions, which
+  count a poisoned session's runtime as holding work and its deliveries as
+  unavailable. Only the session listing, the controller custody of governed
+  administration and the delivery backlog total refuse while a session's
+  scope is poisoned.
 - **Lost fence.** Losing the fence poisons the whole realm.
 
 ### Limits And Exceptions

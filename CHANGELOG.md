@@ -91,6 +91,41 @@ them.
   (`AuthCredentialIdentity::from_auth_binding`) and ran with provider-native
   tools on (`ProviderNativeToolPolicy::Inherit`). See Changed.
 
+- Behaviour-only (not measured by the gate): `meerkat-runtime`: a host
+  store call refused by a poisoned scope or a poisoned realm answers the
+  typed `RuntimeStoreError::ScopeRefused { scopes }`, naming each refused
+  scope with its poison cause, or `RuntimeStoreError::RealmRefused { cause }`
+  (both new, see Added), where it answered `RuntimeStoreError::ReadFailed` or
+  `WriteFailed` with the refusal's text. `SpiError::into_read` and
+  `SpiError::into_write` map `ScopePoisoned`, `RealmPoisoned` and the new
+  `ScopesPoisoned` to them, and `SpiRealm::check_cross_scope_read` answers
+  `SpiError::ScopesPoisoned`, naming every poisoned scope, where it answered
+  `SpiError::RealmPoisoned`. The batch that fails still answers `WriteFailed`
+  to the call that sent it; the refusal is what the later calls on its scopes
+  answer. A caller that matched the old variants for these refusals matches
+  the new ones; one that only formats the error keeps compiling, and the text
+  still names the scope and its cause.
+
+- Behaviour-only (not measured by the gate): `meerkat-session`: a committed
+  read that a host store refuses until its realm is reopened keeps the
+  store's typed refusal as `SessionError::Store`, where it surfaced as
+  `SessionError::Agent(AgentError::InternalError)`: a WholeBlob session's
+  committed read, the HeadCanonical boundary authority read, and the
+  committed snapshot read under a provisional tail. Its `SessionError::code`
+  is `SESSION_STORE_ERROR` (was `AGENT_ERROR`), and a wire error built from
+  it carries `INTERNAL_ERROR` (was `AGENT_ERROR`); a session method's
+  JSON-RPC error is `INTERNAL_ERROR` either way.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`:
+  `MobHandle::wait_one`, `wait_all`, `wait_for_kickoff_complete` and
+  `wait_for_members_kickoff_complete` end with an error when a member they
+  wait on is not final (for a kickoff wait, its kickoff is not resolved) and
+  the store refuses its session until the realm is reopened:
+  `MobError::SessionError` carrying the store's typed refusal as its
+  `SessionError::Store` source, with no new error code. They polled that
+  member's status until the caller gave up, a kickoff wait until its timeout.
+  The member's lifecycle is unchanged; only the wait ends.
+
 ### Added
 
 - GitHub Copilot configured once: `[realm.<realm>.copilot]` states a Copilot
@@ -173,6 +208,34 @@ them.
   `meerkat_store::doctor::operator_instruction_mob_events` expose the
   doctor's operator-instruction census readers over a connection the caller
   opened read-only, so another storage doctor counts by the same rule.
+
+- `meerkat-runtime`: a host store's refusal until its realm is reopened is
+  typed through the runtime store: `RuntimeStoreError::ScopeRefused { scopes }`
+  and `RuntimeStoreError::RealmRefused { cause }` (the enum is
+  non-exhaustive), `RefusedScope` (a refused scope, `<family tag>:<key>`, and
+  its poison cause) and `RuntimeStoreError::is_refused_until_reopen`. The
+  realm names every poisoned scope with its cause: `PoisonedScope`,
+  `SpiRealm::poisoned_scopes` and `SpiRealm::poisoned_scopes_of`, and
+  `SpiRealm::check_cross_scope_read_of` refuses a read across scopes only
+  while a scope of a family it reads is poisoned (`SpiError::ScopesPoisoned`,
+  new). See Fixed.
+
+- `meerkat-runtime`: `RuntimeStore::list_runtime_delivery_authorities_or_unavailable`,
+  the delivery authority listing answered per runtime
+  (`RuntimeDeliveryAuthorityListing { records, unavailable }`, with
+  `UnavailableRuntime`), and `RuntimeDeliveryInbox::runtime_delivery_backlog`,
+  the backlog answered per runtime (`RuntimeDeliveryBacklog { pending,
+  unavailable }`). The trait default answers every record of
+  `list_runtime_delivery_authorities` and no unavailable runtime, so the
+  in-memory and SQLite stores answer as before; the host store adapter
+  answers it per runtime. A store decorator forwards it to the store it
+  wraps; one that keeps the default answers through its own listing, which a
+  host store refuses while any runtime scope is poisoned.
+
+- `meerkat-mob`: `MemberPreviewUnavailable::StoreRefused` (the enum is
+  non-exhaustive): a member status read whose session the store refuses
+  until its realm is reopened. Its serialized and wire value is the existing
+  `read_failed`, and nothing deserializes into it.
 
 ### Changed
 
@@ -374,6 +437,37 @@ them.
   batches now make 13. The budget, the errors that are retried, and the
   poisoning of the scopes of a batch that does not settle are unchanged.
   Affects 0.9.5 through 0.9.9.
+
+- `meerkat-runtime`, `meerkat`, `meerkat-mob`: one poisoned host store scope
+  no longer refuses store-wide reads realm-wide. A batch that fails, or whose
+  outcome stays unknown past the retry budget, poisons the scopes it touched
+  until the realm is reopened. Until now any poisoned scope, of any family (a
+  session's runtime, a mob's event log, a Meta document), also made every
+  read across scopes refuse until a restart: the session listing
+  (`sessions/list`), the delivery backlog reconcile (deliveries for healthy
+  runtimes stayed pending), a lazy mob boot's obligation scan (every mob
+  start, lift or seat woke every member), governed controller
+  administration, and mob host convergence. Each such read now depends only
+  on the scope families it reads. The recovery-work scan answers, listing a
+  poisoned runtime as holding work; the delivery owner drains every healthy
+  runtime and reports a poisoned one as a blocked runtime with the store's
+  refusal; a lazy boot plans only the member whose runtime scope is poisoned
+  as holding work and leaves the others dormant. The session listing, the
+  controller custody and the delivery backlog total still refuse, typed,
+  while a session's runtime scope is poisoned, and a mob host listing while
+  a scope of its own family is. Affects 0.9.5 through 0.9.9.
+
+- `meerkat-mob`: a member status read whose session the store refuses until
+  its realm is reopened records the refusal, with the member's binding it
+  was read for, and logs it once, at WARN. Later status reads of the member
+  under that binding answer from the record without reading the session; a
+  member rebound, reloaded or woken since is read again. Every status read
+  read the session again and logged again (at DEBUG). A wait on such a
+  member ends with the refusal (see Breaking). Affects 0.9.5 through 0.9.9.
+
+- `meerkat-mob-mcp`: a live delegation's outcome append to a session whose
+  store refuses it until the realm is reopened settles once instead of
+  retrying until shutdown.
 
 ### Known limitations
 

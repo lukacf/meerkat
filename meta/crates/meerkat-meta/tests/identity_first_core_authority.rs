@@ -42,8 +42,10 @@
 //!   roster dropped is retired; a host-adopted member is neither respawned
 //!   nor retired, and a second boot changes nothing;
 //! - a member the host spawned under an identity's member id, which the
-//!   roster never declared, is the host's whatever its labels: no roster
-//!   pass retires it;
+//!   roster never declared, with Meta's `agent_identity` label and no
+//!   durable-identity marker, is the host's: no roster pass retires it; one
+//!   that carries both marks is a legacy roster member, which a pass that
+//!   does not list its identity retires;
 //! - a roster that moved an identity to another profile while the process
 //!   was down is handled by the first pass after the restart: Core lets the
 //!   member's previous role go, and the identity stays seated on its
@@ -998,6 +1000,46 @@ impl Boot {
         binding
             .session
             .unwrap_or_else(|| panic!("{identity}'s unmarked member has a session"))
+    }
+
+    /// Spawn a member through Core's mob under `identity`'s roster member id
+    /// with exactly `labels` and the durable-identity marker keyed by the
+    /// identity, the way a host spawns a member of a durable profile directly
+    /// on the mob. Waits for its first turn, which asks the model to
+    /// remember `token`, and returns its session.
+    async fn spawn_marked_core_member(
+        &self,
+        identity: &AgentIdentity,
+        token: &str,
+        labels: BTreeMap<String, String>,
+    ) -> SessionId {
+        let core_identity =
+            meerkat_meta::member_comms_id::roster_member_id_for_identity(identity.as_str());
+        let before = self.capture.count();
+        let mut member = meerkat_mob::SpawnMemberSpec::host_root("personal", core_identity)
+            .with_labels(labels)
+            .with_initial_message(meerkat_core::ContentInput::Text(format!(
+                "Remember this token: {token}"
+            )));
+        member.continuity_intent = meerkat_mob::SpawnContinuityIntent::DurableIdentity {
+            continuity_key: identity.as_str().to_string(),
+        };
+        self.unified
+            .mob_handle()
+            .spawn_spec(member)
+            .await
+            .unwrap_or_else(|error| panic!("Core spawns {identity}'s marked member: {error}"));
+        let what = format!("{identity}'s first turn");
+        self.capture.wait_for_requests(before + 1, &what).await;
+        self.wait_settled(identity, &what).await;
+        let binding = self.core_last_binding(identity).await;
+        assert!(
+            binding.marked,
+            "{identity}'s seeded member carries the durable-identity marker"
+        );
+        binding
+            .session
+            .unwrap_or_else(|| panic!("{identity}'s marked member has a session"))
     }
 
     /// Retire `identity`'s member through Core's mob, the way a host retires
@@ -3629,13 +3671,13 @@ async fn the_roster_compile_never_respawns_or_retires_a_host_adopted_member() {
 }
 
 /// A member the host spawns directly on the mob under an identity's member
-/// id, with Meta's `agent_identity` label naming that identity, is the
-/// host's: the roster never declared the identity, and Meta writes that
-/// label on the members it seats but never reads it to decide anything. A
-/// roster pass that does not list the identity leaves the member as the host
-/// made it, in the running process and in the first pass after a restart.
-/// The pass used to take the label as the roster's custody and retire the
-/// member.
+/// id, with Meta's `agent_identity` label naming that identity and no
+/// durable-identity marker (one legacy mark), is the host's: the roster
+/// never declared the identity, and Meta writes that label on the members it
+/// seats but never reads it to decide anything. A roster pass that does not
+/// list the identity leaves the member as the host made it, in the running
+/// process and in the first pass after a restart. The pass used to take the
+/// label as the roster's custody and retire the member.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_host_raw_spawn_labelled_agent_identity_and_unlisted_is_not_retired() {
     let temp = tempfile::TempDir::new().expect("temp dir");
@@ -3668,7 +3710,7 @@ async fn a_host_raw_spawn_labelled_agent_identity_and_unlisted_is_not_retired() 
         boot.core_last_binding(&bob).await,
         spawned,
         "a roster pass must not retire a member the host spawned under an identity's member \
-         id that the roster never declared, whatever its labels"
+         id that the roster never declared, with one legacy mark"
     );
     assert!(
         boot.core_member_generation(&alice).await.is_some(),
@@ -3684,6 +3726,52 @@ async fn a_host_raw_spawn_labelled_agent_identity_and_unlisted_is_not_retired() 
         "the first pass after a restart leaves the host's labelled member as it is too"
     );
     boot.assert_continuity_and_leases_unread();
+    boot.stop().await;
+}
+
+/// A member the host spawns directly on the mob under an identity's member
+/// id with both legacy marks, the durable-identity marker (a durable
+/// profile's spawn carries it) and Meta's `agent_identity` label naming that
+/// identity, is a legacy roster member: a roster pass that does not list the
+/// identity retires it, as it retires any member of an identity the roster
+/// dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_raw_spawn_with_both_legacy_marks_and_unlisted_is_retired() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let mob_id = unique_mob_id("raw-marked-unlisted");
+    let alice = id("personal:alice");
+    let bob = id("personal:bob");
+    let roster = vec![spec("personal:alice")];
+
+    let boot = Boot::start(&state, &mob_id, &roster).await;
+    boot.compile(&roster).await;
+    let session = boot
+        .spawn_marked_core_member(
+            &bob,
+            "MARKER-RAW-MARKED-3-DELTA",
+            BTreeMap::from([
+                ("agent_identity".to_string(), bob.as_str().to_string()),
+                ("profile_name".to_string(), "personal".to_string()),
+            ]),
+        )
+        .await;
+    let spawned = boot.core_last_binding(&bob).await;
+    assert!(
+        spawned.live && spawned.marked && spawned.session.as_ref() == Some(&session),
+        "control: Core holds the host's member live with both marks: {spawned:?}"
+    );
+
+    boot.compile(&roster).await;
+    let after = boot.core_last_binding(&bob).await;
+    assert!(
+        !after.live,
+        "a roster pass retires an unlisted member with both legacy marks: {after:?}"
+    );
+    assert!(
+        boot.core_member_generation(&alice).await.is_some(),
+        "the listed identity stays a member"
+    );
     boot.stop().await;
 }
 

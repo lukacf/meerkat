@@ -351,7 +351,8 @@ native-cost-analysis-selftest:
 	@$(PYTHON) scripts/test_analyze_native_cost.py
 
 # Path classifiers (machine-authority-changed, buildbuddy-edge-changes,
-# cargo-agent-gate) and gate wiring contracts. Pure shell, no cargo build.
+# cargo-agent-gate, the local affected-test selection) and gate wiring
+# contracts. Pure shell and Node, no cargo build.
 path-classifier-selftest:
 	@echo "$(GREEN)Self-testing path classifiers and gate wiring...$(NC)"
 	@bash scripts/tests/xtask_scripts_dogma_gates.sh
@@ -365,6 +366,7 @@ path-classifier-selftest:
 	@node scripts/buildbuddy-edge-changes-selftest.mjs
 	@node scripts/rust-source-text-selftest.mjs
 	@node scripts/precommit-build-hook-selftest.mjs
+	@node scripts/affected-tests-selftest.mjs
 
 cargo-agent-gate: rust-lane-doctor
 	@echo "$(GREEN)Running Cargo agent changed-path gate...$(NC)"

@@ -151,12 +151,58 @@ with schemas and BUILD files:
 UPDATE_DOC_EXAMPLES_FIXTURE=1 cargo test -p rkat --test doc_examples_fixture
 ```
 
+## Affected Tests
+
+Run the tests your change affects before you push, and let pull request CI run
+the full pass. `scripts/affected-tests.mjs` prints the commands, one per line,
+with a short summary on stderr:
+
+```bash
+node scripts/affected-tests.mjs                     # merge-base(origin/main, HEAD)..HEAD plus uncommitted changes
+node scripts/affected-tests.mjs origin/main...HEAD --no-uncommitted
+node scripts/affected-tests.mjs -- crates/meerkat-core/src/lib.rs   # what these paths select
+node scripts/affected-tests.mjs --run               # run the commands in order, stop at the first failure
+```
+
+The script hands the changed paths to the CI planner
+(`scripts/ci-cargo-lanes.mjs`) and prints CI's own command for each lane the
+plan selects:
+
+- regeneration: machine and protocol codegen, the machine posters, schemas;
+- Clippy of the changed crates, and the compile check of their reverse
+  dependencies;
+- nextest over the changed crates and their reverse dependencies, one run per
+  product, plus their feature suites, the integration suites the change
+  selects and the tests that read changed non-Rust files
+  (`scripts/ci-non-rust-readers.json`);
+- TLC for the touched machines, or the whole lane when that cannot be narrowed;
+- the Python, TypeScript and Web SDK suites when wire schemas change.
+
+A change that only touches a crate's `tests/*.rs` targets runs just those
+targets. The summary names what CI runs beyond the list (governance gates,
+rustdoc, feature-combination checks and so on), so a green local run is not
+the whole pass. In the pull request, report the commands you ran with their
+exit codes and test counts, and name any listed command you did not run.
+
+Work in your own worktree: `./scripts/repo-cargo` then gives your runs their
+own target directory. Set `CARGO_BUILD_JOBS` for the host's current load.
+Branches may overlap: several changes can edit the same crates, modules and
+machine DSL files, and each keeps an accountable author and reviewer. When two
+changes touch the same contract or machine, their owners agree who reconciles
+the combined behavior. Before each push, merge `main` into your branch, resolve
+the source declarations, regenerate the generated files on the merged tree
+instead of hand-merging them, and run the script again there. TLC follows the
+regenerated specs, so a clean textual merge is not a validated one. Merging a
+branch does not remove its target directory; clean target directories up for
+actual disk pressure, not on merge.
+
 ## Before You Open A Pull Request
 
 Run the narrowest relevant tests while iterating, then finish with the broad
 gate appropriate to the change:
 
 ```bash
+node scripts/affected-tests.mjs --run
 make agent-gate
 make docs-check          # when docs changed
 make verify-version-parity

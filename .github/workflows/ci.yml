@@ -626,6 +626,14 @@ jobs:
           make published-crates-standalone-selftest
           make check-published-crates-standalone-guard
 
+      # The test-feature canary (each Core crate's lib.rs) must stop a test
+      # binary built without the crate's test features and nothing else: a
+      # fixture crate with the same canary, on the pinned toolchain, fails
+      # here if a toolchain evaluates it in check builds or stops evaluating
+      # it in code generation. A few seconds.
+      - name: Test-feature canary trips test code generation only
+        run: make test-feature-canary-selftest
+
       - name: Release doctor workflow assertions still bind
         run: scripts/test-release-doctor-workflow-contract.sh
 

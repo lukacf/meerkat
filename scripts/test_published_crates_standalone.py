@@ -584,6 +584,21 @@ class TestFeatureCanary(unittest.TestCase):
         self.assertEqual(len(self.failures(plain, stray)), 1)
 
 
+class CanaryFixture(unittest.TestCase):
+    def test_the_selftest_fixture_carries_the_canary_shape(self):
+        """scripts/test-feature-canary-selftest.sh builds this fixture to prove
+        how the canary behaves on the pinned toolchain: it must have the shape
+        the guard requires of the Core crates."""
+        fixture = pcs.ROOT / "scripts" / "tests" / "fixtures" / "test-feature-canary"
+        manifest = pcs.tomllib.loads((fixture / "Cargo.toml.txt").read_text())
+        self.assertEqual(pcs.test_features(manifest), ["canary-test-feature"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "src").mkdir()
+            (root / "src" / "lib.rs").write_text((fixture / "lib.rs.txt").read_text())
+            self.assertEqual(pcs.canary_failures("test-feature-canary-fixture", manifest, root), [])
+
+
 class SelfDevDependency(unittest.TestCase):
     def test_a_crate_never_dev_depends_on_itself(self):
         self.assertEqual(pcs.self_dev_dependency_failures("demo", crate_manifest(None, {}, {"other": "1"})), [])

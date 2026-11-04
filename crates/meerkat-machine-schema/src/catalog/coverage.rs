@@ -2076,6 +2076,8 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "SettleNoticeRefusedExecutionRefused",
                         "SettleNoticeRefusedNotEndedOpen",
                         "SettleNoticeRefusedNotEndedApproved",
+                        "AuthorizeExecutionRefusedApproverRevoked",
+                        "AuthorizeExecutionRefusedRevokedSettlementOwed",
                     ])
                     .effects(&[
                         "Held",
@@ -2286,6 +2288,23 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "permit_is_outstanding_only_while_approved",
                             "executed_names_its_held_request",
                             "only_executed_records_an_execution",
+                        ]),
+                ),
+                scenario(
+                    "durable_decision_approver_currentness",
+                    "durable_decision_machine.rs::an_approver_who_is_no_longer_current_gets_no_permit refuses a permit when the approver who decided is no longer current, ends a decision with no outstanding permit refused with its notice owed, and holds one whose permit is outstanding until its owner settles it",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "AuthorizeExecutionRefusedApproverRevoked",
+                            "AuthorizeExecutionRefusedRevokedSettlementOwed",
+                        ])
+                        .effects(&[
+                            "ExecutionRefused",
+                            "Refused",
+                        ])
+                        .invariants(&[
+                            "permit_is_outstanding_only_while_approved",
+                            "ended_decisions_owe_their_notice",
                         ]),
                 ),
                 scenario(

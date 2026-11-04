@@ -26,7 +26,9 @@ resolved persistence store path. That RPC-owned sidecar is not an eighth
 commands do not inventory, migrate, or delete it. The durable decisions beside
 it, in `approval_decisions.sqlite3` (created by the first hold), are part of
 the realm's database inventory: the doctor reports the file and its
-`approval-decisions` ledger domain, and migration fences it.
+`approval-decisions` ledger domain, and migration fences it. The
+`approval_decisions.executor.lock` file beside it holds no data: the decision
+executor keeps an OS lock on it while it runs, and a backup need not copy it.
 
 ## Select Roots And Realms
 

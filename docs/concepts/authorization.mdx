@@ -251,13 +251,25 @@ owner then executes the held request at most once.
   is a decision that carries one, even after a valid presentation was
   recorded.
 - **Execution once.** The owner executes an approved decision under an
-  execution permit, issued only before the deadline, and settles it: executed,
-  released (the decision stays approved) or permanently refused. A permit
-  outstanding at the deadline holds the decision until its settlement. Without
-  one, an approved decision expires at its deadline and never runs after it.
-  The executor keeps three obligations the machine cannot see: one executor
-  per decision; after a commit, the only settlement is recording it; and after
-  a restart it settles first, from its own record of the operation.
+  execution permit, issued only before the deadline and only while the
+  approver who decided is still current (not revoked, and not forbidden by
+  policy since; the host's evidence is checked when the authorization
+  commits), and settles it: executed, released (the decision stays approved)
+  or permanently refused. An approver who is no longer current gets no
+  permit: the decision ends refused, records `approver_not_current`, and owes
+  its notice. A permit already outstanding is settled first, so a commit made
+  under it still counts. A permit outstanding at the deadline holds the
+  decision until its settlement. Without one, an approved decision expires at
+  its deadline and never runs after it.
+- **One executor.** `DecisionExecutorLoop` executes the approved decisions of
+  a store, through one registered executor per decision kind. It holds the
+  store's executor claim while it runs (for the SQLite file, an OS lock on
+  `approval_decisions.executor.lock` beside it, released when its process
+  ends), so a second executor of the store, in this process or another, is
+  refused at start, and a candidate launch starts none. It keeps the three
+  obligations the machine cannot see: one executor per decision; after a
+  commit, the only settlement is recording it; and after a restart it settles
+  first, from the owner's own record of the operation.
 - **One notice.** An ended decision whose requester can be told owes it one
   notice, settled by its delivery receipt.
 
@@ -267,7 +279,8 @@ nothing is read at start, and a read touches one decision or one index page. A
 candidate launch reads decisions and writes none. Durable decisions share no
 record, file or machine with the in-run consent above, and `approval/list` never
 shows them. Core adds no wire method for them: a host builds its decision
-surfaces on the Rust owner, `meerkat_runtime::decision::DurableDecisionService`.
+surfaces on the Rust owner, `meerkat_runtime::decision::DurableDecisionService`,
+and executes them with `meerkat_runtime::decision::DecisionExecutorLoop`.
 
 Read the [integration and migration guide](/guides/authorization-integration)
 for host responsibilities and the remaining deployment checks.

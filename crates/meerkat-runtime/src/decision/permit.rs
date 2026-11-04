@@ -10,7 +10,8 @@ use meerkat_core::approval::decision::{
 ///
 /// Only [`DurableDecisionService::authorize_execution`] mints one, from the
 /// machine's authorization of an approved decision with the held binding
-/// before its deadline: the decision's machine records the permit as
+/// before its deadline, while the approver who decided is still current:
+/// the decision's machine records the permit as
 /// outstanding, and the decision then waits for its settlement instead of
 /// expiring. The operation's owner commits under it at most once and
 /// settles it: [`DurableDecisionService::record_executed`] when the commit
@@ -52,7 +53,8 @@ use meerkat_core::approval::decision::{
 ///   outstanding permit.
 ///
 /// A dropped permit leaves its decision waiting (it never expires) until
-/// the executor settles it as above.
+/// the executor settles it as above. [`DecisionExecutorLoop`] keeps these
+/// obligations for the decision kinds registered with it.
 ///
 /// [`DurableDecisionService::authorize_execution`]: super::DurableDecisionService::authorize_execution
 /// [`DurableDecisionService::record_executed`]: super::DurableDecisionService::record_executed
@@ -60,6 +62,7 @@ use meerkat_core::approval::decision::{
 /// [`DurableDecisionService::close_refused`]: super::DurableDecisionService::close_refused
 /// [`DurableDecisionService::release_after_restart`]: super::DurableDecisionService::release_after_restart
 /// [`DurableDecisionService::close_refused_after_restart`]: super::DurableDecisionService::close_refused_after_restart
+/// [`DecisionExecutorLoop`]: super::DecisionExecutorLoop
 #[derive(Debug, PartialEq, Eq)]
 #[must_use = "an issued permit waits for its settlement"]
 pub struct DecisionExecutionPermit {

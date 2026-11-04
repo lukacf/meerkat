@@ -2287,10 +2287,11 @@ impl MeerkatMachine {
     /// Restoring the state read before the request would erase them, so the
     /// machine's abort arm withdraws only what the accepted request staged.
     /// A stop or a retirement in the gap keeps the staged request, and the
-    /// arm withdraws it in those phases too. A refusal means a newer request
-    /// replaced the pending switch, or the session is gone: there is nothing
-    /// of this request to withdraw. The refusal is not retried and does not
-    /// replace the reconfigure's own error, which the caller reports.
+    /// arm withdraws it in those phases too. A refusal means the session is
+    /// gone or the request is no longer the pending switch (a concurrent
+    /// call with the same id settled it): there is nothing of this request
+    /// to withdraw. The refusal is not retried and does not replace the
+    /// reconfigure's own error, which the caller reports.
     async fn withdraw_failed_until_changed_switch(
         &self,
         session_id: &SessionId,

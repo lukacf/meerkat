@@ -149,8 +149,8 @@ AuditAbortWithdrawsOnlyTheRequest ==
       ]_vars
 
 \* An abort fires only for the request that is still the pending until-changed
-\* switch applying its persistent reconfigure: a request a newer one
-\* replaced, or one already completed or withdrawn, has nothing to withdraw.
+\* switch applying its persistent reconfigure: a request already completed
+\* or withdrawn, or never accepted, has nothing to withdraw.
 AuditAbortOnlyForThePendingRequest ==
     [][\A r \in AuditRequests :
          AuditAbort(r) =>

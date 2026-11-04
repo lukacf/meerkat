@@ -233,8 +233,8 @@ PY
   mutate abort_erases_input_phases \
     "Error: (Action property AuditAbortWithdrawsOnlyTheRequest|Invariant [A-Za-z_]+) is violated" \
     'frame_with("input_phases", "[x \\in {} |-> None]")' "$@"
-  # An abort without its pending-request guard: a replaced, completed or
-  # withdrawn request would withdraw what it no longer owns.
+  # An abort without its pending-request guard: a completed or withdrawn
+  # request, or one never accepted, would withdraw what it does not own.
   mutate abort_ignores_pending_request \
     "Error: Action property AuditAbortOnlyForThePendingRequest is violated" \
     'drop_guard("model_routing_pending_switch_request_id")' "$@"

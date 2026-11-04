@@ -256,7 +256,10 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
     /// denied (`ScopedOverrideConflict`). Dropping the returned future before
     /// it resolves can leave the switch pending: later switches are then
     /// denied until the same request (the same `request_id`) is retried or
-    /// the session is reloaded.
+    /// the session is reloaded. Callers must not make concurrent calls with
+    /// the same `request_id`: the default turn-finalization boundary of
+    /// [`SessionLlmReconfigureHost`](crate::SessionLlmReconfigureHost)
+    /// is a no-op and does not serialize until-changed switches.
     async fn request_switch_turn(
         &self,
         _session_id: &SessionId,

@@ -77,23 +77,27 @@ impl MobActor {
 
     /// The adoption of one legacy member as an identity entry
     /// (`AdoptLegacyIdentityEntry`), decided by MobMachine from the handle's
-    /// observation of the spawn row of the member's incarnation at
-    /// `generation`. An `Adopted` verdict journals the adoption's row (the
-    /// member's current binding, unchanged, with the entry's origin) before
-    /// it commits; every other verdict changes nothing and is answered as
+    /// observation of the member's incarnation at `generation` (its legacy
+    /// marks, whether the roster lists it, whether a host's intent row names
+    /// it). An `Adopted` verdict journals the adoption's row (the member's
+    /// current binding, unchanged, with the entry's origin) before it
+    /// commits; every other verdict changes nothing and is answered as
     /// decided. A mob that is not running answers an invalid transition.
     pub(super) async fn adopt_legacy_identity_entry(
         &mut self,
         agent_identity: AgentIdentity,
         generation: crate::ids::Generation,
-        legacy_roster_member: bool,
+        observation: super::super::identity_entry::LegacyMemberObservation,
     ) -> Result<mob_dsl::LegacyIdentityEntryAdoptionKind, MobError> {
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&agent_identity);
         let prepared = self.prepare_dsl_input_transition(
             mob_dsl::MobMachineInput::AdoptLegacyIdentityEntry {
                 agent_identity: dsl_identity.clone(),
                 generation: mob_dsl::Generation::from_domain(generation),
-                legacy_roster_member,
+                durable_identity_marker: observation.marks.durable_identity,
+                own_identity_label: observation.marks.own_identity_label,
+                listed: observation.listed,
+                intent_row: observation.intent_row,
             },
             "adopt_legacy_identity_entry",
         )?;

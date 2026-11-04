@@ -218,7 +218,7 @@ mod declared_apply;
 pub use declared_apply::{
     DECLARED_APPLY_CHUNK, DeclaredBuild, DeclaredEntry, DeclaredEntryNote, DeclaredEntryOutcome,
     DeclaredEntryRefusal, DeclaredRoster, DeclaredRosterOutcome, FirstBootRequest,
-    UnlistedEntryOutcome,
+    NotAdoptedReason, UnlistedEntryOutcome,
 };
 mod dormant_seat;
 pub use dormant_seat::DormantSeatOutcome;

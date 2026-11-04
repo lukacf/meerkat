@@ -997,6 +997,11 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "UnlistIdentityEntryMobNotRunningStopped",
             "UnlistIdentityEntryMobNotRunningCompleted",
             "UnlistIdentityEntryMobNotRunningDestroyed",
+            // The legacy adoption of an unlisted member and the retirement
+            // of one placed or bound to no session, without its adoption
+            // (0.9.11).
+            "AdoptLegacyIdentityEntryAdoptedUnlisted",
+            "AdoptLegacyIdentityEntryRetireUnadopted",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

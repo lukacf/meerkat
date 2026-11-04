@@ -23,9 +23,13 @@
 \* the admission probe (ProbeMemberAdmission*, with and without entry
 \* custody), the agent lane's member admission
 \* (ResolveAgentLaneMemberAdmission*), every arm of the legacy adoption for
-\* both generations and both observations, the replay of an entry row for
-\* every identity and runtime id, the build seed's composition authority,
-\* the seal of the boot plan, Stop and Resume.
+\* both generations and all sixteen combinations of the shell's raw
+\* observations (the durable-identity marker, the own-identity label,
+\* whether the roster lists the identity, whether a host's intent row names
+\* it), the replay of an entry row for every identity and runtime id, the
+\* build seed's composition authority, the seal of the boot plan, Stop and
+\* Resume. Identity 1 is bound to no session until its binding's replay, so
+\* the adoption meets a member bound to a session and one bound to none.
 \*
 \* The run explores its whole reachable space under a VIEW that leaves out
 \* model_step_count and topology_epoch, which no guard reads, with TLC
@@ -43,20 +47,28 @@
 \*     entry custody, answers IdentityMemberRejected;
 \*   AuditEntryOnlyWithCause (action property): an identity becomes an entry
 \*     only by the declared apply (which records its unseated cause), the
-\*     commit of a ladder that holds its entry custody, an observed adoption,
-\*     or the replay of its row on its seated incarnation;
-\*   AuditAdoptionNeedsObservation (action property): an adoption without the
-\*     shell's legacy observation records no entry.
+\*     commit of a ladder that holds its entry custody, an adoption from
+\*     qualifying legacy marks, or the replay of its row on its seated
+\*     incarnation;
+\*   AuditAdoptionNeedsObservation (action property): an adoption records an
+\*     entry only from qualifying legacy marks (either mark for a listed
+\*     identity; both, and no host's intent row, for an unlisted one);
+\*   AuditRetireUnadoptedQualifies (action property): RetireUnadopted answers
+\*     only an unlisted member with both marks and no intent row that is
+\*     placed on a member host or bound to no session, and not retiring.
 \*
 \* AuditWitness* operators are reachability goals the runner checks as
 \* expected violations, so the properties are not vacuous. With --mutants the
-\* runner also seeds four defects into a copy of the generated model and
+\* runner also seeds six defects into a copy of the generated model and
 \* requires TLC to refuse each: a reconcile that retires an entry, an
 \* admission probe that answers an entry's name without custody as a plain
 \* duplicate (the name reservation; the spawn ladder itself cannot open on a
 \* seated entry's name, whose binding its current_binding_absent guard
-\* already refuses), an adoption without the observation, and a replay that
-\* records an entry on an unseated identity.
+\* already refuses), a listed adoption without its legacy marks, an unlisted
+\* adoption that takes one mark (refused by AuditAdoptionNeedsObservation
+\* alone), a RetireUnadopted that ignores the intent row (refused by
+\* AuditRetireUnadoptedQualifies alone), and a replay that records an entry
+\* on an unseated identity.
 \*
 \* The TLC config is DERIVED from the generated ci.cfg on every run by
 \* identity_entry_audit.sh.
@@ -114,17 +126,37 @@ ReplayArm(id, rid) ==
     \/ RecoverIdentityEntrySeatedRunning(id, rid, AuditOrigin)
     \/ RecoverIdentityEntrySeatedStopped(id, rid, AuditOrigin)
 
-\* Every arm of the legacy adoption.
-AdoptArm(id, g, observed) ==
-    \/ AdoptLegacyIdentityEntryAdopted(id, g, observed)
-    \/ AdoptLegacyIdentityEntryNameHeldByWorker(id, g, observed)
-    \/ AdoptLegacyIdentityEntryNotAdoptable(id, g, observed)
-    \/ AdoptLegacyIdentityEntryStaleObservation(id, g, observed)
-    \/ AdoptLegacyIdentityEntryNotSeated(id, g, observed)
-    \/ AdoptLegacyIdentityEntryAlreadyAnEntry(id, g, observed)
-    \/ AdoptLegacyIdentityEntryOtherCustody(id, g, observed)
-    \/ AdoptLegacyIdentityEntryNonAuthoritative(id, g, observed)
-    \/ AdoptLegacyIdentityEntryMobNotRunningStopped(id, g, observed)
+\* Every arm of the legacy adoption, over the shell's raw observations: the
+\* spawn row's durable-identity marker (m) and own-identity label (l),
+\* whether the roster lists the identity (li) and whether a host's intent
+\* row names it (i).
+AdoptArm(id, g, m, l, li, i) ==
+    \/ AdoptLegacyIdentityEntryAdopted(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryAdoptedUnlisted(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryNameHeldByWorker(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryRetireUnadopted(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryNotAdoptable(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryStaleObservation(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryNotSeated(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryAlreadyAnEntry(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryOtherCustody(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryNonAuthoritative(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryMobNotRunningStopped(id, g, m, l, li, i)
+
+\* The arms that record the member as an entry.
+AdoptRecordArm(id, g, m, l, li, i) ==
+    \/ AdoptLegacyIdentityEntryAdopted(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryAdoptedUnlisted(id, g, m, l, li, i)
+
+\* The marks that make a member a legacy member: either one for an identity
+\* the roster lists; both, and no host's intent row, for one it does not.
+AuditLegacyMarks(m, l, li, i) == IF li THEN m \/ l ELSE m /\ l /\ ~i
+
+\* The member's incarnation is retiring.
+AuditRetiring(id) ==
+    /\ id \in DOMAIN identity_to_runtime
+    /\ identity_to_runtime[id] \in DOMAIN member_state_markers
+    /\ member_state_markers[identity_to_runtime[id]] = "Retiring"
 
 \* Every arm of the admission probe in the run's phases (the run's spawns
 \* carry no created custody).
@@ -166,7 +198,7 @@ AuditNext ==
     \/ L2Commit
     \/ L2Abort
     \/ \E id \in AuditIds, rid \in AuditRids : ReplayArm(id, rid)
-    \/ \E id \in AuditIds, g \in AuditGenerations, observed \in BOOLEAN : AdoptArm(id, g, observed)
+    \/ \E id \in AuditIds, g \in AuditGenerations, m, l, li, i \in BOOLEAN : AdoptArm(id, g, m, l, li, i)
     \/ \E id \in AuditIds, custody \in BOOLEAN : ProbeArm(id, custody)
     \/ \E id \in AuditIds : LaneArm(id)
     \/ \E desired \in SUBSET AuditIds, stale \in BOOLEAN : ReconcileArm(desired, stale)
@@ -228,39 +260,58 @@ AuditAgentLaneExactlyOne ==
     phase \in {"Running", "Stopped"} =>
         \A id \in AuditIds : Cardinality({i \in 1..6 : AuditLaneVerdicts(id)[i]}) = 1
 
-AuditAdoptionVerdicts(id, g, observed) ==
-    <<ENABLED AdoptLegacyIdentityEntryAdopted(id, g, observed),
-      ENABLED AdoptLegacyIdentityEntryNameHeldByWorker(id, g, observed),
-      ENABLED AdoptLegacyIdentityEntryNotAdoptable(id, g, observed),
-      ENABLED AdoptLegacyIdentityEntryStaleObservation(id, g, observed),
-      ENABLED AdoptLegacyIdentityEntryNotSeated(id, g, observed),
-      ENABLED AdoptLegacyIdentityEntryAlreadyAnEntry(id, g, observed),
-      ENABLED AdoptLegacyIdentityEntryOtherCustody(id, g, observed),
-      ENABLED AdoptLegacyIdentityEntryNonAuthoritative(id, g, observed),
-      ENABLED AdoptLegacyIdentityEntryMobNotRunningStopped(id, g, observed)>>
+AuditAdoptionVerdicts(id, g, m, l, li, i) ==
+    <<ENABLED AdoptLegacyIdentityEntryAdopted(id, g, m, l, li, i),
+      ENABLED AdoptLegacyIdentityEntryAdoptedUnlisted(id, g, m, l, li, i),
+      ENABLED AdoptLegacyIdentityEntryNameHeldByWorker(id, g, m, l, li, i),
+      ENABLED AdoptLegacyIdentityEntryRetireUnadopted(id, g, m, l, li, i),
+      ENABLED AdoptLegacyIdentityEntryNotAdoptable(id, g, m, l, li, i),
+      ENABLED AdoptLegacyIdentityEntryStaleObservation(id, g, m, l, li, i),
+      ENABLED AdoptLegacyIdentityEntryNotSeated(id, g, m, l, li, i),
+      ENABLED AdoptLegacyIdentityEntryAlreadyAnEntry(id, g, m, l, li, i),
+      ENABLED AdoptLegacyIdentityEntryOtherCustody(id, g, m, l, li, i),
+      ENABLED AdoptLegacyIdentityEntryNonAuthoritative(id, g, m, l, li, i),
+      ENABLED AdoptLegacyIdentityEntryMobNotRunningStopped(id, g, m, l, li, i)>>
 
-\* The legacy adoption is total and its arms never overlap.
+\* The legacy adoption is total and its arms never overlap, for every one of
+\* the sixteen observations.
 AuditAdoptionExactlyOne ==
     phase \in {"Running", "Stopped"} =>
-        \A id \in AuditIds, g \in AuditGenerations, observed \in BOOLEAN :
-            Cardinality({i \in 1..9 : AuditAdoptionVerdicts(id, g, observed)[i]}) = 1
+        \A id \in AuditIds, g \in AuditGenerations, m, l, li, i \in BOOLEAN :
+            Cardinality({k \in 1..11 : AuditAdoptionVerdicts(id, g, m, l, li, i)[k]}) = 1
 
 \* An identity becomes an entry only by the declared apply (which records the
 \* entry with its unseated cause), the commit of a ladder that holds its
-\* entry custody, an observed adoption, or the replay of its row on its
-\* seated incarnation.
+\* entry custody, an adoption from qualifying legacy marks, or the replay of
+\* its row on its seated incarnation.
 AuditEntryOnlyWithCause ==
     [][\A id \in NewEntries :
          \/ id \in DOMAIN identity_entry_unseated'
          \/ id \in spawn_exec_entry_custody
-         \/ \E g \in AuditGenerations : AdoptLegacyIdentityEntryAdopted(id, g, TRUE)
+         \/ \E g \in AuditGenerations, m, l, li, i \in BOOLEAN :
+                AuditLegacyMarks(m, l, li, i) /\ AdoptRecordArm(id, g, m, l, li, i)
          \/ \E rid \in AuditRids : ReplayArm(id, rid)
       ]_vars
 
-\* An adoption without the shell's legacy observation records no entry.
+\* An adoption records an entry only from qualifying legacy marks: no step
+\* that records an entry is an arm of the adoption answering marks that do
+\* not qualify.
 AuditAdoptionNeedsObservation ==
-    [][(\E id \in AuditIds, g \in AuditGenerations : AdoptArm(id, g, FALSE))
-           => NewEntries = {}
+    [][\A id \in NewEntries :
+         ~\E g \in AuditGenerations, m, l, li, i \in BOOLEAN :
+              AdoptArm(id, g, m, l, li, i) /\ ~AuditLegacyMarks(m, l, li, i)
+      ]_vars
+
+\* RetireUnadopted answers only an unlisted member with both legacy marks and
+\* no host's intent row naming it, placed on a member host or bound to no
+\* session, and not retiring: the one member the complete roster's apply
+\* retires without adopting it.
+AuditRetireUnadoptedQualifies ==
+    [][\A id \in AuditIds, g \in AuditGenerations, m, l, li, i \in BOOLEAN :
+         AdoptLegacyIdentityEntryRetireUnadopted(id, g, m, l, li, i)
+           => /\ ~li /\ m /\ l /\ ~i
+              /\ (id \in DOMAIN member_placement \/ id \notin DOMAIN member_session_bindings)
+              /\ ~AuditRetiring(id)
       ]_vars
 
 (***************************************************************************)
@@ -275,8 +326,8 @@ AuditWitnessCustodyAborted == L2Abort /\ Id2 \in spawn_exec_entry_custody
 \* The replay of a row records an entry, in Running and in Stopped.
 AuditWitnessReplayed == \E rid \in AuditRids : RecoverIdentityEntrySeatedRunning(Id1, rid, AuditOrigin) /\ Id1 \in NewEntries
 AuditWitnessReplayedStopped == \E rid \in AuditRids : RecoverIdentityEntrySeatedStopped(Id1, rid, AuditOrigin) /\ Id1 \in NewEntries
-\* An observed adoption records an entry.
-AuditWitnessAdopted == \E g \in AuditGenerations : AdoptLegacyIdentityEntryAdopted(Id1, g, TRUE) /\ Id1 \in NewEntries
+\* An observed adoption of a listed member records an entry.
+AuditWitnessAdopted == \E g \in AuditGenerations : AdoptLegacyIdentityEntryAdopted(Id1, g, TRUE, TRUE, TRUE, FALSE) /\ Id1 \in NewEntries
 \* A reconcile that retires stale workers runs while an entry it does not
 \* desire is seated, and retires a worker beside it.
 AuditWitnessReconcileSparesEntry ==

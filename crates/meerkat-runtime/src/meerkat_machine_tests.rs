@@ -15165,6 +15165,176 @@ async fn until_changed_switch_turn_reusing_a_staged_finite_id_is_refused() {
     );
 }
 
+/// A retry of a pending until-changed request that cannot be accepted (not
+/// approved, or onto a target that cannot carry the session's transcript)
+/// records no denial: a denial under the request's id would answer the retry
+/// that finishes it as denied and leave the switch pending. Its caller gets
+/// an error, nothing is recorded under the id, and an approved retry then
+/// finishes the switch. Before, the refused retry was recorded as denied, and
+/// every later retry of the request was answered as denied.
+#[tokio::test]
+async fn until_changed_switch_turn_refused_retry_of_a_pending_request_records_no_denial() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(until_changed_reconfigure_host(false));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *adapter
+        .test_switch_turn_reconfigure_gap_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, release_rx));
+
+    let request_key = uuid(614).to_string();
+    let abandoned = {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+                &adapter,
+                &session_id,
+                until_changed_switch_request(614),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("the switch-turn reaches its reconfigure gap")
+        .expect("the gap hold reports its entry");
+
+    // The caller drops the switch-turn while it waits in the gap.
+    abandoned.abort();
+    assert!(
+        abandoned
+            .await
+            .expect_err("the abandoned switch-turn does not finish")
+            .is_cancelled()
+    );
+    drop(release_tx);
+
+    let mut denied_retry = until_changed_switch_request(614);
+    denied_retry.approval = ModelRoutingApprovalDisposition::DeniedByUser;
+    denied_retry.approval_reason =
+        Some(meerkat_core::image_generation::SwitchTurnApprovalReason::CostExceedsThreshold);
+    let denied = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        denied_retry,
+    )
+    .await;
+    assert!(
+        matches!(denied, Err(RuntimeDriverError::Internal(_))),
+        "a retry of the pending request whose approval is denied is an error, not a denial: {denied:?}"
+    );
+
+    let mut unavailable_retry = until_changed_switch_request(614);
+    unavailable_retry.approval = ModelRoutingApprovalDisposition::RequiredButUnavailable;
+    let unavailable = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        unavailable_retry,
+    )
+    .await;
+    assert!(
+        matches!(unavailable, Err(RuntimeDriverError::Internal(_))),
+        "a retry of the pending request whose approval is unavailable is an error, not a denial: {unavailable:?}"
+    );
+
+    // The input a retry carries when its host reports that the target cannot
+    // carry the session's transcript.
+    let uncarried = adapter
+        .apply_session_dsl_input(
+            &session_id,
+            mm_dsl::MeerkatMachineInput::RequestUntilChangedSwitchTurn {
+                request_id: request_key.clone(),
+                target_model: "persistent-target".to_string(),
+                target_realtime_capable: true,
+                requires_approval: false,
+                approval_available: true,
+                approval_denied: false,
+                approval_reason: None,
+                realtime_detach_allowed: false,
+                target_carries_transcript: false,
+            },
+            "RequestSwitchTurn(retry onto a target that cannot carry the transcript)",
+        )
+        .await;
+    assert!(
+        uncarried.is_err(),
+        "a retry of the pending request onto a target that cannot carry the transcript matches no arm"
+    );
+
+    let refused = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the refused retries");
+    assert_eq!(
+        refused.model_routing_pending_switch_request_id,
+        Some(request_key.clone()),
+        "the refused retries leave the request pending"
+    );
+    assert_eq!(
+        refused.model_routing_switch_terminal.get(&request_key),
+        None
+    );
+    assert_eq!(refused.model_routing_switch_denials.get(&request_key), None);
+    assert_eq!(
+        refused.model_routing_approval_phases.get(&request_key),
+        None
+    );
+    assert_eq!(
+        refused
+            .model_routing_switch_approval_reasons
+            .get(&request_key),
+        None
+    );
+
+    let retried = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        until_changed_switch_request(614),
+    )
+    .await
+    .expect("the approved retry is answered");
+    assert!(
+        matches!(
+            retried,
+            meerkat_core::image_generation::SwitchTurnControlResult::Applied { .. }
+        ),
+        "an approved retry finishes the request after the refused ones: {retried:?}"
+    );
+    let after = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the approved retry");
+    assert_eq!(after.model_routing_pending_switch_request_id, None);
+    assert_eq!(
+        after
+            .model_routing_switch_terminal
+            .get(&request_key)
+            .copied(),
+        Some(mm_dsl::RoutingSwitchTurnTerminal::PersistentReconfigureApplied)
+    );
+    assert_eq!(after.model_routing_switch_denials.get(&request_key), None);
+    assert_eq!(
+        after.model_routing_baseline_model.as_deref(),
+        Some("persistent-target")
+    );
+}
+
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_reports_registered_idle_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());

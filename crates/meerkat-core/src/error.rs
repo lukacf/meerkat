@@ -225,7 +225,7 @@ pub enum ToolError {
     /// This is an ordinary tool result, never a run or session disposition.
     /// Its model payload's `data` is exactly the closed refusal kind and
     /// whether the guarded tool code ran (`tool_invoked`: `false` when a
-    /// core certifier met the refusal before invoking it, `"unknown"`
+    /// core certifier met the refusal before that code ran, `"unknown"`
     /// otherwise); see [`crate::authorization::RefusalDispatch`].
     #[error("{refusal}")]
     AuthorizationRefused {

@@ -56,7 +56,7 @@ Everything else in this document is **closed, shipped, superseded, or retired
 as a separate upstream ask**. In particular, ask 12 was fixed before it was
 filed, ask 13's operational incidents were closed by a Meta-local forwarder
 fix plus later Meerkat member-scoped failure containment, and the previously
-status-less Studio M1–M4 reports now carry explicit closure lines below.
+status-less downstream M1-M4 reports now carry explicit closure lines below.
 
 > **Handed to the meerkat coding agent by Luka (2026-07-02).** Eight asks for
 > the meerkat repo, derived from the Meta memory initiative
@@ -972,7 +972,7 @@ make the driver claim past a poisoned row.
 
 ---
 
-# Batch 4 — meerkat-studio field report (2026-07-06)
+# Batch 4 - downstream desktop app field report (2026-07-06)
 
 Reporter context: desktop app pinning meerkat =0.7.17 / meta =0.7.23; thread
 mobs through an embedded gateway (FactoryAgentBuilder →

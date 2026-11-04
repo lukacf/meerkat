@@ -446,7 +446,9 @@ impl ToolDispatchContext {
     /// Before the entry, the operation did not enter. An ungoverned or
     /// default context, or another call, refuses as `AuthorizationRefused`
     /// (`MalformedFacts`) before anything is spent; a refused or no longer
-    /// current operation is `AuthorizationRefused` or
+    /// current operation is `AuthorizationRefused` (certified not
+    /// dispatched while no effect of the dispatch entered, as
+    /// [`Self::enter_reviewed_effect`] certifies it) or
     /// `OperationAuthorizationUnavailable`; a review that cannot be spent
     /// here is `ReviewUnsatisfied` (for example `AlreadyConsumed` on a
     /// second entry) or `ReviewUnavailable`. A conversion refused after the

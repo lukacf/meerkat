@@ -55,6 +55,46 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
+## Upgrading to 0.9.10
+
+This section is for systems running 0.9.9. The full list of changes is in
+the CHANGELOG under `## [0.9.10]`.
+
+### Rebuilds after a completed owner change
+
+Core's governed operations no longer settle a stale read as their outcome when
+the owner change that made it stale had already completed: a governed tool
+dispatch's prepared entry and its entry stagings, a model request, a
+compaction summary, a review's currentness check after its verdict and the
+`web_search` helper's model request take the wait after a stale read
+(`OwnerChangeChurn::wait_after_stale_read`). With no change in progress they
+pause 1 ms and rebuild from the owners, as one of their free rebuilds, within
+the same bounds (2 s and 3 free rebuilds per waiting state). The rebuilt
+decision is current, or its refusal is the owners' current answer, typed as
+before. A model request that reads stale keeps its operation through these
+rebuilds, where it rebuilt once at once and, when that read was stale too,
+sent the controller feedback request, so a host's operation refusal observer
+sees `WaitedForOwnerChange` where it saw `Rebuilt` and `ControllerFeedback`. A
+review whose currentness read was stale is superseded and reviewed once more,
+where it was retired as an authority change.
+
+Native admission (controller admission, a scoped original's own mandate and
+its named contributors' liveness, and the retained-resume checks that share
+them) never waits, because it runs inside the session's ingress transaction.
+It now makes a read that met an owner change once more, in place, when that
+change has completed (`LocalGrantAuthority::owner_change_in_progress` names
+none), and answers `ControllerReadinessUnavailable` with `PolicyChanged` as
+before for a change still in progress or another one met by that read.
+
+**Do:** keep treating native admission's `PolicyChanged` as retryable. Under
+back-to-back changes, wait outside your own locks with a bounded
+`meerkat_core::authorization::OwnerChangeChurn::wait_after_stale_read`, then
+resubmit once. A host or test that counted operation refusal observer
+dispositions for a model request that read stale, or matched an
+authority-change retirement for a review whose currentness read was stale,
+expects the new ones. See
+[Survive owner changes in progress](/rust/native-authorization#survive-owner-changes-in-progress).
+
 ## Upgrading to 0.9.9
 
 This section is for systems running 0.9.8. The full list of changes is in

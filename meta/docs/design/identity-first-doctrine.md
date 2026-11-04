@@ -111,7 +111,7 @@ Deployment census at decision time (audit-verified):
 - **The downstream app**: identity-first end to end for durables (SDK roster provider,
   `reconcile_identity` on boot, console lifecycle buttons hidden); mob plane
   used only for agent-spawned helper churn. Already doctrine-conformant.
-- **meerkat-studio**: currently all mob-plane via `meta_gateway`; migrates
+- **The primary console consumer**: currently all mob-plane via `meta_gateway`; migrates
   to identity semantics zero-flag-day via capabilities detection (their
   crews are definition-derived rosters; domain agents are single durable
   identities).
@@ -131,10 +131,10 @@ the roster may be empty) — and have both binaries call it. The actual binary
 merge is a later packaging step (target: 0.8), because the two binaries have
 deliberately different stdin contracts (`rpc_gateway`: stdin JSON-RPC loop;
 `meta_gateway`: one init line, then stdin-EOF keep-serving that
-meerkat-studio's persistent-helpers feature depends on).
+the primary console consumer's persistent-helpers feature depends on).
 
 Consumer contract to preserve through convergence AND the eventual merge
-(from meerkat-studio, the primary console consumer):
+(from the primary console consumer):
 
 1. stdin init handshake → `http_base_url`, `runtime_id`, `launch_state`
    (including `"resumed"`).

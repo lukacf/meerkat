@@ -8126,7 +8126,7 @@ fn internal_error(id: Value, message: impl Into<String>) -> Value {
     );
     // The real failure reason goes on the wire. It used to be logged here
     // and replaced with a bare "internal_error", which made every -32000
-    // undiagnosable from the client side (meerkat-studio ask K2: their K1
+    // undiagnosable from the client side (downstream ask K2: their K1
     // retire/respawn failures cost a day because this said nothing).
     // `error` stays "internal_error" as the stable kind discriminator for
     // existing clients; `detail` carries the human-readable chain.
@@ -20340,7 +20340,7 @@ message = "review"
         Ok(())
     }
 
-    /// DECISION (2026-07-06, meerkat-studio ask K2): console JSON-RPC internal
+    /// DECISION (2026-07-06, downstream ask K2): console JSON-RPC internal
     /// errors DO disclose the failure reason. Every caller that reaches these
     /// handlers is an operator by construction — an auth-gated console 401s
     /// unauthenticated callers before dispatch, and an open console is a

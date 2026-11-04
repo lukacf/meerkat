@@ -54006,7 +54006,7 @@ async fn test_retire_retry_recaptures_draining_attachment_after_actor_cleanup_fa
     );
 }
 
-/// Ask 21d regression (meerkat-studio, identity-first construction): the
+/// Ask 21d regression (downstream embedder, identity-first construction): the
 /// archive authority CLAIMS the session (ownership probe true) yet the
 /// archive itself resolves NotFound, and the runtime is already RETIRED by
 /// the pre-archive retire. The old escalation ("NotFound for registered
@@ -54118,9 +54118,9 @@ async fn test_retire_removes_stopped_unattached_registration_on_archive_notfound
     );
 }
 
-/// K1 regression (meerkat-studio P0): retire on a SESSION-OWNED member — a
+/// K1 regression (downstream P0): retire on a SESSION-OWNED member (a
 /// runtime-registered session the mob archive authority never had a record
-/// for (e.g. materialized by an embedder's session service) — used to fail
+/// for, e.g. materialized by an embedder's session service) used to fail
 /// deterministically with "mob archive authority returned NotFound for
 /// registered runtime session", leaving the runtime registered so every
 /// retry failed identically and the member could be neither respawned nor

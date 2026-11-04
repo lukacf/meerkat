@@ -14,9 +14,16 @@ name: CI
 #   changes         - changed-path classification (packages, shards, closure,
 #                     conditional-lane flags, what a PR left to the push)
 #   fmt-governance  - always: fmt, docs, semver self-test, version parity,
-#                     lock consistency, classifier self-tests, and the
+#                     lock consistency, release-tooling self-tests, and the
 #                     ripgrep tombstone scans (legacy surface names,
 #                     session-control routes, deprecated backend)
+#   ci-lanes-selftest - always, beside fmt-governance: make
+#                     ci-lanes-selftest (the lane classifier, the gate's
+#                     consistency with the job conditions, release-projection
+#                     reuse, the non-Rust reader inventory)
+#   path-classifier-selftest - always, beside fmt-governance: make
+#                     path-classifier-selftest (the shell path classifiers,
+#                     the TLC lane parts, gate wiring)
 #   ratchets        - generated-contract freshness when contract paths
 #                     changed; machine/protocol drift when machine authority
 #                     changed; the runtime authority bypass audit when Rust,
@@ -338,8 +345,8 @@ jobs:
       release_evidence_run_attempt: ${{ steps.plan.outputs.release_evidence_run_attempt }}
       package_count: ${{ steps.plan.outputs.package_count }}
       closure_count: ${{ steps.plan.outputs.closure_count }}
-      closure_flags: ${{ steps.plan.outputs.closure_flags }}
       closure_check: ${{ steps.plan.outputs.closure_check }}
+      closure_check_matrix: ${{ steps.plan.outputs.closure_check_matrix }}
       rustdoc: ${{ steps.plan.outputs.rustdoc }}
       governed_jsonl: ${{ steps.plan.outputs.governed_jsonl }}
       mcp_confinement_positive: ${{ steps.plan.outputs.mcp_confinement_positive }}
@@ -500,7 +507,7 @@ jobs:
           node scripts/ci-cargo-lanes.mjs --format github --event "${EVENT_NAME}" \
             --base "${plan_base}" --head HEAD "${plan_args[@]}" \
             | tee "${RUNNER_TEMP}/ci-cargo-lanes.txt" >> "${GITHUB_OUTPUT}"
-          grep -vE '^(closure_flags|shard_matrix|shard_rest_matrix|unit_shard_matrix|main_unit_shard_matrix|main_unit_rest_shard_matrix|closure_test_rest_matrix|feature_check_rest_matrix|main_archive_build_matrix|main_archive_run_matrix|integration_matrix|closure_test_matrix|feature_check_matrix)=' "${RUNNER_TEMP}/ci-cargo-lanes.txt"
+          grep -vE '^(closure_flags|closure_check_matrix|shard_matrix|shard_rest_matrix|unit_shard_matrix|main_unit_shard_matrix|main_unit_rest_shard_matrix|closure_test_rest_matrix|feature_check_rest_matrix|main_archive_build_matrix|main_archive_run_matrix|integration_matrix|closure_test_matrix|feature_check_matrix)=' "${RUNNER_TEMP}/ci-cargo-lanes.txt"
 
   stagger:
     name: Stagger the short rows
@@ -520,11 +527,10 @@ jobs:
   fmt-governance:
     name: Format + governance
     runs-on: ubuntu-24.04
-    # On the monorepo workspace the planner selftests alone take about 15
-    # minutes on a hosted runner (make ci-lanes-selftest 13 minutes on
-    # PR #2011's first run, then path-classifier-selftest), past the old
-    # 20-minute cap. Splitting them into a job of their own is a follow-up.
-    timeout-minutes: 45
+    # The planner self-tests run beside this job, in ci-lanes-selftest and
+    # path-classifier-selftest. The steps left here took 340-542 s on the
+    # monorepo pull requests of 2026-11-02..03.
+    timeout-minutes: 20
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -620,16 +626,6 @@ jobs:
           make published-crates-standalone-selftest
           make check-published-crates-standalone-guard
 
-      - name: CI lane classifier fails closed
-        run: make ci-lanes-selftest
-
-      # The shell path classifiers (scripts/machine-authority-changed, the
-      # remote-graph edge classifier and scripts/cargo-agent-gate) silently
-      # stopped matching after the crates/ layout move because nothing ran
-      # their pinning tests.
-      - name: Path classifiers route gate inputs
-        run: make path-classifier-selftest
-
       - name: Release doctor workflow assertions still bind
         run: scripts/test-release-doctor-workflow-contract.sh
 
@@ -709,6 +705,71 @@ jobs:
       - name: Mintlify parse and links (meta/docs)
         working-directory: meta/docs
         run: npx --yes mint@4.2.728 broken-links
+
+  # The planner self-tests, beside Format + governance rather than inside it:
+  # on the monorepo pull requests of 2026-11-02..03 the two took 767-1237 s
+  # of that job's 1107-1710 s, past the 1080-second lane budget. Like it,
+  # they run on every event, wait for no plan (ROOT_JOB_NAMES in the CI
+  # gate's budget step) and are required by the CI gate. They compile
+  # nothing: cargo only reads metadata, so they restore the registry cache
+  # and start no sccache.
+  ci-lanes-selftest:
+    name: CI lane classifier selftest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      # Depth 2, the checkout these self-tests had in Format + governance;
+      # the release-projection self-tests fetch the older commits they read.
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 2
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.event_name != 'workflow_dispatch' }}
+          # The registry entry every lane shares (fmt-governance's comment).
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: CI lane classifier fails closed
+        run: make ci-lanes-selftest
+
+  path-classifier-selftest:
+    name: Path classifier selftest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 2
+
+      # The edge classifier's self-test and the agent gate's dry runs read
+      # cargo metadata.
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.event_name != 'workflow_dispatch' }}
+          # The registry entry every lane shares (fmt-governance's comment).
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      # The shell path classifiers (scripts/machine-authority-changed, the
+      # remote-graph edge classifier and scripts/cargo-agent-gate) silently
+      # stopped matching after the crates/ layout move because nothing ran
+      # their pinning tests.
+      - name: Path classifiers route gate inputs
+        run: make path-classifier-selftest
 
   ratchets:
     name: Generation ratchets
@@ -970,25 +1031,15 @@ jobs:
   # in `ratchets` only proves the artifacts match the DSL). Each shard of
   # the canonical TLC lane needs only a JDK and the TLC jar
   # (setup-tlc-ci; the audit parts never run xtask), runs in parallel, and
-  # fits the PR budget: seven shards of 376-586 s of audits on a hosted
-  # runner (measured per audit in machine_verify_all_tlc_test.sh), where
-  # three shards ran 13-18 minutes or past the job timeout on runs
-  # 40721495692 and 40721504088, an eighth (audits-h) for the controller
-  # hold audit with its mutants (100 s on a 4-worker local run), a ninth
-  # (audits-i) for the member residency audit's witness runs, split from
-  # audits-g, whose whole-space runs stay there (179 s and 212 s locally
-  # with 4 workers), a tenth (audits-j) for the durable decision audit with
-  # its mutants (146 s on a 4-worker local run, about 235-340 s hosted at
-  # the 1.6-2.3x runner factor), an eleventh (audits-l) for the identity
-  # entry audit's entry part (281 s locally), and four (audits-k,
-  # audits-m, audits-n, audits-o) for its declared apply's apply, legacy,
-  # roles and hosted parts (180, 230, 196 and 212 s locally with 4
-  # workers), and six (audits-q through audits-v) for the created identity
-  # audit's runs, two for its recovery part and four for its changes part,
-  # each projected, not yet measured as a shard, to stay within 348 s
-  # locally (800 s hosted at a 2.3x runner factor) from its TLC runs'
-  # start-up and spaces (the lane test's notes); none of these fifteen is
-  # measured on a hosted runner yet.
+  # fits the PR budget: twenty-one shards, which took 146-751 s each on the
+  # hosted runners of the 0.9.9 release pushes and up to 776 s on its pull
+  # requests, audits-f aside (1020 s, then its 20-minute timeout, before
+  # two of its audits moved out). machine_verify_all_tlc_test.sh lists
+  # every audit's and shard's hosted seconds; its assignment keeps each
+  # shard within about 720 s, 60 percent of the job timeout, except the
+  # three shards that each run one part of the identity entry audit
+  # (audits-l, audits-m and audits-n, 741-776 s), which get shorter only
+  # when their parts split.
   # The `machine-verify --all` sweep stays on nightly, the release gate and
   # the release-tag graph.
   tlc-audits:
@@ -998,8 +1049,9 @@ jobs:
     runs-on: ubuntu-24.04
     # On a pull request a shard past about 17.5 minutes fails the execution
     # budget anyway (CI_MAX_EXEC_SECONDS, 1080 s, less about 30 s of change
-    # classification); 20 leaves headroom over a shard's at most about 14
-    # minutes (800 s of TLC hosted at a 2.3x runner factor, and its setup).
+    # classification); 20 leaves headroom over a shard's at most about 13
+    # minutes (776 s, the longest shard of this assignment on the 0.9.9
+    # release runs).
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -2295,14 +2347,21 @@ jobs:
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
 
   closure-check:
-    name: Closure check (${{ needs.changes.outputs.closure_count }} crates)
-    needs: [changes, stagger]
+    name: Closure check (${{ matrix.name }})
+    needs: changes
     # Push only: a pull request's Clippy lanes compile its changed packages
     # under every feature (a whole-workspace plan lints every package, a
     # superset of this check), and the dependents compile here on the push.
+    # One job per product's part of the closure (closure_check_rows in
+    # scripts/ci-cargo-lanes.mjs), in parallel, with the first wave: as one
+    # job that checked the parts in turn it was a workspace push's longest
+    # job (51m49s on main push 41608949055) and waited for the stagger job.
     if: ${{ needs.changes.outputs.closure_check == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ github.event_name == 'pull_request' && 40 || 60 }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.closure_check_matrix) }}
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -2342,22 +2401,20 @@ jobs:
       - name: Check the reverse-dependency closure
         shell: bash
         env:
-          CLOSURE: ${{ needs.changes.outputs.closure_flags }}
+          CLOSURE: ${{ matrix.packages }}
         run: |
           set -euo pipefail
           [[ -n "${CLOSURE}" ]] || { echo "::error::empty closure in the closure-check lane"; exit 1; }
+          # One product's part of the closure, in one invocation: Cargo
+          # unifies features across the packages of one invocation, and the
+          # products' requests must not reach Core's.
+          [[ "${CLOSURE}" != *";"* ]] || { echo "::error::a closure-check job holds more than one product's part"; exit 1; }
           targets=()
           if [[ "${CLOSURE_CHECK_TARGETS}" == "all" ]]; then
             targets+=(--all-targets)
           fi
-          # One invocation per product's part of the closure (` ; ` between
-          # them): Cargo unifies features across the packages of one
-          # invocation, and the products' requests must not reach Core's.
-          IFS=';' read -r -a groups <<<"${CLOSURE}"
-          for group in "${groups[@]}"; do
-            # shellcheck disable=SC2086
-            ./scripts/repo-cargo check ${group} "${targets[@]}" --all-features
-          done
+          # shellcheck disable=SC2086
+          ./scripts/repo-cargo check ${CLOSURE} "${targets[@]}" --all-features
 
       - name: Upload sccache server log
         if: ${{ always() }}
@@ -2365,7 +2422,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: sccache-log-closure-check-${{ github.run_id }}-${{ github.run_attempt }}
+          name: sccache-log-closure-check-${{ matrix.product }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: /home/runner/work/_temp/sccache.log
           if-no-files-found: ignore
           retention-days: 3
@@ -3140,6 +3197,8 @@ jobs:
     needs:
       - changes
       - fmt-governance
+      - ci-lanes-selftest
+      - path-classifier-selftest
       - ratchets
       - governance-gates
       - governance-docs-gate
@@ -3176,6 +3235,8 @@ jobs:
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           FMT_GOVERNANCE_RESULT: ${{ needs.fmt-governance.result }}
+          CI_LANES_SELFTEST_RESULT: ${{ needs.ci-lanes-selftest.result }}
+          PATH_CLASSIFIER_SELFTEST_RESULT: ${{ needs.path-classifier-selftest.result }}
           RATCHETS_RESULT: ${{ needs.ratchets.result }}
           TLC_AUDITS_RESULT: ${{ needs.tlc-audits.result }}
           MACHINE_AUTHORITY: ${{ needs.changes.outputs.machine_authority }}
@@ -3329,7 +3390,7 @@ jobs:
           if [[ -n "${READER_NOT_RUN}" ]]; then
             echo "::notice::readers of changed files that need live-provider credentials run in no CI lane: ${READER_NOT_RUN}"
           fi
-          echo "changes=${CHANGES_RESULT} fmt-governance=${FMT_GOVERNANCE_RESULT} ratchets=${RATCHETS_RESULT} governance-gates=${GOVERNANCE_GATES_RESULT} tlc-audits=${TLC_AUDITS_RESULT}"
+          echo "changes=${CHANGES_RESULT} fmt-governance=${FMT_GOVERNANCE_RESULT} ci-lanes-selftest=${CI_LANES_SELFTEST_RESULT} path-classifier-selftest=${PATH_CLASSIFIER_SELFTEST_RESULT} ratchets=${RATCHETS_RESULT} governance-gates=${GOVERNANCE_GATES_RESULT} tlc-audits=${TLC_AUDITS_RESULT}"
           echo "clippy=${CLIPPY_RESULT} unit=${UNIT_RESULT} governed-jsonl=${GOVERNED_JSONL_RESULT} mcp-confinement-positive=${MCP_CONFINEMENT_POSITIVE_RESULT} integration=${INTEGRATION_RESULT} (${INTEGRATION_COUNT} suites) closure-tests=${CLOSURE_TESTS_RESULT} (${CLOSURE_TEST_COUNT} rows, ${HOOK_BINARY_COUNT} hook binaries, ${HOOK_RETAINED_COUNT} of them lib binaries left to the main and nightly unit lanes, ${TEST_SCOPE_COUNT}-package scope) main-unit=${MAIN_UNIT_RESULT} closure-check=${CLOSURE_CHECK_RESULT} rustdoc=${RUSTDOC_RESULT} feature-check=${FEATURE_CHECK_RESULT} wasm-check=${WASM_CHECK_RESULT} sdk-host=${SDK_HOST_RESULT} example-web=${EXAMPLE_WEB_RESULT} wasm-timers=${WASM_TIMERS_RESULT} bazel-graph=${BAZEL_GRAPH_RESULT}"
           failed=0
           require_success() {
@@ -3360,6 +3421,8 @@ jobs:
           # produce a plan, nothing below can be trusted.
           require_success "Change classification" "${CHANGES_RESULT}"
           require_success "Format + governance" "${FMT_GOVERNANCE_RESULT}"
+          require_success "CI lane classifier selftest" "${CI_LANES_SELFTEST_RESULT}"
+          require_success "Path classifier selftest" "${PATH_CLASSIFIER_SELFTEST_RESULT}"
           require_success "Generation ratchets" "${RATCHETS_RESULT}"
           # The rest waves and the short lanes wait for the stagger job.
           require_success "Stagger the short rows" "${STAGGER_RESULT}"
@@ -3652,8 +3715,8 @@ jobs:
         #   terminal  completed_at, timed from the start of the run attempt
         #             the lane ran in
         # The execution path of a lane is its own run time plus the change
-        # classification's (every lane but classification and format +
-        # governance waits for the plan) and, for a lane that waits for the
+        # classification's (every lane but the root jobs, ROOT_JOB_NAMES below,
+        # waits for the plan) and, for a lane that waits for the
         # stagger job, the stagger job's. The budgets:
         #   - execution path <= CI_MAX_EXEC_SECONDS: fails (exec_over_budget)
         #   - terminal minus path queue <= CI_MAX_TERMINAL_SECONDS: fails
@@ -3691,7 +3754,8 @@ jobs:
           ENFORCE_BUDGET: ${{ github.event_name == 'pull_request' }}
           GATE_JOB_NAME: CI gate
           CLASSIFICATION_JOB_NAME: Change classification
-          ROOT_JOB_NAMES: Change classification,Format + governance
+          # The jobs that wait for no plan, by exact name.
+          ROOT_JOB_NAMES: Change classification,Format + governance,CI lane classifier selftest,Path classifier selftest
           STAGGER_JOB_NAME: Stagger the short rows
           # Why the plan ran each exact-profile lane, and those lanes' job
           # names (exact matches).

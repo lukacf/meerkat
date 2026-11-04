@@ -7,5 +7,6 @@
     "source": "forge-prepare-setup-owner-join-20261011/stock_host_source.py",
     "sha256": "7f460c15e193972a4cd9f724796ab845bb699acdec5b7d75f4937f66880a764c"
   },
-  "scope": "Exact public historical binding modules parsed as AST only; no import, host construction or runtime selection."
+  "scope": "Exact public historical binding modules parsed as AST only; no import, host construction or runtime selection.",
+  "redaction": "Both modules replace the machine-local artifacts root on line 20 with the relative installer/.artifacts; the sha256 values above are those of the unredacted sources."
 }

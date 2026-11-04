@@ -10999,6 +10999,8 @@ impl MobHandle {
         });
         let snapshot = material.to_snapshot();
         let current_bridge_session_id = snapshot.current_bridge_session_id().cloned();
+        let (peer_id, transport_public_key) =
+            Self::projected_member_comms_identity(&domain_identity, roster_entry, machine_state);
         Some(
             MobMemberListEntry {
                 agent_identity: domain_identity.clone(),
@@ -11006,9 +11008,8 @@ impl MobHandle {
                 fence_token: snapshot.fence_token,
                 role,
                 runtime_mode,
-                peer_id: roster_entry.and_then(|entry| entry.peer_id),
-                transport_public_key: roster_entry
-                    .and_then(|entry| entry.transport_public_key.clone()),
+                peer_id,
+                transport_public_key,
                 wired_to: Self::machine_wired_to_for_identity(&domain_identity, machine_state),
                 external_peer_specs: roster_entry
                     .map(|entry| entry.external_peer_specs.clone())
@@ -11044,6 +11045,40 @@ impl MobHandle {
             .member_session_bindings
             .get(&dsl_identity)
             .and_then(|dsl_session_id| SessionId::parse(&dsl_session_id.0).ok())
+    }
+
+    /// The comms identity (peer id and transport key) a read projects for
+    /// `identity`.
+    ///
+    /// A member MobMachine holds seated and not materialized in this process
+    /// (Dormant, or Waking until its wake ends) has no live comms runtime: its
+    /// comms identity is the durable endpoint MobMachine records for it
+    /// (`member_peer_endpoints`), the one its wake materializes and checks.
+    /// So it reads exactly like a live member whether its seat is fresh, a
+    /// successor's or restored, and the read wakes nothing. Such a member
+    /// with no recorded endpoint (on network comms, until its first wake
+    /// registers one) reads none. Every other member reads the comms identity
+    /// its live runtime, or its host, published to the roster.
+    fn projected_member_comms_identity(
+        identity: &AgentIdentity,
+        roster_entry: Option<&RosterEntry>,
+        machine_state: &mob_dsl::MobMachineState,
+    ) -> (Option<PeerId>, Option<String>) {
+        if super::boot_plan::domain_member_is_unmaterialized(machine_state, identity) {
+            return machine_state
+                .member_peer_endpoints
+                .get(&mob_dsl::AgentIdentity::from_domain(identity))
+                .and_then(|endpoint| {
+                    let peer_id = PeerId::parse(&endpoint.peer_id.0).ok()?;
+                    let transport_public_key =
+                        meerkat_comms::PubKey::new(endpoint.signing_key.0).to_pubkey_string();
+                    Some((Some(peer_id), Some(transport_public_key)))
+                })
+                .unwrap_or((None, None));
+        }
+        roster_entry.map_or((None, None), |entry| {
+            (entry.peer_id, entry.transport_public_key.clone())
+        })
     }
 
     fn session_bound_live_runtime_ids_from_machine(
@@ -12289,6 +12324,11 @@ impl MobHandle {
             entry.agent_identity.as_str(),
             machine_state,
             entry.kickoff.as_ref(),
+        );
+        (entry.peer_id, entry.transport_public_key) = Self::projected_member_comms_identity(
+            &entry.agent_identity,
+            Some(&entry),
+            machine_state,
         );
         entry
     }

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Meta Forge 0.3.1 installs the matched Meta 0.9.10 and Toolkit/Connect 0.9.10
+selection. Build and Resume now check the saved guide within the same writer
+reservation that publishes the build.
+
+Forge 0.3.1 is part of the Meerkat 0.9.10 release and is the first Forge
+release from this repository: tag `meta-installer-v0.3.1`, with packages named
+`meta-installer-0.3.1-<target>.zip` for `linux-x86_64` and `macos-arm64`.
+Releases up to Forge 0.3.0 stay in `lukacf/meerkat-meta` (tags
+`forge-v<version>`, packages `meta-forge-<version>-<target>.zip`). Three
+selections stay as in Forge 0.3.0: the Guide runs Meta 0.9.3 with Core 0.9.3,
+agent teams pin the published Meta 0.9.6 runtime, and the protected
+application receiver keeps its Meta 0.9.7 SDK tuple. Acceptance is per target:
+each package is accepted only on evidence for that exact package, and the
+`linux-x86_64` evidence does not stand in for `macos-arm64`.
+
+### Upgrade
+
+- An application that Forge 0.3.0 prepared with its Connect gateway (0.9.5 on
+  Linux, 0.9.4 on macOS) is prepared again at its next install step. Forge
+  0.3.1 and Connect 0.9.10 bind an activation's policy bundle as
+  `policy-v1:sha256:<manifest digest>`, and an activation bound in the
+  earlier form is not current.
+
 ### Added
 
 - The storage doctor (`meta/storage/doctor`, and the console's read method)
@@ -42,6 +65,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Core's read-only reader, or `null` when the directory has no durable mob
   store. The text report prints the same counts. The format stays
   `meerkat-meta.identity-census` version 1: the field is additive.
+
+### Changed
+
+- Forge 0.3.1 selects Meta 0.9.10 with Toolkit 0.9.10 and the Connect 0.9.10
+  gateway for applications on both targets, and the Meta 0.9.10 `rpc_gateway`
+  for applications without a connection setup helper. Forge 0.3.0 selected
+  Meta 0.9.7 with Toolkit 0.9.5 on Linux x86_64 and Meta 0.9.4 with Toolkit
+  0.9.4 on macOS arm64.
+- Forge 0.3.1 accepts the Meta 0.9.10 and Toolkit 0.9.10 SDK wheels in a
+  selected Meta and Toolkit SDK pair, besides the releases it accepted
+  before. The Toolkit wheel's `native-host` extra must still require exactly
+  the selected Meta version.
+- Forge 0.3.1 downloads a Meta release after 0.9.7 from this repository's
+  `meta-v<version>` release, and 0.9.7 or earlier from `lukacf/meerkat-meta`'s
+  `v<version>` release as before: both for the pinned agent team runtime and
+  for the gateway an ordinary application package installs
+  (`install_gateway.py`). Both refuse a version that is not exactly
+  major.minor.patch. The archive and checksum names are unchanged, and an
+  install receipt keeps its fields.
+
+### Fixed
+
+- Build and Resume check the saved guide within the same writer reservation
+  that publishes the build: the final comparison with the saved guide, the
+  service check and the build's publication run inside one SQLite writer
+  reservation on the guide store, with no wait between the check and the
+  publication. Before, a guide change saved while a build was being submitted
+  could still start the builder from the earlier read. A busy, missing or
+  unreadable store refuses the build at once, and a refused build starts
+  nothing.
 
 ## [0.9.9] - 2026-11-03
 
@@ -15632,7 +15685,7 @@ reading a silent-but-working phase as a hung one.
   (idle-retire reaping, no continuity record).
 - `mobkit/capabilities` on both dispatchers now carries a top-level
   `identity_first` flag — the zero-flag-day migration signal consumers gate
-  on (meerkat-studio contract point 5).
+  on (a downstream console consumer's contract point 5).
 
 ### Fixed
 
@@ -15662,7 +15715,7 @@ reading a silent-but-working phase as a hung one.
 
 ### Added
 
-- Identity-first gateway mode (meerkat-studio ask K0): `identity_first: true`
+- Identity-first gateway mode (downstream ask K0): `identity_first: true`
   on `mobkit_gateway` init boots the durable-identity substrate — continuity
   records + lease-fenced embodiment (default providers constructed from the
   existing store paths), resume-first restore with the Broken-identity
@@ -15683,13 +15736,13 @@ reading a silent-but-working phase as a hung one.
   honored, default `warn`) and logs a version-stamped startup line.
   Previously the binary dropped every tracing event in the process —
   runtime failures, console internal-error logs, and the schedule claim
-  watchdog's stall diagnosis were all invisible; meerkat-studio root-caused
+  watchdog's stall diagnosis were all invisible; a downstream app root-caused
   their opaque K1/K2 failures to exactly this gap on the child gateways
   their app spawns. `rpc_gateway` already had the subscriber.
 
 ### Added
 
-- Mob-wide, revival-surviving external-tools seam (meerkat-studio ask K4):
+- Mob-wide, revival-surviving external-tools seam (downstream ask K4):
   `MobBootstrapSpec::with_default_external_tools_provider` forwards to
   meerkat-mob's per-spawn provider, so tools attached there survive member
   respawn/revival — unlike the per-spawn `SpawnMemberSpec.external_tools`
@@ -15699,7 +15752,7 @@ reading a silent-but-working phase as a hung one.
 ### Changed
 
 - Console JSON-RPC internal errors now carry the real failure reason on the
-  wire (meerkat-studio ask K2): `message` and `data.detail` hold the error
+  wire (downstream ask K2): `message` and `data.detail` hold the error
   chain instead of an opaque `{"error":"internal_error"}` (the kind marker is
   kept for existing clients). This deliberately reverses the earlier
   redaction posture for THIS surface: every caller that reaches these
@@ -15710,14 +15763,14 @@ reading a silent-but-working phase as a hung one.
   covers the intermittent mob-spawn 500s reported as K3 wherever they
   originate on mobkit's surface.
 - The meerkat family is now exact-pinned (`=0.7.18`) in Cargo.toml
-  (meerkat-studio ask K5): the compatible meerkat version is declared, not
+  (downstream ask K5): the compatible meerkat version is declared, not
   archaeologized from Cargo.lock at release tags.
 
 ### Known issues
 
 - `mobkit/retire_member` / `mobkit/respawn_member` fail for never-ran
   members on persistent session services and strand them in `retiring`
-  (meerkat-studio K1) — root-caused upstream (ask 20,
+  (downstream ask K1), root-caused upstream (ask 20,
   docs/design/upstream-asks.md): the ArchiveSession disposal step NotFounds
   on a member that never committed a runtime snapshot. Repro ships as an
   `#[ignore]`d test in `tests/studio_k_asks.rs`; the fix lands with the next

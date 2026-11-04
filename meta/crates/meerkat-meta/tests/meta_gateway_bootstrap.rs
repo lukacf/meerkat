@@ -749,7 +749,7 @@ fn meta_gateway_rejects_post_init_stdin_rpc_loudly() {
     );
 }
 
-/// meerkat-studio K2 root cause on this binary: `meta_gateway` had no
+/// Downstream ask K2 root cause on this binary: `meta_gateway` had no
 /// tracing subscriber, so every WARN/ERROR in the process — runtime
 /// failures, console internal-error logs, the schedule claim watchdog's
 /// stall diagnosis — was silently dropped. Pin that the binary emits

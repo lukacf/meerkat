@@ -97,7 +97,7 @@ struct InitParams {
     surface: Option<String>,
     runtime_profile: Option<String>,
     console_read_only: Option<bool>,
-    /// Run this gateway identity-first (meerkat-studio ask K0): durable
+    /// Run this gateway identity-first (downstream ask K0): durable
     /// identities with continuity records, lease-fenced embodiment, and the
     /// tolerant identity lifecycle paths — instead of the session-owned
     /// mob-member surface (where the ask-20 retire/respawn class lives).
@@ -2489,7 +2489,7 @@ fn main() {
     // migration code whose progress reports through tracing; dispatching
     // them ahead of this init dropped every progress line, and a 2026-07
     // production deploy was aborted because a supervisor read the
-    // silent-but-working migration as a hang. Also (meerkat-studio K1/K2):
+    // silent-but-working migration as a hang. Also (downstream asks K1/K2):
     // without any init, runtime failures, console internal-error logs, and
     // the schedule claim watchdog's stall diagnosis all vanish on the child
     // gateways their app spawns. Stderr, never stdout: stdout carries the
@@ -3350,7 +3350,7 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
     })?;
     runtime.set_gateway_peer_keys(peer_keys);
 
-    // Identity-first mode (meerkat-studio ask K0): give this gateway the
+    // Identity-first mode (downstream ask K0): give this gateway the
     // durable-identity substrate — continuity records, lease-fenced
     // embodiment, resume-first restore with the Broken-identity repair task,
     // and the tolerant identity lifecycle paths. Default providers are

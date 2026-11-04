@@ -577,6 +577,13 @@ impl GrantBackedWorkPolicy {
     /// This never authenticates a caller, admits work or returns an entry permit.
     /// The native ingress owner performs its independent current invocation
     /// check and excludes a protected policy removal until acceptance commits.
+    ///
+    /// The policy is read in one observation of the grant publication. A read
+    /// that met an owner change is made once more from the owners when that
+    /// change has completed (no change or writer reservation in progress as
+    /// it answers), as a grant-backed preparation rebuilds once; a change
+    /// still in progress, or another one met by that read, refuses with
+    /// `ReprepareRequired`. Nothing here waits.
     pub fn validate_controller_admission(
         &self,
         association: &InputAuthorityAssociation,

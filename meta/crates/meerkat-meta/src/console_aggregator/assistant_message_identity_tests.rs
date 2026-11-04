@@ -2561,6 +2561,78 @@ async fn a_status_unknown_member_is_reread_only_after_its_backoff() -> ConsoleLo
     Ok(())
 }
 
+/// A member whose event subscription is refused, whose status read did not
+/// answer: the pass arms one re-drive for it, parked until the member's own
+/// state changes. Answers the fixture and that re-drive's task.
+async fn park_a_refused_member_redrive()
+-> ConsoleLogResult<(SeatedMembers, tokio::task::JoinHandle<()>)> {
+    let fixture = SeatedMembers::seat(&["agent-refused"]).await?;
+    let (refused, _, refused_session) = fixture.members[0].clone();
+    let handle = fixture.runtime.mob_handle();
+    assistant_history_refresh::core_status_reads::leave_unanswered(&refused_session);
+    fixture
+        .service
+        .refuse_session_events(&meerkat_core::SessionId::parse(&refused_session)?);
+    assert!(
+        handle.subscribe_agent_events(&refused).await.is_err(),
+        "the fixture refuses the member's event subscription"
+    );
+    backfill_one_session_history(
+        fixture.aggregator.inner.clone(),
+        fixture.recovery_target(0),
+        false,
+    )
+    .await?;
+    let mut redrives =
+        BoundaryFixture::take_tasks(&fixture.aggregator.inner.status_unknown_redrive_tasks)?;
+    assert_eq!(
+        redrives.len(),
+        1,
+        "the pass armed one re-drive for the member"
+    );
+    let redrive = redrives.remove(0);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !redrive.is_finished(),
+        "the re-drive waits for a change of the member's own state"
+    );
+    Ok((fixture, redrive))
+}
+
+/// A re-drive parked for a member the console cannot follow ends when its
+/// runtime is unregistered. It used to stay parked until the member's own
+/// state changed or its mob's actor ended, so each unregistration (or
+/// replacement) of the runtime left such a waiter behind, holding the mob's
+/// handle for a registration that no longer existed.
+#[tokio::test]
+async fn a_parked_redrive_ends_when_its_runtime_is_unregistered() -> ConsoleLogResult<()> {
+    let (fixture, redrive) = park_a_refused_member_redrive().await?;
+    fixture.aggregator.unregister_runtime(RUNTIME);
+    tokio::time::timeout(Duration::from_secs(5), redrive)
+        .await
+        .map_err(|_| "the parked re-drive outlived its runtime's registration by 5 s")??;
+    fixture.runtime.mob_handle().stop().await?;
+    Ok(())
+}
+
+/// A re-drive parked for a member the console cannot follow still fires once
+/// the member's own state changes: retiring the member wakes it and its pass
+/// runs. The narrowed wait ignores other members' changes, not the member's
+/// own.
+#[tokio::test]
+async fn a_refused_members_redrive_fires_when_its_own_state_changes() -> ConsoleLogResult<()> {
+    let (fixture, redrive) = park_a_refused_member_redrive().await?;
+    let (refused, _, _) = fixture.members[0].clone();
+    fixture.runtime.mob_handle().retire(refused).await?;
+    // A parked re-drive ends by firing, or when its runtime's registration
+    // or its mob's actor ends; neither of the last two happens here.
+    tokio::time::timeout(Duration::from_secs(10), redrive)
+        .await
+        .map_err(|_| "the re-drive did not fire within 10 s of the member's retirement")??;
+    fixture.runtime.mob_handle().stop().await?;
+    Ok(())
+}
+
 /// The wait before a member's status is read again after unanswered reads in
 /// a row: 1 s, doubled for each further one, at most 30 s.
 #[test]

@@ -279,7 +279,8 @@ const EVENT_LOG_RETRY_BUFFER_CAP: usize = 4096;
 
 /// Longest wait between two appends to a store that refuses them, unless the
 /// flush interval is longer. The first wait is the flush interval, and each
-/// further refused flush in a row doubles it.
+/// further refused flush in a row doubles it; while arriving events are
+/// dropped at [`EVENT_LOG_RETRY_BUFFER_CAP`], the wait is one interval.
 const EVENT_LOG_RETRY_BACKOFF_MAX: Duration = Duration::from_secs(30);
 
 /// Start the event log ingestion engine. Returns a handle for the runtime
@@ -355,7 +356,11 @@ async fn run_flush_loop(
                         if retry.failing() {
                             // While a refused flush waits out its backoff,
                             // the retry buffer grows here: bound it here.
-                            retry.dropped += enforce_retry_cap(&mut batch);
+                            let dropped = enforce_retry_cap(&mut batch);
+                            if dropped > 0 {
+                                retry.dropped += dropped;
+                                retry.dropping();
+                            }
                         }
                         if batch.len() >= batch_size && retry.due() {
                             flush_batch(&store, &mut batch, batch_size, &mut retry, &error_hook)
@@ -425,15 +430,30 @@ impl FlushRetry {
         self.not_before = None;
     }
 
+    /// Arriving events push older ones out of the full retry buffer: a longer
+    /// wait only loses more of them, so the next flush asks the store within
+    /// one interval.
+    fn dropping(&mut self) {
+        let within_an_interval = tokio::time::Instant::now() + self.interval;
+        if self.not_before.is_none_or(|at| at > within_an_interval) {
+            self.not_before = Some(within_an_interval);
+        }
+    }
+
     /// The store refused a flush: the wait before the next one. A flush that
     /// got events into the store before the refusal counts as the first
-    /// refusal in a row.
-    fn refused(&mut self, made_progress: bool) -> Duration {
+    /// refusal in a row. While events are being dropped at the cap
+    /// (`dropping`), the wait is one interval.
+    fn refused(&mut self, made_progress: bool, dropping: bool) -> Duration {
         if made_progress {
             self.failures = 0;
         }
         self.failures = self.failures.saturating_add(1);
-        let wait = flush_retry_wait(self.interval, self.failures);
+        let wait = if dropping {
+            self.interval
+        } else {
+            flush_retry_wait(self.interval, self.failures)
+        };
         self.not_before = Some(tokio::time::Instant::now() + wait);
         wait
     }
@@ -518,7 +538,7 @@ async fn flush_batch(
             // Bound the retry buffer so a persistently failing store can't
             // drive meta OOM.
             let dropped = std::mem::take(&mut retry.dropped) + enforce_retry_cap(batch);
-            let wait = retry.refused(sent > 0);
+            let wait = retry.refused(sent > 0, dropped > 0);
             if dropped > 0 {
                 format!(
                     "event log flush failed: {err}; dropped {dropped} oldest events to bound the retry buffer at {EVENT_LOG_RETRY_BUFFER_CAP}; will retry in {wait:?}"
@@ -1039,8 +1059,8 @@ mod tests {
         let mut batch: Vec<PersistedEvent> =
             (0..5).map(|n| sample_event(&format!("evt-{n}"))).collect();
         let mut retry = FlushRetry::new(Duration::from_secs(1));
-        retry.refused(false);
-        retry.refused(false);
+        retry.refused(false, false);
+        retry.refused(false, false);
 
         flush_batch(&store, &mut batch, 2, &mut retry, &None).await;
         let buffered = |batch: &[PersistedEvent]| -> Vec<String> {

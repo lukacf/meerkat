@@ -593,7 +593,9 @@ impl DecisionStore for SqliteDecisionStore {
             Self::lock_executor_file(&self.executor_lock_path(), ExecutorLock::Shared)?;
         let kind_lock =
             Self::lock_executor_file(&self.executor_kind_lock_path(kind), ExecutorLock::Exclusive)?;
-        Ok(DecisionExecutorClaim::new((store_lock, kind_lock)))
+        Ok(DecisionExecutorClaim::new(HeldExecutorLocks(vec![
+            store_lock, kind_lock,
+        ])))
     }
 
     /// Holds an exclusive OS lock on the executor lock file beside the
@@ -605,8 +607,11 @@ impl DecisionStore for SqliteDecisionStore {
     /// Creating the lock file is the only write; the database file is not
     /// touched.
     fn claim_executor(&self) -> Result<DecisionExecutorClaim, ApprovalStoreError> {
-        Self::lock_executor_file(&self.executor_lock_path(), ExecutorLock::Exclusive)
-            .map(DecisionExecutorClaim::new)
+        let store_lock =
+            Self::lock_executor_file(&self.executor_lock_path(), ExecutorLock::Exclusive)?;
+        Ok(DecisionExecutorClaim::new(HeldExecutorLocks(vec![
+            store_lock,
+        ])))
     }
 }
 
@@ -615,6 +620,20 @@ impl DecisionStore for SqliteDecisionStore {
 enum ExecutorLock {
     Shared,
     Exclusive,
+}
+
+/// The lock files one executor claim holds, in the order it locked them.
+/// Dropping the claim unlocks them explicitly, in the reverse order (a
+/// kind's lock before the store's), before the files close: on some
+/// platforms a lock is released only some time after its file closes.
+struct HeldExecutorLocks(Vec<std::fs::File>);
+
+impl Drop for HeldExecutorLocks {
+    fn drop(&mut self) {
+        while let Some(file) = self.0.pop() {
+            let _ = file.unlock();
+        }
+    }
 }
 
 #[cfg(test)]

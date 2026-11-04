@@ -515,6 +515,9 @@ mod legacy_preparation;
 #[path = "service_task_churn_tests.rs"]
 mod service_task_churn;
 
+#[path = "helper_admission_writer_tests.rs"]
+mod helper_admission_writer;
+
 #[path = "warm_service_issuance_tests.rs"]
 mod warm_service_issuance;
 

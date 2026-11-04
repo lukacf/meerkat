@@ -527,6 +527,10 @@ pub struct ToolkitOriginalOwner {
     source_writer_wait: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     #[cfg(test)]
     record_change_probe: Mutex<Option<Arc<dyn toolkit_store::RecordChangePublication>>>,
+    // A fixture's hold of the source writer, taken just before the next
+    // helper admission takes the writer.
+    #[cfg(test)]
+    helper_admission_writer_hold: Mutex<Option<std::time::Duration>>,
     originals: Mutex<Vec<OriginalRecord>>,
     // Published by the same canonical collector writer, never agent custody.
     collectors: Mutex<Vec<collector_originals::PublishedCollector>>,
@@ -645,6 +649,8 @@ impl ToolkitOriginalOwner {
             source_writer_wait: Mutex::new(None),
             #[cfg(test)]
             record_change_probe: Mutex::new(None),
+            #[cfg(test)]
+            helper_admission_writer_hold: Mutex::new(None),
             originals: Mutex::new(Vec::new()),
             collectors: Mutex::new(Vec::new()),
             canonical_source: Mutex::new(None),

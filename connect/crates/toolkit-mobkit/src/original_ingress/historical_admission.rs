@@ -58,6 +58,41 @@ impl ToolkitOriginalOwner {
         receiver
     }
 
+    /// Have the next helper admission meet the source writer held for
+    /// `hold`, as another original's admission holds it across its durable
+    /// write. The fixture's holder takes the writer just before the admission
+    /// takes it, and releases it after `hold`.
+    #[cfg(test)]
+    pub(crate) fn hold_source_writer_at_next_helper_admission_for_test(
+        &self,
+        hold: std::time::Duration,
+    ) {
+        assert!(
+            self.helper_admission_writer_hold
+                .lock()
+                .unwrap()
+                .replace(hold)
+                .is_none()
+        );
+    }
+
+    /// The fixture hold set above, taken on a thread of its own once.
+    #[cfg(test)]
+    pub(crate) fn hold_source_writer_for_test(self: &Arc<Self>) {
+        let hold = self.helper_admission_writer_hold.lock().unwrap().take();
+        if let Some(hold) = hold {
+            let owner = self.clone();
+            let (held, holding) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let writer = owner.mutation.blocking_lock();
+                held.send(()).unwrap();
+                std::thread::sleep(hold);
+                drop(writer);
+            });
+            holding.recv().unwrap();
+        }
+    }
+
     /// Warm custody remains the existing native resume path, including source
     /// classes outside the narrow cold reconstruction. This is no permission
     /// check: native still checks the complete contributor closure and grants.

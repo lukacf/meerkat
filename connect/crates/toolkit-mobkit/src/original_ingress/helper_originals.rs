@@ -812,6 +812,8 @@ impl ToolkitOriginalOwner {
             .capabilities()
             .require_durable_contract()
             .map_err(|_| OriginalWriterError::Unavailable)?;
+        #[cfg(test)]
+        self.hold_source_writer_for_test();
         let _mutation = self
             .mutation
             .try_lock()

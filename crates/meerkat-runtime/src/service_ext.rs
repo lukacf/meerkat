@@ -259,10 +259,12 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
     /// the session is reloaded. A request that reuses the pending switch's
     /// `request_id` and cannot be accepted (a finite request, or one that is
     /// not approved or whose target cannot carry the session's transcript)
-    /// fails with an error and leaves the pending switch as it is. Callers
-    /// must not make concurrent calls with the same `request_id`: the default
-    /// turn-finalization boundary of
-    /// [`SessionLlmReconfigureHost`](crate::SessionLlmReconfigureHost)
+    /// fails with an error and leaves the pending switch as it is. A denied
+    /// `request_id` stays denied: a retry with it is answered with the
+    /// recorded denial and changes nothing, so a switch requested again after
+    /// a denial needs a new `request_id`. Callers must not make concurrent
+    /// calls with the same `request_id`: the default turn-finalization
+    /// boundary of [`SessionLlmReconfigureHost`](crate::SessionLlmReconfigureHost)
     /// is a no-op and does not serialize until-changed switches.
     async fn request_switch_turn(
         &self,

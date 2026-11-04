@@ -14170,6 +14170,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.model_routing_operation_override_id == None
                 && self.model_routing_pending_switch_request_id == None
             }
+            // A denied request stays denied: no request is staged under an id
+            // that holds a denial (RequestUntilChangedSwitchTurnAccepted).
+            guard "request_not_denied" { !self.model_routing_switch_denials.contains_key(request_id) }
             update {
                 if requires_approval {
                     self.model_routing_approval_phases.insert(request_id, RoutingApprovalPhase::Approved);
@@ -14205,6 +14208,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (self.model_routing_pending_switch_request_id == Some(request_id)
                     && self.model_routing_pending_switch_turns == None)
             }
+            // A denied request stays denied: no request is staged under an id
+            // that holds a denial, and the shell answers its retry with the
+            // recorded denial. A pending switch's id never holds one
+            // (RequestUntilChangedSwitchTurnPendingConflict), so the retry
+            // that finishes a pending switch is staged again.
+            guard "request_not_denied" { !self.model_routing_switch_denials.contains_key(request_id) }
             update {
                 if requires_approval {
                     self.model_routing_approval_phases.insert(request_id, RoutingApprovalPhase::Approved);

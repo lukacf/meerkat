@@ -408,7 +408,12 @@ them.
   recorded as denied under that id, so the pending switch's own approved
   retry was answered as denied too and the switch stayed pending, and a
   retried finite switch was answered as denied although it still applied
-  at its turn. Affects 0.6.0 through 0.9.9.
+  at its turn. A denied `request_id` now stays denied: its retry is answered
+  with the recorded denial and stages nothing. Before, a retry sent after
+  the conflict that refused it had cleared was staged but answered as
+  denied: an until-changed switch then stayed pending without its
+  reconfigure, and a finite one still applied at its turn. Affects 0.6.0
+  through 0.9.9.
 
 - `meerkat-runtime`: a stop or a retirement that landed after an
   until-changed model switch had reconfigured the session, but before the

@@ -2095,6 +2095,16 @@ impl MeerkatMachine {
                 .await?,
         );
         let request_key = switch_request_key(request.request_id);
+        // A denied request stays denied: generated authority stages nothing
+        // under an id that holds a denial, so a retry is answered with the
+        // recorded denial and applies nothing. A pending switch's id never
+        // holds a denial, so the retry that finishes a pending switch goes on.
+        let recorded = self.session_dsl_state(session_id).await?;
+        if let Some(denied) =
+            recorded_switch_turn_denial(&recorded, &request_key, request.request_id)?
+        {
+            return Ok(denied);
+        }
         match &request.intent.duration {
             meerkat_core::image_generation::SwitchTurnDuration::Finite { duration } => {
                 self.apply_session_dsl_input(
@@ -2253,21 +2263,10 @@ impl MeerkatMachine {
         }
 
         let status_state = self.session_dsl_state(session_id).await?;
-        if let Some(reason) = status_state.model_routing_switch_denials.get(&request_key) {
-            let reason = switch_denial_from_routing(
-                *reason,
-                status_state
-                    .model_routing_switch_approval_reasons
-                    .get(&request_key)
-                    .copied(),
-            )
-            .map_err(RuntimeControlPlaneError::Internal)?;
-            return Ok(
-                meerkat_core::image_generation::SwitchTurnControlResult::Denied {
-                    request_id: request.request_id,
-                    reason,
-                },
-            );
+        if let Some(denied) =
+            recorded_switch_turn_denial(&status_state, &request_key, request.request_id)?
+        {
+            return Ok(denied);
         }
 
         Ok(
@@ -3106,6 +3105,30 @@ fn switch_denial_from_routing(
             Ok(SwitchTurnDenialReason::CapabilityPolicy)
         }
     }
+}
+
+/// The answer to a switch-turn request whose id holds a denial in generated
+/// state: the recorded denial, with the approval reason recorded beside it.
+fn recorded_switch_turn_denial(
+    state: &super::dsl::MeerkatMachineState,
+    request_key: &str,
+    request_id: meerkat_core::image_generation::SwitchTurnRequestId,
+) -> Result<Option<meerkat_core::image_generation::SwitchTurnControlResult>, RuntimeControlPlaneError>
+{
+    let Some(reason) = state.model_routing_switch_denials.get(request_key) else {
+        return Ok(None);
+    };
+    let reason = switch_denial_from_routing(
+        *reason,
+        state
+            .model_routing_switch_approval_reasons
+            .get(request_key)
+            .copied(),
+    )
+    .map_err(RuntimeControlPlaneError::Internal)?;
+    Ok(Some(
+        meerkat_core::image_generation::SwitchTurnControlResult::Denied { request_id, reason },
+    ))
 }
 
 fn image_denial_from_routing(

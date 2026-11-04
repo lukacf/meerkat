@@ -688,6 +688,12 @@ them.
   for an Anthropic model runs on `copilot_anthropic`, so the chosen
   target's name is not the route the session runs on.
 
+- `meerkat-runtime`: on a host store realm, a scope that a failed commit
+  poisoned (a batch that did not settle within
+  `SpiRealmConfig::commit_retry_budget`, or a lost fence) refuses until the
+  realm is reopened. There is no in-place recovery of a poisoned scope or
+  member yet: reopen the realm (for a Meta gateway, restart it).
+
 ## [0.9.9] - 2026-11-03
 
 ### Highlights

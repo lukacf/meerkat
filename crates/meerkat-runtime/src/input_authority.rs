@@ -18,12 +18,14 @@ use crate::identifiers::{IdempotencyKey, LogicalRuntimeId};
 use crate::input::Input;
 use crate::traits::RuntimeDriverError;
 
+mod governed_origin;
 mod peer_ingress;
+pub use governed_origin::GovernedPeerOrigin;
 pub(crate) use peer_ingress::delivery_input_id;
 pub use peer_ingress::{
-    PeerIngressBindFuture, PeerIngressBindRefusal, PeerIngressBindRequest, PeerIngressBinder,
-    PeerIngressBinding, PeerIngressClaimKind, PeerIngressCommsOrigin, PeerIngressOrigin,
-    PeerIngressSupervisorOrigin,
+    PeerIngressBindDenial, PeerIngressBindFuture, PeerIngressBindRefusal, PeerIngressBindRequest,
+    PeerIngressBinder, PeerIngressBinding, PeerIngressClaimKind, PeerIngressCommsOrigin,
+    PeerIngressOrigin, PeerIngressSupervisorOrigin,
 };
 
 /// The native replay lookup's verdict for one admission of a governed input:
@@ -1003,6 +1005,18 @@ pub enum BoundOriginalPin<'a> {
     /// [`PeerIngressBindRequest::delivery_work`]): the original's work only,
     /// since its authority principal is the host's.
     DeliveryWork(&'a EvidenceId),
+    /// Core's work id for one delivery that carries a governed origin (an
+    /// in-process delivery from governed work,
+    /// [`PeerIngressCommsOrigin::governed_origin`]), as `DeliveryWork`. The
+    /// binding also keeps the origin's requester, names the sending agent
+    /// as its ingress actor, and names every work of the sending work as a
+    /// contributor ([`GovernedPeerOrigin::sender_work`]), so the receiving
+    /// work keeps the original requester and is narrowed by the requester's
+    /// own ceiling.
+    GovernedDelivery {
+        work: &'a EvidenceId,
+        origin: &'a GovernedPeerOrigin,
+    },
 }
 
 /// Check a trusted host's binding of an input Core handed it: Core's exact
@@ -1061,6 +1075,29 @@ pub fn check_bound_original(
         BoundOriginalPin::DeliveryWork(work) => {
             if claims.original_work.work != *work {
                 return Err("the binding names another delivery's work than Core's".into());
+            }
+        }
+        BoundOriginalPin::GovernedDelivery { work, origin } => {
+            if claims.original_work.work != *work {
+                return Err("the binding names another delivery's work than Core's".into());
+            }
+            if claims.requester != *origin.requester() {
+                return Err("the binding names another requester than the sending work's".into());
+            }
+            if claims.ingress_actor != *origin.sender_executor() {
+                return Err(
+                    "the binding names another ingress actor than the sending agent".into(),
+                );
+            }
+            if origin
+                .sender_work()
+                .iter()
+                .any(|sent| !claims.contributing_work.contains(sent))
+            {
+                return Err(
+                    "the binding does not name every work of the sending work as a contributor"
+                        .into(),
+                );
             }
         }
     }

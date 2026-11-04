@@ -1326,3 +1326,195 @@ fn an_ungoverned_row_is_admitted_only_under_its_own_key() {
     )));
     assert!(!stored.admitted_under_idempotency_key(&key));
 }
+
+/// Governed origins on the drain: an in-process delivery from governed work
+/// is offered with its origin, a binding of it must keep the original
+/// requester, and Core's own binder keeps it.
+mod governed_origin {
+    use super::*;
+    use crate::input_authority::GovernedPeerOrigin;
+    use meerkat_authorization_contracts::constraints::{
+        AudienceRef, ExecutionRestrictions, ResourceDomain,
+    };
+    use meerkat_authorization_contracts::evidence::{EvidenceDigest, HistoricalEvidenceRef};
+    use meerkat_authorization_contracts::protocol::ContractRequirements;
+    use meerkat_authorization_contracts::resource::ResourceRef;
+    use meerkat_authorization_contracts::work_association::{
+        GrantLineageRef, InputAuthorityAssociation, InputAuthorityAssociationCandidate,
+        NativeWorkTarget, OriginalWorkRef, QualifiedIngressNamespace, WorkAuthorityBasis,
+    };
+
+    /// A principal in the domain the drain fixtures' host admits.
+    fn principal(value: &str) -> meerkat_core::PrincipalRef {
+        meerkat_core::PrincipalRef::in_domain(
+            meerkat_core::PrincipalKind::ServiceAccount,
+            value,
+            meerkat_core::TrustDomainId::new("native-test").expect("domain"),
+        )
+        .expect("qualified")
+    }
+
+    fn id(value: &str) -> EvidenceId {
+        EvidenceId::new(value).expect("fixture id")
+    }
+
+    fn evidence(value: &str) -> HistoricalEvidenceRef {
+        HistoricalEvidenceRef {
+            resource: ResourceRef {
+                domain: ResourceDomain {
+                    authority: principal("owner"),
+                    namespace: "fixture".into(),
+                },
+                resource_id: value.into(),
+            },
+            revision: id("r1"),
+            digest: EvidenceDigest::from_array([7; 32]),
+        }
+    }
+
+    fn lineage(grant: &str) -> GrantLineageRef {
+        GrantLineageRef {
+            root_authority: principal("grant-owner"),
+            authority_namespace: id("controller"),
+            authority_generation: 1,
+            authority_incarnation: serde_json::from_value(serde_json::json!(
+                "00000000-0000-4000-8000-000000000001"
+            ))
+            .expect("fixture incarnation data"),
+            grant_id: id(grant),
+            issued_revision: 1,
+        }
+    }
+
+    fn work(name: &str) -> OriginalWorkRef {
+        OriginalWorkRef {
+            authority: principal("ingress"),
+            work: id(name),
+        }
+    }
+
+    /// The requester's admitted work on the sending agent. The fixtures'
+    /// host admits a peer work whose ingress actor is `ingress`, so the
+    /// sending agent is that principal here.
+    fn sender_association(
+        selection: &meerkat_core::ControllerModelSelection,
+    ) -> InputAuthorityAssociation {
+        InputAuthorityAssociation::new(InputAuthorityAssociationCandidate {
+            requester: principal("caller"),
+            ingress_actor: principal("chat"),
+            represented_subject: None,
+            original_authentication: evidence("caller-authentication"),
+            logical_executor: principal("ingress"),
+            target: NativeWorkTarget {
+                logical_owner: principal("native-owner"),
+                logical_runtime: id("sender-runtime"),
+                context: id("context"),
+                context_generation: 1,
+                audience: AudienceRef::Principal {
+                    principal: principal("audience"),
+                },
+            },
+            original_work: work("caller-question"),
+            root_event: evidence("caller-event"),
+            contributing_work: vec![work("caller-source")],
+            authority_basis: WorkAuthorityBasis::GrantLineage {
+                lineage: vec![lineage("caller-delegation")],
+            },
+            controller_grant_lineage: vec![lineage("controller-leaf")],
+            controller_model: Some(selection.clone()),
+            controller_ceiling: ExecutionRestrictions::unrestricted(),
+            admitted_ceiling: ExecutionRestrictions::unrestricted(),
+            source_observations: Vec::new(),
+            ingress_namespace: QualifiedIngressNamespace {
+                realm: meerkat_core::connection::RealmId::parse("native-test").expect("realm"),
+                ingress: ResourceDomain {
+                    authority: principal("ingress"),
+                    namespace: "prompts".into(),
+                },
+                occurrence_scope: id("caller-occurrence"),
+            },
+            contract: ContractRequirements::local_governed_v1(),
+        })
+        .expect("the sending work's claims")
+    }
+
+    fn sender_origin(selection: &meerkat_core::ControllerModelSelection) -> GovernedPeerOrigin {
+        GovernedPeerOrigin::from_associations([&sender_association(selection)])
+            .expect("one staged original")
+    }
+
+    /// An in-process delivery that governed work sent is offered to the
+    /// binder with that work's origin. The fixture's binder binds every
+    /// delivery under a requester of its own: Core refuses that binding as
+    /// malformed, so nothing is admitted under another requester, and its
+    /// custody settles `NotAdmitted`.
+    #[tokio::test]
+    async fn an_in_process_delivery_offers_the_binder_its_governed_origin() {
+        let fixture = Governed::storeless(true);
+        let session_id = fixture.session().await;
+        let origin = sender_origin(&fixture.binder.selection);
+        let runtime = message_runtime(actionable_message_candidate(0));
+        runtime
+            .queue
+            .carry_governed_origin(Some(origin.to_send_origin()));
+
+        fixture
+            .drain(&session_id, &runtime, SenderAuthentication::InProcess)
+            .await;
+
+        let calls = fixture.binder.calls();
+        let [call] = calls.as_slice() else {
+            panic!("one offer: {calls:?}");
+        };
+        let PeerIngressOrigin::Comms(comms) = &call.origin else {
+            panic!("a comms origin: {:?}", call.origin);
+        };
+        assert_eq!(comms.sender_authentication, SenderAuthentication::InProcess);
+        assert_eq!(comms.governed_origin.as_ref(), Some(&origin));
+        assert_eq!(
+            fixture.input_count(&session_id).await,
+            0,
+            "a binding under another requester than the sending work's is never admitted"
+        );
+        assert!(
+            matches!(
+                runtime.queue.committed_outcomes().as_slice(),
+                [Some(Terminal::RuntimeRejected { .. })]
+            ),
+            "{:?}",
+            runtime.queue.committed_outcomes()
+        );
+        assert_eq!(fixture.binder.settlements(), vec![Settlement::NotAdmitted]);
+    }
+
+    /// Only an in-process sender carries a governed origin: what a queue
+    /// item names for a sender the listener verified is no origin, and its
+    /// delivery is bound and admitted as before.
+    #[tokio::test]
+    async fn a_governed_origin_is_offered_only_for_an_in_process_sender() {
+        let fixture = Governed::storeless(true);
+        let session_id = fixture.session().await;
+        let runtime = message_runtime(actionable_message_candidate(0));
+        runtime.queue.carry_governed_origin(Some(
+            sender_origin(&fixture.binder.selection).to_send_origin(),
+        ));
+
+        fixture
+            .drain(
+                &session_id,
+                &runtime,
+                SenderAuthentication::SignatureVerified,
+            )
+            .await;
+
+        let calls = fixture.binder.calls();
+        let [call] = calls.as_slice() else {
+            panic!("one offer: {calls:?}");
+        };
+        let PeerIngressOrigin::Comms(comms) = &call.origin else {
+            panic!("a comms origin: {:?}", call.origin);
+        };
+        assert_eq!(comms.governed_origin, None);
+        assert_eq!(fixture.input_count(&session_id).await, 1);
+    }
+}

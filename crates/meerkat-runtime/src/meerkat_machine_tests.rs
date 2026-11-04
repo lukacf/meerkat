@@ -14858,6 +14858,123 @@ async fn until_changed_switch_turn_failure_after_an_unregister_in_its_gap_keeps_
     );
 }
 
+/// A caller that drops an until-changed switch-turn inside its reconfigure gap
+/// leaves the switch pending. Another request is refused while it is pending,
+/// and a retry of the same request finishes it: the switch applies, the
+/// baseline follows it and nothing stays pending.
+#[tokio::test]
+async fn until_changed_switch_turn_abandoned_in_its_gap_is_finished_by_its_retry() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(until_changed_reconfigure_host(false));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *adapter
+        .test_switch_turn_reconfigure_gap_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, release_rx));
+
+    let request_key = uuid(609).to_string();
+    let abandoned = {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+                &adapter,
+                &session_id,
+                until_changed_switch_request(609),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("the switch-turn reaches its reconfigure gap")
+        .expect("the gap hold reports its entry");
+
+    // The caller drops the switch-turn while it waits in the gap.
+    abandoned.abort();
+    assert!(
+        abandoned
+            .await
+            .expect_err("the abandoned switch-turn does not finish")
+            .is_cancelled()
+    );
+    drop(release_tx);
+    let stranded = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the caller left");
+    assert_eq!(
+        stranded.model_routing_pending_switch_request_id,
+        Some(request_key.clone()),
+        "the abandoned request stays the pending switch"
+    );
+
+    let other = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        until_changed_switch_request(610),
+    )
+    .await
+    .expect("another switch-turn is answered");
+    assert!(
+        matches!(
+            other,
+            meerkat_core::image_generation::SwitchTurnControlResult::Denied {
+                reason:
+                    meerkat_core::image_generation::SwitchTurnDenialReason::ScopedOverrideConflict,
+                ..
+            }
+        ),
+        "another request is refused while the abandoned one is pending: {other:?}"
+    );
+
+    let retried = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        until_changed_switch_request(609),
+    )
+    .await
+    .expect("the retry of the abandoned request is answered");
+    assert!(
+        matches!(
+            retried,
+            meerkat_core::image_generation::SwitchTurnControlResult::Applied { .. }
+        ),
+        "the retry finishes the abandoned request: {retried:?}"
+    );
+    let after = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the retry");
+    assert_eq!(after.model_routing_pending_switch_request_id, None);
+    assert_eq!(
+        after
+            .model_routing_switch_terminal
+            .get(&request_key)
+            .copied(),
+        Some(mm_dsl::RoutingSwitchTurnTerminal::PersistentReconfigureApplied)
+    );
+    assert_eq!(
+        after.model_routing_baseline_model.as_deref(),
+        Some("persistent-target")
+    );
+}
+
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_reports_registered_idle_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());

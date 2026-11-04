@@ -1485,16 +1485,26 @@ pub(crate) fn unlisted_legacy_member(binding: &super::MemberBinding) -> bool {
     ) && legacy_roster_member(binding).both()
 }
 
+/// The namespace of generated runtime aliases (`rt:{identity}:{generation}`):
+/// a legacy identity label in it names no member.
+const GENERATED_RUNTIME_ALIAS_PREFIX: &str = "rt:";
+
 /// Whether a legacy identity label's value names the identity `member_id`
-/// is the id of: it spells the member id itself, or it names the identity
-/// the member id encodes. Both sides are read in the one encoding of a name
-/// into a member id ([`crate::ids::member_id_for_name`]), so a label that
-/// spells the identity (`team:alice`) and one that spells its member id
-/// (`mk--team_calice`) name the same member.
+/// is the id of: it spells the member id itself, or the member id is the
+/// label's name in the one encoding of a name into a member id
+/// ([`crate::ids::member_id_for_name`]), so a label that spells the identity
+/// (`team:alice`) and one that spells its member id (`mk--team_calice`) name
+/// the same member. The label is a name, so it is encoded and never decoded
+/// as if it were a member id: a name that begins with the encoding's marker
+/// (`mk--ops`, seated as `mk--mk--ops`) names its own member and no other. As
+/// the label's writer reads it, the value is trimmed, and an empty one or one
+/// in the generated runtime-alias namespace names no member.
 fn names_member_id(named: &str, member_id: &AgentIdentity) -> bool {
-    named == member_id.as_str()
-        || crate::ids::member_id_for_name(&crate::ids::name_for_member_id(named))
-            == member_id.as_str()
+    let named = named.trim();
+    if named.is_empty() || named.starts_with(GENERATED_RUNTIME_ALIAS_PREFIX) {
+        return false;
+    }
+    named == member_id.as_str() || crate::ids::member_id_for_name(named) == member_id.as_str()
 }
 
 /// The machine's adoption verdict as the handle's answer; `None` for
@@ -1898,6 +1908,39 @@ mod tests {
         for named in ["team:bob", "team_calice", "mk--team_cbob"] {
             assert!(!labelled(named), "{named}");
         }
+    }
+
+    /// The label is a name, encoded and never decoded as a member id: a name
+    /// that begins with the encoding's marker names its own member
+    /// (`mk--reserved`, seated as `mk--mk--reserved`), never the member the
+    /// rest of it spells (`mk--worker-1` does not name `worker-1`). The value
+    /// is trimmed, as its writer reads it; an empty one, or one in the
+    /// generated runtime-alias namespace, names no member.
+    ///
+    /// RED (`RED-F2-decoded-label.patch`): decode the label as if it were a
+    /// member id: `mk--reserved` no longer names its member, and
+    /// `mk--worker-1` names `worker-1`.
+    #[test]
+    fn the_legacy_label_is_read_as_a_name_never_as_a_member_id() {
+        let labelled = |member_id: &str, named: &str| {
+            legacy_roster_member(&binding(
+                member_id,
+                SpawnContinuityIntent::Ephemeral,
+                Some(named),
+            ))
+            .own_identity_label
+        };
+        let reserved = crate::ids::member_id_for_name("mk--reserved").into_owned();
+        assert_eq!(reserved, "mk--mk--reserved");
+        assert!(labelled(&reserved, "mk--reserved"));
+        assert!(!labelled("worker-1", "mk--worker-1"));
+        assert!(labelled("mk--team_calice", " team:alice "));
+        let empty = crate::ids::member_id_for_name("").into_owned();
+        for named in ["", "   "] {
+            assert!(!labelled(&empty, named), "{named:?}");
+        }
+        let alias = crate::ids::member_id_for_name("rt:alice:3").into_owned();
+        assert!(!labelled(&alias, "rt:alice:3"));
     }
 
     /// The machine's two verdicts that are not answers (a stale observation

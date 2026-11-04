@@ -26,7 +26,8 @@ pub(crate) struct StoredScope {
 }
 
 /// One call the host answered or refused, with the scope it named (a
-/// listing names its kind, a commit names none).
+/// listing names its kind); a commit names its batch's commit id and the
+/// instant it arrived.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HostCall {
     AcquireFence,
@@ -34,7 +35,7 @@ pub(crate) enum HostCall {
     LoadHead { kind: ScopeKind, name: String },
     ListHeads { kind: ScopeKind },
     ReadRows { kind: ScopeKind, name: String },
-    Commit,
+    Commit { commit_id: String, at: Instant },
 }
 
 /// One visible scope as a row reads it, without copying its rows: its
@@ -473,7 +474,10 @@ impl HostStore for TestHost {
     }
 
     async fn commit(&self, batch: &CommitBatch) -> Result<(), HostStoreError> {
-        self.record(HostCall::Commit);
+        self.record(HostCall::Commit {
+            commit_id: batch.commit_id().as_str().to_string(),
+            at: Instant::now(),
+        });
         self.commits_started
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let gate = self

@@ -71,6 +71,15 @@ fn identity_labelled(name: &str, identity: &str) -> SpawnMemberSpec {
     spec
 }
 
+/// `worker_spec(name)` with the durable-identity continuity marker, as a
+/// legacy host spawned the members it held under their identities.
+fn durably_marked(mut spec: SpawnMemberSpec) -> SpawnMemberSpec {
+    spec.continuity_intent = SpawnContinuityIntent::DurableIdentity {
+        continuity_key: spec.identity.to_string(),
+    };
+    spec
+}
+
 /// A complete roster that lists no identity.
 fn empty_roster() -> DeclaredRoster {
     DeclaredRoster::complete(Vec::<DeclaredEntry>::new())
@@ -2405,6 +2414,87 @@ async fn a_raw_member_is_adopted_once_its_host_labels_it_with_the_identity() {
         mob.session(&member_id).await,
         session,
         "the adoption keeps the session"
+    );
+}
+
+/// A member a legacy host seated under its identity before identity
+/// entries existed (its spawn row carries the durable-identity marker and
+/// the legacy label naming it), whose identity the roster dropped before the
+/// host first applied it, is no entry and is not listed. A complete roster
+/// adopts it and its seal unlists the entry: the member is retired, the
+/// retirement journals the cause `Unlisted`, and the listed identity is
+/// seated.
+///
+/// RED: drop the complete apply's adoption of unlisted legacy members: the
+/// member is no entry, the seal leaves it, and it keeps serving as a worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_complete_roster_retires_an_unlisted_legacy_member_with_both_marks() {
+    let mob = ApplyMob::new("apply-unlisted-legacy").await;
+    mob.handle
+        .spawn_spec(durably_marked(identity_labelled("dropped", "dropped")))
+        .await
+        .expect("a legacy host's member, marked and labelled");
+
+    let outcome = mob
+        .apply(DeclaredRoster::complete([declared("kept")]))
+        .await;
+    assert!(
+        matches!(seated_on(&outcome, "kept"), Some((_, None))),
+        "{outcome:?}"
+    );
+    assert!(
+        matches!(
+            outcome.unlisted.get(&id("dropped")),
+            Some(UnlistedEntryOutcome::Retired)
+        ),
+        "{outcome:?}"
+    );
+    assert!(!mob.is_member("dropped").await, "the member is retired");
+    assert_eq!(
+        retirement_causes(&mob.journal().await),
+        vec![(id("dropped"), Some(MemberRetirementCause::Unlisted))],
+        "one retirement, of the unlisted entry"
+    );
+}
+
+/// A complete roster leaves a member it does not list that carries one
+/// legacy mark only: the durable-identity marker alone (a member its host
+/// marked and keeps), or the legacy label naming it alone (a raw member its
+/// host labelled). Neither is adopted, unlisted or retired; both keep their
+/// sessions and generations.
+///
+/// RED: adopt an unlisted member with either mark (`LegacyRosterMarks::either`
+/// in the complete apply): both members are retired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_complete_roster_leaves_an_unlisted_member_with_one_legacy_mark() {
+    let mob = ApplyMob::new("apply-unlisted-one-mark").await;
+    mob.handle
+        .spawn_spec(durably_marked(worker_spec("marked")))
+        .await
+        .expect("a member its host marked");
+    mob.handle
+        .spawn_spec(identity_labelled("labelled", "labelled"))
+        .await
+        .expect("a member its host labelled");
+    let sessions = [mob.session("marked").await, mob.session("labelled").await];
+
+    let outcome = mob
+        .apply(DeclaredRoster::complete([declared("kept")]))
+        .await;
+    assert!(outcome.unlisted.is_empty(), "{outcome:?}");
+    for (name, session) in ["marked", "labelled"].into_iter().zip(sessions) {
+        assert!(mob.is_member(name).await, "{name}");
+        assert_eq!(mob.standing(name), None, "{name} is no entry");
+        assert_eq!(mob.session(name).await, session, "{name}");
+        assert_eq!(
+            mob.generation(name).await,
+            Some(Generation::new(0)),
+            "{name}"
+        );
+    }
+    assert!(
+        retirement_causes(&mob.journal().await).is_empty(),
+        "nothing is retired"
     );
 }
 

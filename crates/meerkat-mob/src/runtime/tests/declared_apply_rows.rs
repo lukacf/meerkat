@@ -2998,6 +2998,38 @@ async fn a_complete_roster_leaves_an_unlisted_host_adopted_member_with_both_mark
     )
     .await;
     super::member_history::await_adoption_convergence(&handle, &id("adopted")).await;
+    // The member Core realized for the adoption still carries both legacy
+    // marks, and the host's intent row names it: it is left as it is for the
+    // row alone, not for want of a mark.
+    let history = handle
+        .member_binding_history()
+        .await
+        .expect("Core's member history");
+    let adopted = history
+        .last_binding(&id("adopted"))
+        .expect("Core binds the adopted member");
+    assert!(
+        matches!(
+            adopted.continuity_intent(),
+            SpawnContinuityIntent::DurableIdentity { .. }
+        ),
+        "the adopted member carries the durable-identity marker: {adopted:?}"
+    );
+    assert_eq!(
+        adopted
+            .labels()
+            .get(crate::runtime::identity_entry::LEGACY_IDENTITY_LABEL)
+            .map(String::as_str),
+        Some("adopted"),
+        "the adopted member carries the identity's label: {adopted:?}"
+    );
+    assert!(
+        matches!(
+            adopted.identity_management(),
+            crate::MemberIdentityManagement::IntentManaged
+        ),
+        "the host's intent row names the member: {adopted:?}"
+    );
 
     let outcome = tokio::time::timeout(STEP, handle.apply_declared_roster(empty_roster()))
         .await

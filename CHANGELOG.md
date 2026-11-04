@@ -187,6 +187,13 @@ them.
   (a customizer per identity) composes only the identities it expects the
   apply to seat or rotate, and an unchanged roster composes none.
 
+- `meerkat-mob`: the one encoding of a name into a member id,
+  `ids::member_id_for_name`, and its inverse `ids::name_for_member_id`
+  (with `ids::ENCODED_MEMBER_ID_MARKER`). A name that is a member
+  comms-name component is its own member id; any other name (`team:alice`)
+  is the marker and the escaped name (`mk--team_calice`). Meerkat Meta's
+  member ids are this encoding.
+
 ### Changed
 
 - A session on a zero-config Copilot route, or on a route of a

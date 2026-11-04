@@ -148,6 +148,22 @@ them.
   `DECISION_EXECUTOR_LOCK_EXTENSION`), exclusive across opens and
   processes and released when its process ends. Creating the lock file is
   the claim's only write.
+- `meerkat-core`: the provided method `DecisionStore::claim_executor_kind`,
+  the executor claim of one decision kind of a store. At most one claim of a
+  kind is live at a time, in this process or any other, and none beside a
+  whole-store claim; claims of different kinds are independent. The default
+  refuses, so a `DecisionStore` wrapper forwards it, and
+  `InMemoryDecisionStore` keeps one claim per kind among the owners that
+  share it.
+- `meerkat-store`: `SqliteDecisionStore` claims a kind with an exclusive OS
+  lock on `approval_decisions.executor.<kind>.lock` beside the database
+  (`SqliteDecisionStore::executor_kind_lock_path`) and a shared one on
+  `approval_decisions.executor.lock`, so a whole-store claim and the claims
+  of kinds exclude each other across processes.
+- `meerkat-runtime`: `DurableDecisionService::claim_executor_kind`, and
+  `DecisionExecutorPass::unclaimed`: each registered kind whose claim the
+  pass could not take, with the refusal (`DecisionError::ExecutorHeld` while
+  another executor holds the kind or the whole store).
 
 - GitHub Copilot configured once: `[realm.<realm>.copilot]` states a Copilot
   account's credential source once (`source`, an `env` or
@@ -259,6 +275,26 @@ them.
   so the host is asked again. The hand-written audit checks
   `AuditPermitOnlyForCurrentApprover` with two new witnesses and three new
   mutants.
+
+- `meerkat-runtime`: `DecisionExecutorLoop` claims the executor role of each
+  decision kind it registers instead of the whole store, so two runtimes on
+  one store each execute their own kinds. A kind another executor holds is
+  not executed: the loop starts without it, each pass lists it as unclaimed
+  and asks for its claim again, and the loop takes the kind over once that
+  executor ends. `DecisionExecutorLoop::start` no longer refuses a second
+  loop with `DecisionError::ExecutorHeld`, and refuses a candidate launch
+  whatever kinds it registers. A 0.9.10 executor and a 0.9.11 one never
+  execute on one store at once: beside a 0.9.10 executor a loop executes
+  nothing until it ends, and a 0.9.10 executor is refused at start beside a
+  running loop. Upgrade every process that executes decisions on one store
+  together.
+
+### Deprecated
+
+- `meerkat-core`, `meerkat-runtime`: `DecisionStore::claim_executor` and
+  `DurableDecisionService::claim_executor`, the whole-store executor claim of
+  0.9.10. It still excludes every claim of a kind and is excluded by them; an
+  executor claims each kind it executes with `claim_executor_kind`.
 
 ### Fixed
 

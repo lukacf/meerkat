@@ -149,18 +149,24 @@ async fn check_tool_after_owner_change(
 impl InstalledServiceTaskSource {
     /// This exact call's current authorization check after its effect ran:
     /// a shared selected check that joined, then released, its physical
-    /// selection. The caller holds no lock, source reservation or owner
-    /// change across it. `churn` is the waiting state the call's checks after
-    /// its effect share, and `site` names the check.
+    /// selection. The caller holds no lock, publication guard or owner
+    /// change across it. A refusal to rebuild (an owner change in progress
+    /// on the work's own publication, or one completed during the read)
+    /// takes Core's wait after a stale read with `churn`, the waiting state
+    /// the call's checks after its effect share (one deadline within the
+    /// call's remaining tool time, never renewed), and only the check
+    /// repeats: never the dispatch, the join or the release. A change that
+    /// outlasts the bounds stays Core's typed refusal, which claims nothing
+    /// about dispatch, and every other answer is final at once.
     pub async fn check_after_shared_effect(
         &self,
         call: ToolCallView<'_>,
         context: &ToolDispatchContext,
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
-        _churn: &mut meerkat_core::authorization::OwnerChangeChurn,
-        _site: &'static str,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
+        site: &'static str,
     ) -> Result<Option<ToolDispatchContext>, meerkat_core::ToolError> {
-        context.check_tool_authorization(call, plan)
+        check_tool_after_owner_change(context, call, plan, churn, site).await
     }
 }
 impl InstalledAcquisition {

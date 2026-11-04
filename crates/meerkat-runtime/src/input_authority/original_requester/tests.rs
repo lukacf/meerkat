@@ -317,13 +317,12 @@ impl ScriptedHost {
     }
 
     fn grant(request: &PeerServiceRequest, basis: &str, account: &str) -> PeerServiceGrant {
-        PeerServiceGrant {
-            receiver: principal("owner-agent"),
-            represented_subject: Some(principal("data-owner")),
-            authority_basis: WorkAuthorityBasis::GrantLineage {
+        PeerServiceGrant::new(
+            principal("owner-agent"),
+            WorkAuthorityBasis::GrantLineage {
                 lineage: vec![lineage(basis)],
             },
-            target: NativeWorkTarget {
+            NativeWorkTarget {
                 logical_owner: principal("native-owner"),
                 logical_runtime: id(&request.runtime_id.to_string()),
                 context: id("receiver-context"),
@@ -332,11 +331,12 @@ impl ScriptedHost {
                     principal: principal("requester"),
                 },
             },
-            controller_grant_lineage: vec![lineage("receiver-controller")],
-            controller_ceiling: ExecutionRestrictions::unrestricted(),
-            admitted_ceiling: ExecutionRestrictions::unrestricted(),
-            controller: controller(account),
-        }
+            vec![lineage("receiver-controller")],
+            ExecutionRestrictions::unrestricted(),
+            ExecutionRestrictions::unrestricted(),
+            controller(account),
+        )
+        .with_represented_subject(principal("data-owner"))
     }
 }
 

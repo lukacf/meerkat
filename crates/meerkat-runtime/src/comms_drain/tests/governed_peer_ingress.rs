@@ -1506,13 +1506,12 @@ mod governed_origin {
         fn basis_for<'a>(&'a self, request: &'a PeerServiceRequest) -> PeerServiceFuture<'a> {
             let basis = *self.basis.lock().expect("basis");
             Box::pin(async move {
-                Ok(PeerServiceGrant {
-                    receiver: principal("executor"),
-                    represented_subject: None,
-                    authority_basis: WorkAuthorityBasis::GrantLineage {
+                Ok(PeerServiceGrant::new(
+                    principal("executor"),
+                    WorkAuthorityBasis::GrantLineage {
                         lineage: vec![lineage(basis)],
                     },
-                    target: NativeWorkTarget {
+                    NativeWorkTarget {
                         logical_owner: principal("native-owner"),
                         logical_runtime: id(&request.runtime_id.to_string()),
                         context: id("context"),
@@ -1521,14 +1520,14 @@ mod governed_origin {
                             principal: principal("audience"),
                         },
                     },
-                    controller_grant_lineage: vec![lineage("controller-leaf")],
-                    controller_ceiling: ExecutionRestrictions::unrestricted(),
-                    admitted_ceiling: ExecutionRestrictions::unrestricted(),
-                    controller: meerkat_core::ControllerModelClient::new(
+                    vec![lineage("controller-leaf")],
+                    ExecutionRestrictions::unrestricted(),
+                    ExecutionRestrictions::unrestricted(),
+                    meerkat_core::ControllerModelClient::new(
                         self.selection.clone(),
                         Arc::new(Controller(self.selection.clone())),
                     ),
-                })
+                ))
             })
         }
 

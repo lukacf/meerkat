@@ -50,18 +50,17 @@ impl PeerServiceBasis for ReceivingSide {
                     meerkat_core::authorization::ControllerReadinessFailure::TurnBoundaryHeld,
                 ),
             )?;
-            Ok(PeerServiceGrant {
-                receiver: receiver_agent(),
-                represented_subject: None,
-                authority_basis: WorkAuthorityBasis::GrantLineage {
+            Ok(PeerServiceGrant::new(
+                receiver_agent(),
+                WorkAuthorityBasis::GrantLineage {
                     lineage: vec![self.host.receiver_basis.clone()],
                 },
-                target: self.host.target(&request.runtime_id),
-                controller_grant_lineage: vec![self.host.receiver_controller.clone()],
-                controller_ceiling: ExecutionRestrictions::unrestricted(),
-                admitted_ceiling: ExecutionRestrictions::unrestricted(),
+                self.host.target(&request.runtime_id),
+                vec![self.host.receiver_controller.clone()],
+                ExecutionRestrictions::unrestricted(),
+                ExecutionRestrictions::unrestricted(),
                 controller,
-            })
+            ))
         })
     }
 

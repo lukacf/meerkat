@@ -105,7 +105,9 @@ impl std::fmt::Debug for PeerServiceRequest {
 }
 
 /// The receiving agent's own side of one governed peer binding, as the
-/// host's owners hold it now for this receiver and this requester.
+/// host's owners hold it now for this receiver and this requester. Built with
+/// [`Self::new`].
+#[non_exhaustive]
 pub struct PeerServiceGrant {
     /// The receiving agent: the work's logical executor.
     pub receiver: PrincipalRef,
@@ -127,6 +129,43 @@ pub struct PeerServiceGrant {
     /// The receiving session's live controller client, pinned without
     /// waiting on its turn.
     pub controller: ControllerModelClient,
+}
+
+impl PeerServiceGrant {
+    /// The receiving agent's side of a binding: `receiver` serves the
+    /// requester on `authority_basis` at `target`, under its own controller
+    /// grant lineage and ceilings, with its pinned `controller`. It acts for
+    /// no other principal unless [`Self::with_represented_subject`] names
+    /// one.
+    #[must_use]
+    pub fn new(
+        receiver: PrincipalRef,
+        authority_basis: WorkAuthorityBasis,
+        target: NativeWorkTarget,
+        controller_grant_lineage: Vec<GrantLineageRef>,
+        controller_ceiling: ExecutionRestrictions,
+        admitted_ceiling: ExecutionRestrictions,
+        controller: ControllerModelClient,
+    ) -> Self {
+        Self {
+            receiver,
+            represented_subject: None,
+            authority_basis,
+            target,
+            controller_grant_lineage,
+            controller_ceiling,
+            admitted_ceiling,
+            controller,
+        }
+    }
+
+    /// The same grant, with the receiving agent acting for `subject`: the
+    /// principal its basis resolves for.
+    #[must_use]
+    pub fn with_represented_subject(mut self, subject: PrincipalRef) -> Self {
+        self.represented_subject = Some(subject);
+        self
+    }
 }
 
 impl std::fmt::Debug for PeerServiceGrant {

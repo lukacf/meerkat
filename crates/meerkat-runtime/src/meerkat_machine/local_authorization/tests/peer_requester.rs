@@ -248,13 +248,12 @@ impl PeerServiceBasis for Receivers {
             .cloned();
         Box::pin(async move {
             let receiver = receiver.ok_or(PeerServiceRefusal::NoBasis)?;
-            Ok(PeerServiceGrant {
-                receiver: receiver.agent,
-                represented_subject: None,
-                authority_basis: WorkAuthorityBasis::GrantLineage {
+            Ok(PeerServiceGrant::new(
+                receiver.agent,
+                WorkAuthorityBasis::GrantLineage {
                     lineage: vec![receiver.basis],
                 },
-                target: NativeWorkTarget {
+                NativeWorkTarget {
                     logical_owner: principal("native-owner"),
                     logical_runtime: EvidenceId::new(request.runtime_id.to_string())
                         .expect("runtime"),
@@ -264,14 +263,14 @@ impl PeerServiceBasis for Receivers {
                         principal: principal("audience"),
                     },
                 },
-                controller_grant_lineage: vec![receiver.controller],
-                controller_ceiling: ExecutionRestrictions::unrestricted(),
-                admitted_ceiling: ExecutionRestrictions::unrestricted(),
-                controller: ControllerModelClient::new(
+                vec![receiver.controller],
+                ExecutionRestrictions::unrestricted(),
+                ExecutionRestrictions::unrestricted(),
+                ControllerModelClient::new(
                     self.selection.clone(),
                     Arc::new(SelectedClient(self.selection.clone())),
                 ),
-            })
+            ))
         })
     }
 

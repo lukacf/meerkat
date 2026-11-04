@@ -189,19 +189,19 @@ make_worktree "$LANE_E" 5000
 
 # Background fixtures must not inherit this script's stdio: an inherited pipe
 # would keep any consumer of this test's output waiting on them.
-# Lane E is mid-validation: its dispatcher lock names a live pid.
+# LANE_E is mid-validation: its dispatcher lock names a live pid.
 sleep 600 >/dev/null 2>&1 &
 LOCK_HOLDER_PID=$!
 BACKGROUND_PIDS+=("$LOCK_HOLDER_PID")
 mkdir -p "${HOOK_CACHE_ROOT}/dispatcher-${LANE_E}.lock"
 printf '%s\n' "$LOCK_HOLDER_PID" > "${HOOK_CACHE_ROOT}/dispatcher-${LANE_E}.lock/pid"
-# Lane A once had a lock too, but its owner is gone: stale locks do not protect.
+# LANE_A once had a lock too, but its owner is gone: stale locks do not protect.
 mkdir -p "${HOOK_CACHE_ROOT}/dispatcher-${LANE_A}.lock"
 printf '%s\n' "999999999" > "${HOOK_CACHE_ROOT}/dispatcher-${LANE_A}.lock/pid"
 touch_at 4000 "${HOOK_CACHE_ROOT}/dispatcher-${LANE_A}.lock"
 
-# Lane G is named on a live process's command line (python keeps the extra
-# argument in argv); lane H is a live process's working directory (the cwd
+# LANE_G is named on a live process's command line (python keeps the extra
+# argument in argv); LANE_H is a live process's working directory (the cwd
 # rule is /proc-based and therefore Linux-only).
 python3 -c 'import time; time.sleep(600)' "${TOOLCHAIN_NEW}/${LANE_G}" \
   >/dev/null 2>&1 </dev/null &

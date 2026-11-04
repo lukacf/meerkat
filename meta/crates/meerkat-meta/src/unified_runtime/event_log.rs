@@ -139,8 +139,16 @@ pub struct EventLogConfig {
     /// 4 events). When it is full, the runtime's event drain waits for room
     /// before it takes the next event; no event is dropped to make room.
     pub batch_size: usize,
-    /// Maximum time between flushes, even if batch is not full.
-    /// Default: 1 second.
+    /// Maximum time between flushes while the store takes them, even if the
+    /// batch is not full. Default: 1 second.
+    ///
+    /// After the store refuses an append, the next flush waits this interval,
+    /// doubled for each further refusal in a row, up to 30 seconds (or this
+    /// interval when it is longer); while arriving events are dropped at the
+    /// retry buffer's 4096-event limit, it waits one interval. A long
+    /// interval therefore holds back the next append after a single refusal
+    /// for at least that long. On a quiet log a retry runs at the first flush
+    /// tick after its wait, up to one interval later.
     pub flush_interval: Duration,
 }
 

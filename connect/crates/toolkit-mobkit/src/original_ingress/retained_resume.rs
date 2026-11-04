@@ -76,7 +76,13 @@ impl ToolkitOriginalOwner {
         if evidence.identity().controller().is_none() || evidence.contributors().is_empty() {
             return Err(malformed());
         }
-        let originals = self.originals.try_lock().map_err(|_| unavailable())?;
+        // A resume reads the source collection natively, outside any owner
+        // change of this owner: a short hold by another owner is contention,
+        // waited for within Core's owner-change bound, never a refusal that
+        // leaves the resumed row pending until an unrelated wake.
+        let originals = self
+            .wait_for_source_collection()
+            .map_err(RetainedResumeError::Readiness)?;
         for original in evidence.contributors() {
             let association = original.association();
             let claims = association.candidate();
@@ -110,7 +116,10 @@ impl ToolkitOriginalOwner {
         if evidence.contributors().is_empty() {
             return Err(malformed());
         }
-        let originals = self.originals.try_lock().map_err(|_| unavailable())?;
+        // The same native read as validate_retained_sources.
+        let originals = self
+            .wait_for_source_collection()
+            .map_err(RetainedResumeError::Readiness)?;
         let mut selected = None;
         for original in evidence.contributors() {
             let association = original.association();

@@ -730,6 +730,7 @@ pub(crate) fn test_peer_ingress_queue_claim(
     let class = claim.entry.class;
     let delivery_contract = claim.entry.delivery_contract;
     let sender_authentication = claim.entry.sender_authentication;
+    let governed_send_origin = claim.entry.governed_send_origin.clone();
     let candidate = classified_entry_to_interaction(claim.entry);
     meerkat_core::PeerIngressQueueClaim::from_comms_queue(
         claim.claim_id,
@@ -740,6 +741,7 @@ pub(crate) fn test_peer_ingress_queue_claim(
         claim.lease,
     )
     .with_sender_authentication(sender_authentication)
+    .with_governed_send_origin(governed_send_origin)
 }
 
 #[cfg(test)]
@@ -1164,6 +1166,16 @@ impl CoreCommsRuntime for CommsRuntime {
     }
 
     async fn send(&self, cmd: CommsCommand) -> Result<SendReceipt, SendError> {
+        self.send_with_governed_origin(cmd, None).await
+    }
+
+    /// An in-process delivery `cmd` makes carries `governed_origin` to its
+    /// receiver's queue unchanged; a delivery over a socket carries none.
+    async fn send_with_governed_origin(
+        &self,
+        cmd: CommsCommand,
+        governed_origin: Option<meerkat_core::GovernedSendOrigin>,
+    ) -> Result<SendReceipt, SendError> {
         match cmd {
             CommsCommand::Input {
                 body,
@@ -1244,6 +1256,7 @@ impl CoreCommsRuntime for CommsRuntime {
                         in_reply_to: in_reply_to.map(|delivery| delivery.0),
                     },
                     content_taint,
+                    governed_origin,
                 )
                 .await
                 .map(|outcome| SendReceipt::PeerMessageSent {
@@ -1270,6 +1283,7 @@ impl CoreCommsRuntime for CommsRuntime {
                         expected_recipient,
                     },
                     content_taint,
+                    governed_origin,
                 )
                 .await
                 .map(|outcome| SendReceipt::PeerMessageSent {
@@ -1281,6 +1295,7 @@ impl CoreCommsRuntime for CommsRuntime {
                     &to,
                     crate::types::MessageKind::Lifecycle { kind, params },
                     None,
+                    governed_origin,
                 )
                 .await
                 .map(|outcome| SendReceipt::PeerLifecycleSent {
@@ -1309,6 +1324,7 @@ impl CoreCommsRuntime for CommsRuntime {
                     objective_id,
                     None,
                     None,
+                    governed_origin,
                 )
                 .await
             }
@@ -1424,6 +1440,7 @@ impl CoreCommsRuntime for CommsRuntime {
                             objective_id,
                         },
                         content_taint,
+                        governed_origin,
                     )
                     .await?;
 
@@ -1517,6 +1534,7 @@ impl CoreCommsRuntime for CommsRuntime {
                         objective_id,
                         None,
                         None,
+                        None,
                     )
                     .await?;
                 let event_stream = self
@@ -1598,6 +1616,7 @@ impl CoreCommsRuntime for CommsRuntime {
         let delivery_contract = claim.entry.delivery_contract;
         let raw_item_id = claim.entry.raw_item_id;
         let sender_authentication = claim.entry.sender_authentication;
+        let governed_send_origin = claim.entry.governed_send_origin.clone();
         let candidate = classified_entry_to_interaction(claim.entry);
         Ok(Some(
             meerkat_core::PeerIngressQueueClaim::from_comms_queue(
@@ -1608,7 +1627,8 @@ impl CoreCommsRuntime for CommsRuntime {
                 candidate,
                 claim.lease,
             )
-            .with_sender_authentication(sender_authentication),
+            .with_sender_authentication(sender_authentication)
+            .with_governed_send_origin(governed_send_origin),
         ))
     }
 
@@ -3142,8 +3162,9 @@ impl CommsRuntime {
         route: &PeerRoute,
         kind: crate::types::MessageKind,
         content_taint: Option<meerkat_core::comms::SendTaintOverride>,
+        governed_origin: Option<meerkat_core::GovernedSendOrigin>,
     ) -> Result<crate::router::SendOutcome, SendError> {
-        self.send_peer_command_with_id(route, Uuid::new_v4(), kind, content_taint)
+        self.send_peer_command_with_id(route, Uuid::new_v4(), kind, content_taint, governed_origin)
             .await
     }
 
@@ -3156,17 +3177,27 @@ impl CommsRuntime {
     /// `content_taint` is the per-send tri-state taint override, resolved
     /// against the runtime-level declaration at the router's single outbound
     /// choke point ([`crate::router::Router::send_with_id`]).
+    ///
+    /// `governed_origin`, when governed work sends, rides with an in-process
+    /// delivery to the receiver's queue unchanged.
     async fn send_peer_command_with_id(
         &self,
         route: &PeerRoute,
         envelope_id: Uuid,
         kind: crate::types::MessageKind,
         content_taint: Option<meerkat_core::comms::SendTaintOverride>,
+        governed_origin: Option<meerkat_core::GovernedSendOrigin>,
     ) -> Result<crate::router::SendOutcome, SendError> {
         let kind = self.hydrate_message_kind_for_transport(kind).await?;
         let result = self
             .router
-            .send_with_id(route.peer_id, envelope_id, kind, content_taint)
+            .send_with_id_and_origin(
+                route.peer_id,
+                envelope_id,
+                kind,
+                content_taint,
+                governed_origin,
+            )
             .await;
         match result {
             Ok(outcome) => Ok(outcome),
@@ -3290,6 +3321,7 @@ impl CommsRuntime {
         objective_id: Option<meerkat_core::interaction::ObjectiveId>,
         reply_endpoint: Option<meerkat_core::comms::PeerAddress>,
         send_deadline: Option<Instant>,
+        governed_origin: Option<meerkat_core::GovernedSendOrigin>,
     ) -> Result<SendReceipt, SendError> {
         if reply_endpoint
             .as_ref()
@@ -3343,6 +3375,7 @@ impl CommsRuntime {
                 objective_id,
             },
             content_taint,
+            governed_origin,
         );
         let send_result = if let Some(deadline) = send_deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -3444,6 +3477,7 @@ impl CommsRuntime {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -3473,6 +3507,7 @@ impl CommsRuntime {
             None,
             None,
             Some(deadline),
+            None,
         )
         .await
     }
@@ -3504,6 +3539,7 @@ impl CommsRuntime {
             None,
             Some(reply_endpoint),
             None,
+            None,
         )
         .await
     }
@@ -3532,6 +3568,7 @@ impl CommsRuntime {
             None,
             Some(reply_endpoint),
             Some(deadline),
+            None,
         )
         .await
     }
@@ -3617,6 +3654,7 @@ impl CommsRuntime {
                 false,
                 None,
                 reply_endpoint,
+                None,
                 None,
             )
             .await

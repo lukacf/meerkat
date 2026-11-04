@@ -3182,7 +3182,6 @@ dependencies = [
  "meerkat",
  "meerkat-anthropic",
  "meerkat-auth-core",
- "meerkat-authorization",
  "meerkat-authorization-contracts",
  "meerkat-core",
  "meerkat-llm-core",

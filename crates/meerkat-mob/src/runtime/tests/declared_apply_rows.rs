@@ -2132,9 +2132,9 @@ async fn a_member_labelled_with_the_identity_its_id_encodes_is_adopted() {
 }
 
 /// A raw member a host spawned under an identity's member id refuses that
-/// identity (`NameHeldByWorker`) until the host labels it with the identity
-/// it names, the identity no member id can spell: the next apply adopts
-/// it, on its session.
+/// identity (`NameHeldByWorker`). Once the host spawns the member again
+/// labelled with the identity it names, the identity no member id can
+/// spell, the next apply adopts it, on the session it was spawned on.
 ///
 /// RED: compare the label with the member id byte for byte (drop the
 /// encoded comparison from `names_member_id`): the labelled member is still
@@ -2147,7 +2147,6 @@ async fn a_raw_member_is_adopted_once_its_host_labels_it_with_the_identity() {
         .spawn_spec(worker_spec(&member_id))
         .await
         .expect("a host's raw member under the identity's member id");
-    let session = mob.session(&member_id).await;
     let roster = || DeclaredRoster::partial([declared(&member_id)]);
 
     let refused = mob.apply(roster()).await;
@@ -2166,17 +2165,13 @@ async fn a_raw_member_is_adopted_once_its_host_labels_it_with_the_identity() {
         .expect("the retirement answers")
         .expect("the host retires its raw member");
     // Wait for the retirement's end, not only for the member to leave the
-    // listing, which a retiring member does at once: the retirement archives
-    // the session, and a resume of it before the archive ends is refused,
-    // retryably.
+    // listing, which a retiring member does at once.
     mob.retirement_ended(&member_id).await;
     mob.handle
-        .spawn_spec(
-            identity_labelled(&member_id, "team:bob")
-                .with_resume_bridge_session_id(session.clone()),
-        )
+        .spawn_spec(identity_labelled(&member_id, "team:bob"))
         .await
-        .expect("the host spawns it again on its session, labelled with the identity");
+        .expect("the host spawns it again, labelled with the identity");
+    let session = mob.session(&member_id).await;
 
     let adopted = mob.apply(roster()).await;
     assert!(

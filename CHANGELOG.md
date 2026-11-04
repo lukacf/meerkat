@@ -112,9 +112,33 @@ them.
   `SessionError::Agent(AgentError::InternalError)`: a WholeBlob session's
   committed read, the HeadCanonical boundary authority read, and the
   committed snapshot read under a provisional tail. Its `SessionError::code`
-  is `SESSION_STORE_ERROR` (was `AGENT_ERROR`), and a wire error built from
-  it carries `INTERNAL_ERROR` (was `AGENT_ERROR`); a session method's
-  JSON-RPC error is `INTERNAL_ERROR` either way.
+  is `SESSION_STORE_ERROR` (was `AGENT_ERROR`), and
+  `meerkat_core::service::transport::jsonrpc_code` answers `-32006` for it
+  (was `-32000`). A wire error built from it (`WireError::from`) carries
+  `INTERNAL_ERROR`, JSON-RPC `-32603` (was `AGENT_ERROR`, `-32013`). The
+  session transport code (`session_transport_error_code`: a session
+  method's JSON-RPC error over `rkat-rpc`, and the `rkat` exit status) is
+  `INTERNAL_ERROR` either way, and the HTTP status stays 500.
+
+- Behaviour-only (not measured by the gate): `meerkat-runtime`:
+  `RuntimeDeliveryInbox::pending_delivery_total` and
+  `runtimes_with_pending_deliveries` answer while only scopes of other
+  families are poisoned, and while a runtime scope is poisoned they refuse
+  with `RuntimeDeliveryError::Store(RuntimeStoreError::ScopeRefused { .. })`,
+  naming each poisoned runtime scope. They refused with
+  `RuntimeDeliveryError::Store(RuntimeStoreError::ReadFailed(..))` while any
+  scope of the realm was poisoned. Neither answers a count or a list that
+  leaves a poisoned runtime out; `runtime_delivery_backlog` (see Added)
+  answers per runtime.
+
+- Behaviour-only (not measured by the gate): `meerkat`: a delivery owner
+  pass (`RuntimeDeliveryPass`) lists a runtime whose host store scope is
+  poisoned in `blocked_runtimes`, with a `failures` line naming the store's
+  refusal, while its rows stay pending: the owner does not drain it until
+  the realm is reopened, and `blocked_sessions` does not list its sessions.
+  Before, a poisoned scope of any family failed the pass's backlog
+  reconcile instead (one `failures` line, "runtime delivery backlog could
+  not be read"), and no runtime was listed for it.
 
 - Behaviour-only (not measured by the gate): `meerkat-mob`:
   `MobHandle::wait_one`, `wait_all`, `wait_for_kickoff_complete` and
@@ -238,6 +262,20 @@ them.
   `read_failed`, and nothing deserializes into it.
 
 ### Changed
+
+- Host store refusals are typed and scoped to the families a read needs
+  (see Breaking, Added and Fixed). A call refused by a poisoned scope or
+  realm answers `RuntimeStoreError::ScopeRefused` or `RealmRefused`
+  (`SpiError::into_read` and `into_write`; `SpiRealm::check_cross_scope_read`
+  answers `SpiError::ScopesPoisoned`). A session read refused so answers
+  `SessionError::Store` (`SESSION_STORE_ERROR`; `-32006` from
+  `meerkat_core::service::transport::jsonrpc_code`, was `-32000`; a wire
+  error's `INTERNAL_ERROR`, was `AGENT_ERROR`; HTTP 500 unchanged). The
+  delivery inbox's total and runtime list refuse typed while a runtime scope
+  is poisoned, the delivery owner lists a poisoned runtime in
+  `blocked_runtimes`, and `MobHandle` waits end on the refusal. Meerkat
+  Meta's `HostStoreReadiness::is_ready()` no longer counts a scope-only
+  poison (see Meta's changelog).
 
 - A session on a zero-config Copilot route, or on a route of a
   `[realm.<realm>.copilot]` account, carries the route's account as its

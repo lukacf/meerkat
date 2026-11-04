@@ -142,7 +142,7 @@ assert_line_contains() {
 }
 
 assert_line_contains 'cargo <nextest> <archive> <--workspace> <--exclude> <meerkat-meta> <--features> <meerkat-mob/test-support> <--lib>'
-assert_line_contains 'cargo <nextest> <archive> <-p> <meerkat-mob> <--features> <meerkat-mob/test-support> <--lib>'
+assert_line_contains 'cargo <nextest> <archive> <-p> <meerkat-mob> <--features> <test-support> <--lib>'
 assert_line_contains 'cargo <nextest> <archive> <-p> <meerkat-integration-tests> <--tests> <--profile> <fast>'
 assert_line_contains '<-p> <meerkat-mob> <-p> <meerkat-mob-adaptive>'
 assert_line_contains '<-p> <meerkat-workgraph> <--features> <meerkat-mob/test-support> <--tests> <--profile> <fast>'

@@ -15873,12 +15873,18 @@ async fn finite_switch_turn_retry_of_a_denied_request_stays_denied() {
         None
     );
 
-    <MeerkatMachine as SessionServiceRuntimeExt>::admit_model_routing_assistant_turn(
-        &adapter,
-        &session_id,
-    )
-    .await
-    .expect("the next assistant turn is admitted");
+    // The next assistant turn has no switch to admit, so the refused target
+    // does not take it.
+    let admitted =
+        <MeerkatMachine as SessionServiceRuntimeExt>::admit_model_routing_assistant_turn(
+            &adapter,
+            &session_id,
+        )
+        .await;
+    assert!(
+        admitted.is_err(),
+        "no switch is staged for the next assistant turn: {admitted:?}"
+    );
     let status = <MeerkatMachine as SessionServiceRuntimeExt>::session_model_routing_status(
         &adapter,
         &session_id,

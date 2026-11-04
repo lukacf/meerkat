@@ -15,7 +15,7 @@ use meerkat_mob::MobSessionService as _;
 
 /// Hang guard of the rows below. Each wait it bounds is woken by the event it
 /// waits for; the bound only turns a hang into a failure.
-const WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+const WAIT: std::time::Duration = std::time::Duration::from_mins(1);
 
 const TASK: &str = "voice work owed across the restart";
 
@@ -261,7 +261,7 @@ async fn a_live_channel_preparation_is_refused_when_the_restart_inventory_cannot
     let control: Arc<dyn ExperimentalGptLiveControlPlane> = Arc::new(UnboundControl);
 
     let prepared = tokio::time::timeout(
-        std::time::Duration::from_secs(600),
+        std::time::Duration::from_mins(10),
         coordinator.prepare_bound_channel(binding, control),
     )
     .await

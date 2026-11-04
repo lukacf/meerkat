@@ -121,6 +121,15 @@ impl HostAuthenticationScope {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The digest a record keeps of this scope: `sha256:` and the lowercase
+    /// hex SHA-256 of its text. A record names the login it was made in by
+    /// this digest and never keeps the scope itself; a host compares it with
+    /// the digest of a login it knows.
+    #[must_use]
+    pub fn digest(&self) -> super::decision::Sha256Digest {
+        super::decision::Sha256Digest::of(self.0.as_bytes())
+    }
 }
 
 impl AuthenticatedApprover {

@@ -505,9 +505,11 @@ struct Witness {
     custody: Arc<Mutex<Vec<Weak<PendingOriginalAdmission>>>>,
 }
 
-/// One bounded control on a fresh fixture. Once the fixture's owners joined,
-/// every bound attempt's source custody is settled (withdrawn, moved to its
-/// replay, or promoted), and no hold of the launch's review custody remains.
+/// One bounded control on a fresh fixture. On every exit a selected recovery
+/// is stopped, native is shut down and the recovery is joined, in that order.
+/// Once those owners joined, every bound attempt's source custody is settled
+/// (withdrawn, moved to its replay, or promoted), and no hold of the launch's
+/// review custody remains.
 async fn control(
     name: &str,
     recovery: Recovery,
@@ -534,22 +536,42 @@ async fn control(
     }))
     .catch_unwind()
     .await;
+    // Native shutdown neither stops nor joins the source's recovery: stop it,
+    // shut native down, then join it, before the body's panic resumes or any
+    // settlement check runs.
+    if recovery == Recovery::Selected {
+        f.source.stop_custody_recovery();
+    }
     let cleanup = f.shutdown().await;
+    let joined = f.source.join_custody_recovery().await;
     assert!(cleanup.is_ok(), "{name}: {cleanup:?}");
+    assert!(joined.is_ok(), "{name}: recovery join {joined:?}");
     match result {
         Ok(result) => result.unwrap_or_else(|_| panic!("bounded {name}")),
         Err(panic) => std::panic::resume_unwind(panic),
     }
+    let settled = |pending: &PendingOriginalAdmission| {
+        pending.handoff.phase() == HandoffPhase::Done
+            && matches!(
+                &*pending.pending.lock().unwrap(),
+                SourcePublication::Settled { .. }
+            )
+    };
+    // An attempt the recovery owned (enrolled) is checked while the source
+    // still retains it, so it cannot pass only because it was dropped with
+    // the fixture. An unenrolled attempt has no recovery phase to reach.
+    for (attempt, custody) in witness.custody.lock().unwrap().iter().enumerate() {
+        assert!(
+            custody
+                .upgrade()
+                .is_none_or(|pending| !pending.handoff.enrolled() || settled(&pending)),
+            "{name}: attempt {attempt}'s enrolled source custody settled once its owners joined"
+        );
+    }
     drop(f);
     for (attempt, custody) in witness.custody.lock().unwrap().iter().enumerate() {
         assert!(
-            custody.upgrade().is_none_or(|pending| {
-                pending.handoff.phase() == HandoffPhase::Done
-                    && matches!(
-                        &*pending.pending.lock().unwrap(),
-                        SourcePublication::Settled { .. }
-                    )
-            }),
+            custody.upgrade().is_none_or(|pending| settled(&pending)),
             "{name}: attempt {attempt}'s source custody settled once its owners joined"
         );
     }

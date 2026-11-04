@@ -178,6 +178,8 @@ struct MemberProvenanceSearch {
 }
 type NoticeObservationCache =
     BoundedProjectionCache<(String, String, String), RuntimeNoticeObservation>;
+type StatusUnknownRedrives =
+    BTreeMap<(uuid::Uuid, String, String, String), tokio::sync::oneshot::Sender<()>>;
 
 struct AggregatorInner {
     /// Policy views share one canonical projector and publish to its broadcaster.
@@ -230,9 +232,7 @@ struct AggregatorInner {
     /// only the discovery tick. Each key holds its waiter's hold: removing the
     /// key (its runtime's registration ended or was replaced) drops it, which
     /// ends a waiter still parked.
-    status_unknown_redrives: std::sync::Mutex<
-        BTreeMap<(uuid::Uuid, String, String, String), tokio::sync::oneshot::Sender<()>>,
-    >,
+    status_unknown_redrives: std::sync::Mutex<StatusUnknownRedrives>,
     #[cfg(test)]
     status_unknown_redrive_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Retry keys whose last status reads did not answer, with when their

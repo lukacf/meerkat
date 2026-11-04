@@ -3338,4 +3338,59 @@ default_binding = "local"
         }
         Ok(())
     }
+
+    /// An open Console serves only the hosts it is reached at: a loopback
+    /// name, its listen address or its public base URL. A request that names
+    /// another host (a page that rebound its own name to this listener) is
+    /// refused 403.
+    #[tokio::test]
+    async fn open_console_refuses_a_foreign_host() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let composition =
+            console_drain_test_composition(&directory, GatewayCompatibilityProfile::ConsoleHttp)
+                .await?;
+        let app = composition
+            .runtime()
+            .build_reference_app_router(open_console_decisions());
+        let composition = composition.activate();
+        let binding = GatewayHttpBinding::bind_loopback()
+            .await?
+            .with_advertised_base_url(Some("https://mob.example.com".to_string()));
+        let base = binding.http_base_url();
+        let port = binding.port();
+        let server = binding.serve(app);
+        let client = reqwest::Client::new();
+        let mut answers = Vec::new();
+        for host in [
+            format!("rebound.example.net:{port}"),
+            format!("127.0.0.1:{port}"),
+            format!("localhost:{port}"),
+            "mob.example.com".to_string(),
+        ] {
+            let status = client
+                .post(format!("{base}/console/rpc"))
+                .header(reqwest::header::HOST, host.as_str())
+                .json(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": crate::rpc::CONSOLE_WHOAMI_METHOD,
+                    "params": {},
+                }))
+                .send()
+                .await?
+                .status();
+            answers.push((host, status.as_u16()));
+        }
+        let _ = composition.shutdown(server, || async {}, || async {}).await;
+        assert_eq!(
+            answers,
+            vec![
+                (format!("rebound.example.net:{port}"), 403),
+                (format!("127.0.0.1:{port}"), 200),
+                (format!("localhost:{port}"), 200),
+                ("mob.example.com".to_string(), 200),
+            ]
+        );
+        Ok(())
+    }
 }

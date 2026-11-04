@@ -239,3 +239,97 @@ async fn shared_account_token_is_a_token_principal() {
         "an unknown accounts value is refused"
     );
 }
+
+/// `body` posted to `path` on `app` with no `Authorization` header: the
+/// status.
+async fn post_without_header(app: &Router, path: &str, body: Value) -> StatusCode {
+    use tower::ServiceExt;
+    app.clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(path)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .expect("console request"),
+        )
+        .await
+        .expect("console response")
+        .status()
+}
+
+/// `path` read on `app` with no `Authorization` header: the status.
+async fn get_without_header(app: &Router, path: &str) -> StatusCode {
+    use tower::ServiceExt;
+    app.clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(path)
+                .body(axum::body::Body::empty())
+                .expect("console request"),
+        )
+        .await
+        .expect("console response")
+        .status()
+}
+
+/// A Console write takes its token in the `Authorization` header: a POST
+/// whose only token is in the query string is refused 401, since a token in
+/// a URL reaches proxy logs and browser history. A GET still takes a query
+/// token (`EventSource` cannot set headers).
+#[tokio::test]
+async fn post_with_query_token_only_is_refused() {
+    let enforced = console_json_router_with_state(state());
+    let bob = token(human_claims(), Some(now_seconds() + 3600));
+    let whoami = json!({ "jsonrpc": "2.0", "id": 1, "method": WHOAMI, "params": {} });
+    assert_eq!(
+        post_without_header(
+            &enforced,
+            &format!("/console/rpc?auth_token={bob}"),
+            whoami.clone()
+        )
+        .await,
+        StatusCode::UNAUTHORIZED,
+        "a console RPC with only a query token"
+    );
+    let send = json!({
+        "identity": "agent-a",
+        "content": "hello",
+        "origin": "console",
+        "idempotency_key": "query-token-send",
+    });
+    assert_eq!(
+        post_without_header(&enforced, &format!("/console/send?auth_token={bob}"), send).await,
+        StatusCode::UNAUTHORIZED,
+        "a console send with only a query token"
+    );
+    // On an open Console too: the token is refused, not dropped for an
+    // anonymous call.
+    let mut open = state();
+    open.decisions.console.require_app_auth = false;
+    assert_eq!(
+        post_without_header(
+            &console_json_router_with_state(open),
+            &format!("/console/rpc?auth_token={bob}"),
+            whoami
+        )
+        .await,
+        StatusCode::UNAUTHORIZED,
+        "an open console's RPC with only a query token"
+    );
+    // The header form is answered.
+    let person = console_rpc_as(&enforced, Some(&bob), WHOAMI, json!({})).await;
+    assert_eq!(person["result"]["actor"]["kind"], "person", "{person}");
+    // A GET is judged on its query token.
+    assert_eq!(
+        get_without_header(&enforced, "/console/experience?auth_token=not-a-token").await,
+        StatusCode::UNAUTHORIZED,
+        "a GET with a bad query token"
+    );
+    assert_ne!(
+        get_without_header(&enforced, &format!("/console/experience?auth_token={bob}")).await,
+        StatusCode::UNAUTHORIZED,
+        "a GET with a good query token"
+    );
+}

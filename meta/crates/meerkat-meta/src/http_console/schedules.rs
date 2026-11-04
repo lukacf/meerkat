@@ -208,6 +208,8 @@ async fn update(
     let name = optional_string(call.params, "name")?;
     let (read, current) = console_schedule(call, schedules, identity, &schedule_id).await?;
     let target = sendable_target(call, schedules, &current.identity).await?;
+    #[cfg(test)]
+    schedules.wait_at_write_hold().await;
     let send = ConsoleScheduledSend::new(
         target,
         content.unwrap_or(current.content),

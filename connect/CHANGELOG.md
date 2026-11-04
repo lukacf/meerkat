@@ -13,6 +13,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   Meerkat uses for owner changes, and still refuse at once when the state is
   poisoned, stopped or withdrawn.
 
+- Cancelling an original's operations, a follow-up of a shared setup and a
+  setup helper's recovery step no longer fail as unavailable while another
+  task briefly holds the original's source state or writes it. They wait for
+  that holder, within the same bound, and never while an authorization
+  change is in progress; a holder that outlasts the bound is still refused as
+  unavailable.
+
 - A service task check that meets an authorization change still in progress
   now waits for the change and checks again, instead of refusing the call as
   access denied. Only the check repeats; the task is prepared once. A change

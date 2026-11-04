@@ -446,7 +446,6 @@ const GPT_LIVE_TEST_STACK = 32 * 1024 * 1024;
 // change. An intermittent one stays out of both runs.
 export const TOOLKIT_MOBKIT_TEST_DEBT = "connect/crates/toolkit-mobkit/NATIVE-HOST-TEST-DEBT.md";
 const COLD_RESTORE = "cold-restore-refusals";
-const TOOL_RESULT = "tool-result-payload";
 const STALE = "stale-expectations";
 const INTERMITTENT = "intermittent-races";
 export const TOOLKIT_MOBKIT_KNOWN_REDS = [
@@ -455,10 +454,7 @@ export const TOOLKIT_MOBKIT_KNOWN_REDS = [
   ["private_originals::governed_submit::tests::first_input_tests::approved_fixture::custody_recovery_helper_cold_tests::cold_pending_helper_settles_retired_input_without_resubmission", COLD_RESTORE],
   ["private_originals::governed_submit::tests::first_input_tests::approved_fixture::custody_recovery_helper_cold_tests::cold_promoted_helper_restores_exact_input_and_refuses_tampered_or_legacy_bytes", COLD_RESTORE],
   ["private_originals::service_approved_input::admission_tests::cold_service_tests::cold_b_restores_actual_admission_and_phase_without_replay_or_new_issuer", COLD_RESTORE],
-  ["private_originals::governed_submit::tests::first_input_tests::acquisition_denial::controller_only_original_denies_enrolled_acquisition_in_its_real_turn", TOOL_RESULT],
-  ["private_originals::governed_submit::tests::first_input_tests::helper_report::warm_reacquisition::admitted_b_setup_revoke_preserves_b_service_and_refuses_another_helper", TOOL_RESULT],
-  ["private_originals::governed_submit::tests::first_input_tests::helper_report::warm_reacquisition::warm_helper_reacquisition_uses_fresh_c_grants_and_independent_native_targets", TOOL_RESULT],
-  ["private_originals::service_approved_input::attachment::tests::native::batch::admitted_batch_target_independence_and_settled_cold_restore_after_alpha_revoke", TOOL_RESULT],
+  ["private_originals::service_approved_input::attachment::tests::native::batch::admitted_batch_target_independence_and_settled_cold_restore_after_alpha_revoke", COLD_RESTORE],
   ["installed_host::acquisition::enrollment::tests::production_leaves_reach_actual_bound_owner_but_not_missing_native_continuation", "interaction-lineage"],
   ["installed_host::tests::direct_rust_access_is_fenced_by_owner_close_or_selection_replacement", STALE],
   ["installed_host::tests::direct_rust_original_cancellation_is_fenced_and_does_not_revoke_standing_access", STALE],

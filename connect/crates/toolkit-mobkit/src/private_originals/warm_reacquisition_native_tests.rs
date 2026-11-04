@@ -969,8 +969,10 @@ impl WarmScript {
     }
 }
 
+// Core certifies this denial, met before the tool's effect, as not
+// dispatched: the public result carries tool_invoked false.
 fn assert_public_refusal(result: &ToolResult) {
-    let expected = meerkat_core::ops::terminal_tool_outcome_for_error(
+    let mut expected = meerkat_core::ops::terminal_tool_outcome_for_error(
         result.tool_use_id.clone(),
         meerkat_core::ToolError::AuthorizationRefused {
             refusal: meerkat_core::OperationRefused::new(
@@ -979,6 +981,9 @@ fn assert_public_refusal(result: &ToolResult) {
         },
     )
     .result;
+    let mut body: serde_json::Value = serde_json::from_str(&expected.text_content()).unwrap();
+    body["data"]["tool_invoked"] = serde_json::json!(false);
+    expected.set_text_content(body.to_string());
     assert_eq!(
         serde_json::to_value(result).unwrap(),
         serde_json::to_value(expected).unwrap()

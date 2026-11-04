@@ -157,18 +157,11 @@ impl PlanningScript {
     }
 }
 
-// Exact Core projection of this one documented refusal. Unknown dispatch is
-// retained as unknown, never converted into proof that the effect did not run.
+// Exact Core projection of this one documented refusal, certified before the
+// Find's effect (tool_invoked false). An uncertified ("unknown") result makes
+// no claim that the effect did not run, so it never permits a fresh Find.
 fn planning_find_reprepare(result: &meerkat_core::ToolResult) -> bool {
-    use meerkat_core::authorization::{OperationRefusalKind, OperationRefused};
-    *result
-        == meerkat_core::ops::terminal_tool_outcome_for_error(
-            result.tool_use_id.clone(),
-            meerkat_core::ToolError::AuthorizationRefused {
-                refusal: OperationRefused::new(OperationRefusalKind::ReprepareRequired),
-            },
-        )
-        .result
+    find_feedback::certified_reprepare(result)
 }
 
 impl PlanningScript {
@@ -1010,6 +1003,14 @@ mod fresh_find_tests {
         )
         .result
     }
+    // Core's certified form of the same refusal, met before the Find's effect.
+    fn certified(call: &str) -> ToolResult {
+        let mut result = refusal(call, OperationRefusalKind::ReprepareRequired);
+        let mut body: Value = serde_json::from_str(&result.text_content()).unwrap();
+        body["data"]["tool_invoked"] = json!(false);
+        result.set_text_content(body.to_string());
+        result
+    }
     fn emitted(events: &[LlmEvent]) -> Vec<String> {
         events
             .iter()
@@ -1037,7 +1038,7 @@ mod fresh_find_tests {
             emitted(&script.response(&request("b", vec![]))),
             ["b-planning-find"]
         );
-        let refused = refusal("a-planning-find", OperationRefusalKind::ReprepareRequired);
+        let refused = certified("a-planning-find");
         assert_eq!(
             emitted(&script.response(&request("a", vec![refused.clone()]))),
             ["a-planning-find-fresh"]
@@ -1065,18 +1066,14 @@ mod fresh_find_tests {
         let run = |results: Vec<ToolResult>| {
             let script = script();
             script.response(&request("a", vec![]));
-            let refused = refusal("a-planning-find", OperationRefusalKind::ReprepareRequired);
+            let refused = certified("a-planning-find");
             script.response(&request("a", vec![refused]));
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 script.response(&request("a", results))
             }))
         };
         assert!(
-            run(vec![refusal(
-                "a-planning-find",
-                OperationRefusalKind::ReprepareRequired
-            )])
-            .is_err(),
+            run(vec![certified("a-planning-find")]).is_err(),
             "replayed first refusal cannot issue another fresh attempt before its result"
         );
         assert!(
@@ -1105,11 +1102,11 @@ mod fresh_find_tests {
 
     #[test]
     fn fresh_find_is_opt_in_and_refuses_other_errors_and_exhausted_retry() {
-        let mut changed = refusal("a-planning-find", OperationRefusalKind::ReprepareRequired);
+        let mut changed = certified("a-planning-find");
         let mut body: Value = serde_json::from_str(&changed.text_content()).unwrap();
         body["data"]["kind"] = json!("unknown");
         changed.set_text_content(body.to_string());
-        let mut missing = refusal("a-planning-find", OperationRefusalKind::ReprepareRequired);
+        let mut missing = certified("a-planning-find");
         let mut body: Value = serde_json::from_str(&missing.text_content()).unwrap();
         body.as_object_mut().unwrap().remove("data");
         missing.set_text_content(body.to_string());
@@ -1124,6 +1121,8 @@ mod fresh_find_tests {
             ToolResult::new("a-planning-find".into(), "not JSON".into(), true),
             changed,
             missing,
+            // Uncertified: no claim that the effect did not run.
+            refusal("a-planning-find", OperationRefusalKind::ReprepareRequired),
         ];
         for error in errors {
             let script = script();
@@ -1138,32 +1137,18 @@ mod fresh_find_tests {
         let strict = PlanningScript::default();
         strict.response(&request("a", vec![]));
         assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| strict.response(&request(
-                "a",
-                vec![refusal(
-                    "a-planning-find",
-                    OperationRefusalKind::ReprepareRequired
-                )]
-            ))))
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                || strict.response(&request("a", vec![certified("a-planning-find")]))
+            ))
             .is_err()
         );
         let bounded = script();
         bounded.response(&request("a", vec![]));
-        bounded.response(&request(
-            "a",
-            vec![refusal(
-                "a-planning-find",
-                OperationRefusalKind::ReprepareRequired,
-            )],
-        ));
+        bounded.response(&request("a", vec![certified("a-planning-find")]));
         assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bounded.response(&request(
-                "a",
-                vec![refusal(
-                    "a-planning-find-fresh",
-                    OperationRefusalKind::ReprepareRequired
-                )]
-            ))))
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                || bounded.response(&request("a", vec![certified("a-planning-find-fresh")]))
+            ))
             .is_err()
         );
     }

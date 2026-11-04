@@ -491,12 +491,15 @@ async fn controller_only_original_denies_enrolled_acquisition_in_its_real_turn()
             assert!(results[0].is_error, "{results:?}");
             let payload: serde_json::Value =
                 serde_json::from_str(&results[0].text_content()).unwrap();
-            let expected = meerkat_core::ToolError::AuthorizationRefused {
+            // Core certifies this denial, met before the Find's effect, as not
+            // dispatched: the model reads tool_invoked false.
+            let mut expected = meerkat_core::ToolError::AuthorizationRefused {
                 refusal: meerkat_core::OperationRefused::new(
                     meerkat_core::OperationRefusalKind::Denied,
                 ),
             }
             .to_error_payload();
+            expected["data"]["tool_invoked"] = serde_json::json!(false);
             assert_eq!(
                 payload, expected,
                 "must be the native operation denial, not surface/parser/owner unavailability"
@@ -525,14 +528,18 @@ async fn controller_only_original_denies_enrolled_acquisition_in_its_real_turn()
                     .is_empty(),
                 "no canonical acquisition/helper work"
             );
+            // The deployment scope also holds the application service tool
+            // policy's own record; count the source events only.
             let sources = fixture
                 .store
                 .list_records(&fixture.scope, None, 10)
                 .await
-                .unwrap();
+                .unwrap()
+                .into_iter()
+                .filter(|record| record.data.schema == "toolkit.authenticated-source-event")
+                .count();
             assert_eq!(
-                sources.len(),
-                1,
+                sources, 1,
                 "only the original A exists, with no helper/B source"
             );
             let replay = fixture.submit().await;

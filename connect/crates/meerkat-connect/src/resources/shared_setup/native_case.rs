@@ -333,7 +333,8 @@ impl Script {
                         }
                         let bounded_find_feedback = !helper
                             && operation == toolkit_mobkit::FIND_AND_INSTALL
-                            && find_feedback::canonical_unavailable(result);
+                            && (find_feedback::canonical_unavailable(result)
+                                || find_feedback::certified_reprepare(result));
                         // The public refusal does not identify its cause. The
                         // settled test audit must prove pre-entry change later.
                         let bounded_check_feedback = helper

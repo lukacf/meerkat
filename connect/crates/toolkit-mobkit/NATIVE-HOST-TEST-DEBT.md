@@ -31,19 +31,6 @@ diagnostic before each check in `cold_setup_admission.rs` and
 - `private_originals::governed_submit::tests::first_input_tests::approved_fixture::custody_recovery_helper_cold_tests::cold_pending_helper_settles_retired_input_without_resubmission`
 - `private_originals::governed_submit::tests::first_input_tests::approved_fixture::custody_recovery_helper_cold_tests::cold_promoted_helper_restores_exact_input_and_refuses_tampered_or_legacy_bytes`
 - `private_originals::service_approved_input::admission_tests::cold_service_tests::cold_b_restores_actual_admission_and_phase_without_replay_or_new_issuer`
-
-## Tool result payload
-
-Status: open. Kind: stale test.
-
-A denied tool result now carries `"tool_invoked": false`, and these tests
-still expect `"unknown"`. Fix: expect `{"kind":"denied","tool_invoked":false}`
-in `controller_only_acquisition_tests.rs`, `warm_reacquisition_native_tests.rs`
-and `batch_native_tests.rs`.
-
-- `private_originals::governed_submit::tests::first_input_tests::acquisition_denial::controller_only_original_denies_enrolled_acquisition_in_its_real_turn`
-- `private_originals::governed_submit::tests::first_input_tests::helper_report::warm_reacquisition::admitted_b_setup_revoke_preserves_b_service_and_refuses_another_helper`
-- `private_originals::governed_submit::tests::first_input_tests::helper_report::warm_reacquisition::warm_helper_reacquisition_uses_fresh_c_grants_and_independent_native_targets`
 - `private_originals::service_approved_input::attachment::tests::native::batch::admitted_batch_target_independence_and_settled_cold_restore_after_alpha_revoke`
 
 ## Interaction lineage

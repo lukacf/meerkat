@@ -284,6 +284,18 @@ pub enum DeclaredBuild {
     FactsOnly,
 }
 
+impl DeclaredBuild {
+    /// Whether the declaration carries the identity's member build, so a
+    /// verdict may build the member from its spec. Every kind answers here,
+    /// so a kind added later builds no member until it does.
+    fn carries_member_build(self) -> bool {
+        match self {
+            Self::Composed => true,
+            Self::FactsOnly => false,
+        }
+    }
+}
+
 /// A host's one-shot first-boot request for one identity
 /// ([`DeclaredRoster::first_boot_requests`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -430,7 +442,9 @@ pub enum UnlistedEntryOutcome {
     /// No member held it: the entry was removed at once.
     Removed,
     /// Its member's retirement failed: the entry stays marked, and the next
-    /// complete apply retires it again.
+    /// complete apply retires it again. For a legacy member the complete
+    /// roster does not list, its adoption failed: it stays a member, no
+    /// entry, and the next complete apply tries the adoption again.
     Failed { error: MobError },
 }
 
@@ -1234,7 +1248,7 @@ impl super::MobHandle {
                 // the seat waits for the host's composed build, and nothing
                 // of the seat is done (an archived session is not let go).
                 (mob_dsl::IdentityEntryVerdict::SeatOwed, _)
-                    if entry.build == DeclaredBuild::FactsOnly =>
+                    if !entry.build.carries_member_build() =>
                 {
                     outcome
                         .entries
@@ -1272,7 +1286,7 @@ impl super::MobHandle {
                     Some(FirstBootRequest::Fresh),
                 ) if self.seated_now(&agent_identity) => {
                     // The fresh life is a rotation built from the spec.
-                    if entry.build == DeclaredBuild::FactsOnly {
+                    if !entry.build.carries_member_build() {
                         outcome
                             .entries
                             .insert(agent_identity, DeclaredEntryOutcome::BuildRequired);
@@ -1848,9 +1862,7 @@ impl super::MobHandle {
             }
             // The rotation builds the next incarnation from the spec: never
             // from facts only, and the member is not released for it.
-            mob_dsl::IdentityEntryVerdict::RoleRotate
-                if entry.build == DeclaredBuild::FactsOnly =>
-            {
+            mob_dsl::IdentityEntryVerdict::RoleRotate if !entry.build.carries_member_build() => {
                 DeclaredEntryOutcome::BuildRequired
             }
             mob_dsl::IdentityEntryVerdict::RoleRotate => {

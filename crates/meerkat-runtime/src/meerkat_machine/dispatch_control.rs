@@ -2200,17 +2200,30 @@ impl MeerkatMachine {
                     }
                     let reconfigure_result =
                         Box::pin(self.execute_meerkat_machine_session_command(reconfigure)).await;
-                    _mutation_guard = Some(
-                        self.lock_current_control_durability_ready_session_mutation_gate(
-                            session_id,
-                        )
-                        .await?,
-                    );
+                    let relocked = self
+                        .lock_current_control_durability_ready_session_mutation_gate(session_id)
+                        .await;
                     if let Err(err) = reconfigure_result {
-                        self.withdraw_failed_until_changed_switch(session_id, &request_key)
-                            .await;
+                        // The caller gets the reconfigure's own error. A gate
+                        // refusal means the session is gone or no longer
+                        // durability-ready: nothing is withdrawn then, and the
+                        // refusal does not replace that error.
+                        match relocked {
+                            Ok(guard) => {
+                                _mutation_guard = Some(guard);
+                                self.withdraw_failed_until_changed_switch(session_id, &request_key)
+                                    .await;
+                            }
+                            Err(refusal) => tracing::debug!(
+                                session_id = %session_id,
+                                request_id = %request_key,
+                                reason = %refusal,
+                                "no session gate after a failed switch-turn; nothing withdrawn"
+                            ),
+                        }
                         return Err(RuntimeControlPlaneError::Internal(err.to_string()));
                     }
+                    _mutation_guard = Some(relocked?);
                     self.apply_session_dsl_input(
                         session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::SetModelRoutingBaseline {
@@ -2268,9 +2281,11 @@ impl MeerkatMachine {
     /// committed meanwhile (an admitted input, a run, a lifecycle change).
     /// Restoring the state read before the request would erase them, so the
     /// machine's abort arm withdraws only what the accepted request staged.
-    /// A refusal means the pending switch is no longer this request, or the
-    /// session is gone: nothing of this request is left to withdraw, and the
-    /// caller still reports the reconfigure's own error.
+    /// A stop or a retirement in the gap keeps the staged request, and the
+    /// arm withdraws it in those phases too. A refusal means a newer request
+    /// replaced the pending switch, or the session is gone: there is nothing
+    /// of this request to withdraw. The refusal is not retried and does not
+    /// replace the reconfigure's own error, which the caller reports.
     async fn withdraw_failed_until_changed_switch(
         &self,
         session_id: &SessionId,
@@ -2286,11 +2301,11 @@ impl MeerkatMachine {
             )
             .await
         {
-            tracing::warn!(
+            tracing::debug!(
                 session_id = %session_id,
                 request_id = %request_key,
                 reason = %reason,
-                "a failed until-changed switch-turn had no pending request of its own to withdraw"
+                "a failed until-changed switch-turn has nothing to withdraw"
             );
         }
     }

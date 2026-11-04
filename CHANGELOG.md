@@ -96,9 +96,9 @@ them.
   reconfigure (see Fixed). `MeerkatMachineInput` (meerkat-machine-schema and
   meerkat-runtime) and the kernel `generated::meerkat` `Input` gain
   `AbortUntilChangedSwitchTurnReconfigure { request_id }`, and
-  `MeerkatMachineInputVariant`, `MeerkatMachineRuntimeInternalInput`
-  (meerkat-machine-schema and meerkat-runtime) and the kernel `InputKind`
-  gain `AbortUntilChangedSwitchTurnReconfigure`. The kernel
+  `MeerkatMachineInputVariant` (meerkat-machine-schema and meerkat-runtime),
+  `MeerkatMachineRuntimeInternalInput` (meerkat-runtime) and the kernel
+  `InputKind` gain `AbortUntilChangedSwitchTurnReconfigure`. The kernel
   `generated::meerkat::TransitionId` gains
   `AbortUntilChangedSwitchTurnReconfigureIdle`,
   `AbortUntilChangedSwitchTurnReconfigureAttached`,
@@ -368,15 +368,17 @@ them.
   that lasts until changed (`SwitchTurnDuration::UntilChanged`) records its
   request and runs the LLM reconfigure without holding the session's
   mutation gate, so other callers can admit input meanwhile. When the
-  reconfigure, or its preparation, failed, the switch wrote back the whole
-  generated state it had read before its request, erasing every fact other
-  callers committed in that gap: an input admitted then lost its generated
-  phase while its ledger row stayed, so the machine no longer tracked an
-  input the runtime had accepted. A failed switch now withdraws only its own
-  request, through the MeerkatMachine input
-  `AbortUntilChangedSwitchTurnReconfigure` (see Breaking), and leaves every
-  other fact as it stands; its caller still gets the reconfigure's error.
-  Affects 0.6.0 through 0.9.9.
+  reconfigure failed, the switch wrote back the whole generated state it
+  had read before its request, erasing every fact other callers committed
+  in that gap: an input admitted then lost its generated phase while its
+  ledger row stayed, so the machine no longer tracked an input the runtime
+  had accepted, and a stop in that gap was undone in the machine. A failed
+  switch now withdraws only its own request, through the MeerkatMachine
+  input `AbortUntilChangedSwitchTurnReconfigure` (see Breaking), and leaves
+  every other fact as it stands, a stop included; a failed preparation,
+  which fails before the gate is released, withdraws through the same
+  input. The caller still gets the reconfigure's error. Affects 0.6.0
+  through 0.9.9.
 
 ### Known limitations
 

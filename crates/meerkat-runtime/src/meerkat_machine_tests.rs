@@ -14349,6 +14349,189 @@ async fn until_changed_switch_turn_prepare_failure_withdraws_its_request() {
     );
 }
 
+/// A stop can land in an until-changed switch-turn's reconfigure gap: it
+/// terminalizes the input queued then and leaves the session stopped, and the
+/// stopped session refuses the reconfigure. The switch-turn caller gets that
+/// refusal, the request is withdrawn in the stopped phase (no pending switch,
+/// no approval entry, no terminal, the baseline kept), and the stop stands:
+/// the session stays stopped and the input keeps the phase the stop gave it.
+#[tokio::test]
+async fn until_changed_switch_turn_failure_after_a_stop_in_its_gap_keeps_the_stop() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(Arc::new(TestLlmReconfigureHost {
+        current_identity: Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
+            model: "baseline".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        })),
+        current_visibility_state: Arc::new(std::sync::Mutex::new(Default::default())),
+        target_identity: meerkat_core::SessionLlmIdentity {
+            model: "persistent-target".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        },
+        current_capability_surface: Some(test_llm_capability_surface(true)),
+        target_capability_surface: test_llm_capability_surface(true),
+        base_tool_names: BTreeSet::new(),
+        fail_persist: false,
+    }));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *adapter
+        .test_switch_turn_reconfigure_gap_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, release_rx));
+
+    let request_uuid = uuid(604);
+    let request_key = request_uuid.to_string();
+    let request = SwitchTurnRequest {
+        request_id: meerkat_core::image_generation::SwitchTurnRequestId::new(request_uuid),
+        intent: meerkat_core::image_generation::SwitchTurnIntent {
+            target_model: model("persistent-target"),
+            duration: meerkat_core::image_generation::SwitchTurnDuration::UntilChanged,
+            origin: meerkat_core::image_generation::SwitchTurnOrigin::SystemPolicy {
+                reason: meerkat_core::image_generation::SwitchTurnPolicyReason::SafetyHandoff,
+            },
+        },
+        target_realtime: realtime_policy(true),
+        approval: ModelRoutingApprovalDisposition::Approved,
+        approval_reason: Some(
+            meerkat_core::image_generation::SwitchTurnApprovalReason::CostExceedsThreshold,
+        ),
+    };
+    let switch_turn = {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+                &adapter,
+                &session_id,
+                request,
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("the switch-turn reaches its reconfigure gap")
+        .expect("the gap hold reports its entry");
+    let staged = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state in the gap");
+    assert_eq!(
+        staged
+            .model_routing_approval_phases
+            .get(&request_key)
+            .copied(),
+        Some(mm_dsl::RoutingApprovalPhase::Approved),
+        "the approved request recorded its approval before it released the gate"
+    );
+    assert_eq!(
+        staged
+            .model_routing_approval_parent_kind
+            .get(&request_key)
+            .copied(),
+        Some(mm_dsl::RoutingApprovalParentKind::SwitchTurn)
+    );
+
+    // In the gap another caller admits an input, then the session is stopped.
+    let input = Input::Prompt(crate::input::PromptInput::new(
+        "admitted before a stop in the model switch gap",
+        None,
+    ));
+    let input_id = input.id().clone();
+    assert!(
+        adapter
+            .accept_input(&session_id, input)
+            .await
+            .expect("admit an input while the switch-turn holds no gate")
+            .is_accepted()
+    );
+    adapter
+        .stop_runtime_executor(&session_id, "stop in the switch-turn gap")
+        .await
+        .expect("stop the session while the switch-turn holds no gate");
+    let stopped = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the stop");
+    assert_eq!(stopped.lifecycle_phase, mm_dsl::MeerkatPhase::Stopped);
+    assert_eq!(
+        stopped.model_routing_pending_switch_request_id,
+        Some(request_key.clone()),
+        "the stop leaves the staged request to its switch-turn"
+    );
+    let stopped_input_phase = stopped.input_phases.get(&input_id.to_string()).copied();
+    assert!(
+        stopped_input_phase.is_some(),
+        "the stop keeps a phase for the input it terminalized"
+    );
+
+    // The reconfigure runs against the stopped session, which refuses it.
+    release_tx.send(()).expect("release the reconfigure");
+    let switch_error = tokio::time::timeout(Duration::from_secs(5), switch_turn)
+        .await
+        .expect("the switch-turn settles")
+        .expect("the switch-turn task does not panic")
+        .expect_err("a stopped session fails the switch-turn's reconfigure")
+        .to_string();
+    assert!(
+        switch_error.contains("ReconfigureSessionLlmIdentity") && switch_error.contains("Stopped"),
+        "the switch-turn caller gets the reconfigure's own refusal: {switch_error}"
+    );
+
+    let after = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the failed switch");
+    assert_eq!(
+        after.input_phases.get(&input_id.to_string()).copied(),
+        stopped_input_phase,
+        "the input admitted in the gap keeps the phase the stop gave it"
+    );
+    assert_eq!(
+        after.lifecycle_phase,
+        mm_dsl::MeerkatPhase::Stopped,
+        "the failed switch leaves the stop standing"
+    );
+    assert_eq!(after.model_routing_pending_switch_request_id, None);
+    assert_eq!(after.model_routing_pending_switch_phase, None);
+    assert_eq!(after.model_routing_approval_phases.get(&request_key), None);
+    assert_eq!(
+        after.model_routing_approval_parent_kind.get(&request_key),
+        None
+    );
+    assert_eq!(after.model_routing_switch_terminal.get(&request_key), None);
+    assert_eq!(
+        after.model_routing_baseline_model.as_deref(),
+        Some("baseline")
+    );
+    let snapshot = adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("the stopped session keeps its registration");
+    assert_eq!(snapshot.control.phase, RuntimeState::Stopped);
+}
+
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_reports_registered_idle_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());

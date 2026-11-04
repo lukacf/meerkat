@@ -385,10 +385,10 @@ them.
   waited, every later call of every session waited behind it until the slow
   batch settled. Such a read now waits outside that queue while a commit
   settles slowly (from its first unknown or unavailable answer, or once its
-  first call outlasts the host's declared `FenceTiming::max_commit_latency`)
-  and queues as before otherwise, so the other sessions keep working and the
-  read still never sees a batch whose outcome is unknown. Affects 0.9.5
-  through 0.9.9.
+  first call outlasts the host's declared `FenceTiming::max_commit_latency`;
+  any commit on the realm counts, the mob store's included) and queues as
+  before otherwise, so the other sessions keep working and the read still
+  never sees a batch whose outcome is unknown. Affects 0.9.5 through 0.9.9.
 
 ### Known limitations
 

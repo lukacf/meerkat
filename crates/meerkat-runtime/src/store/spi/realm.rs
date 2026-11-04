@@ -16,7 +16,7 @@
 //! Adapters add a realm gate on top (shared for single-scope calls,
 //! exclusive for cross-scope reads); the realm itself never serializes two
 //! scopes' commits. A commit that settles slowly counts in
-//! [`SpiRealm::slow_settles`] while it does, so an exclusive waiter can step
+//! `SpiRealm::slow_settles` while it does, so an exclusive waiter can step
 //! out of such a gate's queue instead of holding back every later call.
 //!
 //! # Fencing

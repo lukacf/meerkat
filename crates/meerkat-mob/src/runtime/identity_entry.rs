@@ -1427,20 +1427,62 @@ pub(crate) fn member_lifecycle_page(
 // The legacy adoption's observation
 // ---------------------------------------------------------------------------
 
-/// The shell's raw observation of a legacy roster member: the spawn row of
-/// the binding's incarnation carries the durable-identity continuity marker,
-/// or the legacy identity label naming the binding's own identity
-/// ([`names_member_id`]). The one place a label is read as a lifecycle
-/// input; MobMachine decides the adoption from it
+/// The legacy marks the spawn row of a member's incarnation carries
+/// ([`legacy_roster_member`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LegacyRosterMarks {
+    /// The durable-identity continuity marker.
+    pub(crate) durable_identity: bool,
+    /// The legacy identity label naming the member's own identity.
+    pub(crate) own_identity_label: bool,
+}
+
+impl LegacyRosterMarks {
+    /// Either mark: a legacy member, which a roster that lists its name
+    /// adopts as an entry.
+    pub(crate) fn either(self) -> bool {
+        self.durable_identity || self.own_identity_label
+    }
+
+    /// Both marks: a legacy member a complete roster adopts even when it no
+    /// longer lists the name, so its seal unlists the entry
+    /// ([`unlisted_legacy_member`]).
+    pub(crate) fn both(self) -> bool {
+        self.durable_identity && self.own_identity_label
+    }
+}
+
+/// The shell's raw observation of a legacy roster member: whether the spawn
+/// row of the binding's incarnation carries the durable-identity continuity
+/// marker, and whether it carries the legacy identity label naming the
+/// binding's own identity ([`names_member_id`]). The one place a label is
+/// read as a lifecycle input; MobMachine decides the adoption from it
 /// ([`super::MobHandle::adopt_legacy_identity_entry`]).
-pub(crate) fn legacy_roster_member(binding: &super::MemberBinding) -> bool {
-    matches!(
-        binding.continuity_intent(),
-        super::SpawnContinuityIntent::DurableIdentity { .. }
-    ) || binding
-        .labels()
-        .get(LEGACY_IDENTITY_LABEL)
-        .is_some_and(|named| names_member_id(named, binding.identity()))
+pub(crate) fn legacy_roster_member(binding: &super::MemberBinding) -> LegacyRosterMarks {
+    LegacyRosterMarks {
+        durable_identity: matches!(
+            binding.continuity_intent(),
+            super::SpawnContinuityIntent::DurableIdentity { .. }
+        ),
+        own_identity_label: binding
+            .labels()
+            .get(LEGACY_IDENTITY_LABEL)
+            .is_some_and(|named| names_member_id(named, binding.identity())),
+    }
+}
+
+/// Whether a complete roster that no longer lists the member `binding`
+/// holds adopts it, so its seal unlists the entry and retires the member: no
+/// host's intent row names the identity (readable or not), and the spawn row
+/// of the member's incarnation carries both legacy marks. A member with one
+/// mark only is left as it is: a host's own member (a raw spawn the host
+/// labelled, or a member the host marked and keeps).
+pub(crate) fn unlisted_legacy_member(binding: &super::MemberBinding) -> bool {
+    !matches!(
+        binding.identity_management(),
+        super::MemberIdentityManagement::IntentManaged
+            | super::MemberIdentityManagement::IntentUnreadable
+    ) && legacy_roster_member(binding).both()
 }
 
 /// Whether a legacy identity label's value names the identity `member_id`
@@ -1753,22 +1795,85 @@ mod tests {
         let durable = SpawnContinuityIntent::DurableIdentity {
             continuity_key: "legacy".to_string(),
         };
-        assert!(legacy_roster_member(&binding("legacy", durable, None)));
-        assert!(legacy_roster_member(&binding(
-            "legacy",
-            SpawnContinuityIntent::Ephemeral,
-            Some("legacy"),
+        assert_eq!(
+            legacy_roster_member(&binding("legacy", durable.clone(), None)),
+            LegacyRosterMarks {
+                durable_identity: true,
+                own_identity_label: false,
+            }
+        );
+        assert_eq!(
+            legacy_roster_member(&binding(
+                "legacy",
+                SpawnContinuityIntent::Ephemeral,
+                Some("legacy"),
+            )),
+            LegacyRosterMarks {
+                durable_identity: false,
+                own_identity_label: true,
+            }
+        );
+        assert_eq!(
+            legacy_roster_member(&binding("legacy", durable, Some("legacy"))),
+            LegacyRosterMarks {
+                durable_identity: true,
+                own_identity_label: true,
+            }
+        );
+        for unmarked in [
+            binding(
+                "worker",
+                SpawnContinuityIntent::Ephemeral,
+                Some("someone-else"),
+            ),
+            binding("worker", SpawnContinuityIntent::Ephemeral, None),
+        ] {
+            assert!(!legacy_roster_member(&unmarked).either(), "{unmarked:?}");
+        }
+    }
+
+    /// A complete roster adopts an unlisted member only when its spawn row
+    /// carries both legacy marks and no host's intent row names it: one
+    /// mark, or a host-adopted identity (its intent row readable or not),
+    /// leaves the member as it is.
+    #[test]
+    fn an_unlisted_member_is_adopted_only_with_both_marks_and_no_intent_row() {
+        let durable = || SpawnContinuityIntent::DurableIdentity {
+            continuity_key: "legacy".to_string(),
+        };
+        let managed = |management: MemberIdentityManagement| {
+            MemberBinding::for_test(
+                AgentIdentity::from("legacy"),
+                Generation::new(0),
+                Some(SessionId::new()),
+                MemberBindingState::Live,
+                ProfileName::from("worker"),
+                durable(),
+                management,
+            )
+            .with_labels(std::collections::BTreeMap::from([(
+                LEGACY_IDENTITY_LABEL.to_string(),
+                "legacy".to_string(),
+            )]))
+        };
+        assert!(unlisted_legacy_member(&managed(
+            MemberIdentityManagement::CommandDriven
         )));
-        assert!(!legacy_roster_member(&binding(
-            "worker",
-            SpawnContinuityIntent::Ephemeral,
-            Some("someone-else"),
-        )));
-        assert!(!legacy_roster_member(&binding(
-            "worker",
-            SpawnContinuityIntent::Ephemeral,
-            None,
-        )));
+        for management in [
+            MemberIdentityManagement::IntentManaged,
+            MemberIdentityManagement::IntentUnreadable,
+        ] {
+            assert!(
+                !unlisted_legacy_member(&managed(management)),
+                "{management:?}"
+            );
+        }
+        for one_mark in [
+            binding("legacy", durable(), None),
+            binding("legacy", SpawnContinuityIntent::Ephemeral, Some("legacy")),
+        ] {
+            assert!(!unlisted_legacy_member(&one_mark), "{one_mark:?}");
+        }
     }
 
     /// The legacy label names the member when it spells the identity the
@@ -1785,6 +1890,7 @@ mod tests {
                 SpawnContinuityIntent::Ephemeral,
                 Some(named),
             ))
+            .own_identity_label
         };
         for named in ["team:alice", "mk--team_calice"] {
             assert!(labelled(named), "{named}");

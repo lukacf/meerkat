@@ -10643,7 +10643,7 @@ impl MobHandle {
             let observation = history.last_binding(identity).map(|binding| {
                 (
                     binding.generation(),
-                    super::identity_entry::legacy_roster_member(binding),
+                    super::identity_entry::legacy_roster_member(binding).either(),
                 )
             });
             #[cfg(test)]

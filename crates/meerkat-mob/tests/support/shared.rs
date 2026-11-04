@@ -4668,8 +4668,53 @@ pub async fn create_controlling_mob_with_local_llm_client(
         |_| {},
         |builder| builder,
         local_llm_client,
+        keep_storage,
     )
     .await
+}
+
+/// [`create_controlling_mob`] over the storage `compose_storage` composes
+/// from the fixture's: it takes the fixture's in-memory event store, its
+/// custom storage composition and its identity store, and answers the
+/// storage the mob runs on with the identity store [`ControllingMob`]
+/// keeps. A test inside the crate joins there what a custom composition
+/// cannot, such as the identity store paired with the event store, which
+/// the mob reads its members' binding history from.
+pub async fn create_controlling_mob_with_storage(
+    label: &str,
+    compose_storage: impl FnOnce(
+        &meerkat_mob::store::InMemoryMobEventStore,
+        meerkat_mob::MobStorage,
+        Arc<dyn meerkat_mob::store::MobIdentityStore>,
+    ) -> (
+        meerkat_mob::MobStorage,
+        Arc<dyn meerkat_mob::store::MobIdentityStore>,
+    ),
+) -> ControllingMob {
+    create_controlling_mob_composed_with_client(
+        label,
+        None,
+        None,
+        |_| {},
+        |builder| builder,
+        Arc::new(meerkat_client::TestClient::for_provider(
+            meerkat_core::Provider::Anthropic,
+        )),
+        compose_storage,
+    )
+    .await
+}
+
+/// The storage a controlling mob runs on as the fixture composes it.
+fn keep_storage(
+    _events: &meerkat_mob::store::InMemoryMobEventStore,
+    storage: meerkat_mob::MobStorage,
+    identity: Arc<dyn meerkat_mob::store::MobIdentityStore>,
+) -> (
+    meerkat_mob::MobStorage,
+    Arc<dyn meerkat_mob::store::MobIdentityStore>,
+) {
+    (storage, identity)
 }
 
 async fn create_controlling_mob_composed(
@@ -4688,6 +4733,7 @@ async fn create_controlling_mob_composed(
         Arc::new(meerkat_client::TestClient::for_provider(
             meerkat_core::Provider::Anthropic,
         )),
+        keep_storage,
     )
     .await
 }
@@ -4699,6 +4745,14 @@ async fn create_controlling_mob_composed_with_client(
     mutate_definition: impl FnOnce(&mut meerkat_mob::MobDefinition),
     mutate_builder: impl FnOnce(meerkat_mob::MobBuilder) -> meerkat_mob::MobBuilder,
     local_llm_client: Arc<dyn meerkat_client::LlmClient>,
+    compose_storage: impl FnOnce(
+        &meerkat_mob::store::InMemoryMobEventStore,
+        meerkat_mob::MobStorage,
+        Arc<dyn meerkat_mob::store::MobIdentityStore>,
+    ) -> (
+        meerkat_mob::MobStorage,
+        Arc<dyn meerkat_mob::store::MobIdentityStore>,
+    ),
 ) -> ControllingMob {
     let temp = tempfile::tempdir().expect("controlling mob temp dir");
     let paths = ControllingMobPaths::new(temp.path());
@@ -4741,6 +4795,7 @@ async fn create_controlling_mob_composed_with_client(
         Arc::clone(&identity_status),
     )
     .with_forked_participant_store(Some(Arc::clone(&forked_participants)));
+    let (storage, identity) = compose_storage(&*events_in_memory, storage, identity);
 
     let mob_service: Arc<dyn meerkat_mob::MobSessionService> = service.clone();
     let runtime_adapter = mob_service

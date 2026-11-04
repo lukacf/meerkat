@@ -730,6 +730,77 @@ async fn controller_custody_refuses_while_a_commit_is_in_flight() {
     assert!(RuntimeStore::try_controller_mutation_custody(&*store, &claim).is_ok());
 }
 
+// One settling commit does not stall other runtimes behind a cross-scope
+// read. The batch of runtime "settling" keeps meeting `Unavailable`, so its
+// commit retries, holding the store's gate shared until it settles. A
+// delivery authority listing (the read a host's delivery driver makes every
+// second) then waits for the gate exclusive. A read of another runtime must
+// still answer at once, while the listing keeps waiting for the settle: it
+// never reads a batch whose outcome is unknown.
+#[tokio::test(start_paused = true)]
+async fn a_settling_commit_does_not_stall_other_runtimes_behind_a_cross_scope_read() {
+    let host = Arc::new(TestHost::new());
+    let (_realm, store) = open(&host).await;
+    let store = Arc::new(store);
+    let healthy = LogicalRuntimeId::new("healthy");
+    store
+        .persist_input_state(
+            &healthy,
+            &persistable(StoredInputState::new_accepted(InputId::new())),
+        )
+        .await
+        .expect("the healthy runtime lands");
+
+    let started = host.commits_started.load(Ordering::Acquire);
+    host.faults.lock().unwrap().unavailable = u32::MAX;
+    let settling = {
+        let store = Arc::clone(&store);
+        tokio::spawn(async move {
+            store
+                .persist_input_state(
+                    &LogicalRuntimeId::new("settling"),
+                    &persistable(StoredInputState::new_accepted(InputId::new())),
+                )
+                .await
+        })
+    };
+    while host.commits_started.load(Ordering::Acquire) == started {
+        tokio::task::yield_now().await;
+    }
+    let listing = {
+        let store = Arc::clone(&store);
+        tokio::spawn(async move { store.list_runtime_delivery_authorities().await })
+    };
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert!(!listing.is_finished(), "the listing waits for the settle");
+
+    let read =
+        tokio::time::timeout(Duration::from_secs(1), store.load_input_states(&healthy)).await;
+    assert!(
+        read.is_ok(),
+        "a read of another runtime waited behind the listing for the settling commit"
+    );
+    read.unwrap().expect("the healthy runtime reads");
+    assert!(!settling.is_finished(), "the batch still settles");
+    assert!(
+        !listing.is_finished(),
+        "the listing never reads a batch whose outcome is unknown"
+    );
+
+    // The store answers again: the batch lands, then the listing answers.
+    host.faults.lock().unwrap().unavailable = 0;
+    settling
+        .await
+        .unwrap()
+        .expect("the batch lands once the store answers");
+    listing
+        .await
+        .unwrap()
+        .expect("the listing answers after the settle");
+}
+
 // Unrun until the candidate's validation.
 #[tokio::test]
 async fn a_host_declared_self_fence_margin_bounds_the_write_window() {

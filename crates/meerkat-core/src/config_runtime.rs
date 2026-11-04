@@ -1009,7 +1009,7 @@ tier = \"r2\"\n";
         crate::PrincipalRef::in_domain(
             crate::PrincipalKind::Human,
             "admin-7",
-            crate::TrustDomainId::new("console-idp").unwrap(),
+            crate::TrustDomainId::new("example-idp").unwrap(),
         )
         .unwrap()
     }

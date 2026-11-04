@@ -9516,7 +9516,7 @@ fn fixture_administrator() -> meerkat_core::PrincipalRef {
     meerkat_core::PrincipalRef::in_domain(
         meerkat_core::PrincipalKind::Human,
         "admin-7",
-        meerkat_core::TrustDomainId::new("console-idp").unwrap(),
+        meerkat_core::TrustDomainId::new("example-idp").unwrap(),
     )
     .unwrap()
 }

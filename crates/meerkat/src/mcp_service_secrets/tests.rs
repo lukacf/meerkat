@@ -1205,7 +1205,7 @@ mod owner_updates {
         meerkat_core::PrincipalRef::in_domain(
             meerkat_core::PrincipalKind::Human,
             "admin-7",
-            meerkat_core::TrustDomainId::new("console-idp").expect("domain"),
+            meerkat_core::TrustDomainId::new("example-idp").expect("domain"),
         )
         .expect("qualified principal")
     }

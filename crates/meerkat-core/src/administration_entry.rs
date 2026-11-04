@@ -390,7 +390,7 @@ mod tests {
         PrincipalRef::in_domain(
             PrincipalKind::Human,
             "admin-7",
-            TrustDomainId::new("console-idp").unwrap(),
+            TrustDomainId::new("example-idp").unwrap(),
         )
         .unwrap()
     }

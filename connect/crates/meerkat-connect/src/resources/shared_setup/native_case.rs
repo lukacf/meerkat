@@ -1267,6 +1267,12 @@ impl Case {
             .unwrap(),
         );
         let native = self.native.as_mut().unwrap();
+        // The legacy constructor returns an active runtime that has no
+        // bootstrap completion yet; activating it without an identity context
+        // mints one (nothing is pending). The identity context below is
+        // attached, not installed: this runtime does not bootstrap an attached
+        // roster, so the attach keeps that completion for the host to publish.
+        native.activate_without_identity_context().await.unwrap();
         participant.bind_runtime(native).unwrap();
         let handle = native.mob_runtime().handle();
         let leases = Arc::new(LocalLeaseProvider::new());

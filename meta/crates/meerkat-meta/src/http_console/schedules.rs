@@ -175,6 +175,7 @@ async fn create(
     let name = optional_string(call.params, "name")?;
     let target = sendable_target(call, schedules, identity).await?;
     let send = ConsoleScheduledSend::new(target, content, sender, now_epoch_seconds());
+    caller_current(call)?;
     let schedule = schedules
         .service
         .create(CreateScheduleRequest {
@@ -210,6 +211,7 @@ async fn update(
     let target = sendable_target(call, schedules, &current.identity).await?;
     #[cfg(test)]
     schedules.wait_at_write_hold().await;
+    caller_current(call)?;
     let send = ConsoleScheduledSend::new(
         target,
         content.unwrap_or(current.content),
@@ -238,6 +240,7 @@ async fn pause(
 ) -> Result<Value, JsonRpcError> {
     let schedule_id = schedule_id_param(call.params)?;
     let (_, send) = console_schedule(call, schedules, identity, &schedule_id).await?;
+    caller_current(call)?;
     let schedule = schedules
         .service
         .pause(&schedule_id)
@@ -261,6 +264,7 @@ async fn resume(
     }
     let target = sendable_target(call, schedules, &current.identity).await?;
     let send = ConsoleScheduledSend::new(target, current.content, sender, now_epoch_seconds());
+    caller_current(call)?;
     // The sender is recorded while the schedule is still paused, so no fire
     // goes out as the earlier sender once it resumes, and at the revision the
     // resume read, so it never puts back a message changed meanwhile.
@@ -289,6 +293,7 @@ async fn delete(
 ) -> Result<Value, JsonRpcError> {
     let schedule_id = schedule_id_param(call.params)?;
     let (_, send) = console_schedule(call, schedules, identity, &schedule_id).await?;
+    caller_current(call)?;
     schedules
         .service
         .delete(&schedule_id)
@@ -299,6 +304,14 @@ async fn delete(
         "schedule_id": schedule_id.to_string(),
         "deleted": true,
     }))
+}
+
+/// Refuse a write whose caller's login ended while it read: checked after
+/// the write's last read, right before it writes.
+fn caller_current(call: &ScheduleCall<'_>) -> Result<(), JsonRpcError> {
+    call.governance
+        .refuse_unless_caller_current()
+        .map_err(ConsoleCallerRefusal::json_rpc_error)
 }
 
 /// The Console caller a create, update or resume records as the schedule's
@@ -677,6 +690,7 @@ impl crate::console_schedules::ConsoleScheduleDoor for ConsoleSendDoor {
             scope: sender.scope(),
             runtime_governed: self.runtime.native_work_governed(),
             access: self.access.clone(),
+            verification: None,
         };
         let request = ConsoleSendRequest {
             identity: send.identity.clone(),

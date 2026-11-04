@@ -398,6 +398,67 @@ pub const GATEWAY_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(377);
 pub const DEFAULT_GATEWAY_HTTP_LISTEN: SocketAddr =
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
 
+/// The hosts a gateway listener serves, recorded on every request it
+/// serves: an open Console answers only requests addressed to one of them.
+#[derive(Clone, Debug)]
+pub(crate) struct ServedHosts {
+    listen: IpAddr,
+    public_host: Option<String>,
+}
+
+impl ServedHosts {
+    /// The hosts a listener bound to `listen` serves, with the host of the
+    /// public base URL declared for it.
+    pub(crate) fn new(listen: SocketAddr, public_base_url: Option<&str>) -> Self {
+        Self {
+            listen: listen.ip(),
+            public_host: public_base_url
+                .and_then(|url| reqwest::Url::parse(url).ok())
+                .and_then(|url| url.host_str().map(normalized_host_name)),
+        }
+    }
+
+    /// Whether a request whose `Host` header is `host` is addressed to this
+    /// listener: a loopback name, the bound address (unless it binds every
+    /// interface), or the public base URL's host. Ports do not matter: a
+    /// page that rebinds its own name to this listener still sends that
+    /// name.
+    pub(crate) fn allows(&self, host: &str) -> bool {
+        let name = host_name(host);
+        if name == "localhost" {
+            return true;
+        }
+        if let Ok(ip) = name.parse::<IpAddr>()
+            && (ip.is_loopback() || (!self.listen.is_unspecified() && ip == self.listen))
+        {
+            return true;
+        }
+        self.public_host.as_deref() == Some(name.as_str())
+    }
+}
+
+/// The host name of a `Host` header value, without its port.
+fn host_name(authority: &str) -> String {
+    let authority = authority.trim();
+    let name = match authority.strip_prefix('[') {
+        Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
+        None => match authority.rsplit_once(':') {
+            Some((name, port)) if port.bytes().all(|byte| byte.is_ascii_digit()) => name,
+            _ => authority,
+        },
+    };
+    normalized_host_name(name)
+}
+
+/// A host name as the Host check compares it: lowercased, without the
+/// brackets of an IPv6 literal or a trailing dot.
+fn normalized_host_name(name: &str) -> String {
+    name.trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
 /// A bound gateway HTTP listener plus the two base URLs it can be reached at:
 /// the same-host form ([`http_base_url`](Self::http_base_url)) and, when the
 /// launch declared one, the proxy-facing form
@@ -483,6 +544,10 @@ impl GatewayHttpBinding {
         let (streams_end_tx, streams_end_rx) = tokio::sync::watch::channel(false);
         let app = app.layer(axum::Extension(crate::http_sse::StreamShutdown::new(
             streams_end_rx,
+        )));
+        let app = app.layer(axum::Extension(ServedHosts::new(
+            self.local_addr,
+            self.advertised_base_url.as_deref(),
         )));
         let task = tokio::spawn(async move {
             axum::serve(self.listener, app)
@@ -3381,6 +3446,21 @@ default_binding = "local"
                 .status();
             answers.push((host, status.as_u16()));
         }
+        // The console's other routes (its page, its event streams) answer
+        // only the hosts it serves too; a health probe answers any host.
+        let mut other_routes = Vec::new();
+        for path in ["/console", "/mob/events", "/healthz"] {
+            let status = client
+                .get(format!("{base}{path}"))
+                .header(
+                    reqwest::header::HOST,
+                    format!("rebound.example.net:{port}").as_str(),
+                )
+                .send()
+                .await?
+                .status();
+            other_routes.push((path, status == reqwest::StatusCode::FORBIDDEN));
+        }
         let _ = composition.shutdown(server, || async {}, || async {}).await;
         assert_eq!(
             answers,
@@ -3389,6 +3469,14 @@ default_binding = "local"
                 (format!("127.0.0.1:{port}"), 200),
                 (format!("localhost:{port}"), 200),
                 ("mob.example.com".to_string(), 200),
+            ]
+        );
+        assert_eq!(
+            other_routes,
+            vec![
+                ("/console", true),
+                ("/mob/events", true),
+                ("/healthz", false)
             ]
         );
         Ok(())

@@ -259,7 +259,12 @@ In the reference app router, these surfaces remain public even when
 
 Console JSON, JSON-RPC, timeline, blob, Flow Editor RPC, and all Meta SSE
 surfaces honor `require_app_auth`. When enabled, they accept either
-`Authorization: Bearer <token>` or an exact `auth_token` query parameter.
+`Authorization: Bearer <token>` or an exact `auth_token` query parameter. A
+console write (`POST /console/rpc`, `/console/rpc/multipart`,
+`/console/send`, `/console/send/recover` and the MCP Apps routes) takes its
+token only in the header: one whose only token is in the query string is
+refused 401, on an open console too, because a token in a URL reaches proxy
+logs and browser history.
 Query values are percent-decoded, so callers must URL-encode reserved
 characters. Prefer the header except where a browser or SSE bootstrap requires
 a query token.

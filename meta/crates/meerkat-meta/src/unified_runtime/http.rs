@@ -592,6 +592,11 @@ impl UnifiedRuntime {
         // structural-events route gated; tier-2 (`/agents/{id}/events`)
         // and tier-3 (`/mob/events`) shipped unauthenticated.
         let flow_editor_decisions = decisions.clone();
+        // An open Console answers only requests addressed to a host its
+        // listener serves (the console's JSON routes check that themselves);
+        // health probes answer whatever host they name.
+        let open_console = crate::gateway_composition::ConsoleAuthPosture::of(&decisions)
+            == crate::gateway_composition::ConsoleAuthPosture::Open;
         let flow_editor_runtime_catalog = self.mobpack_runtime_catalog_state_snapshot();
         let flow_editor_host_deploy = self.flow_editor_host_deploy;
         let sse_decisions_a = decisions.clone();
@@ -607,32 +612,31 @@ impl UnifiedRuntime {
         // Late-bound: a gateway installs its identity runtime after the
         // router is built.
         let health_identity_runtime = Arc::clone(&self.implicit_delegate_identity_runtime);
-        Router::new()
-            .route(
-                "/healthz",
-                get(move |headers: HeaderMap| {
-                    let job_health_projection = Arc::clone(&job_health_projection);
-                    let health_runtime = health_runtime.clone();
-                    let lifecycle_projection = health_identity_runtime
-                        .read()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .as_ref()
-                        .map(|identities| identities.lifecycle_projection_status());
-                    async move {
-                        let broken_members = async move {
-                            crate::mob_handle_runtime::broken_members_of(&health_runtime.handle())
-                                .await
-                        };
-                        healthz_response(
-                            headers,
-                            job_health_projection,
-                            broken_members,
-                            lifecycle_projection,
-                        )
-                        .await
-                    }
-                }),
-            )
+        let health: Router = Router::new().route(
+            "/healthz",
+            get(move |headers: HeaderMap| {
+                let job_health_projection = Arc::clone(&job_health_projection);
+                let health_runtime = health_runtime.clone();
+                let lifecycle_projection = health_identity_runtime
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                    .map(|identities| identities.lifecycle_projection_status());
+                async move {
+                    let broken_members = async move {
+                        crate::mob_handle_runtime::broken_members_of(&health_runtime.handle()).await
+                    };
+                    healthz_response(
+                        headers,
+                        job_health_projection,
+                        broken_members,
+                        lifecycle_projection,
+                    )
+                    .await
+                }
+            }),
+        );
+        let console = Router::new()
             .merge(self.build_console_frontend_router())
             .merge(protected_flow_editor_router_with_runtime_catalog(
                 flow_editor_decisions,
@@ -649,7 +653,6 @@ impl UnifiedRuntime {
                 }),
                 self.has_explicit_provider_credentials(),
             ))
-            .merge(self.build_console_json_router_with_policy(decisions, visibility_policy))
             .merge(agent_events_sse_router_with_access_and_priming(
                 Arc::new(move |agent_id, cursor| {
                     let runtime = agent_runtime.clone();
@@ -774,7 +777,13 @@ impl UnifiedRuntime {
                     access,
                     self.console_session_fences().clone(),
                 )
-            }))
+            }));
+        health
+            .merge(self.build_console_json_router_with_policy(decisions, visibility_policy))
+            .merge(crate::http_console::served_hosts_only(
+                console,
+                open_console,
+            ))
     }
 }
 

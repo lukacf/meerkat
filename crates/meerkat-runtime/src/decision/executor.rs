@@ -1,4 +1,4 @@
-//! [`DecisionExecutorLoop`]: the one executor of a decision store.
+//! [`DecisionExecutorLoop`]: an executor of the decision kinds of a store.
 //!
 //! The owner of each decision kind of a store registers a
 //! [`DecisionExecutor`]; for those kinds the loop is the only caller of the
@@ -6,20 +6,24 @@
 //! makes none of its own), and it keeps the obligations
 //! [`DecisionExecutionPermit`] states:
 //!
-//! - **One executor per decision.** The loop holds the store's executor
-//!   claim for its lifetime ([`DurableDecisionService::claim_executor`]): a
-//!   second loop over the same store, in this process or another, is refused
-//!   at start. A pass takes the loop mutably and drives one decision at a
-//!   time.
+//! - **One executor per decision.** The loop holds the executor claim of
+//!   each kind it executes for its lifetime
+//!   ([`DurableDecisionService::claim_executor_kind`]). Another loop that
+//!   registers the kind over the same store, in this process or another,
+//!   executes none of its decisions while the claim lives: each of its
+//!   passes lists the kind as unclaimed ([`DecisionExecutorPass::unclaimed`])
+//!   and asks for the claim again. Loops of different kinds of one store run
+//!   side by side. A pass takes the loop mutably and drives one decision at
+//!   a time.
 //! - **Never release after a commit.** A commit an executor reports is
 //!   recorded executed; when that record fails, the permit stays outstanding
 //!   and the next pass settles it first.
 //! - **Settle first.** Within a pass the loop settles every permit it
 //!   authorizes before it moves on. A permit a store records as outstanding
-//!   when a pass reads it was left by an earlier executor, an earlier pass
-//!   that was dropped, or a settlement call that failed, and nothing holds
-//!   it any more: an execution whose future is dropped commits nothing after
-//!   the drop that the executor's own record does not report
+//!   when a pass reads it was left by an earlier executor of its kind, an
+//!   earlier pass that was dropped, or a settlement call that failed, and
+//!   nothing holds it any more: an execution whose future is dropped commits
+//!   nothing after the drop that the executor's own record does not report
 //!   ([`DecisionExecutor::execute`]). The loop asks that record whether a
 //!   commit landed under the permit before anything else: a landed commit is
 //!   recorded executed, and only a permit with no commit is released.
@@ -46,6 +50,7 @@ use meerkat_core::approval::decision::{
     DecisionPhase, DecisionReference, StoredDecision, UnreadableDecision,
 };
 
+use super::DecisionWriteMode;
 use super::permit::DecisionExecutionPermit;
 use super::service::{DecisionError, DecisionListing, DecisionRefusal, DurableDecisionService};
 
@@ -166,8 +171,9 @@ pub enum DecisionPassOutcome {
     NoticeSettled,
     /// Nothing could be done now; a later pass asks again.
     Deferred(DecisionDeferral),
-    /// No executor is registered for the decision's kind: it was left as
-    /// stored.
+    /// No executor of the decision's kind runs in this loop: none is
+    /// registered, or another executor holds the kind
+    /// ([`DecisionExecutorPass::unclaimed`]). It was left as stored.
     NoExecutor,
     /// A call failed; the decision is left for a later pass.
     Failed(DecisionError),
@@ -185,6 +191,12 @@ pub struct DecisionExecutorPass {
     /// A page read that failed; the pass read no further page of that
     /// queue.
     pub read_failures: Vec<DecisionError>,
+    /// Each registered kind whose executor claim the pass could not take,
+    /// in kind order, with the refusal: [`DecisionError::ExecutorHeld`]
+    /// while another executor holds the kind (or, as an executor of 0.9.10
+    /// does, the whole store). The pass executed none of its decisions; the
+    /// next pass asks for the claim again.
+    pub unclaimed: Vec<(DecisionKind, DecisionError)>,
 }
 
 impl DecisionExecutorPass {
@@ -200,26 +212,40 @@ pub enum DecisionExecutorLoopError {
     /// Two executors were registered for one decision kind.
     #[error("two executors are registered for the decision kind {0}")]
     DuplicateKind(DecisionKind),
-    /// The store's executor claim was refused: another executor holds it
-    /// ([`DecisionError::ExecutorHeld`]), the owner serves a candidate
-    /// launch, or the store cannot serve the claim.
+    /// The owner serves a candidate launch ([`DecisionError::CandidateLaunch`]),
+    /// or the store cannot serve an executor claim.
     #[error(transparent)]
     Decision(#[from] DecisionError),
 }
 
-/// The one executor of a decision store's registered kinds.
+/// An executor of the registered decision kinds of a store, for each kind
+/// whose executor claim it holds.
 pub struct DecisionExecutorLoop {
     service: DurableDecisionService,
-    executors: BTreeMap<DecisionKind, Arc<dyn DecisionExecutor>>,
+    kinds: BTreeMap<DecisionKind, RegisteredKind>,
     approver: Arc<dyn DecisionApproverCurrentness>,
-    _claim: DecisionExecutorClaim,
+}
+
+/// One registered kind: its executor, and the loop's claim of the kind while
+/// it holds one.
+struct RegisteredKind {
+    executor: Arc<dyn DecisionExecutor>,
+    claim: Option<DecisionExecutorClaim>,
 }
 
 impl std::fmt::Debug for DecisionExecutorLoop {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let claimed = |held: bool| {
+            self.kinds
+                .iter()
+                .filter(move |(_, registered)| registered.claim.is_some() == held)
+                .map(|(kind, _)| kind)
+                .collect::<Vec<_>>()
+        };
         f.debug_struct("DecisionExecutorLoop")
             .field("service", &self.service)
-            .field("kinds", &self.executors.keys().collect::<Vec<_>>())
+            .field("claimed_kinds", &claimed(true))
+            .field("unclaimed_kinds", &claimed(false))
             .finish_non_exhaustive()
     }
 }
@@ -230,46 +256,64 @@ fn next_page(after: Option<&str>, next: Option<String>) -> Option<String> {
 }
 
 impl DecisionExecutorLoop {
-    /// Claim the executor role of `service`'s store and start the loop for
-    /// `executors`, one per decision kind. Nothing else is read or written.
+    /// Start the loop for `executors`, one per decision kind, and claim the
+    /// executor role of each kind in `service`'s store. A kind another
+    /// executor holds is not claimed: the loop starts without it, and each
+    /// pass asks for its claim again ([`DecisionExecutorPass::unclaimed`]).
+    /// Nothing else is read or written.
     ///
     /// # Errors
     /// [`DecisionExecutorLoopError::DuplicateKind`] for two executors of one
-    /// kind (nothing is claimed); [`DecisionError::ExecutorHeld`] while
-    /// another executor holds the store; [`DecisionError::CandidateLaunch`]
-    /// for a candidate launch, which starts no executor; other store
-    /// failures.
+    /// kind, and [`DecisionError::CandidateLaunch`] for a candidate launch,
+    /// which starts no executor (nothing is claimed for either); a store that
+    /// cannot serve an executor claim ([`DecisionError::Unavailable`]: the
+    /// claims taken are released).
     pub fn start(
         service: DurableDecisionService,
         executors: impl IntoIterator<Item = Arc<dyn DecisionExecutor>>,
         approver: Arc<dyn DecisionApproverCurrentness>,
     ) -> Result<Self, DecisionExecutorLoopError> {
-        let mut by_kind = BTreeMap::new();
+        let mut kinds = BTreeMap::new();
         for executor in executors {
             let kind = executor.kind().clone();
-            if by_kind.insert(kind.clone(), executor).is_some() {
+            let registered = RegisteredKind {
+                executor,
+                claim: None,
+            };
+            if kinds.insert(kind.clone(), registered).is_some() {
                 return Err(DecisionExecutorLoopError::DuplicateKind(kind));
             }
         }
-        let claim = service.claim_executor()?;
+        if service.write_mode() == DecisionWriteMode::CandidateLaunch {
+            return Err(DecisionError::CandidateLaunch.into());
+        }
+        for (kind, registered) in &mut kinds {
+            match service.claim_executor_kind(kind) {
+                Ok(claim) => registered.claim = Some(claim),
+                Err(DecisionError::ExecutorHeld) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         Ok(Self {
             service,
-            executors: by_kind,
+            kinds,
             approver,
-            _claim: claim,
         })
     }
 
-    /// One pass over the store's work: first the decisions due an expiry
+    /// One pass over the store's work: first a claim of each registered
+    /// kind the loop does not hold, then the decisions due an expiry
     /// observation (their expiry is recorded), then the owed ones (approved
     /// decisions are settled first and executed; ended ones get their
-    /// notice). A decision of a kind with no executor is left as stored.
+    /// notice). A decision of a kind with no executor in this loop is left
+    /// as stored.
     ///
     /// A pass may be dropped at any await: a permit it issued and did not
     /// settle stays outstanding, and the next pass, of this loop or the
     /// next, settles it first.
     pub async fn pass(&mut self) -> DecisionExecutorPass {
         let mut pass = DecisionExecutorPass::default();
+        self.claim_unclaimed_kinds(&mut pass);
         let mut after: Option<String> = None;
         loop {
             let listing = match self.service.due(after.as_deref(), DECISION_PAGE_MAX) {
@@ -321,8 +365,27 @@ impl DecisionExecutorLoop {
         pass
     }
 
+    /// Claim each registered kind the loop holds no claim of. A kind whose
+    /// claim is refused is listed in `pass` with the refusal, and asked for
+    /// again at the next pass.
+    fn claim_unclaimed_kinds(&mut self, pass: &mut DecisionExecutorPass) {
+        for (kind, registered) in &mut self.kinds {
+            if registered.claim.is_some() {
+                continue;
+            }
+            match self.service.claim_executor_kind(kind) {
+                Ok(claim) => registered.claim = Some(claim),
+                Err(error) => pass.unclaimed.push((kind.clone(), error)),
+            }
+        }
+    }
+
+    /// The executor of `row`'s kind, when this loop holds the kind's claim.
     fn executor_of(&self, row: &StoredDecision) -> Option<Arc<dyn DecisionExecutor>> {
-        self.executors.get(&row.descriptor.kind).cloned()
+        self.kinds
+            .get(&row.descriptor.kind)
+            .filter(|registered| registered.claim.is_some())
+            .map(|registered| Arc::clone(&registered.executor))
     }
 
     /// Record the expiry a due decision shows.

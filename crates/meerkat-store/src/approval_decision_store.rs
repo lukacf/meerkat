@@ -25,8 +25,9 @@ use std::time::Duration;
 
 use meerkat_core::approval::ApprovalStoreError;
 use meerkat_core::approval::decision::{
-    DECISION_PAGE_MAX, DecisionExecutorClaim, DecisionId, DecisionListFilter, DecisionPage,
-    DecisionPrincipalKey, DecisionRow, DecisionStore, StoredDecision, UnreadableDecision,
+    DECISION_PAGE_MAX, DecisionExecutorClaim, DecisionId, DecisionKind, DecisionListFilter,
+    DecisionPage, DecisionPrincipalKey, DecisionRow, DecisionStore, StoredDecision,
+    UnreadableDecision,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, ToSql, Transaction, TransactionBehavior, params_from_iter};
@@ -36,8 +37,13 @@ pub const APPROVAL_DECISIONS_FILE: &str = "approval_decisions.sqlite3";
 
 /// The extension of the executor lock file beside a decision file: for
 /// `approval_decisions.sqlite3` it is `approval_decisions.executor.lock`.
-/// The executor of the store holds an exclusive OS lock on it
-/// ([`DecisionStore::claim_executor`]); the lock ends with its process.
+/// Every executor of the store holds an OS lock on it while it runs: a
+/// shared one beside the exclusive lock of each decision kind it executes
+/// ([`DecisionStore::claim_executor_kind`],
+/// [`SqliteDecisionStore::executor_kind_lock_path`]), or, as an executor of
+/// 0.9.10 does, an exclusive one for the whole store
+/// ([`DecisionStore::claim_executor`]), so the two never execute on one
+/// store at once. The locks end with their process.
 pub const DECISION_EXECUTOR_LOCK_EXTENSION: &str = "executor.lock";
 
 const CREATE_DECISIONS_TABLE_SQL: &str = r"
@@ -329,6 +335,51 @@ impl SqliteDecisionStore {
         self.path.with_extension(DECISION_EXECUTOR_LOCK_EXTENSION)
     }
 
+    /// The executor lock file of the decisions of `kind` beside the database
+    /// file: for `approval_decisions.sqlite3` and the kind `release` it is
+    /// `approval_decisions.executor.release.lock`. A kind is a token of
+    /// `[a-z0-9._-]`, so every kind names a file of its own, on
+    /// case-insensitive filesystems too.
+    #[must_use]
+    pub fn executor_kind_lock_path(&self, kind: &DecisionKind) -> PathBuf {
+        self.path.with_extension(format!("executor.{kind}.lock"))
+    }
+
+    /// An OS lock on the lock file at `path`, shared or exclusive, creating
+    /// the file (and the store directory) if needed. The lock lasts as long
+    /// as the returned file is open. Creating the file is the only write.
+    fn lock_executor_file(
+        path: &Path,
+        mode: ExecutorLock,
+    ) -> Result<std::fs::File, ApprovalStoreError> {
+        let not_committed = |what: &str, error: &std::io::Error| {
+            ApprovalStoreError::NotCommitted(format!(
+                "cannot {what} the decision executor lock {}: {error}",
+                path.display()
+            ))
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| not_committed("create the directory of", &error))?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .map_err(|error| not_committed("open", &error))?;
+        let locked = match mode {
+            ExecutorLock::Shared => file.try_lock_shared(),
+            ExecutorLock::Exclusive => file.try_lock(),
+        };
+        match locked {
+            Ok(()) => Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => Err(ApprovalStoreError::Contended),
+            Err(std::fs::TryLockError::Error(error)) => Err(not_committed("lock", &error)),
+        }
+    }
+
     /// A connection to the file, created when `create` is set. Every open
     /// checks the domain's ledger before anything else: a file a newer
     /// binary migrated is refused, never read.
@@ -521,38 +572,46 @@ impl DecisionStore for SqliteDecisionStore {
         true
     }
 
+    /// Holds a shared OS lock on the store's executor lock file
+    /// ([`SqliteDecisionStore::executor_lock_path`]) and an exclusive one on
+    /// the kind's ([`SqliteDecisionStore::executor_kind_lock_path`]),
+    /// creating the files (and the store directory) if needed. The kind's
+    /// lock is the one claim of the kind across processes: another open of
+    /// its file, in this process or any other, finds it held. The shared
+    /// lock keeps out a claim of the whole store, and a whole-store claim
+    /// keeps it out. Both end when the claim drops or its process ends.
+    /// Creating the lock files is the only write; the database file is not
+    /// touched.
+    fn claim_executor_kind(
+        &self,
+        kind: &DecisionKind,
+    ) -> Result<DecisionExecutorClaim, ApprovalStoreError> {
+        let store_lock =
+            Self::lock_executor_file(&self.executor_lock_path(), ExecutorLock::Shared)?;
+        let kind_lock =
+            Self::lock_executor_file(&self.executor_kind_lock_path(kind), ExecutorLock::Exclusive)?;
+        Ok(DecisionExecutorClaim::new((store_lock, kind_lock)))
+    }
+
     /// Holds an exclusive OS lock on the executor lock file beside the
     /// database file ([`SqliteDecisionStore::executor_lock_path`]), creating
-    /// the file (and the store directory) if needed. The lock is the one
-    /// claim of the store across processes: another open of the file, in
-    /// this process or any other, finds it held, and it ends when the claim
-    /// drops or its process ends. Creating the lock file is the only write;
-    /// the database file is not touched.
+    /// the file (and the store directory) if needed: the whole-store claim
+    /// of 0.9.10, which every claim of a kind keeps out with its shared
+    /// lock. Another open of the file, in this process or any other, finds
+    /// it held, and it ends when the claim drops or its process ends.
+    /// Creating the lock file is the only write; the database file is not
+    /// touched.
     fn claim_executor(&self) -> Result<DecisionExecutorClaim, ApprovalStoreError> {
-        let path = self.executor_lock_path();
-        let not_committed = |what: &str, error: &std::io::Error| {
-            ApprovalStoreError::NotCommitted(format!(
-                "cannot {what} the decision executor lock {}: {error}",
-                path.display()
-            ))
-        };
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| not_committed("create the directory of", &error))?;
-        }
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|error| not_committed("open", &error))?;
-        match file.try_lock() {
-            Ok(()) => Ok(DecisionExecutorClaim::new(file)),
-            Err(std::fs::TryLockError::WouldBlock) => Err(ApprovalStoreError::Contended),
-            Err(std::fs::TryLockError::Error(error)) => Err(not_committed("lock", &error)),
-        }
+        Self::lock_executor_file(&self.executor_lock_path(), ExecutorLock::Exclusive)
+            .map(DecisionExecutorClaim::new)
     }
+}
+
+/// How a decision executor holds a lock file.
+#[derive(Debug, Clone, Copy)]
+enum ExecutorLock {
+    Shared,
+    Exclusive,
 }
 
 #[cfg(test)]

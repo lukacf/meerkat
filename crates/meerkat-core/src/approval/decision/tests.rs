@@ -850,21 +850,59 @@ fn the_evidence_records_the_observed_time_and_older_evidence_keeps_its_digest() 
 }
 
 #[test]
-fn the_in_memory_store_keeps_one_executor_claim_at_a_time() {
+fn the_in_memory_store_keeps_one_executor_claim_per_kind() {
     let store = InMemoryDecisionStore::new();
-    let claim = store.claim_executor().expect("the first claim");
+    let release = DecisionKind::new("release").expect("kind");
+    let deploy = DecisionKind::new("deploy").expect("kind");
+    let claim = store
+        .claim_executor_kind(&release)
+        .expect("the first claim of the kind");
+    assert_eq!(
+        store.claim_executor_kind(&release).map(|_| ()),
+        Err(ApprovalStoreError::Contended),
+        "one claim of a kind at a time"
+    );
+    let other_kind = store
+        .claim_executor_kind(&deploy)
+        .expect("a claim of another kind is independent");
+    drop(claim);
+    let again = store
+        .claim_executor_kind(&release)
+        .expect("the claim ends when it drops");
+    assert_eq!(
+        store.claim_executor_kind(&release).map(|_| ()),
+        Err(ApprovalStoreError::Contended)
+    );
+    drop((again, other_kind));
+}
+
+#[test]
+#[allow(deprecated)]
+fn the_in_memory_whole_store_claim_and_kind_claims_exclude_each_other() {
+    let store = InMemoryDecisionStore::new();
+    let release = DecisionKind::new("release").expect("kind");
+    let kind_claim = store.claim_executor_kind(&release).expect("a kind claim");
     assert_eq!(
         store.claim_executor().map(|_| ()),
         Err(ApprovalStoreError::Contended),
-        "one claim at a time"
+        "no whole-store claim beside a claim of a kind"
     );
-    drop(claim);
-    let again = store
+    drop(kind_claim);
+    let whole_store = store
         .claim_executor()
-        .expect("the claim ends when it drops");
+        .expect("free once no kind is claimed");
+    assert_eq!(
+        store.claim_executor_kind(&release).map(|_| ()),
+        Err(ApprovalStoreError::Contended),
+        "no claim of a kind beside the whole-store claim"
+    );
     assert_eq!(
         store.claim_executor().map(|_| ()),
-        Err(ApprovalStoreError::Contended)
+        Err(ApprovalStoreError::Contended),
+        "one whole-store claim at a time"
     );
-    drop(again);
+    drop(whole_store);
+    let _kind_claim = store
+        .claim_executor_kind(&release)
+        .expect("free once the whole-store claim drops");
 }

@@ -41,11 +41,14 @@ cargo_bin="${CARGO:-${root}/scripts/repo-cargo}"
 # `--exclude` for every package of the other products, derived by
 # scripts/core-workspace-args.mjs (ci/products.json and cargo metadata).
 # Cargo unifies features across the packages of one invocation, so a bare
-# `--workspace` would compile Core's crates with the products' features.
+# `--workspace` would compile Core's crates with the products' features. A
+# lane that builds test targets without --all-features passes --tests: the
+# selection then carries every member's test features, which no
+# dev-dependency turns on.
 core_workspace=()
 load_core_workspace() {
   local selection
-  selection="$(CARGO="${cargo_bin}" node "${root}/scripts/core-workspace-args.mjs")" || {
+  selection="$(CARGO="${cargo_bin}" node "${root}/scripts/core-workspace-args.mjs" "$@")" || {
     echo "run-build-backend-lane: cannot derive Core's package selection" >&2
     exit 1
   }
@@ -229,7 +232,7 @@ case "${lane}" in
     # both the worktree and the main checkout's `.cargo/config.toml`), which
     # duplicated their arguments and tripped clap's "cannot be used multiple
     # times" guard. Expand the alias inline, with Core's selection.
-    load_core_workspace
+    load_core_workspace --tests
     "${cargo_bin}" nextest run "${core_workspace[@]}" --profile fast --show-progress none --status-level none --final-status-level fail
     run_head_canonical_kill_window
     exec "${cargo_bin}" test -p meerkat-session --features session-store projection_continuity -- --quiet
@@ -249,7 +252,7 @@ case "${lane}" in
     fi
     use_standard_rust_test_stack
     export_mcp_test_server_fixture
-    load_core_workspace
+    load_core_workspace --tests
     exec "${cargo_bin}" nextest run "${core_workspace[@]}" --lib --show-progress none --status-level none --final-status-level fail
     ;;
   test-int)
@@ -258,7 +261,7 @@ case "${lane}" in
     fi
     use_standard_rust_test_stack
     export_mcp_test_server_fixture
-    load_core_workspace
+    load_core_workspace --tests
     "${cargo_bin}" nextest run "${core_workspace[@]}" --tests --profile fast --show-progress none --status-level none --final-status-level fail
     run_head_canonical_kill_window
     ;;

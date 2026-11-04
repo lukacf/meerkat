@@ -16,6 +16,13 @@ CARGO ?= ./scripts/repo-cargo
 # bare `--workspace` would compile Core's crates with the products' features.
 # Each product's own lanes select its packages (`--product NAME`).
 CORE_WORKSPACE = $(shell node scripts/core-workspace-args.mjs)
+# A lane that builds test targets without --all-features also passes the
+# selected members' test features (their [package.metadata.meerkat.standalone-tests]
+# features and `workspace-tests`): no dev-dependency turns them on, and a test
+# build without them fails to compile here. CORE_WORKSPACE_TESTS is Core's
+# whole workspace, $(call TEST_PACKAGES,-p NAME ...) the named packages.
+CORE_WORKSPACE_TESTS = $(shell node scripts/core-workspace-args.mjs --tests)
+TEST_PACKAGES = $(shell node scripts/core-workspace-args.mjs --tests $(1))
 # Python >= 3.11 for the repo's scripts and SDK tooling (tomllib,
 # hashlib.file_digest). scripts/require-python prefers python3.13..3.11 over a
 # PATH python3 (macOS can put Apple's 3.9 first). If none qualifies, any target
@@ -67,7 +74,7 @@ test-unit:
 # neighboring tests and opts the Linux-hosted case back in explicitly.
 test-mob-dense-topology:
 	@echo "$(GREEN)Running dense Mob topology stress lane...$(NC)"
-	$(CARGO) nextest run --profile mob-dense-topology -p meerkat-mob --lib --run-ignored all --no-tests=fail
+	$(CARGO) nextest run --profile mob-dense-topology $(call TEST_PACKAGES,-p meerkat-mob) --lib --run-ignored all --no-tests=fail
 
 # Linux positive confinement acceptance. These cases need a host whose kernel
 # policy allows the native backend, so on Linux they are ignored in ordinary
@@ -231,7 +238,7 @@ test-minimal:
 	$(CARGO) check -p meerkat-tools --no-default-features
 	$(CARGO) check -p meerkat --no-default-features
 	$(CARGO) check -p rkat --no-default-features
-	$(CARGO) nextest run -p meerkat-core
+	$(CARGO) nextest run $(call TEST_PACKAGES,-p meerkat-core)
 
 # Library crate feature combinations
 test-feature-matrix-lib:
@@ -252,7 +259,7 @@ test-feature-matrix-lib:
 	$(CARGO) check -p meerkat-mob --no-default-features --features runtime-adapter
 	MEERKAT_MCP_TEST_SERVER="$$(scripts/mcp-test-server-fixture)" && \
 		export MEERKAT_MCP_TEST_SERVER && \
-		$(CARGO) nextest run -p meerkat --features all-providers,comms,mcp
+		$(CARGO) nextest run $(call TEST_PACKAGES,-p meerkat) --features all-providers,comms,mcp
 
 # Surface crate feature combinations
 test-feature-matrix-surface:
@@ -726,7 +733,7 @@ outdated:
 # Run benchmarks (if you have benches/)
 bench:
 	@echo "$(GREEN)Running benchmarks...$(NC)"
-	$(CARGO) bench $(CORE_WORKSPACE)
+	$(CARGO) bench $(CORE_WORKSPACE_TESTS)
 
 # ── Version parity & release targets ────────────────────────────────────────
 
@@ -805,7 +812,9 @@ check-published-crates-standalone-guard:
 published-crates-standalone-selftest:
 	@$(PYTHON) scripts/test_published_crates_standalone.py
 
-STANDALONE_CENSUS_OUT ?= target/published-crates-standalone
+# Outside the repository: the standalone builds run in it, and must not read
+# the repository's Cargo configuration (the census refuses such a directory).
+STANDALONE_CENSUS_OUT ?= $(or $(TMPDIR),/tmp)/meerkat-published-crates-standalone
 published-crates-standalone-census:
 	@$(PYTHON) scripts/published_crates_standalone.py census --out $(STANDALONE_CENSUS_OUT) $(STANDALONE_CENSUS_ARGS)
 

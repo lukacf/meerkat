@@ -18,11 +18,15 @@ scripts/release-rust-crates.sh lists.
         - `cargo test -p C --features <declared>` passes, where <declared> is
           the crate's [package.metadata.meerkat.standalone-tests] features;
         - test-name parity: per test target, the standalone test names equal
-          the workspace's names for the same package and features, minus the
-          workspace-only tests ci/standalone-workspace-only.toml declares.
+          the workspace's names for the same package and features (plus
+          `workspace-tests` when the crate declares it, as every workspace
+          test build of the crate passes), minus the workspace-only tests
+          ci/standalone-workspace-only.toml declares.
       --stack mirror (default) sets RUST_MIN_STACK to the workspace's
       .cargo/config.toml value; --stack default leaves Rust's own default, to
-      record which targets need the larger stack.
+      record which targets need the larger stack. --out must not lie under a
+      directory with a Cargo configuration (the repository's included): the
+      standalone builds run inside it, and a downloader has none.
 
   published_crates_standalone.py guard [--crate NAME ...]
 
@@ -36,9 +40,8 @@ scripts/release-rust-crates.sh lists.
         - code under a cfg that needs `workspace-tests` is not scanned: the
           package leaves that feature off, so the code never builds there;
         - the declared test features exist and leave `workspace-tests` off,
-          a crate declaring `workspace-tests` has the path-only self
-          dev-dependency that enables it and its Bazel unit-test target
-          turns it on, and the packaged README.md prints the test command.
+          a crate declaring `workspace-tests` gets it on its Bazel unit-test
+          target, and the packaged README.md prints the test command.
       A flagged line that is not a test escape is listed under the crate's
       `guard_allow` with its reason.
 
@@ -178,9 +181,9 @@ def test_command(manifest: dict) -> str | None:
 
 def published_test_contract_failures(crate: str, manifest: dict, package_root: pathlib.Path, packaged: set[str]) -> list[str]:
     """The published test contract: the declared feature set exists and never
-    turns on `workspace-tests`; a crate that declares `workspace-tests` has the
-    path-only self dev-dependency that enables it; and README.md, which the
-    package carries, prints the exact test command."""
+    turns on `workspace-tests`, which only the workspace's own test builds
+    pass; and README.md, which the package carries, prints the exact test
+    command."""
     failures = []
     features = (manifest.get("features") or {})
     for feature in standalone_features(manifest):
@@ -188,13 +191,6 @@ def published_test_contract_failures(crate: str, manifest: dict, package_root: p
             failures.append(f"{crate}: standalone-tests features must not include {WORKSPACE_TESTS}")
         elif feature not in features:
             failures.append(f"{crate}: standalone-tests feature {feature} is not declared in [features]")
-    if WORKSPACE_TESTS in features:
-        self_dep = (manifest.get("dev-dependencies") or {}).get(crate)
-        if not (isinstance(self_dep, dict) and self_dep.get("path") == "." and "version" not in self_dep
-                and WORKSPACE_TESTS in (self_dep.get("features") or [])):
-            failures.append(
-                f"{crate}: declares {WORKSPACE_TESTS} but no path-only self dev-dependency enables it"
-            )
     command = test_command(manifest)
     if command is not None:
         readme = package_root / "README.md"
@@ -221,8 +217,9 @@ def bazel_unit_test_features(build_text: str, target: str) -> list[str] | None:
 
 def bazel_workspace_tests_failures(crate: str, manifest: dict, package_root: pathlib.Path) -> list[str]:
     """A crate that declares `workspace-tests` gets it on its Bazel unit-test
-    target (scripts/generate-bazel-rust-builds.mjs follows the self
-    dev-dependency), or the Bazel lanes silently drop its workspace-only tests."""
+    target (scripts/generate-bazel-rust-builds.mjs adds every crate's test
+    features to its feature union), or the Bazel lanes silently drop its
+    workspace-only tests."""
     if WORKSPACE_TESTS not in (manifest.get("features") or {}):
         return []
     target = f"{crate.replace('-', '_')}_unit_test"
@@ -724,11 +721,34 @@ def package_and_unpack(root: pathlib.Path, crates: list[str], all_crates: list[s
     return unpacked
 
 
+def cargo_config_above(path: pathlib.Path) -> pathlib.Path | None:
+    """The first Cargo configuration file Cargo would read for a build run in
+    `path` from the directories above it (`.cargo/config.toml` or
+    `.cargo/config` of `path` or an ancestor), or None. The user's own
+    $CARGO_HOME configuration is not one: a downloader has that too."""
+    home = pathlib.Path(os.environ.get("CARGO_HOME") or pathlib.Path.home() / ".cargo").resolve()
+    own = {home / "config.toml", home / "config"}
+    for directory in [path, *path.parents]:
+        for name in ("config.toml", "config"):
+            candidate = directory / ".cargo" / name
+            if candidate.is_file() and candidate.resolve() not in own:
+                return candidate
+    return None
+
+
 def census(root: pathlib.Path, crates: list[str], out: pathlib.Path, stack: str, allow_dirty: bool) -> int:
     manifest = load_manifest(root)
     all_crates = release_crates(root)
     dirs = crate_dirs(root)
     rust_toolchain = toolchain(root)
+    # The standalone builds run in out/ws: a Cargo configuration above it (the
+    # repository's [env], for one) would reach them, and a downloader has none.
+    config = cargo_config_above(out.resolve())
+    if config is not None:
+        raise UsageError(
+            f"--out {out} lies under {config.parent.parent}, whose Cargo configuration ({config}) the standalone "
+            "builds would read; choose a directory outside the repository"
+        )
     out.mkdir(parents=True, exist_ok=False)
     logs = out / "logs"
     logs.mkdir()
@@ -761,7 +781,13 @@ def census(root: pathlib.Path, crates: list[str], out: pathlib.Path, stack: str,
 
         rc_s, standalone_listing = run([cargo(), "test", "-p", crate, *feature_args, "--", "--list", "--format", "terse"],
                                        ws, standalone_env, logs / f"{crate}.list-standalone.log")
-        rc_w, workspace_listing = run([cargo(), "test", "-p", crate, *feature_args, "--", "--list", "--format", "terse"],
+        # The workspace runs the crate's tests with `workspace-tests` too when
+        # it declares that feature: every workspace test build passes it (no
+        # dev-dependency does), and the parity below takes the tests it gates
+        # out again (ci/standalone-workspace-only.toml).
+        workspace_features = [*features, *([WORKSPACE_TESTS] if WORKSPACE_TESTS in (packaged.get("features") or {}) else [])]
+        workspace_feature_args = ["--features", ",".join(workspace_features)] if workspace_features else []
+        rc_w, workspace_listing = run([cargo(), "test", "-p", crate, *workspace_feature_args, "--", "--list", "--format", "terse"],
                                       root, workspace_env, logs / f"{crate}.list-workspace.log")
         if rc_s != 0 or rc_w != 0:
             row["problems"].append(f"listing failed (standalone rc {rc_s}, workspace rc {rc_w})")

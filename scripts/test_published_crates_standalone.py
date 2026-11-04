@@ -9,6 +9,7 @@ listing parser, the manifest's workspace-only selection and name parity.
 from __future__ import annotations
 
 import importlib.util
+import os
 import pathlib
 import sys
 import tempfile
@@ -406,13 +407,35 @@ class PublishedTestContract(unittest.TestCase):
         readme = "cargo test --features missing,workspace-tests\n"
         self.assertEqual(len(self.failures(manifest, readme)), 2)
 
-    def test_workspace_tests_needs_the_path_only_self_dev_dependency(self):
+    def test_workspace_tests_needs_no_dev_dependency(self):
+        # The workspace's test builds pass it (scripts/core-workspace-args.mjs --tests).
         declared = {"workspace-tests": []}
-        self.assertEqual(len(self.failures(crate_manifest(None, declared))), 1)
-        versioned = {"demo": {"path": ".", "version": "1", "features": ["workspace-tests"]}}
-        self.assertEqual(len(self.failures(crate_manifest(None, declared, versioned))), 1)
-        path_only = {"demo": {"path": ".", "features": ["workspace-tests"]}}
-        self.assertEqual(self.failures(crate_manifest(None, declared, path_only)), [])
+        self.assertEqual(self.failures(crate_manifest(None, declared)), [])
+
+
+class CargoConfigAbove(unittest.TestCase):
+    def test_a_configuration_above_the_directory_is_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp) / "repo"
+            (root / ".cargo").mkdir(parents=True)
+            (root / ".cargo" / "config.toml").write_text("[env]\n")
+            self.assertEqual(pcs.cargo_config_above(root / "target" / "census"), root / ".cargo" / "config.toml")
+            self.assertIsNone(pcs.cargo_config_above(pathlib.Path(tmp) / "elsewhere"))
+
+    def test_the_users_own_cargo_home_does_not_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = pathlib.Path(tmp) / ".cargo"
+            home.mkdir()
+            (home / "config.toml").write_text("[build]\n")
+            previous = os.environ.get("CARGO_HOME")
+            os.environ["CARGO_HOME"] = str(home)
+            try:
+                self.assertIsNone(pcs.cargo_config_above(pathlib.Path(tmp) / "census"))
+            finally:
+                if previous is None:
+                    del os.environ["CARGO_HOME"]
+                else:
+                    os.environ["CARGO_HOME"] = previous
 
 
 UNIT_TEST_RULE = """

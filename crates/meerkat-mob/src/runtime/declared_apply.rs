@@ -566,6 +566,30 @@ fn apply_error_is_retryable(error: &MobError) -> bool {
     super::builder::restore_error_is_retryable(error)
 }
 
+/// The declared identities the identity store manages: a host-adopted
+/// intent row in `history`, readable or not, names them. A created entry's
+/// row is not one: MobMachine refuses a created name itself. A mob without an
+/// identity store has none.
+fn declared_apply_intent_managed(
+    history: Option<&super::MemberBindingHistory>,
+    declared: &BTreeMap<AgentIdentity, DeclaredEntry>,
+) -> BTreeSet<AgentIdentity> {
+    let Some(history) = history else {
+        return BTreeSet::new();
+    };
+    declared
+        .keys()
+        .filter(|identity| {
+            matches!(
+                history.identity_management(identity),
+                super::MemberIdentityManagement::IntentManaged
+                    | super::MemberIdentityManagement::IntentUnreadable
+            )
+        })
+        .cloned()
+        .collect()
+}
+
 /// A declared identity's answer for an error of its realization.
 fn failure_outcome(error: MobError) -> DeclaredEntryOutcome {
     if apply_error_is_retryable(&error) {
@@ -1059,9 +1083,11 @@ impl super::MobHandle {
         }
 
         // The raw observations MobMachine decides by: the identity store's
-        // intent rows (read once; a read that fails fails the pass, never
-        // reads as no row) and the session service's durability.
-        let intent_managed = self.declared_apply_intent_managed(&declared).await?;
+        // intent rows, read once with the member binding history (a read
+        // that fails fails the pass, never reads as no row), and the session
+        // service's durability.
+        let history = self.declared_apply_history().await?;
+        let intent_managed = declared_apply_intent_managed(history.as_ref(), &declared);
         let session_memory_only = !self.session_service.keeps_durable_member_sessions();
 
         // A legacy member listed under its own name is adopted first, once:
@@ -1092,13 +1118,15 @@ impl super::MobHandle {
         // unlists them and retires their members: members a host seated
         // under their identities before identity entries existed, whose
         // identities the roster dropped before this build first applied it.
-        // A member with one mark only is a host's own, left as it is.
+        // A member with one mark only is a host's own, left as it is. The
+        // scan reads the history the intent rows came with; the adoption
+        // applies the same rule to its own read before MobMachine decides.
         if complete {
-            for identity in self.unlisted_legacy_members(&listed).await? {
+            for identity in self.unlisted_legacy_members(history.as_ref(), &listed) {
                 if let Err(error) = self
                     .adopt_observed_legacy_member(
                         &identity,
-                        super::identity_entry::LegacyRosterMarks::both,
+                        super::identity_entry::unlisted_legacy_member,
                     )
                     .await
                 {
@@ -1415,73 +1443,50 @@ impl super::MobHandle {
             }))
     }
 
-    /// The members a complete roster's seal would leave as they are that it
-    /// adopts first, so the seal unlists them: seated, no identity entry,
-    /// not `listed`, and the last binding of the identity carries both
-    /// legacy marks and no host's intent row
-    /// ([`super::identity_entry::unlisted_legacy_member`]). One read of the
-    /// member binding history; a read that fails fails the pass. A mob
-    /// without an identity store has none.
-    async fn unlisted_legacy_members(
+    /// The member binding history the apply reads its raw observations
+    /// from, with the identity store's intent rows in the same store read:
+    /// `None` for a mob without an identity store. A read that fails fails
+    /// the pass.
+    async fn declared_apply_history(
         &self,
-        listed: &BTreeSet<AgentIdentity>,
-    ) -> Result<Vec<AgentIdentity>, MobError> {
-        let unlisted: Vec<AgentIdentity> = {
-            let state = self.machine_state_watch_rx.borrow();
-            state
-                .identity_to_runtime
-                .keys()
-                .filter(|identity| !state.identity_entry_origins.contains_key(*identity))
-                .map(|identity| AgentIdentity::from(identity.0.as_str()))
-                .filter(|identity| !listed.contains(identity))
-                .collect()
-        };
-        if unlisted.is_empty() {
-            return Ok(Vec::new());
-        }
+    ) -> Result<Option<super::MemberBindingHistory>, MobError> {
         let Some(store) = self.identity_member.as_ref() else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
-        let history = self
-            .member_binding_fold
-            .read(store.as_ref(), self.mob_id())
-            .await?;
-        Ok(unlisted
-            .into_iter()
-            .filter(|identity| {
-                history
-                    .last_binding(identity)
-                    .is_some_and(super::identity_entry::unlisted_legacy_member)
-            })
-            .collect())
+        Ok(Some(
+            self.member_binding_fold
+                .read(store.as_ref(), self.mob_id())
+                .await?,
+        ))
     }
 
-    /// The declared identities the identity store manages: a host-adopted
-    /// intent row, readable or not, names them. A created entry's row is not
-    /// one: MobMachine refuses a created name itself. A mob without an
+    /// The members a complete roster's seal would leave as they are that it
+    /// adopts first, so the seal unlists them: seated, no identity entry,
+    /// not `listed`, and the last binding of the identity in `history` is
+    /// an unlisted legacy member's
+    /// ([`super::identity_entry::unlisted_legacy_member`]). A mob without an
     /// identity store has none.
-    async fn declared_apply_intent_managed(
+    fn unlisted_legacy_members(
         &self,
-        declared: &BTreeMap<AgentIdentity, DeclaredEntry>,
-    ) -> Result<BTreeSet<AgentIdentity>, MobError> {
-        let Some(store) = self.identity_member.as_ref() else {
-            return Ok(BTreeSet::new());
+        history: Option<&super::MemberBindingHistory>,
+        listed: &BTreeSet<AgentIdentity>,
+    ) -> Vec<AgentIdentity> {
+        let Some(history) = history else {
+            return Vec::new();
         };
-        let history = self
-            .member_binding_fold
-            .read(store.as_ref(), self.mob_id())
-            .await?;
-        Ok(declared
+        let state = self.machine_state_watch_rx.borrow();
+        state
+            .identity_to_runtime
             .keys()
+            .filter(|identity| !state.identity_entry_origins.contains_key(*identity))
+            .map(|identity| AgentIdentity::from(identity.0.as_str()))
             .filter(|identity| {
-                matches!(
-                    history.identity_management(identity),
-                    super::MemberIdentityManagement::IntentManaged
-                        | super::MemberIdentityManagement::IntentUnreadable
-                )
+                !listed.contains(identity)
+                    && history
+                        .last_binding(identity)
+                        .is_some_and(super::identity_entry::unlisted_legacy_member)
             })
-            .cloned()
-            .collect())
+            .collect()
     }
 
     /// MobMachine's verdicts for `declarations`, one chunk per actor step,

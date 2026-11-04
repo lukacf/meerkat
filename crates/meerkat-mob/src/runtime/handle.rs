@@ -10628,24 +10628,24 @@ impl MobHandle {
         if already_an_entry {
             return Ok(super::LegacyIdentityEntryAdoption::AlreadyAnEntry);
         }
-        self.adopt_observed_legacy_member(
-            identity,
-            super::identity_entry::LegacyRosterMarks::either,
-        )
-        .await
+        self.adopt_observed_legacy_member(identity, super::identity_entry::listed_legacy_member)
+            .await
     }
 
     /// The legacy adoption's observation and MobMachine's decision for an
-    /// admitted caller: the spawn row of the identity's current incarnation,
-    /// read from the member binding history, makes the member a legacy
-    /// member when its marks are `adoptable` (either mark for a listed name
-    /// or this handle's adoption, both for a complete roster's unlisted
-    /// member). An observation whose incarnation moved before MobMachine
-    /// decided is observed again, a bounded number of times.
+    /// admitted caller: the binding of the identity's current incarnation,
+    /// read from the member binding history with the intent rows in one
+    /// store read, makes the member a legacy member when `adoptable` holds of
+    /// it ([`super::identity_entry::listed_legacy_member`] for a listed name
+    /// or this handle's adoption,
+    /// [`super::identity_entry::unlisted_legacy_member`] for a complete
+    /// roster's unlisted member, the rule its scan applied). An observation
+    /// whose incarnation moved before MobMachine decided is observed again, a
+    /// bounded number of times.
     pub(super) async fn adopt_observed_legacy_member(
         &self,
         identity: &AgentIdentity,
-        adoptable: fn(super::identity_entry::LegacyRosterMarks) -> bool,
+        adoptable: fn(&super::MemberBinding) -> bool,
     ) -> Result<super::LegacyIdentityEntryAdoption, MobError> {
         const LEGACY_ADOPTION_OBSERVATIONS: usize = 3;
         let store = self
@@ -10657,12 +10657,9 @@ impl MobHandle {
                 .member_binding_fold
                 .read(store.as_ref(), self.mob_id())
                 .await?;
-            let observation = history.last_binding(identity).map(|binding| {
-                (
-                    binding.generation(),
-                    adoptable(super::identity_entry::legacy_roster_member(binding)),
-                )
-            });
+            let observation = history
+                .last_binding(identity)
+                .map(|binding| (binding.generation(), adoptable(binding)));
             #[cfg(test)]
             let observation = legacy_observation_hold::observed(identity, observation);
             let (generation, legacy_roster_member) = match observation {

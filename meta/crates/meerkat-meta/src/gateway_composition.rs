@@ -3297,4 +3297,39 @@ default_binding = "local"
             "a launch that declares nothing keeps executing schedules"
         );
     }
+
+    /// Neither the refusal of a remote bind nor the warning a remote bind
+    /// logs sends an operator to an authenticating proxy: the Console reads
+    /// identity only from a token it verifies itself, so behind such a proxy
+    /// every person is one anonymous caller. Both texts say so.
+    #[test]
+    fn remote_bind_texts_name_the_anonymous_console() -> Result<(), std::net::AddrParseError> {
+        let listen: SocketAddr = "0.0.0.0:8080".parse()?;
+        let refusal = HttpBindPolicyError::RemoteBindRequiresExplicitAllow {
+            surface: GatewaySurface::MetaGateway,
+            listen,
+        }
+        .to_string();
+        let writer = CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_ansi(false)
+            .finish();
+        // A second registered Dispatch keeps callsite interest from being
+        // cached `never` by threads without a subscriber.
+        let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+        tracing::subscriber::with_default(subscriber, || {
+            warn_on_non_loopback_bind(
+                GatewaySurface::MetaGateway,
+                listen,
+                &open_console_decisions(),
+            );
+        });
+        let warning = writer.contents();
+        for text in [refusal.as_str(), warning.as_str()] {
+            assert!(!text.contains("authenticating proxy"), "{text}");
+            assert!(text.contains("anonymous"), "{text}");
+        }
+        Ok(())
+    }
 }

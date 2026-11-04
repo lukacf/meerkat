@@ -815,4 +815,66 @@ mod tests {
             None
         );
     }
+
+    /// An open Console admits callers without a token, and an anonymous
+    /// caller may be any person: a deny rule that names a subject or a group
+    /// binds it too, so leaving out a token never escapes a deny. An allow
+    /// rule that names people still never matches it.
+    #[test]
+    fn an_anonymous_caller_is_bound_by_deny_rules_that_name_people() {
+        let deny = |id: &str, subjects: &[&str], groups: &[&str], action: &str| AccessRule {
+            id: id.to_string(),
+            effect: AccessEffect::Deny,
+            subjects: subjects.iter().map(ToString::to_string).collect(),
+            groups: groups.iter().map(ToString::to_string).collect(),
+            actions: vec![action.to_string()],
+            ..AccessRule::default()
+        };
+        let allow = |id: &str, subjects: &[&str], action: &str| AccessRule {
+            id: id.to_string(),
+            subjects: subjects.iter().map(ToString::to_string).collect(),
+            actions: vec![action.to_string()],
+            ..AccessRule::default()
+        };
+        let config = config_with_rules(vec![
+            allow("everyone-retires", &[], "agent.retire"),
+            deny(
+                "alice-never-retires",
+                &["alice@example.test"],
+                &[],
+                "agent.retire",
+            ),
+            allow("everyone-resets", &[], "agent.reset"),
+            deny("ops-never-resets", &[], &["ops"], "agent.reset"),
+            deny("no-signed-in-spawn", &["*"], &[], "agent.respawn"),
+            allow("everyone-respawns", &[], "agent.respawn"),
+            allow("bob-spawns", &["bob@example.test"], "agent.spawn"),
+        ]);
+        let allows = |principal: &AccessPrincipal, action: &str| {
+            evaluate_access(&config, principal, action, &AccessResource::none()).is_allow()
+        };
+        let anonymous = AccessPrincipal::anonymous();
+        let carol = principal("carol@example.test", &[]);
+        assert_eq!(
+            [
+                allows(&anonymous, "agent.retire"),
+                allows(&anonymous, "agent.reset"),
+                allows(&anonymous, "agent.respawn"),
+                allows(&anonymous, "agent.spawn"),
+            ],
+            [false; 4],
+            "every deny that names people binds an anonymous caller, and an allow that \
+             names people never matches it"
+        );
+        assert_eq!(
+            [
+                allows(&carol, "agent.retire"),
+                allows(&carol, "agent.reset"),
+                allows(&principal("alice@example.test", &[]), "agent.retire"),
+                allows(&principal("dave@example.test", &["ops"]), "agent.reset"),
+            ],
+            [true, true, false, false],
+            "named callers are decided as before"
+        );
+    }
 }

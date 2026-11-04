@@ -2879,6 +2879,10 @@ mod console_side_chat_tests;
 mod console_schedule_tests;
 
 #[cfg(test)]
+#[path = "console_actor_tests.rs"]
+mod console_actor_tests;
+
+#[cfg(test)]
 async fn console_send_identity_first(
     aggregator: &MetaConsoleAggregator,
     identity_runtime: Arc<crate::identity_first::IdentityRuntime>,
@@ -31077,7 +31081,7 @@ mod console_token_lapse_tests {
 
     /// Call `method` on the console route with `token`, or with no
     /// credentials at all.
-    async fn console_rpc_as(
+    pub(super) async fn console_rpc_as(
         app: &Router,
         token: Option<&str>,
         method: &str,

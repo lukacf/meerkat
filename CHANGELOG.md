@@ -91,6 +91,24 @@ them.
   (`AuthCredentialIdentity::from_auth_binding`) and ran with provider-native
   tools on (`ProviderNativeToolPolicy::Inherit`). See Changed.
 
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-runtime`: the
+  MeerkatMachine gains the failure arm of an until-changed switch-turn
+  reconfigure (see Fixed). `MeerkatMachineInput` (meerkat-machine-schema and
+  meerkat-runtime) and the kernel `generated::meerkat` `Input` gain
+  `AbortUntilChangedSwitchTurnReconfigure { request_id }`, and
+  `MeerkatMachineInputVariant`, `MeerkatMachineRuntimeInternalInput`
+  (meerkat-machine-schema and meerkat-runtime) and the kernel `InputKind`
+  gain `AbortUntilChangedSwitchTurnReconfigure`. The kernel
+  `generated::meerkat::TransitionId` gains
+  `AbortUntilChangedSwitchTurnReconfigureIdle`,
+  `AbortUntilChangedSwitchTurnReconfigureAttached`,
+  `AbortUntilChangedSwitchTurnReconfigureRunning`,
+  `AbortUntilChangedSwitchTurnReconfigureRetired` and
+  `AbortUntilChangedSwitchTurnReconfigureStopped`. Every new variant is
+  appended last, so no existing variant's implicit discriminant moves. Every
+  enum named here is exhaustive, so a downstream exhaustive match needs the
+  new arms, or a wildcard arm.
+
 ### Added
 
 - GitHub Copilot configured once: `[realm.<realm>.copilot]` states a Copilot
@@ -344,6 +362,21 @@ them.
   failing warns on its 1st, 2nd, 4th, 8th and later power-of-two failures
   instead of every second. Affects hosts up to 0.9.9 that compose the live
   delegation coordinator with lazily restored members.
+
+- `meerkat-runtime`: a failed model switch during a session no longer
+  discards an input admitted while the switch was in progress. A switch
+  that lasts until changed (`SwitchTurnDuration::UntilChanged`) records its
+  request and runs the LLM reconfigure without holding the session's
+  mutation gate, so other callers can admit input meanwhile. When the
+  reconfigure, or its preparation, failed, the switch wrote back the whole
+  generated state it had read before its request, erasing every fact other
+  callers committed in that gap: an input admitted then lost its generated
+  phase while its ledger row stayed, so the machine no longer tracked an
+  input the runtime had accepted. A failed switch now withdraws only its own
+  request, through the MeerkatMachine input
+  `AbortUntilChangedSwitchTurnReconfigure` (see Breaking), and leaves every
+  other fact as it stands; its caller still gets the reconfigure's error.
+  Affects 0.6.0 through 0.9.9.
 
 ### Known limitations
 

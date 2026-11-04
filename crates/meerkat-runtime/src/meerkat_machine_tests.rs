@@ -13979,6 +13979,221 @@ async fn until_changed_switch_turn_reconfigures_baseline_not_scoped_override() {
     );
 }
 
+/// An until-changed switch-turn releases the session mutation gate while its
+/// LLM reconfigure runs, so another caller can admit an input in that gap.
+/// When the reconfigure then fails, the switch-turn caller still gets the
+/// error and the switch is withdrawn, but the admitted input keeps its
+/// generated phase beside its ledger row and is answered once an executor
+/// serves the session: a failed switch withdraws only its own request.
+#[tokio::test]
+async fn until_changed_switch_turn_failure_keeps_an_input_admitted_in_its_gap() {
+    struct NoopExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for NoopExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                None,
+                None,
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(Arc::new(TestLlmReconfigureHost {
+        current_identity: Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
+            model: "baseline".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        })),
+        current_visibility_state: Arc::new(std::sync::Mutex::new(Default::default())),
+        target_identity: meerkat_core::SessionLlmIdentity {
+            model: "persistent-target".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        },
+        current_capability_surface: Some(test_llm_capability_surface(true)),
+        target_capability_surface: test_llm_capability_surface(true),
+        base_tool_names: BTreeSet::new(),
+        fail_persist: true,
+    }));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    // Pause the switch-turn in its gap: it has staged the request and released
+    // the session mutation gate for the reconfigure, which has not run yet.
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *adapter
+        .test_switch_turn_reconfigure_gap_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, release_rx));
+
+    let request_uuid = uuid(601);
+    let request_key = request_uuid.to_string();
+    let request = SwitchTurnRequest {
+        request_id: meerkat_core::image_generation::SwitchTurnRequestId::new(request_uuid),
+        intent: meerkat_core::image_generation::SwitchTurnIntent {
+            target_model: model("persistent-target"),
+            duration: meerkat_core::image_generation::SwitchTurnDuration::UntilChanged,
+            origin: meerkat_core::image_generation::SwitchTurnOrigin::SystemPolicy {
+                reason: meerkat_core::image_generation::SwitchTurnPolicyReason::SafetyHandoff,
+            },
+        },
+        target_realtime: realtime_policy(true),
+        approval: ModelRoutingApprovalDisposition::NotRequired,
+        approval_reason: None,
+    };
+    let switch_turn = {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+                &adapter,
+                &session_id,
+                request,
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("the switch-turn reaches its reconfigure gap")
+        .expect("the gap hold reports its entry");
+    let staged = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state in the gap");
+    assert_eq!(
+        staged.model_routing_pending_switch_request_id,
+        Some(request_key.clone()),
+        "the switch-turn staged its request before it released the gate"
+    );
+    assert_eq!(
+        staged.model_routing_pending_switch_phase,
+        Some(mm_dsl::RoutingSwitchTurnPhase::ApplyingPersistentReconfigure)
+    );
+
+    // Another caller admits an input while the reconfigure is in flight.
+    let input = Input::Prompt(crate::input::PromptInput::new(
+        "admitted while the model switch is in flight",
+        None,
+    ));
+    let input_id = input.id().clone();
+    let (outcome, completion) = adapter
+        .accept_input_with_completion(&session_id, input)
+        .await
+        .expect("admit an input while the switch-turn holds no gate");
+    assert!(outcome.is_accepted());
+    let completion = completion.expect("the admitted input registers a completion waiter");
+    let queued = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the admission");
+    assert_eq!(
+        queued.input_phases.get(&input_id.to_string()).copied(),
+        Some(mm_dsl::InputPhase::Queued),
+        "the admitted input is queued in generated state"
+    );
+
+    // The reconfigure runs and fails: the host refuses to persist it.
+    release_tx.send(()).expect("release the reconfigure");
+    let switch_error = tokio::time::timeout(Duration::from_secs(5), switch_turn)
+        .await
+        .expect("the switch-turn settles")
+        .expect("the switch-turn task does not panic")
+        .expect_err("a failed reconfigure fails the switch-turn");
+    assert!(
+        switch_error
+            .to_string()
+            .contains("injected persist failure"),
+        "the switch-turn caller gets the reconfigure error: {switch_error:?}"
+    );
+
+    let after = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the failed switch");
+    assert_eq!(
+        after.input_phases.get(&input_id.to_string()).copied(),
+        Some(mm_dsl::InputPhase::Queued),
+        "the input admitted in the switch-turn gap keeps its generated phase"
+    );
+    assert_eq!(after.model_routing_pending_switch_request_id, None);
+    assert_eq!(after.model_routing_pending_switch_phase, None);
+    assert_eq!(after.model_routing_switch_terminal.get(&request_key), None);
+    assert_eq!(
+        after.model_routing_baseline_model.as_deref(),
+        Some("baseline")
+    );
+    {
+        let sessions = adapter.sessions.read().await;
+        let entry = sessions.get(&session_id).expect("registered session entry");
+        let driver = entry.driver.lock().await;
+        assert!(
+            driver.ledger().get(&input_id).is_some(),
+            "the admitted input keeps its ledger row"
+        );
+    }
+
+    // The admitted input is answered once an executor serves the session.
+    adapter
+        .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
+        .await
+        .expect("an executor attaches after the failed switch");
+    let answered = tokio::time::timeout(Duration::from_secs(5), completion.wait())
+        .await
+        .expect("the admitted input is answered once an executor serves the session")
+        .expect("the admitted input completes");
+    assert!(
+        matches!(
+            answered,
+            CompletionOutcome::Completed(_) | CompletionOutcome::CompletedWithoutResult
+        ),
+        "the admitted input completes normally: {answered:?}"
+    );
+}
+
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_reports_registered_idle_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());

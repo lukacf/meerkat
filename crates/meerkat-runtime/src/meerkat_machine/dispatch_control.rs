@@ -2183,6 +2183,18 @@ impl MeerkatMachine {
                         }
                     };
                     drop(_mutation_guard.take());
+                    #[cfg(test)]
+                    {
+                        let hold = self
+                            .test_switch_turn_reconfigure_gap_hold
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take();
+                        if let Some((entered, release)) = hold {
+                            let _ = entered.send(());
+                            let _ = release.await;
+                        }
+                    }
                     let reconfigure_result =
                         Box::pin(self.execute_meerkat_machine_session_command(reconfigure)).await;
                     _mutation_guard = Some(

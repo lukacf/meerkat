@@ -11700,6 +11700,16 @@ pub struct MeerkatMachineShared {
             crate::tokio::sync::oneshot::Receiver<()>,
         )>,
     >,
+    /// Deterministic test gate in an until-changed switch-turn after it
+    /// released the session mutation gate for its reconfigure, before the
+    /// reconfigure runs. One-shot: the next switch-turn to get there takes it.
+    #[cfg(test)]
+    test_switch_turn_reconfigure_gap_hold: StdMutex<
+        Option<(
+            crate::tokio::sync::oneshot::Sender<()>,
+            crate::tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
     /// Deterministic test gate in a durable steer's live-boundary work after
     /// its wait for an earlier durable steer ended, before it retakes the
     /// session mutation gate. One-shot: the first waiter to get there takes it.
@@ -13715,6 +13725,8 @@ impl MeerkatMachine {
                 #[cfg(test)]
                 test_accepted_boundary_work_hold: StdMutex::new(None),
                 #[cfg(test)]
+                test_switch_turn_reconfigure_gap_hold: StdMutex::new(None),
+                #[cfg(test)]
                 test_durable_steer_relock_hold: StdMutex::new(None),
                 #[cfg(test)]
                 test_accepted_boundary_work_outcomes: StdMutex::new(None),
@@ -13976,6 +13988,8 @@ impl MeerkatMachine {
                 test_fenced_accept_after_lease: StdMutex::new(None),
                 #[cfg(test)]
                 test_accepted_boundary_work_hold: StdMutex::new(None),
+                #[cfg(test)]
+                test_switch_turn_reconfigure_gap_hold: StdMutex::new(None),
                 #[cfg(test)]
                 test_durable_steer_relock_hold: StdMutex::new(None),
                 #[cfg(test)]

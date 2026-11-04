@@ -979,6 +979,234 @@ async fn a_settling_commit_does_not_stall_other_runtimes_behind_a_cross_scope_re
         .expect("the listing answers after the settle");
 }
 
+// A commit call that hangs without failing counts as slow once it outlasts
+// the host's declared longest commit: from then on a cross-scope read queued
+// behind it stops holding back other runtimes' calls. Before that bound the
+// read keeps its place in the queue, so the stall is at most the bound.
+#[tokio::test(start_paused = true)]
+async fn a_commit_held_past_the_declared_latency_stops_holding_back_other_runtimes() {
+    let bound = Duration::from_secs(1);
+    let timing = FenceTiming::default()
+        .try_with_max_commit_latency(bound)
+        .unwrap();
+    let host = Arc::new(TestHost::with_timing(timing));
+    let (realm, store) = open(&host).await;
+    let store = Arc::new(store);
+    let healthy = LogicalRuntimeId::new("healthy");
+    store
+        .persist_input_state(
+            &healthy,
+            &persistable(StoredInputState::new_accepted(InputId::new())),
+        )
+        .await
+        .expect("the healthy runtime lands");
+
+    let held_open = Arc::new(tokio::sync::Notify::new());
+    *host.commit_gate.lock().unwrap() = Some(Arc::clone(&held_open));
+    let started = host.commits_started.load(Ordering::Acquire);
+    let held = {
+        let store = Arc::clone(&store);
+        tokio::spawn(async move {
+            store
+                .persist_input_state(
+                    &LogicalRuntimeId::new("held"),
+                    &persistable(StoredInputState::new_accepted(InputId::new())),
+                )
+                .await
+        })
+    };
+    while host.commits_started.load(Ordering::Acquire) == started {
+        tokio::task::yield_now().await;
+    }
+    let listing = {
+        let store = Arc::clone(&store);
+        tokio::spawn(async move { store.list_runtime_delivery_authorities().await })
+    };
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !listing.is_finished(),
+        "the listing waits for the held commit"
+    );
+
+    let asked = tokio::time::Instant::now();
+    let read =
+        tokio::time::timeout(Duration::from_secs(10), store.load_input_states(&healthy)).await;
+    assert!(
+        read.is_ok(),
+        "a read of another runtime waited behind the listing past the declared bound"
+    );
+    read.unwrap().expect("the healthy runtime reads");
+    let waited = asked.elapsed();
+    assert!(
+        waited <= bound + Duration::from_millis(100),
+        "held back for {waited:?}, past the declared {bound:?}"
+    );
+    assert_eq!(
+        *realm.slow_settles().borrow(),
+        1,
+        "the held commit counts as slow"
+    );
+    assert!(!held.is_finished(), "the commit is still held open");
+    assert!(
+        !listing.is_finished(),
+        "the listing never reads a batch whose outcome is unknown"
+    );
+
+    *host.commit_gate.lock().unwrap() = None;
+    held_open.notify_one();
+    held.await.unwrap().expect("the held batch lands");
+    listing
+        .await
+        .unwrap()
+        .expect("the listing answers after the held commit");
+    assert_eq!(*realm.slow_settles().borrow(), 0, "the settle ended");
+}
+
+// No starvation: under a steady stream of fast settles, none of them slow,
+// a cross-scope read keeps its place in the gate's queue and answers while
+// the stream runs, not after it. Every writer holds the gate across each of
+// its awaits, so a read that never queued would find no free moment until
+// the stream ends.
+#[tokio::test(start_paused = true)]
+async fn a_cross_scope_read_completes_under_a_steady_stream_of_fast_settles() {
+    const RUNTIMES: usize = 4;
+    const WRITES: usize = 50;
+    let host = Arc::new(TestHost::new());
+    let (realm, store) = open(&host).await;
+    let store = Arc::new(store);
+    let written = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stream: Vec<_> = (0..RUNTIMES)
+        .map(|index| {
+            let store = Arc::clone(&store);
+            let written = Arc::clone(&written);
+            tokio::spawn(async move {
+                let runtime = LogicalRuntimeId::new(format!("busy-{index}"));
+                for _ in 0..WRITES {
+                    store
+                        .persist_input_state(
+                            &runtime,
+                            &persistable(StoredInputState::new_accepted(InputId::new())),
+                        )
+                        .await
+                        .expect("a fast settle");
+                    written.fetch_add(1, Ordering::AcqRel);
+                }
+            })
+        })
+        .collect();
+    while written.load(Ordering::Acquire) < RUNTIMES {
+        tokio::task::yield_now().await;
+    }
+
+    store
+        .list_runtime_delivery_authorities()
+        .await
+        .expect("the listing answers");
+    let before = written.load(Ordering::Acquire);
+    assert!(
+        before < RUNTIMES * WRITES,
+        "the listing waited for the whole stream: {before} of {} writes came first",
+        RUNTIMES * WRITES
+    );
+    assert_eq!(*realm.slow_settles().borrow(), 0, "no settle was slow");
+    for writer in stream {
+        writer.await.unwrap();
+    }
+}
+
+// The slow-settle count rises while a settle retries and falls on every way
+// a settle ends: landed, refused (its scope poisoned), fenced out (the realm
+// poisoned) and cancelled (the call dropped mid-settle).
+#[tokio::test(start_paused = true)]
+async fn a_slow_settle_counts_until_it_ends_on_every_path() {
+    use meerkat_core::host_store::HostStore as _;
+
+    type Settle<'a> =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SpiError>> + 'a>>;
+
+    async fn realm_over(host: &Arc<TestHost>) -> Arc<SpiRealm> {
+        SpiRealm::open(Arc::clone(host) as _, SpiRealmConfig::default())
+            .await
+            .unwrap()
+    }
+
+    /// Run `commit` until its settle counts as slow.
+    async fn until_counted(realm: &SpiRealm, commit: &mut Settle<'_>) {
+        let mut slow = realm.slow_settles();
+        let counted = tokio::select! {
+            settled = commit => Err(settled),
+            counted = slow.wait_for(|count| *count == 1) => Ok(counted.is_ok()),
+        };
+        assert!(
+            matches!(counted, Ok(true)),
+            "the batch settled before it counted as slow: {counted:?}"
+        );
+    }
+
+    let id = ScopeId::new(TEST_FAMILY, "settle");
+    let delta = || ScopeDelta::Changes(vec![("pin".into(), Some(Arc::new(b"v".to_vec())))]);
+
+    // Landed on its second attempt.
+    let host = Arc::new(TestHost::new());
+    let realm = realm_over(&host).await;
+    host.faults.lock().unwrap().unavailable = 1;
+    let mut commit: Settle<'_> = Box::pin(commit_one(&realm, &id, delta()));
+    until_counted(&realm, &mut commit).await;
+    commit.await.expect("the batch lands on its second attempt");
+    assert_eq!(*realm.slow_settles().borrow(), 0, "landed");
+
+    // Refused on its second attempt: the scope is poisoned.
+    let host = Arc::new(TestHost::new());
+    let realm = realm_over(&host).await;
+    {
+        let mut faults = host.faults.lock().unwrap();
+        faults.unavailable = 1;
+        faults.conflict = 1;
+    }
+    let mut commit: Settle<'_> = Box::pin(commit_one(&realm, &id, delta()));
+    until_counted(&realm, &mut commit).await;
+    let refused = commit.await;
+    assert!(
+        matches!(
+            refused,
+            Err(SpiError::Host(HostStoreError::Conflict { .. }))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(*realm.slow_settles().borrow(), 0, "refused");
+
+    // Fenced out while it waits to retry: the realm is poisoned.
+    let host = Arc::new(TestHost::new());
+    let realm = realm_over(&host).await;
+    host.faults.lock().unwrap().unavailable = 1;
+    let mut commit: Settle<'_> = Box::pin(commit_one(&realm, &id, delta()));
+    until_counted(&realm, &mut commit).await;
+    host.acquire_fence(AcquireMode::Takeover)
+        .await
+        .expect("another writer takes the fence");
+    let fenced = commit.await;
+    assert!(
+        matches!(fenced, Err(SpiError::RealmPoisoned(_))),
+        "{fenced:?}"
+    );
+    assert_eq!(*realm.slow_settles().borrow(), 0, "fenced out");
+
+    // Cancelled: the call is dropped mid-settle.
+    let host = Arc::new(TestHost::new());
+    let realm = realm_over(&host).await;
+    host.faults.lock().unwrap().unavailable = u32::MAX;
+    let mut commit: Settle<'_> = Box::pin(commit_one(&realm, &id, delta()));
+    until_counted(&realm, &mut commit).await;
+    drop(commit);
+    assert_eq!(
+        *realm.slow_settles().borrow(),
+        0,
+        "a settle dropped mid-way counts no more"
+    );
+}
+
 // Unrun until the candidate's validation.
 #[tokio::test]
 async fn a_host_declared_self_fence_margin_bounds_the_write_window() {

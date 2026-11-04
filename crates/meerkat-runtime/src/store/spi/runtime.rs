@@ -5,7 +5,9 @@
 //! ([`InMemoryRuntimeStore`], WholeBlobV1) under the locks of the scopes
 //! its arguments name, inside a change capture ([`journal::capture`]):
 //!
-//! 1. take the realm gate shared (cross-scope reads take it exclusive);
+//! 1. take the realm gate shared (cross-scope reads take it exclusive,
+//!    waiting outside its queue while a commit settles slowly, see
+//!    `SpiRuntimeStore::exclusive_gate`);
 //! 2. a mutation checks the self-fence first ([`SpiRealm::ensure_lease`]),
 //!    so a writer past its window changes nothing;
 //! 3. lock the named scopes in order, refuse poisoned ones, and load a body
@@ -77,6 +79,10 @@ use crate::store::{
     RuntimeStoreWriteFence, SerializedSessionSnapshot, WholeBlobProvisionalTailAuthority,
     WholeBlobSnapshotCasOutcome, WholeBlobStoreAuthority,
 };
+
+/// How often a cross-scope read waiting outside the gate's queue for a slow
+/// settle tries the gate again ([`SpiRuntimeStore::exclusive_gate`]).
+const SLOW_SETTLE_RETRY: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// One runtime: a session scope. Its head pins the catalog entry, the
 /// machine lifecycle, the delivery authority and the boot facts; its rows
@@ -650,6 +656,51 @@ impl SpiRuntimeStore {
         result
     }
 
+    /// Take the gate exclusive for a cross-scope read without holding back
+    /// every other call behind a slow settle.
+    ///
+    /// The gate is a first-in-first-out lock: an exclusive waiter in its
+    /// queue lets no new shared holder in, and a call holds the gate shared
+    /// until its batch settles, for as long as the commit retry budget. So
+    /// the read takes the gate at once when it is free. While no commit
+    /// settles slowly ([`SpiRealm::slow_settles`]) it queues as before, and
+    /// leaves the queue if one turns slow meanwhile. While one does, it waits
+    /// outside the queue and tries again whenever the count changes, and
+    /// every [`SLOW_SETTLE_RETRY`], since a slow settle of another adapter
+    /// on the realm does not hold this gate. The read still runs only with
+    /// the gate exclusive: no call is between its change of memory and its
+    /// settle, so it never reads a batch whose outcome is unknown.
+    async fn exclusive_gate(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
+        let mut slow = self.realm.slow_settles();
+        loop {
+            if let Ok(gate) = self.gate.try_write() {
+                return gate;
+            }
+            if *slow.borrow_and_update() == 0 {
+                tokio::select! {
+                    biased;
+                    gate = self.gate.write() => return gate,
+                    // A settle turned slow: leave the queue. The watch's
+                    // guard stays inside this future (it is not `Send`).
+                    gone = async { slow.wait_for(|count| *count > 0).await.is_err() } => {
+                        if gone {
+                            return self.gate.write().await;
+                        }
+                    }
+                }
+            } else {
+                tokio::select! {
+                    changed = slow.changed() => {
+                        if changed.is_err() {
+                            return self.gate.write().await;
+                        }
+                    }
+                    () = tokio::time::sleep(SLOW_SETTLE_RETRY) => {}
+                }
+            }
+        }
+    }
+
     /// A cross-scope read: exclusive gate (no commit in flight), and
     /// refused while any scope is poisoned.
     async fn cross_scope_read<T, F>(&self, op: F) -> Result<T, RuntimeStoreError>
@@ -657,7 +708,7 @@ impl SpiRuntimeStore {
         F: std::future::Future<Output = Result<T, RuntimeStoreError>> + Send,
         T: Send,
     {
-        let _gate = self.gate.write().await;
+        let _gate = self.exclusive_gate().await;
         self.realm
             .check_cross_scope_read()
             .map_err(SpiError::into_read)?;
@@ -2155,7 +2206,7 @@ impl RuntimeStore for SpiRuntimeStore {
     }
 
     async fn list_mob_host_bindings(&self) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
-        let _gate = self.gate.write().await;
+        let _gate = self.exclusive_gate().await;
         self.realm
             .check_cross_scope_read()
             .map_err(SpiError::into_read)?;
@@ -2258,7 +2309,7 @@ impl RuntimeStore for SpiRuntimeStore {
     }
 
     async fn list_mob_host_revocations(&self) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
-        let _gate = self.gate.write().await;
+        let _gate = self.exclusive_gate().await;
         self.realm
             .check_cross_scope_read()
             .map_err(SpiError::into_read)?;

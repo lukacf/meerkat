@@ -293,6 +293,14 @@ later calls on the scopes it holds wait for those scopes, and a run waits
 for its round commit, since the runtime store over a host store declares no
 commit outcome deadline (`RuntimeStore::commit_outcome_deadline` is `None`).
 
+Core also uses the longest commit to tell a slow commit: one that met an
+unknown or unavailable answer, or whose first call has run longer than the
+longest commit, until it settles. A read of the runtime store across
+sessions (a listing, the delivery total) waits until no commit it could see
+is in flight, so it never reads a batch that has not settled. While a commit
+settles slowly, such a read waits without holding back the other sessions'
+calls.
+
 ### Core's Writer Rules
 
 The store relies on Core keeping these rules:

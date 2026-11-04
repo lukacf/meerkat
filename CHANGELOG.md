@@ -375,6 +375,21 @@ them.
   poisoning of the scopes of a batch that does not settle are unchanged.
   Affects 0.9.5 through 0.9.9.
 
+- `meerkat-runtime`: one host store commit that settles slowly no longer
+  stalls every session's runtime store calls. A runtime store call holds the
+  store until its batch settles, and a batch that meets `Unavailable` or
+  `Indeterminate` is retried for up to `SpiRealmConfig::commit_retry_budget`
+  (30 s by default). A read across sessions (a listing, or the delivery total
+  a host's delivery driver reads every second) waits until no batch is in
+  flight, and it queued in arrival order with every other call: once it
+  waited, every later call of every session waited behind it until the slow
+  batch settled. Such a read now waits outside that queue while a commit
+  settles slowly (from its first unknown or unavailable answer, or once its
+  first call outlasts the host's declared `FenceTiming::max_commit_latency`)
+  and queues as before otherwise, so the other sessions keep working and the
+  read still never sees a batch whose outcome is unknown. Affects 0.9.5
+  through 0.9.9.
+
 ### Known limitations
 
 - Meerkat Connect: its provider setup and first-target setup read a

@@ -15,7 +15,9 @@
 //! no other call observes a scope's state before the host acknowledged it.
 //! Adapters add a realm gate on top (shared for single-scope calls,
 //! exclusive for cross-scope reads); the realm itself never serializes two
-//! scopes' commits.
+//! scopes' commits. A commit that settles slowly counts in
+//! [`SpiRealm::slow_settles`] while it does, so an exclusive waiter can step
+//! out of such a gate's queue instead of holding back every later call.
 //!
 //! # Fencing
 //!
@@ -575,6 +577,8 @@ pub struct SpiRealm {
     /// Commits hold it shared; a re-acquire holds it exclusive, so no batch
     /// carrying the old token is in flight when the token changes.
     fence_gate: tokio::sync::RwLock<()>,
+    /// How many commits settle slowly now ([`Self::slow_settles`]).
+    slow_settles: tokio::sync::watch::Sender<usize>,
     /// Serializes re-acquires.
     renew_gate: Mutex<()>,
     /// The re-acquire [`Self::ensure_lease`] runs on a task of its own, while
@@ -743,6 +747,25 @@ pub(crate) fn commit_retry_pause(commit_id: &CommitId, attempt: u32) -> Duration
     Duration::from_millis(schedule.saturating_add(share).min(longest))
 }
 
+/// One commit counted in [`SpiRealm::slow_settles`] for as long as it lives.
+/// It is a local of the settle's own future, so the count falls on every way
+/// a settle ends: landed, refused (the caller poisons), fenced out, past its
+/// retry budget, or dropped mid-settle (a cancelled call).
+struct SlowSettle<'a>(&'a tokio::sync::watch::Sender<usize>);
+
+impl<'a> SlowSettle<'a> {
+    fn count(slow_settles: &'a tokio::sync::watch::Sender<usize>) -> Self {
+        slow_settles.send_modify(|count| *count = count.saturating_add(1));
+        Self(slow_settles)
+    }
+}
+
+impl Drop for SlowSettle<'_> {
+    fn drop(&mut self) {
+        self.0.send_modify(|count| *count = count.saturating_sub(1));
+    }
+}
+
 /// The re-acquire in flight, shared by every caller that waits on it.
 type SharedReacquire =
     futures::future::Shared<futures::future::BoxFuture<'static, Result<(), SpiError>>>;
@@ -810,6 +833,7 @@ impl SpiRealm {
             lease_start: StdMutex::new(started),
             stopped: AtomicBool::new(false),
             fence_gate: tokio::sync::RwLock::new(()),
+            slow_settles: tokio::sync::watch::Sender::new(0),
             renew_gate: Mutex::new(()),
             reacquire_in_flight: StdMutex::new(None),
             known_heads: StdMutex::new(HashMap::new()),
@@ -910,6 +934,19 @@ impl SpiRealm {
             ));
         }
         Ok(())
+    }
+
+    /// How many commits settle slowly now, as a watch. A commit counts from
+    /// its first retryable answer (`Unavailable`, or `Indeterminate` before
+    /// its head is read), or from the moment its first host call outlasts the
+    /// host's declared longest commit ([`FenceTiming::max_commit_latency`]),
+    /// until its settle ends, however it ends. An adapter whose calls hold a
+    /// gate until their commits settle waits outside that gate's queue while
+    /// one counts, so one slow settle does not hold back every other call
+    /// behind a queued exclusive waiter.
+    #[must_use]
+    pub(crate) fn slow_settles(&self) -> tokio::sync::watch::Receiver<usize> {
+        self.slow_settles.subscribe()
     }
 
     /// Refuse a call on a poisoned scope (or realm).
@@ -1933,20 +1970,42 @@ impl SpiRealm {
     /// Commit `batch`, settling an unknown or unavailable outcome by
     /// retrying the same batch (same commit id) and by reading the first
     /// scope's head, within the retry budget, pausing before each retry as
-    /// [`commit_retry_pause`] says.
+    /// [`commit_retry_pause`] says. From its first retryable answer, or once
+    /// its first call outlasts the host's declared longest commit, the
+    /// settle counts in [`Self::slow_settles`] until it ends.
     async fn commit_settled(&self, batch: &CommitBatch) -> Result<(), SpiError> {
         let deadline = Instant::now() + self.config.commit_retry_budget;
+        // A local of this future: it drops on every return below, and with
+        // the future when the caller drops the settle mid-way.
+        let mut slow: Option<SlowSettle<'_>> = None;
         let mut attempt: u32 = 0;
         loop {
-            let error = match self.host.commit(batch).await {
+            let mut call = self.host.commit(batch);
+            let answer = if slow.is_some() {
+                call.await
+            } else {
+                tokio::select! {
+                    biased;
+                    answer = &mut call => answer,
+                    () = tokio::time::sleep(self.timing.max_commit_latency()) => {
+                        slow = Some(SlowSettle::count(&self.slow_settles));
+                        call.await
+                    }
+                }
+            };
+            let error = match answer {
                 Ok(()) => return Ok(()),
                 Err(HostStoreError::Indeterminate(detail)) => {
+                    slow.get_or_insert_with(|| SlowSettle::count(&self.slow_settles));
                     if self.landed(batch).await {
                         return Ok(());
                     }
                     HostStoreError::Indeterminate(detail)
                 }
-                Err(HostStoreError::Unavailable(detail)) => HostStoreError::Unavailable(detail),
+                Err(HostStoreError::Unavailable(detail)) => {
+                    slow.get_or_insert_with(|| SlowSettle::count(&self.slow_settles));
+                    HostStoreError::Unavailable(detail)
+                }
                 Err(other) => return Err(SpiError::Host(other)),
             };
             attempt = attempt.saturating_add(1);

@@ -1822,7 +1822,6 @@ mod tests {
                 SpawnContinuityIntent::Ephemeral,
                 Some(named),
             ))
-            .own_identity_label
         };
         let reserved = crate::ids::member_id_for_name("mk--reserved").into_owned();
         assert_eq!(reserved, "mk--mk--reserved");

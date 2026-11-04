@@ -498,6 +498,13 @@ impl SessionBridge for ObservedBridge {
         self.inner.seat_dormant_members(requests).await
     }
 
+    async fn apply_declared_roster(
+        &self,
+        roster: DeclaredRosterRequest,
+    ) -> Result<DeclaredRosterAnswer, BridgeError> {
+        self.inner.apply_declared_roster(roster).await
+    }
+
     async fn rotate_member(
         &self,
         identity: &AgentIdentity,

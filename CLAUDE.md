@@ -131,7 +131,20 @@ a crate without them fails to compile in this repository: its `lib.rs`
 canary, armed by `.cargo/config.toml` [env], stops the build with the exact
 command to run (`cargo test -p NAME --features ...`). Only code generation
 trips it, so `cargo check`, clippy and an editor's check run are unaffected,
-and the published packages build without that configuration.
+and the published packages build without that configuration. The canary sits
+in the crate's lib test: a run narrowed to an integration target
+(`--test TARGET`) builds no lib test, so nothing stops it, and without the
+flags it compiles the tests they gate out without a word. Pass the same
+flags there:
+`./scripts/repo-cargo nextest run $(node scripts/core-workspace-args.mjs --tests -p NAME) --test TARGET`.
+
+**rust-analyzer: set `rust-analyzer.cargo.features` to `"all"`.** Without
+features its analysis treats the code the test features gate (the
+`workspace-tests` test modules, for one) as inactive: no completion and no
+diagnostics there, and its Run test lens builds without the flags and stops
+on the canary. A package-qualified list (`meerkat-mob/test-support`, ...)
+does not work: Cargo refuses a feature of a package the command does not
+select, and rust-analyzer's runnables select one package (`--package NAME`).
 
 **The workspace also holds Meerkat Meta (`meta/`) and Meerkat Connect
 (`connect/`).** Cargo unifies features across the packages of one invocation,

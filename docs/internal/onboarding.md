@@ -101,6 +101,18 @@ the crate's test features, which
 ./scripts/repo-cargo test $(node scripts/core-workspace-args.mjs --tests -p meerkat-core) session
 ```
 
+Pass the same flags to a run narrowed to one integration target
+(`--test <target>`): it builds no lib test, so the crate's test-feature check
+does not stop it, and without them it compiles the gated tests out without a
+word.
+
+For rust-analyzer, set `rust-analyzer.cargo.features` to `"all"` (in VS Code,
+the `rust-analyzer.cargo.features` setting). Without features it treats the
+code the test features gate, such as the `workspace-tests` test modules, as
+inactive, and its Run test lens stops on the test-feature check. A
+package-qualified list does not work: Cargo refuses a feature of a package the
+command does not select, and rust-analyzer's runnables select one package.
+
 Avoid raw `cargo` and raw `bb` for normal repository work. The wrapper keeps
 multi-worktree and multi-agent build outputs isolated. In one checkout, give
 each concurrent agent a distinct `RUST_LANE_ID` when stable warm output roots

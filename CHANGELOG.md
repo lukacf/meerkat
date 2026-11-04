@@ -611,6 +611,71 @@ them.
 
 ### Known limitations
 
+- `meerkat-rpc`, `meerkat-runtime`: scoped tool grants are for sessions
+  only. `tool_grants/grant`, `tool_grants/list` and `tool_grants/audit`
+  refuse an `identity` subject as capability unavailable ("this server
+  grants tools to sessions only: identity subjects are unsupported"), so a
+  grant cannot name a mob member's durable identity. Grant to the member's
+  current session instead. The grant names that one session, so a member
+  that moves to a new session (after a reset, for example) needs a new
+  grant.
+
+- `meerkat-runtime`, `meerkat-rpc`: a scoped tool grant is issued directly,
+  with `tool_grants/grant`, for a time window only. No approval flow carries
+  a grant (the `requested` and `declined` grant statuses are not produced in
+  this release), and no grant is scoped to a turn or a run. A host that
+  wants a human to approve a grant decides first and then issues it. For a
+  grant that should end with a run, give it a short `duration_ms` and revoke
+  it with `tool_grants/revoke` when the run ends.
+
+- `meerkat-runtime`, `meerkat-rpc`: a grant gate (`grant_gated_tools`) names
+  built-in tool families and individual tool names only. There is no gate
+  for a whole MCP server: each of a server's tools is gated by name. A gated
+  name that no tool source of the session provides when the session is
+  built fails the build (`tool_grant_gate_refused`), so a tool of a server
+  added after the build cannot be gated in that session.
+
+- `meerkat-mob`: store-owned identity changes
+  (`MobHandle::create_store_owned_identities`,
+  `update_store_owned_identity`, `archive_identity`, `unarchive_identity`
+  and `remove_identity`) and the declared-roster apply
+  (`MobHandle::apply_declared_roster`) are Rust APIs only. No JSON-RPC, REST
+  or MCP method and no Core SDK method carries them, and no agent tool
+  creates a durable identity: a host calls them on its own `MobHandle`.
+
+- `meerkat-mob`: legacy adoption compares a member's `agent_identity` label
+  with the member id, but the label holds the identity's name. A legacy
+  member that carries only that label, and no durable-identity continuity
+  marker, is therefore not adopted when its member id is an escaped form of
+  the name (a name that contains `:`, for example):
+  `MobHandle::adopt_legacy_identity_entry` answers
+  `LegacyIdentityEntryAdoption::NameHeldByWorker`, and the declared-roster
+  apply (`MobHandle::apply_declared_roster`) refuses the identity with
+  `DeclaredEntryRefusal::NameHeldByWorker`. A legacy member that carries the
+  durable-identity continuity marker is adopted through it as before. Meta
+  calls neither method, so Meta hosts that do not call them directly are not
+  affected. A later release fixes the comparison.
+
+- `meerkat-mob`: a role change or a rotation that finishes while its mob is
+  stopped seats the member's new incarnation without the edges the mob
+  definition declares for it (`auto_wire_orchestrator`, `role_wiring`), and
+  the mob logs "the declared edges of newly seated members are not wired:
+  the mob is not running". Starting the mob does not add those edges. Wire
+  the member to its declared peers with `mob/wire` (`MobHandle::wire`) once
+  the mob is running, or rotate the member again while the mob is running,
+  which wires its new incarnation to them.
+
+- `meerkat-core`, `meerkat-session`, `meerkat-mob`: operator instructions
+  are a Rust host API only (`SessionServiceInstructionExt`,
+  `MobHandle::set_operator_instruction`, `revoke_operator_instruction` and
+  `operator_instruction_status`). No JSON-RPC, REST or MCP method and no SDK
+  method sets, revokes or reads them; history reads only carry each entry's
+  identity (`WireInstructionEntryIdentity`). A placed member is reported
+  blocked (`member_host_unsupported`), and operator instructions do not
+  reach a live channel. Instruction activations
+  (`session/activate_instruction`) are a separate mechanism and do not set
+  operator instructions.
+
 - Meerkat Connect: its provider setup and first-target setup read a
   realm's explicit tables only, so they do not yet list the routes a
   `[realm.<realm>.copilot]` section declares (see Added), and a realm whose

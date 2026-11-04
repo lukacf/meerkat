@@ -121,6 +121,35 @@ each package is accepted only on evidence for that exact package, and the
   unreadable store refuses the build at once, and a refused build starts
   nothing.
 
+### Known limitations
+
+- Meta's roster pass still decides the lifecycle of the identities a host
+  declares: which are seated, and which are retired when the roster no
+  longer lists them. It does not use Core's declared-roster apply
+  (`MobHandle::apply_declared_roster`) yet, so the verdicts and role-change
+  holds Core's 0.9.9 notes describe for that apply do not govern a Meta
+  host's declared identities.
+
+- Agents and Console users cannot create durable identities through Meta
+  yet. The identity policy a launch takes
+  (`runtime_options.identity_creation`, or
+  `GatewayHostComposition::identity_creation_policy` for a native host) is
+  validated at launch but not enforced: no executor, decision ingress, host
+  RPC method, agent tool or Meta SDK method carries an identity request, and
+  the Console has no form that creates a durable agent. Durable identities
+  still come from the host's roster declarations.
+
+- Meta has no host verbs and no SDK methods for operator instructions. A
+  native host sets, revokes and reads them with Core's Rust API on the mob
+  handle (`UnifiedRuntime::mob_handle`, then
+  `MobHandle::set_operator_instruction`, `revoke_operator_instruction` and
+  `operator_instruction_status`); a host that reaches Meta only over RPC or
+  an SDK cannot set them.
+
+- Meta builds its members with no tool grant gate and has no grant methods,
+  so scoped tool grants do not apply to Meta members: nothing in Meta's RPC,
+  the Console or the Meta SDKs issues, lists or revokes a grant.
+
 ## [0.9.9] - 2026-11-03
 
 ### Breaking

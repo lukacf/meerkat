@@ -14532,6 +14532,159 @@ async fn until_changed_switch_turn_failure_after_a_stop_in_its_gap_keeps_the_sto
     assert_eq!(snapshot.control.phase, RuntimeState::Stopped);
 }
 
+/// A reconfigure host for the until-changed rows below: the session starts on
+/// `baseline`, and every reconfigure resolves `persistent-target`.
+fn until_changed_reconfigure_host(fail_persist: bool) -> Arc<TestLlmReconfigureHost> {
+    let identity = |model: &str| meerkat_core::SessionLlmIdentity {
+        model: model.to_string(),
+        provider: meerkat_core::Provider::OpenAI,
+        self_hosted_server_id: None,
+        provider_params: None,
+        auth_binding: None,
+    };
+    Arc::new(TestLlmReconfigureHost {
+        current_identity: Arc::new(std::sync::Mutex::new(identity("baseline"))),
+        current_visibility_state: Arc::new(std::sync::Mutex::new(Default::default())),
+        target_identity: identity("persistent-target"),
+        current_capability_surface: Some(test_llm_capability_surface(true)),
+        target_capability_surface: test_llm_capability_surface(true),
+        base_tool_names: BTreeSet::new(),
+        fail_persist,
+    })
+}
+
+/// An until-changed switch-turn onto `persistent-target` that needs no
+/// approval.
+fn until_changed_switch_request(n: u128) -> SwitchTurnRequest {
+    SwitchTurnRequest {
+        request_id: meerkat_core::image_generation::SwitchTurnRequestId::new(uuid(n)),
+        intent: meerkat_core::image_generation::SwitchTurnIntent {
+            target_model: model("persistent-target"),
+            duration: meerkat_core::image_generation::SwitchTurnDuration::UntilChanged,
+            origin: meerkat_core::image_generation::SwitchTurnOrigin::SystemPolicy {
+                reason: meerkat_core::image_generation::SwitchTurnPolicyReason::SafetyHandoff,
+            },
+        },
+        target_realtime: realtime_policy(true),
+        approval: ModelRoutingApprovalDisposition::NotRequired,
+        approval_reason: None,
+    }
+}
+
+/// One until-changed switch-turn is pending at a time. A second request that
+/// arrives while the first is in its reconfigure gap is refused with the
+/// scoped-override conflict a finite switch meets, and the first completes:
+/// its reconfigure applies, it sets the baseline and it is recorded as
+/// applied. Before, the second request replaced the first's pending switch,
+/// so the first's completion was refused after its reconfigure had applied.
+#[tokio::test]
+async fn until_changed_switch_turn_refuses_a_second_request_while_one_is_pending() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(until_changed_reconfigure_host(false));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *adapter
+        .test_switch_turn_reconfigure_gap_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, release_rx));
+
+    let first_key = uuid(605).to_string();
+    let first_switch = {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+                &adapter,
+                &session_id,
+                until_changed_switch_request(605),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("the first switch-turn reaches its reconfigure gap")
+        .expect("the gap hold reports its entry");
+
+    // In the gap a second until-changed request arrives.
+    let second_key = uuid(606).to_string();
+    let second_result = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        until_changed_switch_request(606),
+    )
+    .await
+    .expect("the second switch-turn is answered");
+    assert!(
+        matches!(
+            second_result,
+            meerkat_core::image_generation::SwitchTurnControlResult::Denied {
+                reason:
+                    meerkat_core::image_generation::SwitchTurnDenialReason::ScopedOverrideConflict,
+                ..
+            }
+        ),
+        "a second until-changed request is refused while one is pending: {second_result:?}"
+    );
+    let staged = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state in the gap");
+    assert_eq!(
+        staged.model_routing_pending_switch_request_id,
+        Some(first_key.clone()),
+        "the first request stays the pending switch"
+    );
+
+    release_tx.send(()).expect("release the first reconfigure");
+    let first_result = tokio::time::timeout(Duration::from_secs(5), first_switch)
+        .await
+        .expect("the first switch-turn settles")
+        .expect("the first switch-turn task does not panic")
+        .expect("the first switch-turn applies after the second is refused");
+    assert!(
+        matches!(
+            first_result,
+            meerkat_core::image_generation::SwitchTurnControlResult::Applied { .. }
+        ),
+        "the first switch-turn applies: {first_result:?}"
+    );
+    let after = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the switch");
+    assert_eq!(after.model_routing_pending_switch_request_id, None);
+    assert_eq!(
+        after.model_routing_switch_terminal.get(&first_key).copied(),
+        Some(mm_dsl::RoutingSwitchTurnTerminal::PersistentReconfigureApplied)
+    );
+    assert_eq!(
+        after
+            .model_routing_switch_terminal
+            .get(&second_key)
+            .copied(),
+        Some(mm_dsl::RoutingSwitchTurnTerminal::Denied)
+    );
+    assert_eq!(
+        after.model_routing_baseline_model.as_deref(),
+        Some("persistent-target")
+    );
+}
+
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_reports_registered_idle_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());

@@ -2200,6 +2200,18 @@ impl MeerkatMachine {
                     }
                     let reconfigure_result =
                         Box::pin(self.execute_meerkat_machine_session_command(reconfigure)).await;
+                    #[cfg(test)]
+                    {
+                        let hold = self
+                            .test_switch_turn_post_reconfigure_hold
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take();
+                        if let Some((entered, release)) = hold {
+                            let _ = entered.send(());
+                            let _ = release.await;
+                        }
+                    }
                     let relocked = self
                         .lock_current_control_durability_ready_session_mutation_gate(session_id)
                         .await;

@@ -14685,6 +14685,111 @@ async fn until_changed_switch_turn_refuses_a_second_request_while_one_is_pending
     );
 }
 
+/// A stop can land after an until-changed switch-turn's reconfigure applied
+/// and before the switch-turn takes the session mutation gate again. The
+/// switch still completes: the baseline follows the reconfigured model, the
+/// request is recorded as applied and leaves no pending switch, and the stop
+/// stands. Before, the stopped session refused the baseline and the
+/// completion, so the caller got an error after its reconfigure had applied
+/// and the pending switch stayed.
+#[tokio::test]
+async fn until_changed_switch_turn_completes_after_a_stop_that_follows_its_reconfigure() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(until_changed_reconfigure_host(false));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *adapter
+        .test_switch_turn_post_reconfigure_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, release_rx));
+
+    let request_key = uuid(607).to_string();
+    let switch_turn = {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+                &adapter,
+                &session_id,
+                until_changed_switch_request(607),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("the switch-turn's reconfigure returns")
+        .expect("the post-reconfigure hold reports its entry");
+
+    // The reconfigure has applied. Before the switch-turn takes the gate
+    // again, the session is stopped.
+    adapter
+        .stop_runtime_executor(&session_id, "stop after the switch-turn reconfigure")
+        .await
+        .expect("stop the session while the switch-turn holds no gate");
+    let stopped = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the stop");
+    assert_eq!(stopped.lifecycle_phase, mm_dsl::MeerkatPhase::Stopped);
+    assert_eq!(
+        stopped.model_routing_pending_switch_request_id,
+        Some(request_key.clone()),
+        "the stop leaves the staged request to its switch-turn"
+    );
+
+    release_tx.send(()).expect("release the switch-turn");
+    let switch_result = tokio::time::timeout(Duration::from_secs(5), switch_turn)
+        .await
+        .expect("the switch-turn settles")
+        .expect("the switch-turn task does not panic")
+        .expect("the switch-turn completes on the stopped session");
+    assert!(
+        matches!(
+            switch_result,
+            meerkat_core::image_generation::SwitchTurnControlResult::Applied { .. }
+        ),
+        "the switch-turn applies: {switch_result:?}"
+    );
+    let after = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the switch");
+    assert_eq!(after.model_routing_pending_switch_request_id, None);
+    assert_eq!(after.model_routing_pending_switch_phase, None);
+    assert_eq!(
+        after
+            .model_routing_switch_terminal
+            .get(&request_key)
+            .copied(),
+        Some(mm_dsl::RoutingSwitchTurnTerminal::PersistentReconfigureApplied)
+    );
+    assert_eq!(
+        after.model_routing_baseline_model.as_deref(),
+        Some("persistent-target"),
+        "the baseline follows the reconfigured model"
+    );
+    assert_eq!(
+        after.lifecycle_phase,
+        mm_dsl::MeerkatPhase::Stopped,
+        "the stop stands"
+    );
+}
+
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_reports_registered_idle_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());

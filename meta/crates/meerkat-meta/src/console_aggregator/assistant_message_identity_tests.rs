@@ -2418,20 +2418,22 @@ impl SeatedMembers {
     }
 }
 
-/// A member whose status reads go unanswered and whose event subscription is
-/// refused (as when its session's store scope was refused and its session
-/// actor is gone) is not read again on other members' changes. The re-drive
-/// armed for it used to wake on every change of the mob, and an answered
-/// status read of another member is one, so 100 status reads of an idle peer
-/// made about 100 status reads of the refused member: the loop behind a
-/// status-read storm.
+/// A member whose event subscription is refused (as when its session's store
+/// scope was refused and its session actor is gone) while its status still
+/// reads a run open is not read again on other members' changes. The
+/// re-drive armed for it used to wake on every change of the mob, and an
+/// answered status read of another member is one, so 100 status reads of an
+/// idle peer made a status read of the refused member each: the loop behind
+/// a status-read storm. (A run-open read re-drives a session boundary, which
+/// a pass still in flight for the session keeps for after it, so the base's
+/// loop does not stop at the first overlap.)
 #[tokio::test]
 async fn a_refused_member_is_not_reread_on_other_members_changes() -> ConsoleLogResult<()> {
     let fixture = SeatedMembers::seat(&["agent-refused", "agent-peer"]).await?;
     let (refused, _, refused_session) = &fixture.members[0];
     let (peer, _, _) = &fixture.members[1];
     let handle = fixture.runtime.mob_handle();
-    assistant_history_refresh::core_status_reads::leave_unanswered(refused_session);
+    assistant_history_refresh::core_status_reads::answer_run_open(refused_session);
     fixture
         .service
         .refuse_session_events(&meerkat_core::SessionId::parse(refused_session)?);
@@ -2447,9 +2449,9 @@ async fn a_refused_member_is_not_reread_on_other_members_changes() -> ConsoleLog
         false,
     )
     .await?;
-    assert_eq!(
-        reads(),
-        1,
+    let recovery_reads = reads();
+    assert!(
+        recovery_reads >= 1,
         "the recovery pass read the refused member's status"
     );
     assert_eq!(
@@ -2500,9 +2502,9 @@ async fn a_refused_member_is_not_reread_on_other_members_changes() -> ConsoleLog
     );
     let reads = reads();
     assert!(
-        reads <= 2,
-        "the refused member's status was read {reads} times while only its peer changed \
-         the mob ({published} changes)"
+        reads <= recovery_reads + 1,
+        "the refused member's status was read {reads} times ({recovery_reads} by the \
+         recovery pass) while only its peer changed the mob ({published} changes)"
     );
     handle.stop().await?;
     Ok(())
@@ -2520,7 +2522,6 @@ async fn a_status_unknown_member_is_reread_only_after_its_backoff() -> ConsoleLo
     assistant_history_refresh::core_status_reads::leave_unanswered(unknown_session);
     let reads = || assistant_history_refresh::core_status_reads::count(unknown_session);
 
-    let mut read_at = vec![tokio::time::Instant::now()];
     backfill_one_session_history(
         fixture.aggregator.inner.clone(),
         fixture.recovery_target(0),
@@ -2529,31 +2530,30 @@ async fn a_status_unknown_member_is_reread_only_after_its_backoff() -> ConsoleLo
     .await?;
     assert_eq!(reads(), 1, "the recovery pass read the member's status");
 
-    // Other members keep changing the mob; record when the member's status is
-    // read again, until it was read three times or 10 s passed.
+    // Other members keep changing the mob until the member's status was read
+    // three times or 10 s passed. The waits are taken between the instants
+    // the reads themselves recorded.
     let handle = fixture.runtime.mob_handle();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while read_at.len() < 3 && tokio::time::Instant::now() < deadline {
+    while reads() < 3 && tokio::time::Instant::now() < deadline {
         handle.member_status(peer).await?;
         tokio::time::sleep(Duration::from_millis(10)).await;
-        while read_at.len() < reads().min(3) {
-            read_at.push(tokio::time::Instant::now());
-        }
     }
+    let read_at = assistant_history_refresh::core_status_reads::instants(unknown_session);
     assert!(
         read_at.len() >= 2,
         "the member's status was read again within 10 s"
     );
     let first_wait = read_at[1] - read_at[0];
     assert!(
-        first_wait >= Duration::from_millis(900),
+        first_wait >= Duration::from_secs(1),
         "the member's status was read again {first_wait:?} after a read that did not \
          answer; the first wait is 1 s"
     );
-    assert_eq!(read_at.len(), 3, "and a third time within 10 s");
+    assert!(read_at.len() >= 3, "and a third time within 10 s");
     let second_wait = read_at[2] - read_at[1];
     assert!(
-        second_wait >= Duration::from_millis(1900),
+        second_wait >= Duration::from_secs(2),
         "the member's status was read a third time {second_wait:?} after the second \
          unanswered read; the wait doubles to 2 s"
     );

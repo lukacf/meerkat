@@ -162,8 +162,11 @@ prebuild_e2e_system_other_tests() {
     -p meerkat-integration-tests \
     --test system_shared_realm \
     --no-run
+  # meerkat-rpc's test features, as the nested suite command passes them
+  # (PACKAGE_TEST_FEATURES in tests/integration/src/e2e_lanes.rs).
   "${cargo_bin}" test \
     -p meerkat-rpc \
+    --features workspace-tests \
     --test realm_mcp_original_session \
     --no-run
 }

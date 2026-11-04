@@ -59,15 +59,26 @@ fn assert_no_restored_sources(
     assert!(c.member.session().is_err());
 }
 
-/// Neither A's nor P's member was woken: a stopped, refused or unselected
-/// recovery step reaches no wake. Every read here is a registry observation.
+/// Neither A's, P's nor G's member was woken: a stopped, refused or
+/// unselected recovery step reaches no wake. Every read here is a registry
+/// observation. The controls that use it reopen with G left Dormant, so an
+/// unwanted wake of the lead shows here too.
 async fn assert_unwoken(c: &PersistentDedicated) {
-    for session in [&c.f.session, &c.parent_session] {
+    for session in [&c.f.session, &c.parent_session, &c.lead_session] {
         assert!(
             super::idle_restore_tests::dormant(c, session).await,
             "no recovery step woke {session}"
         );
     }
+}
+
+/// The controls' reopen: every member stays Dormant, G included (its pin
+/// step is skipped), so a control can prove its step wakes no one.
+async fn reopen_all_dormant(saved: &super::waiter_restore_tests::Saved) -> PersistentDedicated {
+    use crate::private_originals::governed_submit::tests::first_input_tests::dedicated::LEAVE_LEAD_DORMANT;
+    LEAVE_LEAD_DORMANT
+        .scope((), PersistentDedicated::reopen(saved.durable.clone()))
+        .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -162,8 +173,12 @@ async fn canonical_interest_pages_restore_once_and_replays_keep_publication_curr
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn canonical_interest_step_rereads_selection_and_cancelled_evidence_before_promotion() {
     let saved = selected_then_close().await;
-    let c = PersistentDedicated::reopen(saved.durable.clone()).await;
+    let c = reopen_all_dormant(&saved).await;
     let body = AssertUnwindSafe(Box::pin(async {
+        // The custody worker's rounds stop first, as for every idle
+        // component step, so the step under test is the only actor on the
+        // source writer and on the members.
+        join_recovery_for_idle_restore(&c).await;
         let source = &c.f.source;
         let p = source
             .binding_evidence(&c.parent.original)
@@ -262,8 +277,12 @@ async fn canonical_interest_step_rereads_selection_and_cancelled_evidence_before
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn canonical_interest_step_observes_stop_and_departure_after_page_read() {
     let saved = selected_then_close().await;
-    let c = PersistentDedicated::reopen(saved.durable.clone()).await;
+    let c = reopen_all_dormant(&saved).await;
     let body = AssertUnwindSafe(Box::pin(async {
+        // The custody worker's rounds stop first, as for every idle
+        // component step, so the step under test is the only actor on the
+        // source writer and on the members.
+        join_recovery_for_idle_restore(&c).await;
         let source = &c.f.source;
         let p = source
             .binding_evidence(&c.parent.original)
@@ -497,6 +516,130 @@ async fn sweep_step_wakes_its_dormant_lead_before_reading_its_capture() {
             "G registered exactly once"
         );
         assert_eq!(all_ids(&c).await, saved.ids, "no input");
+        assert_eq!(c.f.model_requests(), 0, "no model request");
+    }))
+    .catch_unwind()
+    .await;
+    close(&c, body).await;
+}
+
+/// A selected waiter whose workflow lead was cancelled (the cancellation
+/// recorded in G's own source row, the workflow not yet departed) never
+/// wakes that lead. The production step reads G's cancellation with its
+/// other capture-independent canonical facts before any wake and refuses
+/// Denied. G, A and P stay Dormant: no registration, attachment or actor,
+/// no source custody, no input and no model request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sweep_step_leaves_a_cancelled_dormant_lead_dormant() {
+    let saved = selected_then_close().await;
+    let c = reopen_all_dormant(&saved).await;
+    let body = AssertUnwindSafe(Box::pin(async {
+        join_recovery_for_idle_restore(&c).await;
+        let source = &c.f.source;
+        let p = source
+            .binding_evidence(&c.parent.original)
+            .await
+            .unwrap()
+            .unwrap();
+        let g = source
+            .binding_evidence(&c.lead.original)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_unwoken(&c).await;
+        source
+            .record_operation_cancelled(&c.lead.original)
+            .await
+            .unwrap();
+        assert_unwoken(&c).await;
+        assert_eq!(
+            source
+                .recover_workflow_interest_source(&saved.row, || true)
+                .await,
+            Err(PrivateOriginalError::Denied),
+            "the cancelled lead is refused before any wake"
+        );
+        assert_no_restored_sources(&c, &saved.association, &p, &g);
+        assert_unwoken(&c).await;
+        assert_eq!(all_ids(&c).await, saved.ids, "no input");
+        assert_eq!(histories(&c).await, saved.histories);
+        assert_eq!(c.f.model_requests(), 0, "no model request");
+    }))
+    .catch_unwind()
+    .await;
+    close(&c, body).await;
+}
+
+/// The step's publication observation, taken before its canonical reads, is
+/// the one its lead's wake carries. Held at the lead's wake selection, after
+/// those reads, the step meets a change completed there: first another owner
+/// change, then a cancellation of G itself. Each makes the observation stale
+/// and the step refuses before it asks Core to wake G. A later step reads
+/// G's cancellation and refuses Denied, again with no wake. G, A and P stay
+/// Dormant throughout, with no custody, input or model request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lead_wake_selection_refuses_changes_completed_after_its_canonical_reads() {
+    use crate::private_originals::setup_workflow::launch::recovery::LEAD_WAKE_SELECTION;
+    let saved = selected_then_close().await;
+    let c = reopen_all_dormant(&saved).await;
+    let body = AssertUnwindSafe(Box::pin(async {
+        join_recovery_for_idle_restore(&c).await;
+        let source = &c.f.source;
+        let p = source
+            .binding_evidence(&c.parent.original)
+            .await
+            .unwrap()
+            .unwrap();
+        let g = source
+            .binding_evidence(&c.lead.original)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_unwoken(&c).await;
+        for cancel_lead in [false, true] {
+            let hold = Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+            let step_source = source.clone();
+            let row = saved.row.clone();
+            let step = tokio::spawn(LEAD_WAKE_SELECTION.scope(hold.clone(), async move {
+                step_source
+                    .recover_workflow_interest_source(&row, || true)
+                    .await
+            }));
+            tokio::time::timeout(GUARD, hold.0.notified())
+                .await
+                .expect("the step reached its lead's wake selection");
+            if cancel_lead {
+                source
+                    .record_operation_cancelled(&c.lead.original)
+                    .await
+                    .unwrap();
+            } else {
+                drop(source.owner.publication().begin_owner_change().unwrap());
+            }
+            hold.1.notify_one();
+            let refused = tokio::time::timeout(GUARD, step)
+                .await
+                .expect("the held step settles")
+                .unwrap();
+            assert_eq!(
+                refused,
+                Err(PrivateOriginalError::Unavailable),
+                "the stale observation refuses before the wake"
+            );
+            assert_no_restored_sources(&c, &saved.association, &p, &g);
+            assert_unwoken(&c).await;
+        }
+        assert_eq!(
+            source
+                .recover_workflow_interest_source(&saved.row, || true)
+                .await,
+            Err(PrivateOriginalError::Denied),
+            "the cancelled lead is refused before any wake"
+        );
+        assert_no_restored_sources(&c, &saved.association, &p, &g);
+        assert_unwoken(&c).await;
+        assert_eq!(all_ids(&c).await, saved.ids, "no input");
+        assert_eq!(histories(&c).await, saved.histories);
         assert_eq!(c.f.model_requests(), 0, "no model request");
     }))
     .catch_unwind()

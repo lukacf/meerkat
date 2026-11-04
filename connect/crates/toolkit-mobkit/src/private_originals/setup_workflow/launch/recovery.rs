@@ -12,6 +12,14 @@ pub(crate) enum WorkflowInterestRecovery {
     Stopped,
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    // Same-crate control only: hold a recovery step at its workflow lead's
+    // wake selection, after the step's canonical reads.
+    pub(in crate::private_originals) static LEAD_WAKE_SELECTION:
+        Arc<(tokio::sync::Notify, tokio::sync::Notify)>;
+}
+
 impl PrivateOriginals {
     /// Consume one row from the existing canonical source page. The row and
     /// cursor are disposable observations; every selected source is reread.
@@ -31,6 +39,16 @@ impl PrivateOriginals {
         if observed.data.schema != SOURCE_SCHEMA {
             return Ok(WorkflowInterestRecovery::NotSelected);
         }
+        // One publication observation covers this step's canonical reads. A
+        // workflow lead's wake selected from them carries it: a cancellation
+        // or any other owner change completed after these reads refuses
+        // before the wake. No fresh observation starts after stale evidence
+        // was read.
+        let (_, stamp) = self
+            .owner
+            .publication()
+            .observe(|| ())
+            .map_err(|_| PrivateOriginalError::Unavailable)?;
         let row = self
             .store
             .get(&observed.key)
@@ -67,11 +85,22 @@ impl PrivateOriginals {
             if binding.original != original || &binding.parent != parent {
                 return Err(PrivateOriginalError::Conflict);
             }
-            let association = record
-                .final_association
-                .as_ref()
-                .ok_or(PrivateOriginalError::Unavailable)?;
-            self.wake_workflow_lead(association).await?;
+            // The same capture-independent checks as for a waiter's lead,
+            // before the wake: the lead's own record, then the workflow that
+            // names it as planning source.
+            let association = Self::selected_lead_before_wake(&record)?;
+            let snapshot = self
+                .workflow_store()?
+                .load_setup_workflow(&binding.workflow)
+                .await
+                .map_err(|_| PrivateOriginalError::Unavailable)?;
+            if !enter() {
+                return Ok(WorkflowInterestRecovery::Stopped);
+            }
+            if snapshot.terms().planning_source != row.key {
+                return Err(PrivateOriginalError::Conflict);
+            }
+            self.wake_workflow_lead(association, &stamp).await?;
             let member = self
                 .owner
                 .captured_workflow_member(&binding.workflow, association)
@@ -148,11 +177,15 @@ impl PrivateOriginals {
             return Ok(WorkflowInterestRecovery::Stopped);
         }
         let g = self.decode_record(&g_row, planning)?;
-        let association = g
-            .final_association
-            .as_ref()
-            .ok_or(PrivateOriginalError::Unavailable)?;
-        self.wake_workflow_lead(association).await?;
+        // Every capture-independent canonical fact of the selected lead is
+        // checked before its wake: its Lead evidence, cancellation, retained
+        // input and association, and the workflow that names it as planning
+        // source. A cancelled or mismatched lead is refused, never woken.
+        let association = Self::selected_lead_before_wake(&g)?;
+        if snapshot.terms().planning_source != g_row.key {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        self.wake_workflow_lead(association, &stamp).await?;
         let member = self
             .owner
             .captured_workflow_member(workflow, association)
@@ -202,9 +235,14 @@ impl PrivateOriginals {
     /// input, no turn) before reading its capture. A refused wake leaves the
     /// interest unavailable for a later round, as before; a cancelled,
     /// departed or unselected source never reaches this point.
+    ///
+    /// `stamp` is the step's publication observation, taken before its
+    /// canonical reads: a change completed after those reads refuses before
+    /// the wake. The caller holds no source writer or publication guard.
     async fn wake_workflow_lead(
         &self,
         association: &InputAuthorityAssociation,
+        stamp: &meerkat_authorization::publication::LocalPublicationStamp,
     ) -> Result<(), PrivateOriginalError> {
         let session =
             meerkat_core::SessionId::parse(association.candidate().target.context.as_str())
@@ -215,12 +253,41 @@ impl PrivateOriginals {
             .and_then(Weak::upgrade)
             .ok_or(PrivateOriginalError::Unavailable)?;
         let machine = self.machine()?;
-        let (_, stamp) = self
-            .owner
-            .publication()
-            .observe(|| ())
-            .map_err(|_| PrivateOriginalError::Unavailable)?;
-        Self::wake_original_session_owner(&machine, &*pins, &session, &stamp).await
+        #[cfg(test)]
+        if let Ok(hold) = LEAD_WAKE_SELECTION.try_with(Arc::clone) {
+            hold.0.notify_one();
+            hold.1.notified().await;
+        }
+        Self::wake_original_session_owner(&machine, &*pins, &session, stamp).await
+    }
+
+    /// The capture-independent canonical facts of an exact selected workflow
+    /// lead, checked before anything wakes it: its Lead evidence, its
+    /// cancellation, and its retained input with that input's association.
+    /// The lead's capture exists only once it registers, so the capture and
+    /// every check that needs it still follow the wake.
+    fn selected_lead_before_wake(
+        lead: &crate::private_originals::SourceRecord,
+    ) -> Result<&InputAuthorityAssociation, PrivateOriginalError> {
+        let Some(PlanningSourceEvidence::Lead { .. }) = &lead.planning_source_evidence else {
+            return Err(PrivateOriginalError::Unavailable);
+        };
+        if lead.operation_cancelled {
+            return Err(PrivateOriginalError::Denied);
+        }
+        let input = lead
+            .bound_service_input
+            .as_ref()
+            .ok_or(PrivateOriginalError::Unavailable)?
+            .decode()?;
+        let association = lead
+            .final_association
+            .as_ref()
+            .ok_or(PrivateOriginalError::Unavailable)?;
+        if input.header().authority_association.as_ref() != Some(association) {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        Ok(association)
     }
 
     fn held_workflow_source(

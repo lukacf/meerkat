@@ -171,10 +171,15 @@ pub enum DecisionPassOutcome {
     NoticeSettled,
     /// Nothing could be done now; a later pass asks again.
     Deferred(DecisionDeferral),
-    /// No executor of the decision's kind runs in this loop: none is
-    /// registered, or another executor holds the kind
-    /// ([`DecisionExecutorPass::unclaimed`]). It was left as stored.
+    /// No executor of the decision's kind is registered in this loop. It
+    /// was left as stored.
     NoExecutor,
+    /// An executor of the decision's kind is registered in this loop, but
+    /// the loop holds no claim of the kind: another executor holds it and
+    /// executes the decision, or the claim could not be taken (the kind's
+    /// entry in [`DecisionExecutorPass::unclaimed`] has the refusal). It was
+    /// left as stored, and the next pass asks for the claim again.
+    KindNotClaimed,
     /// A call failed; the decision is left for a later pass.
     Failed(DecisionError),
 }
@@ -380,18 +385,23 @@ impl DecisionExecutorLoop {
         }
     }
 
-    /// The executor of `row`'s kind, when this loop holds the kind's claim.
-    fn executor_of(&self, row: &StoredDecision) -> Option<Arc<dyn DecisionExecutor>> {
-        self.kinds
-            .get(&row.descriptor.kind)
-            .filter(|registered| registered.claim.is_some())
-            .map(|registered| Arc::clone(&registered.executor))
+    /// The executor of `row`'s kind, when this loop holds the kind's claim;
+    /// otherwise the outcome the pass records for the row.
+    fn executor_of(
+        &self,
+        row: &StoredDecision,
+    ) -> Result<Arc<dyn DecisionExecutor>, DecisionPassOutcome> {
+        match self.kinds.get(&row.descriptor.kind) {
+            Some(registered) if registered.claim.is_some() => Ok(Arc::clone(&registered.executor)),
+            Some(_) => Err(DecisionPassOutcome::KindNotClaimed),
+            None => Err(DecisionPassOutcome::NoExecutor),
+        }
     }
 
     /// Record the expiry a due decision shows.
     fn observe_expiry(&self, row: &StoredDecision, pass: &mut DecisionExecutorPass) {
-        if self.executor_of(row).is_none() {
-            pass.record(&row.decision_id, DecisionPassOutcome::NoExecutor);
+        if let Err(outcome) = self.executor_of(row) {
+            pass.record(&row.decision_id, outcome);
             return;
         }
         match self.service.get(&row.decision_id) {
@@ -405,9 +415,12 @@ impl DecisionExecutorLoop {
 
     /// The work one owed decision owes.
     async fn work(&self, row: StoredDecision, pass: &mut DecisionExecutorPass) {
-        let Some(executor) = self.executor_of(&row) else {
-            pass.record(&row.decision_id, DecisionPassOutcome::NoExecutor);
-            return;
+        let executor = match self.executor_of(&row) {
+            Ok(executor) => executor,
+            Err(outcome) => {
+                pass.record(&row.decision_id, outcome);
+                return;
+            }
         };
         match row.state.phase {
             DecisionPhase::Approved => {

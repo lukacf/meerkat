@@ -366,7 +366,7 @@ async fn a_kind_held_elsewhere_is_reported_and_retried() {
         );
         assert_eq!(
             held.outcomes,
-            vec![(decision_id.clone(), DecisionPassOutcome::NoExecutor)]
+            vec![(decision_id.clone(), DecisionPassOutcome::KindNotClaimed)]
         );
     }
     assert!(
@@ -494,7 +494,7 @@ async fn a_0910_loop_and_a_0911_loop_never_share_a_store() {
     );
     assert_eq!(
         held.outcomes,
-        vec![(decision_id.clone(), DecisionPassOutcome::NoExecutor)]
+        vec![(decision_id.clone(), DecisionPassOutcome::KindNotClaimed)]
     );
     assert!(
         owner.calls().is_empty(),
@@ -889,6 +889,38 @@ async fn a_decision_of_a_kind_with_no_executor_is_left_as_stored() {
         ]
     );
     assert_eq!(store.stored(&decision_id), before);
+    assert!(owner.calls().is_empty());
+}
+
+/// A pass tells a decision of a kind the loop registered, whose claim
+/// another executor holds, from a decision of a kind the loop does not
+/// register: the first is `KindNotClaimed`, the second `NoExecutor`, and
+/// neither runs here.
+#[tokio::test]
+async fn a_pass_tells_a_kind_held_elsewhere_from_an_unregistered_kind() {
+    let (store, clock, service) = fixture();
+    let other_owner = service_over(&store, &clock);
+    let rendering = rendering();
+    let release_id = approved(&service, &rendering);
+    let deploy_id = approved_of_kind(&service, &rendering, "deploy", "artifact:build-7");
+    let holder = ScriptedOwner::release();
+    let owner = ScriptedOwner::release();
+    let approvers = Approvers::current();
+    let _holder = start(&other_owner, &[&holder], &approvers).expect("the executor of releases");
+    let mut executor = start(&service, &[&owner], &approvers).expect("a loop beside it");
+
+    let pass = executor.pass().await;
+    assert_eq!(
+        pass.unclaimed,
+        vec![(release_kind(), DecisionError::ExecutorHeld)]
+    );
+    assert_eq!(
+        outcomes_of(&pass),
+        BTreeMap::from([
+            (release_id, vec![DecisionPassOutcome::KindNotClaimed]),
+            (deploy_id, vec![DecisionPassOutcome::NoExecutor]),
+        ])
+    );
     assert!(owner.calls().is_empty());
 }
 

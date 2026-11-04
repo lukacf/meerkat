@@ -67,8 +67,10 @@ registers (`DecisionStore::claim_executor_kind`), where 0.9.10 claimed the
 whole store, so two runtimes on one store each execute their own kinds. A
 second loop of a kind no longer fails at start with
 `DecisionError::ExecutorHeld`: it starts, lists the kind in each pass's
-`DecisionExecutorPass::unclaimed`, and claims it once the first executor of
-the kind ends. The SQLite store keeps one lock file per kind,
+`DecisionExecutorPass::unclaimed`, reports the kind's decisions as
+`DecisionPassOutcome::KindNotClaimed` (the executor that holds the kind
+executes them), and claims the kind once the first executor of the kind
+ends. The SQLite store keeps one lock file per kind,
 `approval_decisions.executor.<kind>.lock`, beside
 `approval_decisions.executor.lock`, which every loop now holds shared.
 

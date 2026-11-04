@@ -5,8 +5,8 @@
 //! identity, the role hold, the runtime-mode restamp, held creation and
 //! placed identities, first-boot requests, the revival of an unlisted
 //! identity on its archived session (and the two causes it can fail for),
-//! the candidate composition, the unchanged roster that writes nothing, and
-//! the rollback rows. They run on the combined candidate: the machine, the
+//! the candidate composition, the unchanged roster that writes nothing, the
+//! declaration of an identity's lifecycle facts only, and the rollback rows. They run on the combined candidate: the machine, the
 //! actor, the journal and the replay together.
 
 use super::identity_entry_rows::{predating_reader_journal, write_rollback_fixture};
@@ -15,7 +15,7 @@ use crate::machines::mob_machine as dsl;
 use crate::runtime::actor::member_wake::MemberWakeFailure;
 use crate::runtime::dormant_seat::fresh_seat_session_id;
 use crate::runtime::{
-    DECLARED_APPLY_CHUNK, DeclaredEntry, DeclaredEntryOutcome, DeclaredEntryRefusal,
+    DECLARED_APPLY_CHUNK, DeclaredBuild, DeclaredEntry, DeclaredEntryOutcome, DeclaredEntryRefusal,
     DeclaredRoster, DeclaredRosterOutcome, DormantSeatOutcome, EntryStanding, FirstBootRequest,
     HistoryUnavailable, HostPreparationCause, IDENTITY_ENTRY_PAGE_MAX, IdentityEntryRead,
     MemberIdentityManagement, MemberLifecycleEvent, MemberRetirementCause, MobCompositionAuthority,
@@ -53,6 +53,11 @@ fn declared(name: &str) -> DeclaredEntry {
 /// `name` declared under `role`, with `runtime_mode`.
 fn declared_as(name: &str, role: &str, runtime_mode: crate::MobRuntimeMode) -> DeclaredEntry {
     DeclaredEntry::new(spec_as(name, role, runtime_mode))
+}
+
+/// `name` declared as a turn-driven worker, with its lifecycle facts only.
+fn declared_facts_only(name: &str) -> DeclaredEntry {
+    declared(name).with_build(DeclaredBuild::FactsOnly)
 }
 
 /// A complete roster that lists no identity.
@@ -282,6 +287,14 @@ impl ApplyMob {
             .await
             .expect("roster read")
             .map(|entry| entry.generation)
+    }
+
+    async fn role(&self, name: &str) -> Option<ProfileName> {
+        self.handle
+            .get_member(&id(name))
+            .await
+            .expect("roster read")
+            .map(|entry| entry.role)
     }
 
     async fn is_member(&self, name: &str) -> bool {
@@ -2084,6 +2097,211 @@ async fn a_descriptive_facet_change_is_never_a_new_life() {
         Some(dsl::MemberMaterializationPhase::Live),
         "the live member keeps serving"
     );
+}
+
+/// No member is built from a declaration of the identity's lifecycle facts
+/// only. An identity no member holds, declared with its facts only, is
+/// answered `BuildRequired`: no seat is taken, nothing materializes, and the
+/// entry stays owed its seat. A seated identity declared with its facts only
+/// keeps its seat, since its verdict builds nothing. Declared again with its
+/// composed build, the owed identity is seated.
+///
+/// RED: drop the facts-only arm of the owed seat (seat a facts-only
+/// declaration as a composed one): the identity is seated from its facts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_declaration_of_facts_only_seats_no_member_and_answers_build_required() {
+    let mob = ApplyMob::new("apply-facts-only").await;
+    let seated = mob
+        .apply(DeclaredRoster::complete([declared("kept")]))
+        .await;
+    let (session, _) = seated_on(&seated, "kept").expect("the identity is seated");
+
+    let outcome = mob
+        .apply(DeclaredRoster::complete([
+            declared_facts_only("kept"),
+            declared_facts_only("owed"),
+        ]))
+        .await;
+    assert!(
+        matches!(answer(&outcome, "kept"), DeclaredEntryOutcome::Kept),
+        "a verdict that builds nothing answers as for a composed declaration: {outcome:?}"
+    );
+    assert!(
+        matches!(
+            answer(&outcome, "owed"),
+            DeclaredEntryOutcome::BuildRequired
+        ),
+        "{outcome:?}"
+    );
+    assert!(outcome.unlisted.is_empty(), "{outcome:?}");
+    assert!(
+        !mob.is_member("owed").await,
+        "no member is seated from facts only"
+    );
+    assert_eq!(mob.materialization("owed"), None, "nothing materializes");
+    assert_eq!(
+        mob.standing("owed"),
+        Some(EntryStanding::Unseated(UnseatedEntryCause::SeatOwed)),
+        "the entry stays owed its seat"
+    );
+    assert_eq!(mob.session("kept").await, session);
+    assert_eq!(mob.generation("kept").await, Some(Generation::new(0)));
+
+    let composed = mob
+        .apply(DeclaredRoster::complete([
+            declared("kept"),
+            declared("owed"),
+        ]))
+        .await;
+    assert!(
+        matches!(seated_on(&composed, "owed"), Some((_, None))),
+        "declared again with its composed build, the identity is seated: {composed:?}"
+    );
+    assert!(mob.is_member("owed").await);
+}
+
+/// A first-boot `Fresh` request starts its identity's fresh life with a seat
+/// or a rotation built from the spec. Declared with their facts only, an
+/// unseated identity and a seated member both answer `BuildRequired`: the
+/// seated member keeps its session, the unseated identity keeps its archived
+/// session record, neither request is carried out, and both still owe their
+/// first-boot preparation. Declared again with their composed builds, both
+/// start their fresh lives and the host consumes both requests.
+///
+/// RED: drop the facts-only arm of the seated member's fresh life (rotate a
+/// facts-only declaration as a composed one): the seated member starts its
+/// fresh life from its facts, and its request is carried out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_request_declared_with_facts_only_starts_no_fresh_life() {
+    let mut mob = ApplyMob::new("apply-facts-only-fresh").await;
+    let seated = mob
+        .apply(DeclaredRoster::complete([
+            declared("fresh-unseated"),
+            declared("fresh-seated"),
+        ]))
+        .await;
+    let (unseated_session, _) = seated_on(&seated, "fresh-unseated").expect("seated");
+    let (seated_session, _) = seated_on(&seated, "fresh-seated").expect("seated");
+    mob.wake("fresh-unseated").await;
+    mob.apply(DeclaredRoster::complete([declared("fresh-seated")]))
+        .await;
+    assert_eq!(
+        mob.archived_record("fresh-unseated"),
+        Some(dsl::SessionId::from_domain(&unseated_session))
+    );
+    mob.restart_host_pending(&["fresh-unseated", "fresh-seated"])
+        .await;
+    let requests = |roster: DeclaredRoster| {
+        roster
+            .with_first_boot_request("fresh-unseated", FirstBootRequest::Fresh)
+            .with_first_boot_request("fresh-seated", FirstBootRequest::Fresh)
+    };
+
+    let facts_only = mob
+        .apply(requests(DeclaredRoster::complete([
+            declared_facts_only("fresh-unseated"),
+            declared_facts_only("fresh-seated"),
+        ])))
+        .await;
+    for name in ["fresh-unseated", "fresh-seated"] {
+        assert!(
+            matches!(
+                answer(&facts_only, name),
+                DeclaredEntryOutcome::BuildRequired
+            ),
+            "{name}: {facts_only:?}"
+        );
+        assert_eq!(
+            mob.preparation_owed(name),
+            Some(dsl::HostPreparationCause::FirstBootRow),
+            "{name}: the request is left to the host"
+        );
+    }
+    assert!(
+        facts_only.first_boot_requests_carried_out.is_empty(),
+        "{facts_only:?}"
+    );
+    assert_eq!(
+        mob.session("fresh-seated").await,
+        seated_session,
+        "nothing is rotated"
+    );
+    assert_eq!(
+        mob.archived_record("fresh-unseated"),
+        Some(dsl::SessionId::from_domain(&unseated_session)),
+        "the archived session record is kept"
+    );
+
+    let fresh = mob
+        .apply(requests(DeclaredRoster::complete([
+            declared("fresh-unseated"),
+            declared("fresh-seated"),
+        ])))
+        .await;
+    for (name, previous) in [
+        ("fresh-unseated", &unseated_session),
+        ("fresh-seated", &seated_session),
+    ] {
+        let session = match answer(&fresh, name) {
+            DeclaredEntryOutcome::FreshLife { session_id } => session_id.clone(),
+            other => panic!("{name} starts its fresh life: {other:?}"),
+        };
+        assert_ne!(&session, previous, "{name}");
+    }
+    assert_eq!(
+        fresh.first_boot_requests_carried_out,
+        BTreeSet::from([id("fresh-unseated"), id("fresh-seated")]),
+        "{fresh:?}"
+    );
+}
+
+/// A rotation onto a fresh session builds the member's next incarnation
+/// from the spec: on a service whose member sessions live in memory only, a
+/// seated member declared under another role is rotated. Declared under the
+/// other role with its lifecycle facts only, it answers `BuildRequired` and
+/// keeps its session, its generation and its role. Declared again with its
+/// composed build, it is rotated onto a fresh session under the declared
+/// role.
+///
+/// RED: drop the facts-only arm of the rotation (rotate a facts-only
+/// declaration as a composed one): the member is rotated from its facts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rotation_declared_with_facts_only_rotates_no_member() {
+    let mob = ApplyMob::new("apply-facts-only-rotation").await;
+    let seated = mob
+        .apply(DeclaredRoster::complete([declared("rotating")]))
+        .await;
+    let (session, _) = seated_on(&seated, "rotating").expect("the identity is seated");
+    mob.service.keep_member_sessions_in_memory();
+    let moved = || declared_as("rotating", "lead", crate::MobRuntimeMode::TurnDriven);
+
+    let facts_only = mob
+        .apply(DeclaredRoster::complete([
+            moved().with_build(DeclaredBuild::FactsOnly)
+        ]))
+        .await;
+    assert!(
+        matches!(
+            answer(&facts_only, "rotating"),
+            DeclaredEntryOutcome::BuildRequired
+        ),
+        "{facts_only:?}"
+    );
+    assert_eq!(mob.session("rotating").await, session, "nothing is rotated");
+    assert_eq!(
+        mob.role("rotating").await,
+        Some(ProfileName::from("worker"))
+    );
+    assert_eq!(mob.generation("rotating").await, Some(Generation::new(0)));
+
+    let rotated = mob.apply(DeclaredRoster::complete([moved()])).await;
+    let fresh = match answer(&rotated, "rotating") {
+        DeclaredEntryOutcome::RoleRotated { session_id } => session_id.clone(),
+        other => panic!("declared with its composed build, the member is rotated: {other:?}"),
+    };
+    assert_ne!(fresh, session);
+    assert_eq!(mob.session("rotating").await, fresh);
+    assert_eq!(mob.role("rotating").await, Some(ProfileName::from("lead")));
 }
 
 /// Rollback of an unlisted retirement, in-process leg: a retirement start

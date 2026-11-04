@@ -4,7 +4,7 @@ description: "JSON-RPC 2.0 protocol for Meta runtime operations: gating, memory,
 icon: "plug"
 ---
 
-*Mirrored from Meerkat Meta main at [71cbbe395d41](https://github.com/lukacf/meerkat/commit/71cbbe395d41cec46e088b3fa66b1634530b70c4) on 2026-11-04; Meta version 0.9.9 at that commit.*
+*Mirrored from Meerkat Meta main at [d414d004fe93](https://github.com/lukacf/meerkat/commit/d414d004fe935a0b5b8e6c493c41792c3047b801) on 2026-11-04; Meta version 0.9.9 at that commit.*
 
 Meta exposes its operational API over JSON-RPC 2.0. SDK gateways use JSON lines over stdio, while the embedded console uses `POST /console/rpc` for console-specific methods and explicitly implemented runtime operations. The HTTP dispatcher is not a general stdio passthrough; check `meta/capabilities` on the surface you use.
 
@@ -3028,6 +3028,22 @@ console-frame blob references, legacy-FS blob objects, and filesystem
 artifacts. On a live persistent gateway the H1/H2 durability resolution
 (`blob-durability`, `session-store-incremental`) is attached as findings; a
 cold directory reports `durability-census-unavailable`.
+
+It also takes the rollback census of the directory: what a rollback to a
+release on Core 0.9.8 or earlier (Meta 0.9.7 or earlier) does not read,
+counted read-only by Core's own rules, as Info findings that carry counts
+only (never a session id, an identity or a mob name):
+
+| Code | Counts |
+|------|--------|
+| `operator-instruction-envelope` | The sessions of `runtime.sqlite` written at session envelope 5, which such a release refuses until a roll-forward, so their identities do not resume there |
+| `operator-instruction-mob-events` | The mob events at mob event schema 10 in the directory's own mob journal (`event_log.sqlite3`) and in each child mob's journal under `mobs/`. Such a release does not start a mob whose journal holds any, and stops restoring every mob of the directory at it: destroy such a child mob, or move its database out of `mobs/`, before the rollback; a rollback is not available for a gateway whose own journal holds any without losing its mob |
+| `identity-store-rows` | The identity-store rows of schema version 2 and later in the same mob stores (store-owned identities and the tombstones of removed names, with the archived and unreadable ones counted apart), which such a release does not read and this release has no step to delete: a rollback is not supported while the total is above 0 |
+
+Each census reports one finding for the state directory (its `path`) with
+the total, 0 included, and one more for each file that counts above 0 or
+could not be counted (its `path` is the file). The census never fails the
+doctor, and `identity` does not narrow it.
 
 Available on the module-only, unified, and console (`POST /console/rpc`,
 read method, `runtime.admin` grant) surfaces. Additive method — no

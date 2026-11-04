@@ -60,24 +60,6 @@ fn hold_request(
     }
 }
 
-fn attested(approve: bool) -> AttestedDecision {
-    let approver = AuthenticatedApprover::new(
-        principal(PrincipalKind::Human, "alice", "example.org"),
-        ApprovalAssurance::PersonAuthenticated,
-    )
-    .expect("authenticated human");
-    AttestedDecision::new(
-        approver,
-        DecisionIngress::new("console").expect("ingress"),
-        reference("event-1"),
-        7,
-        approver_id(),
-        Sha256Digest::of(b"the rendering"),
-        approve,
-    )
-    .expect("attested decision")
-}
-
 #[test]
 fn subject_digest_is_computed_never_taken() {
     let rendering = rendering("Release build 7 to the stable channel.");
@@ -262,7 +244,7 @@ fn decision_id_derives_from_kind_and_subject_key() {
 
 #[test]
 fn evidence_digest_changes_with_any_evidence_field() {
-    let human = attested(true)
+    let human = attested_in(&HostAuthenticationScope::new("login-1"), true)
         .with_presentation(PresentationRecord::complete(
             PresentationAudience::Approver {
                 approver_id: approver_id(),
@@ -296,7 +278,7 @@ fn evidence_digest_changes_with_any_evidence_field() {
         assert_ne!(evidence, human, "the change must change the evidence");
         evidence.digest().expect("digest")
     };
-    let changes: [(&str, &dyn Fn(&mut DecisionEvidence)); 13] = [
+    let changes: [(&str, &dyn Fn(&mut DecisionEvidence)); 15] = [
         ("decider", &|evidence| {
             if let DecisionEvidence::Human { decider, .. } = evidence {
                 *decider = key(PrincipalKind::Human, "bob");
@@ -319,6 +301,25 @@ fn evidence_digest_changes_with_any_evidence_field() {
             } = evidence
             {
                 *authentication_scope = Some("login-2".to_owned());
+            }
+        }),
+        ("authentication scope digest", &|evidence| {
+            if let DecisionEvidence::Human {
+                authentication_scope_digest,
+                ..
+            } = evidence
+            {
+                *authentication_scope_digest =
+                    Some(HostAuthenticationScope::new("login-2").digest());
+            }
+        }),
+        ("no authentication scope digest", &|evidence| {
+            if let DecisionEvidence::Human {
+                authentication_scope_digest,
+                ..
+            } = evidence
+            {
+                *authentication_scope_digest = None;
             }
         }),
         ("ingress", &|evidence| {
@@ -720,6 +721,10 @@ const REVIEW_EVIDENCE_DIGEST: &str =
 /// session id, a presentation record, a canonical part), serializes changes
 /// these bytes and fails here, before it would tear every decided row. Such
 /// a change needs a new evidence domain and a migration of the stored rows.
+/// The human evidence here keeps the login itself, as evidence recorded
+/// before the login digest did (`the_new_evidence_encoding_and_its_digest_are_pinned`
+/// pins the form recorded now): it still decodes, and keeps its bytes and
+/// its digest.
 #[test]
 fn the_evidence_encoding_and_its_digest_are_pinned() {
     let rendering = rendering("Release build 7.");
@@ -728,6 +733,7 @@ fn the_evidence_encoding_and_its_digest_are_pinned() {
         principal: principal(PrincipalKind::Human, "alice", "example.org"),
         assurance: ApprovalAssurance::PersonAuthenticated,
         authentication_scope: Some("login-1".to_owned()),
+        authentication_scope_digest: None,
         ingress: DecisionIngress::new("web").expect("ingress"),
         event_ref: reference("event-1"),
         observed_at_ms: None,

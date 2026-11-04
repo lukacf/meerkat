@@ -368,11 +368,12 @@ them.
   the store met every retry of them at the same instants. Each pause below
   3.2 s is now lengthened by up to half, by an amount derived from the
   batch's commit id and the attempt number: such batches spread out, and one
-  batch pauses the same on every run. No pause is shorter than before, so a
-  batch makes no more attempts within its budget (at most 14 when every
-  attempt fails at once, under the default budget); the budget, the errors
-  that are retried, and the poisoning of the scopes of a batch that does not
-  settle are unchanged. Affects 0.9.5 through 0.9.9.
+  batch pauses the same on every run. No pause is shorter than before, so
+  this never adds an attempt: with every attempt failing at once, a batch
+  makes at most 14 within the default budget, as before, and about 1.6% of
+  batches now make 13. The budget, the errors that are retried, and the
+  poisoning of the scopes of a batch that does not settle are unchanged.
+  Affects 0.9.5 through 0.9.9.
 
 ### Known limitations
 

@@ -148,10 +148,12 @@ sends the same batch again, with the same commit id (obligation 3), after a
 pause that starts at 100 ms and doubles up to 3.2 s, until the batch lands
 or its retry budget runs out (`SpiRealmConfig::commit_retry_budget`, 30 s by
 default). Each pause below 3.2 s is lengthened by up to half, by an amount
-derived from the batch's commit id, so batches that fail together do not
-retry together. No pause is shorter than the schedule's, so this adds no
-attempt within the budget. Any other error ends the commit at once. The
-chunk batches of a large value are settled the same way.
+derived from the batch's commit id and the attempt number, so batches that
+fail together do not retry together. No pause is shorter than the
+schedule's, so this never adds an attempt: with every attempt failing at
+once, a batch makes at most 14 within the default budget, and about 1.6% of
+batches make 13. Any other error ends the commit at once. The chunk batches
+of a large value are settled the same way.
 
 A commit that does not settle within its budget, or ends in another error,
 fails the call that made it with a write error, and every scope the batch

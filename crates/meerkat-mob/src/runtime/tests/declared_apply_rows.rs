@@ -7,8 +7,9 @@
 //! identity on its archived session (and the two causes it can fail for),
 //! the candidate composition, the unchanged roster that writes nothing, the
 //! declaration of an identity's lifecycle facts only, the legacy members a
-//! roster adopts, and the rollback rows. They run on the combined candidate:
-//! the machine, the actor, the journal and the replay together.
+//! roster adopts or retires without adopting them, and the rollback rows.
+//! They run on the combined candidate: the machine, the actor, the journal
+//! and the replay together.
 
 use super::identity_entry_rows::{predating_reader_journal, write_rollback_fixture};
 use super::*;
@@ -20,7 +21,7 @@ use crate::runtime::{
     DeclaredRoster, DeclaredRosterOutcome, DormantSeatOutcome, EntryStanding, FirstBootRequest,
     HistoryUnavailable, HostPreparationCause, IDENTITY_ENTRY_PAGE_MAX, IdentityEntryRead,
     MemberIdentityManagement, MemberLifecycleEvent, MemberRetirementCause, MobCompositionAuthority,
-    MobJournalCursor, UnlistedEntryOutcome, UnseatedEntryCause,
+    MobJournalCursor, NotAdoptedReason, UnlistedEntryOutcome, UnseatedEntryCause,
 };
 
 const STEP: Duration = Duration::from_mins(1);
@@ -61,15 +62,20 @@ fn declared_facts_only(name: &str) -> DeclaredEntry {
     declared(name).with_build(DeclaredBuild::FactsOnly)
 }
 
-/// `worker_spec(name)` labelled, as a legacy host labels its members, with
-/// the identity it names.
-fn identity_labelled(name: &str, identity: &str) -> SpawnMemberSpec {
-    let mut spec = worker_spec(name);
+/// `spec` labelled, as a legacy host labels its members, with the identity
+/// it names.
+fn labelled(mut spec: SpawnMemberSpec, identity: &str) -> SpawnMemberSpec {
     spec.labels = Some(BTreeMap::from([(
         crate::runtime::identity_entry::LEGACY_IDENTITY_LABEL.to_string(),
         identity.to_string(),
     )]));
     spec
+}
+
+/// `worker_spec(name)` labelled, as a legacy host labels its members, with
+/// the identity it names.
+fn identity_labelled(name: &str, identity: &str) -> SpawnMemberSpec {
+    labelled(worker_spec(name), identity)
 }
 
 /// `worker_spec(name)` with the durable-identity continuity marker, as a
@@ -161,6 +167,37 @@ impl ApplyMob {
             handle,
             service,
         }
+    }
+
+    /// A new mob that also reaches peers outside it: its definition names an
+    /// external backend and its owner bridge session may create sessions, so
+    /// a spec bound to a peer's endpoint spawns a member bound to no session.
+    /// Answers the owner bridge session such a spawn names.
+    async fn with_external_peers(label: &str) -> (Self, SessionId) {
+        let keys = tempfile::tempdir().expect("a comms identity root");
+        let service = Arc::new(MockSessionService::new());
+        let _adapter = service.enable_runtime_adapter();
+        let storage = MobStorage::in_memory();
+        let owner_bridge_session_id = SessionId::new();
+        let handle = MobBuilder::new(
+            with_unique_mob_id(sample_definition_with_external_backend(), label),
+            storage.clone(),
+        )
+        .with_session_service(service.clone())
+        .with_member_comms_identity_root(keys.path())
+        .with_owner_bridge_session_create_authority(owner_bridge_session_id.clone(), false, false)
+        .create()
+        .await
+        .expect("create the mob");
+        (
+            Self {
+                keys,
+                storage,
+                handle,
+                service,
+            },
+            owner_bridge_session_id,
+        )
     }
 
     /// Crash the mob, restart its session service and resume `storage` as
@@ -2809,8 +2846,9 @@ async fn a_label_naming_another_identity_never_marks_a_member() {
 /// retirement journals the cause `Unlisted`, and the listed identity is
 /// seated.
 ///
-/// RED: drop the complete apply's adoption of unlisted legacy members: the
-/// member is no entry, the seal leaves it, and it keeps serving as a worker.
+/// RED (`RED-F1-unlisted-adoption-r3.patch`): drop the complete apply's
+/// offer of its unlisted legacy members to MobMachine: the member is no
+/// entry, the seal leaves it, and it keeps serving as a worker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_complete_roster_retires_an_unlisted_legacy_member_with_both_marks() {
     let mob = ApplyMob::new("apply-unlisted-legacy").await;
@@ -2847,8 +2885,9 @@ async fn a_complete_roster_retires_an_unlisted_legacy_member_with_both_marks() {
 /// host labelled). Neither is adopted, unlisted or retired; both keep their
 /// sessions and generations.
 ///
-/// RED: adopt an unlisted member with either mark (`LegacyRosterMarks::either`
-/// in the complete apply): both members are retired.
+/// RED (`RED-F1-either-candidate-r3.patch`): observe an unlisted member
+/// with either mark as carrying both: MobMachine adopts both members, and
+/// the seal retires both.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_complete_roster_leaves_an_unlisted_member_with_one_legacy_mark() {
     let mob = ApplyMob::new("apply-unlisted-one-mark").await;
@@ -2885,8 +2924,9 @@ async fn a_complete_roster_leaves_an_unlisted_member_with_one_legacy_mark() {
 /// A partial roster adopts no member it does not list: a member with both
 /// legacy marks keeps serving as it is, no entry, and nothing is retired.
 ///
-/// RED (`RED-F1-partial-adopts.patch`): adopt the unlisted legacy members on
-/// every apply, partial ones included: the member is adopted as an entry.
+/// RED (`RED-F1-partial-adopts-r3.patch`): offer the unlisted legacy
+/// members to MobMachine on every apply, partial ones included: the member
+/// is adopted as an entry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_partial_roster_adopts_no_unlisted_legacy_member() {
     let mob = ApplyMob::new("apply-partial-unlisted-legacy").await;
@@ -2911,9 +2951,9 @@ async fn a_partial_roster_adopts_no_unlisted_legacy_member() {
 /// host's, whatever its marks: a complete roster that does not list it
 /// leaves it as it is, though its spawn row carries both legacy marks.
 ///
-/// RED (`RED-F1-intent-ignored.patch`): drop the intent row from the
-/// unlisted adoption's rule: the host-adopted member is adopted, unlisted
-/// and retired.
+/// RED (`RED-F1-intent-ignored-r3.patch`): drop the intent row from the
+/// adoption's observation: the host-adopted member is adopted, unlisted and
+/// retired.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_complete_roster_leaves_an_unlisted_host_adopted_member_with_both_marks() {
     let mob = ApplyMob::new("apply-unlisted-host-adopted").await;
@@ -3066,6 +3106,208 @@ async fn an_unlisted_legacy_member_whose_adoption_fails_is_answered_failed_and_s
             Some(UnlistedEntryOutcome::Retired)
         ),
         "{retired:?}"
+    );
+}
+
+/// An unlisted legacy member bound to no session (a peer the mob reaches at
+/// its own endpoint, spawned with both legacy marks and named by no host's
+/// intent row) is never adopted: an identity entry's member is local and
+/// bound to a session. MobMachine answers it `RetireUnadopted`, and the
+/// complete roster retires it through the ordinary retirement, at the
+/// incarnation MobMachine decided on, answered `Retired`. It was no entry,
+/// so its retirement records no cause, and its name is left free: no entry,
+/// no mark and no reserved name, and a later roster that lists the identity
+/// seats its entry.
+///
+/// RED (`RED-P35-unadopted-kept.patch`): leave a member MobMachine answers
+/// `RetireUnadopted` as it is (the shape before MobMachine decided its
+/// retirement): the roster answers it nothing, and it keeps serving.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_complete_roster_retires_an_unlisted_legacy_member_bound_to_no_session() {
+    let _serial = lock_real_comms_tests();
+    let (mob, owner_bridge_session_id) = ApplyMob::with_external_peers("apply-unlisted-peer").await;
+    let external =
+        spawn_live_external_peer(&test_comms_name_for(mob.handle.mob_id(), "worker", "peer")).await;
+    let mut spec = durably_marked(identity_labelled("peer", "peer"));
+    spec.binding = Some(external.binding());
+    mob.handle
+        .spawn_spec_receipt_with_generated_owner_context(spec, owner_bridge_session_id)
+        .await
+        .expect("a legacy host's peer, marked and labelled");
+    assert_eq!(
+        mob.handle.resolve_bridge_session_id(&id("peer")).await,
+        None,
+        "the peer is bound to no session"
+    );
+
+    let outcome = mob.apply(empty_roster()).await;
+    assert!(
+        matches!(
+            outcome.unlisted.get(&id("peer")),
+            Some(UnlistedEntryOutcome::Retired)
+        ),
+        "{outcome:?}"
+    );
+    mob.retirement_ended("peer").await;
+    assert!(!mob.is_member("peer").await, "the peer is retired");
+    assert_eq!(
+        retirement_causes(&mob.journal().await),
+        vec![(id("peer"), None)],
+        "one plain retirement: the peer was no entry"
+    );
+    assert!(
+        matches!(
+            mob.handle
+                .identity_entry(&id("peer"))
+                .expect("the entry read answers"),
+            IdentityEntryRead::NotAnEntry { .. }
+        ),
+        "the name is no entry"
+    );
+    {
+        let state = mob.handle.machine_state_watch_rx.borrow();
+        let peer = dsl_id("peer");
+        assert!(
+            !state.identity_entry_origins.contains_key(&peer)
+                && !state.identity_entry_retiring.contains(&peer)
+                && !state.identity_entry_tombstones.contains(&peer),
+            "MobMachine records no entry, mark or reserved name for it"
+        );
+    }
+
+    let listed = mob
+        .apply(DeclaredRoster::complete([declared("peer")]))
+        .await;
+    assert!(
+        matches!(answer(&listed, "peer"), DeclaredEntryOutcome::Seated { .. }),
+        "the free name seats its entry: {listed:?}"
+    );
+    assert!(
+        matches!(mob.standing("peer"), Some(EntryStanding::Seated(_))),
+        "the identity is an entry now"
+    );
+}
+
+/// An unlisted legacy member placed on a member host is never adopted: an
+/// identity entry's member is local. MobMachine answers it
+/// `RetireUnadopted`, and the complete roster retires it at its delivery
+/// scope, captured at the incarnation MobMachine decided on, through its
+/// member host, answered `Retired`. It was no entry, so its retirement
+/// records no cause.
+///
+/// RED (`RED-P35-unadopted-kept.patch`): leave a member MobMachine answers
+/// `RetireUnadopted` as it is: the roster answers it nothing, and it keeps
+/// serving.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_complete_roster_retires_an_unlisted_placed_legacy_member_through_its_host() {
+    use super::placement_support as placement;
+    let _guard = placement::REAL_COMMS_TEST_LOCK.lock().await;
+    let scripted = placement::spawn_scripted_host_peer("apply-placed-legacy-host").await;
+    let member = Arc::new(
+        placement::spawn_peer_comms_endpoint("apply-placed-legacy-member", true, None).await,
+    );
+    scripted.script_member_identity("placed", placement::member_identity_of(&member));
+    scripted.bind_member_endpoint("placed", Arc::clone(&member));
+    let responder = placement::spawn_scripted_member_turn_responder(member);
+    let controlling = placement::create_controlling_mob("apply-placed-legacy").await;
+    let report = controlling.bind_scripted(&scripted).await;
+    controlling
+        .handle
+        .spawn_spec(durably_marked(labelled(
+            placement::placed_spawn_spec("worker", "placed", &report.host_id),
+            "placed",
+        )))
+        .await
+        .expect("a legacy host's placed member, marked and labelled");
+
+    let outcome = tokio::time::timeout(
+        STEP,
+        controlling.handle.apply_declared_roster(empty_roster()),
+    )
+    .await
+    .expect("the apply answers")
+    .expect("the apply runs");
+    assert!(
+        matches!(
+            outcome.unlisted.get(&id("placed")),
+            Some(UnlistedEntryOutcome::Retired)
+        ),
+        "{outcome:?}"
+    );
+    assert!(
+        !controlling
+            .handle
+            .list_members()
+            .await
+            .iter()
+            .any(|member| member.agent_identity == id("placed")),
+        "the placed member is retired"
+    );
+    let journal = controlling
+        .storage_events
+        .poll(0, usize::MAX)
+        .await
+        .expect("read the journal");
+    assert_eq!(
+        retirement_causes(&journal),
+        vec![(id("placed"), None)],
+        "one plain retirement: the member was no entry"
+    );
+    responder.shutdown();
+    scripted.shutdown();
+}
+
+/// An unlisted legacy member whose retirement started already is neither
+/// adopted nor retired again: MobMachine answers it not adoptable, and the
+/// complete roster answers it `NotAdopted { reason: Retiring }`. Its own
+/// retirement ends it, as a plain retirement: it was no entry, so the
+/// retirement records no cause.
+///
+/// RED (`RED-P35-retiring-untyped.patch`): leave a member MobMachine
+/// answers not adoptable unanswered (the shape before the typed outcome):
+/// the roster answers it nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_complete_roster_answers_a_retiring_unlisted_legacy_member_not_adopted() {
+    let mob = ApplyMob::new("apply-unlisted-retiring").await;
+    mob.handle
+        .spawn_spec(durably_marked(identity_labelled("retiring", "retiring")))
+        .await
+        .expect("a legacy host's member, marked and labelled");
+    let hold = crate::runtime::actor::retirement_stage_hold::install(
+        &id("retiring"),
+        "retire-runtime-quiesce",
+    );
+    let retiring = {
+        let handle = mob.handle.clone();
+        tokio::spawn(async move { handle.retire(id("retiring")).await })
+    };
+    tokio::time::timeout(STEP, hold.entered())
+        .await
+        .expect("the member's retirement starts");
+
+    let outcome = mob.apply(empty_roster()).await;
+    assert!(
+        matches!(
+            outcome.unlisted.get(&id("retiring")),
+            Some(UnlistedEntryOutcome::NotAdopted {
+                reason: NotAdoptedReason::Retiring
+            })
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(mob.standing("retiring"), None, "it is no entry");
+
+    hold.release();
+    tokio::time::timeout(STEP, retiring)
+        .await
+        .expect("the retirement answers")
+        .expect("the retirement task ends")
+        .expect("the member is retired");
+    mob.retirement_ended("retiring").await;
+    assert_eq!(
+        retirement_causes(&mob.journal().await),
+        vec![(id("retiring"), None)],
+        "one plain retirement, its own"
     );
 }
 

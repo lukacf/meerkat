@@ -238,34 +238,151 @@ mod whole_blob_read_error_tests {
         );
     }
 
-    /// A committed read that a host store refused because the session's
-    /// scope (or the realm) is poisoned keeps its typed store error too: the
-    /// refusal lasts until the realm is reopened, and only a typed refusal
-    /// lets a status read answer it without reading again, or a wait end on
-    /// it. Before, it was flattened into an internal agent error.
+    /// Whether a mapped error keeps exactly the refusal it was mapped from.
+    #[cfg(not(target_arch = "wasm32"))]
+    type KeepsTheRefusal = fn(&RuntimeStoreError) -> bool;
+
+    /// The two refusals until the realm is reopened, as the host store
+    /// adapter answers a read of a poisoned scope and of a poisoned realm,
+    /// each with the check that a mapped error keeps exactly that refusal:
+    /// the scope refused with its cause, or the realm with its cause. A
+    /// mapping to a retryable `Unavailable`, to `Corrupt`, to `ReadFailed` or
+    /// to an internal agent error fails the check.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn refusals_until_reopen() -> [(RuntimeStoreError, KeepsTheRefusal); 2] {
+        use meerkat_runtime::store::spi::SpiError;
+
+        [
+            (
+                SpiError::ScopePoisoned {
+                    scope: "rt:poisoned".to_string(),
+                    cause: "the store refused the batch".to_string(),
+                }
+                .into_read(),
+                |kept| {
+                    matches!(
+                        kept,
+                        RuntimeStoreError::ScopeRefused { scopes }
+                            if *scopes == [meerkat_runtime::store::RefusedScope::new(
+                                "rt:poisoned",
+                                "the store refused the batch",
+                            )]
+                    )
+                },
+            ),
+            (
+                SpiError::RealmPoisoned("fenced out".to_string()).into_read(),
+                |kept| matches!(kept, RuntimeStoreError::RealmRefused { cause } if cause == "fenced out"),
+            ),
+        ]
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[track_caller]
+    fn assert_keeps_the_refusal(mapped: &SessionError, keeps: KeepsTheRefusal) {
+        let SessionError::Store(source) = mapped else {
+            panic!("a refusal until the realm reopens stays a store error: {mapped:?}");
+        };
+        assert!(
+            source
+                .downcast_ref::<RuntimeStoreError>()
+                .is_some_and(keeps),
+            "the source keeps the exact typed refusal: {source:?}"
+        );
+    }
+
+    /// A WholeBlob session's committed read that a host store refused
+    /// because the session's scope (or the realm) is poisoned keeps its
+    /// typed store error too: the refusal lasts until the realm is reopened,
+    /// and only a typed refusal lets a status read answer it without reading
+    /// again, or a wait end on it. Before, it was flattened into an internal
+    /// agent error.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_poisoned_scope_refusal_keeps_its_typed_store_error() {
-        use meerkat_runtime::store::spi::SpiError;
+        let session_id = SessionId::new();
+        for (error, keeps) in refusals_until_reopen() {
+            assert_keeps_the_refusal(
+                &whole_blob_read_error_to_session_error(&session_id, "session", error),
+                keeps,
+            );
+        }
+        // Any other store failure still becomes an internal agent error.
+        let flattened = refusal_or_internal_error(
+            RuntimeStoreError::ReadFailed("other".to_string()),
+            |error| format!("read: {error}"),
+        );
+        assert!(
+            matches!(&flattened, SessionError::Agent(AgentError::InternalError(text))
+                if text == "read: Store read failed: other"),
+            "{flattened:?}"
+        );
+    }
+
+    /// A HeadCanonical session's boundary authority read that a host store
+    /// refused until its realm is reopened keeps its typed store error; any
+    /// other failure of it stays an internal agent error. Before, every
+    /// failure was flattened into an internal agent error.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_refused_head_canonical_authority_read_keeps_its_typed_store_error() {
+        let session_id = SessionId::new();
+        for (error, keeps) in refusals_until_reopen() {
+            assert_keeps_the_refusal(
+                &head_canonical_authority_read_error(&session_id, "session", error),
+                keeps,
+            );
+        }
+        let flattened = head_canonical_authority_read_error(
+            &session_id,
+            "session",
+            RuntimeStoreError::ReadFailed("other".to_string()),
+        );
+        let expected = format!(
+            "failed to load session HeadCanonical authority for session {session_id}: Store read failed: other"
+        );
+        assert!(
+            matches!(&flattened, SessionError::Agent(AgentError::InternalError(text)) if *text == expected),
+            "{flattened:?}"
+        );
+    }
+
+    /// A read of a session's committed snapshot under its provisional tail
+    /// that a host store refused until its realm is reopened keeps its typed
+    /// store error; any other failure of it stays an internal agent error.
+    /// Before, every failure was flattened into an internal agent error.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_refused_committed_snapshot_read_under_a_tail_keeps_its_typed_store_error() {
+        use meerkat_runtime::recovery::DurableTailRecoveryError;
 
         let session_id = SessionId::new();
-        for error in [
-            SpiError::ScopePoisoned {
-                scope: "rt:poisoned".to_string(),
-                cause: "the store refused the batch".to_string(),
-            }
-            .into_read(),
-            SpiError::RealmPoisoned("fenced out".to_string()).into_read(),
+        for (error, keeps) in refusals_until_reopen() {
+            assert_keeps_the_refusal(
+                &committed_snapshot_under_tail_read_error(
+                    &session_id,
+                    DurableTailRecoveryError::Store(error),
+                ),
+                keeps,
+            );
+        }
+        for (error, cause) in [
+            (
+                DurableTailRecoveryError::Store(RuntimeStoreError::ReadFailed("other".to_string())),
+                "recovery commit failed: Store read failed: other",
+            ),
+            (
+                DurableTailRecoveryError::InvalidEvidence("torn".to_string()),
+                "recovery evidence is invalid: torn",
+            ),
         ] {
-            let mapped = whole_blob_read_error_to_session_error(&session_id, "session", error);
-            let SessionError::Store(source) = &mapped else {
-                panic!("a refusal until the realm reopens stays a store error: {mapped:?}");
-            };
+            let flattened = committed_snapshot_under_tail_read_error(&session_id, error);
+            let expected = format!(
+                "failed to read the committed snapshot of session {session_id} under its provisional tail: {cause}"
+            );
             assert!(
-                source
-                    .downcast_ref::<RuntimeStoreError>()
-                    .is_some_and(|error| !matches!(error, RuntimeStoreError::ReadFailed(_))),
-                "the source keeps the typed refusal: {source:?}"
+                matches!(&flattened, SessionError::Agent(AgentError::InternalError(text)) if *text == expected),
+                "{flattened:?}"
             );
         }
     }

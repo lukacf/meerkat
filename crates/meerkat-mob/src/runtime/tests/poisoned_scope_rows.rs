@@ -132,6 +132,22 @@ fn poisoned_session_read(session_id: &SessionId) -> SessionError {
     SessionError::Store(Box::new(poisoned_scope_refusal(session_id)))
 }
 
+/// Whether `error` is the store's refusal of `session_id`'s scope until the
+/// realm is reopened, as a wait ends with it.
+fn is_refusal_of(error: &MobError, session_id: &SessionId) -> bool {
+    let MobError::SessionError(SessionError::Store(source)) = error else {
+        return false;
+    };
+    let RuntimeStoreError::ScopeRefused { scopes: expected } = poisoned_scope_refusal(session_id)
+    else {
+        return false;
+    };
+    matches!(
+        source.downcast_ref::<RuntimeStoreError>(),
+        Some(RuntimeStoreError::ScopeRefused { scopes }) if *scopes == expected
+    )
+}
+
 fn poisoned_scope_refusal(session_id: &SessionId) -> RuntimeStoreError {
     SpiError::ScopePoisoned {
         scope: format!("rt:{}", LogicalRuntimeId::for_session(session_id).0),
@@ -335,6 +351,28 @@ async fn a_healthy_runtime_backlog_drains_while_another_runtime_scope_is_poisone
             passes.borrow()
         )
     });
+    // The poisoned runtime is a visible blocked row, with the store's
+    // refusal, and no drain reached it.
+    let pass = passes.borrow().clone();
+    assert!(
+        pass.blocked_runtimes.contains(&doomed),
+        "the poisoned runtime is reported blocked: {pass:?}"
+    );
+    assert!(
+        pass.failures
+            .iter()
+            .any(|failure| failure.contains(&doomed.0)
+                && failure.contains("unavailable until the store is reopened")),
+        "the pass names the poisoned runtime's refusal: {pass:?}"
+    );
+    assert_eq!(
+        pass.failures
+            .iter()
+            .filter(|failure| failure.contains(&doomed.0))
+            .count(),
+        1,
+        "no drain of the poisoned runtime was tried, so no other failure names it: {pass:?}"
+    );
 }
 
 /// A session read refused by a poisoned scope has a class of its own: the
@@ -352,6 +390,11 @@ fn a_poisoned_scope_refusal_has_its_own_class_and_is_not_retried() {
         assert_ne!(
             session_store_failure_class(&refusal),
             SessionStoreFailureClass::Unavailable,
+            "{refusal:?}"
+        );
+        assert_eq!(
+            session_store_failure_class(&refusal),
+            SessionStoreFailureClass::RefusedUntilReopen,
             "{refusal:?}"
         );
         assert!(
@@ -389,6 +432,10 @@ async fn a_refused_member_status_is_answered_from_the_recorded_refusal() {
             snapshot.preview_unavailable.is_some(),
             "the preview is unavailable, not empty"
         );
+        assert_eq!(
+            snapshot.preview_unavailable,
+            Some(crate::runtime::handle::MemberPreviewUnavailable::StoreRefused)
+        );
     }
     assert_eq!(
         service
@@ -398,6 +445,145 @@ async fn a_refused_member_status_is_answered_from_the_recorded_refusal() {
         1,
         "one read of the refused session, then its recorded refusal answers"
     );
+}
+
+/// A refusal is recorded for the member's projection target it was read
+/// for, and logged once for it: a status read for that target answers from
+/// the record without reading. Once the member is rebound (its fence token
+/// changes) or woken, the record is dropped and the session read again, so a
+/// stale refusal is never served: a read the store refuses again is recorded
+/// and logged once more, and a read it answers is served.
+#[tokio::test]
+async fn a_recorded_refusal_answers_only_for_the_target_it_was_read_for() {
+    use crate::runtime::actor::MobActor;
+    use crate::runtime::actor::member_status_lane::MemberStatusViewReads;
+    use crate::runtime::handle::MemberPreviewUnavailable;
+    use crate::runtime::state::{MemberStatusProjectionTarget, MemberStatusSessionObservation};
+
+    async fn observe(
+        service: &Arc<MockSessionService>,
+        member: &AgentIdentity,
+        target: &MemberStatusProjectionTarget,
+        view_reads: &MemberStatusViewReads,
+    ) -> MemberStatusSessionObservation {
+        let (observation, drain) = MobActor::observe_member_status_session(
+            Arc::clone(service) as Arc<dyn crate::runtime::session_service::MobSessionService>,
+            None,
+            member.clone(),
+            target,
+            0,
+            view_reads,
+        )
+        .await;
+        assert!(drain.is_none(), "the read answered within the deadline");
+        observation
+    }
+
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member = AgentIdentity::from("rebound-refused-status");
+    let session_id = handle
+        .spawn(ProfileName::from("worker"), member.clone(), None)
+        .await
+        .expect("spawn")
+        .bridge_session_id()
+        .expect("session-backed member")
+        .clone();
+    let (captured, _capture) = capture_warnings();
+    let refused_session = session_id.clone();
+    service.refuse_status_view_reads(&session_id, move || poisoned_session_read(&refused_session));
+    let scope = format!("rt:{}", LogicalRuntimeId::for_session(&session_id).0);
+    let reads = || {
+        service
+            .durable_reads_of(&session_id)
+            .member_status_durable_head
+    };
+    let logged = || {
+        let session = session_id.to_string();
+        captured
+            .lock()
+            .expect("captured warnings lock")
+            .iter()
+            .filter(|fields| {
+                field(fields, "bridge_session_id") == Some(session.as_str())
+                    && field(fields, "message").is_some_and(|message| {
+                        message.contains("refused until the host store realm is reopened")
+                    })
+            })
+            .count()
+    };
+    let assert_refused = |observation: &MemberStatusSessionObservation| {
+        assert_eq!(
+            observation.preview_unavailable,
+            Some(MemberPreviewUnavailable::StoreRefused)
+        );
+        assert!(
+            matches!(
+                &observation.store_refusal,
+                Some(RuntimeStoreError::ScopeRefused { scopes })
+                    if scopes.len() == 1 && scopes[0].scope == scope
+            ),
+            "the observation carries the store's typed refusal: {:?}",
+            observation.store_refusal
+        );
+    };
+
+    let view_reads = MemberStatusViewReads::default();
+    let bound = MemberStatusProjectionTarget {
+        bridge_session_id: Some(session_id.clone()),
+        include_local_session_details: true,
+        agent_runtime_id: Some(crate::ids::AgentRuntimeId::new(
+            member.clone(),
+            crate::ids::Generation::new(0),
+        )),
+        fence_token: Some(crate::ids::FenceToken::new(1)),
+        dormant: true,
+        unborn_seat: false,
+    };
+    let before = reads();
+    for _ in 0..3 {
+        assert_refused(&observe(&service, &member, &bound, &view_reads).await);
+    }
+    assert_eq!(reads() - before, 1, "one read for the bound target");
+    assert_eq!(
+        logged(),
+        1,
+        "the refusal is logged once for the bound target"
+    );
+
+    let rebound = MemberStatusProjectionTarget {
+        fence_token: Some(crate::ids::FenceToken::new(2)),
+        ..bound.clone()
+    };
+    for _ in 0..3 {
+        assert_refused(&observe(&service, &member, &rebound, &view_reads).await);
+    }
+    assert_eq!(
+        reads() - before,
+        2,
+        "the rebound member's session is read again, once"
+    );
+    assert_eq!(
+        logged(),
+        2,
+        "the refusal recorded for the rebound target is logged once"
+    );
+
+    service.answer_status_view_reads(&session_id);
+    let woken = MemberStatusProjectionTarget {
+        dormant: false,
+        ..rebound.clone()
+    };
+    let served = observe(&service, &member, &woken, &view_reads).await;
+    assert_eq!(
+        served.preview_unavailable, None,
+        "the woken member's read is served, not the stale refusal"
+    );
+    assert!(served.store_refusal.is_none());
+    assert!(
+        view_reads.recorded_refusal(&session_id, &rebound).is_none(),
+        "the rebound target's record was dropped"
+    );
+    assert_eq!(logged(), 2, "a served read logs no refusal");
 }
 
 /// A wait on a member whose session read is refused until the realm reopens
@@ -422,6 +608,10 @@ async fn a_wait_on_a_store_refused_member_ends_with_the_refusal() {
         matches!(one, Ok(Err(_))),
         "wait_one ends with the refusal: {one:?}"
     );
+    assert!(
+        matches!(&one, Ok(Err(error)) if is_refusal_of(error, &session_id)),
+        "wait_one ends with the store's typed refusal: {one:?}"
+    );
     let all = tokio::time::timeout(
         Duration::from_secs(3),
         handle.wait_all(std::slice::from_ref(&member)),
@@ -430,6 +620,10 @@ async fn a_wait_on_a_store_refused_member_ends_with_the_refusal() {
     assert!(
         matches!(all, Ok(Err(_))),
         "wait_all ends with the refusal: {all:?}"
+    );
+    assert!(
+        matches!(&all, Ok(Err(error)) if is_refusal_of(error, &session_id)),
+        "wait_all ends with the store's typed refusal: {all:?}"
     );
 }
 
@@ -464,5 +658,9 @@ async fn a_kickoff_wait_on_a_store_refused_member_ends_with_the_refusal() {
     assert!(
         !matches!(error, MobError::KickoffWaitTimedOut { .. }),
         "the kickoff wait ends with the refusal, not at its timeout: {error:?}"
+    );
+    assert!(
+        is_refusal_of(&error, &session_id),
+        "the kickoff wait ends with the store's typed refusal: {error:?}"
     );
 }

@@ -1083,9 +1083,11 @@ async fn lead_wake_under_a_held_source_writer_registers_once() {
     close(&c, body).await;
 }
 
-/// Restoring the same binding again in one host reuses its retained entry:
-/// three restorations of G's custody leave the retained set at the size the
-/// first one left it.
+/// Restoring the same binding again under one source owner reuses its
+/// retained entry. After three restorations of G's custody the retained set
+/// holds exactly the entries the first one left: the same references, the
+/// same associations and the same retained originals. G's own entry is G's
+/// reference with G's canonical association.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn repeated_restoration_of_one_binding_keeps_its_retained_entry() {
     let saved = admit_then_close().await;
@@ -1093,15 +1095,58 @@ async fn repeated_restoration_of_one_binding_keeps_its_retained_entry() {
     let body = AssertUnwindSafe(Box::pin(async {
         join_recovery_for_idle_restore(&c).await;
         c.member.restore_admitted_source().await.unwrap();
-        let once = c.f.source.retained.lock().unwrap().len();
+        let retained = || {
+            c.f.source
+                .retained
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|held| {
+                    (
+                        held.reference.clone(),
+                        held.original.association().clone(),
+                        held.original.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let once = retained();
+        let lead =
+            c.f.source
+                .binding_evidence(&c.lead.original)
+                .await
+                .unwrap()
+                .expect("G's canonical association");
+        let lead_entries = once
+            .iter()
+            .filter(|(reference, ..)| *reference == c.lead.original)
+            .map(|(_, association, _)| association)
+            .collect::<Vec<_>>();
+        assert!(
+            lead_entries == vec![&lead],
+            "one entry for G, with G's canonical association"
+        );
         for _ in 0..2 {
             c.member.restore_admitted_source().await.unwrap();
         }
-        let after = c.f.source.retained.lock().unwrap().len();
+        let after = retained();
         assert_eq!(
-            after, once,
-            "retained after 1 restoration: {once}, after 3: {after}"
+            after.len(),
+            once.len(),
+            "retained after 1 restoration: {}, after 3: {}",
+            once.len(),
+            after.len()
         );
+        for ((reference, association, original), (again, again_association, again_original)) in
+            once.iter().zip(&after)
+        {
+            assert!(again == reference, "the same reference");
+            assert!(again_association == association, "the same association");
+            assert!(
+                Arc::ptr_eq(again_original, original),
+                "the same retained original, not a replacement"
+            );
+        }
     }))
     .catch_unwind()
     .await;

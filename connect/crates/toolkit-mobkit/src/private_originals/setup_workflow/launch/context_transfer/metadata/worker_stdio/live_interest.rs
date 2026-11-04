@@ -100,12 +100,15 @@ async fn child() {
     let observed_directory = directory.clone();
     let observed_sessions = sessions.clone();
     let expected_before = before.clone();
-    // The bindings this run restores: A's waiter source, P and G.
+    // The bindings this run restores: A's waiter source, P and G. The
+    // observer records their retained entries at Ready.
     let restored = (
         saved.row.key.clone(),
         saved.durable.parent_source().clone(),
         saved.durable.lead_source().clone(),
     );
+    let restored_bindings = Arc::new(std::sync::OnceLock::new());
+    let observed_bindings = restored_bindings.clone();
     let observer = tokio::spawn(async move {
         let _release = Release(observed_probe.clone());
         let checked = AssertUnwindSafe(async {
@@ -169,6 +172,31 @@ async fn child() {
                 p.interest_restored.load(Ordering::SeqCst) == 1
                     && p.custody_rounds.load(Ordering::SeqCst) > 0)).await.unwrap();
             assert_eq!(member.session().unwrap(), observed_sessions[2]);
+            // The retained entries this run restored: exactly A's waiter
+            // source, P and G, each by its exact reference with its canonical
+            // association.
+            let canonical = [
+                (saved.row.key.clone(), saved.association.clone()),
+                (
+                    observed_source.key(saved.durable.parent_source()).unwrap(),
+                    observed_source.binding_evidence(saved.durable.parent_source()).await.unwrap().unwrap(),
+                ),
+                (
+                    observed_source.key(saved.durable.lead_source()).unwrap(),
+                    observed_source.binding_evidence(saved.durable.lead_source()).await.unwrap().unwrap(),
+                ),
+            ];
+            let bindings = observed_source.retained.lock().unwrap().iter()
+                .map(|held| (observed_source.key(&held.reference).unwrap(), held.reference.clone(),
+                    held.original.association().clone(), held.original.clone()))
+                .collect::<Vec<_>>();
+            assert_eq!(bindings.len(), canonical.len(), "one retained entry per restored binding");
+            for (key, association) in &canonical {
+                assert_eq!(bindings.iter().filter(|(held, _, held_association, _)|
+                    held == key && held_association == association).count(), 1,
+                    "the restored binding {key:?} with its canonical association, once");
+            }
+            assert!(observed_bindings.set(bindings).is_ok());
             let held = observed_source.retained.lock().unwrap().iter()
                 .find(|held| held.reference == *saved.durable.lead_source()).unwrap().clone();
             let attached = held.setup_workflow.get().unwrap();
@@ -229,29 +257,62 @@ async fn child() {
         );
         host.join_close().await.unwrap();
         assert_eq!(work_census(directory.path(), &sessions).await, before);
-        // Interim close check until Connect states the close contract. The
-        // retained set is append-only in this host (hold_binding only adds),
-        // so after join_close it holds exactly the bindings this run
-        // restored, each once, and no live actor serves any of their sessions.
+        // The close contract: retained product state is not cleared. After
+        // join_close the retained set holds exactly the bindings this run
+        // restored, each once, with its exact reference, its canonical
+        // association and the same retained original as at Ready; no live
+        // actor serves any of their sessions, and the current owners refuse a
+        // restoration through a retained handle, typed.
         let (waiter_key, parent, lead) = &restored;
-        let mut held: Vec<_> = source
+        let restored_bindings = restored_bindings
+            .get()
+            .expect("the observer recorded the restored bindings at Ready");
+        let held: Vec<_> = source
             .retained
             .lock()
             .unwrap()
             .iter()
-            .map(|held| source.key(&held.reference).unwrap())
+            .map(|held| {
+                (
+                    source.key(&held.reference).unwrap(),
+                    held.reference.clone(),
+                    held.original.association().clone(),
+                    held.original.clone(),
+                )
+            })
             .collect();
+        assert_eq!(
+            held.len(),
+            restored_bindings.len(),
+            "exactly the bindings this run restored, each once"
+        );
+        for (key, reference, association, original) in &held {
+            assert!(
+                restored_bindings.iter().any(
+                    |(
+                        restored_key,
+                        restored_reference,
+                        restored_association,
+                        restored_original,
+                    )| {
+                        restored_key == key
+                            && restored_reference == reference
+                            && restored_association == association
+                            && Arc::ptr_eq(restored_original, original)
+                    }
+                ),
+                "retained {key:?} is a binding this run restored, unchanged"
+            );
+        }
+        let mut keys: Vec<_> = held.iter().map(|(key, ..)| key.clone()).collect();
         let mut expected = vec![
             waiter_key.clone(),
             source.key(parent).unwrap(),
             source.key(lead).unwrap(),
         ];
-        held.sort_by(|a, b| a.id.cmp(&b.id));
+        keys.sort_by(|a, b| a.id.cmp(&b.id));
         expected.sort_by(|a, b| a.id.cmp(&b.id));
-        assert_eq!(
-            held, expected,
-            "exactly the bindings this run restored, each once"
-        );
+        assert_eq!(keys, expected, "A's waiter source, P and G");
         if let Some(pins) = source
             .controller_pin_source
             .get()

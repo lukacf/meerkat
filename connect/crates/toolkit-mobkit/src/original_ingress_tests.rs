@@ -732,6 +732,41 @@ fn retained_custody_waits_at_most_its_bound_and_then_answers_unavailable() {
     });
 }
 
+// Core's ingress check authenticates an original through the same source
+// collection, from the same kind of synchronous native callback.
+#[test]
+fn authenticated_original_waits_for_a_held_source_collection_instead_of_refusing() {
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (owner, a, namespace, work) = admitted_original(dir.path());
+    let ingress = ingress_for(&a);
+    let found = |owner: &ToolkitOriginalOwner| {
+        owner
+            .authenticated_original(&ingress, &namespace, &work)
+            .map(|found| found.is_some())
+    };
+    assert_eq!(found(&owner), Ok(true));
+    let (held, holding) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let holder = scope.spawn(|| {
+            let originals = owner.originals.lock().unwrap();
+            held.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(originals);
+        });
+        holding.recv().unwrap();
+        let answer = found(&owner);
+        assert_eq!(
+            answer,
+            Ok(true),
+            "a held source collection is waited for, not answered unavailable"
+        );
+        holder.join().unwrap();
+    });
+}
+
 pub(crate) fn private_event(label: &str) -> crate::private_originals::PrivateAuthenticatedEvent {
     use crate::private_originals::{PrivateAuthenticatedEvent, PrivateSourceEvidence};
     let sha256 = evidence(label)

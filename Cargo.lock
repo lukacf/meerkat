@@ -3653,7 +3653,6 @@ dependencies = [
  "meerkat-capabilities",
  "meerkat-contracts",
  "meerkat-core",
- "meerkat-mcp",
  "meerkat-runtime",
  "meerkat-sandbox",
  "meerkat-skills",

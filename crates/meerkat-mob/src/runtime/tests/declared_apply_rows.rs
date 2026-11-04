@@ -2392,7 +2392,11 @@ async fn a_raw_member_is_adopted_once_its_host_labels_it_with_the_identity() {
         .await
         .expect("the retirement answers")
         .expect("the host retires its raw member");
-    mob.left(&member_id).await;
+    // Wait for the retirement's end, not only for the member to leave the
+    // listing, which a retiring member does at once: the retirement archives
+    // the session, and a resume of it before the archive ends is refused,
+    // retryably.
+    mob.retirement_ended(&member_id).await;
     mob.handle
         .spawn_spec(
             identity_labelled(&member_id, "team:bob")

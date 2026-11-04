@@ -26,7 +26,8 @@ use super::agent_memory::{
     AgentMemoryRuntimeInjector, NewAgentMemory,
 };
 use super::bridge::{
-    BridgeAdmissionError, BridgeError, BridgeTurnError, ResumeRejectionKind, SessionBridge,
+    BridgeAdmissionError, BridgeError, BridgeTurnError, DeclaredIdentityAnswer,
+    ResumeRejectionKind, SessionBridge,
 };
 use super::contracts::{
     AgentCustomizer, ContinuityStore, LeaseProvider, RosterProvider, TopologyProvider,
@@ -59,6 +60,7 @@ use crate::memory::records::{
 };
 
 mod build_preparation;
+mod declare;
 mod lifecycle_projection;
 mod records;
 #[cfg(test)]
@@ -1188,6 +1190,17 @@ pub enum IdentityRuntimeError {
         member: String,
         session_id: Option<SessionId>,
     },
+    /// Core's declared apply answered no identity of a declaration: another
+    /// apply of the mob was in progress (`retryable`: declare again once it
+    /// ends), the lifecycle projection's cursor could not be read or started
+    /// (`retryable`), or the apply could not run at all (the mob is not
+    /// running, its store could not be read, or this runtime's session
+    /// bridge cannot reach the apply). Nothing was declared. JSON-RPC
+    /// internal-error code with `data.kind` `identity_declaration_not_applied`.
+    DeclarationNotApplied {
+        retryable: bool,
+        detail: String,
+    },
     /// The wake's resume was held: Core withheld the
     /// session's durable resume, or the roster profile moved off the role
     /// Core last ran the identity under without a declared migration. The
@@ -1515,6 +1528,15 @@ impl std::fmt::Display for IdentityRuntimeError {
                 session_id
                     .as_ref()
                     .map_or_else(String::new, |session| format!(" on session {session}"))
+            ),
+            Self::DeclarationNotApplied { retryable, detail } => write!(
+                f,
+                "nothing was declared in Core's mob{}: {detail}",
+                if *retryable {
+                    " (retryable: declare again)"
+                } else {
+                    ""
+                }
             ),
             Self::WakeHeld {
                 identity,
@@ -2033,6 +2055,9 @@ impl IdentityRuntimeError {
                 "member": member,
                 "session_id": session_id.as_ref().map(ToString::to_string),
                 "retryable": false,
+            })),
+            Self::DeclarationNotApplied { retryable, .. } => Some(serde_json::json!({
+                "kind": "identity_declaration_not_applied", "retryable": retryable,
             })),
             // An identity whose held member was not published keeps the
             // internal-error code; the kind tells its host that the identity
@@ -6993,16 +7018,43 @@ impl IdentityRuntime {
     // Registration / activation
     // -----------------------------------------------------------------------
 
-    /// Register (or re-register) an identity's roster spec, under its
+    /// Register (or re-register) an identity's roster spec by declaring the
+    /// identity in Core's mob, as one partial roster
+    /// ([`SessionBridge::apply_declared_roster`]): Core's MobMachine decides
+    /// what becomes of the identity's member (a Dormant seat, a kept member,
+    /// a restamp, a held role move, a refusal) and Core realizes it. The
+    /// answer is Core's, typed; Meta decides nothing about the member.
+    ///
+    /// A declaration Core decided registers the spec, under the identity's
     /// lifecycle lock: replacing an entry replaces its registered row, which
-    /// a governed or row-checked send holding that lock delivers under. Meta
-    /// keeps no Core fact here. A recorded wake refusal survives a
-    /// re-registration, because it describes Core's session rather than the
-    /// spec, until the next successful wake.
-    pub async fn register(&self, spec: DurableAgentSpec) {
-        let lifecycle_lock = self.lifecycle_lock_for(&spec.identity).await;
-        let _lifecycle_guard = lifecycle_lock.lock().await;
-        self.register_locked(spec).await;
+    /// a governed or row-checked send holding that lock delivers under. So
+    /// does Core's answer that a host or the identity store drives the
+    /// identity, or that this composition of the mob is not authoritative:
+    /// the spec is then shown read-only
+    /// ([`DeclaredIdentityAnswer::registers_spec`]). A deferred, refused or
+    /// failed declaration leaves the previous registration as it was. A
+    /// recorded wake refusal survives a re-registration, because it describes
+    /// Core's session rather than the spec, until the next successful wake.
+    ///
+    /// The host's customizer composes the member build only when Core
+    /// answers that the identity's verdict builds a member; an identity Core
+    /// keeps is declared with its lifecycle facts alone. The customizer runs
+    /// with no lifecycle lock held. A runtime with no session bridge has no
+    /// Core mob: the spec is registered and the answer is
+    /// [`DeclaredIdentityAnswer::RecordedOnly`].
+    ///
+    /// `Err` only when Core answered nothing for the identity: the declared
+    /// apply could not run, or another apply of the mob stayed in progress
+    /// past a bounded wait ([`IdentityRuntimeError::DeclarationNotApplied`]);
+    /// the identity's first-boot row contradicts Core's history; its build
+    /// could not be composed; or the first-boot manifest or Core's member
+    /// history could not be read.
+    pub async fn register(
+        &self,
+        spec: DurableAgentSpec,
+    ) -> Result<DeclaredIdentityAnswer, IdentityRuntimeError> {
+        self.declare_registration(spec, declare::Registration::Register)
+            .await
     }
 
     /// [`Self::register`]'s body for callers that already hold the
@@ -9730,13 +9782,22 @@ impl IdentityRuntime {
         Ok(tx.subscribe())
     }
 
-    /// Update the registered row of an existing identity, under its
-    /// lifecycle lock: a governed or row-checked send holding that lock
-    /// delivers under the row it checked, and this update commits after it.
-    pub async fn update_spec(&self, spec: DurableAgentSpec) -> Result<(), IdentityRuntimeError> {
-        let lifecycle_lock = self.lifecycle_lock_for(&spec.identity).await;
-        let _lifecycle_guard = lifecycle_lock.lock().await;
-        self.update_spec_locked(spec).await
+    /// Update the registered row of an existing identity by declaring it
+    /// again in Core's mob, as one partial roster: Core decides what the
+    /// change does to the member (a restamp of its runtime mode, a declared
+    /// or held role move, nothing for a change of descriptive facets), as
+    /// [`Self::register`] declares, and the answer is Core's. A declaration
+    /// Core decided updates the row under the identity's lifecycle lock: a
+    /// governed or row-checked send holding that lock delivers under the row
+    /// it checked, and this update commits after it. An identity this
+    /// runtime has not registered is refused before Core is asked
+    /// ([`IdentityRuntimeError::UnknownIdentity`]).
+    pub async fn update_spec(
+        &self,
+        spec: DurableAgentSpec,
+    ) -> Result<DeclaredIdentityAnswer, IdentityRuntimeError> {
+        self.declare_registration(spec, declare::Registration::Update)
+            .await
     }
 
     /// [`Self::update_spec`]'s body for callers that already hold the
@@ -16454,6 +16515,16 @@ mod reset_reprofile_tests {
         ) -> Result<(), BridgeError> {
             Ok(())
         }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
+        }
     }
 
     /// Bridge used to prove REQ-33 metadata hot reloads never cross the
@@ -16612,6 +16683,16 @@ mod reset_reprofile_tests {
         ) -> Result<meerkat_mob::MemberIdentityManagement, BridgeError> {
             Ok(meerkat_mob::MemberIdentityManagement::CommandDriven)
         }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
+        }
     }
 
     fn durable_spec(identity: AgentIdentity, profile: &str) -> DurableAgentSpec {
@@ -16710,6 +16791,16 @@ mod reset_reprofile_tests {
                 return Err(BridgeError::Mob("mob refused the release".to_string()));
             }
             Ok(())
+        }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
         }
     }
 
@@ -16955,7 +17046,10 @@ mod reset_reprofile_tests {
             bridge: Some(bridge),
             default_timeout: None,
         }));
-        runtime.register(durable_spec(identity, "domain")).await;
+        runtime
+            .register(durable_spec(identity, "domain"))
+            .await
+            .expect("the identity registers");
         Ok((runtime, alias))
     }
 
@@ -17531,7 +17625,10 @@ mod reset_reprofile_tests {
             bridge: Some(bridge.clone()),
             default_timeout: None,
         }));
-        runtime.register(spec.clone()).await;
+        runtime
+            .register(spec.clone())
+            .await
+            .expect("the identity registers");
 
         let active_generation =
             runtime.begin_identity_bootstrap_pending(IdentityBootstrapMode::LazyMaterialize);
@@ -18198,7 +18295,10 @@ mod completion_wait_tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let runtime = runtime()?;
         let identity = AgentIdentity::parse("agent:gone")?;
-        runtime.register(spec(&identity)).await;
+        runtime
+            .register(spec(&identity))
+            .await
+            .expect("the identity registers");
         let baseline = runtime.completion_cursor(&identity).await;
         let wait = runtime.await_completion(&identity, Some(baseline), Duration::from_mins(10));
         let remove = async {
@@ -18233,7 +18333,10 @@ mod completion_wait_tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let runtime = runtime()?;
         let identity = AgentIdentity::parse("agent:closing")?;
-        runtime.register(spec(&identity)).await;
+        runtime
+            .register(spec(&identity))
+            .await
+            .expect("the identity registers");
         let baseline = runtime.completion_cursor(&identity).await;
         let completion =
             runtime.await_completion(&identity, Some(baseline), Duration::from_mins(10));
@@ -19158,6 +19261,16 @@ mod admission_first_topology_tests {
         ) -> Result<meerkat_mob::MemberIdentityManagement, BridgeError> {
             Ok(meerkat_mob::MemberIdentityManagement::CommandDriven)
         }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
+        }
     }
 
     fn spec(identity: &AgentIdentity) -> DurableAgentSpec {
@@ -19223,7 +19336,10 @@ mod admission_first_topology_tests {
             },
             &spec.profile,
         );
-        runtime.register(spec).await;
+        runtime
+            .register(spec)
+            .await
+            .expect("the identity registers");
         Ok(runtime_id)
     }
 
@@ -19385,7 +19501,10 @@ mod admission_first_topology_tests {
         let bridge = Arc::new(bridge);
         let runtime = runtime_with(bridge.clone(), "delivery-wakes-no-peer")?;
         let target_rt = register_active(&runtime, &bridge, &target, 0).await?;
-        runtime.register(spec(&peer)).await;
+        runtime
+            .register(spec(&peer))
+            .await
+            .expect("the identity registers");
         runtime
             .set_desired_peer_edges(vec![ManagedPeerEdge::new(target.clone(), peer.clone())?])
             .await;
@@ -19500,7 +19619,10 @@ mod admission_first_topology_tests {
         let bridge = Arc::new(WedgeableTopologyBridge::new(gate));
         let runtime = runtime_with(bridge.clone(), "wake-wires-before-admission")?;
         let peer_rt = register_active(&runtime, &bridge, &peer, 0).await?;
-        runtime.register(spec(&sleeper)).await;
+        runtime
+            .register(spec(&sleeper))
+            .await
+            .expect("the identity registers");
         runtime
             .set_desired_peer_edges(vec![ManagedPeerEdge::new(sleeper.clone(), peer.clone())?])
             .await;
@@ -20122,6 +20244,16 @@ model = "gpt-5.5"
         ) -> Result<meerkat_mob::MemberIdentityManagement, BridgeError> {
             Ok(meerkat_mob::MemberIdentityManagement::CommandDriven)
         }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
+        }
     }
 
     /// A wire whose reply timed out is still queued in a wedged actor when
@@ -20160,7 +20292,10 @@ model = "gpt-5.5"
                 },
                 &spec.profile,
             );
-            runtime.register(spec).await;
+            runtime
+                .register(spec)
+                .await
+                .expect("the identity registers");
             runtime_ids.push(runtime_id);
         }
         let edge = ManagedPeerEdge::new(alpha.clone(), beta.clone())?;
@@ -20276,7 +20411,10 @@ model = "gpt-5.5"
         let bridge = Arc::new(WedgeableTopologyBridge::new(gate));
         let runtime = runtime_with(bridge.clone(), "wake-lock-timeout")?;
         register_active(&runtime, &bridge, &peer, 0).await?;
-        runtime.register(spec(&sleeper)).await;
+        runtime
+            .register(spec(&sleeper))
+            .await
+            .expect("the identity registers");
         runtime
             .set_desired_peer_edges(vec![ManagedPeerEdge::new(sleeper.clone(), peer.clone())?])
             .await;
@@ -21076,6 +21214,16 @@ mod wake_per_reason_tests {
         ) -> Result<meerkat_mob::MemberBindingHistory, BridgeError> {
             self.core.history()
         }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
+        }
     }
 
     async fn runtime_refusing_with(
@@ -21112,7 +21260,10 @@ mod wake_per_reason_tests {
             bridge: Some(bridge.clone() as Arc<dyn SessionBridge>),
             default_timeout: None,
         });
-        runtime.register(spec(identity)).await;
+        runtime
+            .register(spec(identity))
+            .await
+            .expect("the identity registers");
         Ok((bridge, runtime))
     }
 
@@ -21457,6 +21608,16 @@ mod wake_per_reason_tests {
         ) -> Result<meerkat_mob::MemberBindingHistory, BridgeError> {
             Ok(meerkat_mob::MemberBindingHistory::for_test([], [], [], 0))
         }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
+        }
     }
 
     /// A bridge over a Core that holds the identity's member live, whose
@@ -21644,6 +21805,16 @@ mod wake_per_reason_tests {
         ) -> Result<meerkat_mob::MemberBindingHistory, BridgeError> {
             self.core.history()
         }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
+        }
     }
 
     /// A delivery whose member's session Core holds no durable copy of is
@@ -21678,7 +21849,10 @@ mod wake_per_reason_tests {
             bridge: Some(bridge.clone() as Arc<dyn SessionBridge>),
             default_timeout: None,
         });
-        runtime.register(spec(&identity)).await;
+        runtime
+            .register(spec(&identity))
+            .await
+            .expect("the identity registers");
 
         for delivery in ["first", "second"] {
             let refused = match runtime
@@ -21752,7 +21926,10 @@ mod wake_per_reason_tests {
             bridge: Some(bridge.clone() as Arc<dyn SessionBridge>),
             default_timeout: None,
         });
-        runtime.register(spec(&identity)).await;
+        runtime
+            .register(spec(&identity))
+            .await
+            .expect("the identity registers");
 
         for attempt in 1..=2 {
             let error = match runtime.materialize(&identity).await {
@@ -21829,7 +22006,10 @@ mod wake_per_reason_tests {
             bridge: Some(bridge.clone() as Arc<dyn SessionBridge>),
             default_timeout: None,
         });
-        runtime.register(spec(&identity)).await;
+        runtime
+            .register(spec(&identity))
+            .await
+            .expect("the identity registers");
 
         for attempt in 1..=2 {
             let Err(error) = runtime.materialize(&identity).await else {
@@ -22091,6 +22271,16 @@ mod respawn_window_tests {
                 1,
             ))
         }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
+        }
     }
 
     #[tokio::test]
@@ -22108,7 +22298,10 @@ mod respawn_window_tests {
             bridge: Some(bridge.clone() as Arc<dyn SessionBridge>),
             default_timeout: None,
         }));
-        runtime.register(spec(&identity)).await;
+        runtime
+            .register(spec(&identity))
+            .await
+            .expect("the identity registers");
         // Notes an earlier wake left on a member Core now holds live: a final
         // refusal and a replaced session. Neither describes the live member.
         {
@@ -22239,6 +22432,16 @@ mod history_read_fault_tests {
                 "the mob journal could not be read".to_string(),
             ))
         }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
+        }
     }
 
     fn spec(identity: &AgentIdentity) -> DurableAgentSpec {
@@ -22271,7 +22474,10 @@ mod history_read_fault_tests {
             default_timeout: None,
         });
         let keeper = AgentIdentity::parse("keeper")?;
-        runtime.register(spec(&keeper)).await;
+        runtime
+            .register(spec(&keeper))
+            .await
+            .expect("the identity registers");
 
         let error = match runtime.statuses().await {
             Err(error) => error,

@@ -526,7 +526,10 @@ async fn a_member_embodied_outside_the_add_refuses_it() {
         .runtime
         .set_held_after_freshness_hook(Box::new(move || {
             Box::pin(async move {
-                competitor.register(competing_spec).await;
+                competitor
+                    .register(competing_spec)
+                    .await
+                    .expect("the identity registers");
                 let _ = tokio::time::timeout(
                     Duration::from_secs(10),
                     competitor.materialize(&competing),

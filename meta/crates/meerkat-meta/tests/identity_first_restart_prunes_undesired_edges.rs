@@ -1671,5 +1671,15 @@ mod no_registration_reload {
         ) -> Result<CommittedBoundaryRepair, BridgeError> {
             self.inner.recover_committed_boundary(session_id).await
         }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: meerkat_meta::identity_first::DeclaredRosterRequest,
+        ) -> Result<
+            meerkat_meta::identity_first::DeclaredRosterAnswer,
+            meerkat_meta::identity_first::BridgeError,
+        > {
+            self.inner.apply_declared_roster(roster).await
+        }
     }
 }

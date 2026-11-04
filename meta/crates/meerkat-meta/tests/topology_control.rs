@@ -1658,8 +1658,14 @@ async fn runtime_with_a_dormant_edge_endpoint(
     let dormant = AgentIdentity::parse("domain:dormant").expect("dormant identity");
     let active_spec = identity_spec(&active);
     let dormant_spec = identity_spec(&dormant);
-    identity_runtime.register(active_spec.clone()).await;
-    identity_runtime.register(dormant_spec.clone()).await;
+    identity_runtime
+        .register(active_spec.clone())
+        .await
+        .expect("the identity registers");
+    identity_runtime
+        .register(dormant_spec.clone())
+        .await
+        .expect("the identity registers");
     let managed = ManagedPeerEdge::new(active.clone(), dormant.clone()).expect("managed edge");
     identity_runtime.set_desired_peer_edges(vec![managed]).await;
     unified.attach_identity_first_context(Arc::new(IdentityFirstRuntimeContext::new(

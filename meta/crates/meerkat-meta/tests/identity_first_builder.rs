@@ -517,6 +517,16 @@ impl SessionBridge for RecordingResumeBridge {
     ) -> Result<Vec<meerkat_mob::MemberBinding>, BridgeError> {
         self.core.durable_identity_members()
     }
+
+    async fn apply_declared_roster(
+        &self,
+        roster: meerkat_meta::identity_first::DeclaredRosterRequest,
+    ) -> Result<
+        meerkat_meta::identity_first::DeclaredRosterAnswer,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        Ok(meerkat_meta::identity_first::DeclaredRosterAnswer::kept_for(&roster))
+    }
 }
 
 #[derive(Clone)]
@@ -2090,6 +2100,16 @@ impl SessionBridge for CoreBackedBridge {
     ) -> Result<(), BridgeError> {
         self.core.retire(runtime_id);
         Ok(())
+    }
+
+    async fn apply_declared_roster(
+        &self,
+        roster: meerkat_meta::identity_first::DeclaredRosterRequest,
+    ) -> Result<
+        meerkat_meta::identity_first::DeclaredRosterAnswer,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        Ok(meerkat_meta::identity_first::DeclaredRosterAnswer::kept_for(&roster))
     }
 }
 

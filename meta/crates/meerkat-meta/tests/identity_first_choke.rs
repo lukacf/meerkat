@@ -235,10 +235,16 @@ async fn identity_first_choke_06_addressability_to_delivery_enforcement() {
     let runtime = make_runtime(store, lease);
 
     // Register Addressable
-    runtime.register(make_spec("public:main")).await;
+    runtime
+        .register(make_spec("public:main"))
+        .await
+        .expect("the identity registers");
 
     // Register InternalOnly
-    runtime.register(make_internal_spec("internal:main")).await;
+    runtime
+        .register(make_internal_spec("internal:main"))
+        .await
+        .expect("the identity registers");
 
     // Trace: addressability from roster → runtime → delivery enforcement
     let status_public = runtime.status(&make_identity("public:main")).await.unwrap();
@@ -433,7 +439,10 @@ async fn identity_first_choke_14_identity_status_wire_format() {
         .insert("env".to_string(), "production".to_string());
     spec.labels.insert("tier".to_string(), "1".to_string());
 
-    runtime.register(spec).await;
+    runtime
+        .register(spec)
+        .await
+        .expect("the identity registers");
 
     let status = runtime.status(&make_identity("triage:main")).await.unwrap();
 
@@ -583,7 +592,10 @@ async fn identity_first_choke_18_hot_update_registry_behavioral_change() {
     let runtime = make_runtime(store, lease);
 
     // Register as InternalOnly
-    runtime.register(make_internal_spec("agent:main")).await;
+    runtime
+        .register(make_internal_spec("agent:main"))
+        .await
+        .expect("the identity registers");
 
     let id = make_identity("agent:main");
 

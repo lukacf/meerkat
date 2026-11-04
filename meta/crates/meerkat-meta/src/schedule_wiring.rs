@@ -3727,7 +3727,8 @@ comms = true
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
 
         let schedule = Schedule::new(CreateScheduleRequest {
             name: Some("schedule-dedup-identity-carrier".to_string()),
@@ -3929,7 +3930,8 @@ external_addressable = true
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
 
         let schedule = Schedule::new(CreateScheduleRequest {
             name: Some("identity-no-bridge".to_string()),
@@ -4193,7 +4195,8 @@ schedule = true
                         binding: None,
                         placement: None,
                     })
-                    .await;
+                    .await
+                    .expect("the identity registers");
                 Some(identity_runtime)
             } else {
                 None
@@ -7940,6 +7943,18 @@ schedule = true
             ) -> Result<(), crate::identity_first::BridgeError> {
                 self.core.retire(runtime_id);
                 Ok(())
+            }
+
+            async fn apply_declared_roster(
+                &self,
+                roster: crate::identity_first::DeclaredRosterRequest,
+            ) -> Result<
+                crate::identity_first::DeclaredRosterAnswer,
+                crate::identity_first::BridgeError,
+            > {
+                Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                    &roster,
+                ))
             }
         }
 

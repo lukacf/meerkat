@@ -222,4 +222,14 @@ impl SessionBridge for CoreBridge {
     async fn release_member(&self, _identity: &AgentIdentity) -> Result<(), BridgeError> {
         Ok(())
     }
+
+    async fn apply_declared_roster(
+        &self,
+        roster: meerkat_meta::identity_first::DeclaredRosterRequest,
+    ) -> Result<
+        meerkat_meta::identity_first::DeclaredRosterAnswer,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        Ok(meerkat_meta::identity_first::DeclaredRosterAnswer::kept_for(&roster))
+    }
 }

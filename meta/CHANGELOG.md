@@ -22,6 +22,32 @@ application receiver keeps its Meta 0.9.7 SDK tuple. Acceptance is per target:
 each package is accepted only on evidence for that exact package, and the
 `linux-x86_64` evidence does not stand in for `macos-arm64`.
 
+### Breaking
+
+- `IdentityRuntime::register` and `IdentityRuntime::update_spec` declare the
+  identity in Core's mob and return Core's answer for it,
+  `Result<DeclaredIdentityAnswer, IdentityRuntimeError>` (`register` returned
+  `()` and `update_spec` `Result<(), IdentityRuntimeError>`); a caller
+  handles the result. `register` can now fail: with the new
+  `IdentityRuntimeError::DeclarationNotApplied { retryable, detail }` (error
+  kind `identity_declaration_not_applied`) when Core answered nothing for the
+  identity, retryable when another declared apply of the mob stayed in
+  progress past a bounded wait; when the identity's first-boot row
+  contradicts Core's history; when the build its host composes fails; or
+  when the first-boot manifest or Core's member history cannot be read. A
+  `match` over every `IdentityRuntimeError` variant adds an arm for the new
+  one.
+- `SessionBridge` has a new method, `apply_declared_roster`: Core's declared
+  apply (`MobHandle::apply_declared_roster`) of a roster of
+  `DeclaredIdentity` values, answered with a `DeclaredRosterAnswer` (a
+  `DeclaredIdentityAnswer` per identity, the unlisted identities of a
+  complete roster, and the first-boot requests Core carried out). Its
+  default answers `BridgeError::Unsupported` and logs at error level, so a
+  registration through a bridge that does not implement it declares nothing
+  and is refused (`DeclarationNotApplied`). A host's own wrapper of a session
+  bridge forwards it to the bridge it wraps; a test double with no Core mob
+  can answer `DeclaredRosterAnswer::kept_for(&roster)`.
+
 ### Upgrade
 
 - An application that Forge 0.3.0 prepared with its Connect gateway (0.9.5 on
@@ -68,6 +94,22 @@ each package is accepted only on evidence for that exact package, and the
 
 ### Changed
 
+- Registering an identity (`IdentityRuntime::register`) or updating its spec
+  (`update_spec`) declares it in Core's mob as a one-identity roster: Core's
+  MobMachine decides what becomes of the identity's member and Core realizes
+  it. Meta records the spec only when Core decided the declaration
+  (`DeclaredIdentityAnswer::registers_spec`); a refusal, a deferral or a
+  failure leaves the previous registration as it was. An identity Core holds
+  no member for is seated Dormant when it is registered, on its archived
+  session or a fresh one, instead of at the next roster pass or its first
+  delivery. The host's customizer composes the member build only when Core
+  answers that the identity's verdict builds a member: an identity Core keeps
+  is declared with its lifecycle facts alone, and no customizer runs. A raw
+  member a host spawned under the identity's member id is adopted when its
+  spawn carries the durable-identity marker or the `agent_identity` label
+  naming the identity, and is refused (`NameHeldByWorker`) otherwise. A
+  runtime with no session bridge records the spec and answers
+  `DeclaredIdentityAnswer::RecordedOnly`.
 - Forge 0.3.1 selects Meta 0.9.10 with Toolkit 0.9.10 and the Connect 0.9.10
   gateway for applications on both targets, and the Meta 0.9.10 `rpc_gateway`
   for applications without a connection setup helper. Forge 0.3.0 selected

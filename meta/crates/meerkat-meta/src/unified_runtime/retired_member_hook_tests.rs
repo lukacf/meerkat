@@ -1109,6 +1109,14 @@ impl SessionBridge for MachineReadsBridge {
             .current_session_registration_witness(session_id)
             .await
     }
+
+    async fn apply_declared_roster(
+        &self,
+        roster: crate::identity_first::DeclaredRosterRequest,
+    ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+    {
+        self.reads.apply_declared_roster(roster).await
+    }
 }
 
 /// Retire (release) `prefix`'s one live registered member, bound to

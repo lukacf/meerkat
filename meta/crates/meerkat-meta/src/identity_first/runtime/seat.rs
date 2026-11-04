@@ -56,8 +56,7 @@ use super::super::bridge::{DormantSeatRequest, DormantSeatResult};
 use super::super::contracts::AgentCustomizer;
 use super::super::first_boot_manifest::{FirstBootRow, FirstBootRowKind, FirstBootRowState};
 use super::super::types::{
-    AgentBuildContext, AgentBuildDraft, AgentIdentity, DurableAgentSpec, FirstBootWait,
-    IdentityLifecycleState,
+    AgentBuildDraft, AgentIdentity, DurableAgentSpec, FirstBootWait, IdentityLifecycleState,
 };
 use super::{
     CANDIDATE_CREATE_MEMBER, CANDIDATE_FIRST_BOOT_FRESH, CANDIDATE_FRESH_SESSION,
@@ -547,7 +546,7 @@ impl IdentityRuntime {
     }
 
     /// Core ended `identity`'s host preparation.
-    fn forget_seeded_host_preparation(&self, identity: &AgentIdentity) {
+    pub(super) fn forget_seeded_host_preparation(&self, identity: &AgentIdentity) {
         self.host_pending_seeded
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -636,7 +635,7 @@ impl IdentityRuntime {
     }
 
     /// The rows of the first-boot manifest still to carry out, by identity.
-    fn pending_first_boot_rows_snapshot(&self) -> BTreeMap<AgentIdentity, FirstBootRow> {
+    pub(super) fn pending_first_boot_rows_snapshot(&self) -> BTreeMap<AgentIdentity, FirstBootRow> {
         match &*self
             .first_boot
             .lock()
@@ -989,59 +988,14 @@ impl IdentityRuntime {
                 let active_peers = active_peers.clone();
                 let managed_edges = managed_edges.clone();
                 async move {
-                    let mut draft = Self::base_build_draft(&planned.spec);
-                    let Some(customizer) = customizer.filter(|_| planned.plan.customizes()) else {
-                        return Ok(draft);
-                    };
-                    let identity = &planned.spec.identity;
-                    let context = AgentBuildContext {
-                        identity: identity.clone(),
+                    let customizer = customizer.filter(|_| planned.plan.customizes());
+                    self.compose_declared_build(
+                        &planned.spec,
+                        customizer,
                         active_peers,
                         managed_edges,
-                        runtime_services: self.runtime_services(),
-                    };
-                    let mut shutdown = self.foreground_cancel.subscribe();
-                    if *shutdown.borrow() {
-                        return Err(IdentityRuntimeError::Internal(format!(
-                            "the seat of {identity} was cancelled during shutdown before its \
-                             build"
-                        )));
-                    }
-                    let result = {
-                        let customize =
-                            customizer.customize_build(&context, &planned.spec, &mut draft);
-                        tokio::pin!(customize);
-                        tokio::select! {
-                            result = &mut customize => result,
-                            changed = shutdown.changed() => {
-                                if changed.is_ok() && *shutdown.borrow() {
-                                    return Err(IdentityRuntimeError::Internal(format!(
-                                        "the seat of {identity} was cancelled during shutdown \
-                                         before its build"
-                                    )));
-                                }
-                                customize.await
-                            }
-                        }
-                    };
-                    match result {
-                        Ok(()) => {
-                            self.publish_customizer_tools(identity, &mut draft).await;
-                            // Told to `after_create` once the lifecycle
-                            // projection reaches the step's seat.
-                            self.note_lifecycle_build(
-                                identity,
-                                self.session_created_context(&planned.spec, &draft),
-                            );
-                            Ok(draft)
-                        }
-                        Err(super::super::types::CustomizerError::ToolArtifactRefused(refusal)) => {
-                            Err(IdentityRuntimeError::ToolArtifactRefused(refusal))
-                        }
-                        Err(error) => Err(IdentityRuntimeError::Internal(format!(
-                            "customizer: {error}"
-                        ))),
-                    }
+                    )
+                    .await
                 }
             })
             .buffered(super::super::orchestrator::identity_restore_concurrency())

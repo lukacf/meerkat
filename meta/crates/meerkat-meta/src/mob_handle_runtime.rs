@@ -14274,7 +14274,8 @@ mod tests {
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         *dispatcher
             .identity_runtime
             .write()

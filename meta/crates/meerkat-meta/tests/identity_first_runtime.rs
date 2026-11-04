@@ -768,7 +768,10 @@ async fn register_live(
         .core
         .bind_live(&spec.identity, generation, session_id.clone());
     bridge.set_deliver_session_id(session_id.clone()).await;
-    runtime.register(spec).await;
+    runtime
+        .register(spec)
+        .await
+        .expect("the identity registers");
     session_id
 }
 
@@ -1674,6 +1677,16 @@ impl SessionBridge for CountingBridge {
         }
         Ok(())
     }
+
+    async fn apply_declared_roster(
+        &self,
+        roster: meerkat_meta::identity_first::DeclaredRosterRequest,
+    ) -> Result<
+        meerkat_meta::identity_first::DeclaredRosterAnswer,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        Ok(meerkat_meta::identity_first::DeclaredRosterAnswer::kept_for(&roster))
+    }
 }
 
 fn make_content() -> meerkat_core::ContentInput {
@@ -1720,7 +1733,10 @@ async fn identity_first_runtime_send_to_internal_only_rejected() {
 
     let spec = make_internal_spec("gate:main");
 
-    runtime.register(spec).await;
+    runtime
+        .register(spec)
+        .await
+        .expect("the identity registers");
 
     let result = runtime
         .send(&make_identity("gate:main"), &make_content())
@@ -1765,7 +1781,10 @@ async fn r68_a_delivery_to_an_unseated_identity_seats_it_once_and_wakes_through_
     let runtime = make_runtime_with_bridge_no_store(bridge.clone());
     let id = make_identity("triage:main");
     let last = seed_core_last_session(&bridge, "triage:main");
-    runtime.register(make_spec("triage:main")).await;
+    runtime
+        .register(make_spec("triage:main"))
+        .await
+        .expect("the identity registers");
 
     runtime
         .send(&id, &make_content())
@@ -2004,7 +2023,10 @@ async fn identity_first_runtime_agent_returns_for_active() {
 
     let spec = make_spec("triage:main");
 
-    runtime.register(spec).await;
+    runtime
+        .register(spec)
+        .await
+        .expect("the identity registers");
 
     assert!(runtime.contains(&make_identity("triage:main")).await);
 }
@@ -2414,7 +2436,8 @@ async fn member_health_does_not_lock_entries_while_awaiting_custom_durability() 
         runtime.register(make_spec("triage:other")),
     )
     .await
-    .expect("a custom durability read must not block fleet entry writes");
+    .expect("a custom durability read must not block fleet entry writes")
+    .expect("the identity registers");
     gate.notify_one();
     assert!(health.await.unwrap().durability.is_none());
 }
@@ -2505,7 +2528,10 @@ async fn last_reload_records_early_noops_and_failures_without_reviving_retired_i
     // Registered, but Core holds no member for it: Dormant. A reload
     // finds nothing current and wakes nothing.
     let id = make_identity("triage:early");
-    runtime.register(make_spec("triage:early")).await;
+    runtime
+        .register(make_spec("triage:early"))
+        .await
+        .expect("the identity registers");
     let result = runtime.reload_member(&id).await;
     assert!(result.is_ok(), "{result:?}");
     let health = runtime.member_health(&id).await.unwrap();
@@ -3469,7 +3495,10 @@ async fn identity_first_runtime_parallel_sends_to_an_unseated_identity_seat_it_o
 
     // Core holds the member retired on its last session.
     let last = seed_core_last_session(&bridge, "agent:coalesce");
-    runtime.register(make_spec("agent:coalesce")).await;
+    runtime
+        .register(make_spec("agent:coalesce"))
+        .await
+        .expect("the identity registers");
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     bridge.set_seat_barrier(barrier.clone()).await;
 
@@ -3761,8 +3790,14 @@ async fn identity_first_runtime_materialize_all_required_fails_when_an_identity_
     let broken = make_identity("agent:broken");
 
     // Registered, not seated yet.
-    runtime.register(make_spec("agent:healthy")).await;
-    runtime.register(make_spec("agent:broken")).await;
+    runtime
+        .register(make_spec("agent:healthy"))
+        .await
+        .expect("the identity registers");
+    runtime
+        .register(make_spec("agent:broken"))
+        .await
+        .expect("the identity registers");
     runtime.materialize(&healthy).await.unwrap();
     bridge.fail_create();
 
@@ -4904,6 +4939,16 @@ async fn identity_first_runtime_topology_materializes_runtime_peer_wires() {
                 })
                 .collect())
         }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: meerkat_meta::identity_first::DeclaredRosterRequest,
+        ) -> Result<
+            meerkat_meta::identity_first::DeclaredRosterAnswer,
+            meerkat_meta::identity_first::BridgeError,
+        > {
+            Ok(meerkat_meta::identity_first::DeclaredRosterAnswer::kept_for(&roster))
+        }
     }
 
     struct StaticTopology(Vec<(&'static str, &'static str)>);
@@ -5181,6 +5226,16 @@ async fn identity_first_runtime_topology_claims_persisted_wires_without_rebatchi
                 })
                 .collect())
         }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: meerkat_meta::identity_first::DeclaredRosterRequest,
+        ) -> Result<
+            meerkat_meta::identity_first::DeclaredRosterAnswer,
+            meerkat_meta::identity_first::BridgeError,
+        > {
+            Ok(meerkat_meta::identity_first::DeclaredRosterAnswer::kept_for(&roster))
+        }
     }
 
     struct StaticTopology(Vec<(&'static str, &'static str)>);
@@ -5353,7 +5408,10 @@ async fn identity_first_runtime_roster_inspect_returns_all_identities() {
     let mut spec2 = make_internal_spec("gate:main");
     spec2.labels.insert("role".to_string(), "gate".to_string());
     register_live(&runtime, &bridge, spec1.clone(), 2).await;
-    runtime.register(spec2.clone()).await;
+    runtime
+        .register(spec2.clone())
+        .await
+        .expect("the identity registers");
     let roster = runtime
         .roster_inspect()
         .await
@@ -5489,7 +5547,10 @@ async fn identity_first_runtime_subscribe_receives_identity_events() {
     let bridge = Arc::new(CountingBridge::default());
     let runtime = make_runtime_with_bridge_no_store(bridge.clone());
     let identity = make_identity("triage:main");
-    runtime.register(make_spec("triage:main")).await;
+    runtime
+        .register(make_spec("triage:main"))
+        .await
+        .expect("the identity registers");
     let mut rx = runtime.subscribe(&identity).await.unwrap();
     // The lifecycle states published since the last call, in order: every
     // verb publishes before it answers.
@@ -6336,7 +6397,10 @@ async fn identity_first_runtime_owned_identity_for_member_alias_discriminates_pl
     let store = Arc::new(LocalContinuityStore::in_memory().unwrap());
     let lease = Arc::new(LocalLeaseProvider::new());
     let runtime = make_runtime(store, lease);
-    runtime.register(make_spec("personal:alice")).await;
+    runtime
+        .register(make_spec("personal:alice"))
+        .await
+        .expect("the identity registers");
 
     // Registered identity: plain name and rt-alias both resolve.
     assert_eq!(

@@ -1189,7 +1189,10 @@ comms = true
             binding: None,
             placement: None,
         };
-        identity_runtime.register(spec.clone()).await;
+        identity_runtime
+            .register(spec.clone())
+            .await
+            .expect("the identity registers");
         // The identity's retirement hook hears of each retire made through
         // the identity authority; a raw retire of the member tells it nothing.
         let (retired_tx, mut retirements) = tokio::sync::mpsc::unbounded_channel();
@@ -2069,7 +2072,10 @@ comms = true
             binding: None,
             placement: None,
         };
-        identity_runtime.register(spec.clone()).await;
+        identity_runtime
+            .register(spec.clone())
+            .await
+            .expect("the identity registers");
         runtime.attach_identity_first_context(Arc::new(IdentityFirstRuntimeContext::new(
             Arc::clone(&identity_runtime),
             Arc::new(FixedRoster(vec![spec])),

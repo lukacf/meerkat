@@ -586,6 +586,16 @@ mod losing {
                 .unregister_session_runtime_state(session_id)
                 .await
         }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: meerkat_meta::identity_first::DeclaredRosterRequest,
+        ) -> Result<
+            meerkat_meta::identity_first::DeclaredRosterAnswer,
+            meerkat_meta::identity_first::BridgeError,
+        > {
+            self.inner.apply_declared_roster(roster).await
+        }
     }
 }
 
@@ -668,7 +678,8 @@ async fn governed_runtime_composed(
             binding: None,
             placement: None,
         })
-        .await;
+        .await
+        .expect("the identity registers");
     (runtime, identity)
 }
 

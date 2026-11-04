@@ -76,7 +76,8 @@ async fn governed_identity_runtime_as(
             binding: None,
             placement: None,
         })
-        .await;
+        .await
+        .expect("the identity registers");
     (runtime, identity)
 }
 

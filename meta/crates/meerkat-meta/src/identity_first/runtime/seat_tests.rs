@@ -777,6 +777,16 @@ impl SessionBridge for SeatCore {
         }
         self.core.journal_page(after, limit)
     }
+
+    async fn apply_declared_roster(
+        &self,
+        roster: crate::identity_first::DeclaredRosterRequest,
+    ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+    {
+        Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+            &roster,
+        ))
+    }
 }
 
 /// A runtime whose Core is `core`, over the first-boot manifest in
@@ -797,7 +807,10 @@ fn runtime_over(state_dir: Option<&std::path::Path>, core: &Arc<SeatCore>) -> Ar
 
 async fn register_all(runtime: &IdentityRuntime, specs: &[DurableAgentSpec]) {
     for spec in specs {
-        runtime.register(spec.clone()).await;
+        runtime
+            .register(spec.clone())
+            .await
+            .expect("the identity registers");
     }
 }
 
@@ -2781,7 +2794,10 @@ async fn a_materialization_that_applies_a_declared_migration_builds_the_member_o
     // Core holds alice on her session under her previous role; the roster
     // names her new one.
     bind_live(&core.core, &alice, &previous, 0, Some(session.clone())).expect("Core holds alice");
-    runtime.register(spec(&alice)).await;
+    runtime
+        .register(spec(&alice))
+        .await
+        .expect("the identity registers");
 
     let scope = runtime
         .materialize(&alice)

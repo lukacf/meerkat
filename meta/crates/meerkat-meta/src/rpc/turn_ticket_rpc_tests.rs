@@ -484,6 +484,16 @@ impl SessionBridge for TicketBridge {
             peer_reachable_count: 0,
         })
     }
+
+    async fn apply_declared_roster(
+        &self,
+        roster: crate::identity_first::DeclaredRosterRequest,
+    ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+    {
+        Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+            &roster,
+        ))
+    }
 }
 
 fn make_runtime(bridge: Option<Arc<dyn SessionBridge>>) -> Arc<IdentityRuntime> {
@@ -1012,7 +1022,10 @@ async fn wait_for_completion_rpc_reports_deadline_and_incarnation_change() {
             Some(session.clone()),
         )
         .unwrap();
-        identity_runtime.register(make_spec("watcher")).await;
+        identity_runtime
+            .register(make_spec("watcher"))
+            .await
+            .expect("the identity registers");
     };
     let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
         tokio::join!(wait, rotate)

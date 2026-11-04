@@ -4212,6 +4212,10 @@ pub enum DeclaredIdentityAnswer {
     /// could not be lowered: an apply runs it again only once the cause is
     /// fixed.
     Failed { error: BridgeError },
+    /// Nothing was declared in Core: the identity runtime that registered
+    /// the spec has no session bridge, so no Core mob to declare it in. Never
+    /// answered by a session bridge.
+    RecordedOnly,
 }
 
 impl DeclaredIdentityAnswer {
@@ -4225,6 +4229,39 @@ impl DeclaredIdentityAnswer {
             | Self::RoleRotated { session_id }
             | Self::FreshLife { session_id } => Some(session_id),
             _ => None,
+        }
+    }
+
+    /// Whether the declared spec stands as the identity's registration
+    /// after this answer: Core decided the declaration (whatever it did, or
+    /// held, of the member), Core answered that a host or the identity store
+    /// drives the identity or that this composition of the mob is not
+    /// authoritative (the spec is shown, read-only), or nothing was
+    /// declared because there is no Core mob. A deferred, refused or failed
+    /// declaration, and one whose verdict still needs its composed build,
+    /// leaves the previous registration as it was.
+    #[must_use]
+    pub fn registers_spec(&self) -> bool {
+        match self {
+            Self::Seated { .. }
+            | Self::Embodied { .. }
+            | Self::Kept
+            | Self::Restamped { .. }
+            | Self::RoleMigrated { .. }
+            | Self::RoleRotated { .. }
+            | Self::FreshLife { .. }
+            | Self::RoleMigrationHeld { .. }
+            | Self::AwaitingHeldCreation
+            | Self::PreparationPending
+            | Self::HostedOnFirstUse
+            | Self::Noted { .. }
+            | Self::RecordedOnly => true,
+            Self::Refused { refusal } => matches!(
+                refusal,
+                meerkat_mob::DeclaredEntryRefusal::HostAdopted
+                    | meerkat_mob::DeclaredEntryRefusal::NonAuthoritative
+            ),
+            Self::BuildRequired | Self::Deferred { .. } | Self::Failed { .. } => false,
         }
     }
 }
@@ -4256,6 +4293,25 @@ pub struct DeclaredRosterAnswer {
     pub unlisted: BTreeMap<AgentIdentity, UnlistedIdentityAnswer>,
     /// The identities whose first-boot request the apply carried out.
     pub first_boot_requests_carried_out: BTreeSet<AgentIdentity>,
+}
+
+impl DeclaredRosterAnswer {
+    /// The answer of a session bridge with no Core mob of its own (a test
+    /// double) to `roster`: every declared identity keeps what it has
+    /// ([`DeclaredIdentityAnswer::Kept`]), nothing is unlisted, and no
+    /// first-boot request is carried out.
+    #[must_use]
+    pub fn kept_for(roster: &DeclaredRosterRequest) -> Self {
+        Self {
+            identities: roster
+                .identities
+                .iter()
+                .map(|declared| (declared.spec.identity.clone(), DeclaredIdentityAnswer::Kept))
+                .collect(),
+            unlisted: BTreeMap::new(),
+            first_boot_requests_carried_out: BTreeSet::new(),
+        }
+    }
 }
 
 /// Where Core's member lifecycle journal of the bridge's mob stands

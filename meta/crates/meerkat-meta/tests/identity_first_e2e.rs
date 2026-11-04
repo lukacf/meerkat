@@ -286,10 +286,16 @@ async fn identity_first_e2e_08_send_dispatch_addressability() {
     let runtime = make_runtime(store.clone(), lease_prov.clone());
 
     // Addressable identity
-    runtime.register(make_spec("public:main")).await;
+    runtime
+        .register(make_spec("public:main"))
+        .await
+        .expect("the identity registers");
 
     // InternalOnly identity
-    runtime.register(make_internal_spec("internal:main")).await;
+    runtime
+        .register(make_internal_spec("internal:main"))
+        .await
+        .expect("the identity registers");
 
     // This runtime has no session bridge, so no member exists to deliver to
     // (#306: Core holds members); addressability is judged before delivery.

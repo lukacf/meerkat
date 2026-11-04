@@ -8935,6 +8935,16 @@ mod tests {
         ) -> Result<crate::identity_first::MemberStanding, BridgeError> {
             self.core.member_standing(identity)
         }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
+        }
     }
 
     /// A customizer that changes no build and records each seat it is told
@@ -11269,7 +11279,8 @@ shell = true
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         let identity_ctx = IdentityFirstContext {
             runtime: crate::identity_first::PublicIdentityRuntime::new(
                 Arc::new(identity_rt),
@@ -11604,7 +11615,8 @@ shell = true
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         let identity_ctx = IdentityFirstContext {
             runtime: crate::identity_first::PublicIdentityRuntime::new(
                 Arc::new(identity_rt),
@@ -13350,7 +13362,8 @@ shell = true
                     binding: None,
                     placement: None,
                 })
-                .await;
+                .await
+                .expect("the identity registers");
         }
         let identity_ctx = IdentityFirstContext {
             runtime: crate::identity_first::PublicIdentityRuntime::new(
@@ -15031,7 +15044,8 @@ comms = true
             let identity = AgentIdentity::parse(durable)?;
             identity_rt
                 .register(rpc_durable_spec(identity.as_str(), "worker"))
-                .await;
+                .await
+                .expect("the identity registers");
             runtime.attach_identity_first_context(Arc::new(
                 crate::identity_first::IdentityFirstRuntimeContext::new(
                     identity_rt,

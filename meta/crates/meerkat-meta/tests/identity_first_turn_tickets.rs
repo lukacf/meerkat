@@ -430,6 +430,16 @@ impl SessionBridge for TicketBridge {
             peer_reachable_count: 0,
         })
     }
+
+    async fn apply_declared_roster(
+        &self,
+        roster: meerkat_meta::identity_first::DeclaredRosterRequest,
+    ) -> Result<
+        meerkat_meta::identity_first::DeclaredRosterAnswer,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        Ok(meerkat_meta::identity_first::DeclaredRosterAnswer::kept_for(&roster))
+    }
 }
 
 fn make_runtime(bridge: Option<Arc<dyn SessionBridge>>) -> Arc<IdentityRuntime> {
@@ -462,7 +472,10 @@ async fn register_spec(
             .core
             .bind_live_at_fence(&identity, &spec.profile, 0, Some(session.clone()), 1);
     }
-    runtime.register(spec).await;
+    runtime
+        .register(spec)
+        .await
+        .expect("the identity registers");
     identity
 }
 
@@ -2388,7 +2401,10 @@ async fn a_superseded_row_does_not_wake_a_dormant_identity() {
     let runtime = make_runtime(Some(bridge.clone()));
     let spec = make_spec("sleeper");
     let identity = spec.identity.clone();
-    runtime.register(spec.clone()).await;
+    runtime
+        .register(spec.clone())
+        .await
+        .expect("the identity registers");
     let stale = runtime
         .registered_spec(&identity)
         .await

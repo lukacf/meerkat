@@ -181,7 +181,10 @@ pub(crate) async fn register_live(
         generation,
         Some(session),
     )?;
-    runtime.register(spec).await;
+    runtime
+        .register(spec)
+        .await
+        .expect("the identity registers");
     Ok(runtime_id)
 }
 
@@ -602,5 +605,15 @@ impl SessionBridge for CoreReadsBridge {
                 "{runtime_id} is not a live member bound to a session"
             ))),
         }
+    }
+
+    async fn apply_declared_roster(
+        &self,
+        roster: crate::identity_first::DeclaredRosterRequest,
+    ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+    {
+        Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+            &roster,
+        ))
     }
 }

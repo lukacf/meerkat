@@ -1095,7 +1095,8 @@ mod tests {
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
 
         for target in [
             "lead".to_string(),

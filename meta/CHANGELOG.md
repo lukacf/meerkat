@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.10] - 2026-11-04
+
 Meta 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10 and Connect
 0.9.10, released together) and pins Core `=0.9.10`. Meta Forge 0.3.1 ships
 with it and installs the matched Meta 0.9.10, Connect 0.9.10 and Connect

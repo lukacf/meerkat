@@ -5,6 +5,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A shared setup helper is no longer refused as unavailable policy while
+  another task briefly holds its original's in-memory source state. Native
+  reads of that state now wait for such a short hold, within the bound
+  Meerkat uses for owner changes, and still refuse at once when the state is
+  poisoned, stopped or withdrawn.
+
+- A service task check that meets an authorization change still in progress
+  now waits for the change and checks again, instead of refusing the call as
+  access denied. Only the check repeats; the task is prepared once. A change
+  that outlasts the bound is refused as `operation_refused` with kind
+  `reprepare_required`, which a caller may retry, and a real denial is still
+  refused at once.
+
 ## [0.9.9] - 2026-11-03
 
 ### Breaking

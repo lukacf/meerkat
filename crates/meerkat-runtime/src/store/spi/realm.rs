@@ -723,6 +723,26 @@ pub(crate) fn dispatch_wait_bound(
         .saturating_add(renew_timeout)
 }
 
+/// The pause before a commit's next attempt, after `attempt` failed ones (1
+/// after the first): the doubling schedule (100 ms, doubling up to 3.2 s)
+/// lengthened by up to half of itself, never past 3.2 s. The share comes
+/// from the batch's commit id and the attempt number, so batches that fail
+/// together do not retry together, and one batch pauses the same on every
+/// run. No pause is shorter than the schedule's, so a batch makes no more
+/// attempts within its retry budget than the schedule allows.
+pub(crate) fn commit_retry_pause(commit_id: &CommitId, attempt: u32) -> Duration {
+    let schedule = 50_u64.saturating_mul(1 << attempt.min(6));
+    let longest = 50_u64 << 6;
+    let mut seed = commit_id.as_str().as_bytes().to_vec();
+    seed.extend_from_slice(&attempt.to_be_bytes());
+    let draw = codec::sha256(&seed)
+        .iter()
+        .take(8)
+        .fold(0_u64, |draw, byte| (draw << 8) | u64::from(*byte));
+    let share = draw % (schedule / 2 + 1);
+    Duration::from_millis(schedule.saturating_add(share).min(longest))
+}
+
 /// The re-acquire in flight, shared by every caller that waits on it.
 type SharedReacquire =
     futures::future::Shared<futures::future::BoxFuture<'static, Result<(), SpiError>>>;
@@ -1912,7 +1932,8 @@ impl SpiRealm {
 
     /// Commit `batch`, settling an unknown or unavailable outcome by
     /// retrying the same batch (same commit id) and by reading the first
-    /// scope's head, within the retry budget.
+    /// scope's head, within the retry budget, pausing before each retry as
+    /// [`commit_retry_pause`] says.
     async fn commit_settled(&self, batch: &CommitBatch) -> Result<(), SpiError> {
         let deadline = Instant::now() + self.config.commit_retry_budget;
         let mut attempt: u32 = 0;
@@ -1929,7 +1950,7 @@ impl SpiRealm {
                 Err(other) => return Err(SpiError::Host(other)),
             };
             attempt = attempt.saturating_add(1);
-            let backoff = Duration::from_millis(50_u64.saturating_mul(1 << attempt.min(6)));
+            let backoff = commit_retry_pause(batch.commit_id(), attempt);
             if Instant::now() + backoff >= deadline {
                 return Err(SpiError::Host(error));
             }

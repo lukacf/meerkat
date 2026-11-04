@@ -14245,11 +14245,12 @@ macro_rules! meerkat_catalog_machine_dsl {
         // An until-changed request that arrives while another switch is
         // pending is refused with the conflict a finite request meets: it
         // would otherwise replace the pending switch, whose own reconfigure
-        // could then neither complete nor withdraw. Declared after the
-        // approval arms, so an approval refusal still answers first, as it
-        // does for a finite request. A retry of the pending request itself is
-        // accepted again (RequestUntilChangedSwitchTurnAccepted); a denial
-        // recorded under its id would answer that request's caller as denied.
+        // could then neither complete nor withdraw. It requires the approval
+        // the accept requires, so it never overlaps the approval arms and an
+        // approval refusal still answers first, as it does for a finite
+        // request. A retry of the pending request itself is accepted again
+        // (RequestUntilChangedSwitchTurnAccepted); a denial recorded under its
+        // id would answer that request's caller as denied.
         transition RequestUntilChangedSwitchTurnPendingConflict {
             per_phase [Idle, Attached, Running]
             on input RequestUntilChangedSwitchTurn {
@@ -14258,6 +14259,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 approval_reason, realtime_detach_allowed, target_carries_transcript
             }
             guard "transcript_carried" { target_carries_transcript }
+            guard "approval_satisfied" { !requires_approval || (approval_available && !approval_denied) }
             guard "pending_switch_conflict" {
                 self.model_routing_pending_switch_request_id != None
                 && self.model_routing_pending_switch_request_id != Some(request_id)

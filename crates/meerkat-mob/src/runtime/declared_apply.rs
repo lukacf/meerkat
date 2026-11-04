@@ -767,7 +767,12 @@ impl super::MobHandle {
     ///   that commits the new role, so a deferred or refused restamp keeps it.
     /// - A legacy member listed under its own name is adopted as an entry
     ///   first ([`Self::adopt_legacy_identity_entry`]); a worker holding a
-    ///   listed name refuses that identity alone.
+    ///   listed name refuses that identity alone. A complete roster also
+    ///   adopts a member it does not list whose spawn row carries both legacy
+    ///   marks (the durable-identity continuity marker and the legacy
+    ///   identity label naming it) and that no host's intent row names, so
+    ///   its seal unlists the entry and retires the member; a member with
+    ///   one mark only is left as it is.
     /// - No member is built from a declaration of the identity's lifecycle
     ///   facts only ([`DeclaredBuild::FactsOnly`]): a verdict that would seat
     ///   it, rotate its member onto a fresh session or start its first-boot
@@ -1082,6 +1087,27 @@ impl super::MobHandle {
                 outcome.entries.insert(identity, failure_outcome(error));
             }
         }
+        // A complete roster also adopts the members it does not list that
+        // carry both legacy marks and no host's intent row, so its seal
+        // unlists them and retires their members: members a host seated
+        // under their identities before identity entries existed, whose
+        // identities the roster dropped before this build first applied it.
+        // A member with one mark only is a host's own, left as it is.
+        if complete {
+            for identity in self.unlisted_legacy_members(&listed).await? {
+                if let Err(error) = self
+                    .adopt_observed_legacy_member(
+                        &identity,
+                        super::identity_entry::LegacyRosterMarks::both,
+                    )
+                    .await
+                {
+                    outcome
+                        .unlisted
+                        .insert(identity, UnlistedEntryOutcome::Failed { error });
+                }
+            }
+        }
 
         // The role the session each unseated identity's seat would resume was
         // last built under (its first-boot request's session, or its archived
@@ -1387,6 +1413,47 @@ impl super::MobHandle {
             .and_then(|metadata| {
                 crate::build::stored_member_role_name(&metadata).map(ProfileName::from)
             }))
+    }
+
+    /// The members a complete roster's seal would leave as they are that it
+    /// adopts first, so the seal unlists them: seated, no identity entry,
+    /// not `listed`, and the last binding of the identity carries both
+    /// legacy marks and no host's intent row
+    /// ([`super::identity_entry::unlisted_legacy_member`]). One read of the
+    /// member binding history; a read that fails fails the pass. A mob
+    /// without an identity store has none.
+    async fn unlisted_legacy_members(
+        &self,
+        listed: &BTreeSet<AgentIdentity>,
+    ) -> Result<Vec<AgentIdentity>, MobError> {
+        let unlisted: Vec<AgentIdentity> = {
+            let state = self.machine_state_watch_rx.borrow();
+            state
+                .identity_to_runtime
+                .keys()
+                .filter(|identity| !state.identity_entry_origins.contains_key(*identity))
+                .map(|identity| AgentIdentity::from(identity.0.as_str()))
+                .filter(|identity| !listed.contains(identity))
+                .collect()
+        };
+        if unlisted.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(store) = self.identity_member.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let history = self
+            .member_binding_fold
+            .read(store.as_ref(), self.mob_id())
+            .await?;
+        Ok(unlisted
+            .into_iter()
+            .filter(|identity| {
+                history
+                    .last_binding(identity)
+                    .is_some_and(super::identity_entry::unlisted_legacy_member)
+            })
+            .collect())
     }
 
     /// The declared identities the identity store manages: a host-adopted

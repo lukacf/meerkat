@@ -3936,7 +3936,6 @@ dependencies = [
  "meerkat-core",
  "meerkat-llm-core",
  "meerkat-models",
- "meerkat-openai",
  "meerkat-runtime",
  "oai-rt-rs",
  "reqwest 0.12.28",

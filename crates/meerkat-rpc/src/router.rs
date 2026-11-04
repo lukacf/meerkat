@@ -7622,6 +7622,83 @@ mod tests {
                 serde_json::json!({"kind": "unknown_family", "family": "shel"})
             );
         }
+
+        /// A `keep_alive` create answers once its first turn has built the
+        /// session, so a gate no grant could honour fails the create with
+        /// the typed invalid-params refusal an immediate create answers.
+        #[tokio::test]
+        async fn keep_alive_create_reports_a_refused_grant_gate() {
+            let (router, _rx) = test_router().await;
+            let refused = call(
+                &router,
+                "session/create",
+                serde_json::json!({
+                    "prompt": "hello",
+                    "keep_alive": true,
+                    "comms_name": "keep-alive-refused-gate",
+                    "grant_gated_tools": {"families": ["shel"]},
+                }),
+            )
+            .await;
+            let Some(failure) = refused.error.as_ref() else {
+                panic!(
+                    "a keep_alive create answered success over a gate no grant could honour: \
+                     {refused:?}"
+                );
+            };
+            assert_eq!(failure.code, error::INVALID_PARAMS, "{failure:?}");
+            let data = failure.data.as_ref().expect("typed refusal data");
+            assert_eq!(data["kind"], "tool_grant_gate_refused");
+            assert_eq!(
+                data["tool_grant_gate_refusal"],
+                serde_json::json!({"kind": "unknown_family", "family": "shel"})
+            );
+        }
+
+        /// A `keep_alive` create still answers before its first turn ends:
+        /// once that turn has built the session, the create answers while
+        /// the turn waits on its provider, and the turn runs on.
+        #[tokio::test]
+        async fn keep_alive_create_answers_once_built_while_its_first_turn_runs() {
+            // Bounds a failure only; the passing path never waits for it.
+            const FAILURE_BOUND: Duration = Duration::from_secs(30);
+            let calls = Arc::new(tokio::sync::watch::channel(0usize).0);
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            let (router, _rx) = test_router_with_llm(Arc::new(GatedLlmClient {
+                calls: Arc::clone(&calls),
+                release: Arc::clone(&release),
+                requests: Arc::new(StdMutex::new(Vec::new())),
+            }))
+            .await;
+            // Nothing releases the provider before the create answers, so
+            // a create that waited for its first turn to end never answers.
+            let created = tokio::time::timeout(
+                FAILURE_BOUND,
+                call(
+                    &router,
+                    "session/create",
+                    serde_json::json!({
+                        "prompt": "hello",
+                        "keep_alive": true,
+                        "comms_name": "keep-alive-honoured-gate",
+                        "grant_gated_tools": {"families": ["shell"]},
+                    }),
+                ),
+            )
+            .await
+            .expect("a keep_alive create answers before its first turn ends");
+            assert!(
+                created.error.is_none(),
+                "a gate the build honours: {created:?}"
+            );
+
+            let mut seen = calls.subscribe();
+            tokio::time::timeout(FAILURE_BOUND, seen.wait_for(|calls| *calls >= 1))
+                .await
+                .expect("the first turn runs on to its provider")
+                .expect("call counter stays open");
+            release.add_permits(1);
+        }
     }
 
     async fn pending_runtime_approval(router: &MethodRouter) -> String {

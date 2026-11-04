@@ -18,6 +18,15 @@ impl ReviewCustody {
         }
     }
 
+    /// A lifetime witness in place of a native reviewed entry, for controls
+    /// that count the holds their custody keeps of it.
+    #[cfg(test)]
+    pub(crate) fn witness_for_test(entry: Arc<dyn Send + Sync>) -> Self {
+        Self {
+            _entry: Some(entry),
+        }
+    }
+
     /// Retain a clone for lifetime only. The typed capability is passed
     /// separately to the exact operation's native steps and is never exposed here.
     pub(crate) fn entered_operation(entry: &meerkat_core::EnteredDispatchOperation) -> Self {

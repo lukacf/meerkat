@@ -792,14 +792,19 @@ impl OriginalBinder {
         context: &GovernedBindContext,
         input: Input,
     ) -> Result<BoundGovernedInput, String> {
-        self.bind_retained_with_workflow(context, input, None).await
+        self.bind_retained_with_workflow(context, input, None, None)
+            .await
     }
 
+    /// `replay` names a refused attempt's retained first custody when this
+    /// bind replays that attempt: the bind then only rebinds exactly that
+    /// custody through the selected recovery, and never stages a candidate.
     pub(super) async fn bind_retained_with_workflow(
         &self,
         context: &GovernedBindContext,
         input: Input,
         planning: Option<&setup_workflow::PreparedWorkflowLaunch>,
+        replay: Option<&Weak<PendingOriginalAdmission>>,
     ) -> Result<BoundGovernedInput, String> {
         // Console/workflow binders also enter here, including already-bound
         // sources. Enrollment rechecks after the asynchronous preparation.
@@ -1039,7 +1044,16 @@ impl OriginalBinder {
                     .first_custody
                     .lock()
                     .map_err(|_| PrivateOriginalError::Unavailable)?;
+                // A replay rebinds exactly its refused attempt's custody.
+                let replays = |prior: &Arc<PendingOriginalAdmission>| {
+                    replay.is_none_or(|refused| {
+                        refused
+                            .upgrade()
+                            .is_some_and(|refused| Arc::ptr_eq(&refused, prior))
+                    })
+                };
                 let (input, pending, handoff) = match admitted {
+                    Some(_) if replay.is_some() => return Err(PrivateOriginalError::Conflict),
                     Some((input, pending)) => (
                         input,
                         pending,
@@ -1051,7 +1065,7 @@ impl OriginalBinder {
                     ),
                     None => match retained.as_ref().filter(|_| selected) {
                         Some(prior) => {
-                            if prior.session != context.session_id {
+                            if prior.session != context.session_id || !replays(prior) {
                                 return Err(PrivateOriginalError::Conflict);
                             }
                             let ((input, pending), handoff) = prior.handoff.rebind(|| {
@@ -1063,6 +1077,8 @@ impl OriginalBinder {
                             })?;
                             (input, pending, handoff)
                         }
+                        // Without that retained custody a replay never binds.
+                        None if replay.is_some() => return Err(PrivateOriginalError::Unavailable),
                         None => {
                             let (input, pending) = prepared
                                 .stage()

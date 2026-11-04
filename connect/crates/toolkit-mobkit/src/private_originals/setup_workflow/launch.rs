@@ -31,7 +31,9 @@ pub use context_transfer::{
 mod close;
 mod recovery;
 mod restore;
-use crate::private_originals::governed_submit::{OriginalBinder, evidence};
+use crate::private_originals::governed_submit::{
+    OriginalBinder, PendingOriginalAdmission, evidence,
+};
 #[cfg(test)]
 pub(crate) use close::WorkflowCloseObservation;
 pub(crate) use close::WorkflowTerminalRecovery;
@@ -200,6 +202,21 @@ fn launch_replay(error: &IdentityRuntimeError, attempt: &LaunchAttempt) -> Optio
         .then_some(LaunchReplay::PolicyChanged)
 }
 
+/// A replay's typed cause, for diagnostics only: a static event and cause,
+/// like the submission error diagnostic. It establishes nothing.
+fn launch_replay_diagnostic(replay: LaunchReplay) {
+    use std::io::Write as _;
+    let cause = match replay {
+        LaunchReplay::PolicyChanged => "PolicyChanged",
+        LaunchReplay::SourceWriterBusy => "SourceWriterBusy",
+    };
+    let diagnostic = serde_json::json!({
+        "event": "toolkit_workflow_launch_replay",
+        "cause": cause,
+    });
+    let _ = writeln!(std::io::stderr().lock(), "{diagnostic}");
+}
+
 /// What one launch binder's native calls recorded for its dispatch: the
 /// session its latest bind was for, and the typed cause of its fence's latest
 /// refusal when that cause may be waited out.
@@ -207,8 +224,25 @@ fn launch_replay(error: &IdentityRuntimeError, attempt: &LaunchAttempt) -> Optio
 pub(in crate::private_originals) struct LaunchAttempt {
     bound_session: std::sync::Mutex<Option<meerkat_core::SessionId>>,
     fence_refusal: std::sync::Mutex<Option<LaunchReplay>>,
+    #[cfg(test)]
+    replay_wait: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<LaunchReplay>>>,
 }
 impl LaunchAttempt {
+    /// `waiting` receives the cause when this attempt's dispatch starts
+    /// waiting it out, from inside that wait's first poll.
+    #[cfg(test)]
+    fn observe_replay_wait_for_test(
+        &self,
+        waiting: tokio::sync::mpsc::UnboundedSender<LaunchReplay>,
+    ) {
+        assert!(self.replay_wait.lock().unwrap().replace(waiting).is_none());
+    }
+    #[cfg(test)]
+    fn replay_waiting(&self, replay: LaunchReplay) {
+        if let Some(waiting) = self.replay_wait.lock().unwrap().as_ref() {
+            let _ = waiting.send(replay);
+        }
+    }
     fn fence_refused(&self, cause: Option<LaunchReplay>) {
         if let Ok(mut refusal) = self.fence_refusal.lock() {
             *refusal = cause;
@@ -1813,15 +1847,19 @@ impl PreparedWorkflowLaunch {
         source: &Arc<PrivateOriginals>,
         route: &PrivateOriginalRoute,
     ) -> Result<Arc<WorkflowBinder>, PrivateOriginalError> {
-        self.binder_with_review(source, route, ReviewCustody::default())
+        self.binder_with_review(source, route, ReviewCustody::default(), None)
             .await
     }
 
+    /// A fresh workflow binder. `replay_of` names a refused attempt's
+    /// retained first custody when this binder replays that attempt: it then
+    /// binds only by rebinding exactly that custody.
     async fn binder_with_review(
         self: &Arc<Self>,
         source: &Arc<PrivateOriginals>,
         route: &PrivateOriginalRoute,
         review_custody: ReviewCustody,
+        replay_of: Option<std::sync::Weak<PendingOriginalAdmission>>,
     ) -> Result<Arc<WorkflowBinder>, PrivateOriginalError> {
         let delegate = OriginalBinder {
             source: source.clone(),
@@ -1844,6 +1882,7 @@ impl PreparedWorkflowLaunch {
         Ok(Arc::new(WorkflowBinder {
             delegate,
             planning: self.clone(),
+            replay_of,
             attempt: Arc::new(LaunchAttempt::default()),
             #[cfg(any(test, feature = "test-support"))]
             launch_diagnostics: Arc::new(WorkflowLaunchDiagnostics::default()),
@@ -1863,15 +1902,17 @@ impl PreparedWorkflowLaunch {
             .await
     }
 
-    /// Submit the launch input once, taking each attempt's binder from
-    /// `binders`. On a dispatch, an attempt whose real workflow binder records a
-    /// typed [`LaunchReplay`] answer is replayed once per cause: the cause is
-    /// waited out holding nothing, everything the input relies on is checked
-    /// again, the refused attempt's original custody records its definite
-    /// refusal (as an Original submission does), and a fresh binder from
-    /// `binders` rebinds that same retained first custody and its exact first
-    /// input. The input value, route and budget are never rebuilt; a second
-    /// answer of the same cause stops.
+    /// Submit the launch input, taking each attempt's binder from `binders`.
+    /// On a dispatch, the first attempt may be replayed once, and only once
+    /// in total whatever its cause: its real workflow binder recorded a typed
+    /// [`LaunchReplay`] answer, its first candidate is retained in custody
+    /// recovery's enrollment, the cause was waited out holding nothing, and
+    /// everything the input relies on was checked again. The refused
+    /// attempt's custody then records its definite refusal (as an Original
+    /// submission does) and a fresh binder from `binders` binds the same input
+    /// value by rebinding exactly that retained first custody, or refuses.
+    /// The input value, route and budget are never rebuilt; the replay's
+    /// answer is final, and when no replay goes the first refusal stands.
     async fn submit_launch(
         self: &Arc<Self>,
         source: &Arc<PrivateOriginals>,
@@ -1917,13 +1958,20 @@ impl PreparedWorkflowLaunch {
                 &self.selection.submission.original.original,
             )
             .map_err(custody_error)?;
-        let mut replayed = Vec::new();
-        // A refused attempt's binder stays alive until its replay has rebound
-        // that custody, so its foreground never releases the custody to
-        // recovery in between.
+        // The refused first attempt, kept alive with its answer while its
+        // replay binds, so its foreground never releases that custody to
+        // recovery in between; and the custody the replay must rebind.
         let mut refused = None;
+        let mut replay_of = None;
         let result = loop {
-            let binding = binders.next().await?;
+            let binding = match binders.next(replay_of.take()).await {
+                Ok(binding) => binding,
+                // No replay binder: the first attempt's definite refusal stands.
+                Err(error) => match refused.take() {
+                    Some((_, result)) => break result,
+                    None => return Err(error),
+                },
+            };
             let result = if dedicated.is_some() {
                 runtime
                     .dispatch_governed_with_turn_ticket(
@@ -1953,24 +2001,24 @@ impl PreparedWorkflowLaunch {
                     error,
                 );
             }
-            let replay = match (&result, &binding.workflow) {
-                (Err(error), Some(workflow)) => launch_replay(error, &workflow.attempt),
-                _ => None,
-            };
-            let mut replay_now = None;
-            if let (Some(replay), Some((context, deadline)), Some(churn), Some(workflow)) =
-                (replay, dispatch, churn.as_mut(), &binding.workflow)
-                && !replayed.contains(&replay)
+            // Only the first attempt is ever replayed: one replay in total.
+            let mut replay = None;
+            if refused.is_none()
+                && let (Err(error), Some((context, deadline)), Some(churn), Some(workflow)) =
+                    (&result, dispatch, churn.as_mut(), &binding.workflow)
+                && let Some(cause) = launch_replay(error, &workflow.attempt)
+                && let Some(custody) = workflow.replay_custody()
                 && self
-                    .replay_after_wait(source, replay, context, deadline, churn)
-                    .await?
+                    .replay_after_wait(source, &workflow.attempt, cause, context, deadline, churn)
+                    .await
             {
                 workflow.record_definite_refusal();
-                replay_now = Some(replay);
+                launch_replay_diagnostic(cause);
+                replay = Some(custody);
             }
-            if let Some(replay) = replay_now {
-                replayed.push(replay);
-                refused = Some(binding);
+            if replay.is_some() {
+                replay_of = replay;
+                refused = Some((binding, result));
                 continue;
             }
             break result;
@@ -2019,17 +2067,19 @@ impl PreparedWorkflowLaunch {
     /// Wait out `replay` on the launch's dispatch, holding no source writer,
     /// publication, session driver or mutation guard, within the dispatch's
     /// remaining tool time and request deadline (never reset). Then check
-    /// again the live source, the selection and its current authority on the
-    /// same churn, and the remaining budget. True when the same input may go
-    /// once more; a cancelled dispatch drops this wait with nothing held.
+    /// again that the source still admits work, the selection and its current
+    /// authority on the same churn, and the remaining budget. True only when
+    /// the wait settled and every check holds: the same input may then go
+    /// once more. A cancelled dispatch drops this wait with nothing held.
     async fn replay_after_wait(
         &self,
         source: &Arc<PrivateOriginals>,
+        _attempt: &LaunchAttempt,
         replay: LaunchReplay,
         context: &meerkat_core::ToolDispatchContext,
         deadline: tokio::time::Instant,
         churn: &mut meerkat_core::authorization::OwnerChangeChurn,
-    ) -> Result<bool, PrivateOriginalError> {
+    ) -> bool {
         let remaining = || {
             let request = deadline.saturating_duration_since(tokio::time::Instant::now());
             context
@@ -2037,24 +2087,24 @@ impl PreparedWorkflowLaunch {
                 .map_or(request, |tool| tool.min(request))
         };
         let budget = remaining();
+        let Some(work) = context.work_authorization() else {
+            return false;
+        };
         if budget.is_zero() {
-            return Ok(false);
+            return false;
         }
+        #[cfg(test)]
+        _attempt.replay_waiting(replay);
         let settled = match replay {
-            LaunchReplay::PolicyChanged => {
-                let work = context
-                    .work_authorization()
-                    .ok_or(PrivateOriginalError::Denied)?;
-                churn
-                    .wait_after_stale_read(
-                        work.authorization().as_ref(),
-                        Some(budget),
-                        "toolkit.workflow.launch_submission",
-                        None,
-                    )
-                    .await
-                    .settled()
-            }
+            LaunchReplay::PolicyChanged => churn
+                .wait_after_stale_read(
+                    work.authorization().as_ref(),
+                    Some(budget),
+                    "toolkit.workflow.launch_submission",
+                    None,
+                )
+                .await
+                .settled(),
             // The same awaitable acquisition every other source mutation
             // uses; the guard drops with this statement, so the writer is
             // released at once: the holder's mutation has finished.
@@ -2064,28 +2114,21 @@ impl PreparedWorkflowLaunch {
                     .is_ok()
             }
         };
-        if !settled || remaining().is_zero() {
-            return Ok(false);
-        }
-        if !self
-            .selection
-            .source
-            .upgrade()
-            .is_some_and(|current| Arc::ptr_eq(&current, source))
-        {
-            return Err(PrivateOriginalError::Unavailable);
-        }
-        self.selection
-            .check_binding_on_dispatch(
-                source,
-                &self.selection.submission.original,
-                context,
-                deadline,
-                churn,
-            )
-            .await
-            .map_err(binding_refusal)?;
-        Ok(!remaining().is_zero())
+        settled
+            && !remaining().is_zero()
+            && source.with_new_work_admission(|| ()).is_ok()
+            && self
+                .selection
+                .check_binding_on_dispatch(
+                    source,
+                    &self.selection.submission.original,
+                    context,
+                    deadline,
+                    churn,
+                )
+                .await
+                .is_ok()
+            && !remaining().is_zero()
     }
 }
 
@@ -2097,10 +2140,14 @@ struct LaunchBinding {
     workflow: Option<Arc<WorkflowBinder>>,
 }
 
-/// Where a launch submission takes each attempt's binder.
+/// Where a launch submission takes each attempt's binder: `replay_of` is
+/// the refused attempt's retained first custody when the attempt replays it.
 #[async_trait::async_trait]
 trait LaunchBinders: Send {
-    async fn next(&mut self) -> Result<LaunchBinding, PrivateOriginalError>;
+    async fn next(
+        &mut self,
+        replay_of: Option<std::sync::Weak<PendingOriginalAdmission>>,
+    ) -> Result<LaunchBinding, PrivateOriginalError>;
 }
 
 /// The product's launch: a fresh workflow binder per attempt, under the
@@ -2113,10 +2160,13 @@ struct ReviewedBinders<'a> {
 }
 #[async_trait::async_trait]
 impl LaunchBinders for ReviewedBinders<'_> {
-    async fn next(&mut self) -> Result<LaunchBinding, PrivateOriginalError> {
+    async fn next(
+        &mut self,
+        replay_of: Option<std::sync::Weak<PendingOriginalAdmission>>,
+    ) -> Result<LaunchBinding, PrivateOriginalError> {
         let workflow = self
             .launch
-            .binder_with_review(self.source, self.route, self.review.clone())
+            .binder_with_review(self.source, self.route, self.review.clone(), replay_of)
             .await?;
         Ok(LaunchBinding {
             binder: self.review.bind(workflow.clone()),
@@ -2131,7 +2181,10 @@ struct OneBinder(Option<Arc<dyn GovernedInputBinder>>);
 #[cfg(test)]
 #[async_trait::async_trait]
 impl LaunchBinders for OneBinder {
-    async fn next(&mut self) -> Result<LaunchBinding, PrivateOriginalError> {
+    async fn next(
+        &mut self,
+        _: Option<std::sync::Weak<PendingOriginalAdmission>>,
+    ) -> Result<LaunchBinding, PrivateOriginalError> {
         Ok(LaunchBinding {
             binder: self.0.take().ok_or(PrivateOriginalError::Unavailable)?,
             workflow: None,
@@ -2142,11 +2195,30 @@ impl LaunchBinders for OneBinder {
 struct WorkflowBinder {
     delegate: OriginalBinder,
     planning: Arc<PreparedWorkflowLaunch>,
+    /// The refused attempt's retained first custody this binder replays.
+    replay_of: Option<std::sync::Weak<PendingOriginalAdmission>>,
     attempt: Arc<LaunchAttempt>,
     #[cfg(any(test, feature = "test-support"))]
     launch_diagnostics: Arc<WorkflowLaunchDiagnostics>,
 }
 impl WorkflowBinder {
+    /// The custody a replay of this refused attempt would rebind: its first
+    /// candidate, enrolled with the selected custody recovery when it bound
+    /// and still the source's retained first custody. None otherwise (custody
+    /// recovery unselected or stopped when it bound, a guard of an already
+    /// admitted source, or another attempt's custody retained since): such an
+    /// attempt is never replayed, so a replay never stages fresh custody.
+    fn replay_custody(&self) -> Option<std::sync::Weak<PendingOriginalAdmission>> {
+        let pending = self.delegate.pending.get()?;
+        let held = self.delegate.held.get()?;
+        let retained = held.first_custody.lock().ok()?;
+        (pending.handoff.enrolled()
+            && retained
+                .as_ref()
+                .is_some_and(|first| Arc::ptr_eq(first, pending)))
+        .then(|| Arc::downgrade(pending))
+    }
+
     /// Native answered this binder's attempt with a definite pre-admission
     /// refusal and withdrew its custody. The binder is single-use (native
     /// binds it once), so record that refusal on the attempt's original
@@ -2187,7 +2259,12 @@ impl GovernedInputBinder for WorkflowBinder {
         }
         let mut bound = self
             .delegate
-            .bind_retained_with_workflow(context, input, Some(&self.planning))
+            .bind_retained_with_workflow(
+                context,
+                input,
+                Some(&self.planning),
+                self.replay_of.as_ref(),
+            )
             .await?;
         if bound.entry_fence.is_some() {
             return Err("The planning input has a conflicting entry owner".into());

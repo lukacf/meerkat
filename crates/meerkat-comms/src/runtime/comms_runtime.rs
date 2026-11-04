@@ -12558,4 +12558,199 @@ mod tests {
             "take must consume the tombstone"
         );
     }
+
+    /// The facts a native runtime would mint, opaque to this crate.
+    #[cfg(feature = "workspace-tests")]
+    fn runtime_minted_origin() -> meerkat_core::GovernedSendOrigin {
+        meerkat_core::GovernedSendOrigin::__from_runtime_facts(Arc::new("staged run facts"))
+    }
+
+    /// The kinds of delivery the in-process lane carries.
+    #[cfg(feature = "workspace-tests")]
+    #[derive(Debug, Clone, Copy)]
+    enum CarriedKind {
+        Message,
+        FencedMessage,
+        Request,
+        Response,
+    }
+
+    /// A sender and a receiver that trust each other, and the command of
+    /// `kind` from the sender to the receiver, with the authority each side
+    /// needs for it: a request needs the sender's request authority, and a
+    /// response answers a request the receiver sent the sender.
+    #[cfg(feature = "workspace-tests")]
+    async fn carried_kind_pair(
+        kind: CarriedKind,
+    ) -> (Arc<CommsRuntime>, Arc<CommsRuntime>, CommsCommand) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("origin-carriage-sender-{suffix}");
+        let receiver_name = format!("origin-carriage-receiver-{suffix}");
+        let sender = Arc::new(CommsRuntime::inproc_only(&sender_name).expect("sender runtime"));
+        let receiver =
+            Arc::new(CommsRuntime::inproc_only(&receiver_name).expect("receiver runtime"));
+        let to = peer_route(&receiver_name, receiver.public_key());
+        let command = match kind {
+            CarriedKind::Message => {
+                let _finalizer = install_test_peer_ingress_runtime(receiver.as_ref());
+                CommsCommand::PeerMessage {
+                    to,
+                    body: "governed message".to_string(),
+                    blocks: None,
+                    content_taint: None,
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
+                    objective_id: None,
+                    in_reply_to: None,
+                }
+            }
+            CarriedKind::FencedMessage => {
+                let _finalizer = install_test_peer_ingress_runtime(receiver.as_ref());
+                CommsCommand::IncarnationFencedPeerMessage {
+                    to,
+                    body: "governed fenced message".to_string(),
+                    blocks: None,
+                    content_taint: None,
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
+                    objective_id: None,
+                    expected_recipient: meerkat_core::comms::PeerRecipientIncarnation {
+                        mob_id: "mob".to_string(),
+                        agent_identity: "worker".to_string(),
+                        host_id: "host".to_string(),
+                        binding_generation: 2,
+                        member_session_id: "session".to_string(),
+                        generation: 3,
+                        fence_token: 5,
+                    },
+                }
+            }
+            CarriedKind::Request => {
+                let _finalizer = install_test_peer_ingress_runtime(receiver.as_ref());
+                install_test_peer_request_response_authority(&sender);
+                CommsCommand::PeerRequest {
+                    objective_id: None,
+                    content_taint: None,
+                    to,
+                    intent: "review".to_string(),
+                    params: serde_json::json!({"path": "README.md"}),
+                    blocks: None,
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
+                    stream: InputStreamMode::None,
+                }
+            }
+            CarriedKind::Response => {
+                let responder = Arc::new(TestPeerInteractionHandle::default());
+                sender.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
+                    responder.clone(),
+                    Arc::new(TestInteractionStreamHandle::default()),
+                ));
+                let requester = Arc::new(TestPeerInteractionHandle::default());
+                receiver.install_peer_request_response_authority(
+                    PeerRequestResponseAuthority::new(
+                        requester.clone(),
+                        Arc::new(TestInteractionStreamHandle::default()),
+                    ),
+                );
+                let interaction_id = Uuid::new_v4();
+                let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
+                meerkat_core::handles::PeerInteractionHandle::request_received(
+                    responder.as_ref(),
+                    corr_id,
+                    meerkat_core::types::HandlingMode::Queue,
+                    receiver.public_key().to_peer_id(),
+                )
+                .expect("the responder's machine records the inbound request");
+                meerkat_core::handles::PeerInteractionHandle::request_sent(
+                    requester.as_ref(),
+                    corr_id,
+                    sender.public_key().to_peer_id(),
+                )
+                .expect("the requester's machine expects the response");
+                CommsCommand::PeerResponse {
+                    objective_id: None,
+                    content_taint: None,
+                    to,
+                    in_reply_to: InteractionId(interaction_id),
+                    status: meerkat_core::ResponseStatus::Completed,
+                    result: serde_json::json!({"ok": true}),
+                    blocks: None,
+                    handling_mode: None,
+                }
+            }
+        };
+        add_trusted_peer_with_generated_authority(
+            sender.as_ref(),
+            trusted_descriptor(
+                &receiver_name,
+                receiver.public_key(),
+                &format!("inproc://{receiver_name}"),
+            ),
+        )
+        .await;
+        add_trusted_peer_with_generated_authority(
+            receiver.as_ref(),
+            trusted_descriptor(
+                &sender_name,
+                sender.public_key(),
+                &format!("inproc://{sender_name}"),
+            ),
+        )
+        .await;
+        (sender, receiver, command)
+    }
+
+    /// The in-process lane carries the governed origin a send was made with
+    /// to the receiver's queue claim unchanged, beside the in-process sender
+    /// authentication, for every kind it carries: a message, an
+    /// incarnation-fenced message, a request and a response. A send made
+    /// without one leaves the claim without one.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn every_kind_the_in_process_lane_carries_keeps_its_governed_origin() {
+        for kind in [
+            CarriedKind::Message,
+            CarriedKind::FencedMessage,
+            CarriedKind::Request,
+            CarriedKind::Response,
+        ] {
+            for carried in [Some(runtime_minted_origin()), None] {
+                let (sender, receiver, command) = carried_kind_pair(kind).await;
+                let sent = carried.clone();
+                // A message, fenced message or request waits on the
+                // receiver's drain, which this row replaces: the send is
+                // aborted once the receiver's claim was read.
+                let send = tokio::spawn(async move {
+                    CoreCommsRuntime::send_with_governed_origin(sender.as_ref(), command, sent)
+                        .await
+                });
+                let claim = loop {
+                    if let Some(claim) =
+                        CoreCommsRuntime::claim_classified_inbox_interaction(receiver.as_ref())
+                            .await
+                            .expect("claim surface")
+                    {
+                        break claim;
+                    }
+                    tokio::task::yield_now().await;
+                };
+                assert_eq!(
+                    claim.sender_authentication(),
+                    meerkat_core::PeerIngressSenderAuthentication::InProcess,
+                    "{kind:?}"
+                );
+                match (&carried, claim.governed_send_origin()) {
+                    (Some(sent), Some(received)) => assert!(
+                        Arc::ptr_eq(sent.__runtime_facts(), received.__runtime_facts()),
+                        "{kind:?}: the receiver's claim holds the sender's own origin"
+                    ),
+                    (None, None) => {}
+                    (sent, received) => {
+                        panic!("{kind:?}: carried {sent:?}, received {received:?}")
+                    }
+                }
+                drop(claim);
+                send.abort();
+                let _ = send.await;
+            }
+        }
+    }
 }

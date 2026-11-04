@@ -247,6 +247,61 @@ async fn a_send_to_a_dormant_member_wakes_it_once_then_delivers_once() {
     );
 }
 
+/// A woken member receives the governed origin its sender carried: the
+/// envelope handed off after the wake keeps the origin, beside the
+/// in-process sender authentication, as a delivery to a live member does.
+#[tokio::test]
+async fn a_woken_member_receives_the_governed_origin_its_sender_carried() {
+    let registry = Arc::new(InprocRegistry::new());
+    let member = make_keypair();
+    let (inbox, inbox_sender) = open_inbox();
+    let owner = ScriptedOwner::new(OnWake::Materialize {
+        registry: Arc::clone(&registry),
+        namespace: "realm".to_string(),
+        name: "worker-1".to_string(),
+        pubkey: member.public_key(),
+        sender: std::sync::Mutex::new(Some(inbox_sender)),
+    });
+    assert!(registry.publish_wake_route("realm", member.public_key(), "worker-1", owner.weak()));
+    let origin =
+        meerkat_core::GovernedSendOrigin::__from_runtime_facts(Arc::new("staged run facts"));
+
+    registry
+        .send_to_pubkey_in_namespace_with_id_wait(
+            "realm",
+            &make_keypair(),
+            &member.public_key(),
+            Uuid::new_v4(),
+            response(),
+            true,
+            BUDGET,
+            Some(origin.clone()),
+        )
+        .await
+        .expect("the wake answered ready and the envelope was handed off");
+    assert_eq!(owner.calls(), 1, "the member was dormant and was woken");
+
+    let claim = crate::runtime::comms_runtime::test_peer_ingress_queue_claim(
+        inbox
+            .try_claim_one_classified()
+            .expect("the envelope handed off after the wake"),
+    );
+    assert_eq!(
+        claim.sender_authentication(),
+        meerkat_core::PeerIngressSenderAuthentication::InProcess
+    );
+    assert!(
+        claim
+            .governed_send_origin()
+            .is_some_and(|received| Arc::ptr_eq(
+                received.__runtime_facts(),
+                origin.__runtime_facts()
+            )),
+        "the woken member's claim holds the sender's own origin: {:?}",
+        claim.governed_send_origin()
+    );
+}
+
 /// A key with neither route is not a member.
 #[tokio::test]
 async fn a_key_with_no_route_at_all_is_peer_not_found() {

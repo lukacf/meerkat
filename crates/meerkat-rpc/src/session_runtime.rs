@@ -276,6 +276,50 @@ impl Drop for TurnSessionEventsOptOut {
     }
 }
 
+/// Per session, the signal to the `keep_alive` create waiting for that
+/// session's first build (see [`SessionRuntime::first_build_wait`]).
+type FirstBuildWaiters = Arc<StdMutex<HashMap<SessionId, tokio::sync::oneshot::Sender<()>>>>;
+
+/// A `keep_alive` create's wait for its session's first build, held while
+/// the create waits. Dropping it forgets the wait, whether or not the
+/// session was built.
+pub(crate) struct FirstBuildWait {
+    waiters: FirstBuildWaiters,
+    session_id: SessionId,
+    built: tokio::sync::oneshot::Receiver<()>,
+}
+
+impl FirstBuildWait {
+    /// Resolves once a turn that materialized the session has built it. A
+    /// build that fails never resolves it: that turn's own result reports
+    /// the failure.
+    pub(crate) async fn built(&mut self) {
+        if (&mut self.built).await.is_err() {
+            // A newer wait for the same session replaced this one, so no
+            // signal comes for it.
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+impl Drop for FirstBuildWait {
+    fn drop(&mut self) {
+        // Closed first, so only this wait's own signal reads as closed and
+        // a newer wait for the session stays.
+        self.built.close();
+        let mut waiters = self
+            .waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if waiters
+            .get(&self.session_id)
+            .is_some_and(tokio::sync::oneshot::Sender::is_closed)
+        {
+            waiters.remove(&self.session_id);
+        }
+    }
+}
+
 pub(crate) struct RpcRuntimePreAdmission {
     admission: Option<RuntimePreAdmission>,
     #[cfg(feature = "local-authorization")]
@@ -499,6 +543,44 @@ struct PendingPromotionPreTurnHook {
     reached_flag: std::sync::atomic::AtomicBool,
     reached: Notify,
     release: Notify,
+}
+
+/// Test-only: holds a staged session's runtime-routed first turn after its
+/// input was admitted and before the staged promotion builds the session
+/// (see [`SessionRuntime::pause_first_turns_before_promotion`]).
+#[cfg(test)]
+pub(crate) struct PrePromotionPause {
+    slot: Arc<StdMutex<Option<Arc<PendingPromotionPreTurnHook>>>>,
+    hook: Arc<PendingPromotionPreTurnHook>,
+}
+
+#[cfg(test)]
+impl PrePromotionPause {
+    /// Resolves once a first turn waits at the pause.
+    pub(crate) async fn reached(&self) {
+        loop {
+            // A `notify_waiters` after this future exists wakes it, polled
+            // or not, so the flag check below cannot miss the turn.
+            let reached = self.hook.reached.notified();
+            if self
+                .hook
+                .reached_flag
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return;
+            }
+            reached.await;
+        }
+    }
+
+    /// Lets the waiting turn go on; later turns pass without a pause.
+    pub(crate) fn release(&self) {
+        *self
+            .slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        self.hook.release.notify_waiters();
+    }
 }
 
 async fn await_guarded_session_cleanup(
@@ -3041,6 +3123,9 @@ pub struct SessionRuntime {
     /// be written as `session/event` notifications, while that request runs
     /// (see [`TurnSessionEventsOptOut`]).
     turn_session_event_opt_outs: TurnSessionEventOptOuts,
+    /// The `keep_alive` create waiting for each staged session's first
+    /// build, while that create waits (see [`FirstBuildWait`]).
+    first_build_waiters: FirstBuildWaiters,
     runtime_registration_locks: Arc<StdMutex<HashMap<SessionId, Weak<Mutex<()>>>>>,
     runtime_actor_witness_slots:
         Arc<StdRwLock<HashMap<SessionId, meerkat::LiveSessionActorWitnessSlot>>>,
@@ -4215,6 +4300,7 @@ impl SessionRuntime {
             staged_capacity_admissions,
             runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
             turn_session_event_opt_outs: TurnSessionEventOptOuts::default(),
+            first_build_waiters: FirstBuildWaiters::default(),
             runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
             commissioned_config_store: None,
             runtime_actor_witness_slots: Arc::new(StdRwLock::new(HashMap::new())),
@@ -4394,6 +4480,7 @@ impl SessionRuntime {
             staged_capacity_admissions,
             runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
             turn_session_event_opt_outs: TurnSessionEventOptOuts::default(),
+            first_build_waiters: FirstBuildWaiters::default(),
             runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
             commissioned_config_store: None,
             runtime_actor_witness_slots: Arc::new(StdRwLock::new(HashMap::new())),
@@ -4805,6 +4892,24 @@ impl SessionRuntime {
             opt_outs: Arc::clone(&self.turn_session_event_opt_outs),
             session_id: session_id.clone(),
             input_id: input_id.clone(),
+        }
+    }
+
+    /// Wait for `session_id`'s first build. The wait resolves once a turn
+    /// that materializes the staged session has built it, while that turn
+    /// runs on (the promotion signals it through
+    /// [`Self::materialized_session_callback`]); register it before that
+    /// turn's input is admitted. It lasts as long as the returned guard.
+    pub(crate) fn first_build_wait(&self, session_id: &SessionId) -> FirstBuildWait {
+        let (signal, built) = tokio::sync::oneshot::channel();
+        self.first_build_waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.clone(), signal);
+        FirstBuildWait {
+            waiters: Arc::clone(&self.first_build_waiters),
+            session_id: session_id.clone(),
+            built,
         }
     }
 
@@ -5542,7 +5647,7 @@ impl SessionRuntime {
         keep_alive: bool,
         generated_machine_archived_resume_admission: GeneratedMachineArchivedResumeAdmission,
     ) -> ServiceApplyRuntimeTurnResultReceiver {
-        let comms_refresh = self.comms_context_refresh_callback(keep_alive);
+        let comms_refresh = self.materialized_session_callback(keep_alive);
         let pre_turn_hook = self.pending_promotion_pre_turn_hook_callback();
         let publication_refresh = self.actor_publication_refresh_callback(&session_id);
         // The promotion task, and the actor it creates, run on the host's
@@ -5582,7 +5687,7 @@ impl SessionRuntime {
         admission: ActiveCapacityGuard,
         keep_alive: bool,
     ) -> ServiceApplyRuntimeTurnResultReceiver {
-        let comms_refresh = self.comms_context_refresh_callback(keep_alive);
+        let comms_refresh = self.materialized_session_callback(keep_alive);
         let publication_refresh = self.actor_publication_refresh_callback(&session_id);
         // The recovery task, and the actor it creates, run on the host's
         // runtime, not on the runtime loop's that applies this turn.
@@ -12067,6 +12172,32 @@ impl SessionRuntime {
         .await
     }
 
+    /// Build the callback a staged promotion or a recovery fires once it has
+    /// materialized the live session, before it waits for the turn: the
+    /// comms context refresh, then the signal to the `keep_alive` create
+    /// waiting for the session's first build (see [`Self::first_build_wait`]).
+    fn materialized_session_callback(
+        &self,
+        keep_alive: bool,
+    ) -> meerkat::session_runtime::staged_promotion::CommsContextRefreshFn {
+        let comms_context_refresh = self.comms_context_refresh_callback(keep_alive);
+        let first_build_waiters = Arc::clone(&self.first_build_waiters);
+        Arc::new(move |session_id| {
+            let comms_context_refresh = Arc::clone(&comms_context_refresh);
+            let first_build_waiters = Arc::clone(&first_build_waiters);
+            Box::pin(async move {
+                comms_context_refresh(session_id.clone()).await;
+                let waiter = first_build_waiters
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&session_id);
+                if let Some(waiter) = waiter {
+                    let _ = waiter.send(());
+                }
+            })
+        })
+    }
+
     /// Build the comms-context refresh callback fired after a staged
     /// promotion materializes the live session. With the `comms` feature
     /// enabled this re-syncs `update_peer_ingress_context`; otherwise it
@@ -14106,6 +14237,31 @@ impl SessionRuntime {
     #[cfg(test)]
     pub(crate) fn mcp_wire_attempt_count_for_testing(&self) -> usize {
         self.mcp_wire_attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    /// Holds every staged session's runtime-routed first turn after its
+    /// input was admitted and before the promotion builds the session,
+    /// until the returned pause is released.
+    #[cfg(test)]
+    pub(crate) fn pause_first_turns_before_promotion(&self) -> PrePromotionPause {
+        let hook = Arc::new(PendingPromotionPreTurnHook::default());
+        *self
+            .runtime_routed_pre_promotion_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&hook));
+        PrePromotionPause {
+            slot: Arc::clone(&self.runtime_routed_pre_promotion_hook),
+            hook,
+        }
+    }
+
+    /// How many `keep_alive` creates wait for a session's first build.
+    #[cfg(test)]
+    pub(crate) fn first_build_waiter_count_for_testing(&self) -> usize {
+        self.first_build_waiters
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
@@ -16976,6 +17132,54 @@ mod tests {
         assert!(
             runtime.turn_writes_session_events(&session, std::slice::from_ref(&opted_out)),
             "the opt-out ends with its request"
+        );
+    }
+
+    /// A create's wait for its session's first build resolves on the
+    /// callback that session's materialization fires, and on no other
+    /// session's. A dropped wait leaves no registration behind, and a newer
+    /// wait for the same session survives an older one's drop.
+    #[tokio::test]
+    async fn a_first_build_wait_resolves_on_its_sessions_materialization_only() {
+        // Bounds a failure only; the passing path never waits for it.
+        const FAILURE_BOUND: Duration = Duration::from_secs(10);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime(temp_factory(&temp), 4);
+        let registered = |session: &SessionId| {
+            runtime
+                .first_build_waiters
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(session)
+        };
+        let session = SessionId::new();
+        let materialized = runtime.materialized_session_callback(true);
+
+        let mut wait = runtime.first_build_wait(&session);
+        materialized(SessionId::new()).await;
+        assert!(
+            registered(&session),
+            "another session's materialization leaves the wait"
+        );
+        materialized(session.clone()).await;
+        assert!(!registered(&session), "the signal is sent once");
+        tokio::time::timeout(FAILURE_BOUND, wait.built())
+            .await
+            .expect("the session's materialization resolves its wait");
+        drop(wait);
+        assert!(!registered(&session));
+
+        let older = runtime.first_build_wait(&session);
+        let newer = runtime.first_build_wait(&session);
+        drop(older);
+        assert!(
+            registered(&session),
+            "a newer wait survives an older one's drop"
+        );
+        drop(newer);
+        assert!(
+            !registered(&session),
+            "a dropped wait leaves no registration behind"
         );
     }
 

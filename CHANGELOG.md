@@ -213,6 +213,23 @@ them.
   TypeScript SDKs that drive it, `rkat mob deploy --surface rpc`, and other
   hosts of `meerkat_rpc::SessionRuntime`.
 
+- `meerkat-rpc`: a `session/create` with `keep_alive: true` answers once its
+  first turn has built the session, and lets that turn run on; the answer
+  still carries none of the turn's output. A first build that fails is
+  answered as an immediate create answers it, so a scoped tool grant gate no
+  grant could honour fails the create with invalid params
+  (`data.kind = "tool_grant_gate_refused"`). This resolves the 0.9.9 Known
+  limitation "a `session/create` with `keep_alive: true` answers before its
+  first turn builds the session, so it does not report a scoped tool grant
+  gate no grant could honour". Before, the create answered as soon as the
+  session's comms runtime was up, or after 250 ms without it (at once in a
+  build without the `comms` feature), so a failed first build was answered
+  as a success and only logged. The create now waits for the build however
+  long it takes. Affects a refused grant gate from 0.9.9, and any other
+  failed first build of a `keep_alive` (before 0.5, `host_mode`) create from
+  0.3.3, through 0.9.9: `rkat-rpc`, and the Python and TypeScript SDKs that
+  drive it.
+
 - `meerkat-store`: `FileApprovalStore` now creates its files private (0600)
   on Unix regardless of the process umask, so consumers that verify private
   decision files no longer refuse stores created under the common 022/002

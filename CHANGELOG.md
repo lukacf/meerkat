@@ -232,20 +232,6 @@ them.
 
 ### Changed
 
-- `meerkat-runtime`, `meerkat-machine-schema`: `DurableDecisionMachine`
-  issues an execution permit only while the party who decided is still
-  current. An authorization the host's answer refuses issues no permit:
-  with no permit outstanding the decision ends `execution_refused`, records
-  `approver_not_current` and owes its notice; with one outstanding nothing
-  changes and `SettlementOwed` is answered, so the owner settles it first
-  and a commit made under it still records executed. Only a refusal ends a
-  decision: an unsettled answer, evidence an owner change made stale before
-  the authorization commits (related or not) and an answer of a kind the
-  service does not know apply nothing and answer `DecisionError::Unsettled`,
-  so the host is asked again. The hand-written audit checks
-  `AuditPermitOnlyForCurrentApprover` with two new witnesses and three new
-  mutants.
-
 - A session on a zero-config Copilot route, or on a route of a
   `[realm.<realm>.copilot]` account, carries the route's account as its
   credential identity, the identity its connection and lease always used,
@@ -259,6 +245,20 @@ them.
   (`runtime_session_authority.boundary_head_json`), which carry the session
   envelope of the head they committed, beside the head rows, the head-less
   documents and the WholeBlob documents.
+
+- `meerkat-runtime`, `meerkat-machine-schema`: `DurableDecisionMachine`
+  issues an execution permit only while the party who decided is still
+  current. An authorization the host's answer refuses issues no permit:
+  with no permit outstanding the decision ends `execution_refused`, records
+  `approver_not_current` and owes its notice; with one outstanding nothing
+  changes and `SettlementOwed` is answered, so the owner settles it first
+  and a commit made under it still records executed. Only a refusal ends a
+  decision: an unsettled answer, evidence an owner change made stale before
+  the authorization commits (related or not) and an answer of a kind the
+  service does not know apply nothing and answer `DecisionError::Unsettled`,
+  so the host is asked again. The hand-written audit checks
+  `AuditPermitOnlyForCurrentApprover` with two new witnesses and three new
+  mutants.
 
 ### Fixed
 

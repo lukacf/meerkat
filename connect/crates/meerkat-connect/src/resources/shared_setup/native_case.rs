@@ -5,6 +5,7 @@ use super::native_case_artifacts::publish;
 mod authenticated_helper_roles;
 mod find_feedback;
 mod planning_admission;
+mod post_effect_controls;
 use super::sdk_host::{SdkClient, SdkLaunchOwner, SdkParent};
 use super::*;
 use async_trait::async_trait;

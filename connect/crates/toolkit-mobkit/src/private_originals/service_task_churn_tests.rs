@@ -252,3 +252,140 @@ async fn settled_owner_change_at_the_final_check_keeps_one_preparation() {
     );
     assert_eq!(prepared.reached.count("prepare.final_authorization"), 1);
 }
+
+/// What the task source's check after a shared effect answered on the actual
+/// held report dispatch, and how long it took.
+struct CheckedAfterEffect {
+    result: Result<(), meerkat_core::ToolError>,
+    elapsed: Duration,
+    remaining: Option<Duration>,
+}
+
+/// Run the check after a shared effect once on the actual held report
+/// dispatch, acting just before it: an owner change held open on the work's
+/// own publication, or the original's operations really cancelled.
+async fn check_after_effect_with(act: AtCheck) -> CheckedAfterEffect {
+    let script = acquisition_denial::Script::for_approved();
+    let report = Report::new(script.tools().result_tool());
+    let (fixture, _runtime_store) =
+        Fixture::for_configured_helper_report(script.clone(), report.clone()).await;
+    let held = Mutex::new(None::<HeldChange>);
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT,
+        Box::pin(async {
+            let first = fixture.submit().await;
+            fixture.finish(&first).await.unwrap();
+            let context = report.take_context().await;
+            let remaining = context.remaining_tool_time();
+            let owner = script.installed_owner();
+            let mut bootstrap = AcquisitionBootstrap::selected(owner.clone());
+            assert!(Arc::ptr_eq(
+                &bootstrap.prepare(None, None).unwrap().unwrap(),
+                &owner
+            ));
+            let bootstrap = Arc::new(Mutex::new(bootstrap));
+            let tasks = InstalledServiceTaskSource::new(&bootstrap);
+            match act {
+                AtCheck::OwnerChange(hold) => {
+                    let change = HeldChange::begin(fixture.source.owner.publication(), hold);
+                    *held.lock().unwrap() = Some(change);
+                }
+                AtCheck::Cancellation => {
+                    fixture
+                        .source
+                        .record_operation_cancelled(&fixture.submission.original)
+                        .await
+                        .unwrap();
+                }
+            }
+            let started = Instant::now();
+            let result = report.check_after_shared_effect(&tasks).await;
+            let elapsed = started.elapsed();
+            if let Some(change) = held.lock().unwrap().take() {
+                change.release();
+            }
+            (result, elapsed, remaining)
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    if let Some(change) = held.lock().unwrap().take() {
+        change.release();
+    }
+    report.release();
+    report.leaf.context.lock().unwrap().take();
+    let cleanup = fixture.shutdown().await;
+    assert!(cleanup.is_ok(), "{cleanup:?}");
+    match checked {
+        Ok(Ok((result, elapsed, remaining))) => CheckedAfterEffect {
+            result,
+            elapsed,
+            remaining,
+        },
+        Ok(Err(_)) => panic!("the check after a shared effect exceeded its bounded deadline"),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+/// The model payload of a refused check: its kind and whether it claims the
+/// tool ran.
+fn refusal_data(error: &meerkat_core::ToolError) -> serde_json::Value {
+    let rendered =
+        meerkat_core::ops::terminal_tool_outcome_for_error("shared-check", error.clone()).result;
+    serde_json::from_str::<serde_json::Value>(&rendered.text_content()).unwrap()["data"].clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settled_owner_change_after_a_shared_effect_is_checked_again() {
+    let hold = Duration::from_millis(200);
+    let checked = check_after_effect_with(AtCheck::OwnerChange(Some(hold))).await;
+    assert_tool_time_covers_the_wait(checked.remaining);
+    assert!(
+        checked.result.is_ok(),
+        "a settled owner change is waited out and the check answers current: {:?}",
+        checked.result.as_ref().err().map(refusal_data)
+    );
+    assert!(
+        checked.elapsed >= hold - Duration::from_millis(50),
+        "the check waited for the change: {:?}",
+        checked.elapsed
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persistent_owner_change_after_a_shared_effect_ends_typed_and_uncertified() {
+    let checked = check_after_effect_with(AtCheck::OwnerChange(None)).await;
+    assert_tool_time_covers_the_wait(checked.remaining);
+    let error = checked
+        .result
+        .expect_err("a change that outlasts the bound is refused");
+    assert_eq!(
+        refusal_data(&error),
+        serde_json::json!({"kind": "reprepare_required", "tool_invoked": "unknown"}),
+        "after its effect the refusal stays typed and claims nothing about dispatch"
+    );
+    assert!(
+        checked.elapsed >= OWNER_CHANGE_WAIT_BOUND - Duration::from_millis(100)
+            && checked.elapsed < OWNER_CHANGE_WAIT_BOUND + Duration::from_secs(2),
+        "the check waits out Core's bound once, never renewed: {:?}",
+        checked.elapsed
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_denial_after_a_shared_effect_stays_immediate() {
+    let checked = check_after_effect_with(AtCheck::Cancellation).await;
+    let error = checked
+        .result
+        .expect_err("a cancelled original's call is refused");
+    assert_ne!(
+        refusal_data(&error)["kind"],
+        "reprepare_required",
+        "a denial is never a refusal to rebuild"
+    );
+    assert!(
+        checked.elapsed < OWNER_CHANGE_WAIT_BOUND,
+        "a denial is final at once: {:?}",
+        checked.elapsed
+    );
+}

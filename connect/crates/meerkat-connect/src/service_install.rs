@@ -48,10 +48,14 @@ pub(crate) mod shared_check_probe {
         Joined,
         /// The check after the join answered current.
         JoinedChecked,
+        /// The check after the join refused.
+        JoinedRefused,
         /// The selection is released; the check after it runs next.
         Released,
         /// The check after the release answered current.
         ReleasedChecked,
+        /// The check after the release refused.
+        ReleasedRefused,
         /// The entry monitor is about to close the claimed entry.
         EntryClosing,
         /// The entry monitor settled the claimed entry's source.
@@ -1040,9 +1044,17 @@ impl CheckedInstalls {
         shared_check_probe::observe(shared_check_probe::Step::Joined, call.id);
         let refreshed = approvals
             .check_after_shared_effect(call, context, plan, &mut churn, SHARED_CHECK_JOINED)
-            .await?;
+            .await;
         #[cfg(test)]
-        shared_check_probe::observe(shared_check_probe::Step::JoinedChecked, call.id);
+        shared_check_probe::observe(
+            if refreshed.is_ok() {
+                shared_check_probe::Step::JoinedChecked
+            } else {
+                shared_check_probe::Step::JoinedRefused
+            },
+            call.id,
+        );
+        let refreshed = refreshed?;
         let current = refreshed.as_ref().unwrap_or(context);
         member
             .check_current()
@@ -1055,11 +1067,19 @@ impl CheckedInstalls {
             .map_err(|_| unconfirmed())?;
         #[cfg(test)]
         shared_check_probe::observe(shared_check_probe::Step::Released, call.id);
-        approvals
+        let checked = approvals
             .check_after_shared_effect(call, current, plan, &mut churn, SHARED_CHECK_RELEASED)
-            .await?;
+            .await;
         #[cfg(test)]
-        shared_check_probe::observe(shared_check_probe::Step::ReleasedChecked, call.id);
+        shared_check_probe::observe(
+            if checked.is_ok() {
+                shared_check_probe::Step::ReleasedChecked
+            } else {
+                shared_check_probe::Step::ReleasedRefused
+            },
+            call.id,
+        );
+        checked?;
         let validation = hex(&value, "validation_id", 32)
             .ok_or_else(unconfirmed)?
             .to_owned();

@@ -29,6 +29,12 @@ struct ReportPreparationRequest {
     reply: tokio::sync::oneshot::Sender<Result<Option<InstalledServiceTask>, ServiceTaskError>>,
 }
 
+/// A check after a shared effect, run by the held real leaf on its own call.
+struct SharedCheckRequest {
+    source: InstalledServiceTaskSource,
+    reply: tokio::sync::oneshot::Sender<Result<(), meerkat_core::ToolError>>,
+}
+
 pub(super) struct Report {
     leaf: Arc<ReportLeaf>,
     selection: OnceLock<InstalledSetupSelection>,
@@ -42,6 +48,7 @@ impl Report {
                 inner,
                 context: Mutex::new(None),
                 preparation: Mutex::new(None),
+                shared_check: Mutex::new(None),
                 arrived: tokio::sync::Notify::new(),
                 released: AtomicBool::new(false),
                 resume: tokio::sync::Notify::new(),
@@ -103,6 +110,30 @@ impl Report {
             .expect("held report dispatch must settle preparation")?
             .ok_or(ServiceTaskError::Refused(PrivateOriginalError::Unavailable))
     }
+    /// Ask the held real leaf to run the task source's check after a shared
+    /// effect on its exact native call and plan, and answer what it answered.
+    async fn check_after_shared_effect(
+        &self,
+        source: &InstalledServiceTaskSource,
+    ) -> Result<(), meerkat_core::ToolError> {
+        assert!(!self.leaf.released.load(Ordering::SeqCst));
+        let (reply, received) = tokio::sync::oneshot::channel();
+        assert!(
+            self.leaf
+                .shared_check
+                .lock()
+                .unwrap()
+                .replace(SharedCheckRequest {
+                    source: source.clone(),
+                    reply,
+                })
+                .is_none()
+        );
+        self.leaf.resume.notify_one();
+        received
+            .await
+            .expect("held report dispatch must answer the check")
+    }
 }
 
 /// Forward every native dispatcher seam unchanged. The pause retains the
@@ -111,6 +142,7 @@ struct ReportLeaf {
     inner: Arc<dyn AgentToolDispatcher>,
     context: Mutex<Option<ToolDispatchContext>>,
     preparation: Mutex<Option<ReportPreparationRequest>>,
+    shared_check: Mutex<Option<SharedCheckRequest>>,
     arrived: tokio::sync::Notify,
     released: AtomicBool,
     resume: tokio::sync::Notify,
@@ -309,6 +341,24 @@ impl ReportLeaf {
                 };
                 // A timed-out test may have dropped its receiver; it still
                 // releases and joins this real dispatch through normal cleanup.
+                let _ = request.reply.send(result);
+            }
+            let shared_check = self.shared_check.lock().unwrap().take();
+            if let Some(request) = shared_check {
+                // The task source's check after a shared effect, on this
+                // exact call and plan, with the call's one waiting state.
+                let mut churn = context.owner_change_churn();
+                let result = request
+                    .source
+                    .check_after_shared_effect(
+                        call,
+                        context,
+                        plan,
+                        &mut churn,
+                        "toolkit.shared_check.control",
+                    )
+                    .await
+                    .map(drop);
                 let _ = request.reply.send(result);
             }
             if self.released.load(Ordering::SeqCst) {

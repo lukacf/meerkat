@@ -147,8 +147,11 @@ scope is gone), the batch landed. Otherwise, and after `Unavailable`, Core
 sends the same batch again, with the same commit id (obligation 3), after a
 pause that starts at 100 ms and doubles up to 3.2 s, until the batch lands
 or its retry budget runs out (`SpiRealmConfig::commit_retry_budget`, 30 s by
-default). Any other error ends the commit at once. The chunk batches of a
-large value are settled the same way.
+default). Each pause below 3.2 s is lengthened by up to half, by an amount
+derived from the batch's commit id, so batches that fail together do not
+retry together. No pause is shorter than the schedule's, so this adds no
+attempt within the budget. Any other error ends the commit at once. The
+chunk batches of a large value are settled the same way.
 
 A commit that does not settle within its budget, or ends in another error,
 fails the call that made it with a write error, and every scope the batch

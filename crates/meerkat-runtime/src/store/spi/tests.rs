@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use meerkat_core::completion_feed::CompletionFeed;
-use meerkat_core::host_store::{AcquireMode, FenceTiming, HostStoreError, ScopeKind};
+use meerkat_core::host_store::{AcquireMode, CommitId, FenceTiming, HostStoreError, ScopeKind};
 use meerkat_core::lifecycle::InputId;
 use meerkat_core::ops_lifecycle::{
     CompletionCursorConsumer, OperationId, OperationKind, OperationResult, OperationSource,
@@ -21,6 +21,7 @@ use meerkat_core::{EpochCursorState, RuntimeEpochId};
 use super::codec::{self, RowOp, ScopeHeadV1};
 use super::realm::{
     CHECKPOINT_FACTOR, CHECKPOINT_MIN_BYTES, INLINE_VALUE_LIMIT, LIST_PAGE_HEADS, READ_PAGE_ROWS,
+    commit_retry_pause,
 };
 use super::test_host::{HostCall, TestHost};
 use super::{
@@ -423,6 +424,44 @@ async fn batches_that_fail_together_do_not_retry_together() {
         second.len() > 1,
         "batches that fail together retry together: every second attempt came {second:?} after the first"
     );
+}
+
+// A commit's retry pauses: each is the doubling schedule's (100 ms, doubling
+// up to 3.2 s) lengthened by up to half, never past 3.2 s, so none is shorter
+// than the schedule's and none longer than its longest; one batch pauses the
+// same every time; and the pauses of different batches differ.
+#[test]
+fn commit_retry_pauses_keep_the_schedule_bounds_and_differ_by_batch() {
+    let longest = Duration::from_millis(3200);
+    let ids: Vec<CommitId> = (1..=8)
+        .map(|batch| CommitId::try_new(format!("writer-{batch}")).unwrap())
+        .collect();
+    for id in &ids {
+        let mut schedule = Duration::from_millis(100);
+        for attempt in 1..=20 {
+            let pause = commit_retry_pause(id, attempt);
+            assert!(
+                pause >= schedule && pause <= (schedule + schedule / 2).min(longest),
+                "{id}, attempt {attempt}: a pause of {pause:?} where the schedule's is {schedule:?}"
+            );
+            assert_eq!(
+                pause,
+                commit_retry_pause(id, attempt),
+                "{id}, attempt {attempt}"
+            );
+            schedule = (schedule * 2).min(longest);
+        }
+    }
+    for attempt in 1..=5 {
+        let pauses: BTreeSet<Duration> = ids
+            .iter()
+            .map(|id| commit_retry_pause(id, attempt))
+            .collect();
+        assert!(
+            pauses.len() > 1,
+            "attempt {attempt}: every batch pauses {pauses:?}"
+        );
+    }
 }
 
 // Unrun until the candidate's validation.

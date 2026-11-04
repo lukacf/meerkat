@@ -196,6 +196,16 @@ them.
 
 ### Changed
 
+- `meerkat-mob`: a complete declared roster also adopts a member it does not
+  list when the member's spawn row carries both legacy marks (the
+  durable-identity continuity marker and the `agent_identity` label naming
+  the member) and no host's identity intent row names it, so its seal
+  unlists the entry and retires the member, as it retires any unlisted
+  entry's member. A member a host seated under its identity before identity
+  entries existed, whose identity the roster dropped before the host first
+  applied it, was left serving as a worker. A member with one mark only,
+  and a host-adopted identity, are left as they are, as before.
+
 - A session on a zero-config Copilot route, or on a route of a
   `[realm.<realm>.copilot]` account, carries the route's account as its
   credential identity, the identity its connection and lease always used,

@@ -10607,9 +10607,6 @@ impl MobHandle {
         &self,
         identity: &AgentIdentity,
     ) -> Result<super::LegacyIdentityEntryAdoption, MobError> {
-        // An observation whose incarnation moved before MobMachine decided
-        // is observed again, a bounded number of times.
-        const LEGACY_ADOPTION_OBSERVATIONS: usize = 3;
         // The scope and the lane first: nothing is answered, not even from
         // the entry, to a caller the adoption is refused to.
         self.admit_control_scope_for(
@@ -10631,6 +10628,26 @@ impl MobHandle {
         if already_an_entry {
             return Ok(super::LegacyIdentityEntryAdoption::AlreadyAnEntry);
         }
+        self.adopt_observed_legacy_member(
+            identity,
+            super::identity_entry::LegacyRosterMarks::either,
+        )
+        .await
+    }
+
+    /// The legacy adoption's observation and MobMachine's decision for an
+    /// admitted caller: the spawn row of the identity's current incarnation,
+    /// read from the member binding history, makes the member a legacy
+    /// member when its marks are `adoptable` (either mark for a listed name
+    /// or this handle's adoption, both for a complete roster's unlisted
+    /// member). An observation whose incarnation moved before MobMachine
+    /// decided is observed again, a bounded number of times.
+    pub(super) async fn adopt_observed_legacy_member(
+        &self,
+        identity: &AgentIdentity,
+        adoptable: fn(super::identity_entry::LegacyRosterMarks) -> bool,
+    ) -> Result<super::LegacyIdentityEntryAdoption, MobError> {
+        const LEGACY_ADOPTION_OBSERVATIONS: usize = 3;
         let store = self
             .identity_member
             .as_ref()
@@ -10643,7 +10660,7 @@ impl MobHandle {
             let observation = history.last_binding(identity).map(|binding| {
                 (
                     binding.generation(),
-                    super::identity_entry::legacy_roster_member(binding).either(),
+                    adoptable(super::identity_entry::legacy_roster_member(binding)),
                 )
             });
             #[cfg(test)]

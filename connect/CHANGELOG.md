@@ -17,8 +17,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   now waits for the change and checks again, instead of refusing the call as
   access denied. Only the check repeats; the task is prepared once. A change
   that outlasts the bound is refused as `operation_refused` with kind
-  `reprepare_required`, which a caller may retry, and a real denial is still
-  refused at once.
+  `reprepare_required`: the call needs a fresh, current authorization. The
+  refusal does not say whether the call's work already ran (`tool_invoked`
+  stays unknown), so a retry follows the caller's own operation, idempotency
+  and settlement rules, never a blind replay of the whole call. A real denial
+  is still refused at once.
 
 ## [0.9.9] - 2026-11-03
 

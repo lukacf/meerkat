@@ -2236,16 +2236,9 @@ impl MeerkatMachine {
                         return Err(RuntimeControlPlaneError::Internal(err.to_string()));
                     }
                     _mutation_guard = Some(relocked?);
-                    self.apply_session_dsl_input(
-                        session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::SetModelRoutingBaseline {
-                            baseline_model: request.intent.target_model.to_string(),
-                            realtime_capable: request.target_realtime.target_realtime_capable,
-                        },
-                        "SetModelRoutingBaseline",
-                    )
-                    .await
-                    .map_err(RuntimeControlPlaneError::Internal)?;
+                    // The completion records the applied target as the
+                    // routing baseline, in every phase the session can reach
+                    // in the gap (a stop or a retirement included).
                     self.apply_session_dsl_input(
                         session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::CompleteUntilChangedSwitchTurnReconfigure {

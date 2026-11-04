@@ -14270,8 +14270,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::ScopedOverrideConflict }
         }
 
+        // A reconfigured until-changed switch completes in whatever phase the
+        // session reached meanwhile: the shell releases its session mutation
+        // gate while the reconfigure runs, so a stop or a retirement can land
+        // before it takes the gate again. The completion records the applied
+        // target as the routing baseline itself, so no separate baseline
+        // input is needed in a phase that refuses one (Stopped).
         transition CompleteUntilChangedSwitchTurnReconfigure {
-            per_phase [Idle, Attached, Running]
+            per_phase [Idle, Attached, Running, Retired, Stopped]
             on input CompleteUntilChangedSwitchTurnReconfigure { request_id }
             guard "pending_until_changed_reconfigure" {
                 self.model_routing_pending_switch_request_id == Some(request_id)
@@ -14279,6 +14285,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.model_routing_pending_switch_phase == Some(RoutingSwitchTurnPhase::ApplyingPersistentReconfigure)
             }
             update {
+                self.model_routing_baseline_model = Some(self.model_routing_pending_switch_target_model.get("value"));
+                self.model_routing_baseline_realtime = Some(self.model_routing_pending_switch_realtime.get("value"));
+                self.model_routing_topology_epoch = self.model_routing_topology_epoch + 1;
                 self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::PersistentReconfigureApplied);
                 self.model_routing_pending_switch_request_id = None;
                 self.model_routing_pending_switch_target_model = None;

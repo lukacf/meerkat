@@ -552,6 +552,10 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     "RequestUntilChangedSwitchTurnPendingConflictIdle",
     "RequestUntilChangedSwitchTurnPendingConflictAttached",
     "RequestUntilChangedSwitchTurnPendingConflictRunning",
+    // A reconfigured until-changed switch-turn completes after a retirement
+    // or a stop (0.9.10).
+    "CompleteUntilChangedSwitchTurnReconfigureRetired",
+    "CompleteUntilChangedSwitchTurnReconfigureStopped",
 ];
 
 // Append-only emission tails for the other machines, whose public

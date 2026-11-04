@@ -93,8 +93,9 @@ them.
 
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-runtime`: the
   MeerkatMachine gains the failure arm of an until-changed switch-turn
-  reconfigure, and the refusal of an until-changed switch-turn while another
-  switch is pending (see Fixed). `MeerkatMachineInput`
+  reconfigure, the refusal of an until-changed switch-turn while another
+  switch is pending, and the completion of a reconfigured switch-turn in a
+  retired or stopped session (see Fixed). `MeerkatMachineInput`
   (meerkat-machine-schema and meerkat-runtime) and the kernel
   `generated::meerkat` `Input` gain
   `AbortUntilChangedSwitchTurnReconfigure { request_id }`, and
@@ -108,8 +109,10 @@ them.
   `AbortUntilChangedSwitchTurnReconfigureRetired`,
   `AbortUntilChangedSwitchTurnReconfigureStopped`,
   `RequestUntilChangedSwitchTurnPendingConflictIdle`,
-  `RequestUntilChangedSwitchTurnPendingConflictAttached` and
-  `RequestUntilChangedSwitchTurnPendingConflictRunning`. Every new variant is
+  `RequestUntilChangedSwitchTurnPendingConflictAttached`,
+  `RequestUntilChangedSwitchTurnPendingConflictRunning`,
+  `CompleteUntilChangedSwitchTurnReconfigureRetired` and
+  `CompleteUntilChangedSwitchTurnReconfigureStopped`. Every new variant is
   appended last, so no existing variant's implicit discriminant moves. Every
   enum named here is exhaustive, so a downstream exhaustive match needs the
   new arms, or a wildcard arm.
@@ -397,6 +400,13 @@ them.
   retry of the pending request itself (the same `request_id`) is accepted,
   so a caller that dropped its request while the reconfigure ran can
   finish it. Affects 0.6.0 through 0.9.9.
+
+- `meerkat-runtime`: a stop or a retirement that landed after an
+  until-changed model switch had reconfigured the session, but before the
+  switch finished, failed the switch: the caller got an error although the
+  reconfigure had applied, and the switch stayed pending. The switch now
+  finishes in a stopped or retired session as well. Affects 0.6.0 through
+  0.9.9.
 
 ### Known limitations
 

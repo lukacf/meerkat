@@ -231,10 +231,10 @@ them.
 - `meerkat-mob`: the one encoding of a name into a member id,
   `ids::member_id_for_name`, and its inverse `ids::name_for_member_id`
   (with `ids::ENCODED_MEMBER_ID_MARKER`). A name that is a member
-  comms-name component and does not begin with the marker is its own member
-  id; any other name (`team:alice`, or `mk--ops`) is the marker and the
-  escaped name (`mk--team_calice`, `mk--mk--ops`). Meerkat Meta's member ids
-  are this encoding.
+  comms-name component and does not begin with the marker is its own
+  member id; any other name (`team:alice`, or `mk--ops`) is the marker and
+  the escaped name (`mk--team_calice`, `mk--mk--ops`). Meerkat Meta's
+  member ids are this encoding.
 
 - `meerkat-mob`: `UnlistedEntryOutcome::NotAdopted { reason }`, with the new
   `NotAdoptedReason` (`Retiring`): a complete roster's answer for a member

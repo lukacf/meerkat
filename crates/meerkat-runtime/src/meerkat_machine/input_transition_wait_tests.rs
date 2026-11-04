@@ -16,6 +16,8 @@
 //! persistent driver's own cancelled-run realization (durable commit, then
 //! archive) and runs on the real clock: the run's interrupt answers on the
 //! process-owned cleanup runtime, under a tokio-timed acknowledgement bound.
+//! A row the ledger keeps without its generated state is no archive, so an
+//! observed input found that way still answers absent.
 //!
 //! The cancellations' settle deadline is a std-clock instant, which the paused
 //! clock does not move. The paused-clock bound tests therefore cover the read
@@ -987,5 +989,67 @@ async fn exact_cancellation_answers_observed_after_the_run_archives_its_input() 
             .await
             .expect("cancelling the archived input"),
         "an input no pass of the call observed is absent"
+    );
+}
+
+/// A row the live ledger keeps without its generated lifecycle state was not
+/// archived: when a later pass finds an observed input so, the cancellation
+/// answers `false`, as before an observation carried across passes.
+#[tokio::test(start_paused = true)]
+async fn exact_cancellation_answers_absent_for_a_row_without_its_generated_state() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let input_id = input_between_steps(&machine, &session_id, "exact-forgotten-phase").await;
+
+    let cancel = crate::tokio::spawn({
+        let machine = Arc::clone(&machine);
+        let session_id = session_id.clone();
+        let input_id = input_id.clone();
+        async move {
+            machine
+                .cancel_input_if_present_owned(
+                    &session_id,
+                    &input_id,
+                    "cancelled between steps".to_string(),
+                )
+                .await
+        }
+    });
+    until_parked().await;
+    assert!(
+        !cancel.is_finished(),
+        "the first pass observes the input between steps and waits"
+    );
+
+    // Drop the input's generated phase and keep its ledger row, with no step
+    // signal: the read after the wait's bound finds no live state.
+    {
+        let driver = session_driver(&machine, &session_id).await;
+        let driver = driver.lock().await;
+        let crate::meerkat_machine::driver::DriverEntry::Ephemeral(ephemeral) = &*driver else {
+            panic!("an ephemeral machine registers an ephemeral driver")
+        };
+        ephemeral.forget_input_phase_for_test(&input_id);
+        assert!(
+            driver.as_driver().stored_input_state(&input_id).is_none(),
+            "no live state is read for the input"
+        );
+        assert!(
+            driver.ledger().get(&input_id).is_some(),
+            "the live ledger keeps the input's row"
+        );
+    }
+
+    let answer = cancel
+        .await
+        .expect("cancellation task")
+        .expect("the read after the bound answers");
+    assert!(
+        !answer,
+        "a row kept without its generated state was not archived"
     );
 }

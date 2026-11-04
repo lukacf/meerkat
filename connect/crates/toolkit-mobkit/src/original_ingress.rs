@@ -3115,11 +3115,33 @@ impl ToolkitOriginalOwner {
     /// must not wait or await, and runs at most once.
     fn change_with_collection<T>(
         &self,
+        apply: impl FnMut(&mut Vec<OriginalRecord>) -> Result<T, OriginalWriterError>,
+    ) -> Result<T, OriginalWriterError> {
+        self.change_with_collection_within(
+            std::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+            std::thread::sleep,
+            || {},
+            apply,
+        )
+    }
+
+    /// [`Self::change_with_collection`] with its one deadline, the pause of
+    /// its outside wait, and `before_round`, run before every round after the
+    /// first with no change open: a test's seam for a caller descheduled
+    /// there.
+    fn change_with_collection_within<T>(
+        &self,
+        deadline: std::time::Instant,
+        mut pause: impl FnMut(std::time::Duration),
+        mut before_round: impl FnMut(),
         mut apply: impl FnMut(&mut Vec<OriginalRecord>) -> Result<T, OriginalWriterError>,
     ) -> Result<T, OriginalWriterError> {
-        let deadline =
-            std::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+        let mut first = true;
         loop {
+            if !first {
+                before_round();
+            }
+            first = false;
             {
                 let _publication = self
                     .publication
@@ -3134,7 +3156,7 @@ impl ToolkitOriginalOwner {
                 }
             }
             drop(
-                wait_for_lock(&self.originals, deadline, std::thread::sleep)
+                wait_for_lock(&self.originals, deadline, &mut pause)
                     .map_err(|_| OriginalWriterError::Unavailable)?,
             );
         }

@@ -1073,7 +1073,7 @@ for (const path of [
   ".config/nextest.toml",
   "rust-toolchain.toml",
   "scripts/repo-cargo",
-  "scripts/cargo-agent-gate",
+  "scripts/cargo-fast-nextest",
   "scripts/ci-cargo-lanes.mjs",
   "scripts/ci-hook-coverage.mjs",
   "scripts/ci-verify-row-binaries.mjs",
@@ -1457,8 +1457,8 @@ for (const path of [
 }
 
 // The typed governance gates run on the agent gate's governance paths: the
-// machine-authority paths and the dogma documents (scripts/cargo-agent-gate,
-// is_governance_path), which ran them in the pre-push hook's ratchets.
+// machine-authority paths and the dogma documents (scripts/buildbuddy-agent-gate,
+// is_governance_path).
 {
   assert.equal(planFor(["specs/machines/meerkat_machine/model.tla"]).governance_gates, true, "machine authority runs the governance gates");
   for (const path of [
@@ -1474,9 +1474,9 @@ for (const path of [
   for (const path of ["docs/architecture/meerkat-dogma-notes.md", ".claude/skills/meerkat-architecture/SKILL.md", "docs/internal/machine-posters/mob_machine.html"]) {
     assert.equal(planFor([path]).governance_gates, false, `${path} does not run the governance gates`);
   }
-  const gate = readFileSync(resolve(root, "scripts/cargo-agent-gate"), "utf8");
+  const gate = readFileSync(resolve(root, "scripts/buildbuddy-agent-gate"), "utf8");
   const start = gate.indexOf("is_governance_path() {");
-  assert.ok(start >= 0, "scripts/cargo-agent-gate defines is_governance_path");
+  assert.ok(start >= 0, "scripts/buildbuddy-agent-gate defines is_governance_path");
   const body = gate.slice(start, gate.indexOf("\n}\n", start));
   assert.ok(body.includes("scripts/machine-authority-changed"), "the agent gate's governance paths start from machine authority");
   const patterns = body

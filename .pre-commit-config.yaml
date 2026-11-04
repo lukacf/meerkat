@@ -64,17 +64,6 @@ repos:
         pass_filenames: false
         stages: [pre-push]
 
-  # Manual: changed-crate deterministic validation when you want a local preflight.
-  - repo: local
-    hooks:
-      - id: agent-check-changed
-        name: clippy + deterministic tests (changed crates)
-        entry: scripts/agent-gate --staged
-        language: script
-        types: [rust]
-        pass_filenames: false
-        stages: [manual]
-
   # On commit: recorded gpt-live provider streams must be scrubbed (no
   # credentials, SDP, host details or voice audio) before they are committed.
   - repo: local
@@ -147,27 +136,6 @@ repos:
         types: [rust]
         pass_filenames: false
         stages: [pre-push]
-
-  # Manual: the agent gate's changed-path ratchets (formal/governance
-  # targets, generated contract freshness, Web SDK tests, wasm check). They
-  # ran on every push (497-2725 s a push on 2026-10-14..16) and CI runs each
-  # of them before merge: the ratchets job (generated contracts; machine
-  # drift on a machine-authority change; the runtime authority bypass audit
-  # on every Rust change), governance-gates (the typed governance gates on
-  # a machine-authority or dogma change), example-web
-  # (the Web SDK suites) and wasm-check, all selected by the same changed
-  # paths. No Clippy either: the required CI Clippy lanes lint every
-  # package this hook used to (scripts/test-pre-push-ratchets.sh pins all of
-  # it).
-  - repo: local
-    hooks:
-      - id: changed-path-ratchets
-        name: governance, contract, Web SDK and wasm ratchets (changed paths)
-        entry: scripts/pre-push-ratchets.sh
-        language: script
-        pass_filenames: false
-        always_run: true
-        stages: [manual]
 
   # Manual: machine file codegen + verify for the exact pushed refs (run
   # them with --from-ref/--to-ref). CI runs both before merge on a
@@ -262,14 +230,14 @@ repos:
         always_run: true
         stages: [pre-push]
 
-      # Also runs the release-projection, harness-only and ratchets
-      # contracts, which read the CI planner, ci.yml and the agent gate.
+      # Also runs the release-projection and harness-only contracts, which
+      # read the CI planner and ci.yml.
       - id: pre-push-unit-status-contract
         name: pre-push deterministic gate preserves lane failures
         entry: scripts/test-pre-push-unit-status.sh
         language: script
         pass_filenames: false
-        files: '^(scripts/(pre-push-[^/]*|test-pre-push-[^/]*|release-projection-only\.mjs|test-release-projection-[^/]*|cargo-agent-gate|agent-gate|ci-cargo-lanes\.mjs|ci-hook-coverage\.mjs|ci-non-rust-readers[^/]*|ci-verify-row-binaries\.mjs|rust-test-selector\.mjs|rust-embedded-inputs\.mjs|generated-contract-ratchet-changed|machine-authority-changed)|\.pre-commit-config\.yaml|\.github/workflows/ci\.yml|\.config/nextest\.toml|Makefile)$'
+        files: '^(scripts/(pre-push-[^/]*|test-pre-push-[^/]*|release-projection-only\.mjs|test-release-projection-[^/]*|ci-cargo-lanes\.mjs|ci-hook-coverage\.mjs|ci-non-rust-readers[^/]*|ci-verify-row-binaries\.mjs|rust-test-selector\.mjs|rust-embedded-inputs\.mjs|generated-contract-ratchet-changed|machine-authority-changed)|\.pre-commit-config\.yaml|\.github/workflows/ci\.yml|\.config/nextest\.toml|Makefile)$'
         stages: [pre-push]
 
       - id: lock-consistency-gate-contract

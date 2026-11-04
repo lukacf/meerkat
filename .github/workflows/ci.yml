@@ -764,10 +764,11 @@ jobs:
           cache-targets: "false"
           cache-on-failure: true
 
-      # The shell path classifiers (scripts/machine-authority-changed, the
-      # remote-graph edge classifier and scripts/cargo-agent-gate) silently
-      # stopped matching after the crates/ layout move because nothing ran
-      # their pinning tests.
+      # The path classifiers (scripts/machine-authority-changed, the
+      # remote-graph edge classifier, the local affected-test selection in
+      # scripts/affected-tests.mjs) run their pinning tests here: the shell
+      # ones silently stopped matching after the crates/ layout move because
+      # nothing ran them.
       - name: Path classifiers route gate inputs
         run: make path-classifier-selftest
 

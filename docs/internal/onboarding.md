@@ -22,7 +22,7 @@ make install-build-deps
 ```
 
 This target bootstraps Rust, not every validation tool. Install the separate
-Cargo test runner before using `make test` or `make agent-gate`:
+Cargo test runner before using `make test` or `scripts/affected-tests.mjs`:
 
 ```bash
 ./scripts/repo-cargo install cargo-nextest --locked
@@ -47,8 +47,8 @@ make check
 make test
 ```
 
-For a smaller first pass, `make agent-gate` derives the Rust lanes affected by
-the current diff and runs the scoped checks.
+For a smaller first pass, `node scripts/affected-tests.mjs --run` runs the
+tests the current diff affects (see [Affected Tests](#affected-tests)).
 
 ## Architecture In Five Minutes
 
@@ -89,8 +89,9 @@ make build
 make check
 make lint
 make test
-make agent-gate
 ```
+
+For the tests a change affects, see [Affected Tests](#affected-tests).
 
 Use the repository wrapper for a targeted Cargo command:
 
@@ -203,7 +204,6 @@ gate appropriate to the change:
 
 ```bash
 node scripts/affected-tests.mjs --run
-make agent-gate
 make docs-check          # when docs changed
 make verify-version-parity
 ```

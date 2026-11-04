@@ -817,9 +817,11 @@ impl super::MobHandle {
     ///   one mark only is left as it is.
     /// - No member is built from a declaration of the identity's lifecycle
     ///   facts only ([`DeclaredBuild::FactsOnly`]): a verdict that would seat
-    ///   it, rotate its member onto a fresh session or start its first-boot
-    ///   fresh life answers [`DeclaredEntryOutcome::BuildRequired`] and takes
-    ///   no member step; the host declares it again with its composed build.
+    ///   it, rotate its member onto a fresh session, migrate it to another
+    ///   role on its own session or start its first-boot fresh life answers
+    ///   [`DeclaredEntryOutcome::BuildRequired`] and takes no member step;
+    ///   the host declares it again with its composed build. A role
+    ///   migration's successor builds with the declaration's build inputs.
     /// - A store-owned identity's name is left as it is, with a typed note
     ///   ([`DeclaredEntryOutcome::Noted`] with
     ///   [`DeclaredEntryNote::OwnedByStore`]): a quiet steady state that

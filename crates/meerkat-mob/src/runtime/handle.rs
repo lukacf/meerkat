@@ -6677,7 +6677,7 @@ impl MobHandle {
     /// real process exit still destroys its process-global inproc registry,
     /// so same-process cold-restart fixtures must establish that boundary
     /// explicitly instead of racing the last `Arc` drop.
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn retire_supervisor_transport_for_process_exit_test(&self) {
         self.supervisor_bridge.shutdown().await;
     }

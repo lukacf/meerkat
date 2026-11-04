@@ -3816,7 +3816,6 @@ dependencies = [
  "meerkat-machine-dsl",
  "meerkat-machine-kernels",
  "meerkat-machine-schema",
- "meerkat-mob",
  "meerkat-models",
  "meerkat-runtime",
  "meerkat-session",

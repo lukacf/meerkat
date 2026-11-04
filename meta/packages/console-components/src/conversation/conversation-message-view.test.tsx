@@ -369,7 +369,7 @@ describe("ConversationMessageView", () => {
 
     // The transcript keeps peer sends humanized: the header carries the peer
     // target, never the raw tool name (meta's pre-union `send_message →
-    // worker-a` label was superseded by the studio's title-neutral rendering).
+    // worker-a` label was superseded by the embedding app's title-neutral rendering).
     expect(screen.getByText("worker-a")).toBeInTheDocument();
     expect(screen.queryByText(/send_message/)).not.toBeInTheDocument();
   });

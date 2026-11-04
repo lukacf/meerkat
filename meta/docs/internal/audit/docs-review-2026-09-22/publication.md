@@ -4,9 +4,8 @@
 
 ## MobKit
 
-The verified changes are committed on
-`luka-crnkovicfriis-abk-documentation-adversarial-audit` and pushed to
-`lukacf/meerkat-mobkit`:
+The verified changes are committed on a documentation-audit working branch
+and pushed to `lukacf/meerkat-mobkit`:
 
 - `e53206a1fad55092b29420f3b647bee6af12079a`: 148 confirmed local documentation corrections.
 - `426c5c951a35c63389b956cc1f719641e7c513af`: complete evidence and review ledger.
@@ -28,7 +27,7 @@ A read-only GitHub query confirmed that no PR exists for this head branch.
 The creation operation could not select the separately authorized keyring
 account. No alternative creation operation was performed.
 
-[Open the prepared MobKit comparison](https://github.com/lukacf/meerkat-mobkit/compare/main...luka-crnkovicfriis-abk-documentation-adversarial-audit)
+The prepared MobKit comparison is that working branch against `main`.
 
 This is a pushed branch and a verified audit, not a claim that a PR was created
 or merged. PR publication requires an account authorized for this repository.
@@ -41,7 +40,7 @@ Its independently reviewed correction is preserved in a separate worktree:
 | Receipt | Value |
 |---|---|
 | Repository | `lukacf/meerkat` |
-| Branch | `luka-crnkovicfriis-abk-mobkit-lease-skill-correction` |
+| Branch | A local skill-correction working branch |
 | Base | `02dc6732c87ba2105eb4f84a1f499869965159a7` |
 | Correction commit | `4b97c131d8c8213f7b53c0d5d3753da70016f797` |
 | File | `.claude/skills/meerkat-architecture/references/gotchas.md` |

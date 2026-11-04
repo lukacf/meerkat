@@ -6807,7 +6807,7 @@ pub struct MobBootstrapSpec {
     /// member spawn — including revival — so tools attached here survive
     /// `materialize_revived_member_session`, unlike the per-spawn
     /// `SpawnMemberSpec.external_tools` overlay, which revival drops
-    /// (meerkat-studio ask K4/M2). NOTE: a profile's `tools.mcp` allowlist
+    /// (downstream asks K4/M2). NOTE: a profile's `tools.mcp` allowlist
     /// gates what this provider exposes to that member, and an EMPTY allowlist
     /// means the full surface, not none.
     pub(crate) default_external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,

@@ -3172,7 +3172,7 @@ mod tests {
         assert_eq!(snapshot.pending_lineage_sequence, Some(1));
     }
 
-    /// 0.7.19 regression (meerkat-studio): the composite dispatcher now
+    /// 0.7.19 regression (downstream embedder): the composite dispatcher now
     /// forwards the session-authority bind to nested MCP adapters, so the
     /// standard embedder flow — construct the router on an ephemeral
     /// authority, stage + connect tool servers, THEN build the agent (bind

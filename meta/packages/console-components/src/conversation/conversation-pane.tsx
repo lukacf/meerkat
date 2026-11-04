@@ -59,7 +59,7 @@ export type ConversationPaneProps = ConversationApprovalProps & {
   onFlowRunRestore?: FlowRunRestoreHandler | null;
   workGraphActions?: WorkGraphCardActions | null;
   // The jump-to-turn rail on the pane's edge. Default true (the Meta
-  // console ships it); meerkat-studio opts out until it adopts the rail
+  // console ships it); an embedding app opts out until it adopts the rail
   // deliberately.
   showTurnRail?: boolean;
 };

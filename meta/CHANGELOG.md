@@ -15649,7 +15649,7 @@ reading a silent-but-working phase as a hung one.
   (idle-retire reaping, no continuity record).
 - `mobkit/capabilities` on both dispatchers now carries a top-level
   `identity_first` flag — the zero-flag-day migration signal consumers gate
-  on (meerkat-studio contract point 5).
+  on (a downstream console consumer's contract point 5).
 
 ### Fixed
 
@@ -15679,7 +15679,7 @@ reading a silent-but-working phase as a hung one.
 
 ### Added
 
-- Identity-first gateway mode (meerkat-studio ask K0): `identity_first: true`
+- Identity-first gateway mode (downstream ask K0): `identity_first: true`
   on `mobkit_gateway` init boots the durable-identity substrate — continuity
   records + lease-fenced embodiment (default providers constructed from the
   existing store paths), resume-first restore with the Broken-identity
@@ -15700,13 +15700,13 @@ reading a silent-but-working phase as a hung one.
   honored, default `warn`) and logs a version-stamped startup line.
   Previously the binary dropped every tracing event in the process —
   runtime failures, console internal-error logs, and the schedule claim
-  watchdog's stall diagnosis were all invisible; meerkat-studio root-caused
+  watchdog's stall diagnosis were all invisible; a downstream app root-caused
   their opaque K1/K2 failures to exactly this gap on the child gateways
   their app spawns. `rpc_gateway` already had the subscriber.
 
 ### Added
 
-- Mob-wide, revival-surviving external-tools seam (meerkat-studio ask K4):
+- Mob-wide, revival-surviving external-tools seam (downstream ask K4):
   `MobBootstrapSpec::with_default_external_tools_provider` forwards to
   meerkat-mob's per-spawn provider, so tools attached there survive member
   respawn/revival — unlike the per-spawn `SpawnMemberSpec.external_tools`
@@ -15716,7 +15716,7 @@ reading a silent-but-working phase as a hung one.
 ### Changed
 
 - Console JSON-RPC internal errors now carry the real failure reason on the
-  wire (meerkat-studio ask K2): `message` and `data.detail` hold the error
+  wire (downstream ask K2): `message` and `data.detail` hold the error
   chain instead of an opaque `{"error":"internal_error"}` (the kind marker is
   kept for existing clients). This deliberately reverses the earlier
   redaction posture for THIS surface: every caller that reaches these
@@ -15727,14 +15727,14 @@ reading a silent-but-working phase as a hung one.
   covers the intermittent mob-spawn 500s reported as K3 wherever they
   originate on mobkit's surface.
 - The meerkat family is now exact-pinned (`=0.7.18`) in Cargo.toml
-  (meerkat-studio ask K5): the compatible meerkat version is declared, not
+  (downstream ask K5): the compatible meerkat version is declared, not
   archaeologized from Cargo.lock at release tags.
 
 ### Known issues
 
 - `mobkit/retire_member` / `mobkit/respawn_member` fail for never-ran
   members on persistent session services and strand them in `retiring`
-  (meerkat-studio K1) — root-caused upstream (ask 20,
+  (downstream ask K1), root-caused upstream (ask 20,
   docs/design/upstream-asks.md): the ArchiveSession disposal step NotFounds
   on a member that never committed a runtime snapshot. Repro ships as an
   `#[ignore]`d test in `tests/studio_k_asks.rs`; the fix lands with the next

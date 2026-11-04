@@ -843,6 +843,69 @@ fn source_wait_past_its_deadline_releases_its_holder() {
     assert_eq!(answer, Err(ControllerReadinessFailure::PolicyUnavailable));
 }
 
+// The cancellation's change rounds share one deadline. A caller descheduled
+// across it between its outside wait (which took the collection) and its next
+// round begins no owner change and applies nothing, even with the collection
+// free again; and no change is open while it is held there.
+#[test]
+fn change_rounds_check_their_deadline_before_every_new_round() {
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (owner, _a, _namespace, _work) = admitted_original(dir.path());
+    let (mut pauses, mut rounds, mut applied) = (0, 0, 0);
+    let mut open_between_rounds = None;
+    let mut stamp = None;
+    let answer = with_released_holder(&owner.originals, |release, free| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        owner.change_with_collection_within(
+            deadline,
+            |_| {
+                pauses += 1;
+                if pauses == 1 {
+                    // The holder releases: the outside wait's next attempt
+                    // takes the collection, before the deadline.
+                    release.send(()).unwrap();
+                    free.recv().unwrap();
+                }
+            },
+            || {
+                rounds += 1;
+                open_between_rounds = Some(owner.publication().change_in_progress().is_some());
+                while std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                stamp = Some(owner.publication().observe(|| ()).unwrap().1);
+            },
+            |_| {
+                applied += 1;
+                Ok(())
+            },
+        )
+    });
+    assert_eq!(
+        answer,
+        Err(OriginalWriterError::Unavailable),
+        "a round past the deadline is unavailable, even with the collection free"
+    );
+    assert_eq!(applied, 0, "nothing is applied after the deadline");
+    assert_eq!(pauses, 1);
+    assert_eq!(
+        rounds, 1,
+        "the first round never reruns; the second is checked first"
+    );
+    assert_eq!(
+        open_between_rounds,
+        Some(false),
+        "no change is open between rounds"
+    );
+    assert!(
+        stamp.unwrap().check_current().is_ok(),
+        "no owner change begins after the deadline"
+    );
+}
+
 // Hold the source collection on another thread for `hold`, then run `check`
 // on this thread while it is held, and answer what `check` answered.
 fn while_collection_held<T>(

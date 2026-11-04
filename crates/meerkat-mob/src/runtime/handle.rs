@@ -10629,7 +10629,9 @@ impl MobHandle {
             return Ok(super::LegacyIdentityEntryAdoption::AlreadyAnEntry);
         }
         // The host names the identity: its member is observed as listed.
-        let (_, verdict) = self.adopt_observed_legacy_member(identity, true).await?;
+        let (_, verdict) = self
+            .adopt_observed_legacy_member(identity, true, None)
+            .await?;
         super::identity_entry::legacy_adoption_answer(verdict).ok_or_else(|| {
             MobError::Internal(format!(
                 "MobMachine answered the adoption of member '{identity}' with no answer: \
@@ -10645,14 +10647,18 @@ impl MobHandle {
     /// ([`super::identity_entry::LegacyMemberObservation`]: its legacy marks,
     /// whether a host's intent row names it, and `listed`, whether the
     /// roster or the host names the identity), and MobMachine decides the
-    /// verdict from that observation. An observation whose incarnation moved
-    /// before MobMachine decided is observed again, a bounded number of
-    /// times. The answer is MobMachine's verdict, with the generation of the
-    /// incarnation it decided on.
+    /// verdict from that observation. The first observation is read from
+    /// `history` when the caller read that history already (a complete
+    /// roster's pass over its unlisted members reads it once for all of
+    /// them), and from a fresh read otherwise. An observation whose
+    /// incarnation moved before MobMachine decided is observed again from a
+    /// fresh read, a bounded number of times. The answer is MobMachine's
+    /// verdict, with the generation of the incarnation it decided on.
     pub(super) async fn adopt_observed_legacy_member(
         &self,
         identity: &AgentIdentity,
         listed: bool,
+        history: Option<&super::MemberBindingHistory>,
     ) -> Result<
         (
             crate::ids::Generation,
@@ -10665,11 +10671,19 @@ impl MobHandle {
             .identity_member
             .as_ref()
             .ok_or(crate::store::MobStoreError::IdentityMemberAtomicPersistenceUnavailable)?;
+        let mut first = history;
         for _ in 0..LEGACY_ADOPTION_OBSERVATIONS {
-            let history = self
-                .member_binding_fold
-                .read(store.as_ref(), self.mob_id())
-                .await?;
+            let read;
+            let history = match first.take() {
+                Some(history) => history,
+                None => {
+                    read = self
+                        .member_binding_fold
+                        .read(store.as_ref(), self.mob_id())
+                        .await?;
+                    &read
+                }
+            };
             let observation = history.last_binding(identity).map(|binding| {
                 (
                     binding.generation(),

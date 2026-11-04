@@ -1167,10 +1167,15 @@ impl super::MobHandle {
         // entry and retires it, or retires one placed or bound to no session
         // at its incarnation without its adoption, or answers a retiring one
         // not adoptable; a member with one mark, or one an intent row names,
-        // is a host's own and left as it is.
+        // is a host's own and left as it is. Each candidate is first observed
+        // in the history the pass read: one read for the whole pass, and a
+        // fresh one only after a stale answer.
         if complete {
             for identity in self.unlisted_legacy_candidates(history.as_ref(), &listed) {
-                let answer = match self.adopt_observed_legacy_member(&identity, false).await {
+                let answer = match self
+                    .adopt_observed_legacy_member(&identity, false, history.as_ref())
+                    .await
+                {
                     Ok((generation, mob_dsl::LegacyIdentityEntryAdoptionKind::RetireUnadopted)) => {
                         match self
                             .retire_unadopted_legacy_member(&identity, generation)

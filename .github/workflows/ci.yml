@@ -750,8 +750,8 @@ jobs:
         with:
           fetch-depth: 2
 
-      # The edge classifier's self-test and the agent gate's dry runs read
-      # cargo metadata.
+      # The edge classifier's self-test and the affected-test selection's
+      # end-to-end cases read cargo metadata.
       - name: Setup Rust
         uses: ./.github/actions/setup-rust-ci
 

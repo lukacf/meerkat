@@ -18,7 +18,10 @@ import {
   TLC_PROCEDURE_PATHS,
   UsageError,
   changedPaths,
+  crateGate,
   dslMachineNames,
+  hostCfg,
+  ignoredTests,
   machineRegistry,
   parseArgs,
   parseTlcLane,
@@ -268,7 +271,9 @@ function fixturePackage(name, { product = "core", deps = [], fixture = false, ki
 // core <- runtime <- integration-tests, meta, auth-core; sqlite alone.
 const FIXTURE_PACKAGES = [
   fixturePackage("meerkat-core"),
-  fixturePackage("meerkat-sqlite", { tests: ["lock_sources", "feature_only", "e2e_fast_lane", "live_smoke"] }),
+  fixturePackage("meerkat-sqlite", {
+    tests: ["lock_sources", "feature_only", "e2e_fast_lane", "live_smoke", "gated_oracle", "gated_live", "lane_only", "wasm_only", "empty_target", "odd_gate"],
+  }),
   fixturePackage("meerkat-runtime", { deps: ["meerkat-core"], tests: ["runtime_contracts"] }),
   fixturePackage("meerkat-auth-core", { deps: ["meerkat-core"] }),
   fixturePackage("meerkat-integration-tests", { deps: ["meerkat-runtime"], fixture: true, tests: ["e2e_fast_lane"] }),
@@ -288,6 +293,19 @@ const FIXTURE_INVENTORY = parseNonRustReaders({
     ],
   },
 });
+// What the fixture's test targets need to run: cargo's required-features, a
+// crate-level gate, their tests' #[ignore] attributes.
+const ALWAYS = { state: "always", features: [], expr: null };
+const FIXTURE_TARGETS = {
+  feature_only: { requiredFeatures: ["slow-tests"] },
+  live_smoke: { requiredFeatures: ["integration-real-tests"] },
+  gated_oracle: { gate: { state: "needs", features: ["test-oracle"], expr: 'feature = "test-oracle"' } },
+  gated_live: { gate: { state: "needs", features: ["integration-real-tests"], expr: 'feature = "integration-real-tests"' } },
+  lane_only: { ignored: { tests: 2, ignored: 2, reasons: ["lane:e2e-system"] } },
+  wasm_only: { gate: { state: "never", features: [], expr: 'target_arch = "wasm32"' } },
+  empty_target: { ignored: { tests: 0, ignored: 0, reasons: [] } },
+  odd_gate: { gate: { state: "unreadable", features: [], expr: 'any(feature = "a", feature = "b")' } },
+};
 function fixtureContext({ lane = parseTlcLane(FIXTURE_LANE) } = {}) {
   const packages = new Map(FIXTURE_PACKAGES.map((pkg) => [pkg.name, pkg]));
   const dirOf = (name) => (packages.get(name).product === "meta" ? `meta/crates/${name}` : `crates/${name}`);
@@ -295,7 +313,7 @@ function fixtureContext({ lane = parseTlcLane(FIXTURE_LANE) } = {}) {
     products: PRODUCTS,
     inventory: FIXTURE_INVENTORY,
     packages,
-    readText: (path) => (path === `${DSL_DIR}alpha.rs` ? "machine AlphaMachine {\n}\n" : null),
+    readText: (path) => (path === `${DSL_DIR}alpha.rs` ? "machine AlphaMachine {\n}\n" : path === "Makefile" ? "e2e-system:\n\t@true\n" : null),
     tlc: {
       lane,
       registry: { machines: new Set(["alpha", "beta"]), nameToSlug: new Map([["AlphaMachine", "alpha"], ["BetaMachine", "beta"]]), compositions: new Map([["seam", new Set(["AlphaMachine"])]]) },
@@ -304,7 +322,7 @@ function fixtureContext({ lane = parseTlcLane(FIXTURE_LANE) } = {}) {
     testTargetsFor: (name, path) => {
       const match = new RegExp(`^${dirOf(name)}/tests/([a-z0-9_]+)\\.rs$`).exec(path);
       if (!match || !packages.get(name).targets.some((target) => target.name === match[1] && target.kind.includes("test"))) return null;
-      return [{ name: match[1], requiredFeatures: match[1] === "feature_only" ? ["slow-tests"] : match[1] === "live_smoke" ? ["integration-real-tests"] : [] }];
+      return [{ name: match[1], requiredFeatures: [], gate: ALWAYS, ignored: { tests: 1, ignored: 0, reasons: [] }, ...FIXTURE_TARGETS[match[1]] }];
     },
     profileSelects: (profile, binary) => profile === TEST_PROFILE && binary.binary !== "e2e_fast_lane",
   };
@@ -421,6 +439,59 @@ check("narrowed targets take their required features, and leave profile-excluded
   assert.ok(!tests.some((line) => line.includes("--test lock_sources --profile ci-pr")), "the narrowed run covers the whole-checkout reader of the same target");
 });
 
+check("crate-level gates are read for the host", () => {
+  const linux = hostCfg("linux", "x64");
+  const windows = hostCfg("win32", "x64");
+  assert.deepEqual(crateGate("use std::fs;\n", linux), { state: "always", features: [], expr: null });
+  assert.deepEqual(crateGate('//! Docs first.\n/* and a block */\n#![cfg(feature = "test-oracle")]\n#![allow(clippy::unwrap_used)]\nuse x;\n', linux), {
+    state: "needs",
+    features: ["test-oracle"],
+    expr: 'feature = "test-oracle"',
+  });
+  assert.deepEqual(crateGate('#![cfg(all(\n    not(target_arch = "wasm32"),\n    feature = "oauth",\n))]\n', linux).features, ["oauth"]);
+  assert.deepEqual(crateGate('#![cfg(all(unix, feature = "b", feature = "a"))]\n#![cfg(feature = "c")]\n', linux).features, ["a", "b", "c"]);
+  assert.equal(crateGate("#![cfg(unix)]\n", linux).state, "always");
+  assert.equal(crateGate("#![cfg(unix)]\n", windows).state, "never");
+  assert.equal(crateGate('#![cfg(any(target_os = "linux", target_os = "macos"))]\n', linux).state, "always");
+  assert.equal(crateGate('#![cfg(target_arch = "wasm32")]\n', linux).state, "never");
+  assert.equal(crateGate('#![cfg(all(target_arch = "wasm32", feature = "x"))]\n', linux).state, "never", "a host the gate excludes wins over its features");
+  for (const gate of ['#![cfg(any(feature = "a", feature = "b"))]', '#![cfg(not(feature = "skills"))]', "#![cfg(tokio_unstable)]", '#![cfg(feature = "a"']) {
+    assert.equal(crateGate(`${gate}\nuse x;\n`, linux).state, "unreadable", gate);
+  }
+  // Only the attributes the file opens with gate the crate.
+  assert.equal(crateGate('#![cfg_attr(test, allow(dead_code))]\nuse x;\n#[cfg(feature = "late")]\nmod late;\n', linux).state, "always");
+});
+
+check("tests and their #[ignore] attributes are counted", () => {
+  const laneOnly = '#[test]\n#[ignore = "lane:e2e-system"]\nfn a() {}\n\n#[tokio::test(flavor = "multi_thread")]\n#[ignore = "lane:e2e-system"]\nasync fn b() {}\n';
+  assert.deepEqual(ignoredTests([laneOnly]), { tests: 2, ignored: 2, reasons: ["lane:e2e-system"] });
+  assert.deepEqual(ignoredTests(["#[test]\nfn a() {}\n", "#[test]\n#[ignore]\nfn b() {}\n// #[test]\n#[cfg(test)]\nmod t {}\n"]), { tests: 2, ignored: 1, reasons: [""] });
+});
+
+check("crate-level gates and ignored tests decide what a narrowed target runs", () => {
+  const push = pushPlan({ mode: "packages", rust_changed: true, packages: ["meerkat-sqlite"], closure: ["meerkat-sqlite"], shards: [] });
+  const paths = ["gated_oracle", "gated_live", "lane_only", "wasm_only", "empty_target", "feature_only"].map((target) => `crates/meerkat-sqlite/tests/${target}.rs`);
+  const selection = selectCommands({ paths, push, pr: NO_PR, ctx: fixtureContext() });
+  const tests = lines(selection, "tests");
+  assert.ok(tests.includes(nextest(`-p meerkat-sqlite --features slow-tests,test-oracle --test feature_only --test gated_oracle --profile ${TEST_PROFILE} --no-tests=fail`)), tests.join("\n"));
+  for (const named of ["gated_live", "lane_only", "wasm_only", "empty_target"]) {
+    assert.ok(!tests.some((line) => line.includes(`--test ${named}`)), `${named} is named, not run`);
+  }
+  for (const note of [
+    "meerkat-sqlite --test gated_live needs integration-real-tests (live provider credentials): not run",
+    "meerkat-sqlite --test lane_only: all 2 tests are ignored (lane e2e-system), run by make e2e-system: not run",
+    'meerkat-sqlite --test wasm_only: cfg(target_arch = "wasm32") compiles it out on this host: not run',
+    "meerkat-sqlite --test empty_target declares no test: nothing to run",
+  ]) {
+    assert.ok(selection.notes.includes(note), `${note}\n${selection.notes.join("\n")}`);
+  }
+  // A gate this script cannot read leaves its package whole.
+  const odd = selectCommands({ paths: ["crates/meerkat-sqlite/tests/odd_gate.rs"], push, pr: NO_PR, ctx: fixtureContext() });
+  assert.deepEqual(odd.summary.narrowed, []);
+  assert.ok(lines(odd, "tests").includes(nextest(`-p meerkat-sqlite --profile ${TEST_PROFILE} --no-tests=pass`)));
+  assert.ok(odd.notes.some((note) => note.startsWith("meerkat-sqlite: --test odd_gate opens with cfg(any(") && note.endsWith("the package runs whole")), odd.notes.join("\n"));
+});
+
 check("a change outside the tests directory is not narrowed", () => {
   const push = pushPlan({ mode: "packages", rust_changed: true, packages: ["meerkat-sqlite"], closure: ["meerkat-sqlite"], shards: [] });
   for (const paths of [["crates/meerkat-sqlite/tests/lock_sources.rs", "crates/meerkat-sqlite/src/lib.rs"], ["crates/meerkat-sqlite/tests/fixture.json"]]) {
@@ -510,6 +581,10 @@ check("--run", () => {
   assert.equal(runCommands(commands, { repo, spawn: spawn({}), digest: () => `tree ${digests++}`, log: quiet }), 3);
   assert.deepEqual(ran.splice(0), ["regen"], "a regeneration that changed the tree stops the run");
   assert.equal(runCommands([{ section: "tests", line: "exit 5" }], { repo, digest: () => "unused", log: quiet }), 5, "bash runs each line");
+  const said = [];
+  assert.equal(runCommands([], { repo, spawn: spawn({}), digest: () => "unused", log: (text) => said.push(text) }), 0);
+  assert.deepEqual(ran.splice(0), []);
+  assert.deepEqual(said, ["affected-tests: nothing to run\n"], "nothing to run is not reported as passed commands");
 });
 
 // --------------------------------------------------------------------------
@@ -533,9 +608,13 @@ check("end to end: a test target change is narrowed", () => {
   let pick = null;
   for (const pkg of packages) {
     const dir = packageDir(pkg);
-    const target = pkg.targets.find(
-      (candidate) => candidate.kind.includes("test") && candidate.src_path.endsWith(`${sep}tests${sep}${candidate.name}.rs`) && !candidate["required-features"]?.length && !candidate.name.startsWith("e2e_"),
-    );
+    const target = pkg.targets.find((candidate) => {
+      if (!candidate.kind.includes("test") || !candidate.src_path.endsWith(`${sep}tests${sep}${candidate.name}.rs`)) return false;
+      if (candidate["required-features"]?.length || candidate.name.startsWith("e2e_")) return false;
+      const text = readFileSync(candidate.src_path, "utf8");
+      const tests = ignoredTests([text]);
+      return crateGate(text).state === "always" && tests.tests > tests.ignored;
+    });
     if (target && !dir.startsWith("meta/") && !dir.startsWith("connect/")) {
       pick = { pkg: pkg.name, target: target.name, path: `${dir}/tests/${target.name}.rs` };
       break;
@@ -547,6 +626,23 @@ check("end to end: a test target change is narrowed", () => {
   assert.ok(out.stdout.some((line) => line.includes(`nextest run -p ${pick.pkg} --test ${pick.target} --profile ${TEST_PROFILE}`)), `${pick.path} runs its target`);
   assert.ok(!out.stdout.some((line) => line.includes(" check -p ")), "no reverse-dependency closure");
   assert.ok(out.stderr.includes("only test targets changed"), out.stderr);
+});
+
+check("end to end: a gated, a live-gated and a lane-only test target", () => {
+  const out = cli(
+    "--",
+    "crates/meerkat-machine-kernels/tests/kernel_typed_round_trip.rs",
+    "crates/meerkat-cli/tests/system_cli_realm_mcp.rs",
+    "crates/meerkat-rpc/tests/live_smoke_rpc.rs",
+  );
+  assert.equal(out.status, 0, out.stderr);
+  assert.ok(
+    out.stdout.some((line) => line.includes(`nextest run -p meerkat-machine-kernels --features test-oracle --test kernel_typed_round_trip --profile ${TEST_PROFILE}`)),
+    `the crate-level test-oracle gate is passed as a feature:\n${out.stdout.join("\n")}`,
+  );
+  assert.ok(!out.stdout.some((line) => /system_cli_realm_mcp|live_smoke_rpc/.test(line)), "the live-gated and lane-only targets are named, not run");
+  assert.ok(out.stderr.includes("rkat --test system_cli_realm_mcp needs integration-real-tests (live provider credentials): not run"), out.stderr);
+  assert.match(out.stderr, /meerkat-rpc --test live_smoke_rpc: all \d+ tests are ignored \(lanes? [^)]*e2e-live[^)]*\)/);
 });
 
 check("end to end: a machine DSL change regenerates and runs the machine's TLC", () => {

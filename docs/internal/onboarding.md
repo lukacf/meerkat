@@ -180,10 +180,14 @@ plan selects:
 - the Python, TypeScript and Web SDK suites when wire schemas change.
 
 A change that only touches a crate's `tests/*.rs` targets runs just those
-targets. The summary names what CI runs beyond the list (governance gates,
-rustdoc, feature-combination checks and so on), so a green local run is not
-the whole pass. In the pull request, report the commands you ran with their
-exit codes and test counts, and name any listed command you did not run.
+targets, with the features they need (cargo's `required-features`, or a
+crate-level `#![cfg(feature = "...")]`). A target that needs live provider
+credentials, or whose tests are all `#[ignore]`d for a lane, is named on stderr
+with that lane instead of run. The summary names what CI runs beyond the list
+(governance gates, rustdoc, feature-combination checks and so on), so a green
+local run is not the whole pass. In the pull request, report the commands you
+ran with their exit codes and test counts, and name any listed command you did
+not run.
 
 Work in your own worktree: `./scripts/repo-cargo` then gives your runs their
 own target directory. Set `CARGO_BUILD_JOBS` for the host's current load.

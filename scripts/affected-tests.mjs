@@ -62,6 +62,14 @@
 // include it), nor any package of a whole-workspace, lock-scoped or
 // product-wide plan. A narrowed target behind a live-provider feature
 // (LIVE_ONLY_FEATURES) is named, not run, as the planner treats such a reader.
+// A target's crate-level gate (the `#![cfg(...)]` its root file opens with)
+// counts like cargo's required-features: its features are passed, a live one
+// names the target, a gate this host fails (wasm32 only) names it, and a gate
+// this script cannot read (a feature under any() or not(), a cfg it does not
+// know, a feature the package does not declare) leaves the package un-narrowed.
+// A target whose every test is #[ignore]d runs nothing by default: it is
+// named with its lanes (`#[ignore = "lane:NAME"]`) and reasons, as is a
+// target that declares no test.
 //
 // Generated files and TLC. The generators run first, and TLC follows the
 // specs: the machines and compositions whose specs/ files changed, the
@@ -512,9 +520,167 @@ function reverseClosure(seeds, ctx) {
   return [...seen].sort();
 }
 
+// The cfg predicates of this host, for crate-level gates.
+export function hostCfg(platform, arch) {
+  const os = platform === "darwin" ? "macos" : platform === "win32" ? "windows" : platform;
+  return { os, family: os === "windows" ? "windows" : "unix", arch: arch === "x64" ? "x86_64" : arch === "arm64" ? "aarch64" : arch };
+}
+const HOST = hostCfg(process.platform, process.arch);
+
+// The index of the bracket that closes the one at `open`, skipping string
+// literals; -1 when it is not closed.
+function closingBracket(text, open) {
+  let depth = 0;
+  for (let index = open; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === '"') {
+      for (index += 1; index < text.length && text[index] !== '"'; index += 1) if (text[index] === "\\") index += 1;
+    } else if (char === "[") depth += 1;
+    else if (char === "]" && --depth === 0) return index;
+  }
+  return -1;
+}
+
+// A cfg predicate as a tree: { name }, { name, value } or { name, args }.
+function parseCfg(text) {
+  const tokens = text.match(/[A-Za-z_][A-Za-z0-9_]*|"(?:[^"\\]|\\.)*"|[(),=]|\S/g) ?? [];
+  let at = 0;
+  const take = (expected) => {
+    if (expected !== undefined && tokens[at] !== expected) throw new Error(`expected ${expected}`);
+    return tokens[at++];
+  };
+  const predicate = () => {
+    const name = take();
+    if (!/^[A-Za-z_]/.test(name ?? "")) throw new Error("expected a cfg name");
+    if (tokens[at] === "=") {
+      take("=");
+      const value = take();
+      if (!value?.startsWith('"')) throw new Error("expected a string");
+      return { name, value: JSON.parse(value) };
+    }
+    if (tokens[at] !== "(") return { name };
+    take("(");
+    const args = [];
+    while (tokens[at] !== ")") {
+      args.push(predicate());
+      if (tokens[at] === ",") take(",");
+      else if (tokens[at] !== ")") throw new Error("expected , or )");
+    }
+    take(")");
+    return { name, args };
+  };
+  const tree = predicate();
+  if (at !== tokens.length) throw new Error("trailing tokens");
+  return tree;
+}
+
+// A cfg predicate on this host: true, false, the features it needs, or null
+// when this script cannot read it (a feature under any() or not(), a cfg it
+// does not know).
+function evalCfg(node, host) {
+  if (node.args) {
+    const values = node.args.map((arg) => evalCfg(arg, host));
+    if (node.name === "all") {
+      if (values.includes(false)) return false;
+      if (values.includes(null)) return null;
+      const features = [...new Set(values.flatMap((value) => (value === true ? [] : value)))];
+      return features.length > 0 ? features : true;
+    }
+    if (node.name === "any") {
+      if (values.includes(true)) return true;
+      return values.every((value) => value === false) ? false : null;
+    }
+    if (node.name === "not" && values.length === 1) return typeof values[0] === "boolean" ? !values[0] : null;
+    return null;
+  }
+  if ("value" in node) {
+    if (node.name === "feature") return [node.value];
+    if (node.name === "target_os") return host.os === node.value;
+    if (node.name === "target_family") return host.family === node.value;
+    if (node.name === "target_arch") return host.arch === node.value;
+    return null;
+  }
+  if (node.name === "test" || node.name === "debug_assertions") return true;
+  if (node.name === "unix" || node.name === "windows") return host.family === node.name;
+  return null;
+}
+
+// The crate-level gate of a test target: the `#![cfg(...)]` attributes its
+// root file opens with, read for this host. { state: "always" } when they
+// hold, "never" when they cannot (a wasm32-only target here), "needs" with
+// the features they name (features the target needs, as cargo's
+// required-features), "unreadable" for anything else.
+export function crateGate(text, host = HOST) {
+  const exprs = [];
+  let rest = text.replace(/^\uFEFF/, "");
+  for (;;) {
+    rest = rest.replace(/^\s+/, "");
+    if (rest.startsWith("//")) {
+      const end = rest.indexOf("\n");
+      rest = end < 0 ? "" : rest.slice(end + 1);
+    } else if (rest.startsWith("/*")) {
+      const end = rest.indexOf("*/");
+      if (end < 0) return { state: "unreadable", features: [], expr: "an unclosed block comment" };
+      rest = rest.slice(end + 2);
+    } else if (rest.startsWith("#![")) {
+      const end = closingBracket(rest, 2);
+      if (end < 0) return { state: "unreadable", features: [], expr: rest.slice(0, 60) };
+      const body = rest.slice(3, end).trim();
+      if (/^cfg\s*\(/.test(body)) exprs.push(body.slice(body.indexOf("(") + 1, body.lastIndexOf(")")).trim());
+      rest = rest.slice(end + 1);
+    } else break;
+  }
+  if (exprs.length === 0) return { state: "always", features: [], expr: null };
+  const expr = exprs.join(", ");
+  let value;
+  try {
+    value = evalCfg(parseCfg(`all(${expr})`), host);
+  } catch {
+    value = null;
+  }
+  if (value === true) return { state: "always", features: [], expr };
+  if (value === false) return { state: "never", features: [], expr };
+  if (value === null) return { state: "unreadable", features: [], expr };
+  return { state: "needs", features: [...value].sort(), expr };
+}
+
+// The tests a target's sources declare and the #[ignore] attributes among
+// them, with their reasons: a target whose every test is ignored runs none
+// by default.
+const TEST_ATTRIBUTE = /^[ \t]*#\[(?:[A-Za-z_][A-Za-z0-9_]*::)*(?:test|rstest|test_case)\b/gm;
+const IGNORE_ATTRIBUTE = /^[ \t]*#\[ignore(?:\s*=\s*"((?:[^"\\]|\\.)*)")?\s*\]/gm;
+export function ignoredTests(texts) {
+  let tests = 0;
+  const reasons = [];
+  for (const text of texts) {
+    tests += [...text.matchAll(TEST_ATTRIBUTE)].length;
+    for (const match of text.matchAll(IGNORE_ATTRIBUTE)) reasons.push(match[1] ?? "");
+  }
+  return { tests, ignored: reasons.length, reasons: [...new Set(reasons)].sort() };
+}
+
+// The features a narrowed target needs: cargo's required-features and its
+// crate-level gate's.
+function targetFeatures(target) {
+  return [...new Set([...target.requiredFeatures, ...(target.gate?.state === "needs" ? target.gate.features : [])])].sort();
+}
+
+// Why a target whose every test is ignored runs nothing here: its lanes
+// (`#[ignore = "lane:NAME"]`, with the Make target that runs each) and its
+// other reasons.
+function ignoredNote(name, target, makeTargets) {
+  const { tests, reasons } = target.ignored;
+  const lanes = [...new Set(reasons.map((reason) => /^lane:([A-Za-z0-9_-]+)/.exec(reason)?.[1]).filter(Boolean))];
+  const others = reasons.filter((reason) => !reason.startsWith("lane:")).map((reason) => reason || "no reason given");
+  const why = [...(lanes.length > 0 ? [`lane${lanes.length > 1 ? "s" : ""} ${lanes.join(", ")}`] : []), ...others].join("; ");
+  const make = lanes.filter((lane) => makeTargets.has(lane)).map((lane) => `make ${lane}`);
+  return `${name} --test ${target.name}: all ${tests} tests are ignored (${why})${make.length > 0 ? `, run by ${make.join(", ")}` : ""}: not run`;
+}
+
 // The changed packages that run only their changed test targets (see the
-// header), with those targets.
-export function narrowedPackages(paths, push, ctx) {
+// header), with those targets. A target whose crate-level gate this script
+// cannot read leaves its package whole.
+export function narrowedPackages(paths, push, ctx, notes = []) {
   const narrowed = new Map();
   if (push.mode !== "packages") return narrowed;
   const lockMembers = new Set(push.lock_scope?.members ?? []);
@@ -531,6 +697,13 @@ export function narrowedPackages(paths, push, ctx) {
     for (const path of mine) {
       const hits = ctx.testTargetsFor(name, path);
       if (!hits || hits.length === 0) {
+        testOnly = false;
+        break;
+      }
+      const unread = hits.find((target) => target.gate?.state === "unreadable");
+      if (unread) {
+        const why = unread.gate.reason ? ` (${unread.gate.reason})` : "";
+        notes.push(`${name}: --test ${unread.name} opens with cfg(${unread.gate.expr}), which this script cannot read${why}; the package runs whole`);
         testOnly = false;
         break;
       }
@@ -583,7 +756,7 @@ export function selectCommands({ paths, push, pr, ctx }) {
   // The packages to test: the changed ones less the narrowed, and their
   // reverse-dependency closure; the planner's own closure when nothing
   // narrowed (checked against this one).
-  const narrowed = narrowedPackages(paths, push, ctx);
+  const narrowed = narrowedPackages(paths, push, ctx, notes);
   const seeds = push.packages.filter((name) => !narrowed.has(name));
   const closure = push.mode === "workspace" ? [...push.closure].sort() : reverseClosure(seeds, ctx);
   if (narrowed.size === 0 && closure.join("\n") !== [...push.closure].sort().join("\n")) {
@@ -614,16 +787,31 @@ export function selectCommands({ paths, push, pr, ctx }) {
     }),
   );
   const specialBinaries = new Set(specialRows.flatMap((row) => row.binaries));
+  const makeTargets = new Set([...(ctx.readText("Makefile") ?? "").matchAll(/^([A-Za-z0-9_-]+):/gm)].map((match) => match[1]));
   const narrowedRun = new Map();
   for (const [name, targets] of narrowed) {
     if (inClosure.has(name)) continue;
     const kept = targets.filter((target) => {
       if (specialBinaries.has(`${name}::${target.name}`)) return false;
-      // A target behind a live-provider feature needs credentials and runs in
-      // no CI lane, as the planner treats such a reader.
-      const live = target.requiredFeatures.filter((feature) => LIVE_ONLY_FEATURES.includes(feature));
+      if (target.gate?.state === "never") {
+        notes.push(`${name} --test ${target.name}: cfg(${target.gate.expr}) compiles it out on this host: not run`);
+        return false;
+      }
+      // A target behind a live-provider feature (required, or its crate-level
+      // gate's) needs credentials and runs in no CI lane, as the planner
+      // treats such a reader.
+      const live = targetFeatures(target).filter((feature) => LIVE_ONLY_FEATURES.includes(feature));
       if (live.length > 0) {
         notes.push(`${name} --test ${target.name} needs ${live.join(", ")} (live provider credentials): not run`);
+        return false;
+      }
+      // Every test ignored: nextest runs none of them by default.
+      if (target.ignored && target.ignored.tests === 0) {
+        notes.push(`${name} --test ${target.name} declares no test: nothing to run`);
+        return false;
+      }
+      if (target.ignored && target.ignored.ignored >= target.ignored.tests) {
+        notes.push(ignoredNote(name, target, makeTargets));
         return false;
       }
       if (ctx.profileSelects(TEST_PROFILE, { kind: "test", binary: target.name, package: name })) return true;
@@ -632,7 +820,7 @@ export function selectCommands({ paths, push, pr, ctx }) {
     });
     if (kept.length === 0) continue;
     narrowedRun.set(name, new Set(kept.map((target) => target.name)));
-    const features = [...new Set(kept.flatMap((target) => target.requiredFeatures))].sort();
+    const features = [...new Set(kept.flatMap(targetFeatures))].sort();
     add(
       "tests",
       nextestCommand(ctx, {
@@ -889,14 +1077,22 @@ export function buildContext() {
     ),
     packagesForPath: (path) => packagesForFile(path, dirs).map((pkg) => pkg.name),
     // The test targets whose sources hold `path` when it is a Rust file under
-    // the package's tests/ that no other target compiles; null otherwise.
+    // the package's tests/ that no other target compiles, each with its
+    // crate-level gate (a feature it names must be one of the package's) and
+    // its tests' #[ignore] attributes; null otherwise.
     testTargetsFor: (name, path) => {
       const pkg = byName.get(name);
       const dir = packageDir(pkg);
       if (!path.endsWith(".rs") || !path.startsWith(dir === "." ? "tests/" : `${dir}/tests/`) || !existsSync(resolve(root, path))) return null;
       const holders = pkg.targets.filter((target) => sourcesOf(pkg, target).has(path));
       if (holders.length === 0 || holders.some((target) => !target.kind.includes("test"))) return null;
-      return holders.map((target) => ({ name: target.name, requiredFeatures: target["required-features"] ?? [] }));
+      return holders.map((target) => {
+        let gate = crateGate(readFileSync(target.src_path, "utf8"));
+        const unknown = gate.features.filter((feature) => !Object.hasOwn(pkg.features ?? {}, feature));
+        if (unknown.length > 0) gate = { ...gate, state: "unreadable", reason: `not a feature of ${name}: ${unknown.join(", ")}` };
+        const texts = [...sourcesOf(pkg, target)].map((source) => readText(source) ?? "");
+        return { name: target.name, requiredFeatures: target["required-features"] ?? [], gate, ignored: ignoredTests(texts) };
+      });
     },
     profileSelects: (profile, binary) => {
       if (!profileFilters.has(profile)) profileFilters.set(profile, parseFilter(profileFilter(nextestText, profile)));
@@ -925,6 +1121,10 @@ export function worktreeDigest(repo) {
 // (its status) or, once the regeneration commands ran, when they changed the
 // working tree (3). `spawn` and `digest` are injectable for the self-test.
 export function runCommands(commands, { repo, spawn = spawnSync, digest = worktreeDigest, log = (text) => process.stderr.write(text) }) {
+  if (commands.length === 0) {
+    log("affected-tests: nothing to run\n");
+    return 0;
+  }
   const regenerating = commands.filter((command) => command.section === "regenerate").length;
   const before = regenerating > 0 ? digest(repo) : null;
   for (const [index, command] of commands.entries()) {

@@ -423,6 +423,10 @@ function automaticManualOnlyHooks(config) {
 {
   const config = readFileSync(resolve(root, ".pre-commit-config.yaml"), "utf8");
   assert.deepEqual(automaticManualOnlyHooks(config), [], "cargo-test and the machine codegen hooks stay manual-only");
+  // Nor does any hook run Clippy: the required CI Clippy lanes lint every
+  // package before merge.
+  assert.ok(!/pre-push-clippy|id: cargo-clippy/.test(config), "no hook runs the Clippy body");
+  assert.ok(!existsSync(resolve(root, "scripts/pre-push-clippy.sh")), "scripts/pre-push-clippy.sh stays deleted");
   // Each made automatic, on a push stage or on the default stages, fails.
   const manual = "        stages: [manual]\n";
   for (const id of MANUAL_ONLY_HOOKS) {

@@ -135,7 +135,9 @@ and the published packages build without that configuration. The canary sits
 in the crate's lib test: a run narrowed to an integration target
 (`--test TARGET`) builds no lib test, so nothing stops it, and without the
 flags it compiles the tests they gate out without a word. Pass the same
-flags there:
+flags there, plus any feature the target's own `#![cfg(feature = ...)]`
+names (meerkat-core's `wholeblob_compaction_media_guard` needs
+`test-support`; a second `--features` adds it):
 `./scripts/repo-cargo nextest run $(node scripts/core-workspace-args.mjs --tests -p NAME) --test TARGET`.
 
 **rust-analyzer: set `rust-analyzer.cargo.features` to `"all"`.** Without
@@ -145,6 +147,9 @@ diagnostics there, and its Run test lens builds without the flags and stops
 on the canary. A package-qualified list (`meerkat-mob/test-support`, ...)
 does not work: Cargo refuses a feature of a package the command does not
 select, and rust-analyzer's runnables select one package (`--package NAME`).
+`"all"` also turns on every other feature (the live, realtime and GPT Live
+ones, and the products'), so the editor's check compiles more than a
+default build does; it is still the one global value that works.
 
 **The workspace also holds Meerkat Meta (`meta/`) and Meerkat Connect
 (`connect/`).** Cargo unifies features across the packages of one invocation,

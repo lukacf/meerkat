@@ -104,7 +104,9 @@ the crate's test features, which
 Pass the same flags to a run narrowed to one integration target
 (`--test <target>`): it builds no lib test, so the crate's test-feature check
 does not stop it, and without them it compiles the gated tests out without a
-word.
+word. Add any feature the target's own `#![cfg(feature = ...)]` names
+(meerkat-core's `wholeblob_compaction_media_guard` needs `test-support`; a
+second `--features` adds it).
 
 For rust-analyzer, set `rust-analyzer.cargo.features` to `"all"` (in VS Code,
 the `rust-analyzer.cargo.features` setting). Without features it treats the
@@ -112,6 +114,9 @@ code the test features gate, such as the `workspace-tests` test modules, as
 inactive, and its Run test lens stops on the test-feature check. A
 package-qualified list does not work: Cargo refuses a feature of a package the
 command does not select, and rust-analyzer's runnables select one package.
+`"all"` also turns on every other feature (the live, realtime and GPT Live
+ones, and the products'), so the editor's check compiles more than a default
+build does; it is still the one global value that works.
 
 Avoid raw `cargo` and raw `bb` for normal repository work. The wrapper keeps
 multi-worktree and multi-agent build outputs isolated. In one checkout, give

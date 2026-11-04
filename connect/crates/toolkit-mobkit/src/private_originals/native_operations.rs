@@ -159,6 +159,25 @@ impl PrivateOriginals {
         })
     }
 
+    /// [`Self::native_selected_member`] for a saved selection's recipient. A
+    /// recipient with no process registration at all (Dormant after a
+    /// restart) is read from its canonical Active admission, so the check of
+    /// a saved selection does not depend on the recipient's residency and
+    /// wakes nothing. The caller and every other consumer keep the live read.
+    fn native_selected_recipient(
+        &self,
+        route: &Id,
+    ) -> Result<SelectedMember, PrivateOriginalError> {
+        let selected = self.recipient_source_route(route)?;
+        let admission = self.recipient_setup_admission(&selected).map_err(error)?;
+        Ok(SelectedMember {
+            route: selected.0,
+            member: selected.1,
+            context: selected.2,
+            admission,
+        })
+    }
+
     fn check_native_selection(
         &self,
         selected: &NativeOperationsSelection,
@@ -168,7 +187,7 @@ impl PrivateOriginals {
         }
         for row in &selected.targets {
             if let Some(recipient) = &row.recipient
-                && self.native_selected_member(&recipient.route.id)? != *recipient
+                && self.native_selected_recipient(&recipient.route.id)? != *recipient
             {
                 return Err(PrivateOriginalError::Denied);
             }

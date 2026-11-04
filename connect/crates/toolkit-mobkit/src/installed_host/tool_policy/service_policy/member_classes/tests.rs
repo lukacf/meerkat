@@ -1955,6 +1955,153 @@ async fn route_projection_requires_verified_generation_and_live_registration() {
     }
 }
 
+/// A saved selection's recipient check reads a recipient with no process
+/// registration at all (Dormant after a restart) from its canonical Active
+/// admission, with the exact generation and session document its phase
+/// names. A present registration is never treated as absent: an ended,
+/// replaced or unverified one stays refused as on the live route. A drifted
+/// generation and a non-Active admission are refused too. The read wakes
+/// nothing and never repairs lifecycle.
+#[tokio::test]
+async fn recipient_route_reads_only_an_absent_registration_from_its_active_admission() {
+    use meerkat_authorization_contracts::constraints::ResourceDomain;
+    use meerkat_toolkit::host_lifetime::policy::{
+        CompiledNativeSourceOrigin, CompiledNativeSourceRoute,
+    };
+    for case in [
+        "absent",
+        "ended",
+        "replaced",
+        "unverified",
+        "drift",
+        "prepared",
+    ] {
+        let (_directory, policy, owner, rule) = fixture().await;
+        let admitted = policy
+            .admit_member_class(request(&rule.class))
+            .await
+            .unwrap();
+        pending(&owner, false).await;
+        owner.recover().await.unwrap();
+        let member = admitted.instance().member.member.clone();
+        let realm = owner.member_realm().unwrap();
+        let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+        let session = meerkat_core::SessionId::new();
+        let witness = register(&machine, &session).await;
+        let selected = owner
+            .select_registration(&realm, &member, &witness)
+            .await
+            .unwrap()
+            .unwrap();
+        {
+            let _exclusion = owner.exclusion.lock().await;
+            let (stored, mut slot) = owner.read().await.unwrap();
+            slot.admissions[0].phase = MemberClassAdmissionPhase::Prepared {
+                context: selected.context.clone(),
+                context_generation: selected.context_generation,
+            };
+            owner
+                .change(&stored, &slot, "fixture-prepared-checkpoint")
+                .await
+                .unwrap();
+            owner.activate_current(&slot).unwrap();
+        }
+        let route = CompiledNativeSourceRoute {
+            id: Id::new("project-console").unwrap(),
+            origin: CompiledNativeSourceOrigin::LocalConsole {
+                member: member.clone(),
+                requester: principal(),
+                ingress_actor: principal(),
+            },
+            application_parent: None,
+            controller_parent: None,
+            logical_executor: principal(),
+            represented_subject: None,
+            source_authority: principal(),
+            authentication_domain: ResourceDomain {
+                authority: principal(),
+                namespace: "login".into(),
+            },
+            event_domain: ResourceDomain {
+                authority: principal(),
+                namespace: "console".into(),
+            },
+        };
+        owner
+            .commit_member_route(
+                admitted.admission_id(),
+                &selected.context,
+                route.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+        if case == "prepared" {
+            // Not Active: neither route projects it, with or without a
+            // process registration.
+            owner.member_registrations.lock().unwrap().clear();
+            assert!(owner.recipient_member_route(&route.id).unwrap().is_none());
+            machine.unregister_session(&session).await.unwrap();
+            continue;
+        }
+        owner
+            .activate_member(admitted.admission_id(), &witness)
+            .await
+            .unwrap();
+        let live = owner.member_route(&route.id).unwrap().unwrap();
+        assert!(
+            owner.recipient_member_route(&route.id).unwrap() == Some(live.clone()),
+            "a live recipient keeps the live route"
+        );
+        match case {
+            // A restarted owner holds no process registration for the member.
+            "absent" => owner.member_registrations.lock().unwrap().clear(),
+            "ended" => machine.unregister_session(&session).await.unwrap(),
+            "replaced" => {
+                machine.unregister_session(&session).await.unwrap();
+                let next = register(&machine, &session).await;
+                owner
+                    .select_registration(&realm, &member, &next)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            "unverified" | "drift" => {
+                // The same native witness selected again advances the
+                // destination generation and is not yet verified.
+                let next = owner
+                    .select_registration(&realm, &member, &witness)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(next.context_generation, selected.context_generation + 1);
+                if case == "drift" {
+                    // Absent registration, but the canonical destination has
+                    // drifted past the Active phase's generation.
+                    owner.member_registrations.lock().unwrap().clear();
+                }
+            }
+            _ => unreachable!(),
+        }
+        assert!(owner.member_route(&route.id).is_err(), "{case}");
+        let before = owner.read().await.unwrap().0;
+        if case == "absent" {
+            assert!(
+                owner.recipient_member_route(&route.id).unwrap() == Some(live),
+                "an absent registration is read from the exact Active admission"
+            );
+        } else {
+            assert!(owner.recipient_member_route(&route.id).is_err(), "{case}");
+        }
+        assert_eq!(
+            owner.read().await.unwrap().0,
+            before,
+            "the recipient read never repairs lifecycle"
+        );
+        let _ = machine.unregister_session(&session).await;
+    }
+}
+
 #[tokio::test]
 async fn atomic_member_observation_separates_retained_record_from_authorization() {
     let (_directory, policy, owner, rule) = fixture().await;

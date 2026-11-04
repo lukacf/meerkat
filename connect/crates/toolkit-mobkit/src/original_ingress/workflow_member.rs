@@ -168,10 +168,16 @@ impl ToolkitOriginalOwner {
                 return Ok(());
             }
         }
-        let _mutation = self
-            .mutation
-            .try_lock()
-            .map_err(|_| OriginalWriterError::Unavailable)?;
+        // The capture runs inside the member's registration hook, a
+        // synchronous callback that must not wait. It does not take the
+        // source writer: with on-demand member restore, a registration (the
+        // member's first wake) can arrive while a source operation or the
+        // custody worker holds that writer, and refusing it would refuse the
+        // member's whole wake. The publication owner change and the
+        // workflow_members lock below order it with every other writer of a
+        // workflow member (selection, finish, restored completion), which
+        // take both. A source operation that observed the publication before
+        // this capture sees the change at its own currentness check.
         let _publication = self
             .publication
             .begin_owner_change()

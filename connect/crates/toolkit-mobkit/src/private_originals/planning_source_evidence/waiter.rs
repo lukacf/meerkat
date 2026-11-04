@@ -177,6 +177,11 @@ impl PrivateOriginals {
         let record = self.decode_record(&row, reference)?;
         #[cfg(test)]
         Self::synthetic_admission_diagnostic("workflow.waiter_restore.record", ());
+        #[cfg(test)]
+        if let Ok(hold) = super::WAITER_SOURCE_READ.try_with(Arc::clone) {
+            hold.0.notify_one();
+            hold.1.notified().await;
+        }
         let shared = match &record.planning_source_evidence {
             Some(PlanningSourceEvidence::Waiter {
                 workflow: saved,
@@ -278,6 +283,7 @@ impl PrivateOriginals {
             .get()
             .and_then(Weak::upgrade)
             .ok_or(PrivateOriginalError::Unavailable)?;
+        Self::wake_original_session_owner(&machine, &*pins, &session, &stamp).await?;
         let registration = machine
             .current_session_registration_witness(&session)
             .await

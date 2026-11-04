@@ -186,6 +186,7 @@ async fn second_host_input_keeps_dedicated_g_and_refuses_foreign_and_cancelled_p
         .await;
         let first = native(planning.launch(&snapshot).await.unwrap());
         finish(f, "planning_lead", &first).await;
+        custody_promoted(f, &c.lead.original).await;
         let PrivateOriginalSubmission::Admitted {
             session_id,
             input_id,

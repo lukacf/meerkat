@@ -59,6 +59,16 @@ async fn child() {
         .unwrap()
         .unwrap();
     let (config, roster) = saved.durable.gateway_configuration();
+    // One roster seat no workflow interest selects, through the gateway's
+    // ordinary roster path. The acquisition sweep restores only selected
+    // live interests, so it must leave this seat Dormant: its wakes are
+    // bounded by active workflows, not by roster size.
+    let unselected =
+        meerkat_mobkit::identity_first::AgentIdentity::parse("unselected_seat").unwrap();
+    let mut seated = roster.clone();
+    let mut seat = roster[0].clone();
+    seat.identity = unselected.clone();
+    seated.push(seat);
     let (model, requests) = DurableDedicated::gateway_model();
     let (mut host, _private_open) = recovery_host(&mut reopened, &saved.durable);
     host.model = Some(model.clone());
@@ -82,7 +92,7 @@ async fn child() {
     let host = Arc::new(host);
     println!(
         "{}",
-        json!({"fixture":"prepared", "state":directory.path(), "mob_config":config, "roster":roster})
+        json!({"fixture":"prepared", "state":directory.path(), "mob_config":config, "roster":seated})
     );
     let observed_host = host.clone();
     let observed_source = source.clone();
@@ -90,6 +100,15 @@ async fn child() {
     let observed_directory = directory.clone();
     let observed_sessions = sessions.clone();
     let expected_before = before.clone();
+    // The bindings this run restores: A's waiter source, P and G. The
+    // observer records their retained entries at Ready.
+    let restored = (
+        saved.row.key.clone(),
+        saved.durable.parent_source().clone(),
+        saved.durable.lead_source().clone(),
+    );
+    let restored_bindings = Arc::new(std::sync::OnceLock::new());
+    let observed_bindings = restored_bindings.clone();
     let observer = tokio::spawn(async move {
         let _release = Release(observed_probe.clone());
         let checked = AssertUnwindSafe(async {
@@ -98,16 +117,38 @@ async fn child() {
             assert!(!observed_host.closing.load(Ordering::SeqCst));
             let runtime = observed_source.bound_identity_runtime().unwrap();
             let machine = observed_source.machine().unwrap();
+            let pins = observed_source.controller_pin_source.get().and_then(std::sync::Weak::upgrade).unwrap();
+            let handle = runtime.owner().handle();
             for (index, spec) in roster.iter().enumerate() {
                 let status = runtime.status(&spec.identity).await.unwrap();
                 assert_eq!(status.state, IdentityLifecycleState::Active);
                 assert_eq!(status.session_id.as_ref(), Some(&observed_sessions[index]),
                     "actual roster restoration must keep each original session, with no fresh fallback");
-                assert!(machine.current_session_registration_witness(&observed_sessions[index]).await.is_some());
+                // Residency-neutral: each restored member is seated on its
+                // exact original session, its durable binding. The default
+                // on-demand restore may leave a member Dormant or live, which
+                // is the owner's internal state, so neither is asserted.
+                let member = meerkat_mob::AgentIdentity::from(
+                    status.member_id.as_deref().expect("a seated roster member"),
+                );
+                assert_eq!(handle.resolve_bridge_session_id(&member).await.as_ref(), Some(&observed_sessions[index]),
+                    "each member stays bound to its original session");
             }
+            // The pin below needs G's live actor. When no live actor serves
+            // G's session, wake exactly that session through Core's
+            // session-owner wake: no input and no turn.
+            if pins.live_actor(&observed_sessions[2]).await.is_none() {
+                let woke = meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global()
+                    .wake(&observed_sessions[2])
+                    .await;
+                assert!(
+                    matches!(woke, Some(Ok(meerkat_core::session_owner_wake::SessionOwnerWakeOutcome::Ready))),
+                    "the restored lead wakes on its own session: {woke:?}"
+                );
+            }
+            assert!(machine.current_session_registration_witness(&observed_sessions[2]).await.is_some());
             // Reuse the seed's controlled credential on the new actual native
             // owner, selecting its identity from the real reconstructed pin.
-            let pins = observed_source.controller_pin_source.get().and_then(std::sync::Weak::upgrade).unwrap();
             let actor = pins.live_actor(&observed_sessions[2]).await.unwrap();
             let pin = pins.pin_actor(&actor).await.unwrap();
             assert_eq!(Some(pin.selection()), model.controller_model_selection().as_ref());
@@ -131,6 +172,31 @@ async fn child() {
                 p.interest_restored.load(Ordering::SeqCst) == 1
                     && p.custody_rounds.load(Ordering::SeqCst) > 0)).await.unwrap();
             assert_eq!(member.session().unwrap(), observed_sessions[2]);
+            // The retained entries this run restored: exactly A's waiter
+            // source, P and G, each by its exact reference with its canonical
+            // association.
+            let canonical = [
+                (saved.row.key.clone(), saved.association.clone()),
+                (
+                    observed_source.key(saved.durable.parent_source()).unwrap(),
+                    observed_source.binding_evidence(saved.durable.parent_source()).await.unwrap().unwrap(),
+                ),
+                (
+                    observed_source.key(saved.durable.lead_source()).unwrap(),
+                    observed_source.binding_evidence(saved.durable.lead_source()).await.unwrap().unwrap(),
+                ),
+            ];
+            let bindings = observed_source.retained.lock().unwrap().iter()
+                .map(|held| (observed_source.key(&held.reference).unwrap(), held.reference.clone(),
+                    held.original.association().clone(), held.original.clone()))
+                .collect::<Vec<_>>();
+            assert_eq!(bindings.len(), canonical.len(), "one retained entry per restored binding");
+            for (key, association) in &canonical {
+                assert_eq!(bindings.iter().filter(|(held, _, held_association, _)|
+                    held == key && held_association == association).count(), 1,
+                    "the restored binding {key:?} with its canonical association, once");
+            }
+            assert!(observed_bindings.set(bindings).is_ok());
             let held = observed_source.retained.lock().unwrap().iter()
                 .find(|held| held.reference == *saved.durable.lead_source()).unwrap().clone();
             let attached = held.setup_workflow.get().unwrap();
@@ -161,6 +227,12 @@ async fn child() {
             assert_eq!(work_census(observed_directory.path(), &observed_sessions).await, expected_before,
                 "no duplicate input or original model/tool history");
             assert_eq!(requests(), 0, "actual restoration and recovery make no model request");
+            // The sweep restored the selected interest and ran further rounds;
+            // the unselected seat stayed Dormant on its own session.
+            let seat = runtime.status(&unselected).await.unwrap();
+            let seat_session = seat.session_id.clone().expect("the roster pass seats the unselected member");
+            assert!(pins.live_actor(&seat_session).await.is_none(), "the acquisition sweep woke no unselected seat");
+            assert!(machine.current_session_registration_witness(&seat_session).await.is_none());
             println!("{}", json!({"fixture":"fairness", "writer_refusal_observed":true,
                 "acquisition_revisited":true, "custody_completed_rounds":observed_probe.custody_rounds.load(Ordering::SeqCst)}));
             until(|| observed_host.closing.load(Ordering::SeqCst)).await;
@@ -185,7 +257,84 @@ async fn child() {
         );
         host.join_close().await.unwrap();
         assert_eq!(work_census(directory.path(), &sessions).await, before);
-        assert!(source.retained.lock().unwrap().is_empty());
+        // The close contract: retained product state is not cleared. After
+        // join_close the retained set holds exactly the bindings this run
+        // restored, each once, with its exact reference, its canonical
+        // association and the same retained original as at Ready; no live
+        // actor serves any of their sessions, and the current owners refuse a
+        // restoration through a retained handle, typed.
+        let (waiter_key, parent, lead) = &restored;
+        let restored_bindings = restored_bindings
+            .get()
+            .expect("the observer recorded the restored bindings at Ready");
+        let held: Vec<_> = source
+            .retained
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|held| {
+                (
+                    source.key(&held.reference).unwrap(),
+                    held.reference.clone(),
+                    held.original.association().clone(),
+                    held.original.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            held.len(),
+            restored_bindings.len(),
+            "exactly the bindings this run restored, each once"
+        );
+        for (key, reference, association, original) in &held {
+            assert!(
+                restored_bindings.iter().any(
+                    |(
+                        restored_key,
+                        restored_reference,
+                        restored_association,
+                        restored_original,
+                    )| {
+                        restored_key == key
+                            && restored_reference == reference
+                            && restored_association == association
+                            && Arc::ptr_eq(restored_original, original)
+                    }
+                ),
+                "retained {key:?} is a binding this run restored, unchanged"
+            );
+        }
+        let mut keys: Vec<_> = held.iter().map(|(key, ..)| key.clone()).collect();
+        let mut expected = vec![
+            waiter_key.clone(),
+            source.key(parent).unwrap(),
+            source.key(lead).unwrap(),
+        ];
+        keys.sort_by(|a, b| a.id.cmp(&b.id));
+        expected.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(keys, expected, "A's waiter source, P and G");
+        if let Some(pins) = source
+            .controller_pin_source
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            for session in &sessions {
+                assert!(
+                    pins.live_actor(session).await.is_none(),
+                    "no live actor after close"
+                );
+            }
+        }
+        // A retained historical handle authorizes nothing after close: the
+        // current owners refuse a restoration through it, typed.
+        let refused = source.restore_workflow_parent_source(parent).await;
+        assert!(
+            matches!(
+                refused,
+                Err(crate::private_originals::PrivateOriginalError::Unavailable)
+            ),
+            "a closed host refuses its retained handle: {refused:?}"
+        );
         assert!(source.workflow_context_transfers().unwrap().is_empty());
     })
     .catch_unwind()

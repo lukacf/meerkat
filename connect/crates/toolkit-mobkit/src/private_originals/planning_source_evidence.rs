@@ -483,6 +483,7 @@ impl PrivateOriginals {
             .and_then(Weak::upgrade)
             .ok_or(PrivateOriginalError::Unavailable)?;
         let machine = self.machine()?;
+        Self::wake_original_session_owner(&machine, &*pins, &session, &stamp).await?;
         let registration = machine
             .current_session_registration_witness(&session)
             .await
@@ -563,3 +564,11 @@ pub(super) fn is_parent(selection: Option<&PlanningSourceEvidence>) -> bool {
 mod lead;
 mod operational_parent;
 mod waiter;
+
+#[cfg(test)]
+tokio::task_local! {
+    // Same-crate control only: hold a waiter restoration inside its
+    // writer-held canonical read, after its publication observation.
+    pub(in crate::private_originals) static WAITER_SOURCE_READ:
+        Arc<(tokio::sync::Notify, tokio::sync::Notify)>;
+}

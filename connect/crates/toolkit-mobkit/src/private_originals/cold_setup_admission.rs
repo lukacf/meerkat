@@ -354,6 +354,7 @@ impl PrivateOriginals {
         #[cfg(test)]
         Self::synthetic_admission_diagnostic("cold.machine.returned", ());
         let session = &binding.origin_session_id;
+        Self::wake_original_session_owner(&machine, &*pins, session, &stamp).await?;
         #[cfg(test)]
         Self::synthetic_admission_diagnostic("cold.registration.entered", ());
         let registration = machine

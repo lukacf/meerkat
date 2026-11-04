@@ -8,6 +8,26 @@ use super::waiter_restore_tests::{
 use super::*;
 use meerkat_authorization_contracts::work_association::{GrantTarget, WorkAuthorityBasis};
 
+/// Run the production recovery consumer on its own task, as the host's
+/// acquisition worker runs its sweep. Its restoration chain then starts on a
+/// fresh task stack, not beneath this test's own poll frames: the
+/// repository's stack relief for deep chains. No stack size changes.
+async fn recover_on_own_task(
+    source: &Arc<crate::private_originals::PrivateOriginals>,
+    row: &toolkit_store::StoredRecord,
+) -> Result<WorkflowInterestRecovery, PrivateOriginalError> {
+    let source = Arc::clone(source);
+    let row = row.clone();
+    meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+        source
+            .with_synthetic_admission_diagnostics(
+                source.recover_workflow_interest_source(&row, || true),
+            )
+            .await
+    })
+    .await
+}
+
 async fn restored_targets(revoke_first: bool) {
     let saved = selected_profile_then_close(true).await;
     let c = PersistentDedicated::reopen(saved.durable.clone()).await;
@@ -76,12 +96,7 @@ async fn restored_targets(revoke_first: bool) {
         // Exercise the production canonical recovery consumer, not just the
         // component restoration methods. No new native input is submitted.
         assert_eq!(
-            source
-                .with_synthetic_admission_diagnostics(
-                    source.recover_workflow_interest_source(&saved.row, || true)
-                )
-                .await
-                .unwrap(),
+            recover_on_own_task(source, &saved.row).await.unwrap(),
             WorkflowInterestRecovery::Restored { memberships: 1 }
         );
         assert_eq!(c.member.session().unwrap(), c.lead_session);
@@ -99,12 +114,7 @@ async fn restored_targets(revoke_first: bool) {
         let publication = source.owner.publication();
         let (_, replay) = publication.observe(|| ()).unwrap();
         assert_eq!(
-            source
-                .with_synthetic_admission_diagnostics(
-                    source.recover_workflow_interest_source(&saved.row, || true)
-                )
-                .await
-                .unwrap(),
+            recover_on_own_task(source, &saved.row).await.unwrap(),
             WorkflowInterestRecovery::Restored { memberships: 1 }
         );
         replay

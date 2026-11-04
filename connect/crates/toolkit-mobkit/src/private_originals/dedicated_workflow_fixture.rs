@@ -12,6 +12,19 @@ use meerkat_workgraph::{
 };
 use toolkit_package::{ContentDigest, Revision};
 
+tokio::task_local! {
+    // Same-crate control only: a reopened fixture's pin step wakes the lead
+    // while the actual source writer is held, as the custody worker or the
+    // acquisition sweep can hold it when a restored member first wakes.
+    pub(in crate::private_originals) static WAKE_UNDER_SOURCE_WRITER: ();
+}
+
+tokio::task_local! {
+    // Same-crate control only: a reopened fixture skips its pin step and
+    // leaves the lead Dormant, so a control can wake it at an exact point.
+    pub(in crate::private_originals) static LEAVE_LEAD_DORMANT: ();
+}
+
 pub(in crate::private_originals) struct DedicatedFixture<
     S = EphemeralSessionService<FactoryAgentBuilder>,
 > {
@@ -224,19 +237,24 @@ impl DedicatedFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
             profile,
             None,
             |builder, configuration, directory| {
+                // The stdio gateway later opens this state directory with
+                // Meta's own composition of Core's stores: the head-canonical
+                // session and runtime stores sharing runtime.sqlite under the
+                // installation's realm. Its startup refuses a 0.9.3 sessions
+                // database and WholeBlob runtimes, so seed the same layout.
                 let layout = meerkat_mobkit::storage_layout::MetaStorageLayout::standalone(
                     directory.to_path_buf(),
                     directory.join("gateway-home"),
                 );
+                let (sessions, runtime) =
+                    meerkat_mobkit::mob_handle_runtime::open_native_session_pair(
+                        directory,
+                        layout.meerkat_level_realm().unwrap(),
+                    )
+                    .unwrap();
                 let persistence = meerkat::PersistenceBundle::new_with_local_grant_authorization(
-                    Arc::new(
-                        meerkat::SqliteSessionStore::open(layout.session_db().unwrap().path)
-                            .unwrap(),
-                    ),
-                    Arc::new(
-                        meerkat_runtime::store::SqliteRuntimeStore::new(layout.runtime_db())
-                            .unwrap(),
-                    ),
+                    sessions,
+                    runtime,
                     Arc::new(meerkat::MemoryBlobStore::new()),
                     configuration,
                 )
@@ -938,8 +956,10 @@ impl<
             None,
             Some(handle.definition().clone()),
         ));
-        if reviewed.is_some() {
-            // Runtime-owned bootstrap below mints the actual one-use completion.
+        if reviewed.is_some() || saved.is_some() {
+            // Runtime-owned bootstrap below: on a reopen it lifts the mob the
+            // clean shutdown left Stopped before the roster pass; the reviewed
+            // controls also mint the actual one-use completion.
             native.install_identity_first_context(context.clone());
         } else {
             native.attach_identity_first_context(context.clone());
@@ -962,7 +982,14 @@ impl<
             "normal gateway bind must retain the actual service pin owner"
         );
         if saved.is_some() {
-            let restored = context.bootstrap_roster(&roster).await.unwrap();
+            // The supported restore of a restarted composition: the runtime's
+            // identity bootstrap activates the mob a clean shutdown left
+            // Stopped, then restores the roster. The roster pass alone would
+            // leave the mob Stopped, and a Stopped mob wakes no member.
+            let restored = native
+                .bootstrap_installed_identity_first_context(&roster)
+                .await
+                .unwrap();
             for row in &roster {
                 assert!(
                     matches!(
@@ -1080,6 +1107,33 @@ impl<
             &sessions[2..3]
         };
         for session in selected_sessions {
+            if LEAVE_LEAD_DORMANT.try_with(|_| ()).is_ok() {
+                continue;
+            }
+            // A reopened host restores its members Dormant (Core's on-demand
+            // member restore): an Active identity is not a live actor. This
+            // pin needs the live actor, so it first goes through Core's
+            // session-owner wake for exactly this session, the supported path
+            // of a session-keyed live operation. A live member is not woken.
+            if service.live_actor(session).await.is_none() {
+                let held = match WAKE_UNDER_SOURCE_WRITER.try_with(|_| ()) {
+                    Ok(()) => Some(source.owner.source_writer().await),
+                    Err(_) => None,
+                };
+                let woke = meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global()
+                    .wake(session)
+                    .await;
+                drop(held);
+                assert!(
+                    matches!(
+                        woke,
+                        Some(Ok(
+                            meerkat_core::session_owner_wake::SessionOwnerWakeOutcome::Ready
+                        ))
+                    ),
+                    "the restored member wakes on its own session: {woke:?}"
+                );
+            }
             let actor = service.live_actor(session).await.unwrap();
             let pin = service.pin_actor(&actor).await.unwrap();
             meerkat_core::publish_token_lifecycle_acquired_for_identity_within(
@@ -1167,6 +1221,9 @@ impl DurableDedicated {
     }
     pub fn lead_source(&self) -> &PrivateOriginalRef {
         &self.lead.original
+    }
+    pub fn parent_source(&self) -> &PrivateOriginalRef {
+        &self.parent.original
     }
     pub fn sessions(&self) -> &[SessionId] {
         &self.sessions

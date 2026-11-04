@@ -22,6 +22,32 @@ fn forget<S>(fixture: &FirstFixture<S>, association: &InputAuthorityAssociation)
     );
 }
 
+/// Wait for the canonical row of the admitted source to record its custody
+/// attempt Promoted. Connect settles a fresh admission's custody after the
+/// native admission returns: its custody handoff writes the row's decision in
+/// the background under the source writer. The historical restoration below
+/// starts from that settled row, once the writer that made it is released.
+async fn custody_promoted<S>(fixture: &FirstFixture<S>) {
+    let reference = fixture.original_reference();
+    let key = fixture.source.key(reference).unwrap();
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let row = fixture.source.store.get(&key).await.unwrap().unwrap();
+            let record = fixture.source.decode_record(&row, reference).unwrap();
+            if record.custody_attempt.as_ref().is_some_and(|attempt| {
+                attempt.decision()
+                    == crate::original_ingress::custody_attempt::CustodyDecision::Promoted
+            }) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the admitted source's custody settles Promoted");
+    drop(fixture.source.owner.source_writer().await);
+}
+
 async fn close<S>(fixture: &FirstFixture<S>, body: Result<(), Box<dyn std::any::Any + Send>>) {
     let cleanup = std::panic::AssertUnwindSafe(async {
         let result = fixture.shutdown().await;
@@ -45,6 +71,10 @@ async fn selected_parent_restores_only_actual_controller_custody_without_replay(
             .source
             .bind_controller_pin_source(fixture.service.clone())
             .unwrap();
+        // The production custody worker settles each admitted source's
+        // custody attempt; the historical restoration below reads its
+        // Promoted decision. Start it before the first input, as the host does.
+        fixture.source.start_custody_recovery(None).unwrap();
         let unselected = fixture.cold_source_record().await;
         fixture
             .source
@@ -70,6 +100,7 @@ async fn selected_parent_restores_only_actual_controller_custody_without_replay(
         assert_eq!(fixture.inputs().await, Ok(0));
         let first = fixture.submit().await;
         fixture.finish(&first).await.unwrap();
+        custody_promoted(&fixture).await;
         let association = fixture.binding().await.unwrap().unwrap();
         let row = fixture.cold_source_record().await;
         let record = fixture

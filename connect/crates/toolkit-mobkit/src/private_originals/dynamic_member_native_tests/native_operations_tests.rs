@@ -103,6 +103,29 @@ pub(super) async fn add(fixture: &Fixture, name: &str) -> meerkat_core::SessionI
 }
 
 pub(super) async fn ready(fixture: &Fixture, session: &meerkat_core::SessionId) {
+    // A reopened host restores its members Dormant (Core's on-demand member
+    // restore). This pin needs the live actor, so it first goes through
+    // Core's session-owner wake for exactly this session, the supported path
+    // of a session-keyed live operation. A live member is not woken.
+    if fixture
+        .service
+        .live_session_actor_witness(session)
+        .await
+        .is_none()
+    {
+        let woke = meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global()
+            .wake(session)
+            .await;
+        assert!(
+            matches!(
+                woke,
+                Some(Ok(
+                    meerkat_core::session_owner_wake::SessionOwnerWakeOutcome::Ready
+                ))
+            ),
+            "the restored member wakes on its own session: {woke:?}"
+        );
+    }
     let lease = fixture
         .service
         .acquire_live_session_actor_turn_boundary_lease(session)
@@ -416,6 +439,11 @@ async fn native_target_preparation_restores_exact_grants_before_first_input() {
         let recipient_entry = f.native.mob_handle().get_member(
             &meerkat_mobkit::member_comms_id::mob_member_id("project-aborted")).await.unwrap().unwrap();
         let peer = recipient_entry.peer_id().expect("restored recipient has its actual native peer identity");
+        // The restart restores the recipient Dormant: no process registration
+        // and no live actor. Its saved selection is checked from its
+        // canonical Active admission, and the check wakes nothing.
+        assert!(f.service.live_session_actor_witness(&recipient_session).await.is_none(),
+            "the restart left the recipient Dormant");
         for (submission, request, key, row, basis) in &saved {
             assert_eq!(f.source.store.get(key).await.unwrap().as_ref(), Some(row));
             f.source.prepare_original_native_operations(submission.clone(), request.clone()).await.unwrap();
@@ -429,6 +457,8 @@ async fn native_target_preparation_restores_exact_grants_before_first_input() {
                 assert_eq!(&restored, basis, "reopen must reuse the exact native root and child IDs");
             }
         }
+        assert!(f.service.live_session_actor_witness(&recipient_session).await.is_none(),
+            "checking the saved selections woke no recipient");
         let mut changed = saved[0].1.clone();
         let NativeOriginalTarget::Peer { route, .. } = &mut changed.targets[0].target else { unreachable!() };
         *route = f.route(ADDED).id;

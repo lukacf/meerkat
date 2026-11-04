@@ -315,17 +315,6 @@ else
   printf '%s\n' "${selector_selftest_output}" >&2
 fi
 
-agent_gate_probe="$(./scripts/agent-gate --dry-run --working-tree crates/meerkat-runtime/src/input_ledger.rs 2>&1 || true)"
-if [[ -x scripts/agent-gate ]] &&
-  [[ "${agent_gate_probe}" == *"Cargo agent gate packages:"* ]] &&
-  [[ "${agent_gate_probe}" == *"meerkat-runtime"* ]] &&
-  [[ "${agent_gate_probe}" != *"BuildBuddy agent gate"* ]]; then
-  pass "agent-gate defaults to the Cargo changed-path gate"
-else
-  bad "agent-gate default routing is not Cargo-first"
-  printf '%s\n' "${agent_gate_probe}" >&2
-fi
-
 # The pre-push hook reuses source-test evidence across lock-only changes and
 # leaves compiling the resolved graph to the required CI Clippy lanes: the CI
 # planner treats a Cargo.lock change it cannot scope as global, so every
@@ -342,83 +331,34 @@ else
   printf '%s\n' "${lock_ci_probe}" >&2
 fi
 
-package_clippy_probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-clippy-scope.XXXXXX")"
-trap 'rm -rf -- "${package_clippy_probe_dir}"' EXIT
-package_clippy_probe_metadata="${package_clippy_probe_dir}/metadata.json"
-package_clippy_probe_args="${package_clippy_probe_dir}/args"
-package_clippy_probe_cargo="${package_clippy_probe_dir}/cargo"
-./scripts/repo-cargo metadata --format-version=1 --no-deps >"${package_clippy_probe_metadata}"
-cat >"${package_clippy_probe_cargo}" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-case "${1:-}" in
-  metadata)
-    cat "${CARGO_AGENT_GATE_TEST_METADATA}"
-    ;;
-  clippy)
-    shift
-    printf '%s\n' "$@" >"${CARGO_AGENT_GATE_TEST_ARGS}"
-    ;;
-  *)
-    printf 'unexpected cargo-agent-gate command: %s\n' "${1:-<none>}" >&2
-    exit 64
-    ;;
-esac
-EOF
-chmod +x "${package_clippy_probe_cargo}"
-package_clippy_probe="$({
-  CARGO="${package_clippy_probe_cargo}" \
-    CARGO_AGENT_GATE_TEST_METADATA="${package_clippy_probe_metadata}" \
-    CARGO_AGENT_GATE_TEST_ARGS="${package_clippy_probe_args}" \
-    ./scripts/cargo-agent-gate --clippy-only --working-tree crates/meerkat-openai/src/client.rs
-} 2>&1 || true)"
-expected_package_clippy_args=$'-p\nmeerkat-openai\n--no-deps\n--all-targets\n--all-features\n--\n-D\nwarnings'
-actual_package_clippy_args="$(cat "${package_clippy_probe_args}" 2>/dev/null || true)"
-if [[ "${actual_package_clippy_args}" == "${expected_package_clippy_args}" ]]; then
-  pass "cargo-agent-gate executes changed-crate Clippy with package-only dependencies"
+# The local affected-test selection (scripts/affected-tests.mjs) runs an edit
+# confined to integration test targets as just those targets, the modules
+# they declare included, and names a live-provider target instead of running
+# it. Print-only: these read cargo metadata and the CI planner, no build.
+exact_test_probe="$(node scripts/affected-tests.mjs -- crates/meerkat-runtime/tests/meerkat_machine.rs 2>&1 || true)"
+if [[ "${exact_test_probe}" == *"nextest run -p meerkat-runtime --test meerkat_machine --profile"* &&
+  "${exact_test_probe}" == *"meerkat-runtime: only test targets changed (meerkat_machine)"* ]]; then
+  pass "affected tests narrow a direct integration test edit to its test binary"
 else
-  bad "cargo-agent-gate package Clippy can lint unrelated path dependencies"
-  printf '%s\n' "${package_clippy_probe}" >&2
-  printf 'actual Clippy args:\n%s\n' "${actual_package_clippy_args}" >&2
-fi
-
-buildbuddy_agent_gate_probe="$(MEERKAT_BUILDBUDDY=1 ./scripts/agent-gate --dry-run --working-tree crates/meerkat-runtime/src/input_ledger.rs 2>&1 || true)"
-if [[ "${buildbuddy_agent_gate_probe}" == *"BuildBuddy agent gate paths:"* &&
-  "${buildbuddy_agent_gate_probe}" == *"BuildBuddy changed gate dry-run"* ]]; then
-  pass "MEERKAT_BUILDBUDDY=1 routes agent-gate to BuildBuddy"
-else
-  bad "MEERKAT_BUILDBUDDY=1 did not route agent-gate to BuildBuddy"
-  printf '%s\n' "${buildbuddy_agent_gate_probe}" >&2
-fi
-
-exact_test_probe="$(./scripts/cargo-agent-gate --dry-run --working-tree crates/meerkat-runtime/tests/meerkat_machine.rs 2>&1 || true)"
-if [[ "${exact_test_probe}" == *"Cargo agent gate exact tests:"* &&
-  "${exact_test_probe}" == *"--test meerkat_machine"* ]]; then
-  pass "cargo-agent-gate narrows direct integration test edits to exact test binaries"
-else
-  bad "cargo-agent-gate did not select the exact integration test binary"
+  bad "affected tests did not narrow a direct integration test edit to its test binary"
   printf '%s\n' "${exact_test_probe}" >&2
 fi
 
-support_test_probe="$(./scripts/cargo-agent-gate --dry-run --working-tree crates/meerkat/tests/support/test_session_store.rs 2>&1 || true)"
-if [[ "${support_test_probe}" == *"Cargo agent gate exact tests:"* &&
-  "${support_test_probe}" == *"--test sdk_agentfactory"* &&
-  "${support_test_probe}" == *"--test sdk_structured_output"* ]]; then
-  pass "cargo-agent-gate narrows integration support edits to importing test binaries"
+support_test_probe="$(node scripts/affected-tests.mjs -- crates/meerkat/tests/support/test_session_store.rs 2>&1 || true)"
+if [[ "${support_test_probe}" == *"nextest run -p meerkat --test "*"--test sdk_agentfactory --test sdk_structured_output --profile"* ]]; then
+  pass "affected tests narrow an integration support edit to the importing test binaries"
 else
-  bad "cargo-agent-gate did not select exact importing integration test binaries"
+  bad "affected tests did not narrow an integration support edit to the importing test binaries"
   printf '%s\n' "${support_test_probe}" >&2
 fi
 
-required_feature_test_probe="$(./scripts/cargo-agent-gate --dry-run --working-tree crates/meerkat-cli/tests/cli_mobpack_live_smoke.rs 2>&1 || true)"
-if [[ "${required_feature_test_probe}" == *"Cargo agent gate exact tests:"* &&
-  "${required_feature_test_probe}" == *"--features integration-real-tests"* &&
-  "${required_feature_test_probe}" == *"--test cli_mobpack_live_smoke"* ]]; then
-  pass "cargo-agent-gate narrows required-feature test edits to exact test binaries"
+live_test_probe="$(node scripts/affected-tests.mjs -- crates/meerkat-cli/tests/cli_mobpack_live_smoke.rs 2>&1 || true)"
+if [[ "${live_test_probe}" == *"rkat --test cli_mobpack_live_smoke needs integration-real-tests (live provider credentials): not run"* &&
+  "${live_test_probe}" != *"cli_mobpack_live_smoke --profile"* ]]; then
+  pass "affected tests name a live-provider test edit instead of running it"
 else
-  bad "cargo-agent-gate did not select exact required-feature test binaries"
-  printf '%s\n' "${required_feature_test_probe}" >&2
+  bad "affected tests ran or dropped a live-provider test edit"
+  printf '%s\n' "${live_test_probe}" >&2
 fi
 
 if [[ -n "$(git status --short)" ]]; then

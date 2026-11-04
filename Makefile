@@ -34,7 +34,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all install-build-deps build test test-unit test-mob-dense-topology test-mcp-confinement-positive test-int e2e-fast e2e-build e2e-system e2e-live e2e-copilot-live e2e-smoke e2e-auth test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-web test-sdk-suites wasm-check lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-lock-update buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-e2e-smoke-turbo-s buildbuddy-e2e-auth buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-doctor release-preflight release-preflight-smoke release-workflow release-assets release-packages release-web-sdk release-prebuild publish-dry-run publish-dry-run-python publish-dry-run-typescript publish-dry-run-web release-dry-run release-dry-run-smoke clean doc docs-check docs-only-contract-gate docs-sync-meta release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage verify-fixture-mint-generator check-rust-release-config check-crate-license-files check-published-crates-standalone-guard published-crates-standalone-selftest published-crates-standalone-census check-rust-release-packaging check-rust-release-packaging-contract verify-lock-consistency verify-bazel-locks verify-bazel-locks-strict verify-bazel-module-lock-inputs verify-bazel-release-features release-test-code-guards-selftest check-published-facade-link bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-verify-deep-compositions machine-verify-full machine-check-drift machine-authority-docs-gate mobpack-docs-contract-gate runtime-authority-bypass storage-ambient-gate seam-inventory rmat-audit rmat-audit-effect-authority rmat-audit-ownership-ledger rmat-audit-strict audit-generated-headers semver-breaks semver-breaks-meta protocol-codegen protocol-check-drift semver-breaks-selftest path-classifier-selftest stack-budget-release turbo-s-oracle-gate
+.PHONY: all install-build-deps build test test-unit test-mob-dense-topology test-mcp-confinement-positive test-int e2e-fast e2e-build e2e-system e2e-live e2e-copilot-live e2e-smoke e2e-auth test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-web test-sdk-suites wasm-check lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor buildbuddy-install buildbuddy-generate buildbuddy-lock-update buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-e2e-smoke-turbo-s buildbuddy-e2e-auth buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-doctor release-preflight release-preflight-smoke release-workflow release-assets release-packages release-web-sdk release-prebuild publish-dry-run publish-dry-run-python publish-dry-run-typescript publish-dry-run-web release-dry-run release-dry-run-smoke clean doc docs-check docs-only-contract-gate docs-sync-meta release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage verify-fixture-mint-generator check-rust-release-config check-crate-license-files check-published-crates-standalone-guard published-crates-standalone-selftest published-crates-standalone-census check-rust-release-packaging check-rust-release-packaging-contract verify-lock-consistency verify-bazel-locks verify-bazel-locks-strict verify-bazel-module-lock-inputs verify-bazel-release-features release-test-code-guards-selftest check-published-facade-link bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-verify-deep-compositions machine-verify-full machine-check-drift machine-authority-docs-gate mobpack-docs-contract-gate runtime-authority-bypass storage-ambient-gate seam-inventory rmat-audit rmat-audit-effect-authority rmat-audit-ownership-ledger rmat-audit-strict audit-generated-headers semver-breaks semver-breaks-meta protocol-codegen protocol-check-drift semver-breaks-selftest path-classifier-selftest stack-budget-release turbo-s-oracle-gate
 
 # Default target
 all: ci
@@ -343,15 +343,14 @@ ci-lanes-selftest:
 	@scripts/test-ci-non-rust-readers.sh
 	@scripts/test-ci-clippy-sccache-wrapper.sh
 	@scripts/test-setup-sccache-ci.sh
-	@echo "$(GREEN)Checking that CI runs what the pre-push hook no longer runs...$(NC)"
-	@scripts/test-pre-push-ratchets.sh
 
 .PHONY: native-cost-analysis-selftest
 native-cost-analysis-selftest:
 	@$(PYTHON) scripts/test_analyze_native_cost.py
 
 # Path classifiers (machine-authority-changed, buildbuddy-edge-changes,
-# cargo-agent-gate) and gate wiring contracts. Pure shell, no cargo build.
+# the local affected-test selection) and gate wiring contracts. Pure shell
+# and Node, no cargo build.
 path-classifier-selftest:
 	@echo "$(GREEN)Self-testing path classifiers and gate wiring...$(NC)"
 	@bash scripts/tests/xtask_scripts_dogma_gates.sh
@@ -365,22 +364,7 @@ path-classifier-selftest:
 	@node scripts/buildbuddy-edge-changes-selftest.mjs
 	@node scripts/rust-source-text-selftest.mjs
 	@node scripts/precommit-build-hook-selftest.mjs
-
-cargo-agent-gate: rust-lane-doctor
-	@echo "$(GREEN)Running Cargo agent changed-path gate...$(NC)"
-	@scripts/cargo-agent-gate $(AGENT_GATE_ARGS)
-
-agent-gate: SHELL := /bin/bash
-agent-gate:
-	@set -e; . ./scripts/build-backend-env; \
-	if meerkat_buildbuddy_enabled; then \
-		$(MAKE) buildbuddy-doctor; \
-	else \
-		$(MAKE) rust-lane-doctor; \
-	fi
-	@$(MAKE) docs-check
-	@printf '%b\n' "$(GREEN)Running agent changed-path gate...$(NC)"
-	@scripts/agent-gate $(AGENT_GATE_ARGS)
+	@node scripts/affected-tests-selftest.mjs
 
 buildbuddy-install:
 	@echo "$(GREEN)Installing pinned BuildBuddy CLI...$(NC)"
@@ -1133,8 +1117,6 @@ help:
 	@echo "  $(GREEN)fmt-check$(NC)     - Check code formatting"
 	@echo "  $(GREEN)audit$(NC)         - Run security audit (cargo-deny)"
 	@echo "  $(GREEN)rust-lane-doctor$(NC)- Check Rust lane isolation and filtered test lanes"
-	@echo "  $(GREEN)agent-gate$(NC)    - Run Cargo or MEERKAT_BUILDBUDDY=1 BuildBuddy changed gate (AGENT_GATE_ARGS=...)"
-	@echo "  $(GREEN)cargo-agent-gate$(NC)- Run Cargo gate for changed agent files"
 	@echo "  $(GREEN)buildbuddy-install$(NC)- Install pinned optional BuildBuddy CLI"
 	@echo "  $(GREEN)buildbuddy-generate$(NC)- Regenerate optional Bazel BUILD files"
 	@echo "  $(GREEN)buildbuddy-lock-update$(NC)- Refresh Bazel module lockfile"

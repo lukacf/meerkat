@@ -429,14 +429,10 @@ if grep -Fq 'MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS' .github/workflows/buildbuddy
   grep -Fq 'MEERKAT_BUILDBUDDY=1' AGENTS.md &&
   grep -Fq 'MEERKAT_BUILDBUDDY=1' docs/reference/build-and-ci.mdx &&
   grep -Fq 'scripts/buildbuddy-dev' docs/reference/build-and-ci.mdx &&
-  grep -Fq 'MEERKAT_BUILDBUDDY=1' scripts/agent-gate &&
   ! grep -Fq 'MEERKAT_AGENT_GATE_BACKEND' scripts/build-backend-env &&
   ! grep -Fq 'MEERKAT_AGENT_GATE_BACKEND=buildbuddy' README.md &&
   ! grep -Fq 'MEERKAT_AGENT_GATE_BACKEND=buildbuddy' docs/reference/build-and-ci.mdx &&
-  grep -Fq '. ./scripts/build-backend-env' Makefile &&
-  grep -Fq 'CARGO="${CARGO:-$ROOT/scripts/repo-cargo}"' scripts/pre-push-unit.sh &&
-  grep -Fq 'scripts/agent-gate" --staged' scripts/test-changed-crates.sh &&
-  grep -Fq 'exec "$AGENT_GATE" --committed --ratchets-only' scripts/pre-push-ratchets.sh; then
+  grep -Fq 'CARGO="${CARGO:-$ROOT/scripts/repo-cargo}"' scripts/pre-push-unit.sh; then
   pass "CI and local BuildBuddy opt-in switches are wired consistently"
 else
   bad "CI or BuildBuddy opt-in switch is not wired consistently"

@@ -1644,6 +1644,10 @@ impl ApprovalService {
             approver: Some(ApprovalConsentApprover {
                 principal: decision.approver.principal().clone(),
                 assurance: decision.approver.assurance(),
+                authentication_scope_digest: decision
+                    .approver
+                    .authentication_scope()
+                    .map(HostAuthenticationScope::digest),
             }),
             consumed_at: None,
             withdrawal: None,
@@ -5090,6 +5094,7 @@ mod tests {
             Some(ApprovalConsentApprover {
                 principal: approver("lead-1").principal().clone(),
                 assurance: ApprovalAssurance::PersonAuthenticated,
+                authentication_scope_digest: None,
             })
         );
         assert_eq!(consent.consumed_at, None, "recording is not spending");
@@ -7549,6 +7554,7 @@ mod tests {
                 consent.approver = Some(ApprovalConsentApprover {
                     principal,
                     assurance: ApprovalAssurance::PersonAuthenticated,
+                    authentication_scope_digest: None,
                 });
             }
             row
@@ -11604,6 +11610,122 @@ mod tests {
         assert_ne!(
             a["consent"]["approver"], b["consent"]["approver"],
             "the same subject from two issuers stays apart"
+        );
+    }
+
+    /// A row with the login digest restores as it was stored: the reopened
+    /// owner keeps the digest, and the row passes the load check every Core
+    /// makes (the decision's actor is the approver's id). A decision without
+    /// a named login records none.
+    #[tokio::test]
+    async fn a_row_with_the_login_digest_restores_with_it() {
+        let store = Arc::new(InMemoryApprovalStore::new());
+        let w = world_with(
+            ApprovalService::with_store(Arc::clone(&store) as Arc<dyn ApprovalStore>)
+                .expect("approval service"),
+        );
+        let with_login = w.request(&w.check()).await;
+        let without_login = w.request(&w.check()).await;
+        w.approvals
+            .decide_consent(
+                &with_login,
+                AuthenticatedConsentDecision {
+                    approver: approver("lead-1")
+                        .with_authentication_scope(HostAuthenticationScope::new("login-1")),
+                    decision: ApprovalDecision::Approve,
+                    reason: None,
+                },
+            )
+            .expect("approved in a login");
+        w.approvals
+            .decide_consent(&without_login, decision(ApprovalDecision::Deny, "lead-1"))
+            .expect("declined without a named login");
+
+        let reopened = ApprovalService::with_store(store).expect("the rows restore");
+        let approver_of = |id: &ApprovalId| {
+            let record = reopened.get(id).expect("restored row");
+            assert_eq!(
+                record.decision.as_ref().map(|d| d.actor.as_str()),
+                Some("lead-1"),
+                "the actor is the approver's id, as every Core checks at load"
+            );
+            record
+                .consent
+                .and_then(|consent| consent.approver)
+                .expect("recorded approver")
+        };
+        assert_eq!(
+            approver_of(&with_login).authentication_scope_digest,
+            Some(HostAuthenticationScope::new("login-1").digest())
+        );
+        assert_eq!(
+            approver_of(&without_login).authentication_scope_digest,
+            None
+        );
+    }
+
+    /// The stored approver is compatible both ways. A row stored before the
+    /// login digest existed reads with none and is stored as it was. A row
+    /// with it reads in a Core that predates it, whose approver is exactly
+    /// the principal and the assurance and ignores other fields, and that
+    /// Core's rewrite drops the digest, which this Core then reads as none.
+    /// A stored digest must be one: a raw scope is never read as a digest.
+    #[test]
+    fn the_stored_login_digest_is_compatible_both_ways() {
+        /// The stored approver of a Core that predates the login digest.
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct ApproverBeforeTheDigest {
+            principal: PrincipalRef,
+            assurance: ApprovalAssurance,
+        }
+
+        let principal = approver("lead-1").principal().clone();
+        let older = serde_json::json!({
+            "principal": principal,
+            "assurance": "person_authenticated",
+        });
+        let read: ApprovalConsentApprover =
+            serde_json::from_value(older.clone()).expect("an older row reads");
+        assert_eq!(read.authentication_scope_digest, None);
+        assert_eq!(
+            serde_json::to_value(&read).expect("encode"),
+            older,
+            "and is stored as it was"
+        );
+
+        let current = ApprovalConsentApprover {
+            principal,
+            assurance: ApprovalAssurance::PersonAuthenticated,
+            authentication_scope_digest: Some(HostAuthenticationScope::new("login-1").digest()),
+        };
+        let stored = serde_json::to_value(&current).expect("encode");
+        assert_eq!(
+            stored["authentication_scope_digest"],
+            format!(
+                "sha256:{:x}",
+                <sha2::Sha256 as sha2::Digest>::digest(b"login-1")
+            )
+        );
+        let older_read: ApproverBeforeTheDigest =
+            serde_json::from_value(stored.clone()).expect("an older Core reads the row");
+        let rewritten = serde_json::to_value(&older_read).expect("an older Core rewrites it");
+        assert!(
+            rewritten.get("authentication_scope_digest").is_none(),
+            "the older Core's rewrite drops the digest"
+        );
+        assert_eq!(
+            serde_json::from_value::<ApprovalConsentApprover>(rewritten).expect("reads"),
+            ApprovalConsentApprover {
+                authentication_scope_digest: None,
+                ..current
+            }
+        );
+
+        let mut raw_scope = stored;
+        raw_scope["authentication_scope_digest"] = serde_json::json!("login-1");
+        assert!(
+            serde_json::from_value::<ApprovalConsentApprover>(raw_scope).is_err(),
+            "a raw scope is never read as a digest"
         );
     }
 }

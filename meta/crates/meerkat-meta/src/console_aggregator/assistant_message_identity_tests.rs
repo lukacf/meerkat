@@ -1921,7 +1921,7 @@ async fn status_unknown_refresh_is_redriven_by_the_next_typed_change_not_a_tick(
             .status_unknown_redrives
             .lock()
             .map_err(|_| std::io::Error::other("fixture re-drive lock"))?
-            .contains(&retry_key),
+            .contains_key(&retry_key),
         "a fired re-drive releases its key"
     );
     runtime.mob_handle().stop().await?;
@@ -2154,7 +2154,7 @@ async fn draining_refresh_skips_its_read_and_is_redriven_by_the_next_typed_chang
             .status_unknown_redrives
             .lock()
             .map_err(|_| std::io::Error::other("fixture re-drive lock"))?
-            .contains(&fixture.retry_key),
+            .contains_key(&fixture.retry_key),
         "the fired re-drive disarms"
     );
     fixture.runtime.mob_handle().stop().await?;
@@ -2292,7 +2292,7 @@ async fn a_member_stopped_while_draining_is_refreshed_and_converges() -> Console
             .status_unknown_redrives
             .lock()
             .map_err(|_| std::io::Error::other("fixture re-drive lock"))?
-            .contains(&fixture.retry_key),
+            .contains_key(&fixture.retry_key),
         "no waiter stays armed for the stopped member"
     );
     tokio::time::timeout(

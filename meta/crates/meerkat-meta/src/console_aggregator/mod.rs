@@ -227,8 +227,12 @@ struct AggregatorInner {
     /// Retry keys with an armed status-unknown re-drive (one waiter per key):
     /// an idle member whose status read did not answer emits no event of its
     /// own, so its next typed change re-drives the retained retry instead of
-    /// only the discovery tick.
-    status_unknown_redrives: std::sync::Mutex<BTreeSet<(uuid::Uuid, String, String, String)>>,
+    /// only the discovery tick. Each key holds its waiter's hold: removing the
+    /// key (its runtime's registration ended or was replaced) drops it, which
+    /// ends a waiter still parked.
+    status_unknown_redrives: std::sync::Mutex<
+        BTreeMap<(uuid::Uuid, String, String, String), tokio::sync::oneshot::Sender<()>>,
+    >,
     #[cfg(test)]
     status_unknown_redrive_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Retry keys whose last status reads did not answer, with when their
@@ -973,7 +977,7 @@ impl MetaConsoleAggregator {
                     MemberProvenanceSearchCache::new(MEMBER_PROVENANCE_CACHE_LIMIT),
                 ),
                 assistant_history_retries: std::sync::Mutex::new(BTreeSet::new()),
-                status_unknown_redrives: std::sync::Mutex::new(BTreeSet::new()),
+                status_unknown_redrives: std::sync::Mutex::new(BTreeMap::new()),
                 #[cfg(test)]
                 status_unknown_redrive_tasks: std::sync::Mutex::new(Vec::new()),
                 status_unknown_backoff: std::sync::Mutex::new(BTreeMap::new()),
@@ -1066,7 +1070,7 @@ impl MetaConsoleAggregator {
                     MemberProvenanceSearchCache::new(MEMBER_PROVENANCE_CACHE_LIMIT),
                 ),
                 assistant_history_retries: std::sync::Mutex::new(BTreeSet::new()),
-                status_unknown_redrives: std::sync::Mutex::new(BTreeSet::new()),
+                status_unknown_redrives: std::sync::Mutex::new(BTreeMap::new()),
                 #[cfg(test)]
                 status_unknown_redrive_tasks: std::sync::Mutex::new(Vec::new()),
                 status_unknown_backoff: std::sync::Mutex::new(BTreeMap::new()),
@@ -1322,7 +1326,7 @@ impl MetaConsoleAggregator {
             .status_unknown_redrives
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|(_, key, _, _)| key != &runtime_key);
+            .retain(|(_, key, _, _), _| key != &runtime_key);
         self.inner
             .status_unknown_backoff
             .lock()
@@ -1497,7 +1501,7 @@ impl MetaConsoleAggregator {
             .status_unknown_redrives
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|(_, key, _, _)| key != runtime_key);
+            .retain(|(_, key, _, _), _| key != runtime_key);
         self.inner
             .status_unknown_backoff
             .lock()
@@ -7560,10 +7564,15 @@ fn arm_moved_boundary_redrive(
 /// A member with no events to follow (its session has no live actor in the
 /// primary mob, or it is no member there) wakes only on a change of its own
 /// state: the changes of other members, an answered status read among them,
-/// say nothing new about it and would re-drive a read of it each. Either way
-/// the pass waits out the member's status-read backoff
-/// ([`status_read_not_before`]). The discovery loop stays the backup (a
-/// member outside the primary mob, or a mob with no further activity).
+/// say nothing new about it and would re-drive a read of it each. A member
+/// outside the primary mob has no state there that changes, so its waiter
+/// stays parked (its key armed, so no second waiter starts) and the discovery
+/// sweep reads it, within one tick; so does a member whose own state the
+/// handle cannot read, for which nothing waits. Either way the pass waits out
+/// the member's status-read backoff ([`status_read_not_before`]). A waiter
+/// still parked when its key is removed (its runtime's registration ended or
+/// was replaced) ends without a pass. The discovery loop stays the backup
+/// (also for a mob with no further activity).
 fn arm_status_unknown_redrive(
     inner: &Arc<AggregatorInner>,
     retry_key: (uuid::Uuid, String, String, String),
@@ -7572,13 +7581,17 @@ fn arm_status_unknown_redrive(
     if !inner.options.session_history_backfill_enabled {
         return;
     }
-    if !inner
+    let (hold, released) = tokio::sync::oneshot::channel::<()>();
+    match inner
         .status_unknown_redrives
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(retry_key.clone())
+        .entry(retry_key.clone())
     {
-        return;
+        std::collections::btree_map::Entry::Occupied(_) => return,
+        std::collections::btree_map::Entry::Vacant(armed) => {
+            armed.insert(hold);
+        }
     }
     let handle = target.entry.runtime.handle();
     let member =
@@ -7595,55 +7608,70 @@ fn arm_status_unknown_redrive(
     let redrive_inner = Arc::clone(inner);
     let activity = BackfillActivity::begin(inner);
     let task = tokio::spawn(async move {
-        use futures::StreamExt as _;
-        let (woke, _activity) = if handle.member_unmaterialized(&member) {
-            // Not materialized in this process (Dormant, or being woken): it
-            // has no events to wait on and settles nothing until it runs.
-            // Wait for the change that materializes it, not for every change
-            // of the mob. The wait owes no backfill, so it holds no backfill
-            // activity: a console whose other work is done converges.
-            drop(activity);
-            let materialized = wait_for_member_materialized(&handle, &member, &mut changes).await;
-            (
-                materialized,
-                materialized.then(|| BackfillActivity::begin(&redrive_inner)),
-            )
-        } else {
-            match handle.subscribe_agent_events(&member).await {
-                Ok(mut events) => {
-                    let woke = tokio::select! {
-                        event = events.next() => event.is_some(),
-                        changed = changes.changed() => changed.is_ok(),
-                    };
-                    (woke, Some(activity))
+        let wait = async {
+            use futures::StreamExt as _;
+            let (woke, activity) = if handle.member_unmaterialized(&member) {
+                // Not materialized in this process (Dormant, or being woken):
+                // it has no events to wait on and settles nothing until it
+                // runs. Wait for the change that materializes it, not for
+                // every change of the mob. The wait owes no backfill, so it
+                // holds no backfill activity: a console whose other work is
+                // done converges.
+                drop(activity);
+                let materialized =
+                    wait_for_member_materialized(&handle, &member, &mut changes).await;
+                (
+                    materialized,
+                    materialized.then(|| BackfillActivity::begin(&redrive_inner)),
+                )
+            } else {
+                match handle.subscribe_agent_events(&member).await {
+                    Ok(mut events) => {
+                        let woke = tokio::select! {
+                            event = events.next() => event.is_some(),
+                            changed = changes.changed() => changed.is_ok(),
+                        };
+                        (woke, Some(activity))
+                    }
+                    // Not live in the primary mob (its session actor is gone,
+                    // or it is no member there): only a change of its own
+                    // state can make a read of it say more. Like the wait
+                    // above, this one owes no backfill until then.
+                    Err(_) => {
+                        drop(activity);
+                        let changed = match &armed_own_state {
+                            Ok(armed) => {
+                                wait_for_own_member_change(&handle, &member, armed, &mut changes)
+                                    .await
+                            }
+                            Err(error) => {
+                                warn_own_member_state_unreadable(&member, error);
+                                false
+                            }
+                        };
+                        (
+                            changed,
+                            changed.then(|| BackfillActivity::begin(&redrive_inner)),
+                        )
+                    }
                 }
-                // Not live in the primary mob (its session actor is gone, or
-                // it is no member there): only a change of its own state can
-                // make a read of it say more. Like the wait above, this one
-                // owes no backfill until then.
-                Err(_) => {
-                    drop(activity);
-                    let changed = wait_for_own_member_change(
-                        &handle,
-                        &member,
-                        &armed_own_state,
-                        &mut changes,
-                    )
-                    .await;
-                    (
-                        changed,
-                        changed.then(|| BackfillActivity::begin(&redrive_inner)),
-                    )
+            };
+            // Whatever woke it, a member whose status reads did not answer
+            // is not asked again before its backoff ends.
+            if woke {
+                while let Some(not_before) = status_read_not_before(&redrive_inner, &retry_key) {
+                    tokio::time::sleep_until(not_before).await;
                 }
             }
+            (woke, activity)
         };
-        // Whatever woke it, a member whose status reads did not answer is
-        // not asked again before its backoff ends.
-        if woke {
-            while let Some(not_before) = status_read_not_before(&redrive_inner, &retry_key) {
-                tokio::time::sleep_until(not_before).await;
-            }
-        }
+        // The key's removal drops its hold: the registration this waiter
+        // re-drives for is gone, so it stops waiting and re-drives nothing.
+        let (woke, _activity) = tokio::select! {
+            biased;
+            _ = released => (false, None),
+            waited = wait => waited,
+        };
         redrive_inner
             .status_unknown_redrives
             .lock()
@@ -7691,22 +7719,26 @@ async fn wait_for_member_materialized(
 /// this process.
 #[derive(PartialEq, Eq)]
 struct OwnMemberState {
-    entry: Option<meerkat_mob::IdentityEntryRead>,
+    entry: meerkat_mob::IdentityEntryRead,
     unmaterialized: bool,
 }
 
 impl OwnMemberState {
-    fn read(handle: &MobHandle, member: &AgentIdentity) -> Self {
-        Self {
-            entry: handle.identity_entry(member).ok(),
+    /// `Err` when the handle cannot read the member's identity entry (its
+    /// principal lacks the list scope, or a machine fact is malformed): a
+    /// wait could then not tell the member's own changes from others'.
+    fn read(handle: &MobHandle, member: &AgentIdentity) -> Result<Self, meerkat_mob::MobError> {
+        Ok(Self {
+            entry: handle.identity_entry(member)?,
             unmaterialized: handle.member_unmaterialized(member),
-        }
+        })
     }
 }
 
 /// Wait until `member`'s own state differs from `armed`: a change of another
 /// member never ends the wait. `false` when the mob's machine state stops
-/// changing first (its actor is gone).
+/// changing first (its actor is gone), or when the member's own state can no
+/// longer be read.
 async fn wait_for_own_member_change(
     handle: &MobHandle,
     member: &AgentIdentity,
@@ -7717,10 +7749,25 @@ async fn wait_for_own_member_change(
         if changes.changed().await.is_err() {
             return false;
         }
-        if OwnMemberState::read(handle, member) != *armed {
-            return true;
+        match OwnMemberState::read(handle, member) {
+            Ok(own) if own == *armed => {}
+            Ok(_) => return true,
+            Err(error) => {
+                warn_own_member_state_unreadable(member, &error);
+                return false;
+            }
         }
     }
+}
+
+/// A re-drive that cannot read its member's own state does not wait on it:
+/// the discovery sweep reads the member's status instead.
+fn warn_own_member_state_unreadable(member: &AgentIdentity, error: &meerkat_mob::MobError) {
+    tracing::warn!(
+        member = %member,
+        error = %error,
+        "console status re-drive cannot read the member's own state; the discovery sweep reads its status"
+    );
 }
 
 /// The wait before a member's status is read again after a read that did

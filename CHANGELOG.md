@@ -111,6 +111,14 @@ them.
   `meerkat_core::CopilotAccountConfig` and `RealmConfigSection::copilot`
   (see Breaking).
 
+- `meerkat-mob`: the one encoding of a name into a member id,
+  `ids::member_id_for_name`, and its inverse `ids::name_for_member_id`
+  (with `ids::ENCODED_MEMBER_ID_MARKER`). A name that is a member
+  comms-name component and does not begin with the marker is its own
+  member id; any other name (`team:alice`, or `mk--ops`) is the marker and
+  the escaped name (`mk--team_calice`, `mk--mk--ops`). Meerkat Meta's
+  member ids are this encoding.
+
 - Copilot account models: on a route of a GitHub Copilot account, a model
   the registry does not define (no catalog row, no `[models.<id>]` entry) is
   defined for the build by the account's model list. The endpoints the
@@ -174,14 +182,6 @@ them.
   doctor's operator-instruction census readers over a connection the caller
   opened read-only, so another storage doctor counts by the same rule.
 
-- `meerkat-mob`: the one encoding of a name into a member id,
-  `ids::member_id_for_name`, and its inverse `ids::name_for_member_id`
-  (with `ids::ENCODED_MEMBER_ID_MARKER`). A name that is a member
-  comms-name component and does not begin with the marker is its own
-  member id; any other name (`team:alice`, or `mk--ops`) is the marker and
-  the escaped name (`mk--team_calice`, `mk--mk--ops`). Meerkat Meta's
-  member ids are this encoding.
-
 ### Changed
 
 - A session on a zero-config Copilot route, or on a route of a
@@ -199,18 +199,6 @@ them.
   documents and the WholeBlob documents.
 
 ### Fixed
-
-- `meerkat-mob`: the legacy adoption reads a member's `agent_identity`
-  label in the one encoding of a name into a member id
-  (`ids::member_id_for_name`): a label naming the identity a member id
-  encodes (`team:alice` on the member `mk--team_calice`, `mk--ops` on the
-  member `mk--mk--ops`) marks the member as a legacy member, as a label
-  spelling the member id itself always did. The label is read trimmed, and
-  an empty label or one in the generated runtime-alias namespace (`rt:`)
-  names no member. A declared apply that listed such a member without the
-  durable-identity marker, a member labelled with an identity no member id
-  can spell, refused it `NameHeldByWorker`, and a host that labelled a raw
-  member of that name could not have it adopted.
 
 - `meerkat-rpc`: a session's runtime loop no longer waits forever on the
   turn-finalization boundary that its own turn holds. A turn that
@@ -232,6 +220,18 @@ them.
   two minutes. Affects 0.8.22 through 0.9.9: `rkat-rpc`, the Python and
   TypeScript SDKs that drive it, `rkat mob deploy --surface rpc`, and other
   hosts of `meerkat_rpc::SessionRuntime`.
+
+- `meerkat-mob`: the legacy adoption reads a member's `agent_identity`
+  label in the one encoding of a name into a member id
+  (`ids::member_id_for_name`): a label naming the identity a member id
+  encodes (`team:alice` on the member `mk--team_calice`, `mk--ops` on the
+  member `mk--mk--ops`) marks the member as a legacy member, as a label
+  spelling the member id itself always did. The label is read trimmed, and
+  an empty label or one in the generated runtime-alias namespace (`rt:`)
+  names no member. A declared apply that listed such a member without the
+  durable-identity marker, a member labelled with an identity no member id
+  can spell, refused it `NameHeldByWorker`, and a host that labelled a raw
+  member of that name could not have it adopted.
 
 - `meerkat-store`: `FileApprovalStore` now creates its files private (0600)
   on Unix regardless of the process umask, so consumers that verify private

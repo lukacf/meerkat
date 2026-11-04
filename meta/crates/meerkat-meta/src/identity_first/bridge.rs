@@ -4278,6 +4278,12 @@ pub enum UnlistedIdentityAnswer {
     /// Its member's retirement failed: Core keeps it marked, and the next
     /// complete apply retires it again.
     Failed { error: BridgeError },
+    /// A member of a legacy host seated under the identity, which Core
+    /// neither adopted nor retired, for `reason`: the member stays as it is,
+    /// and the next complete apply decides it again.
+    NotAdopted {
+        reason: meerkat_mob::NotAdoptedReason,
+    },
 }
 
 /// Core's answer to a declared roster
@@ -7865,6 +7871,9 @@ fn unlisted_identity_answer(
         meerkat_mob::UnlistedEntryOutcome::Failed { error } => UnlistedIdentityAnswer::Failed {
             error: spawn_bridge_error(&format!("unlisting of {identity}"), &error),
         },
+        meerkat_mob::UnlistedEntryOutcome::NotAdopted { reason } => {
+            UnlistedIdentityAnswer::NotAdopted { reason }
+        }
         _ => UnlistedIdentityAnswer::Failed {
             error: BridgeError::Mob(format!(
                 "Core answered the unlisting of {identity} with an outcome this build does not \
@@ -8632,7 +8641,12 @@ impl SessionBridge for MobSessionBridge {
                 continue;
             };
             let unlisted = unlisted_identity_answer(&identity, unlisted);
-            if !matches!(unlisted, UnlistedIdentityAnswer::Failed { .. }) {
+            // A retirement or a removal ends the member's incarnation; a
+            // member Core did not adopt keeps it.
+            if matches!(
+                unlisted,
+                UnlistedIdentityAnswer::Retired | UnlistedIdentityAnswer::Removed
+            ) {
                 self.forget_member_bindings(&member).await;
             }
             answer.unlisted.insert(identity, unlisted);

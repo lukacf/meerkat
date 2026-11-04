@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use super::MeerkatMachine;
-use crate::delivery_inbox::{RuntimeDeliveryError, runtimes_with_pending_deliveries_in};
+use crate::delivery_inbox::{RuntimeDeliveryError, runtime_delivery_backlog_in};
 use crate::identifiers::LogicalRuntimeId;
 use crate::store::RuntimeStoreError;
 
@@ -14,7 +14,8 @@ pub struct RuntimeBootObligations {
     /// Runtimes whose durable state holds recovery work, as far as the store
     /// can tell.
     pub recovery_work: RuntimeRecoveryWork,
-    /// Runtimes holding committed-but-unapplied deliveries.
+    /// Runtimes holding committed-but-unapplied deliveries, and runtimes the
+    /// store cannot answer for until it is reopened, which may hold them.
     pub pending_deliveries: HashSet<LogicalRuntimeId>,
 }
 
@@ -44,8 +45,14 @@ impl MeerkatMachine {
     /// runtimes with recovery work
     /// ([`RuntimeStore::list_runtimes_with_recovery_work`](crate::store::RuntimeStore::list_runtimes_with_recovery_work))
     /// and the runtimes with pending deliveries (the population
-    /// [`RuntimeDeliveryInbox::runtimes_with_pending_deliveries`](crate::RuntimeDeliveryInbox::runtimes_with_pending_deliveries)
+    /// [`RuntimeDeliveryInbox::runtime_delivery_backlog`](crate::RuntimeDeliveryInbox::runtime_delivery_backlog)
     /// reads). Two store-wide reads, neither of which loads a runtime body.
+    ///
+    /// A runtime the store cannot answer for until it is reopened (a host
+    /// store whose scope of that runtime is poisoned) is an obligation: the
+    /// recovery scan lists it as holding work, and it counts as holding
+    /// pending deliveries. The answer stays observed for every other
+    /// runtime, so one such runtime never makes a boot wake every member.
     ///
     /// A store that cannot list either answers
     /// [`RuntimeRecoveryWork::Unobserved`] with the read it could not make:
@@ -72,8 +79,17 @@ impl MeerkatMachine {
             ),
             Err(error) => return Err(error),
         };
-        let pending_deliveries = match runtimes_with_pending_deliveries_in(store.as_ref()).await {
-            Ok(runtimes) => runtimes.into_iter().collect(),
+        let pending_deliveries = match runtime_delivery_backlog_in(store.as_ref()).await {
+            Ok(backlog) => backlog
+                .pending
+                .into_iter()
+                .chain(
+                    backlog
+                        .unavailable
+                        .into_iter()
+                        .map(|unavailable| unavailable.runtime_id),
+                )
+                .collect(),
             // Deliveries the store cannot list may be pending for any member.
             Err(RuntimeDeliveryError::Store(RuntimeStoreError::Unsupported(_))) => {
                 return Ok(RuntimeBootObligations {

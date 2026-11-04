@@ -79593,6 +79593,7 @@ async fn test_member_status_completion_cancels_while_mailbox_is_full() {
                     execution_snapshot: None,
                     runtime_run_state: None,
                     preview_unavailable: None,
+                    store_refusal: None,
                     observed_at_ms: 1,
                 },
             )),

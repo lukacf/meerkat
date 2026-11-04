@@ -127,9 +127,10 @@ impl BuiltinTool for WebSearchTool {
 }
 
 impl WebSearchTool {
-    /// `context` is the call's dispatch context: a refused delegate request
-    /// waits out an owner change in progress on its admitted work, within
-    /// the call's remaining tool time.
+    /// `context` is the call's dispatch context: a delegate request refused
+    /// to rebuild waits after that stale read of its admitted work (for an
+    /// owner change in progress, or with none one backoff step) and asks
+    /// again, within the call's remaining tool time.
     async fn search(
         &self,
         args: Value,
@@ -153,11 +154,13 @@ impl WebSearchTool {
             provider_params: None,
             context: args.context.filter(|value| !value.trim().is_empty()),
         };
-        // A delegate request refused because an owner change is still in
-        // progress on the work's own publication waits for it (bounded, and
-        // never past the call's tool time, read at the wait) and asks again
-        // under the same operation. The call's context reports the waits as
-        // this call's to the host's operation refusal observer.
+        // A delegate request refused to rebuild is a stale read of the
+        // work's own publication: an owner change still in progress, or one
+        // that completed while the request was prepared. It waits after the
+        // stale read (bounded: for the change, or with none one backoff step,
+        // and never past the call's tool time, read at the wait) and asks
+        // again under the same operation. The call's context reports the
+        // waits as this call's to the host's operation refusal observer.
         let mut owner_change_churn = context
             .map(meerkat_core::ToolDispatchContext::owner_change_churn)
             .unwrap_or_default();
@@ -171,8 +174,8 @@ impl WebSearchTool {
                     == meerkat_core::authorization::OperationRefusalKind::ReprepareRequired
                 && let Some(context) = context
                 && let Some(work) = context.work_authorization()
-                && let Some(wait) = owner_change_churn
-                    .wait_for_settled_change(
+                && owner_change_churn
+                    .wait_after_stale_read(
                         work.authorization().as_ref(),
                         context.remaining_tool_time(),
                         "web_search_delegate",
@@ -181,7 +184,7 @@ impl WebSearchTool {
                             .map(meerkat_core::LlmRequestAuthorization::operation_id),
                     )
                     .await
-                && wait.settled()
+                    .settled()
             {
                 continue;
             }
@@ -897,5 +900,96 @@ mod tests {
             1,
             "no request after an unsettled wait"
         );
+    }
+
+    /// Work whose first helper model preparation meets an owner change that
+    /// publishes and completes while it reads: it refuses to rebuild, and no
+    /// change is in progress any more. When that change `revokes` the work's
+    /// authority, every later helper preparation is refused (`Denied`). The
+    /// call's own tool operation is allowed.
+    #[derive(Default)]
+    struct StaleHelperWork {
+        revokes: bool,
+        model_prepares: std::sync::atomic::AtomicUsize,
+    }
+
+    impl meerkat_core::authorization::WorkAuthorization for StaleHelperWork {
+        fn prepare(
+            &self,
+            binding: &meerkat_core::authorization::PreparedAuthorizationBinding,
+        ) -> Result<
+            Arc<dyn meerkat_core::authorization::PreparedOperationAuthorization>,
+            meerkat_core::OperationAuthorizationError,
+        > {
+            use meerkat_core::authorization::OperationRefusalKind;
+            if let meerkat_core::authorization::AuthorizationOperation::Model(_) =
+                &binding.facts().operation
+            {
+                let refused =
+                    |kind| meerkat_core::authorization::OperationRefused::new(kind).into();
+                if self
+                    .model_prepares
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    == 0
+                {
+                    return Err(refused(OperationRefusalKind::ReprepareRequired));
+                }
+                if self.revokes {
+                    return Err(refused(OperationRefusalKind::Denied));
+                }
+            }
+            Ok(Arc::new(Allowed))
+        }
+    }
+
+    /// The helper request read stale after an owner change that completed
+    /// pauses one backoff step and asks again under the same delegate
+    /// operation: the search completes. When that change revoked the work's
+    /// authority, the call answers with the owners' current refusal
+    /// (`Denied`).
+    ///
+    /// RED on the base: the stale read ended the call with
+    /// `reprepare_required` after one request.
+    #[tokio::test(start_paused = true)]
+    async fn a_stale_helper_request_after_a_completed_change_asks_again() {
+        for revokes in [false, true] {
+            let work = Arc::new(StaleHelperWork {
+                revokes,
+                ..StaleHelperWork::default()
+            });
+            let helper = Arc::new(CheckingHelper::default());
+            let outcome = governed_dispatch(
+                helper.clone(),
+                meerkat_core::WorkAuthorizationContext::new(
+                    work.clone(),
+                    meerkat_core::exact_operation::OperationExecutionScope::Domain,
+                ),
+            )
+            .await;
+            let operations = helper.operations.lock().await.clone();
+            assert_eq!(
+                operations.len(),
+                2,
+                "revokes={revokes}: one stale request, one more: {outcome:?}"
+            );
+            assert_eq!(
+                operations[0], operations[1],
+                "revokes={revokes}: the same delegate operation"
+            );
+            if revokes {
+                assert!(
+                    matches!(
+                        &outcome,
+                        Err(meerkat_core::ToolError::AuthorizationRefused { refusal })
+                            if refusal.kind()
+                                == meerkat_core::authorization::OperationRefusalKind::Denied
+                    ),
+                    "the owners' current refusal: {outcome:?}"
+                );
+            } else {
+                let outcome = outcome.expect("the search completes after the stale read");
+                assert!(!outcome.result.is_error, "{:?}", outcome.result);
+            }
+        }
     }
 }

@@ -136,6 +136,15 @@ them.
   `CopilotModelSnapshot::{offered_model_ids, account_model}` and
   `CopilotRuntime::account_model` (meerkat-copilot). (#1991)
 
+- `meerkat-authorization`: `LocalGrantAuthority::owner_change_in_progress`,
+  the owner change in progress on the grant authority's publication: a
+  published change that has not completed, or a reservation of the
+  publication's writer held now that has not published. It mirrors
+  `WorkAuthorization::owner_change_in_progress` for a caller that holds the
+  grant authority rather than a work and, like it, is a waiting hint only,
+  never a permission. Native admission reads it to tell a change that has
+  completed from one still in progress (see Fixed).
+
 ### Changed
 
 - A session on a zero-config Copilot route, or on a route of a
@@ -189,6 +198,65 @@ them.
   read wakes nothing. A member on network comms has no recorded endpoint
   until its first wake registers one, and reads with none until then, as
   before.
+
+- `meerkat-core`: a governed tool dispatch no longer refuses a call because
+  another actor's owner change completed while the dispatch read the work's
+  authorization publication. Its prepared entry and its entry stagings (the
+  root staging, the call-level execution policy gate's and a dispatch
+  issuance's) waited only for a change still in progress, so a read that
+  waited for an owner's lock while a change held it (for example during a
+  concurrent call's grant issuance on the same publication) ended stale with
+  none in progress, and the call answered `operation_refused` with
+  `{"kind": "reprepare_required", "tool_invoked": false}`. They now take the
+  wait after a stale read (`OwnerChangeChurn::wait_after_stale_read`): with
+  no change in progress they pause 1 ms and prepare again from the owners,
+  as one of the dispatch attempt's free rebuilds, within the existing bounds
+  (3 free rebuilds and 2 s per waiting state, inside the tool's timeout).
+  The rebuilt decision is current, or its refusal is the owners' current
+  answer, typed as before: a call whose authority the change revoked is
+  refused with that answer (`denied`). Shell synchronization only: no
+  machine input, wire type or error variant changes.
+
+- `meerkat-core`, `meerkat-tools`: the rest of Core's governed operations
+  no longer settle a stale read as their outcome when the owner change that
+  made it stale had already completed. A model request, a compaction
+  summary, a review's currentness check after its verdict and the
+  `web_search` helper's model request waited only for a change still in
+  progress, so such a read took the ordinary path at once: a model request
+  rebuilt once and, when that read was stale too, sent the controller
+  feedback request with a refusal notice, a compaction summary skipped its
+  compaction, a review was retired as an authority change and the call
+  refused with `reprepare_required`, and the search answered
+  `reprepare_required`. They now take the wait after a stale read too, within
+  the same bounds, and rebuild: a model request keeps its operation and saves
+  its own rebuild for after its free rebuilds, and a review whose decision a
+  completed change superseded is reviewed once more for the current decision.
+  A host's operation refusal observer sees `WaitedForOwnerChange` where it
+  saw `Rebuilt` and `ControllerFeedback` for such a model request;
+  `WaitedForOwnerChange` now also names the pause after a stale read with no
+  change in progress.
+
+- `meerkat-authorization`, `meerkat-runtime`: native admission no longer
+  refuses governed input as a changed policy because an owner change
+  completed while it read the grant publication. Its reads (controller
+  admission, `GrantBackedWorkPolicy::validate_controller_admission`, and a
+  scoped original's own mandate and named contributors' liveness in
+  `ScopedOriginalIngress`, which `require_source_original_live` and the
+  retained-resume checks share) each observed the publication once and never
+  rebuilt. A read that waited for an owner's lock while a change held it (for
+  example during a concurrent grant issuance) ended stale with no change in
+  progress, and admission answered `ControllerReadinessUnavailable` with
+  `PolicyChanged`. When the change it met has completed
+  (`LocalGrantAuthority::owner_change_in_progress` names none), each such read
+  is now made once more in place from the owners, as a grant-backed
+  preparation rebuilds once: the input is admitted while its authority holds,
+  and refused with the owners' current answer (`InputRefused` with `Denied`)
+  when the change revoked it. Admission still never waits, because it runs
+  inside the session's ingress transaction: a change still in progress, or
+  another one met by the second read (back-to-back changes), answers
+  `PolicyChanged` as before. A host that submits again after `PolicyChanged`
+  waits first, outside its own locks, with a bounded
+  `OwnerChangeChurn::wait_after_stale_read`, then resubmits once.
 
 ### Known limitations
 

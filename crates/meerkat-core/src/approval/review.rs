@@ -995,19 +995,23 @@ enum CurrentDecision {
     /// A completed owner publication change superseded it with this current
     /// decision of the same binding and work.
     Superseded(PreparedOperationCheck),
-    /// The owner refused or failed, or a change in progress did not complete
-    /// within the wait: the authority changed.
+    /// The owner refused or failed, or the reads stayed stale past the wait
+    /// (a change in progress did not complete, or the free rebuilds were
+    /// spent): the authority changed.
     Failed(OperationAuthorizationError),
     /// The attempt's own deadline passed (possibly while waiting).
     Expired,
 }
 
 /// Classify the reviewed decision through the canonical current/reprepare
-/// path ([`PreparedOperationCheck::current`]). A re-preparation refused while
-/// an owner change is still in progress on the work's own publication waits
-/// for that change, within the attempt's own deadline and `churn`'s bounds,
-/// and classifies again: a fact read while a change is half published is
-/// never used, and waiting weakens no refusal.
+/// path ([`PreparedOperationCheck::current`]). A re-preparation refused to
+/// rebuild is a stale read of the work's own publication: an owner change
+/// still in progress, or one that completed while it read. It waits after
+/// the stale read (for the change, or with none one backoff step), within
+/// the attempt's own deadline and `churn`'s bounds, and classifies again: a
+/// fact read while a change is half published is never used, a change that
+/// completed is classified by the owners' current answer, and waiting weakens
+/// no refusal.
 async fn current_decision(
     prepared: &PreparedOperationCheck,
     work: &WorkAuthorizationContext,
@@ -1025,15 +1029,15 @@ async fn current_decision(
         };
         if let OperationAuthorizationError::Refused(refusal) = &error
             && refusal.kind() == crate::authorization::OperationRefusalKind::ReprepareRequired
-            && let Some(wait) = churn
-                .wait_for_settled_change(
+            && churn
+                .wait_after_stale_read(
                     work.authorization().as_ref(),
                     Some(retained.remaining()),
                     "review_currentness",
                     Some(&prepared.binding().facts().operation_id),
                 )
                 .await
-            && wait.settled()
+                .settled()
         {
             continue;
         }
@@ -1054,9 +1058,11 @@ async fn current_decision(
 /// typed ([`ReviewAdmissionRefusal::Superseded`]) with its current successor,
 /// for the fenced dispatch's [`ReviewSupersession`] (as does the retained
 /// allow's check point at that dispatch's own root staging; see
-/// [`ReviewEntry::check_superseding`]). An owner change still in
-/// progress on the work's own publication is first waited out through
-/// `churn`, this attempt's own wait state, within the attempt's own deadline.
+/// [`ReviewEntry::check_superseding`]). A currentness read refused to
+/// rebuild (an owner change still in progress on the work's own publication,
+/// or one that completed while it read) first waits after that stale read
+/// through `churn`, this attempt's own wait state, within the attempt's own
+/// deadline, and is read again.
 /// `successor_material` is the owner material a re-admitted successor was
 /// already read with ([`Readmission`]); without it the material is read
 /// here, once.

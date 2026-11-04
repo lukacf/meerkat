@@ -253,16 +253,38 @@ def bazel_workspace_tests_failures(crate: str, manifest: dict, package_root: pat
 
 CANARY_ENV = "MEERKAT_WORKSPACE_TEST_FEATURES"
 # The canary in any whitespace layout (rustfmt splits a long cfg over lines):
-# `#[cfg(...)]` (no `]` inside), then the const assert on the variable and
-# its message.
+# `#[cfg(...)]` (no `]` inside) on a module whose generic function asserts on
+# the variable in an inline const, and a `#[used]` static that instantiates
+# that function. A generic function's inline const is evaluated only where
+# the function is instantiated, which only code generation does: a test
+# binary trips the canary, `cargo check`, clippy and an editor's check run do
+# not. A plain `const _` assert would trip all of them.
 CANARY = re.compile(
     r'#\[cfg\((?P<cfg>[^\]]*)\)\]\s*'
-    r'const _: \(\) = assert!\(\s*'
+    r'mod test_features_canary \{\s*'
+    r'fn require<T>\(\) \{\s*'
+    r'const \{\s*'
+    r'let _ = size_of::<T>\(\);\s*'
+    r'assert!\(\s*'
     r'option_env!\("' + CANARY_ENV + r'"\)\.is_none\(\),\s*'
     r'"(?P<message>(?:[^"\\]|\\.)*)"\s*,?\s*'
-    r'\);',
+    r'\);\s*'
+    r'\}\s*'
+    r'\}\s*'
+    r'#\[used\]\s*'
+    r'static REQUIRE: fn\(\) = require::<\(\)>;\s*'
+    r'\}',
     re.S,
 )
+
+
+def rust_string_value(literal: str) -> str:
+    """A Rust string literal's text as the compiler reads it, for the escapes
+    a canary message uses: a backslash at the end of a line drops the line
+    break and the next line's leading whitespace, and `\\"` and `\\\\` stand
+    for the character."""
+    text = re.sub(r"\\\n\s*", "", literal)
+    return re.sub(r'\\(["\\])', r"\1", text)
 
 
 def canary_features(cfg: str) -> list[str] | None:
@@ -285,10 +307,11 @@ def canary_features(cfg: str) -> list[str] | None:
 
 def canary_failures(crate: str, manifest: dict, package_root: pathlib.Path) -> list[str]:
     """A crate with test features carries exactly one test-feature canary in
-    its lib.rs, over exactly those features and naming them in its message: in
-    the repository (.cargo/config.toml [env] sets the variable) a test build
-    without them fails to compile instead of compiling the tests they gate
-    out. A crate without test features carries none."""
+    its lib.rs, over exactly those features, whose message names the command
+    to run (`cargo test -p <crate> --features <them>`): in the repository
+    (.cargo/config.toml [env] sets the variable) a test build without them
+    fails to compile instead of compiling the tests they gate out. A crate
+    without test features carries none."""
     wanted = test_features(manifest)
     try:
         text = (package_root / "src" / "lib.rs").read_text()
@@ -299,12 +322,17 @@ def canary_failures(crate: str, manifest: dict, package_root: pathlib.Path) -> l
     if not wanted:
         return [f"{crate}: has no test features but its lib.rs carries a test-feature canary"] if reads else []
     if len(found) != 1 or reads != 1:
-        return [f"{crate}: lib.rs must carry exactly one test-feature canary (cfg(all(test, not(...))) const assert on {CANARY_ENV})"]
+        return [
+            f"{crate}: lib.rs must carry exactly one test-feature canary (a cfg(all(test, not(...))) "
+            f"test_features_canary module asserting on {CANARY_ENV} in a generic function's inline const, "
+            "and the #[used] static that instantiates it)"
+        ]
     features = canary_features(found[0].group("cfg"))
     if features is None or sorted(features) != sorted(wanted):
         return [f"{crate}: the lib.rs canary requires {features}, not the crate's test features {wanted}"]
-    if f"--features {','.join(wanted)}" not in found[0].group("message"):
-        return [f"{crate}: the lib.rs canary message must name `--features {','.join(wanted)}`"]
+    command = f"cargo test -p {crate} --features {','.join(wanted)}"
+    if f"`{command}`" not in rust_string_value(found[0].group("message")):
+        return [f"{crate}: the lib.rs canary message must name `{command}`"]
     return []
 
 

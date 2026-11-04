@@ -36,6 +36,9 @@
 // passes them (`node scripts/core-workspace-args.mjs --tests -p meerkat-runtime`
 // prints them). A test build without them would compile the tests they
 // gate out and pass over fewer tests, so it fails to compile here instead.
+// Only code generation instantiates the generic function below (a test
+// binary does), so `cargo check`, clippy and an editor's check run, which
+// generate no code, are not stopped by it.
 // `.cargo/config.toml` [env] sets MEERKAT_WORKSPACE_TEST_FEATURES for this
 // repository's builds only; the published package builds without it.
 #[cfg(all(
@@ -47,11 +50,22 @@
         feature = "local-authorization"
     ))
 ))]
-const _: () = assert!(
-    option_env!("MEERKAT_WORKSPACE_TEST_FEATURES").is_none(),
-    "meerkat-runtime: this repository's test builds need `--features test-support,sqlite-store,live,local-authorization` \
-     (core-workspace-args.mjs --tests -p meerkat-runtime prints them)"
-);
+mod test_features_canary {
+    fn require<T>() {
+        const {
+            let _ = size_of::<T>();
+            assert!(
+                option_env!("MEERKAT_WORKSPACE_TEST_FEATURES").is_none(),
+                "meerkat-runtime: this repository's test builds need the crate's test features: \
+                 `cargo test -p meerkat-runtime --features test-support,sqlite-store,live,local-authorization` \
+                 (core-workspace-args.mjs --tests prints the flags for any selection)"
+            );
+        }
+    }
+
+    #[used]
+    static REQUIRE: fn() = require::<()>;
+}
 
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {

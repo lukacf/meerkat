@@ -486,10 +486,31 @@ class BazelWorkspaceTests(unittest.TestCase):
             self.assertEqual(len(pcs.bazel_workspace_tests_failures("demo-crate", manifest, root)), 1)
 
 
-def canary_source(predicate, message):
+def canary_source(predicate, message, used=True):
     return (
         "//! Demo.\n\n"
         "// Test-feature canary; .cargo/config.toml [env] sets MEERKAT_WORKSPACE_TEST_FEATURES.\n"
+        f"#[cfg(all(test, not({predicate})))]\n"
+        "mod test_features_canary {\n"
+        "    fn require<T>() {\n"
+        "        const {\n"
+        "            let _ = size_of::<T>();\n"
+        "            assert!(\n"
+        '                option_env!("MEERKAT_WORKSPACE_TEST_FEATURES").is_none(),\n'
+        f'                "{message}"\n'
+        "            );\n"
+        "        }\n"
+        "    }\n"
+        + ("\n    #[used]\n    static REQUIRE: fn() = require::<()>;\n" if used else "")
+        + "}\n\npub fn f() {}\n"
+    )
+
+
+def const_canary_source(predicate, message):
+    """The earlier shape: a `const _` assert, which `cargo check` and editors
+    evaluate too."""
+    return (
+        "//! Demo.\n\n"
         f"#[cfg(all(test, not({predicate})))]\n"
         "const _: () = assert!(\n"
         '    option_env!("MEERKAT_WORKSPACE_TEST_FEATURES").is_none(),\n'
@@ -513,33 +534,53 @@ class TestFeatureCanary(unittest.TestCase):
 
     def test_one_canary_over_exactly_the_test_features(self):
         single = crate_manifest(None, {"workspace-tests": []})
-        message = "demo: needs `--features workspace-tests`"
+        message = "demo: run `cargo test -p demo --features workspace-tests`"
         self.assertEqual(self.failures(single, canary_source('feature = "workspace-tests"', message)), [])
         several = crate_manifest({"features": ["a", "b"]}, {"a": [], "b": []})
-        source = canary_source('all(feature = "a", feature = "b")', "demo: needs `--features a,b`")
+        source = canary_source('all(feature = "a", feature = "b")', "demo: run `cargo test -p demo --features a,b`")
         self.assertEqual(self.failures(several, source), [])
 
     def test_a_canary_split_over_lines_counts(self):
         several = crate_manifest({"features": ["a", "b"]}, {"a": [], "b": []})
-        source = canary_source('all(feature = "a", feature = "b")', "demo: needs `--features a,b` \\\n     (more)")
+        message = "demo: needs its test features: \\\n                 `cargo test -p demo --features a,b` \\\n                 (more)"
+        source = canary_source('all(feature = "a", feature = "b")', message)
         split = source.replace("#[cfg(all(test, not(all(", "#[cfg(all(\n    test,\n    not(all(\n        ")
         self.assertEqual(self.failures(several, split), [])
+        broken = canary_source('all(feature = "a", feature = "b")', "demo: run `cargo test -p demo \\\n    --features a,b`")
+        self.assertEqual(self.failures(several, broken), [])
 
     def test_a_missing_wrong_or_doubled_canary_fails(self):
         single = crate_manifest(None, {"workspace-tests": []})
-        message = "demo: needs `--features workspace-tests`"
+        message = "demo: run `cargo test -p demo --features workspace-tests`"
         self.assertEqual(len(self.failures(single, "pub fn f() {}\n")), 1)
         self.assertEqual(len(self.failures(single, canary_source('feature = "other"', message))), 1)
         self.assertEqual(len(self.failures(single, canary_source('feature = "workspace-tests"', "demo: needs features"))), 1)
         doubled = canary_source('feature = "workspace-tests"', message) * 2
         self.assertEqual(len(self.failures(single, doubled)), 1)
         partial = crate_manifest({"features": ["a", "b"]}, {"a": [], "b": []})
-        self.assertEqual(len(self.failures(partial, canary_source('feature = "a"', "demo: needs `--features a,b`"))), 1)
+        self.assertEqual(len(self.failures(partial, canary_source('feature = "a"', "demo: run `cargo test -p demo --features a,b`"))), 1)
+
+    def test_the_message_names_the_whole_command(self):
+        single = crate_manifest(None, {"workspace-tests": []})
+        for message in (
+            "demo: needs `--features workspace-tests`",
+            "demo: run `cargo test -p other --features workspace-tests`",
+            "demo: run cargo test -p demo --features workspace-tests",
+        ):
+            self.assertEqual(len(self.failures(single, canary_source('feature = "workspace-tests"', message))), 1, message)
+
+    def test_only_a_canary_that_code_generation_alone_evaluates_counts(self):
+        single = crate_manifest(None, {"workspace-tests": []})
+        message = "demo: run `cargo test -p demo --features workspace-tests`"
+        # A `const _` assert trips `cargo check`, clippy and editors too.
+        self.assertEqual(len(self.failures(single, const_canary_source('feature = "workspace-tests"', message))), 1)
+        # Without the static nothing instantiates the function: no build trips it.
+        self.assertEqual(len(self.failures(single, canary_source('feature = "workspace-tests"', message, used=False))), 1)
 
     def test_a_crate_without_test_features_carries_none(self):
         plain = crate_manifest(None, {"a": []})
         self.assertEqual(self.failures(plain, "pub fn f() {}\n"), [])
-        stray = canary_source('feature = "a"', "demo: needs `--features a`")
+        stray = canary_source('feature = "a"', "demo: run `cargo test -p demo --features a`")
         self.assertEqual(len(self.failures(plain, stray)), 1)
 
 

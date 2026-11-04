@@ -25,10 +25,12 @@ LIBSQLITE3_FLAGS = { value = "-DSQLITE_DEFAULT_MEMSTATUS=0 -USQLITE_ENABLE_MEMOR
 # `workspace-tests` when it declares that feature), which no dev-dependency
 # turns on: every test command here passes them (`node
 # scripts/core-workspace-args.mjs --tests` prints them). A test build of such
-# a crate without them fails to compile in this repository (the const assert
-# in its lib.rs reads this variable) instead of compiling the tests they gate
-# out. The published packages build outside this configuration, so their
-# plain `cargo test` never sees it.
+# a crate without them fails to compile in this repository (the canary in its
+# lib.rs reads this variable and names the command to run) instead of
+# compiling the tests they gate out. Only code generation evaluates the
+# canary, so `cargo check`, clippy and editors' check runs never trip it. The
+# published packages build outside this configuration, so their plain
+# `cargo test` never sees it.
 MEERKAT_WORKSPACE_TEST_FEATURES = "required"
 
 [alias]

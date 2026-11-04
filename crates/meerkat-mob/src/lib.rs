@@ -44,14 +44,28 @@
 // passes them (`node scripts/core-workspace-args.mjs --tests -p meerkat-mob`
 // prints them). A test build without them would compile the tests they
 // gate out and pass over fewer tests, so it fails to compile here instead.
+// Only code generation instantiates the generic function below (a test
+// binary does), so `cargo check`, clippy and an editor's check run, which
+// generate no code, are not stopped by it.
 // `.cargo/config.toml` [env] sets MEERKAT_WORKSPACE_TEST_FEATURES for this
 // repository's builds only; the published package builds without it.
 #[cfg(all(test, not(feature = "test-support")))]
-const _: () = assert!(
-    option_env!("MEERKAT_WORKSPACE_TEST_FEATURES").is_none(),
-    "meerkat-mob: this repository's test builds need `--features test-support` \
-     (core-workspace-args.mjs --tests -p meerkat-mob prints them)"
-);
+mod test_features_canary {
+    fn require<T>() {
+        const {
+            let _ = size_of::<T>();
+            assert!(
+                option_env!("MEERKAT_WORKSPACE_TEST_FEATURES").is_none(),
+                "meerkat-mob: this repository's test builds need the crate's test features: \
+                 `cargo test -p meerkat-mob --features test-support` \
+                 (core-workspace-args.mjs --tests prints the flags for any selection)"
+            );
+        }
+    }
+
+    #[used]
+    static REQUIRE: fn() = require::<()>;
+}
 
 /// ATIF trajectory export vocabulary, for hosts that assemble mob member
 /// trajectories into one document. Gated because nothing in this crate consumes

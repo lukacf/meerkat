@@ -1564,18 +1564,13 @@ fn an_authorization_at_the_deadline_is_refused_and_records_the_expiry() {
 }
 
 /// An approver who is no longer current gets no permit: the decision ends
-/// refused, records `approver_not_current` and owes its notice. Evidence
-/// that went stale before the commit answers as a refusal does. Another
+/// refused, records `approver_not_current` and owes its notice. Another
 /// binding is refused as before and ends nothing.
 #[test]
 fn an_approver_who_is_no_longer_current_gets_no_permit() {
     let (_store, _clock, service) = fixture();
     let rendering = rendering();
     let refused = approved_subject(&service, &rendering, "subject:refused");
-    let stale = approved_subject(&service, &rendering, "subject:stale");
-    let evidence = Arc::new(Eligibility::current());
-    let stale_answer = ConsentEligibilityAnswer::Eligible(evidence.clone());
-    evidence.revoke();
 
     assert_eq!(
         refusal(
@@ -1596,41 +1591,91 @@ fn an_approver_who_is_no_longer_current_gets_no_permit() {
         "another binding ends nothing"
     );
 
-    for (decision_id, answer) in [
-        (&refused, ConsentEligibilityAnswer::Refused),
-        (&stale, stale_answer),
-    ] {
-        let error = service
-            .authorize_execution(decision_id, &operation_id(), &request_digest(), &answer)
-            .expect_err("no permit for an approver who is no longer current");
+    let error = service
+        .authorize_execution(
+            &refused,
+            &operation_id(),
+            &request_digest(),
+            &ConsentEligibilityAnswer::Refused,
+        )
+        .expect_err("no permit for an approver who is no longer current");
+    assert_eq!(refusal(&error), DecisionRefusal::NotEligible);
+    let ended = service.get(&refused).expect("read");
+    assert_eq!(ended.state.phase, DecisionPhase::ExecutionRefused);
+    assert!(!ended.state.permit_issued);
+    assert_eq!(ended.state.ended_at_ms, Some(HELD_AT));
+    assert_eq!(ended.state.notice, DecisionNotice::Owed);
+    assert_eq!(
+        ended.execution_refusal,
+        Some(reference(APPROVER_NOT_CURRENT_REFUSAL))
+    );
+    assert_eq!(
+        refusal(
+            &service
+                .authorize_execution(&refused, &operation_id(), &request_digest(), &current())
+                .expect_err("an ended decision is never authorized")
+        ),
+        DecisionRefusal::NotApproved
+    );
+}
+
+/// Evidence that is no longer current when the authorization commits (an
+/// owner change published since the answer, related or not) says nothing
+/// about the approver: it applies nothing, as an unsettled answer does, with
+/// no permit outstanding and with one. A current answer then authorizes. An
+/// answer that does not decide the outcome still applies: at the deadline
+/// the expiry is recorded.
+#[test]
+fn evidence_no_longer_current_at_the_commit_applies_nothing() {
+    let (_store, clock, service) = fixture();
+    let rendering = rendering();
+    let decision_id = approved_subject(&service, &rendering, "subject:stale");
+    let at_deadline = approved_subject(&service, &rendering, "subject:deadline");
+    let stale = || {
+        let evidence = Arc::new(Eligibility::current());
+        let answer = ConsentEligibilityAnswer::Eligible(evidence.clone());
+        evidence.revoke();
+        answer
+    };
+
+    let unsettled = |service: &DurableDecisionService, decision_id: &DecisionId| {
         assert_eq!(
-            refusal(&error),
-            DecisionRefusal::NotEligible,
-            "{decision_id}"
+            service
+                .authorize_execution(decision_id, &operation_id(), &request_digest(), &stale())
+                .expect_err("stale evidence applies nothing"),
+            DecisionError::Unsettled(decision_id.clone())
         );
-        let ended = service.get(decision_id).expect("read");
-        assert_eq!(ended.state.phase, DecisionPhase::ExecutionRefused);
-        assert!(!ended.state.permit_issued);
-        assert_eq!(ended.state.ended_at_ms, Some(HELD_AT));
-        assert_eq!(ended.state.notice, DecisionNotice::Owed);
-        assert_eq!(
-            ended.execution_refusal,
-            Some(reference(APPROVER_NOT_CURRENT_REFUSAL))
-        );
-        assert_eq!(
-            refusal(
-                &service
-                    .authorize_execution(
-                        decision_id,
-                        &operation_id(),
-                        &request_digest(),
-                        &current()
-                    )
-                    .expect_err("an ended decision is never authorized")
-            ),
-            DecisionRefusal::NotApproved
-        );
-    }
+    };
+    let before = service.get(&decision_id).expect("read");
+    unsettled(&service, &decision_id);
+    assert_eq!(service.get(&decision_id).expect("read"), before);
+    assert_eq!(before.state.phase, DecisionPhase::Approved);
+    assert!(before.execution_refusal.is_none());
+
+    let permit = service
+        .authorize_execution(&decision_id, &operation_id(), &request_digest(), &current())
+        .expect("a current answer authorizes");
+    let outstanding = service.get(&decision_id).expect("read");
+    assert!(outstanding.state.permit_issued);
+    unsettled(&service, &decision_id);
+    assert_eq!(service.get(&decision_id).expect("read"), outstanding);
+    service
+        .record_executed(&decision_id, permit.operation_id(), permit.request_digest())
+        .expect("executed");
+
+    clock.set(DEADLINE);
+    assert_eq!(
+        refusal(
+            &service
+                .authorize_execution(&at_deadline, &operation_id(), &request_digest(), &stale())
+                .expect_err("the deadline answers first")
+        ),
+        DecisionRefusal::Expired
+    );
+    assert_eq!(
+        service.get(&at_deadline).expect("read").state.phase,
+        DecisionPhase::Expired
+    );
 }
 
 /// An unsettled answer for the approver applies nothing, and reads and

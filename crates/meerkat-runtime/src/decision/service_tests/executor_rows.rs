@@ -165,6 +165,9 @@ enum Standing {
     Current,
     NotCurrent,
     Unsettled,
+    /// Evidence an owner change makes stale before the authorization
+    /// commits.
+    Stale,
 }
 
 /// The host's answers for the approvers who decided.
@@ -186,6 +189,12 @@ impl DecisionApproverCurrentness for Approvers {
             Standing::Current => current(),
             Standing::NotCurrent => ConsentEligibilityAnswer::Refused,
             Standing::Unsettled => ConsentEligibilityAnswer::Unsettled,
+            Standing::Stale => {
+                let evidence = Arc::new(Eligibility::current());
+                let answer = ConsentEligibilityAnswer::Eligible(evidence.clone());
+                evidence.revoke();
+                answer
+            }
         }
     }
 }
@@ -547,6 +556,40 @@ async fn an_unsettled_approver_answer_defers_the_decision() {
     let owner = ScriptedOwner::release();
     let approvers = Approvers::current();
     approvers.set(Standing::Unsettled);
+    let mut executor = start(&service, &[&owner], &approvers).expect("start");
+
+    let deferred = executor.pass().await;
+    assert_eq!(
+        deferred.outcomes,
+        vec![(
+            decision_id.clone(),
+            DecisionPassOutcome::Deferred(DecisionDeferral::ApproverUnsettled)
+        )]
+    );
+    assert_eq!(store.stored(&decision_id), before, "nothing applied");
+    assert!(owner.executions().is_empty());
+
+    approvers.set(Standing::Current);
+    let executed = executor.pass().await;
+    assert_eq!(
+        executed.outcomes,
+        vec![(decision_id, DecisionPassOutcome::Executed)]
+    );
+}
+
+/// Evidence an owner change made stale before the authorization committed
+/// (related or not) says nothing about the approver: the decision is
+/// deferred as for an unsettled answer, and a later pass with a current
+/// answer executes it.
+#[tokio::test]
+async fn evidence_no_longer_current_at_the_commit_defers_the_decision() {
+    let (store, _clock, service) = fixture();
+    let rendering = rendering();
+    let decision_id = approved(&service, &rendering);
+    let before = store.stored(&decision_id);
+    let owner = ScriptedOwner::release();
+    let approvers = Approvers::current();
+    approvers.set(Standing::Stale);
     let mut executor = start(&service, &[&owner], &approvers).expect("start");
 
     let deferred = executor.pass().await;

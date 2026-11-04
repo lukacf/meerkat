@@ -69,6 +69,70 @@ fn emit_shared_task_refusal(stage: &'static str, kind: &'static str) {
     );
     crate::original_ingress::shared_entry_diagnostics::emit(stage, None, Some(kind));
 }
+
+/// Whether `error` is Core's refusal to rebuild (`ReprepareRequired`): a
+/// stale read of the work's own publication that ran nothing.
+fn refuses_to_rebuild(error: &meerkat_core::ToolError) -> bool {
+    matches!(
+        error.primary_error(),
+        meerkat_core::ToolError::AuthorizationRefused { refusal }
+            if refusal.kind() == meerkat_core::authorization::OperationRefusalKind::ReprepareRequired
+    )
+}
+
+/// This exact call's current authorization answer as a service task answer.
+/// A refusal to rebuild stays typed. Every other refusal keeps its source
+/// projection: a denial stays Denied and unavailability stays Unavailable.
+fn service_task_check(
+    checked: Result<Option<ToolDispatchContext>, meerkat_core::ToolError>,
+) -> Result<Option<ToolDispatchContext>, ServiceTaskError> {
+    checked.map_err(|error| {
+        if refuses_to_rebuild(&error) {
+            ServiceTaskError::ReprepareRequired
+        } else {
+            authorization_error(error).into()
+        }
+    })
+}
+
+/// This exact call's pure current authorization check, checked again after a
+/// refusal to rebuild: an owner change of the work's own publication was in
+/// progress, or completed during the read. The refused check ran nothing, so
+/// it takes Core's wait after a stale read with `churn`, the one waiting
+/// state that every check of this entry point shares: one deadline, set at
+/// the first wait within the call's remaining tool time, and one budget of
+/// free rebuilds, neither renewed by a later check. Only the check repeats,
+/// never the preparation around it. The caller holds no lock, store
+/// transaction or source reservation across this wait, and cancelling it
+/// releases nothing. Any other answer is final at once, and a refusal to
+/// rebuild that outlasts the bounds stays typed.
+async fn check_current_after_owner_change(
+    context: &ToolDispatchContext,
+    call: ToolCallView<'_>,
+    plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
+    churn: &mut meerkat_core::authorization::OwnerChangeChurn,
+    site: &'static str,
+) -> Result<Option<ToolDispatchContext>, ServiceTaskError> {
+    loop {
+        let checked = context.check_tool_authorization(call, plan);
+        if let Err(error) = &checked
+            && refuses_to_rebuild(error)
+            && let Some(work) = context.work_authorization()
+            && churn
+                .wait_after_stale_read(
+                    work.authorization().as_ref(),
+                    context.remaining_tool_time(),
+                    site,
+                    None,
+                )
+                .await
+                .settled()
+        {
+            continue;
+        }
+        return service_task_check(checked);
+    }
+}
 impl InstalledAcquisition {
     /// Current workflow custody supplies G independently of the static helper
     /// inventory. Only a real matching static selection can supply warm setup
@@ -212,8 +276,9 @@ impl InstalledServiceTaskSource {
         selection: &meerkat_toolkit::setup::SharedPreparationSelection,
         resource: Arc<dyn crate::private_originals::SharedPreparationResource>,
     ) -> Result<crate::private_originals::InstalledSharedPreparation, ServiceTaskError> {
+        let mut churn = context.owner_change_churn();
         let task = self
-            .prepare_selected(call, context, plan, None)
+            .prepare_selected(call, context, plan, None, &mut churn)
             .await?
             .ok_or(PrivateOriginalError::Unavailable)?;
         let selected = self
@@ -225,15 +290,25 @@ impl InstalledServiceTaskSource {
             .map_err(|_| PrivateOriginalError::Unavailable)?
             .configured()
             .ok_or(PrivateOriginalError::Unavailable)?;
-        context
-            .check_tool_authorization(call, plan)
-            .map_err(authorization_error)?;
+        check_current_after_owner_change(
+            context,
+            call,
+            plan,
+            &mut churn,
+            "toolkit.service_task.join",
+        )
+        .await?;
         let member = task
             .join_shared_preparation(selection, owner.work_backend.clone(), resource)
             .await?;
-        context
-            .check_tool_authorization(call, plan)
-            .map_err(authorization_error)?;
+        check_current_after_owner_change(
+            context,
+            call,
+            plan,
+            &mut churn,
+            "toolkit.service_task.joined",
+        )
+        .await?;
         member.check_current().await?;
         Ok(member)
     }
@@ -247,8 +322,9 @@ impl InstalledServiceTaskSource {
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
         member: Option<&crate::private_originals::InstalledSharedPreparation>,
     ) -> Result<crate::private_originals::InstalledSharedEntry, ServiceTaskError> {
+        let mut churn = context.owner_change_churn();
         let task = self
-            .prepare_selected(call, context, plan, None)
+            .prepare_selected(call, context, plan, None, &mut churn)
             .await
             .map_err(|error| service_task_refusal("reserve.prepare", error))?
             .ok_or_else(|| {
@@ -263,12 +339,13 @@ impl InstalledServiceTaskSource {
             },
         )
         .await?;
-        if let Err(error) = context.check_tool_authorization(call, plan) {
+        // The reservation is source custody that a cancellation drains, so
+        // this check never waits while holding it. A refusal to rebuild
+        // stays typed here and settles the unused reservation.
+        if let Err(error) = service_task_check(context.check_tool_authorization(call, plan)) {
             // No private transport command has been prepared on this path.
             entry.settle_unentered()?;
-            return Err(
-                shared_task_refusal("reserve.authorization", authorization_error(error)).into(),
-            );
+            return Err(service_task_refusal("reserve.authorization", error));
         }
         Ok(entry)
     }
@@ -284,13 +361,19 @@ impl InstalledServiceTaskSource {
         if call.name != "setup_stop" {
             return Err(PrivateOriginalError::Denied.into());
         }
+        let mut churn = context.owner_change_churn();
         let task = self
-            .prepare_selected(call, context, plan, None)
+            .prepare_selected(call, context, plan, None, &mut churn)
             .await?
             .ok_or(PrivateOriginalError::Unavailable)?;
-        context
-            .check_tool_authorization(call, plan)
-            .map_err(authorization_error)?;
+        check_current_after_owner_change(
+            context,
+            call,
+            plan,
+            &mut churn,
+            "toolkit.service_task.leave",
+        )
+        .await?;
         Ok(task.leave_shared_preparation(member).await?)
     }
     pub async fn complete_shared_preparation(
@@ -303,13 +386,19 @@ impl InstalledServiceTaskSource {
         if call.name != "setup_selected_install" {
             return Err(PrivateOriginalError::Denied.into());
         }
+        let mut churn = context.owner_change_churn();
         let task = self
-            .prepare_selected(call, context, plan, None)
+            .prepare_selected(call, context, plan, None, &mut churn)
             .await?
             .ok_or(PrivateOriginalError::Unavailable)?;
-        context
-            .check_tool_authorization(call, plan)
-            .map_err(authorization_error)?;
+        check_current_after_owner_change(
+            context,
+            call,
+            plan,
+            &mut churn,
+            "toolkit.service_task.complete",
+        )
+        .await?;
         Ok(task.complete_shared_preparation(member).await?)
     }
     pub async fn prepare(
@@ -319,7 +408,8 @@ impl InstalledServiceTaskSource {
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
         agent: &str,
     ) -> Result<Option<InstalledServiceTask>, ServiceTaskError> {
-        self.prepare_selected(call, context, plan, Some(agent))
+        let mut churn = context.owner_change_churn();
+        self.prepare_selected(call, context, plan, Some(agent), &mut churn)
             .await
     }
     /// Prepare only this helper's captured waiting consumer through the same
@@ -331,7 +421,9 @@ impl InstalledServiceTaskSource {
         context: &ToolDispatchContext,
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
     ) -> Result<Option<InstalledServiceTask>, ServiceTaskError> {
-        self.prepare_selected(call, context, plan, None).await
+        let mut churn = context.owner_change_churn();
+        self.prepare_selected(call, context, plan, None, &mut churn)
+            .await
     }
     /// Public service review may select this member's already configured setup
     /// capability for the fresh task. Other preparation surfaces keep their
@@ -342,7 +434,8 @@ impl InstalledServiceTaskSource {
         context: &ToolDispatchContext,
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
     ) -> Result<Option<InstalledServiceTask>, ServiceTaskError> {
-        self.prepare_selected_with_setup(call, context, plan, None, true)
+        let mut churn = context.owner_change_churn();
+        self.prepare_selected_with_setup(call, context, plan, None, true, &mut churn)
             .await
     }
     /// Software review has no proposed target principal. Select the waiting
@@ -353,7 +446,9 @@ impl InstalledServiceTaskSource {
         context: &ToolDispatchContext,
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
     ) -> Result<Option<InstalledServiceTask>, ServiceTaskError> {
-        self.prepare_selected(call, context, plan, None).await
+        let mut churn = context.owner_change_churn();
+        self.prepare_selected(call, context, plan, None, &mut churn)
+            .await
     }
     async fn prepare_selected(
         &self,
@@ -361,8 +456,9 @@ impl InstalledServiceTaskSource {
         context: &ToolDispatchContext,
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
         proposed_agent: Option<&str>,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
     ) -> Result<Option<InstalledServiceTask>, ServiceTaskError> {
-        self.prepare_selected_with_setup(call, context, plan, proposed_agent, false)
+        self.prepare_selected_with_setup(call, context, plan, proposed_agent, false, churn)
             .await
     }
     async fn prepare_selected_with_setup(
@@ -372,6 +468,7 @@ impl InstalledServiceTaskSource {
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
         proposed_agent: Option<&str>,
         select_setup: bool,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
     ) -> Result<Option<InstalledServiceTask>, ServiceTaskError> {
         let selected = self.selected.upgrade().ok_or_else(|| {
             shared_task_refusal(
@@ -458,9 +555,19 @@ impl InstalledServiceTaskSource {
             .host
             .originals
             .observe_service_task_stage_for_test("prepare.authorization");
-        context.check_tool_authorization(call, plan)
-            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"prepare.authorization"}}"#))
-            .map_err(authorization_error)?;
+        check_current_after_owner_change(
+            context,
+            call,
+            plan,
+            churn,
+            "toolkit.service_task.authorization",
+        )
+        .await
+        .inspect_err(|_| {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"prepare.authorization"}}"#
+            )
+        })?;
         let agent = match proposed_agent {
             Some(agent) => agent.to_owned(),
             None => snapshot
@@ -514,9 +621,17 @@ impl InstalledServiceTaskSource {
             .host
             .originals
             .observe_service_task_stage_for_test("prepare.final_authorization");
-        context.check_tool_authorization(call, plan)
-            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"prepare.final_authorization"}}"#))
-            .map_err(authorization_error)?;
+        // The preparation above ran once. Only this check repeats after a
+        // refusal to rebuild, with the same churn as the first check.
+        check_current_after_owner_change(
+            context,
+            call,
+            plan,
+            churn,
+            "toolkit.service_task.final_authorization",
+        )
+        .await
+        .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"prepare.final_authorization"}}"#))?;
         Ok(task)
     }
 }

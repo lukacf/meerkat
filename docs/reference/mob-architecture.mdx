@@ -199,8 +199,14 @@ name.
 `MobHandle::adopt_legacy_identity_entry(identity)` adopts, once, a member a
 host seated before identity entries existed: one whose spawn row carries the
 durable-identity continuity marker or the legacy `agent_identity` label naming
-its own id. MobMachine decides the adoption from that observation of the
-member's current incarnation, read from the member binding history. The
+its own identity. The label names it when it spells the member id, or when the
+member id is the label's name in the one encoding of a name into a member id
+(`member_id_for_name`: the label `team:alice` names the member
+`mk--team_calice`, and the label `mk--ops` the member `mk--mk--ops`). The label
+is read trimmed; an empty one, or one in the generated runtime-alias namespace
+(`rt:`), names no member. MobMachine decides the adoption from that
+observation of the member's current incarnation, read from the member binding
+history. The
 adoption is journaled on a session-binding row that carries the member's
 binding unchanged, with its stored peer endpoint when the machine holds one, a
 restart restores the entry from it, and the label is never read for the member
@@ -374,18 +380,21 @@ under keys of their own, so an older release ignores them.
 Since 0.9.9 a Rust host declares its identity entries as data, and Core
 applies them: `MobHandle::apply_declared_roster(DeclaredRoster)`. The host's
 roster is the authority. A `DeclaredRoster` holds the identities it declares
-(`DeclaredEntry`: a `SpawnMemberSpec`, and whether the host holds the
-identity's creation for its held protocol), whether it is the host's complete
-roster, the role migrations it declares (`with_role_migration(identity,
-from)`) and the host's one-shot first-boot requests (`FirstBootRequest`).
+(`DeclaredEntry`: a `SpawnMemberSpec`, whether the host holds the
+identity's creation for its held protocol, and what the spec carries of the
+identity's member build, `DeclaredBuild`, set with `with_build`), whether it
+is the host's complete roster, the role migrations it declares
+(`with_role_migration(identity, from)`) and the host's one-shot first-boot
+requests (`FirstBootRequest`).
 MobMachine decides each identity's verdict from its declaration and its member
 facts (`DeclareIdentityEntry`), in memory, in chunks of
 `DECLARED_APPLY_CHUNK` identities, each one machine step, and the handle
 realizes the verdict with the mob's own steps. Each identity is answered on
 its own (`DeclaredRosterOutcome::entries`, a `DeclaredEntryOutcome`): one
 identity's refusal or failure never fails the pass. The call fails as a whole
-only for a mob that is not running, an identity store whose intent rows
-cannot be read now (retryable), or another apply of the mob that is running:
+only for a mob that is not running, an identity store whose intent rows and
+member binding history (one read) cannot be read now (retryable), or another
+apply of the mob that is running:
 applies of one mob run one at a time, and a call while another runs is
 refused `MobError::LifecycleOperationPending`, retryable, and writes nothing.
 An apply's end always lets the next one open: a call dropped at any point, a
@@ -405,6 +414,7 @@ seats); the agent lane is refused `MobError::ScopeDenied`.
 | Placed or externally bound, no member | Hosted on its first use (`HostedOnFirstUse`): its host creates the member with the entry's custody, a placed spawn or, for an externally bound one, the owner-bound spawn (`spawn_spec_with_generated_owner_context`, which keeps a host's entry custody). |
 | Held creation, never created | Awaits its held creation (`AwaitingHeldCreation`): the host's held protocol creates it. The host's current hold policy decides on every apply; nothing is kept of an earlier one. |
 | Never seated, its preparation `required` or `constructed` (`DeclaredEntry::with_preparation`, as the host's rule for its profile derives it at this apply) | Awaits its host's preparation (`PreparationPending`): not seated, and a delivery to it is refused retryable (`MobError::MemberWakeRefused`, `HostPreparationPending`). A later declaration with no preparation settles a `required` one; a `constructed` one is settled only by the activation of its held construction (see [Host preparation and held constructions](#host-preparation-and-held-constructions)). |
+| Declared with its lifecycle facts only (`DeclaredBuild::FactsOnly`), and its verdict would build its member: an owed seat, a rotation onto a fresh session, or a first-boot `Fresh` request's fresh life | No member step (`BuildRequired`): no member is seated, rotated or started, an archived session is not let go, and a first-boot request is not carried out. The host declares the identity again with its composed build (`DeclaredBuild::Composed`, the default). Every other verdict answers as for a composed declaration, since it builds nothing from the spec. |
 | Spawn, wake or retirement in flight | Deferred to the next apply (`Deferred`). |
 | A worker holds the name, the identity store manages it (a host adoption), declared twice, or a first-boot request for an undeclared identity | Refused for that identity alone (`Refused`, `DeclaredEntryRefusal`). |
 | A created (store-owned) entry holds the name | Left as it is (`Noted`, `DeclaredEntryNote::OwnedByStore`): a quiet steady state. The listing changes nothing and retires nothing, so a roster that keeps listing an identity after its adoption into store custody (a rollback to an earlier roster generation included) is harmless. |
@@ -413,8 +423,15 @@ seats); the agent lane is refused `MobError::ScopeDenied`.
 
 A legacy member listed under its own name is adopted first
 (`adopt_legacy_identity_entry`) and then declared as the entry it is. A
-dormant seat never takes an identity hosted on its first use or awaiting its
-held creation (`MobError::WiringError`).
+complete roster also adopts each member it does not list whose spawn row
+carries both legacy marks (the durable-identity continuity marker and the
+legacy label naming its own identity) and that no host's intent row names,
+readable or not: the adoption applies that rule again to the member binding
+and intent rows it reads before MobMachine decides. Its seal then unlists the
+entry and retires the member. A member with one mark only, or one a host
+adopted, is left as it is, and a partial roster adopts no member it does not
+list. A dormant seat never takes an identity hosted on its first use or
+awaiting its held creation (`MobError::WiringError`).
 
 A complete roster is sealed after its last chunk (`SealDeclaredRoster`):
 every Declared entry it does not list is unlisted (never a created entry, nor
@@ -427,13 +444,15 @@ once. An entry whose spawn is still in flight (its spawn ladder is open,
 before or after its membership step) is left to a later complete apply,
 and the answer does not name it: once the spawn completes, that apply
 retires the member; when the spawn fails, the entry is left unseated, and
-that apply removes it. A worker is never unlisted. The answer names each
-unlisted entry (`DeclaredRosterOutcome::unlisted`: `Retired`, `Removed`, or
-`Failed`, which the next complete apply retries). Any other retirement
-keeps the entry: a host's `retire` of a declared identity that stays listed
-ends its member, and the next apply seats the identity again. To take a
-declared identity out of the roster, unlist it (`remove_identity` is
-permanent: it tombstones the name).
+that apply removes it. A worker is never unlisted, but for an unlisted
+legacy member the complete roster adopted first (above). The answer names
+each unlisted entry (`DeclaredRosterOutcome::unlisted`: `Retired`, `Removed`,
+or `Failed`, which the next complete apply retries; a failed adoption of an
+unlisted legacy member is answered `Failed` too, and the member stays). Any
+other retirement keeps the entry: a host's `retire` of a declared identity
+that stays listed ends its member, and the next apply seats the identity
+again. To take a declared identity out of the roster, unlist it
+(`remove_identity` is permanent: it tombstones the name).
 
 An unlisted identity listed again comes back as the same identity. The end of
 its retirement recorded the session it archived (MobMachine's

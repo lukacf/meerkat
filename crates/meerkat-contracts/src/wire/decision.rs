@@ -516,6 +516,65 @@ pub struct DecisionDecideParams {
     pub reason: Option<String>,
 }
 
+/// The notification an `rkat-rpc` stdio connection sends its operator about
+/// one durable decision.
+pub const DECISION_NOTICE_NOTIFICATION: &str = "decision/notice";
+
+/// `decision/notice` parameters: what an `rkat-rpc` stdio connection showed
+/// its operator about one durable decision. When its client lists
+/// (`decision/list`), the connection presents each open decision of the
+/// returned page that is addressed to an approver id its operator acts for
+/// and that it has not presented yet: it writes a `presented` notice
+/// carrying the whole rendering, then records that presentation (to the
+/// approver, with this notice's id as its message reference) before it
+/// answers the list. A notice grants nothing: the operator decides with
+/// `decision/decide` on the same connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireDecisionNotice {
+    /// The notice's id: the message reference of the presentation it
+    /// records.
+    pub notice_id: String,
+    pub decision_id: String,
+    /// The decision's kind token.
+    pub kind: String,
+    pub event: WireDecisionNoticeEvent,
+    /// The decision's phase when the notice was written.
+    pub phase: WireDecisionPhase,
+    /// The approver id the decision is held for.
+    pub approver_id: String,
+    /// The requester's principal key.
+    pub requester: String,
+    /// What the operator was shown; set on a `presented` notice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<WireDecisionNoticePresentation>,
+}
+
+/// What a decision notice reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireDecisionNoticeEvent {
+    /// The connection presented the decision to its operator.
+    Presented,
+    /// Forward compatibility: an event this version does not know. The
+    /// server never sends it.
+    #[serde(other)]
+    Unknown,
+}
+
+/// The rendering a `presented` notice showed: the decision's whole
+/// rendering, its renderer and digest, and its canonical parts (one part:
+/// the whole rendering).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireDecisionNoticePresentation {
+    pub rendering: String,
+    pub renderer: String,
+    pub subject_digest: String,
+    pub parts: Vec<WireCanonicalPart>,
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
@@ -574,5 +633,62 @@ mod tests {
                 "a decide body naming {field} is refused"
             );
         }
+    }
+
+    /// A presented notice carries the whole rendering as one canonical
+    /// part; an event this version does not know reads as unknown, and a
+    /// notice without a presentation omits it.
+    #[test]
+    fn a_decision_notice_has_its_documented_shape() {
+        let notice = WireDecisionNotice {
+            notice_id: "notice-1".into(),
+            decision_id: "decision:0".into(),
+            kind: "release".into(),
+            event: WireDecisionNoticeEvent::Presented,
+            phase: WireDecisionPhase::Open,
+            approver_id: "operator".into(),
+            requester: "principal:0".into(),
+            presentation: Some(WireDecisionNoticePresentation {
+                rendering: "Release build 7.".into(),
+                renderer: "render.v1".into(),
+                subject_digest: "sha256:1".into(),
+                parts: vec![WireCanonicalPart {
+                    index: 0,
+                    count: 1,
+                    part_digest: "sha256:1".into(),
+                }],
+            }),
+        };
+        let encoded = serde_json::to_value(&notice).expect("encodes");
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "notice_id": "notice-1",
+                "decision_id": "decision:0",
+                "kind": "release",
+                "event": "presented",
+                "phase": "open",
+                "approver_id": "operator",
+                "requester": "principal:0",
+                "presentation": {
+                    "rendering": "Release build 7.",
+                    "renderer": "render.v1",
+                    "subject_digest": "sha256:1",
+                    "parts": [{"index": 0, "count": 1, "part_digest": "sha256:1"}],
+                },
+            })
+        );
+        let decoded: WireDecisionNotice = serde_json::from_value(encoded).expect("decodes");
+        assert_eq!(decoded, notice);
+
+        let mut later = serde_json::to_value(WireDecisionNotice {
+            presentation: None,
+            ..notice
+        })
+        .expect("encodes");
+        assert!(later.get("presentation").is_none(), "{later}");
+        later["event"] = serde_json::json!("closed");
+        let decoded: WireDecisionNotice = serde_json::from_value(later).expect("decodes");
+        assert_eq!(decoded.event, WireDecisionNoticeEvent::Unknown);
     }
 }

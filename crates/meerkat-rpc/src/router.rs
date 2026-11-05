@@ -19653,6 +19653,9 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
             live_webrtc_enabled: cfg!(feature = "live-webrtc"),
             // The plain router never emits consent notices.
             consent_enabled: false,
+            // Nor decision notices: only a stdio connection's operator
+            // receives them.
+            decision_notices_enabled: false,
         };
         let mut id = 0_i64;
         for method in meerkat_contracts::rpc_method_names(options) {

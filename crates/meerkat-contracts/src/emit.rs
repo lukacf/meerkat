@@ -671,6 +671,9 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "DecisionListResult": schema_for!(crate::wire::DecisionListResult),
         "DecisionResult": schema_for!(crate::wire::DecisionResult),
         "DecisionRenderingResult": schema_for!(crate::wire::DecisionRenderingResult),
+        "WireDecisionNoticeEvent": schema_for!(crate::wire::WireDecisionNoticeEvent),
+        "WireDecisionNoticePresentation": schema_for!(crate::wire::WireDecisionNoticePresentation),
+        "WireDecisionNotice": schema_for!(crate::wire::WireDecisionNotice),
     });
     write_pretty_json(output_dir.join("wire-types.json"), &wire_types)?;
 

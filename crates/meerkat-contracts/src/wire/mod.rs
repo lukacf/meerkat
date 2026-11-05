@@ -86,13 +86,14 @@ pub use connection::{
     WireScopeEvidence,
 };
 pub use decision::{
-    DecisionAudienceRequest, DecisionDecideParams, DecisionGetParams, DecisionListParams,
-    DecisionListResult, DecisionPresentParams, DecisionPresentationRequest,
+    DECISION_NOTICE_NOTIFICATION, DecisionAudienceRequest, DecisionDecideParams, DecisionGetParams,
+    DecisionListParams, DecisionListResult, DecisionPresentParams, DecisionPresentationRequest,
     DecisionRenderingParams, DecisionRenderingResult, DecisionResult, DecisionWithdrawParams,
     WireCanonicalPart, WireDecision, WireDecisionAssurance, WireDecisionErrorData,
-    WireDecisionEvidence, WireDecisionNoticeState, WireDecisionOutcome, WireDecisionPhase,
-    WireDecisionRefusal, WireDecisionReviewVerdict, WireDecisionStage, WireDecisionTier,
-    WirePresentationAudience, WirePresentationRecord, WireUnreadableDecision,
+    WireDecisionEvidence, WireDecisionNotice, WireDecisionNoticeEvent,
+    WireDecisionNoticePresentation, WireDecisionNoticeState, WireDecisionOutcome,
+    WireDecisionPhase, WireDecisionRefusal, WireDecisionReviewVerdict, WireDecisionStage,
+    WireDecisionTier, WirePresentationAudience, WirePresentationRecord, WireUnreadableDecision,
 };
 pub use rpc_surface::{
     ArchiveSessionParams, BlobGetParams, CallbackToolDefinition, DeferredCreateResult,

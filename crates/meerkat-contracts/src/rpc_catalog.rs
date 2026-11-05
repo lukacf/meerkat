@@ -23,6 +23,10 @@ pub struct RpcMethodCatalogOptions {
     /// serves R3 human consent (the stock governed stdio pipe); the plain
     /// router never emits it.
     pub consent_enabled: bool,
+    /// `decision/notice` is delivered only by an `rkat-rpc` stdio connection
+    /// whose operator decides durable decisions (Unix builds with local
+    /// authorization); the plain router never emits it.
+    pub decision_notices_enabled: bool,
 }
 
 impl RpcMethodCatalogOptions {
@@ -41,6 +45,7 @@ impl RpcMethodCatalogOptions {
             skills_enabled: true,
             live_webrtc_enabled: true,
             consent_enabled: true,
+            decision_notices_enabled: true,
         }
     }
 }
@@ -1345,6 +1350,13 @@ pub fn rpc_notification_catalog(
         ));
     }
 
+    if options.decision_notices_enabled {
+        notifications.push(RpcNotificationDescriptor::basic(
+            crate::wire::DECISION_NOTICE_NOTIFICATION,
+            "One durable decision this stdio connection presented to its operator, with the whole rendering, written before the decision/list answer that caused it",
+        ));
+    }
+
     if options.runtime_available && options.live_enabled && options.live_webrtc_enabled {
         notifications.extend([
             RpcNotificationDescriptor::basic(
@@ -1421,6 +1433,23 @@ mod tests {
         assert!(notifications.iter().any(|n| n == "session/stream_end"));
         assert!(notifications.iter().any(|n| n == "mob/stream_event"));
         assert!(notifications.iter().any(|n| n == "mob/stream_end"));
+    }
+
+    /// The decision notice is documented, and a surface whose connections
+    /// have no operator does not advertise it.
+    #[test]
+    fn the_decision_notice_is_documented_and_follows_its_option() {
+        let notice = crate::wire::DECISION_NOTICE_NOTIFICATION;
+        let documented = rpc_notification_names(RpcMethodCatalogOptions::documented_surface());
+        assert!(documented.iter().any(|n| n == notice), "{documented:?}");
+        let without_operator = rpc_notification_names(RpcMethodCatalogOptions {
+            decision_notices_enabled: false,
+            ..RpcMethodCatalogOptions::documented_surface()
+        });
+        assert!(
+            !without_operator.iter().any(|n| n == notice),
+            "{without_operator:?}"
+        );
     }
 
     #[test]

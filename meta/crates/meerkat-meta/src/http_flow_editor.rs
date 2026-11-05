@@ -402,13 +402,22 @@ async fn protected_flow_editor_rpc_handler(
             );
         }
     };
-    let access_view = match sse_access_context(
-        Some(&state.decisions),
-        &state.session_fences,
-        state.access.as_ref(),
-        &headers,
-        &uri,
-    ) {
+    // A write on the Console's listener takes its token only from the
+    // `Authorization` header: a request whose only token is in the query
+    // string is refused before its caller is resolved, on an open Console
+    // too.
+    let caller = if crate::http_console::token_only_in_query(&headers, &uri) {
+        Err(())
+    } else {
+        sse_access_context(
+            Some(&state.decisions),
+            &state.session_fences,
+            state.access.as_ref(),
+            &headers,
+            &uri,
+        )
+    };
+    let access_view = match caller {
         Ok(caller) => caller.access_view,
         Err(()) => {
             return (

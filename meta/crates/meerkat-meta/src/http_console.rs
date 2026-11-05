@@ -8117,10 +8117,18 @@ fn console_write_auth_context(
     headers: &HeaderMap,
     uri: &Uri,
 ) -> Option<ConsoleHttpAuthContext> {
-    if header_bearer_token(headers).is_none() && query_auth_token(uri).is_some() {
+    if token_only_in_query(headers, uri) {
         return None;
     }
     console_request_auth_context(state, headers, uri)
+}
+
+/// Whether a request's only token is in the URL's query string: no bearer
+/// `Authorization` header and an `auth_token` query key. Every write on the
+/// Console's listener refuses such a request with 401, on an open Console
+/// too.
+pub(crate) fn token_only_in_query(headers: &HeaderMap, uri: &Uri) -> bool {
+    header_bearer_token(headers).is_none() && query_auth_token(uri).is_some()
 }
 
 #[derive(Debug)]

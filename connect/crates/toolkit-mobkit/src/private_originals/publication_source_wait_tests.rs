@@ -13,6 +13,7 @@
 use super::*;
 use crate::publication_source_probe::{self, Hold};
 use meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+use std::collections::BTreeSet;
 use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
 
@@ -27,8 +28,8 @@ struct Found {
     reads: usize,
     /// Controller grants the helper's issuance appended.
     issued: usize,
-    /// From the first read to the original's settled turn.
-    settled_after: Duration,
+    /// From the first read to the first Find's result reaching the model.
+    answered_after: Duration,
     /// The helper's source row and its work effect after the first Find
     /// settled (taken before any fresh Find), and at the end.
     first_row: Option<toolkit_store::StoredRecord>,
@@ -37,15 +38,41 @@ struct Found {
     last_effect: toolkit_store::StoredEffect,
 }
 
-/// The helper's one canonical source row.
-async fn helper_row(fixture: &Fixture) -> toolkit_store::StoredRecord {
+/// The ids of the helper source rows in the owner's helper scope.
+async fn helper_rows(fixture: &Fixture) -> BTreeSet<String> {
     let scope = toolkit_store::StoreScope {
         realm: fixture.scope.realm.clone(),
         owner: format!("toolkit/helper-originals/{}", fixture.scope.owner),
     };
     let rows = fixture.store.list_records(&scope, None, 10).await.unwrap();
-    assert_eq!(rows.len(), 1, "one canonical helper source row");
-    fixture.store.get(&rows[0].key).await.unwrap().unwrap()
+    assert!(rows.len() < 10);
+    rows.into_iter().map(|row| row.key.id).collect()
+}
+
+/// The one helper source row this Find's helper wrote: the fixture's
+/// configured producer has its own, written before (`before`).
+async fn helper_row(fixture: &Fixture, before: &BTreeSet<String>) -> toolkit_store::StoredRecord {
+    let ours = helper_rows(fixture)
+        .await
+        .into_iter()
+        .filter(|id| !before.contains(id))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ours.len(),
+        1,
+        "one canonical source row of this helper: {ours:?}"
+    );
+    let scope = toolkit_store::StoreScope {
+        realm: fixture.scope.realm.clone(),
+        owner: format!("toolkit/helper-originals/{}", fixture.scope.owner),
+    };
+    let rows = fixture.store.list_records(&scope, None, 10).await.unwrap();
+    let key = rows
+        .into_iter()
+        .map(|row| row.key)
+        .find(|key| key.id == ours[0])
+        .unwrap();
+    fixture.store.get(&key).await.unwrap().unwrap()
 }
 
 /// The helper's work effect, named by its source row.
@@ -96,7 +123,17 @@ async fn finds_with_hold_at_publication_source(hold: Hold, fresh_finds: usize) -
     let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
         WAIT,
         Box::pin(async {
+            let before = helper_rows(&fixture).await;
             let first = fixture.submit().await;
+            // When the first Find's result reached the original's model.
+            let answered = async {
+                loop {
+                    if !script.observations().0.is_empty() {
+                        break Instant::now();
+                    }
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            };
             // Each fresh Find goes once the hold ended and the first Find's
             // settled state was read.
             let fresh = async {
@@ -114,16 +151,16 @@ async fn finds_with_hold_at_publication_source(hold: Hold, fresh_finds: usize) -
                         + Duration::from_millis(100),
                 )
                 .await;
-                let row = helper_row(&fixture).await;
+                let row = helper_row(&fixture, &before).await;
                 let effect = work_effect(&fixture, &row).await;
                 for _ in 0..fresh_finds {
                     script.release_fresh_find();
                 }
                 (Some(row), Some(effect))
             };
-            let (finished, (first_row, first_effect)) = tokio::join!(fixture.finish(&first), fresh);
+            let (finished, answered, (first_row, first_effect)) =
+                tokio::join!(fixture.finish(&first), answered, fresh);
             finished.unwrap();
-            let settled = Instant::now();
             let (feedback, _, _) = script.observations();
             let (start, from) = reached
                 .lock()
@@ -133,14 +170,14 @@ async fn finds_with_hold_at_publication_source(hold: Hold, fresh_finds: usize) -
                 .iter()
                 .filter(|event| **event == "publication_source_read")
                 .count();
-            let last_row = helper_row(&fixture).await;
+            let last_row = helper_row(&fixture, &before).await;
             let last_effect = work_effect(&fixture, &last_row).await;
             Found {
                 feedback,
                 helpers: fixture.source.helper_sources.lock().unwrap().len(),
                 reads,
                 issued: issued.load(Ordering::SeqCst),
-                settled_after: settled.duration_since(start),
+                answered_after: answered.duration_since(start),
                 first_row,
                 first_effect,
                 last_row,
@@ -186,9 +223,9 @@ fn assert_waited_out(found: &Found, hold: Duration) {
     assert!(found.reads >= 1, "the read was made");
     assert_eq!(found.issued, 1, "the controller grant was issued once");
     assert!(
-        found.settled_after >= hold - Duration::from_millis(50),
+        found.answered_after >= hold - Duration::from_millis(50),
         "the read waited for the hold: {:?}",
-        found.settled_after
+        found.answered_after
     );
 }
 
@@ -222,13 +259,15 @@ async fn publication_source_read_waits_out_sources_held_with_no_owner_change() {
 
 // The negative control: the owner's originals collection held at the read
 // past Core's owner-change bound, with no owner change in progress. The read
-// is refused typed once the bound ran out, and is not made again.
+// is refused typed once the bound ran out (before the hold ended), and is not
+// made again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publication_source_read_held_past_the_bound_is_refused_typed_and_not_read_again() {
+    let hold = OWNER_CHANGE_WAIT_BOUND + Duration::from_millis(500);
     let found = finds_with_hold_at_publication_source(
         Hold {
             owner_change: false,
-            duration: OWNER_CHANGE_WAIT_BOUND + Duration::from_millis(500),
+            duration: hold,
         },
         0,
     )
@@ -245,9 +284,10 @@ async fn publication_source_read_held_past_the_bound_is_refused_typed_and_not_re
     assert_eq!(found.reads, 1, "the refused read was not made again");
     assert_eq!(found.issued, 1, "the controller grant was issued once");
     assert!(
-        found.settled_after >= OWNER_CHANGE_WAIT_BOUND - Duration::from_millis(100),
-        "refused once the bound ran out: {:?}",
-        found.settled_after
+        found.answered_after >= OWNER_CHANGE_WAIT_BOUND - Duration::from_millis(100)
+            && found.answered_after < hold,
+        "refused once the bound ran out, before the hold ended: {:?}",
+        found.answered_after
     );
 }
 

@@ -1,10 +1,12 @@
 //! A control of the shared SDK case for a Find's work step at its helper's
 //! publication-source read (`complete.publication_source`), made once the
 //! helper's controller grants were issued and its source bound. The owner's
-//! originals collection held there inside an owner change on the shared
-//! publication, as another helper's first binding write holds them, is
-//! waited out with the work step's one churn, and only the read is made
-//! again: B's Find admits its helper and the case completes.
+//! originals collection held there by another owner's short section, with no
+//! owner change named (as the scratch diagnostic met it), is waited out with
+//! bounded pauses within Core's owner-change bound, holding nothing, and the
+//! read's check made again: B's Find admits its helper and the case
+//! completes. An owner change held at the same read is a toolkit-mobkit row
+//! of its own, where no other Find's steps share the change.
 use super::*;
 use std::time::Instant;
 use toolkit_mobkit::publication_source_probe::{self, Hold};
@@ -13,7 +15,7 @@ use toolkit_mobkit::publication_source_probe::{self, Hold};
 const FIND: &str = "b-original-find";
 
 #[test]
-fn owner_change_at_b_finds_publication_source_is_waited_out_and_read_again() {
+fn source_collection_held_at_b_finds_publication_source_is_waited_out_and_read_again() {
     let hold = Duration::from_millis(120);
     let (pipes, parent) = SdkParent::pair();
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -34,7 +36,7 @@ fn owner_change_at_b_finds_publication_source_is_waited_out_and_read_again() {
                 let mut seen = seen.lock().unwrap();
                 seen.push(Instant::now());
                 (seen.len() == 1).then_some(Hold {
-                    owner_change: true,
+                    owner_change: false,
                     duration: hold,
                 })
             }));

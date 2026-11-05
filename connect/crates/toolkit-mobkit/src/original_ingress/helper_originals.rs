@@ -3120,7 +3120,13 @@ mod tests {
         ));
         assert!(matches!(
             owner
-                .retain_helper_operation_intents(&other, &admitted, intent)
+                .retain_helper_operation_intents(
+                    &other,
+                    &admitted,
+                    intent,
+                    tokio::time::Instant::now()
+                        + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+                )
                 .await,
             Err(OriginalWriterError::WrongOwner)
         ));

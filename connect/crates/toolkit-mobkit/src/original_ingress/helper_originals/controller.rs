@@ -217,16 +217,29 @@ impl ToolkitOriginalOwner {
         admitted: &AdmittedHelperWork,
         controller: HelperControllerIntent,
     ) -> Result<(ChildGrantIntent, Option<ChildGrantIntent>), OriginalWriterError> {
-        self.retain_helper_operation_intents(store, admitted, controller)
-            .await
-            .map(|(controller, report, _, _, _)| (controller, report))
+        self.retain_helper_operation_intents(
+            store,
+            admitted,
+            controller,
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+        )
+        .await
+        .map(|(controller, report, _, _, _)| (controller, report))
     }
 
+    /// Write the helper's grant intents, under the source writer, before any
+    /// native issuance. The issuance's one deadline, `contended_until`,
+    /// bounds every wait here: for the source writer (another writer holds
+    /// it across its own durable write; nothing is held while waiting), and
+    /// for a source collection held by another owner's short section at the
+    /// source check before the intent write and after it (keeping the
+    /// writer). Only the check repeats; the intent write is never made again.
     pub(crate) async fn retain_helper_operation_intents(
         self: &Arc<Self>,
         store: &dyn ToolkitStore,
         admitted: &AdmittedHelperWork,
         controller: HelperControllerIntent,
+        contended_until: tokio::time::Instant,
     ) -> Result<
         (
             ChildGrantIntent,
@@ -249,9 +262,8 @@ impl ToolkitOriginalOwner {
         ) {
             crate::source_hold_probe::retain(self.hold_writer_for_test(hold.duration));
         }
-        let _mutation = self
-            .mutation
-            .try_lock()
+        let _mutation = tokio::time::timeout_at(contended_until, self.source_writer())
+            .await
             .map_err(|_| OriginalWriterError::Unavailable)?;
         #[cfg(any(test, feature = "test-support"))]
         if let Some(hold) = crate::source_hold_probe::observe(
@@ -262,7 +274,8 @@ impl ToolkitOriginalOwner {
                 self.hold_sources_for_test(hold.owner_change, hold.duration),
             );
         }
-        self.check_admitted_helper(admitted)?;
+        self.check_admitted_helper_until(admitted, contended_until)
+            .await?;
         controller.validate(admitted)?;
         let key = admitted.source_key()?;
         let candidate = HelperSourceRecord {
@@ -309,7 +322,8 @@ impl ToolkitOriginalOwner {
                 self.hold_sources_for_test(hold.owner_change, hold.duration),
             );
         }
-        self.check_admitted_helper(admitted)?;
+        self.check_admitted_helper_until(admitted, contended_until)
+            .await?;
         let report = retained
             .controller
             .report

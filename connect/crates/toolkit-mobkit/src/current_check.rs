@@ -115,12 +115,16 @@ pub async fn check_before_effect_after_owner_change(
     waiting(check_before_effect, context, call, plan, churn, site).await
 }
 
+/// One form of a call's current-authorization check: [`check`] or
+/// [`check_before_effect`].
+type Check = fn(
+    &ToolDispatchContext,
+    ToolCallView<'_>,
+    Option<&ResolvedToolExecutionPlan>,
+) -> Result<Option<ToolDispatchContext>, ToolError>;
+
 async fn waiting(
-    check: fn(
-        &ToolDispatchContext,
-        ToolCallView<'_>,
-        Option<&ResolvedToolExecutionPlan>,
-    ) -> Result<Option<ToolDispatchContext>, ToolError>,
+    check: Check,
     context: &ToolDispatchContext,
     call: ToolCallView<'_>,
     plan: Option<&ResolvedToolExecutionPlan>,

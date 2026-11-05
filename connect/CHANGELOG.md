@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [0.9.10] - 2026-11-05
 
+Meerkat Connect 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10
+and Connect 0.9.10, released together) and the first Connect release from
+this repository: GitHub release `connect-v0.9.10`, a prerelease that is never
+the repository's latest. Connect 0.9.0 and 0.9.4 and the Linux component
+prereleases 0.9.5 and 0.9.6 were released from `lukacf/meerkat-connect`;
+there are no Connect releases numbered 0.9.7 to 0.9.9.
+
 ### Breaking
 
 - Connect's paired-host contract no longer names one host product. Every
@@ -26,8 +33,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - Connect builds in the single Cargo workspace of the Meerkat repository.
   Its six crates are members of the root workspace: they inherit its
-  `rust-version` (1.97.0; Connect's own workspace declared 1.94) and take
-  Core and Meta at the workspace's exact pins, and the standalone
+  `rust-version` (1.97.0; the standalone Connect workspace declared 1.94.0)
+  and take Core and Meta at the workspace's exact pins, and the standalone
   `connect/Cargo.toml` and `native-candidate/` workspaces are gone. Build and
   test from the repository root, for example
   `./scripts/repo-cargo build -p meerkat-connect`.
@@ -36,7 +43,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   carries one paired host's device extension recipe, and its Telegram recipe
   is a generic bot frontend that points at the Python SDK's public frontend
   modules instead of one host's extension package. It holds 9 discovery
-  recipes; with the adopted library the combined catalog holds 110 records.
+  recipes; together with the integration library it ships with, the catalog
+  holds 110 records.
 
 - A Find whose setup helper submission native admission refuses because an
   authorization change landed under it now rebinds after each settled wait
@@ -53,6 +61,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   was refused but the selection made from the earlier proposal stayed in
   force. Such an answer now withdraws the earlier proposal, as a changed
   answer already did, so a selection made from it no longer applies.
+
+- The files Connect keeps through Meerkat's file approval store (its
+  approval store and `native-decisions.json`) are created owner-only
+  (`0600`) on Unix whatever the process umask, so Connect's private-file
+  checks no longer refuse a store created under the common 022 or 002
+  umask. A store file an earlier version left readable by others becomes
+  private on its next commit (Core's `FileApprovalStore` fix in Core
+  0.9.10).
 
 - Provider setup and first-target setup read a realm's model targets as
   Meerkat resolves them, so a realm whose GitHub Copilot account is
@@ -162,8 +178,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Upgrade notes
 
 - Build Connect with Rust 1.97.0 or newer, from the repository root. An
-  application that embeds Connect's crates pins Core and Meta at the same
-  exact versions as the repository state it builds Connect from.
+  application that embeds Connect's crates pins Core and Meta at `=0.9.10`,
+  the versions Connect 0.9.10 is built with.
+
+- Connect's SDKs are release assets, not registry packages: the Python SDK
+  `meerkat-toolkit` 0.9.10, whose `native-host` extra requires
+  `meerkat-meta==0.9.10`, and the TypeScript package `@rkat/toolkit` 0.9.10,
+  whose development and optional peer dependencies are `@rkat/sdk` 0.9.10
+  and `@rkat/meta-sdk` 0.9.10. Install them from the `connect-v0.9.10`
+  release.
 
 - Move paired hosts, devices and scripts to the new paired-host names: pair
   each device again (its stored credential sits under the earlier keyring
@@ -172,10 +195,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   the `paired-host-live` extra in place of the earlier one, and update host
   and agent configuration that names the earlier options, tools or fields.
 
-- Going back to a Connect built on Core 0.9.8 or older can be refused. A
-  Connect built on Core 0.9.9 can write sessions at session envelope 5 and
-  mob journals at mob event schema 10, which Core 0.9.8 and older refuse (see
-  Core's and Meta's Upgrade notes). Before such a rollback, run
+- Going back to a Connect built on Core 0.9.8 or older (Connect 0.9.0 to
+  0.9.6) can be refused. Connect 0.9.10, on Core 0.9.10, can write sessions
+  at session envelope 5 and mob journals at mob event schema 10, which Core
+  0.9.8 and older refuse (see Core's and Meta's Upgrade notes). Before such a
+  rollback, run
   `rkat storage doctor` and handle the sessions and mobs it lists under
   `operator-instruction-envelope` and `operator-instruction-mob-events` as
   Core's CHANGELOG describes.

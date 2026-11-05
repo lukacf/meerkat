@@ -1,16 +1,17 @@
 # Building Meerkat Connect
 
-Connect has two Rust workspaces. The root owns `toolkit-package`;
-`native-candidate/Cargo.toml` owns the CLI, native host adapters and `toolkit-store`.
-Both use checked-in dependency locks.
+Connect's six crates (`meerkat-connect`, `meerkat-toolkit`, `toolkit-catalog`,
+`toolkit-mobkit`, `toolkit-package` and `toolkit-store`) are members of the
+Meerkat repository's root Cargo workspace and build with its checked-in
+`Cargo.lock`. Build and test them from the repository root, for example
+`./scripts/repo-cargo build -p meerkat-connect`.
 
 ## Current development selection
 
-The [native manifest](native-candidate/Cargo.toml) and
-[native lock](native-candidate/Cargo.lock) select Core 0.9.8 and Meta 0.9.7.
-The manifest also selects local Core source patches, Core code generation and
-the Meta source import. Preserve those exact source selections with the build
-record: Cargo's lock does not encode the Git revision of a path dependency.
+The crates take Core and Meta from the same checkout: the root `Cargo.toml`
+pins them at `=0.9.10`, the release this Connect is built with. Record the
+checkout's commit with the build record; it names the Connect, Core and Meta
+source together.
 
 The [TypeScript manifest](sdk/typescript/package.json) and
 [lock](sdk/typescript/package-lock.json) select `@rkat/sdk` 0.9.10 and
@@ -424,8 +425,8 @@ Resource-test discovery includes archive bounds, mapped paths and symlink
 preflight, plus verified input capture across pathname and file-content changes.
 CI also runs the retained product readback and immutable-release integration
 controls with `mcp==2.2.0`, alongside the pinned candidate-test dependency
-`pytest==9.0.2`. Installed-contract controls import the selected native-host
-dependency, `meerkat-meta==0.9.7`, and this checkout's `sdk/python/src`. To run
+`pytest==9.0.2`. Installed-contract controls import Meta's Python SDK from
+this checkout's `meta/sdk/python` and Connect's from `sdk/python/src`. To run
 the preparation controls in an environment with the same MCP dependency installed:
 
 ```sh

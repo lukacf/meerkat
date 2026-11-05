@@ -2142,7 +2142,11 @@ impl ToolDispatchContext {
     /// change that refused the call landed. A later entry's refusal, and one
     /// met in a context outside a fenced dispatch, makes no claim. A leaf
     /// that ran an effect of its own before this entry forwards its refusal
-    /// as `OperationRefused::new(refusal.kind())`.
+    /// as `OperationRefused::new(refusal.kind())`. A caller that only checks
+    /// the call before the tool code runs and leaves the entry to its leaf
+    /// (a wrapper, for example) certifies its refusal the same way, without
+    /// recording an entry or spending the review, with
+    /// [`Self::check_tool_authorization_before_effect`].
     pub fn enter_reviewed_effect(
         &self,
         call: ToolCallView<'_>,
@@ -2158,6 +2162,9 @@ impl ToolDispatchContext {
     /// entered effect for a leaf that may outlive its dispatch. Hand the
     /// custody to the owner that keeps the effect going (for example a send
     /// task that outlives the caller) and hold it until that effect settles.
+    /// A caller that only checks the call before its leaf makes this entry
+    /// uses [`Self::check_tool_authorization_before_effect`], which spends
+    /// nothing.
     pub fn enter_reviewed_effect_held(
         &self,
         call: ToolCallView<'_>,
@@ -2223,7 +2230,10 @@ impl ToolDispatchContext {
     /// concurrent owner change delays the effect instead of refusing it. The
     /// synchronous [`Self::enter_reviewed_effect_held`] (or
     /// [`Self::enter_reviewed_effect`]) fits an entry that cannot await, or
-    /// one that must answer at once.
+    /// one that must answer at once. A caller that only checks the call
+    /// before its leaf makes the entry uses
+    /// [`Self::check_tool_authorization_before_effect`] instead, which
+    /// neither waits nor spends.
     ///
     /// # Errors
     /// As [`Self::enter_reviewed_effect_held`], with the refusal to rebuild
@@ -2374,6 +2384,45 @@ impl ToolDispatchContext {
                 ),
             }),
         }
+    }
+
+    /// [`Self::check_tool_authorization`] for a check made before the tool
+    /// code it guards runs, by a caller that does not make the dispatch's
+    /// effect entry itself (for example a wrapper whose leaf enters the
+    /// effect later). Use the returned context when present, as for
+    /// [`Self::check_tool_authorization`].
+    ///
+    /// An operation refusal met while no effect of the dispatch entered (no
+    /// effect entry passed, no governed step ran its operation) is certified
+    /// [`crate::authorization::RefusalDispatch::NotDispatched`], exactly as
+    /// [`Self::enter_reviewed_effect`] certifies one: the model reads
+    /// `tool_invoked: false`. Once an effect of the dispatch entered, and in
+    /// a context outside a fenced dispatch (one without the dispatch's review
+    /// entry), the refusal is returned unchanged and makes no claim.
+    ///
+    /// It records no entry and spends nothing: it makes exactly the check
+    /// [`Self::check_tool_authorization`] makes, and it can be repeated.
+    /// The dispatch's review stays for the single consuming effect entry
+    /// ([`Self::enter_reviewed_effect`], [`Self::enter_reviewed_effect_held`]
+    /// or [`Self::enter_reviewed_effect_held_after_owner_change`]), so a
+    /// reviewed (R2 or R3) dispatch whose leaf enters after this check still
+    /// spends its review once, there.
+    ///
+    /// The caller must not have performed any effect of the call before it:
+    /// the certification says that the tool code it guards never ran. A
+    /// caller that ran an effect of its own first forwards a refusal as
+    /// `OperationRefused::new(refusal.kind())`, which makes no claim.
+    ///
+    /// # Errors
+    /// As [`Self::check_tool_authorization`], with an operation refusal
+    /// certified as above.
+    pub fn check_tool_authorization_before_effect(
+        &self,
+        call: ToolCallView<'_>,
+        plan: Option<&crate::ResolvedToolExecutionPlan>,
+    ) -> Result<Option<Self>, crate::ToolError> {
+        self.check_tool_authorization(call, plan)
+            .map_err(|error| self.effect_entry_refusal(error))
     }
 
     /// Record an entry attempt, then check actual currentness after that

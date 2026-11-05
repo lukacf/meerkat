@@ -1,11 +1,13 @@
 /**
  * Durable decision wrappers (`decision/*`) send the exact RPC literals with
- * snake_case params and pass the server's answer through.
+ * snake_case params and pass the server's answer through. A server too old
+ * to serve a method answers method not found, raised naming the method.
  */
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { MeerkatClient } from "../dist/client.js";
+import { MeerkatError, meerkatErrorFromJsonRpcCode } from "../dist/index.js";
 
 const DECISION_ID = `decision:${"fe421f09".repeat(8)}`;
 const SUBJECT_DIGEST = `sha256:${"55c20681".repeat(8)}`;
@@ -149,5 +151,53 @@ describe("durable decision wrappers", () => {
       { method: "decision/withdraw", params: { decision_id: DECISION_ID } },
     ]);
     assert.deepEqual(result, { decision: withdrawn });
+  });
+
+  const DECISION_CALLS = [
+    ["decision/list", (client) => client.listDecisions()],
+    ["decision/get", (client) => client.getDecision(DECISION_ID)],
+    ["decision/rendering", (client) => client.decisionRendering(DECISION_ID)],
+    ["decision/present", (client) => client.presentDecision(DECISION_ID, PRESENTATION)],
+    ["decision/withdraw", (client) => client.withdrawDecision(DECISION_ID)],
+  ];
+
+  function answering(error) {
+    const client = new MeerkatClient();
+    client.request = async () => {
+      throw error;
+    };
+    return client;
+  }
+
+  it("names the method a server without it answers method not found for", async () => {
+    for (const [method, call] of DECISION_CALLS) {
+      // The server answers method not found in its own words, without the
+      // method's name: the SDK names the method and the server it needs.
+      const client = answering(meerkatErrorFromJsonRpcCode(-32601, undefined, "Method not found"));
+      await assert.rejects(call(client), (error) => {
+        assert.ok(error instanceof MeerkatError);
+        assert.equal(error.code, "-32601");
+        assert.equal(
+          error.message,
+          `${method} needs a Meerkat 0.9.11 or newer server: Method not found`,
+        );
+        return true;
+      });
+    }
+  });
+
+  it("passes every other error to the caller unchanged", async () => {
+    for (const [, call] of DECISION_CALLS) {
+      const unavailable = meerkatErrorFromJsonRpcCode(
+        -32020,
+        "CAPABILITY_UNAVAILABLE",
+        "no durable decisions",
+      );
+      const client = answering(unavailable);
+      await assert.rejects(call(client), (error) => {
+        assert.equal(error, unavailable);
+        return true;
+      });
+    }
   });
 });

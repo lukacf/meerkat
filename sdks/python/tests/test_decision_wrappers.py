@@ -1,13 +1,16 @@
 """Durable decision wrappers (`decision/*`) send the exact RPC literals with
-snake_case params and pass the server's answer through."""
+snake_case params and pass the server's answer through. A server too old to
+serve a method answers method not found, raised naming the method."""
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
 
-from meerkat import MeerkatClient
+from meerkat import MeerkatClient, MeerkatError
+from meerkat.errors import meerkat_error_from_jsonrpc_code
 
 DECISION_ID = "decision:" + "fe421f09" * 8
 SUBJECT_DIGEST = "sha256:" + "55c20681" * 8
@@ -147,3 +150,64 @@ async def test_withdraw_decision_names_only_the_decision() -> None:
 
     assert calls == [("decision/withdraw", {"decision_id": DECISION_ID})]
     assert result == {"decision": withdrawn}
+
+
+DECISION_CALLS: list[tuple[str, Callable[[MeerkatClient], Awaitable[Any]]]] = [
+    ("decision/list", lambda client: client.list_decisions()),
+    ("decision/get", lambda client: client.get_decision(DECISION_ID)),
+    ("decision/rendering", lambda client: client.decision_rendering(DECISION_ID)),
+    (
+        "decision/present",
+        lambda client: client.present_decision(DECISION_ID, PRESENTATION),
+    ),
+    ("decision/withdraw", lambda client: client.withdraw_decision(DECISION_ID)),
+]
+
+
+def answering(error: MeerkatError) -> MeerkatClient:
+    client = MeerkatClient()
+
+    async def fake_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        raise error
+
+    client._request = fake_request  # type: ignore[assignment]
+    return client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "call"), DECISION_CALLS, ids=[method for method, _ in DECISION_CALLS]
+)
+async def test_a_server_without_the_method_is_named_in_the_error(
+    method: str, call: Callable[[MeerkatClient], Awaitable[Any]]
+) -> None:
+    # The server answers method not found in its own words, without the
+    # method's name: the SDK names the method and the server it needs.
+    client = answering(meerkat_error_from_jsonrpc_code(-32601, None, "Method not found"))
+
+    with pytest.raises(MeerkatError) as raised:
+        await call(client)
+
+    assert raised.value.code == "-32601"
+    assert raised.value.message == (
+        f"{method} needs a Meerkat 0.9.11 or newer server: Method not found"
+    )
+    assert str(raised.value) == raised.value.message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "call"), DECISION_CALLS, ids=[method for method, _ in DECISION_CALLS]
+)
+async def test_every_other_error_reaches_the_caller_unchanged(
+    method: str, call: Callable[[MeerkatClient], Awaitable[Any]]
+) -> None:
+    unavailable = meerkat_error_from_jsonrpc_code(
+        -32020, "CAPABILITY_UNAVAILABLE", "no durable decisions"
+    )
+    client = answering(unavailable)
+
+    with pytest.raises(MeerkatError) as raised:
+        await call(client)
+
+    assert raised.value is unavailable

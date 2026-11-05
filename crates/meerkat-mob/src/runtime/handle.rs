@@ -588,6 +588,35 @@ pub(super) mod legacy_observation_hold {
         stale[position].1 -= 1;
         observed.and_then(|(generation, legacy)| generation.next().map(|next| (next, legacy)))
     }
+
+    static NO_INTENT_ROW: Mutex<Vec<(AgentIdentity, usize)>> = Mutex::new(Vec::new());
+
+    /// Answer the next `count` observations of `identity` without a host's
+    /// intent row, as a member binding history read before the host
+    /// adopted the identity answers them.
+    pub(crate) fn force_no_intent_row(identity: &AgentIdentity, count: usize) {
+        NO_INTENT_ROW
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((identity.clone(), count));
+    }
+
+    /// The observation the adoption uses: `observed`, without its intent
+    /// row while a forced count for `identity` remains.
+    pub(crate) fn intent_row_observed(
+        identity: &AgentIdentity,
+        mut observed: crate::runtime::identity_entry::LegacyMemberObservation,
+    ) -> crate::runtime::identity_entry::LegacyMemberObservation {
+        let mut held = NO_INTENT_ROW.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(position) = held
+            .iter()
+            .position(|(identity_held, count)| identity_held == identity && *count > 0)
+        {
+            held[position].1 -= 1;
+            observed.intent_row = false;
+        }
+        observed
+    }
 }
 
 /// Test-only holds between the steps of a scoped retire, keyed by the root
@@ -10692,6 +10721,13 @@ impl MobHandle {
             });
             #[cfg(test)]
             let observation = legacy_observation_hold::observed(identity, observation);
+            #[cfg(test)]
+            let observation = observation.map(|(generation, legacy)| {
+                (
+                    generation,
+                    legacy_observation_hold::intent_row_observed(identity, legacy),
+                )
+            });
             let (generation, observation) = match observation {
                 Some(observation) => observation,
                 // No incarnation of the identity since the latest mob reset

@@ -3057,6 +3057,103 @@ async fn a_complete_roster_leaves_an_unlisted_host_adopted_member_with_both_mark
     );
 }
 
+/// A host's adoption that the complete roster's history read did not see
+/// keeps the host's member. The pass reads the member binding history once,
+/// before its unlisted members' steps; a host that adopts an unlisted member
+/// after that read (its intent row names the member, and the member's
+/// generation has not moved yet) leaves the pass with an observation of the
+/// member without the intent row. The row commits the host's adoption, then
+/// has the pass observe the member as such an earlier read does
+/// (`legacy_observation_hold::force_no_intent_row`): the legacy adoption reads
+/// the host's intent row in its own step, so MobMachine leaves the member as
+/// it is and the seal retires nothing.
+///
+/// RED (before the step reads the intent row): MobMachine decides on the
+/// pass's observation alone, adopts the member (`AdoptedUnlisted`), and the
+/// seal retires the host's member with the cause `Unlisted`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_adoption_the_pass_read_missed_keeps_the_member() {
+    use crate::runtime::handle::legacy_observation_hold;
+    let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let service = Arc::new(meerkat_session::PersistentSessionService::new(
+        PersistentMockBuilder,
+        16,
+        session_store,
+        runtime_store,
+        blob_store,
+    ));
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "apply-unlisted-adoption-missed"),
+        storage.clone(),
+    )
+    .with_session_service(service)
+    .create()
+    .await
+    .expect("create the mob");
+    let spec = durably_marked(identity_labelled("missed", "missed"));
+    let labels = spec.labels.clone();
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("a member with both legacy marks");
+    let session = handle
+        .resolve_bridge_session_id(&id("missed"))
+        .await
+        .expect("a session-backed member");
+    super::member_history::adopt_existing_labelled_member(
+        &handle,
+        &id("missed"),
+        &session,
+        "worker",
+        labels,
+    )
+    .await;
+    super::member_history::await_adoption_convergence(&handle, &id("missed")).await;
+    assert!(
+        matches!(
+            handle
+                .member_binding_history()
+                .await
+                .expect("Core's member history")
+                .identity_management(&id("missed")),
+            crate::MemberIdentityManagement::IntentManaged
+        ),
+        "the host's intent row names the member"
+    );
+
+    // The pass observes the member as a history read before the adoption.
+    legacy_observation_hold::force_no_intent_row(&id("missed"), 1);
+    let outcome = tokio::time::timeout(STEP, handle.apply_declared_roster(empty_roster()))
+        .await
+        .expect("the apply answers")
+        .expect("the apply runs");
+    assert!(outcome.unlisted.is_empty(), "{outcome:?}");
+    assert!(
+        handle
+            .list_members()
+            .await
+            .iter()
+            .any(|member| member.agent_identity == id("missed")),
+        "the host's member keeps serving"
+    );
+    let journal = storage
+        .events
+        .poll(0, usize::MAX)
+        .await
+        .expect("read the journal");
+    assert!(
+        !retirement_causes(&journal)
+            .iter()
+            .any(|(_, cause)| *cause == Some(MemberRetirementCause::Unlisted)),
+        "nothing is unlisted"
+    );
+}
+
 /// The shape a host that names its identities in a form no member id can
 /// spell leaves behind: the member id encodes the identity (`team:carol` as
 /// `mk--team_ccarol`), the label spells the identity, and the spawn row

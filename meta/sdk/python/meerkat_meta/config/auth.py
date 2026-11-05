@@ -29,7 +29,7 @@ class JwtAuthConfig:
     audience: str | None = None
     leeway_seconds: int = 60
     # "personal" when every token names one person; without it the console
-    # treats these tokens as a shared account that never decides.
+    # treats these tokens as a shared account that never counts as a person.
     accounts: str | None = None
 
     def to_dict(self) -> dict[str, Any]:

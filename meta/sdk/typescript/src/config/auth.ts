@@ -54,7 +54,7 @@ export interface JwtAuthConfig {
   readonly audience: string | null;
   readonly leewaySeconds: number;
   /** `"personal"` when every token names one person; without it the console
-   *  treats these tokens as a shared account that never decides. */
+   *  treats these tokens as a shared account that never counts as a person. */
   readonly accounts: "personal" | "shared" | null;
   toDict(): Record<string, unknown>;
 }

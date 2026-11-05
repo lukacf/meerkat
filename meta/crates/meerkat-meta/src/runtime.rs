@@ -573,9 +573,9 @@ pub struct TrustedOidcRuntimeConfig {
     pub require_verified_email: bool,
     /// The tokens this issuer mints name a shared account, not a person: a
     /// front that signs everyone in as one account mints every holder of its
-    /// password the same `sub`. Such a token identifies a principal and is
-    /// never a Console human, so it never decides and never owns a personal
-    /// account. Set by `provider: "jwt"` configurations unless they declare
+    /// password the same `sub`. Such a token identifies a principal and
+    /// never counts as a person: it is never a Console human. Set by
+    /// `provider: "jwt"` configurations unless they declare
     /// `accounts: "personal"`. Off for `provider: "oidc"` and for hand-built
     /// states, which keep the historical behaviour.
     #[serde(default)]

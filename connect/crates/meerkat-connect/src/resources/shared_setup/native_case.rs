@@ -171,8 +171,88 @@ struct Script {
     cancel_requested: AtomicBool,
     // Find answers of retry_safe this case met, each replayed by a fresh Find.
     retry_safe_answers: AtomicUsize,
+    // The runs each member's input was served in, in order: a later run of
+    // the same input is Core's rerun of it.
+    runs: Mutex<BTreeMap<(String, String), Vec<String>>>,
+    // Each member's call ID prefixes, one per run attempt, in order.
+    prefixes: Mutex<BTreeMap<String, Vec<String>>>,
+}
+/// The input and the run a model request was made in, as Core's binding
+/// names them.
+struct ServedRun {
+    input: String,
+    run: String,
+}
+/// Whether call `id` was emitted in the run whose call ID prefix is
+/// `prefix`: a later run's prefix extends its member's with `-run{attempt}`.
+fn in_run(id: &str, prefix: &str) -> bool {
+    id.strip_prefix(prefix)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .is_some_and(|step| {
+            !step
+                .strip_prefix("run")
+                .and_then(|rest| rest.split('-').next())
+                .is_some_and(|attempt| {
+                    !attempt.is_empty() && attempt.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        })
 }
 impl Script {
+    /// The call ID prefix of `member`'s run: the member itself in the first
+    /// run of an input, `{member}-run{attempt}` in a later run of the same
+    /// input, as a provider issues fresh call IDs in a new run. Core runs
+    /// an input again after a run ended without committing its turn (a
+    /// typed refusal of its model request): each such run is written as
+    /// `sdk_model_turn_rerun`, and the census counts it.
+    fn run_prefix(&self, member: &str, served: Option<&ServedRun>) -> String {
+        let attempt = served.map_or(1, |served| {
+            let mut runs = self.runs.lock().unwrap();
+            let seen = runs
+                .entry((member.to_owned(), served.input.clone()))
+                .or_default();
+            if let Some(index) = seen.iter().position(|run| run == &served.run) {
+                return index + 1;
+            }
+            seen.push(served.run.clone());
+            let attempt = seen.len();
+            if attempt > 1 {
+                eprintln!(
+                    "{}",
+                    json!({
+                        "event":"sdk_model_turn_rerun", "member":member,
+                        "input":served.input, "run":served.run, "attempt":attempt,
+                    })
+                );
+            }
+            attempt
+        });
+        let prefix = if attempt == 1 {
+            member.to_owned()
+        } else {
+            format!("{member}-run{attempt}")
+        };
+        let mut prefixes = self.prefixes.lock().unwrap();
+        let known = prefixes.entry(member.to_owned()).or_default();
+        if !known.contains(&prefix) {
+            known.push(prefix.clone());
+        }
+        prefix
+    }
+    /// `member`'s call ID prefixes, one per run attempt served, in order.
+    fn run_prefixes(&self, member: &str) -> Vec<String> {
+        self.prefixes
+            .lock()
+            .unwrap()
+            .get(member)
+            .cloned()
+            .unwrap_or_else(|| vec![member.to_owned()])
+    }
+    /// The call ID prefix of `member`'s latest run.
+    fn current_prefix(&self, member: &str) -> String {
+        self.run_prefixes(member)
+            .pop()
+            .unwrap_or_else(|| member.to_owned())
+    }
     fn require_loaded_catalog(prefix: &str, value: Value, names: &[&str]) {
         #[derive(serde::Deserialize)]
         struct LoadedCatalog {
@@ -246,6 +326,12 @@ impl Script {
     }
 
     fn response(&self, request: &LlmRequest) -> Vec<LlmEvent> {
+        self.response_in_run(request, None)
+    }
+
+    /// The controlled answer to `request`, made in `served` when Core's
+    /// binding names its input and run.
+    fn response_in_run(&self, request: &LlmRequest, served: Option<&ServedRun>) -> Vec<LlmEvent> {
         let body = serde_json::to_string(&request.messages).unwrap();
         let tag = if body.contains("sdk-child-a") {
             "a"
@@ -258,7 +344,9 @@ impl Script {
             .tools
             .iter()
             .any(|tool| tool.name == meerkat_toolkit::setup::SETUP_REPORT);
-        let prefix = format!("{tag}-{}", if helper { "helper" } else { "original" });
+        let member = format!("{tag}-{}", if helper { "helper" } else { "original" });
+        // This run's call IDs: a later run of the same input gets fresh ones.
+        let prefix = self.run_prefix(&member, served);
         let detail_present = body.contains(DETAIL);
         if tag == "b" {
             eprintln!(
@@ -276,7 +364,7 @@ impl Script {
         for message in &request.messages {
             if let Message::ToolResults { results, .. } = message {
                 for result in results {
-                    if result.tool_use_id.starts_with(&prefix) {
+                    if in_run(&result.tool_use_id, &prefix) {
                         if tag == "a"
                             && result.is_error
                             && self.cancel_requested.load(Ordering::SeqCst)
@@ -328,7 +416,7 @@ impl Script {
                             eprintln!(
                                 "{}",
                                 json!({
-                                    "event":"d5_sdk_tool_result", "member":prefix,
+                                    "event":"d5_sdk_tool_result", "member":member,
                                     "call":result.tool_use_id, "operation":operation,
                                     "is_error":result.is_error, "error_code":code,
                                     "refusal":refusal,
@@ -347,7 +435,7 @@ impl Script {
                             eprintln!(
                                 "{}",
                                 json!({
-                                    "event":"sdk_find_retry_safe", "member":prefix,
+                                    "event":"sdk_find_retry_safe", "member":member,
                                     "call":result.tool_use_id, "answers":answers,
                                 })
                             );
@@ -394,7 +482,7 @@ impl Script {
             eprintln!(
                 "{}",
                 json!({
-                    "event":"d5_sdk_tool_selection", "member":prefix,
+                    "event":"d5_sdk_tool_selection", "member":member,
                     "call":key, "operation":name, "offered":offered,
                 })
             );
@@ -613,7 +701,19 @@ impl LlmClient for Script {
                 .flat_map(|events| futures_util::stream::iter(events.into_iter().map(Ok))),
             );
         }
-        let events = self.response(request.request());
+        let served = match &check_input {
+            (
+                meerkat_core::OperationExecutionScope::RuntimeInput {
+                    canonical_input_id, ..
+                },
+                Some(run),
+            ) => Some(ServedRun {
+                input: canonical_input_id.to_string(),
+                run: run.to_string(),
+            }),
+            _ => None,
+        };
+        let events = self.response_in_run(request.request(), served.as_ref());
         for event in &events {
             if let LlmEvent::ToolCallComplete { id, name, .. } = event
                 && name == "setup_selected_check"
@@ -1663,9 +1763,10 @@ impl Case {
     }
 
     /// Whether helper `tag`'s current install call (its first, or its one
-    /// fresh install after a certified refusal) was approved.
+    /// fresh install after a certified refusal, in its latest run) was
+    /// approved.
     fn install_approved(&self, tag: &str) -> bool {
-        let prefix = format!("{tag}-helper");
+        let prefix = self.script.current_prefix(&format!("{tag}-helper"));
         let call = format!("{prefix}-{}", self.script.retry_suffix(&prefix, "install"));
         self.approved.lock().unwrap().iter().any(|record| {
             record
@@ -1865,7 +1966,7 @@ impl Case {
         let emitted = self.script.calls.lock().unwrap().clone();
         let returned = self.script.results.lock().unwrap().clone();
         let installed = |tag: &str| {
-            let prefix = format!("{tag}-helper");
+            let prefix = self.script.current_prefix(&format!("{tag}-helper"));
             format!("{prefix}-{}", self.script.retry_suffix(&prefix, "install"))
         };
         let reviewed = approved
@@ -1890,15 +1991,26 @@ impl Case {
                     .and_then(|body| body["call_id"].as_str())
                     .expect("each approval names its install call")
                     .to_owned();
-                let first = format!("{tag}-helper-install");
-                assert!(
-                    call_id == installed(tag) || call_id == first,
-                    "an approval reviews the helper's install or its refused first attempt: {call_id}"
-                );
+                // The run of this install call: each run of the helper's
+                // input emits its own calls, and its install is the run's
+                // first install or its one fresh install after that first
+                // was refused.
+                let run = self
+                    .script
+                    .run_prefixes(&format!("{tag}-helper"))
+                    .into_iter()
+                    .find(|prefix| {
+                        call_id == format!("{prefix}-install")
+                            || call_id
+                                == format!("{prefix}-{}", self.script.retry_suffix(prefix, "install"))
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("an approval reviews the helper's install or its refused first attempt: {call_id}")
+                    });
                 let matching = emitted.iter().filter(|(id, _, _)| id == &call_id).collect::<Vec<_>>();
                 assert_eq!(matching.len(), 1, "each approval must match one emitted call");
                 assert_eq!(matching[0].1, "setup_selected_install");
-                let check_id = format!("{tag}-helper-{}", self.script.check_suffix(&format!("{tag}-helper")));
+                let check_id = format!("{run}-{}", self.script.check_suffix(&run));
                 let checks = emitted.iter().filter(|(id, _, _)| id == &check_id).collect::<Vec<_>>();
                 assert_eq!(checks.len(), 1, "each proposal must retain its actual check call");
                 assert_eq!(checks[0].1, "setup_selected_check");
@@ -2026,12 +2138,11 @@ impl Case {
         // model request carries it, which can come after the continuation
         // the result produced reached B's original. Wait for B's job and
         // report results within the bound; the assertions below still
-        // decide, so a result that never arrives still fails here.
-        let job = format!("b-helper-{}", self.script.retry_suffix("b-helper", "job"));
-        let report = format!(
-            "b-helper-{}",
-            self.script.retry_suffix("b-helper", "report")
-        );
+        // decide, so a result that never arrives still fails here. The calls
+        // are those of B's helper's latest run.
+        let helper = self.script.current_prefix("b-helper");
+        let job = format!("{helper}-{}", self.script.retry_suffix(&helper, "job"));
+        let report = format!("{helper}-{}", self.script.retry_suffix(&helper, "report"));
         let _ = tokio::time::timeout(BOUND, async {
             loop {
                 {

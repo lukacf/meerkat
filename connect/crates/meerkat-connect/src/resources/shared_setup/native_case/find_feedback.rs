@@ -90,7 +90,7 @@ impl Script {
         let find = calls
             .iter()
             .filter(|(key, name, _)| {
-                key.starts_with(&format!("{prefix}-")) && name == toolkit_mobkit::FIND_AND_INSTALL
+                in_run(key, prefix) && name == toolkit_mobkit::FIND_AND_INSTALL
             })
             .collect::<Vec<_>>();
         assert!(
@@ -339,6 +339,14 @@ impl Case {
         };
         for tag in tags {
             let prefix = format!("{tag}-original");
+            // This proof reads one run of each Original's input: a rerun of
+            // it (written as sdk_model_turn_rerun) fails here, by name.
+            let runs = self.script.run_prefixes(&prefix);
+            assert_eq!(
+                runs,
+                [prefix.clone()],
+                "{prefix}: the Find proof covers the input's one run; Core ran it again"
+            );
             let audit = self.find_audits(tag, self.script.find_only).await;
             let calls = self
                 .script
@@ -347,8 +355,7 @@ impl Case {
                 .unwrap()
                 .iter()
                 .filter(|(key, name, _)| {
-                    key.starts_with(&format!("{prefix}-"))
-                        && name == toolkit_mobkit::FIND_AND_INSTALL
+                    in_run(key, &prefix) && name == toolkit_mobkit::FIND_AND_INSTALL
                 })
                 .cloned()
                 .collect::<Vec<_>>();
@@ -709,93 +716,117 @@ impl Case {
         let seen = self.script.seen_results.lock().unwrap().clone();
         let inputs = self.script.check_inputs.lock().unwrap().clone();
         for tag in ["a", "b"] {
-            let prefix = format!("{tag}-helper");
-            let checks = calls
-                .iter()
-                .filter(|(key, name, _)| {
-                    key.starts_with(&format!("{prefix}-")) && name == "setup_selected_check"
-                })
-                .collect::<Vec<_>>();
-            assert!(!checks.is_empty() && checks.len() <= 2);
-            for (index, (key, _, args)) in checks.iter().enumerate() {
-                assert_eq!(
-                    key,
-                    &format!(
-                        "{prefix}-{}",
-                        if index == 0 { "check" } else { "check-fresh" }
-                    )
-                );
-                assert_eq!(args, self.script.selected.get().unwrap());
+            let runs = self.script.run_prefixes(&format!("{tag}-helper"));
+            for (index, prefix) in runs.iter().enumerate() {
+                // A run Core ran the helper's input again after ended at a
+                // refused model request, so the model never saw the result
+                // of that run's last call. Every other check applies to it.
+                let latest = index + 1 == runs.len();
+                self.assert_run_check_feedback(tag, prefix, latest, &calls, &seen, &inputs)
+                    .await;
             }
-            assert!(!seen.get(&checks.last().unwrap().0).unwrap().is_error);
-            if checks.len() == 2 {
-                let first = &checks[0].0;
-                let refused = seen.get(first).unwrap();
-                let (scope, run) = inputs
-                    .get(first)
-                    .expect("actual emitted check input and run");
-                assert_eq!(inputs.get(&checks[1].0), inputs.get(first));
-                let session = self.audit_sessions.get(&format!("helper-{tag}")).unwrap();
+        }
+    }
+
+    async fn assert_run_check_feedback(
+        &self,
+        tag: &str,
+        prefix: &str,
+        latest: bool,
+        calls: &[(String, String, Value)],
+        seen: &BTreeMap<String, ToolResult>,
+        inputs: &BTreeMap<String, (meerkat_core::OperationExecutionScope, meerkat_core::RunId)>,
+    ) {
+        let settled = |call: &str| {
+            let result = seen.get(call);
+            assert!(
+                result.is_some() || !latest,
+                "{call}: the latest run's results are retained"
+            );
+            result.is_none_or(|result| !result.is_error)
+        };
+        let checks = calls
+            .iter()
+            .filter(|(key, name, _)| in_run(key, prefix) && name == "setup_selected_check")
+            .collect::<Vec<_>>();
+        assert!((!checks.is_empty() || !latest) && checks.len() <= 2);
+        for (index, (key, _, args)) in checks.iter().enumerate() {
+            assert_eq!(
+                key,
+                &format!(
+                    "{prefix}-{}",
+                    if index == 0 { "check" } else { "check-fresh" }
+                )
+            );
+            assert_eq!(args, self.script.selected.get().unwrap());
+        }
+        if let Some((last, _, _)) = checks.last() {
+            assert!(settled(last), "{last}: the run's last check must succeed");
+        }
+        if checks.len() == 2 {
+            let first = &checks[0].0;
+            let refused = seen.get(first).unwrap();
+            let (scope, run) = inputs
+                .get(first)
+                .expect("actual emitted check input and run");
+            assert_eq!(inputs.get(&checks[1].0), inputs.get(first));
+            let session = self.audit_sessions.get(&format!("helper-{tag}")).unwrap();
+            assert!(
+                matches!(scope, meerkat_core::OperationExecutionScope::RuntimeInput { owner_session_id, .. }
+                if owner_session_id == session)
+            );
+            // Cleanup has joined native input owners; one existing read, no wait.
+            let audit = self.session_audits(session, prefix, false).await;
+            if helper_retry_allowed(refused) {
                 assert!(
-                    matches!(scope, meerkat_core::OperationExecutionScope::RuntimeInput { owner_session_id, .. }
-                    if owner_session_id == session)
+                    certified_retry_proof(&audit, first),
+                    "a certified check refusal ran nothing and recorded nothing"
                 );
-                // Cleanup has joined native input owners; one existing read, no wait.
-                let audit = self.session_audits(session, &prefix, false).await;
-                if helper_retry_allowed(refused) {
-                    assert!(
-                        certified_retry_proof(&audit, first),
-                        "a certified check refusal ran nothing and recorded nothing"
-                    );
-                } else {
-                    assert!(canonical_check_refusal(refused));
-                    assert!(
-                        exact_check_change(&audit, scope, run, first),
-                        "fresh check qualifies only after exact pre-entry PublicationChanged, never denial or an entered effect"
-                    );
-                }
-                let certified = helper_retry_allowed(refused);
-                eprintln!(
-                    "{}",
-                    json!({"event":"sdk_check_settled_proof", "call_id":first,
-                    "fresh_call_id":checks[1].0, "certified_not_dispatched":certified,
-                    "pre_entry_publication_changed":!certified})
-                );
-            }
-            // Every other helper call: one fresh attempt only after a
-            // certified NotDispatched refusal of its first, and it succeeded.
-            for base in ["load", "install", "job", "report"] {
-                let fresh = format!("{prefix}-{base}-fresh");
-                if !calls.iter().any(|(key, _, _)| key == &fresh) {
-                    continue;
-                }
-                let first = format!("{prefix}-{base}");
+            } else {
+                assert!(canonical_check_refusal(refused));
                 assert!(
-                    helper_retry_allowed(
-                        seen.get(&first)
-                            .expect("the refused first attempt is retained")
-                    ),
-                    "{first}: only a certified NotDispatched refusal permits a fresh attempt"
-                );
-                assert!(
-                    !seen
-                        .get(&fresh)
-                        .expect("the fresh attempt's result is retained")
-                        .is_error,
-                    "{fresh}: the one fresh attempt must succeed"
-                );
-                let session = self.audit_sessions.get(&format!("helper-{tag}")).unwrap();
-                let audit = self.session_audits(session, &prefix, false).await;
-                assert!(
-                    certified_retry_proof(&audit, &first),
-                    "{first}: a certified refusal ran nothing and recorded nothing"
-                );
-                eprintln!(
-                    "{}",
-                    json!({"event":"sdk_retry_settled_proof", "call_id":first,
-                    "fresh_call_id":fresh})
+                    exact_check_change(&audit, scope, run, first),
+                    "fresh check qualifies only after exact pre-entry PublicationChanged, never denial or an entered effect"
                 );
             }
+            let certified = helper_retry_allowed(refused);
+            eprintln!(
+                "{}",
+                json!({"event":"sdk_check_settled_proof", "call_id":first,
+                "fresh_call_id":checks[1].0, "certified_not_dispatched":certified,
+                "pre_entry_publication_changed":!certified})
+            );
+        }
+        // Every other helper call: one fresh attempt only after a
+        // certified NotDispatched refusal of its first, and it succeeded.
+        for base in ["load", "install", "job", "report"] {
+            let fresh = format!("{prefix}-{base}-fresh");
+            if !calls.iter().any(|(key, _, _)| key == &fresh) {
+                continue;
+            }
+            let first = format!("{prefix}-{base}");
+            assert!(
+                helper_retry_allowed(
+                    seen.get(&first)
+                        .expect("the refused first attempt is retained")
+                ),
+                "{first}: only a certified NotDispatched refusal permits a fresh attempt"
+            );
+            assert!(
+                settled(&fresh),
+                "{fresh}: the one fresh attempt must succeed"
+            );
+            let session = self.audit_sessions.get(&format!("helper-{tag}")).unwrap();
+            let audit = self.session_audits(session, prefix, false).await;
+            assert!(
+                certified_retry_proof(&audit, &first),
+                "{first}: a certified refusal ran nothing and recorded nothing"
+            );
+            eprintln!(
+                "{}",
+                json!({"event":"sdk_retry_settled_proof", "call_id":first,
+                "fresh_call_id":fresh})
+            );
         }
     }
 }
@@ -1011,6 +1042,40 @@ mod tests {
             script.response(&helper_request(vec![certified, fresh]))
         }));
         assert!(outcome.is_err(), "a second refusal is not tolerated");
+    }
+
+    // Core ran a helper's input again after its run ended at a refused model
+    // request: the model's same answer in the new run carries fresh call IDs,
+    // as a provider's would, each still emitted once, and each run's calls
+    // stay apart from the other's.
+    #[test]
+    fn a_rerun_of_the_same_input_gets_fresh_call_ids() {
+        let script = new_script();
+        let served = |run: &str| ServedRun {
+            input: "helper-input".into(),
+            run: run.into(),
+        };
+        let first = script.response_in_run(&helper_request(vec![]), Some(&served("first")));
+        assert_eq!(selected(&first), vec!["a-helper-load"]);
+        let rerun = script.response_in_run(&helper_request(vec![]), Some(&served("second")));
+        assert_eq!(selected(&rerun), vec!["a-helper-run2-load"]);
+        assert_eq!(
+            script.run_prefixes("a-helper"),
+            ["a-helper", "a-helper-run2"]
+        );
+        assert_eq!(script.current_prefix("a-helper"), "a-helper-run2");
+        assert!(in_run("a-helper-run2-install-fresh", "a-helper-run2"));
+        assert!(in_run("a-helper-install-fresh", "a-helper"));
+        assert!(!in_run("a-helper-run2-load", "a-helper"));
+        assert!(!in_run("a-helper-load", "a-helper-run2"));
+        // A request of a run already served stays in that run.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            script.response_in_run(&helper_request(vec![]), Some(&served("second")))
+        }));
+        assert!(
+            outcome.is_err(),
+            "a run's call ID is emitted once in it, as across runs"
+        );
     }
 
     // A Find that answered retry_safe admitted no helper input: the model

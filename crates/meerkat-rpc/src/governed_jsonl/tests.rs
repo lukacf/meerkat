@@ -3338,6 +3338,169 @@ async fn stock_governed_jsonl_without_native_host_is_refused() {
     http.reap().await;
 }
 
+/// Read the pipe up to the answer to `id`, keeping every decision notice.
+#[cfg(feature = "mcp")]
+async fn response_with_decision_notices(
+    reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
+    id: u64,
+    notices: &mut Vec<Value>,
+) -> Value {
+    loop {
+        let mut line = String::new();
+        assert!(
+            reader.read_line(&mut line).await.unwrap() > 0,
+            "server remains connected"
+        );
+        let value: Value = serde_json::from_str(&line).unwrap();
+        if value["method"] == "decision/notice" {
+            notices.push(value["params"].clone());
+        } else if value["id"] == id {
+            return value;
+        }
+    }
+}
+
+/// The hold of `subject` for the approver id `approver`, until far in the
+/// future.
+#[cfg(feature = "mcp")]
+fn decision_hold(
+    subject: &str,
+    approver: &str,
+) -> meerkat_core::approval::decision::DecisionHoldRequest {
+    use meerkat_core::approval::decision::{
+        ApproverId, DecisionHoldRequest, DecisionKind, DecisionOperationId, DecisionPrincipalKey,
+        DecisionRenderer, DecisionRendering, DecisionRequestBody, DecisionSubjectKey, Sha256Digest,
+    };
+    DecisionHoldRequest::new(
+        DecisionKind::new("release").unwrap(),
+        DecisionSubjectKey::new(subject).unwrap(),
+        DecisionOperationId::new(format!("operation:{subject}")).unwrap(),
+        Sha256Digest::of(br#"{"build":7}"#),
+        DecisionRequestBody::from_value(&json!({"build": 7})).unwrap(),
+        DecisionPrincipalKey::of(&principal("builder")).unwrap(),
+        ApproverId::new(approver).unwrap(),
+        u64::MAX / 2,
+        DecisionRendering::new("Release build 7 to production.").unwrap(),
+        DecisionRenderer::new("render.v1").unwrap(),
+    )
+}
+
+/// The governed pipe presents its realm's open decisions to its operator
+/// when the client lists, as a stdio connection does, and decides them with
+/// `decision/decide` as the pipe's operator, device trusted in the pipe's own
+/// scope.
+#[cfg(feature = "mcp")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_governed_pipe_presents_and_decides_as_its_operator() {
+    use meerkat::governed_realm::stock::{StockGovernance, StockPrincipals, govern_stock_realm};
+    use meerkat::governed_realm::{RealmGovernance, open_governed_realm_persistence_with_provider};
+    use meerkat_core::approval::decision::DecisionPrincipalKey;
+    const REALM: &str = "stock-decisions";
+    let mut http = Server::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let open = |governance: RealmGovernance| {
+        open_governed_realm_persistence_with_provider(
+            &meerkat::DiskStorageProvider,
+            root.path(),
+            REALM,
+            Some(meerkat_store::RealmBackend::Sqlite),
+            None,
+            None,
+            governance,
+        )
+    };
+    drop(open(RealmGovernance::Ungoverned).await.unwrap());
+    let realm = RealmId::parse(REALM).unwrap();
+    let principals = StockPrincipals::for_user(&realm, 4244).unwrap();
+    govern_stock_realm(root.path(), REALM, &principals)
+        .await
+        .expect("governed");
+    let governance = StockGovernance::new(realm.clone(), principals.clone());
+    let (_, bundle) = open(RealmGovernance::Stock(Arc::clone(&governance)))
+        .await
+        .unwrap();
+    let held = bundle
+        .decision_owner()
+        .hold(decision_hold("build-7", "operator"), false)
+        .expect("hold");
+    let decision_id = held.decision_id.to_string();
+    let subject_digest = held.descriptor.subject_digest.to_string();
+    let operator = DecisionPrincipalKey::of(&principals.operator)
+        .unwrap()
+        .to_string();
+    let client = http_client_in(&http, REALM);
+    let selected = client.controller_model_selection().unwrap();
+    let (config, _) = governed_client_config(&http, &selected, &bundle).await;
+    let setup = stock::stock_governed_jsonl_setup_reviewed(
+        &governance,
+        config,
+        bundle,
+        client,
+        Vec::new(),
+        None,
+        &AgentFactory::minimal(),
+    )
+    .await
+    .expect("the stock host's reviewed setup");
+    let (client_io, server_io) = tokio::io::duplex(1 << 20);
+    let (r, w) = tokio::io::split(server_io);
+    let retirement = consent_retirement(&setup);
+    let (serving, _runtime) =
+        governed_serving(BufReader::new(r), w, setup, None, retirement).expect("construct");
+    let server_task = tokio::spawn(serving);
+    let (r, mut w) = tokio::io::split(client_io);
+    let mut r = BufReader::new(r);
+    let scenario = async {
+        let mut notices = Vec::new();
+        send(
+            &mut w,
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        )
+        .await;
+        let initialized = response_with_decision_notices(&mut r, 1, &mut notices).await;
+        assert!(initialized.get("error").is_none(), "{initialized}");
+        assert!(notices.is_empty(), "{notices:?}");
+
+        // The client lists: the pipe presents the operator's decision.
+        send(
+            &mut w,
+            json!({"jsonrpc":"2.0","id":2,"method":"decision/list","params":{}}),
+        )
+        .await;
+        let listed = response_with_decision_notices(&mut r, 2, &mut notices).await;
+        assert!(listed.get("error").is_none(), "{listed}");
+        let notice = notices
+            .iter()
+            .find(|notice| notice["decision_id"] == decision_id.as_str())
+            .unwrap_or_else(|| panic!("the pipe presents the operator's decision: {notices:?}"));
+        assert_eq!(notice["event"], "presented");
+        assert_eq!(notice["approver_id"], "operator");
+
+        // The operator decides it on the pipe.
+        send(
+            &mut w,
+            json!({"jsonrpc":"2.0","id":3,"method":"decision/decide","params":{
+                "decision_id": decision_id,
+                "approve": true,
+                "presented_digest": subject_digest,
+            }}),
+        )
+        .await;
+        let decided = response_with_decision_notices(&mut r, 3, &mut notices).await;
+        let decision = &decided["result"]["decision"];
+        assert_eq!(decision["phase"], "approved", "{decided}");
+        let evidence = &decision["outcome"]["evidence"];
+        assert_eq!(evidence["assurance"], "device_trusted", "{evidence}");
+        assert_eq!(evidence["decider"], operator.as_str(), "{evidence}");
+    };
+    let result =
+        std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_mins(1), scenario))
+            .catch_unwind()
+            .await;
+    let cleanup_failures = cleanup_jsonl(r, &mut w, server_task, &mut http).await;
+    finish_scenario(result, cleanup_failures);
+}
+
 /// Process termination ends a governed connection that is still open, as it
 /// does the ordinary stdio server: it stops reading, drains and returns.
 #[cfg(feature = "mcp")]

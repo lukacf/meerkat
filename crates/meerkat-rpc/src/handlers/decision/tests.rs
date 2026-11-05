@@ -577,6 +577,98 @@ async fn an_ephemeral_runtime_answers_decision_methods_capability_unavailable() 
     }
 }
 
+/// A TCP connection is never a stdio operator's: on a realm whose operator
+/// has an open decision, its list presents nothing and it has no route to
+/// `decision/decide`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tcp_connection_has_no_route_to_decision_decide() {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let (_router, runtime) = persistent_router(root.path()).await;
+    runtime.set_realm_context(
+        Some(meerkat_core::connection::RealmId::parse("decisions").expect("realm id")),
+        None,
+        None,
+    );
+    let decisions = runtime.decision_service();
+    let held = decisions
+        .hold(hold_request("release", "build-7", "operator"), false)
+        .expect("hold");
+    let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
+        Config::default(),
+        meerkat_models::canonical(),
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let client = tokio::net::TcpStream::connect(listener.local_addr().expect("address"))
+        .await
+        .expect("connect");
+    let (accepted, _) = listener.accept().await.expect("accept");
+    let server = tokio::spawn(crate::server::serve_tcp_connection(
+        accepted,
+        Arc::clone(&runtime),
+        config_store,
+        None,
+    ));
+    let (reader, mut writer) = client.into_split();
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let mut notifications = Vec::new();
+    for (id, method, params) in [
+        (1_u64, "initialize", json!({})),
+        (2, "decision/list", json!({"approver_id": "operator"})),
+        (
+            3,
+            "decision/decide",
+            json!({
+                "decision_id": held.decision_id.to_string(),
+                "approve": true,
+                "presented_digest": subject_digest(),
+            }),
+        ),
+    ] {
+        let line = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        writer
+            .write_all(format!("{line}\n").as_bytes())
+            .await
+            .expect("write the request");
+        let answer = loop {
+            let line = tokio::time::timeout(std::time::Duration::from_secs(30), lines.next_line())
+                .await
+                .expect("an answer in time")
+                .expect("read the connection")
+                .expect("the connection stays open");
+            let message: serde_json::Value = serde_json::from_str(&line).expect("a JSON line");
+            if message["id"] == id {
+                break message;
+            }
+            if let Some(method) = message["method"].as_str() {
+                notifications.push(method.to_owned());
+            }
+        };
+        if method == "decision/decide" {
+            assert_eq!(answer["error"]["code"], METHOD_NOT_FOUND, "{answer}");
+        } else {
+            assert!(answer.get("error").is_none(), "{method}: {answer}");
+        }
+    }
+
+    assert!(
+        notifications
+            .iter()
+            .all(|method| method != "decision/notice"),
+        "{notifications:?}"
+    );
+    let row = decisions.get(&held.decision_id).expect("read");
+    assert_eq!(row.state.phase, DecisionPhase::Open);
+    assert_eq!(row.state.first_presented_to_approver_at_ms, None);
+    assert!(row.outcome.is_none());
+    drop(writer);
+    drop(lines);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
+}
+
 // --- The host adapter's decide: these rows use the authenticated event API,
 // --- so they compile only where it exists.
 mod authenticated_event {

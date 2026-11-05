@@ -2752,6 +2752,14 @@ class MeerkatClient:
         decisions answers capability unavailable. Needs a Meerkat 0.9.11 or
         newer server: an older one answers method not found (``-32601``),
         raised as a :class:`MeerkatError` that names the method.
+
+        A list on the stdio connection this client opens is more than a read
+        when the server is a Unix build with local authorization: before it
+        answers, the server shows the connection's operator each decision of
+        the page that is open, waits for a human and is held for an approver
+        id the operator acts for (once per connection), and records each
+        presentation. It writes a ``decision/notice`` for each decision it
+        shows; this client drops those notices.
         """
         params: dict[str, Any] = {}
         if kind is not None:

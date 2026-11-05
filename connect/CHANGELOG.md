@@ -16,6 +16,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- A Find whose own entry meets an authorization change that another task is
+  making no longer fails as `operation_refused` with kind
+  `reprepare_required`. The Find entry waits out the concurrent change within
+  the attempt's owner-change bound and then enters once, spending its review
+  once. A change that outlasts the bound is still refused as
+  `reprepare_required`, before anything ran. At review tier R2 such a change
+  settles the Find as `review_unsatisfied` (`context_changed`) instead, by
+  design: nothing runs under a decision that was not reviewed.
+
 - A Find no longer fails as temporarily unavailable (`tool_unavailable`)
   while another original's Find is writing the shared source state. Its
   setup helper admission waits for that write within the owner-change bound;

@@ -136,6 +136,13 @@ pub(crate) enum CanonicalBindingObservation {
     },
 }
 
+/// A canonical binding observation's cancellation record and historical
+/// custody decision, as a binding's publication applies them.
+type BindingObserved = (
+    Option<Arc<toolkit_store::StoredRecord>>,
+    Option<custody_attempt::CustodyDecision>,
+);
+
 impl From<Option<Arc<toolkit_store::StoredRecord>>> for CanonicalBindingObservation {
     fn from(record: Option<Arc<toolkit_store::StoredRecord>>) -> Self {
         match record {
@@ -1963,20 +1970,7 @@ impl ToolkitOriginalOwner {
         grant_binding: OriginalGrantBinding,
         observation: CanonicalBindingObservation,
     ) -> Result<Arc<RetainedToolkitOriginal>, OriginalWriterError> {
-        let (cancelled_record, historical_decision) = match observation {
-            CanonicalBindingObservation::Unretained => (None, None),
-            CanonicalBindingObservation::Cancelled(record) => (Some(record), None),
-            CanonicalBindingObservation::Historical {
-                association: observed,
-                attempt,
-            } => {
-                if observed != association {
-                    return Err(OriginalWriterError::Conflict);
-                }
-                attempt.validate_binding(&association)?;
-                (None, Some(attempt.decision()))
-            }
-        };
+        let observed = Self::binding_observation(&association, observation)?;
         // The existing writer mutex spans durable observation and this write.
         // Native publication is acquired only after storage I/O has finished.
         let _publication = self
@@ -1987,6 +1981,83 @@ impl ToolkitOriginalOwner {
             .originals
             .try_lock()
             .map_err(|_| OriginalWriterError::Unavailable)?;
+        Self::publish_into(
+            &mut originals,
+            association,
+            source_custody,
+            grant_binding,
+            observed,
+        )
+    }
+
+    /// [`Self::publish_binding`] for a caller that holds no owner change of
+    /// the shared publication and may wait until `deadline`: a source
+    /// collection held by another owner's short section ends the change with
+    /// no fact changed, is waited for outside any change, and the change
+    /// begins again ([`Self::change_with_collection_within`]). Past
+    /// `deadline` it is unavailable, as before. The publication is made at
+    /// most once. The collection's holders never wait for a lock the caller
+    /// holds: the source writer and the publication writer are always taken
+    /// before the collection, never under it.
+    fn publish_binding_within(
+        &self,
+        association: InputAuthorityAssociation,
+        source_custody: AuthenticatedOriginal,
+        grant_binding: OriginalGrantBinding,
+        observation: CanonicalBindingObservation,
+        deadline: std::time::Instant,
+    ) -> Result<Arc<RetainedToolkitOriginal>, OriginalWriterError> {
+        let observed = Self::binding_observation(&association, observation)?;
+        let mut publication = Some((association, source_custody, grant_binding, observed));
+        self.change_with_collection_within(
+            deadline,
+            std::thread::sleep,
+            || {},
+            |originals| {
+                let (association, source_custody, grant_binding, observed) =
+                    publication.take().ok_or(OriginalWriterError::Unavailable)?;
+                Self::publish_into(
+                    originals,
+                    association,
+                    source_custody,
+                    grant_binding,
+                    observed,
+                )
+            },
+        )
+    }
+
+    /// A canonical binding observation's cancellation record and historical
+    /// custody decision, validated against `association`.
+    fn binding_observation(
+        association: &InputAuthorityAssociation,
+        observation: CanonicalBindingObservation,
+    ) -> Result<BindingObserved, OriginalWriterError> {
+        Ok(match observation {
+            CanonicalBindingObservation::Unretained => (None, None),
+            CanonicalBindingObservation::Cancelled(record) => (Some(record), None),
+            CanonicalBindingObservation::Historical {
+                association: observed,
+                attempt,
+            } => {
+                if &observed != association {
+                    return Err(OriginalWriterError::Conflict);
+                }
+                attempt.validate_binding(association)?;
+                (None, Some(attempt.decision()))
+            }
+        })
+    }
+
+    /// Publish a binding into the owner's held collection, inside an open
+    /// owner change of the shared publication. Never waits.
+    fn publish_into(
+        originals: &mut Vec<OriginalRecord>,
+        association: InputAuthorityAssociation,
+        source_custody: AuthenticatedOriginal,
+        grant_binding: OriginalGrantBinding,
+        (cancelled_record, historical_decision): BindingObserved,
+    ) -> Result<Arc<RetainedToolkitOriginal>, OriginalWriterError> {
         let claims = association.candidate();
         let mut first_binding = None;
         let mut first_index = None;

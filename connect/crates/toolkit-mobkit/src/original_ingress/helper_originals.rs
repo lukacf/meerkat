@@ -1044,7 +1044,10 @@ impl ToolkitOriginalOwner {
     /// another owner's short section before the binding write waited out
     /// until `contended_until`: the source writer is released while waiting,
     /// and the check made again under the writer taken afresh. Nothing is
-    /// written before that check.
+    /// written before that check. After the write, or its exact replay, the
+    /// contributors' check and the publication wait out a held collection
+    /// until the same `contended_until`, keeping the writer the publication
+    /// needs, and only they are made again, never the write.
     pub(crate) async fn bind_admitted_helper_until(
         self: &Arc<Self>,
         store: &dyn ToolkitStore,
@@ -1204,7 +1207,27 @@ impl ToolkitOriginalOwner {
         }
         // Cancellation after WorkGraph commit cannot confer source custody.
         // Retain the immutable row for exact reconciliation, but refuse binding.
-        self.check_helper_contributors(contributor, contributors)?;
+        // After the binding write, or its exact replay, this check and the
+        // publication below meet a source collection held by another owner's
+        // short section as contention: with `contended_until` (this bind's
+        // one budget, from its start) it is waited out, keeping this source
+        // writer, which the publication needs. Only the check or the
+        // publication is made again, never the write. No holder of the
+        // collection or of an owner change of the shared publication waits
+        // for this writer: neither is ever held while the writer is taken,
+        // and their holders never await.
+        loop {
+            let settlement = self.observe_helper_sources(contributor, contributors, &[])?;
+            if settlement == HelperSourceSettlement::Contended
+                && let Some(deadline) = contended_until
+                && tokio::time::Instant::now() < deadline
+            {
+                contention_pause(deadline).await;
+                continue;
+            }
+            helper_settlement_result(settlement)?;
+            break;
+        }
         let c = association.candidate();
         let custody = AuthenticatedOriginal {
             original_work: c.original_work.clone(),
@@ -1219,12 +1242,21 @@ impl ToolkitOriginalOwner {
             &association,
             settled.custody_attempt.as_ref(),
         )?;
-        let original = self.publish_binding(
-            association,
-            custody,
-            OriginalGrantBinding::Helper,
-            observation,
-        )?;
+        let original = match contended_until {
+            Some(deadline) => self.publish_binding_within(
+                association,
+                custody,
+                OriginalGrantBinding::Helper,
+                observation,
+                deadline.into_std(),
+            )?,
+            None => self.publish_binding(
+                association,
+                custody,
+                OriginalGrantBinding::Helper,
+                observation,
+            )?,
+        };
         Ok(RetainedHelperSource {
             original,
             source_record: Arc::new(saved),

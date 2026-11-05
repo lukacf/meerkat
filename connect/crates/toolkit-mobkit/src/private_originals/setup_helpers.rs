@@ -669,13 +669,19 @@ impl PrivateOriginals {
             controller_ceiling,
             admitted_ceiling: ExecutionRestrictions::unrestricted(),
         };
+        // The bind's one budget, from its start: its waits for a held source
+        // collection before the write, and after it, for the contributors'
+        // check and the publication.
         let source = self
             .owner
             .bind_admitted_helper_until(
                 self.store.as_ref(),
                 &prepared.admitted,
                 binding,
-                Some(contended_until),
+                Some(
+                    tokio::time::Instant::now()
+                        + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+                ),
             )
             .await
             .map_err(helper_error)?;

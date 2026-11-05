@@ -490,6 +490,15 @@ impl PrivateOriginals {
     /// binder returns the typed Bind branch before submitting any native input.
     /// This is called only after fenced work admission, so a cold helper is
     /// never created before acquisition coalescing has selected its one item.
+    ///
+    /// The binder runs inside Core's governed bind, where it never waits. A
+    /// source collection held there by another owner's short section makes
+    /// it refuse before it captures anything; the preparation then waits for
+    /// the collection outside the bind, until its one deadline (from its
+    /// start, never past the source deadline), and binds again. Nothing is
+    /// captured or submitted by a refused bind: every preparation's own bind
+    /// refuses (after its capture), so Core keeps no input, settlement or
+    /// custody of one, and binding again is the same first bind.
     pub(crate) async fn prepare_setup_helper(
         self: &Arc<Self>,
         admitted: Arc<AdmittedHelperWork>,
@@ -497,6 +506,10 @@ impl PrivateOriginals {
         source_deadline: tokio::time::Instant,
         review: crate::review_custody::ReviewCustody,
     ) -> Result<PreparedHelperController, PrivateOriginalError> {
+        let contended_until = std::cmp::min(
+            source_deadline,
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+        );
         // The native acceptance callback is independent of this tool's turn.
         // Wait before any Meta identity call, with no mutation/publication
         // guard held. Each observation performs the same strict contributor
@@ -519,33 +532,47 @@ impl PrivateOriginals {
             .owned_identity_for_member_alias(&alias)
             .await
             .ok_or(PrivateOriginalError::Unavailable)?;
-        let binder = Arc::new(PrepareHelperBinder {
-            source: Arc::downgrade(self),
-            admitted,
-            captured: Mutex::new(None),
-        });
-        let outcome = runtime
-            .dispatch_governed_with_turn_ticket(
-                &identity,
-                Some(&alias),
-                Input::Prompt(PromptInput::new(content, None)),
-                review.bind(binder.clone()),
-            )
-            .await;
-        if !matches!(
-            outcome,
-            Err(IdentityRuntimeError::GovernedInput(
-                GovernedInputError::Bind(_)
-            ))
-        ) {
-            return Err(PrivateOriginalError::Unavailable);
+        loop {
+            let binder = Arc::new(PrepareHelperBinder {
+                source: Arc::downgrade(self),
+                admitted: admitted.clone(),
+                captured: Mutex::new(None),
+                contended: std::sync::atomic::AtomicBool::new(false),
+            });
+            let outcome = runtime
+                .dispatch_governed_with_turn_ticket(
+                    &identity,
+                    Some(&alias),
+                    Input::Prompt(PromptInput::new(content.clone(), None)),
+                    review.bind(binder.clone()),
+                )
+                .await;
+            if !matches!(
+                outcome,
+                Err(IdentityRuntimeError::GovernedInput(
+                    GovernedInputError::Bind(_)
+                ))
+            ) {
+                return Err(PrivateOriginalError::Unavailable);
+            }
+            let captured = binder
+                .captured
+                .lock()
+                .map_err(|_| PrivateOriginalError::Unavailable)?
+                .take();
+            if let Some(captured) = captured {
+                return Ok(captured);
+            }
+            if !binder.contended.load(std::sync::atomic::Ordering::SeqCst)
+                || tokio::time::Instant::now() >= contended_until
+            {
+                return Err(PrivateOriginalError::Unavailable);
+            }
+            self.owner
+                .check_admitted_helper_until(&admitted, contended_until)
+                .await
+                .map_err(helper_error)?;
         }
-        let captured = binder
-            .captured
-            .lock()
-            .map_err(|_| PrivateOriginalError::Unavailable)?
-            .take();
-        captured.ok_or(PrivateOriginalError::Unavailable)
     }
 
     /// Recover only a previously retained source for this exact work and
@@ -1315,6 +1342,10 @@ struct PrepareHelperBinder {
     source: Weak<PrivateOriginals>,
     admitted: Arc<AdmittedHelperWork>,
     captured: Mutex<Option<PreparedHelperController>>,
+    // Set when the bind met the source collection held by another owner's
+    // short section and refused before capturing anything; the preparation
+    // waits for the collection outside the bind and binds again.
+    contended: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
@@ -1335,10 +1366,17 @@ impl GovernedInputBinder for PrepareHelperBinder {
         ) {
             crate::source_hold_probe::retain(source.hold_sources_for_test(hold));
         }
-        source
-            .owner
-            .check_admitted_helper(&self.admitted)
-            .map_err(|_| "Toolkit helper source is unavailable")?;
+        // Never wait inside Core's bind: a held collection refuses here, with
+        // nothing captured, and the preparation waits outside it.
+        match source.owner.try_check_admitted_helper(&self.admitted) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.contended
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                return Err("Toolkit helper source is held".into());
+            }
+            Err(_) => return Err("Toolkit helper source is unavailable".into()),
+        }
         source
             .require_helper_selection(self.admitted.selection())
             .map_err(|_| "Toolkit helper selection is unavailable")?;

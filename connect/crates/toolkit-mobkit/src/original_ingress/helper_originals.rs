@@ -1601,6 +1601,21 @@ impl ToolkitOriginalOwner {
         helper_settlement_result(self.admitted_helper_settlement(admitted)?)
     }
 
+    /// [`Self::check_admitted_helper`] for a caller that must not wait where
+    /// it runs (a native binder inside Core's governed bind): `Ok(false)` when
+    /// the source collection is held by another owner's short section and
+    /// nothing was checked, `Ok(true)` when the check passed, and the check's
+    /// own refusal otherwise.
+    pub(crate) fn try_check_admitted_helper(
+        self: &Arc<Self>,
+        admitted: &AdmittedHelperWork,
+    ) -> Result<bool, OriginalWriterError> {
+        match self.admitted_helper_settlement(admitted)? {
+            HelperSourceSettlement::Contended => Ok(false),
+            settlement => helper_settlement_result(settlement).map(|()| true),
+        }
+    }
+
     /// [`Self::check_admitted_helper`] for an async caller that holds no
     /// owner change or reservation of the shared publication (the helper
     /// recovery observation): a held source collection is contention, not an

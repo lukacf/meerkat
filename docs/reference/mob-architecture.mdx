@@ -837,8 +837,9 @@ the start and its own re-drives use. A same-session rotation is the mob's
 own: the restart finishes it whatever the host-pending set says, and a
 host-pending member keeps its mark through it. Its successor is seated
 Dormant, and its wakes are refused `HostPreparationPending` until the host's
-seat step for it (a `seat_dormant_members` of the identity on its kept
-session, which answers `AlreadySeated`) ends the mark: the host wakes first.
+declaration of it ends the mark (a declared apply that carries the identity's
+first-boot `Resume` request of its kept session, which keeps the member and
+names the request carried out): the host wakes first.
 Re-issued while its rotation stands, `rotate_member` re-drives that rotation;
 re-issued after it finished, it rotates the member again. So a host that does
 not mark the member host-pending reads the member once after a restart (the

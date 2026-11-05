@@ -47,6 +47,12 @@ each package is accepted only on evidence for that exact package, and the
   and is refused (`DeclarationNotApplied`). A host's own wrapper of a session
   bridge forwards it to the bridge it wraps; a test double with no Core mob
   can answer `DeclaredRosterAnswer::kept_for(&roster)`.
+- `RestoreFlowResult` has a new field, `unlisted`: what the host's whole
+  roster did with each identity Core held declared that the roster does not
+  list (`UnlistedIdentityAnswer`: its member retired, its declaration
+  removed, its retirement failed, or a legacy member left as it is). A struct
+  literal of `RestoreFlowResult` sets it; `restore_flow` and
+  `lazy_register_flow`, which declare part of the roster, answer it empty.
 
 ### Upgrade
 
@@ -110,6 +116,28 @@ each package is accepted only on evidence for that exact package, and the
   naming the identity, and is refused (`NameHeldByWorker`) otherwise. A
   runtime with no session bridge records the spec and answers
   `DeclaredIdentityAnswer::RecordedOnly`.
+- The roster pass declares the host's roster in Core's mob through Core's
+  declared apply, and no longer seats, releases, respawns or retires members
+  itself. A bootstrap or a refresh declares the whole roster: Core seats,
+  keeps, restamps or moves each listed identity (MobMachine decides each
+  verdict), and unlists each identity it holds declared that the roster no
+  longer lists and retires its member, after which the identity leaves
+  Meta's registry. A send, a dispatch or a materialization of an identity
+  Core holds no member for, or one whose first-boot row, held role move or
+  host preparation is still owed, declares that identity alone before it
+  acts. One identity's refusal, held role move or failed retirement is that
+  identity's own typed outcome, and the pass goes on; a retirement that
+  failed is retried by the next complete roster. An identity refused before
+  Core is asked (its first-boot row contradicts Core's history) turns a
+  complete roster into a partial one for that pass, so nothing is unlisted
+  until every listed identity is declared.
+- A member whose spawn carries the `agent_identity` label but not the
+  durable-identity marker (the shape Meta 0.9.3 spawned) is no longer
+  respawned onto its session to gain the marker, and the roster pass no
+  longer retires it when the roster stops listing it: to Core such a member
+  is a host's raw member. Every Meta from 0.9.4 to 0.9.10 respawned these
+  members with the marker at its roster pass, so a state directory last run
+  by the previous matched release holds none.
 - Forge 0.3.1 selects Meta 0.9.10 with Toolkit 0.9.10 and the Connect 0.9.10
   gateway for applications on both targets, and the Meta 0.9.10 `rpc_gateway`
   for applications without a connection setup helper. Forge 0.3.0 selected
@@ -129,6 +157,19 @@ each package is accepted only on evidence for that exact package, and the
 
 ### Fixed
 
+- The roster pass no longer retires a member a host spawned under an
+  identity's member id and labelled with the identity when the roster never
+  declared that identity.
+- The first roster pass after a restart lets the previous role of an
+  identity the roster moved to another profile go: Core holds the member
+  under its previous role, or migrates it when the activation declared the
+  migration, and releases its materialization. The pass used to skip an
+  identity it had not registered yet in this process, so the member stayed
+  loaded under its previous role.
+- One identity whose member Core fails to retire no longer fails the whole
+  roster pass: its outcome is typed and its own, the other identities are
+  declared and unlisted as usual, and the next complete roster retires it
+  again.
 - Build and Resume check the saved guide within the same writer reservation
   that publishes the build: the final comparison with the saved guide, the
   service check and the build's publication run inside one SQLite writer

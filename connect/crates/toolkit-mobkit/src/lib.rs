@@ -852,13 +852,14 @@ pub mod observe_helper_probe {
     }
 }
 
-/// Test seam: a Find's work step just before its helper publication-source
-/// read (`complete.publication_source`), by call ID. A control can have the
-/// owner's originals collection held there on a thread of its own, inside an
-/// owner change on the owner's publication or without one, as another
-/// helper's first binding write holds them.
+/// Test seam: a step of a Find's helper work at which a control can have the
+/// owner's originals collection held on a thread of its own, inside an owner
+/// change on the owner's publication or without one, as another helper's
+/// first binding write holds them. Each site is named by its [`Site`] and a
+/// key: the Find's call ID where the step has it, else the helper's work
+/// item.
 #[cfg(any(test, feature = "test-support"))]
-pub mod publication_source_probe {
+pub mod source_hold_probe {
     use std::sync::{Arc, Mutex, PoisonError};
     use std::thread::JoinHandle;
     use std::time::Duration;
@@ -870,8 +871,29 @@ pub mod publication_source_probe {
         pub owner_change: bool,
         pub duration: Duration,
     }
-    /// A control's answer at the step, given the Find's call ID.
-    pub type Probe = Arc<dyn Fn(&str) -> Option<Hold> + Send + Sync>;
+    /// Where the hold begins.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Site {
+        /// The work step just before its helper publication-source read
+        /// (`complete.publication_source`); keyed by call ID.
+        PublicationSource,
+        /// The retention of a helper source just before its issued lineage
+        /// is resolved (the work step's retain, and the recovery's own
+        /// retain); keyed by work item.
+        Resolve,
+        /// A helper source's first binding write just done, before its
+        /// contributors' check and its publication; keyed by work item.
+        Retain,
+        /// A bound helper source's exact replay (nothing written), before
+        /// its contributors' check and its publication (the Find's
+        /// `advance.recover_helper`); keyed by work item.
+        Recover,
+        /// The Find's live-replay helper observation
+        /// (`advance.observe_helper`); keyed by call ID.
+        Observe,
+    }
+    /// A control's answer at a site, given its key.
+    pub type Probe = Arc<dyn Fn(Site, &str) -> Option<Hold> + Send + Sync>;
     static PROBE: Mutex<Option<Probe>> = Mutex::new(None);
     static HOLDS: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new());
     /// Install the control's probe, replacing any earlier one.
@@ -886,9 +908,9 @@ pub mod publication_source_probe {
             let _ = hold.join();
         }
     }
-    pub(crate) fn observe(call: &str) -> Option<Hold> {
+    pub(crate) fn observe(site: Site, key: &str) -> Option<Hold> {
         let probe = PROBE.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        probe.and_then(|probe| probe(call))
+        probe.and_then(|probe| probe(site, key))
     }
     pub(crate) fn retain(hold: JoinHandle<()>) {
         HOLDS

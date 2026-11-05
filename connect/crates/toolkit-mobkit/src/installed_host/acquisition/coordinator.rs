@@ -424,6 +424,12 @@ impl InstalledAcquisition {
         progress.enter(AdmissionStage::ObserveHelper);
         #[cfg(any(test, feature = "test-support"))]
         crate::observe_helper_probe::observe(call.id);
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) =
+            crate::source_hold_probe::observe(crate::source_hold_probe::Site::Observe, call.id)
+        {
+            crate::source_hold_probe::retain(originals.hold_sources_for_test(hold));
+        }
         let admitted = originals
             .observe_setup_helper_for_live_replay(
                 context,
@@ -765,8 +771,11 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
             }
             Err(SetupError::Store(StoreError::NotFound)) => {
                 #[cfg(any(test, feature = "test-support"))]
-                if let Some(hold) = crate::publication_source_probe::observe(self.call.id) {
-                    crate::publication_source_probe::retain(originals.hold_sources_for_test(hold));
+                if let Some(hold) = crate::source_hold_probe::observe(
+                    crate::source_hold_probe::Site::PublicationSource,
+                    self.call.id,
+                ) {
+                    crate::source_hold_probe::retain(originals.hold_sources_for_test(hold));
                 }
                 let helper_source = originals
                     .setup_helper_publication_source(

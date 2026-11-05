@@ -21,6 +21,8 @@ use std::time::Instant;
 const CALL: &str = "b-helper-check";
 /// B's first install: the call the install control acts on.
 const INSTALL_CALL: &str = "b-helper-install";
+/// A's first install: the call the pending-at-cancel control acts on.
+const A_INSTALL_CALL: &str = "a-helper-install";
 /// How often the check's held entry close looks again whether the check
 /// after the join answered, and the longest it is held: the entry stays
 /// unsettled while that check runs.
@@ -329,6 +331,40 @@ fn owner_change_at_the_install_check_is_refused_certified_and_installed_fresh() 
             .expect("the fresh install's result")
             .is_error,
         "the one fresh install succeeded"
+    );
+}
+
+// A's first install meets the same owner change at its check before the
+// physical dispatch: refused at once, certified not dispatched, and A's
+// model makes its one fresh install. That fresh install joins the held
+// worker, so it is still pending when the case cancels A (the worker is
+// released only after A's cancellation is acknowledged), and A's model need
+// not see its result. The case's proofs hold for it all the same: its first
+// attempt refused certified with nothing run, the fresh install approved
+// once and joined, nothing done twice.
+#[test]
+fn a_fresh_install_pending_at_its_members_cancel_keeps_its_proofs() {
+    let hold = Duration::from_millis(120);
+    let (observed, script) = control_at(Step::InstallGuarded, A_INSTALL_CALL, Hold::For(hold));
+    assert_eq!(
+        observed.count(Step::InstallGuarded, A_INSTALL_CALL),
+        1,
+        "A's refused install's check ran once"
+    );
+    let fresh = format!("{A_INSTALL_CALL}-fresh");
+    assert_eq!(
+        observed.count(Step::InstallGuarded, &fresh),
+        1,
+        "A's fresh install held its own guard once"
+    );
+    let seen = script.seen_results.lock().unwrap();
+    let refused = seen
+        .get(A_INSTALL_CALL)
+        .expect("A's refused install's result");
+    assert!(
+        refused.is_error && find_feedback::certified_reprepare(refused),
+        "refused at once before the physical dispatch, typed and certified not dispatched: {}",
+        refused.text_content()
     );
 }
 

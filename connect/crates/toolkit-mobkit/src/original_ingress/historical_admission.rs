@@ -134,6 +134,12 @@ impl ToolkitOriginalOwner {
         thread
     }
 
+    /// This owner's publication, for a control's own owner change on it.
+    #[cfg(test)]
+    pub(crate) fn publication_for_test(&self) -> &LocalAuthorizationPublication {
+        &self.publication
+    }
+
     /// The helper admission steps recorded so far, in order.
     #[cfg(test)]
     pub(crate) fn helper_admission_events_for_test(&self) -> Vec<&'static str> {

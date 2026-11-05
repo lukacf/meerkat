@@ -1149,6 +1149,8 @@ impl ToolkitOriginalOwner {
             binding: Box::new(binding.clone()),
             association: association.clone(),
         };
+        #[cfg(any(test, feature = "test-support"))]
+        let first_write = matches!(record.state, HelperSourceState::ControllerPending);
         let saved = match &record.state {
             HelperSourceState::ControllerPending => {
                 record.controller.check_binding(self, admitted, &binding)?;
@@ -1186,6 +1188,19 @@ impl ToolkitOriginalOwner {
         let settled = HelperSourceRecord::decode(&saved)?;
         if saved.key != key || settled != record {
             return Err(OriginalWriterError::Conflict);
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            if first_write {
+                crate::source_hold_probe::Site::Retain
+            } else {
+                crate::source_hold_probe::Site::Recover
+            },
+            &facts.item.to_string(),
+        ) {
+            crate::source_hold_probe::retain(
+                self.hold_sources_for_test(hold.owner_change, hold.duration),
+            );
         }
         // Cancellation after WorkGraph commit cannot confer source custody.
         // Retain the immutable row for exact reconciliation, but refuse binding.

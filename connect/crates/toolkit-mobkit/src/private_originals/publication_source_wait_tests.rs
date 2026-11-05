@@ -12,32 +12,38 @@
 //! model call, so it is its own invocation (Toolkit's retry correlation is
 //! the original, its input and the call ID) and makes its own work once. No
 //! effect runs twice, and the refused work is never issued again.
+//!
+//! [`finds_with_hold_at`] makes the same hold at any site of the source hold
+//! probe ([`Site`]); the helper source rows of the other sites use it too.
 use super::*;
-use crate::publication_source_probe::{self, Hold};
+use crate::source_hold_probe::{self, Hold, Site};
 use meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-/// What the original's Finds settled, with `hold` made once, at the first
-/// Find's publication-source read.
-struct Found {
+/// What the original's Finds settled, with `hold` made once, at the site's
+/// hit the control chose.
+pub(super) struct Found {
     /// Each Find's result, in the order the model first saw them.
-    feedback: Vec<ToolResult>,
+    pub(super) feedback: Vec<ToolResult>,
     /// The helpers whose source this owner retains.
-    helpers: usize,
-    /// The publication-source reads made, from the first on.
-    reads: usize,
+    pub(super) helpers: usize,
+    /// The publication-source reads made, from the hold on.
+    pub(super) reads: usize,
     /// The controller grants appended, one entry (its lineage) per append.
-    issued: Vec<String>,
-    /// From the first read to the first Find's result reaching the model.
-    answered_after: Duration,
+    pub(super) issued: Vec<String>,
+    /// From the hold to the first Find's result reaching the model.
+    pub(super) answered_after: Duration,
     /// The first Find's helper source row and its work effect, read after
     /// the hold ended and before any fresh Find.
-    first_row: Option<toolkit_store::StoredRecord>,
-    first_effect: Option<toolkit_store::StoredEffect>,
+    pub(super) first_row: Option<toolkit_store::StoredRecord>,
+    pub(super) first_effect: Option<toolkit_store::StoredEffect>,
     /// Every helper source row the Finds wrote, with its work effect, at
     /// the end.
-    rows: Vec<(toolkit_store::StoredRecord, toolkit_store::StoredEffect)>,
+    pub(super) rows: Vec<(toolkit_store::StoredRecord, toolkit_store::StoredEffect)>,
+    /// How long another actor's owner change, begun on the owner's
+    /// publication while the hold lasted, waited to begin.
+    pub(super) concurrent_change: Option<Duration>,
 }
 
 fn helper_scope(fixture: &Fixture) -> toolkit_store::StoreScope {
@@ -105,6 +111,21 @@ async fn work_effect(
 }
 
 async fn finds_with_hold_at_publication_source(hold: Hold, fresh_finds: usize) -> Found {
+    finds_with_hold_at(Site::PublicationSource, 1, hold, fresh_finds, false).await
+}
+
+/// The original's Finds, with `hold` made once, at the `nth` hit (from 1)
+/// of `site`, and `fresh_finds` fresh Finds released once the hold ended.
+/// With `concurrent_change`, another actor begins and ends an owner change
+/// on the owner's publication 30 ms into the hold, timing how long it waited
+/// to begin.
+pub(super) async fn finds_with_hold_at(
+    site: Site,
+    nth: usize,
+    hold: Hold,
+    fresh_finds: usize,
+    concurrent_change: bool,
+) -> Found {
     let script = acquisition_denial::Script::for_approved();
     script.arm_fresh_finds(fresh_finds);
     let report = Report::new(script.tools().result_tool());
@@ -124,18 +145,38 @@ async fn finds_with_hold_at_publication_source(hold: Hold, fresh_finds: usize) -
             }))
             .is_ok()
     );
-    let reached: Arc<Mutex<Option<(Instant, usize)>>> = Arc::default();
+    // The site's hits so far, and the hold's start with the owner's helper
+    // admission events then.
+    let reached: Arc<Mutex<(usize, Option<(Instant, usize)>)>> = Arc::default();
     let seen = reached.clone();
     let owner = fixture.source.owner.clone();
-    publication_source_probe::install(Arc::new(move |_call| {
-        let mut seen = seen.lock().unwrap();
-        if seen.is_some() {
+    let concurrent: Arc<Mutex<Option<Duration>>> = Arc::default();
+    let measured = concurrent.clone();
+    source_hold_probe::install(Arc::new(move |at, _key| {
+        if at != site {
             return None;
         }
-        *seen = Some((
+        let mut seen = seen.lock().unwrap();
+        seen.0 += 1;
+        if seen.0 != nth {
+            return None;
+        }
+        seen.1 = Some((
             Instant::now(),
             owner.helper_admission_events_for_test().len(),
         ));
+        if concurrent_change {
+            let publication = owner.publication_for_test().clone();
+            let measured = measured.clone();
+            source_hold_probe::retain(std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(30));
+                let started = Instant::now();
+                let change = publication.begin_owner_change().unwrap();
+                *measured.lock().unwrap() = Some(started.elapsed());
+                std::thread::sleep(Duration::from_millis(1));
+                drop(change);
+            }));
+        }
         Some(hold)
     }));
     let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
@@ -159,7 +200,7 @@ async fn finds_with_hold_at_publication_source(hold: Hold, fresh_finds: usize) -
                     return (None, None);
                 }
                 let start = loop {
-                    if let Some((start, _)) = *reached.lock().unwrap() {
+                    if let Some((start, _)) = reached.lock().unwrap().1 {
                         break start;
                     }
                     tokio::time::sleep(Duration::from_millis(5)).await;
@@ -183,7 +224,8 @@ async fn finds_with_hold_at_publication_source(hold: Hold, fresh_finds: usize) -
             let (start, from) = reached
                 .lock()
                 .unwrap()
-                .expect("the first Find reached its publication-source read");
+                .1
+                .expect("the Find reached the hold's site");
             let reads = fixture.source.owner.helper_admission_events_for_test()[from..]
                 .iter()
                 .filter(|event| **event == "publication_source_read")
@@ -205,35 +247,39 @@ async fn finds_with_hold_at_publication_source(hold: Hold, fresh_finds: usize) -
                 first_row,
                 first_effect,
                 rows,
+                concurrent_change: None,
             }
         }),
     ))
     .catch_unwind()
     .await;
-    publication_source_probe::clear();
+    source_hold_probe::clear();
     report.release();
     report.leaf.context.lock().unwrap().take();
     let cleanup = fixture.shutdown().await;
     assert!(cleanup.is_ok(), "{cleanup:?}");
     match checked {
-        Ok(Ok(found)) => found,
+        Ok(Ok(found)) => Found {
+            concurrent_change: *concurrent.lock().unwrap(),
+            ..found
+        },
         Ok(Err(_)) => panic!("the Finds did not settle before the fixture deadline"),
         Err(payload) => std::panic::resume_unwind(payload),
     }
 }
 
-fn reply(result: &ToolResult) -> serde_json::Value {
+pub(super) fn reply(result: &ToolResult) -> serde_json::Value {
     serde_json::from_str(&result.text_content()).unwrap()
 }
 
 /// The Find admitted its helper once the hold was waited out, with the
 /// controller grant issued once.
-fn assert_waited_out(found: &Found, hold: Duration) {
+pub(super) fn assert_waited_out(found: &Found, hold: Duration) {
     assert_eq!(found.feedback.len(), 1, "{:?}", found.feedback);
     let first = &found.feedback[0];
     assert!(
         !first.is_error,
-        "a held source collection at the publication-source read is waited out, not refused: {}",
+        "a held source collection is waited out, not refused: {}",
         reply(first)
     );
     assert_eq!(

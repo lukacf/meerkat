@@ -602,6 +602,13 @@ impl PrivateOriginals {
         {
             return Err(PrivateOriginalError::Denied);
         }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::Resolve,
+            &prepared.admitted.item_id().to_string(),
+        ) {
+            crate::source_hold_probe::retain(self.hold_sources_for_test(hold));
+        }
         let controller_ceiling = {
             let grants = self.owner.grants();
             let resolved = grants
@@ -666,11 +673,11 @@ impl PrivateOriginals {
     }
 
     /// Test seam: the owner's originals collection held per `hold`
-    /// ([`crate::publication_source_probe`]), on a thread of its own.
+    /// ([`crate::source_hold_probe`]), on a thread of its own.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn hold_sources_for_test(
         &self,
-        hold: crate::publication_source_probe::Hold,
+        hold: crate::source_hold_probe::Hold,
     ) -> std::thread::JoinHandle<()> {
         self.owner
             .hold_sources_for_test(hold.owner_change, hold.duration)

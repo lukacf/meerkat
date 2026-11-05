@@ -964,8 +964,17 @@ impl ToolkitOriginalOwner {
                 self.hold_sources_for_test(hold.owner_change, hold.duration),
             );
         }
+        // After the fenced create or read, the sources are checked again
+        // under the same writer; a held collection is waited out until the
+        // step's deadline, keeping the writer, and only the check repeats.
         let Some(outcome) = outcome else {
-            self.check_helper_sources(contributor, contributors, own_originals)?;
+            self.check_helper_sources_within(
+                contributor,
+                contributors,
+                own_originals,
+                contended_until,
+            )
+            .await?;
             return Ok(None);
         };
         let item = match outcome {
@@ -990,7 +999,8 @@ impl ToolkitOriginalOwner {
                 .collect(),
             selection,
         };
-        self.check_helper_sources(contributor, contributors, own_originals)?;
+        self.check_helper_sources_within(contributor, contributors, own_originals, contended_until)
+            .await?;
         Ok(Some(AdmittedHelperWork {
             owner: self.clone(),
             source_scope: source_scope.clone(),
@@ -1711,6 +1721,10 @@ impl ToolkitOriginalOwner {
     /// canonical lookup and still enter native with the same operation witness.
     /// Native checks all accepted associations, ceilings
     /// and current permission; this source check never substitutes for that.
+    /// The fenced helper access makes this check itself, with its wait for a
+    /// held collection ([`Self::check_helper_sources_within`]); the fixtures
+    /// and source rows still use this form.
+    #[cfg(test)]
     fn check_helper_sources(
         &self,
         contributor: &Arc<RetainedToolkitOriginal>,
@@ -1722,6 +1736,35 @@ impl ToolkitOriginalOwner {
             contributors,
             own_originals,
         )?)
+    }
+
+    /// The same source check after a fenced helper create or read, under the
+    /// caller's source writer, which it keeps: a source collection held by
+    /// another owner's short section is contention, not an answer, so with
+    /// `contended_until` (the step's one deadline) it is waited out with
+    /// bounded pauses and the check made again; without it the check answers
+    /// at once. Every other answer is final at once. The collection's holders
+    /// never wait for the source writer: it is always taken before the
+    /// collection, never under it.
+    async fn check_helper_sources_within(
+        &self,
+        contributor: &Arc<RetainedToolkitOriginal>,
+        contributors: &[Arc<RetainedToolkitOriginal>],
+        own_originals: &[Arc<RetainedToolkitOriginal>],
+        contended_until: Option<tokio::time::Instant>,
+    ) -> Result<(), OriginalWriterError> {
+        loop {
+            let settlement =
+                self.observe_helper_sources(contributor, contributors, own_originals)?;
+            if settlement == HelperSourceSettlement::Contended
+                && let Some(deadline) = contended_until
+                && tokio::time::Instant::now() < deadline
+            {
+                contention_pause(deadline).await;
+                continue;
+            }
+            return helper_settlement_result(settlement);
+        }
     }
 
     // This is the same strict source check, with transient observations kept

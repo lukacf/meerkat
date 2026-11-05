@@ -170,12 +170,30 @@ redundant; a detected grant that overlaps an added one otherwise yields to
 it (for example `--confinement-write /opt/foo` drops the read-only `/opt`).
 Any violation refuses the start.
 
+The same grants can live in your own `tui.toml` (the global
+`<config-dir>/tui.toml` or a trusted realm `tui.toml`), next to the flags:
+
+```toml
+[confinement]
+extra_read = ["/data/datasets"]   # like --confinement-read
+extra_write = ["/scratch/build"]  # like --confinement-write
+```
+
+They follow the same rules and fail the start the same way (the error names
+`[confinement] extra_read`/`extra_write` instead of the flag). Layers add
+up (global, realm, then `--set 'confinement.extra_read=["/dir"]'`, whose
+array value appends); a directory listed twice is granted once with the most
+access any layer gives, and the flags win over a file grant that overlaps
+one of theirs. A project `.rkat/tui.toml` and an untrusted realm file may
+not widen the sandbox: their `[confinement]` is ignored with a notice.
+
 A realm `[confinement]` that confines the shell (`shell`, else `all`) is the
 **floor**: the command line may only narrow it. `--confinement workspace`
 (the default) installs the realm's requirement as it is, `--confinement
 strict` installs it with the network denied, and `--confinement off` /
 `--no-confinement` refuses to start, naming the realm's policy; so do
-`--confinement-read`/`--confinement-write` (they would widen it: add the
+`--confinement-read`/`--confinement-write` and the `tui.toml` grants (they
+would widen it: add the
 directories to the realm's `[confinement.shell]` instead). A realm that
 states `trusted_host` (or nothing) for the shell leaves the command line in
 charge.
@@ -232,8 +250,8 @@ requires the caller to be a durable mob member).
 Rules live in TOML, layered (later settings win): the user-global
 `<config-dir>/tui.toml`, then `<realm>/tui.toml` (written by `/rules add`),
 then the command line, then `<project>/.rkat/tui.toml`. The project file may
-only add deny rules and `[auto]` settings; its `[endpoints]` are ignored with
-a notice. Broad allow rules (blanket shell, interpreters, package-manager run
+only add deny rules and `[auto]` settings; its `[endpoints]`, `[pricing]` and
+`[confinement]` are ignored with a notice. Broad allow rules (blanket shell, interpreters, package-manager run
 commands) are dropped when auto mode starts.
 
 **Trusting the realm file.** The realm `tui.toml` lives in the workspace and
@@ -242,8 +260,8 @@ outside the workspace (`<config-dir>/trust/<workspace key>.toml`) with the
 SHA-256 of each workspace file it wrote itself or you trusted. The realm
 `tui.toml` counts as yours only when it is a regular file reached through no
 symbolic link and its digest matches the record; otherwise it can only deny,
-its `[endpoints]`, `[pricing]` and `[auto]` are ignored, and a notice says
-why. `/rules add` and the escalation dialog update the record; `/rules
+its `[endpoints]`, `[pricing]`, `[confinement]` and `[auto]` are ignored,
+and a notice says why. `/rules add` and the escalation dialog update the record; `/rules
 trust` shows a summary of the file as it is now and records its digest.
 
 ```toml
@@ -497,7 +515,9 @@ is, with a one-line start-up notice naming the new default and
 `--config-dir`. Nothing is moved; move the whole directory (the trust
 records included, whose names do not depend on where the directory is) to
 switch. With `--workspace ~` the workspace's own state directory is
-`~/.rkat/tui` too, so pass `--config-dir` there. The price-list cache lives
+`~/.rkat/tui` too: rkat-tui refuses to start (exit 2) when the config
+directory and the realm directory are the same or one holds the other,
+naming both, so pass `--config-dir <other dir>` there. The price-list cache lives
 in the user cache directory (`<config-dir>/cache` when `--config-dir` is
 given).
 

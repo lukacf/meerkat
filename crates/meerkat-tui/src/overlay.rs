@@ -561,4 +561,27 @@ mod tests {
         let f = file(&["--set", "auto.enabled=true", "--no-auto"]);
         assert_eq!(f.auto.unwrap().enabled, Some(false));
     }
+
+    #[test]
+    fn set_takes_confinement_grant_arrays() {
+        let file = file(&[
+            "--set",
+            r#"confinement.extra_read=["/a"]"#,
+            "--set",
+            r#"confinement.extra_read=["/b"]"#,
+            "--set",
+            r#"confinement.extra_write=["/c"]"#,
+        ]);
+        let section = file.confinement.unwrap();
+        // Arrays append across `--set`s.
+        assert_eq!(
+            section.extra_read,
+            vec![std::path::PathBuf::from("/a"), std::path::PathBuf::from("/b")]
+        );
+        assert_eq!(section.extra_write, vec![std::path::PathBuf::from("/c")]);
+        // A bare path is a string, not the array the key takes.
+        let err = overlay(&["--set", "confinement.extra_read=/a"]).unwrap_err();
+        assert_eq!(err.flag, "--set");
+        assert!(overlay(&["--set", r#"confinement.extra=["/a"]"#]).is_err());
+    }
 }

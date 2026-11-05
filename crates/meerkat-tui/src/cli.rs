@@ -82,7 +82,9 @@ pub struct Args {
     /// Directory for user-global rkat-tui files: AGENTS.md, SYSTEM.md, tui.toml
     /// rules, notes, history, trust records. Defaults to ~/.rkat/tui (under
     /// --user-config-root when given); an existing legacy ~/.config/rkat-tui
-    /// ($XDG_CONFIG_HOME/rkat-tui) is used until ~/.rkat/tui exists.
+    /// ($XDG_CONFIG_HOME/rkat-tui) is used until ~/.rkat/tui exists. It may
+    /// not be, hold or lie inside the realm directory (with `-w ~`, pass
+    /// another one).
     #[arg(long)]
     pub config_dir: Option<PathBuf>,
 
@@ -121,12 +123,14 @@ pub struct Args {
 
     /// Let confined commands read this directory (absolute, existing, no
     /// symbolic link on the way, disjoint from the workspace and the other
-    /// grants). Repeatable.
+    /// grants). Repeatable; also `[confinement] extra_read` in your own
+    /// tui.toml (this flag wins on overlap).
     #[arg(long, value_name = "DIR")]
     pub confinement_read: Vec<PathBuf>,
 
     /// Let confined commands read and write this directory (same rules as
-    /// `--confinement-read`). Repeatable.
+    /// `--confinement-read`). Repeatable; also `[confinement] extra_write`
+    /// in your own tui.toml (this flag wins on overlap).
     #[arg(long, value_name = "DIR")]
     pub confinement_write: Vec<PathBuf>,
 

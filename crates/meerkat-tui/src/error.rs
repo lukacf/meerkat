@@ -74,6 +74,23 @@ pub enum TuiError {
     /// composed into one gateway.
     #[error("cannot compose the file and note tools: {0}")]
     ToolGateway(#[source] meerkat_core::error::ToolError),
+    /// The user-global config directory and the realm directory are the
+    /// same directory, or one holds the other (`--workspace ~` with the
+    /// default `~/.rkat/tui`): their `tui.toml`, trust records and notes
+    /// would collide.
+    #[error(
+        "the config dir {} and the realm dir {} {relation}; their tui.toml, trust records and notes would collide; pass --config-dir <other dir> to keep the user-global files elsewhere",
+        .config.display(),
+        .realm.display()
+    )]
+    ConfigDirCollision {
+        /// The resolved user-global config directory.
+        config: PathBuf,
+        /// The realm directory.
+        realm: PathBuf,
+        /// How they collide (`are the same directory`, …).
+        relation: &'static str,
+    },
     /// stdin or stdout is not a terminal; the TUI needs one.
     #[error(
         "stdin and stdout must be a terminal; rkat-tui is interactive (use `rkat run` for scripts)"
@@ -131,6 +148,7 @@ impl TuiError {
             | Self::Overlay(_)
             | Self::Approval(_)
             | Self::Confinement(_)
+            | Self::ConfigDirCollision { .. }
             | Self::NotATerminal => 2,
             Self::Io { .. }
             | Self::Persistence(_)

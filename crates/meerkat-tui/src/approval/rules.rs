@@ -4,7 +4,7 @@
 //! action's canonical subject ([`ArgPattern`]): the command string for `shell`,
 //! the display path for file tools, pretty JSON for everything else.
 //!
-//! Three files are layered: `~/.config/rkat-tui/tui.toml` (global, see
+//! Three files are layered: `~/.rkat/tui/tui.toml` (global, see
 //! [`crate::bootstrap::GlobalDirs`]), `<realm>/tui.toml`
 //! (per-workspace, the default write target) and `<project>/.rkat/tui.toml`
 //! (committed with the repository, therefore untrusted: it may only add deny
@@ -14,9 +14,13 @@
 //! ([`crate::approval::trust`]); otherwise only its deny rules apply. The command-line overlay ([`crate::overlay`]) is a
 //! fourth layer between the realm and project files. Besides rules and
 //! `[auto]`, the file holds `[endpoints.<name>]` (see [`crate::endpoints`])
-//! and `[pricing."<model id>"]` price overrides (see [`crate::pricing`]).
+//! and `[pricing."<model id>"]` price overrides (see [`crate::pricing`]), and
+//! `[confinement] extra_read`/`extra_write` sandbox grants (see
+//! [`crate::bootstrap::confinement`]); like endpoints and prices, those are
+//! honoured from the user's own layers only.
 
 use crate::approval::trust::{TrustStatus, Untrusted};
+use crate::bootstrap::confinement::ConfinementSection;
 use crate::ui::compaction::{CompactMode, CompactionPolicy};
 use globset::{Glob, GlobBuilder, GlobMatcher};
 use serde::{Deserialize, Serialize};
@@ -836,6 +840,9 @@ pub struct RulesFile {
     /// Price overrides by model id (USD per million tokens).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pricing: BTreeMap<String, PricingSection>,
+    /// Extra directories for the confined shell (user layers only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confinement: Option<ConfinementSection>,
 }
 
 impl RulesFile {
@@ -907,6 +914,8 @@ pub enum Notice {
         endpoints: usize,
         /// Ignored price overrides.
         pricing: usize,
+        /// Ignored `[confinement]` grants (directories).
+        confinement: usize,
     },
     /// A global rules file exists at the pre-`GlobalDirs` location and is no
     /// longer read.
@@ -939,6 +948,14 @@ pub enum Notice {
         /// The rules file.
         path: PathBuf,
         /// Number of ignored model entries.
+        count: usize,
+    },
+    /// The project file sets `[confinement]` grants. Only the user's own
+    /// layers may widen the shell's sandbox: they are ignored.
+    ProjectConfinementIgnored {
+        /// Project rules file.
+        path: PathBuf,
+        /// Number of ignored grants (directories).
         count: usize,
     },
     /// A `[pricing."<model>"]` entry has a negative or non-finite price.
@@ -978,10 +995,11 @@ impl fmt::Display for Notice {
                 auto,
                 endpoints,
                 pricing,
+                confinement,
             } => {
                 write!(
                     f,
-                    "{} is not trusted ({reason}); only its deny rules apply (ignored {allow} allow rule(s), {endpoints} endpoint(s), {pricing} price override(s)",
+                    "{} is not trusted ({reason}); only its deny rules apply (ignored {allow} allow rule(s), {endpoints} endpoint(s), {pricing} price override(s), {confinement} [confinement] grant(s)",
                     path.display()
                 )?;
                 if *auto {
@@ -1007,6 +1025,11 @@ impl fmt::Display for Notice {
                 f,
                 "ignored {count} [pricing] entr{} in {}: only your own tui.toml files set prices",
                 if *count == 1 { "y" } else { "ies" },
+                path.display()
+            ),
+            Self::ProjectConfinementIgnored { path, count } => write!(
+                f,
+                "ignored {count} [confinement] grant(s) in {}: project files may not widen the shell's sandbox; add them to your own tui.toml",
                 path.display()
             ),
             Self::PricingInvalid { model, field } => write!(
@@ -1074,6 +1097,10 @@ pub struct Layered {
     pub endpoints: BTreeMap<String, LayeredEndpoint>,
     /// Merged `[pricing."<model>"]` overrides (invalid entries dropped).
     pub pricing: BTreeMap<String, PricingSection>,
+    /// Merged `[confinement]` grants of the user layers (global, an owned
+    /// realm file, the command-line overlay), in layer order; not yet
+    /// validated (see [`crate::bootstrap::confinement::grants_with`]).
+    pub confinement: ConfinementSection,
     /// Non-fatal observations to show once.
     pub notices: Vec<Notice>,
 }
@@ -1111,10 +1138,12 @@ pub fn load_layered(
 ///
 /// User layers (global → realm → cli): rules accumulate, `[auto]` fields and
 /// endpoint fields replace those of earlier layers, endpoints merge by name.
+/// `[confinement]` grants accumulate.
 /// A [`RealmTrust::DenyOnly`] realm file contributes only deny rules (no allow
-/// rules, `[auto]` settings, endpoints or prices). The project layer
-/// contributes deny rules and `[auto]` settings the command line did not
-/// set; its endpoints are ignored with a notice; it can never turn
+/// rules, `[auto]` settings, endpoints, prices or `[confinement]` grants).
+/// The project layer contributes deny rules and `[auto]` settings the
+/// command line did not set; its endpoints and `[confinement]` grants are
+/// ignored with a notice; it can never turn
 /// `trust_project_builds` or `classifier_tools` on, but may turn them off.
 ///
 /// # Errors
@@ -1132,6 +1161,7 @@ pub fn load_layered_with(
     let mut notices = Vec::new();
     let mut endpoints: BTreeMap<String, LayeredEndpoint> = BTreeMap::new();
     let mut pricing: BTreeMap<String, PricingSection> = BTreeMap::new();
+    let mut confinement = ConfinementSection::default();
 
     let mut user_layers: Vec<(Option<PathBuf>, RuleOrigin, RulesFile)> = Vec::new();
     if let Some(global) = global_rules_file {
@@ -1167,7 +1197,12 @@ pub fn load_layered_with(
                 .auto
                 .as_ref()
                 .is_some_and(|auto| *auto != AutoSection::default());
-            if ignored_allow > 0 || auto || !file.endpoints.is_empty() || !file.pricing.is_empty()
+            let grants = file.confinement.as_ref().map_or(0, ConfinementSection::len);
+            if ignored_allow > 0
+                || auto
+                || !file.endpoints.is_empty()
+                || !file.pricing.is_empty()
+                || grants > 0
             {
                 notices.push(Notice::UntrustedRealmDenyOnly {
                     path,
@@ -1176,9 +1211,13 @@ pub fn load_layered_with(
                     auto,
                     endpoints: file.endpoints.len(),
                     pricing: file.pricing.len(),
+                    confinement: grants,
                 });
             }
             continue;
+        }
+        if let Some(section) = &file.confinement {
+            confinement.extend_from(section);
         }
         for (model, section) in &file.pricing {
             pricing
@@ -1231,6 +1270,17 @@ pub fn load_layered_with(
         }
         None => true,
     });
+    // Nor do they widen the shell's sandbox.
+    let project_grants = project
+        .confinement
+        .as_ref()
+        .map_or(0, ConfinementSection::len);
+    if project_grants > 0 {
+        notices.push(Notice::ProjectConfinementIgnored {
+            path: project_path.clone(),
+            count: project_grants,
+        });
+    }
     // Project files never define endpoints, not even new ones: a cloned
     // repository could route prompts and credentials to its own server.
     for name in project.endpoints.keys() {
@@ -1285,6 +1335,7 @@ pub fn load_layered_with(
         settings,
         endpoints,
         pricing,
+        confinement,
         notices,
     })
 }
@@ -1564,6 +1615,10 @@ mod tests {
                     cache_write: None,
                 },
             )]),
+            confinement: Some(ConfinementSection {
+                extra_read: vec![PathBuf::from("/data")],
+                extra_write: vec![PathBuf::from("/scratch")],
+            }),
         };
         let text = toml::to_string_pretty(&file).unwrap();
         let back: RulesFile = toml::from_str(&text).unwrap();
@@ -2231,5 +2286,71 @@ mod tests {
             n,
             Notice::UntrustedRealmDenyOnly { endpoints: 1, .. }
         )));
+    }
+
+    #[test]
+    fn confinement_grants_come_from_user_layers_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (realm, project) = (tmp.path().join("realm"), tmp.path().join("p"));
+        let global = tmp.path().join("global").join(RULES_FILE_NAME);
+        write(
+            global.parent().unwrap(),
+            "[confinement]\nextra_read = [\"/g/read\"]\nextra_write = [\"/g/write\"]\n",
+        );
+        write(&realm, "[confinement]\nextra_read = [\"/r/read\"]\n");
+        write(
+            &project,
+            "[confinement]\nextra_read = [\"/p/a\"]\nextra_write = [\"/p/b\"]\n",
+        );
+        let overlay = cli("[confinement]\nextra_write = [\"/c/write\"]\n");
+        let layered = load_layered_with(
+            &realm,
+            Some(&global),
+            &project,
+            RealmTrust::Owned,
+            Some(&overlay),
+        )
+        .unwrap();
+        // Global, owned realm and command-line overlay accumulate in order;
+        // the project's are ignored with a notice.
+        assert_eq!(
+            layered.confinement,
+            ConfinementSection {
+                extra_read: vec![PathBuf::from("/g/read"), PathBuf::from("/r/read")],
+                extra_write: vec![PathBuf::from("/g/write"), PathBuf::from("/c/write")],
+            }
+        );
+        assert!(layered.notices.iter().any(|n| matches!(
+            n,
+            Notice::ProjectConfinementIgnored { count: 2, .. }
+        )));
+        let texts: Vec<String> = layered.notices.iter().map(ToString::to_string).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("ignored 2 [confinement] grant(s)")),
+            "{texts:?}"
+        );
+
+        // An untrusted realm file's grants are ignored with its notice.
+        let layered = load_layered_with(
+            &realm,
+            Some(&global),
+            &project,
+            RealmTrust::DenyOnly(Untrusted::Changed),
+            None,
+        )
+        .unwrap();
+        assert_eq!(layered.confinement.extra_read, vec![PathBuf::from("/g/read")]);
+        let notice = layered
+            .notices
+            .iter()
+            .find(|n| matches!(n, Notice::UntrustedRealmDenyOnly { confinement: 1, .. }))
+            .unwrap();
+        assert!(notice.to_string().contains("1 [confinement] grant(s)"), "{notice}");
+
+        // Unknown keys in the table are a parse error.
+        write(&realm, "[confinement]\nextra = [\"/x\"]\n");
+        assert!(load_layered_with(&realm, None, &project, RealmTrust::Owned, None).is_err());
     }
 }

@@ -91,8 +91,11 @@ impl From<RealmBackendArg> for RealmBackend {
 ///
 /// Returns [`TuiError::Realm`] for conflicting/invalid realm flags,
 /// [`TuiError::ProjectRoot`] when the root cannot be canonicalized or the
-/// working directory is the home directory, and [`TuiError::Io`] when the
-/// state directory cannot be created.
+/// working directory is the home directory,
+/// [`TuiError::ConfigDirCollision`] when the user-global config directory
+/// and the realm directory are the same or nested (see
+/// [`check_config_dir_collision`]), and [`TuiError::Io`] when the state
+/// directory cannot be created.
 pub fn resolve_scope(args: &Args) -> Result<RuntimeScope, TuiError> {
     let context_root = match &args.context_root {
         Some(root) => root.clone(),
@@ -112,6 +115,10 @@ pub fn resolve_scope(args: &Args) -> Result<RuntimeScope, TuiError> {
     let uses_shared_realm = args.realm.is_some() || args.isolated || args.state_root.is_some();
     if !uses_shared_realm {
         let state_root = context_root.join(WORKSPACE_STATE_DIR);
+        check_config_dir_collision(
+            global.as_ref(),
+            &realm_paths_in(&state_root, WORKSPACE_REALM_ID).root,
+        )?;
         ensure_workspace_state_dir(&state_root)?;
         return Ok(RuntimeScope {
             project_root,
@@ -145,6 +152,10 @@ pub fn resolve_scope(args: &Args) -> Result<RuntimeScope, TuiError> {
         state_root: args.state_root.clone(),
     };
     let locator = realm_cfg.resolve_locator()?;
+    check_config_dir_collision(
+        global.as_ref(),
+        &realm_paths_in(&locator.state_root, locator.realm.as_str()).root,
+    )?;
 
     Ok(RuntimeScope {
         project_root,
@@ -158,6 +169,63 @@ pub fn resolve_scope(args: &Args) -> Result<RuntimeScope, TuiError> {
         backend_hint,
         origin,
     })
+}
+
+/// Refuse a user-global config directory that is the realm directory, or
+/// holds it, or lies inside it: with `--workspace ~` the realm directory
+/// `~/.rkat/tui` is the default config directory, and the realm's
+/// `tui.toml` would be the global one (the trust records and notes would
+/// mix too). Paths are compared canonicalized as far as they exist.
+///
+/// # Errors
+///
+/// [`TuiError::ConfigDirCollision`] naming both paths.
+pub fn check_config_dir_collision(
+    global: Option<&GlobalDirs>,
+    realm_dir: &Path,
+) -> Result<(), TuiError> {
+    let Some(global) = global else {
+        return Ok(());
+    };
+    let config = canonical_prefix(&global.config);
+    let realm = canonical_prefix(realm_dir);
+    let relation = if config == realm {
+        "are the same directory"
+    } else if realm.starts_with(&config) {
+        "overlap (the realm dir is inside the config dir)"
+    } else if config.starts_with(&realm) {
+        "overlap (the config dir is inside the realm dir)"
+    } else {
+        return Ok(());
+    };
+    Err(TuiError::ConfigDirCollision {
+        config: global.config.clone(),
+        realm: realm_dir.to_path_buf(),
+        relation,
+    })
+}
+
+/// `path` with its longest existing ancestor canonicalized and the rest
+/// appended (a directory that is not created yet still compares by where
+/// it will be).
+fn canonical_prefix(path: &Path) -> PathBuf {
+    let mut existing = path.to_path_buf();
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(&existing) {
+            return rest
+                .iter()
+                .rev()
+                .fold(canonical, |dir, part| dir.join(part));
+        }
+        match (existing.file_name().map(ToOwned::to_owned), existing.parent()) {
+            (Some(name), Some(parent)) => {
+                rest.push(name);
+                existing = parent.to_path_buf();
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 /// Message for a working directory that must not become the workspace.
@@ -394,10 +462,86 @@ mod tests {
             })
         );
 
-        let scope = resolve_scope(&args(&["-w", ws, "--user-config-root", ws])).unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let user_root = user.path().to_str().unwrap();
+        let scope = resolve_scope(&args(&["-w", ws, "--user-config-root", user_root])).unwrap();
         assert_eq!(
             scope.global.map(|g| g.config),
-            Some(dir.path().join(".rkat").join("tui"))
+            Some(user.path().join(".rkat").join("tui"))
         );
+    }
+
+    #[test]
+    fn a_config_dir_colliding_with_the_realm_dir_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(dir.path()).unwrap();
+        let ws = home.to_str().unwrap();
+        // `-w ~` with the default config dir `~/.rkat/tui`: the same dir.
+        let err = resolve_scope(&args(&["-w", ws, "--user-config-root", ws])).unwrap_err();
+        let realm = home.join(".rkat").join("tui");
+        let shown = err.to_string();
+        assert!(matches!(err, TuiError::ConfigDirCollision { .. }), "{shown}");
+        assert_eq!(err.exit_code(), 2);
+        assert!(shown.contains("are the same directory"), "{shown}");
+        assert!(shown.contains(realm.to_str().unwrap()), "{shown}");
+        assert!(shown.contains("--config-dir <other dir>"), "{shown}");
+        // Nothing was created before the refusal.
+        assert!(!realm.exists());
+
+        // The config dir inside the realm dir.
+        let inner = realm.join("cfg");
+        let err = resolve_scope(&args(&["-w", ws, "--config-dir", inner.to_str().unwrap()]))
+            .unwrap_err();
+        assert!(err.to_string().contains("config dir is inside the realm dir"), "{err}");
+        // The realm dir inside the config dir.
+        let outer = home.join(".rkat");
+        let err = resolve_scope(&args(&["-w", ws, "--config-dir", outer.to_str().unwrap()]))
+            .unwrap_err();
+        assert!(err.to_string().contains("realm dir is inside the config dir"), "{err}");
+        // Through a symbolic link to the realm dir as well.
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(&realm).unwrap();
+            let link = home.join("link");
+            std::os::unix::fs::symlink(&realm, &link).unwrap();
+            let err = resolve_scope(&args(&["-w", ws, "--config-dir", link.to_str().unwrap()]))
+                .unwrap_err();
+            assert!(err.to_string().contains("are the same directory"), "{err}");
+        }
+
+        // `--config-dir` elsewhere resolves it; so does a sibling whose name
+        // merely shares a prefix.
+        let other = home.join("cfg");
+        let scope =
+            resolve_scope(&args(&["-w", ws, "--config-dir", other.to_str().unwrap()])).unwrap();
+        assert_eq!(scope.global.map(|g| g.config), Some(other));
+        let sibling = home.join(".rkat").join("tui2");
+        assert!(
+            resolve_scope(&args(&["-w", ws, "--config-dir", sibling.to_str().unwrap()])).is_ok()
+        );
+    }
+
+    #[test]
+    fn collision_check_compares_both_directions() {
+        let dirs = |config: &str| GlobalDirs {
+            config: PathBuf::from(config),
+            cache: PathBuf::from("/k"),
+        };
+        let realm = Path::new("/nonexistent-rkat/ws/.rkat/tui");
+        assert!(check_config_dir_collision(None, realm).is_ok());
+        assert!(check_config_dir_collision(Some(&dirs("/nonexistent-rkat/cfg")), realm).is_ok());
+        for config in [
+            "/nonexistent-rkat/ws/.rkat/tui",
+            "/nonexistent-rkat/ws/.rkat",
+            "/nonexistent-rkat/ws/.rkat/tui/sub",
+        ] {
+            assert!(
+                matches!(
+                    check_config_dir_collision(Some(&dirs(config)), realm),
+                    Err(TuiError::ConfigDirCollision { .. })
+                ),
+                "{config}"
+            );
+        }
     }
 }

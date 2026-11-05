@@ -270,6 +270,16 @@ pub struct BootstrapOptions {
     pub host_paths: Option<HostPaths>,
 }
 
+/// The shell's extra grants: the command line's `--confinement-read`/
+/// `--confinement-write`, then the `[confinement]` grants of the user's own
+/// `tui.toml` layers (which yield to the flags, see
+/// [`confinement::grants_with`]).
+fn extra_grants(args: &Args, layered: &crate::approval::rules::Layered) -> confinement::ExtraGrants {
+    let mut extra = confinement::ExtraGrants::from_args(args);
+    extra.extend_from(&layered.confinement);
+    extra
+}
+
 /// Resolve the runtime scope and load the realm config.
 ///
 /// # Errors
@@ -343,7 +353,7 @@ pub async fn bootstrap_with(
         scope.project_root.as_path(),
         &config,
         &host_paths,
-        &confinement::ExtraGrants::from_args(args),
+        &extra_grants(args, &layered),
     )?;
 
     let (manifest, persistence) = meerkat::open_realm_persistence_in(
@@ -787,6 +797,60 @@ mod tests {
         assert_eq!(choice.reference().to_string(), "openai:gpt-5.5");
         let err = plan(&["--provider", "nope"], "").await.unwrap_err();
         assert!(err.to_string().contains("unknown endpoint `nope`"), "{err}");
+    }
+
+    #[test]
+    fn tui_toml_confinement_grants_reach_the_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let ws = root.join("ws");
+        let cfg = root.join("cfg");
+        let (global_dir, overlay_dir, flag_dir) =
+            (root.join("global"), root.join("overlay"), root.join("flag"));
+        for d in [&ws, &cfg, &global_dir, &overlay_dir, &flag_dir] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(
+            cfg.join("tui.toml"),
+            format!(
+                "[confinement]\nextra_read = [{:?}]\nextra_write = [{:?}]\n",
+                global_dir.to_str().unwrap(),
+                flag_dir.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        let set = format!("confinement.extra_read=[{:?}]", overlay_dir.to_str().unwrap());
+        let args = args(&[
+            "-w",
+            ws.to_str().unwrap(),
+            "--config-dir",
+            cfg.to_str().unwrap(),
+            "--set",
+            &set,
+            "--confinement-read",
+            flag_dir.to_str().unwrap(),
+        ]);
+        let scope = resolve_scope(&args).unwrap();
+        let (layered, _) = approval::load_layers(&scope, &args).unwrap();
+        let extra = extra_grants(&args, &layered);
+        assert_eq!(extra.read, vec![flag_dir.clone()]);
+        assert_eq!(extra.file.extra_read, vec![global_dir.clone(), overlay_dir.clone()]);
+        assert_eq!(extra.file.extra_write, vec![flag_dir.clone()]);
+        // The flag wins over the file's write grant of the same directory.
+        let (write, read, _) =
+            confinement::grants_with(&ws, &HostPaths::default(), &extra).unwrap();
+        assert!(read.contains(&flag_dir) && !write.contains(&flag_dir), "{write:?}");
+        assert!(read.contains(&global_dir) && read.contains(&overlay_dir), "{read:?}");
+        let requirement = confinement::lower_with(
+            args.effective_confinement(),
+            scope.project_root.as_path(),
+            &HostPaths::default(),
+            &extra,
+        )
+        .unwrap()
+        .unwrap();
+        let shown = format!("{requirement:?}");
+        assert!(shown.contains(global_dir.to_str().unwrap()), "{shown}");
     }
 
     #[test]

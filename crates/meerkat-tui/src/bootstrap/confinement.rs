@@ -47,6 +47,11 @@
 //! at least that access is refused as redundant. A detected grant that
 //! overlaps an extra grant otherwise yields to it (the backend refuses
 //! overlaps). A violation is a typed start-up error, never a silent drop.
+//! The user's own `tui.toml` layers add more with `[confinement] extra_read
+//! = [...]` / `extra_write = [...]` ([`ConfinementSection`]), validated the
+//! same way; a file grant that overlaps a command-line grant yields to it
+//! (the flags win), and one repeating an earlier file grant with no more
+//! access is dropped.
 //!
 //! Only the shell (foreground calls, background jobs, monitors) is confined.
 //! Command hooks and local MCP stdio servers keep running as the trusted
@@ -129,17 +134,20 @@ pub enum ConfinementError {
     },
     /// Extra grants would widen the realm's `[confinement]` floor.
     #[error(
-        "--confinement-read/--confinement-write would widen the realm's [confinement] policy for the shell ({policy}); add the directories to the realm's [confinement.shell] read/write lists instead"
+        "--confinement-read/--confinement-write (or tui.toml [confinement] extra_read/extra_write) would widen the realm's [confinement] policy for the shell ({policy}); add the directories to the realm's [confinement.shell] read/write lists instead"
     )]
     ExtraGrantsUnderRealmFloor {
         /// The realm's policy, described.
         policy: String,
     },
-    /// An extra grant (`--confinement-read`/`--confinement-write`) is not
+    /// An extra grant (`--confinement-read`/`--confinement-write`, or a
+    /// `tui.toml` `[confinement] extra_read`/`extra_write` entry) is not
     /// grantable.
     #[error("{flag} {}: {problem}", .path.display())]
     ExtraGrant {
-        /// The flag (`--confinement-read` or `--confinement-write`).
+        /// Where it came from: the flag (`--confinement-read`,
+        /// `--confinement-write`) or the `tui.toml` key
+        /// (`[confinement] extra_read`, `[confinement] extra_write`).
         flag: &'static str,
         /// The path as given.
         path: PathBuf,
@@ -405,13 +413,17 @@ impl HostPaths {
 }
 
 /// Directories the user adds to a confined shell's view:
-/// `--confinement-read` / `--confinement-write` (and [`ConfinementSection`]).
+/// `--confinement-read` / `--confinement-write`, and the `[confinement]`
+/// tables of the user's own `tui.toml` layers ([`ConfinementSection`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExtraGrants {
-    /// Read-only directories.
+    /// Read-only directories (`--confinement-read`).
     pub read: Vec<PathBuf>,
-    /// Read-write directories.
+    /// Read-write directories (`--confinement-write`).
     pub write: Vec<PathBuf>,
+    /// The `tui.toml` grants; a command-line grant wins over an
+    /// overlapping one.
+    pub file: ConfinementSection,
 }
 
 impl ExtraGrants {
@@ -421,19 +433,20 @@ impl ExtraGrants {
         Self {
             read: args.confinement_read.clone(),
             write: args.confinement_write.clone(),
+            file: ConfinementSection::default(),
         }
     }
 
-    /// Add the grants of a `[confinement]` table.
+    /// Add the grants of a `tui.toml` `[confinement]` table (they yield to
+    /// the command line's, see [`grants_with`]).
     pub fn extend_from(&mut self, section: &ConfinementSection) {
-        self.read.extend(section.extra_read.iter().cloned());
-        self.write.extend(section.extra_write.iter().cloned());
+        self.file.extend_from(section);
     }
 
     /// Whether nothing is added.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.read.is_empty() && self.write.is_empty()
+        self.read.is_empty() && self.write.is_empty() && self.file.is_empty()
     }
 }
 
@@ -449,6 +462,26 @@ pub struct ConfinementSection {
     /// Read-write directories.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_write: Vec<PathBuf>,
+}
+
+impl ConfinementSection {
+    /// Append `other`'s grants (a later layer adds to an earlier one).
+    pub fn extend_from(&mut self, other: &Self) {
+        self.extra_read.extend(other.extra_read.iter().cloned());
+        self.extra_write.extend(other.extra_write.iter().cloned());
+    }
+
+    /// Number of grants (directories) listed.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.extra_read.len() + self.extra_write.len()
+    }
+
+    /// Whether no grant is listed.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.extra_read.is_empty() && self.extra_write.is_empty()
+    }
 }
 
 /// The filesystem grants of a confined shell: `(read-write directories,
@@ -513,13 +546,29 @@ pub fn grants_with(
     }
     let workspace_grant = canonical(workspace, true)
         .and_then(|ws| write.iter().find(|dir| ws.starts_with(dir)).cloned());
+    // (origin label, path, writable, from the command line)
     let requested = extra
         .write
         .iter()
-        .map(|path| ("--confinement-write", path, true))
-        .chain(extra.read.iter().map(|path| ("--confinement-read", path, false)));
-    let mut accepted: Vec<(PathBuf, bool)> = Vec::new();
-    for (flag, given, writable) in requested {
+        .map(|path| ("--confinement-write", path, true, true))
+        .chain(extra.read.iter().map(|path| ("--confinement-read", path, false, true)))
+        .chain(
+            extra
+                .file
+                .extra_write
+                .iter()
+                .map(|path| ("[confinement] extra_write", path, true, false)),
+        )
+        .chain(
+            extra
+                .file
+                .extra_read
+                .iter()
+                .map(|path| ("[confinement] extra_read", path, false, false)),
+        );
+    // (canonical path, writable, from the command line)
+    let mut accepted: Vec<(PathBuf, bool, bool)> = Vec::new();
+    for (flag, given, writable, from_cli) in requested {
         let refuse = |problem| ConfinementError::ExtraGrant {
             flag,
             path: given.clone(),
@@ -529,7 +578,18 @@ pub fn grants_with(
         if let Some(ws) = workspace_grant.as_ref().filter(|ws| overlaps(&path, ws)) {
             return Err(refuse(ExtraGrantProblem::OverlapsWorkspace(ws.clone())));
         }
-        if let Some((other, _)) = accepted.iter().find(|(other, _)| overlaps(&path, other)) {
+        if !from_cli {
+            // The command line wins over the file; a file grant repeating
+            // an earlier one with no more access adds nothing.
+            let yields = accepted.iter().any(|(other, other_writable, other_cli)| {
+                (*other_cli && overlaps(&path, other))
+                    || (*other == path && (*other_writable || !writable))
+            });
+            if yields {
+                continue;
+            }
+        }
+        if let Some((other, _, _)) = accepted.iter().find(|(other, _, _)| overlaps(&path, other)) {
             return Err(refuse(ExtraGrantProblem::OverlapsGrant(other.clone())));
         }
         let covering = write
@@ -539,13 +599,13 @@ pub fn grants_with(
         if let Some(dir) = covering {
             return Err(refuse(ExtraGrantProblem::AlreadyGranted(dir.clone())));
         }
-        accepted.push((path, writable));
+        accepted.push((path, writable, from_cli));
     }
-    let clashes = |dir: &PathBuf| accepted.iter().any(|(path, _)| overlaps(dir, path));
+    let clashes = |dir: &PathBuf| accepted.iter().any(|(path, _, _)| overlaps(dir, path));
     write.retain(|dir| !clashes(dir));
     read.retain(|dir| !clashes(dir));
-    files.retain(|file| !accepted.iter().any(|(path, _)| file.starts_with(path)));
-    for (path, writable) in accepted {
+    files.retain(|file| !accepted.iter().any(|(path, _, _)| file.starts_with(path)));
+    for (path, writable, _) in accepted {
         if writable {
             write.push(path);
         } else {
@@ -832,7 +892,7 @@ pub fn plan(
     let Some(requirement) = requirement else {
         if !extra.is_empty() {
             notices.push(
-                "--confinement-read/--confinement-write have no effect: commands run unconfined"
+                "--confinement-read/--confinement-write and tui.toml [confinement] grants have no effect: commands run unconfined"
                     .to_string(),
             );
         }
@@ -1185,6 +1245,7 @@ mod tests {
         let extra = ExtraGrants {
             read: vec![data.clone()],
             write: vec![extra_dir.clone()],
+            ..ExtraGrants::default()
         };
         let (write, read, files) = grants_with(&f.ws, &f.host, &extra).unwrap();
         assert_eq!(write, vec![f.ws.clone(), f.cache.clone(), extra_dir]);
@@ -1199,6 +1260,7 @@ mod tests {
             &ExtraGrants {
                 read: Vec::new(),
                 write: vec![inner.clone()],
+                ..ExtraGrants::default()
             },
         )
         .unwrap();
@@ -1226,6 +1288,7 @@ mod tests {
                 &ExtraGrants {
                     read: extra.clone(),
                     write: Vec::new(),
+                    ..ExtraGrants::default()
                 },
             )
             .unwrap_err();
@@ -1246,6 +1309,7 @@ mod tests {
                 &ExtraGrants {
                     read: vec![inner],
                     write: Vec::new(),
+                    ..ExtraGrants::default()
                 },
             )
             .is_err()
@@ -1259,6 +1323,7 @@ mod tests {
         let extra = ExtraGrants {
             read: vec![f.tools.clone()],
             write: Vec::new(),
+            ..ExtraGrants::default()
         };
         let err = plan(ConfinementArg::Workspace, &f.ws, &config, &f.host, &extra).unwrap_err();
         assert!(
@@ -1294,9 +1359,108 @@ mod tests {
         let section: ConfinementSection =
             toml::from_str("extra_read = [\"/a\"]\nextra_write = [\"/b\"]\n").unwrap();
         let mut extra = ExtraGrants::default();
+        assert!(extra.is_empty());
         extra.extend_from(&section);
-        assert_eq!(extra.read, vec![PathBuf::from("/a")]);
-        assert_eq!(extra.write, vec![PathBuf::from("/b")]);
+        assert!(!extra.is_empty());
+        assert!(extra.read.is_empty() && extra.write.is_empty());
+        assert_eq!(extra.file.extra_read, vec![PathBuf::from("/a")]);
+        assert_eq!(extra.file.extra_write, vec![PathBuf::from("/b")]);
+        assert_eq!(extra.file.len(), 2);
         assert!(toml::from_str::<ConfinementSection>("extra = []\n").is_err());
+    }
+
+    #[test]
+    fn file_grants_are_validated_and_yield_to_the_command_line() {
+        let f = fixture();
+        let root = f.ws.parent().unwrap().to_path_buf();
+        let data = root.join("data");
+        let inner = data.join("inner");
+        let other = root.join("other");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let file = |read: Vec<PathBuf>, write: Vec<PathBuf>| ConfinementSection {
+            extra_read: read,
+            extra_write: write,
+        };
+        // File grants alone are granted like flags.
+        let extra = ExtraGrants {
+            file: file(vec![data.clone()], vec![other.clone()]),
+            ..ExtraGrants::default()
+        };
+        let (write, read, _) = grants_with(&f.ws, &f.host, &extra).unwrap();
+        assert!(write.contains(&other), "{write:?}");
+        assert!(read.contains(&data), "{read:?}");
+        // A flag wins over an overlapping file grant, in either direction
+        // and whatever the access.
+        let extra = ExtraGrants {
+            write: vec![data.clone()],
+            file: file(vec![data.clone(), inner.clone()], Vec::new()),
+            ..ExtraGrants::default()
+        };
+        let (write, read, _) = grants_with(&f.ws, &f.host, &extra).unwrap();
+        assert!(write.contains(&data), "{write:?}");
+        assert!(!read.contains(&data) && !read.contains(&inner), "{read:?}");
+        let extra = ExtraGrants {
+            read: vec![inner.clone()],
+            file: file(Vec::new(), vec![data.clone()]),
+            ..ExtraGrants::default()
+        };
+        let (write, read, _) = grants_with(&f.ws, &f.host, &extra).unwrap();
+        assert!(read.contains(&inner) && !write.contains(&data), "{write:?} {read:?}");
+        // A grant repeated across layers is granted once, with the most
+        // access any layer gives.
+        let extra = ExtraGrants {
+            file: file(vec![data.clone(), data.clone()], vec![data.clone()]),
+            ..ExtraGrants::default()
+        };
+        let (write, read, _) = grants_with(&f.ws, &f.host, &extra).unwrap();
+        assert_eq!(write.iter().filter(|d| **d == data).count(), 1);
+        assert!(!read.contains(&data));
+        // Overlapping file grants and invalid ones are typed errors naming
+        // the tui.toml key.
+        for (extra, key, expected) in [
+            (
+                file(vec![data.clone(), inner], Vec::new()),
+                "[confinement] extra_read",
+                ExtraGrantProblem::OverlapsGrant(data.clone()),
+            ),
+            (
+                file(Vec::new(), vec![root.join("missing")]),
+                "[confinement] extra_write",
+                ExtraGrantProblem::Missing,
+            ),
+            (
+                file(vec![root.clone()], Vec::new()),
+                "[confinement] extra_read",
+                ExtraGrantProblem::OverlapsWorkspace(f.ws.clone()),
+            ),
+        ] {
+            let err = grants_with(
+                &f.ws,
+                &f.host,
+                &ExtraGrants {
+                    file: extra,
+                    ..ExtraGrants::default()
+                },
+            )
+            .unwrap_err();
+            match &err {
+                ConfinementError::ExtraGrant { flag, problem, .. } => {
+                    assert_eq!(*flag, key);
+                    assert_eq!(problem, &expected);
+                }
+                other => panic!("unexpected error: {other}"),
+            }
+        }
+        // They widen a realm floor just like flags.
+        let config = realm_with(workspace_floor(WorkspaceNetwork::Unrestricted));
+        let extra = ExtraGrants {
+            file: file(vec![data], Vec::new()),
+            ..ExtraGrants::default()
+        };
+        assert!(matches!(
+            plan(ConfinementArg::Workspace, &f.ws, &config, &f.host, &extra),
+            Err(ConfinementError::ExtraGrantsUnderRealmFloor { .. })
+        ));
     }
 }

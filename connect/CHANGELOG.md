@@ -48,6 +48,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   refusal without `tool_invoked: false` still leaves the install uncertain
   and refuses its retry.
 
+- A selected setup task's call (a reviewed install's shared setup step,
+  a shared setup's check, join or stop, or a setup helper's report) no
+  longer waits for as long as another task holds an authorization change
+  while its task is prepared. The preparation now ends at the owner-change
+  bound, including its reads of the setup store that wait behind a write
+  held up by that change. If the change is still in progress then, the
+  call is refused as `operation_refused` with kind `reprepare_required`
+  and `tool_invoked: false`, before any of its work ran, so it can be
+  retried; otherwise it answers temporarily unavailable.
+
 - A Find no longer fails as temporarily unavailable (`tool_unavailable`)
   when it reads its setup helper's admission while another original's
   first binding is changing the shared authorization. The read waits out
@@ -77,6 +87,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   waits that out within the owner-change bound; the binding is never
   written twice, and a hold that outlasts the bound still answers
   `tool_unavailable`.
+
+- A Find no longer fails as temporarily unavailable (`tool_unavailable`)
+  when another owner's brief hold on the shared source state meets its
+  setup helper's admission or observation right after their read, its
+  grant issuance before or after the grant intent is written, its first
+  source binding write, its helper's preparation or submission, or a
+  contributor's admitted-source read (also in a selected setup task's
+  result source). Each step waits that hold out within the owner-change
+  bound, and the grant issuance also waits for another writer of the
+  source state; nothing the Find already did is made again. A hold that
+  outlasts the bound still answers `tool_unavailable`.
 
 - A Find no longer fails as temporarily unavailable (`tool_unavailable`)
   while another original's Find is writing the shared source state. Its

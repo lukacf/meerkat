@@ -1151,6 +1151,63 @@ impl CheckedInstalls {
         assert!(self.state.is_poisoned());
     }
 
+    /// Test seam: put a successor in place of the proposal an install call's
+    /// arguments name: the same checked fields, unused, with no readback and
+    /// operation metadata of its own. No production path replaces a
+    /// retained proposal; a control uses this while an install that consumed
+    /// the old one is in flight.
+    #[cfg(test)]
+    pub(crate) fn replace_proposal_for_test(&self, install_arguments: &str) {
+        let arguments = document(install_arguments).unwrap();
+        let key = proposal_key(&arguments, hex(&arguments, "validation_id", 32).unwrap()).unwrap();
+        let mut state = self.state.lock().unwrap();
+        let old = state.proposals.remove(&key).unwrap();
+        state.proposals.insert(
+            key,
+            Proposal {
+                session: old.session,
+                epoch: old.epoch,
+                kind: old.kind,
+                install: old.install,
+                review: old.review,
+                used: false,
+                readback: None,
+                operation_names: Arc::new(Mutex::new(OperationMetadata::default())),
+            },
+        );
+    }
+
+    /// Test seam: the readback the proposal an install call's arguments name
+    /// retains while the install that consumed it is in flight.
+    #[cfg(test)]
+    pub(crate) fn consumed_readback_for_test(&self, install_arguments: &str) -> Readback {
+        let arguments = document(install_arguments).unwrap();
+        let key = proposal_key(&arguments, hex(&arguments, "validation_id", 32).unwrap()).unwrap();
+        self.state.lock().unwrap().proposals[&key]
+            .readback
+            .clone()
+            .unwrap()
+    }
+
+    /// Test seam: [`Self::restore_after_certified_refusal`] for the install
+    /// call `name` with `install_arguments`, as `delegate` makes it.
+    #[cfg(test)]
+    pub(crate) fn restore_after_certified_refusal_for_test(
+        &self,
+        name: &str,
+        install_arguments: &str,
+        session: &SessionId,
+        consumed: &Readback,
+    ) -> bool {
+        let args = serde_json::value::RawValue::from_string(install_arguments.to_owned()).unwrap();
+        let call = ToolCallView {
+            id: "install",
+            name,
+            args: &args,
+        };
+        self.restore_after_certified_refusal(call, session, consumed)
+    }
+
     /// Test seam: whether the proposal an install call's arguments name is
     /// used, and whether it holds a readback.
     #[cfg(test)]

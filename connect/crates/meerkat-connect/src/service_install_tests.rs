@@ -1924,6 +1924,57 @@ async fn uncertified_refusal_after_consume_stays_uncertain_and_refuses_the_retry
     }
 }
 
+// Connect's condition for the restore after a certified refusal
+// (`delegate`): it takes back exactly the identity the install call consumed.
+// While an install that consumed its proposal is in flight, the restore is
+// made at its seam. With nothing changed the consumed proposal is restored;
+// with a successor under the key, a moved binding epoch or a retired owner
+// nothing is restored, and the proposal under the key is left as it is.
+#[tokio::test]
+async fn a_certified_refusal_restores_only_the_exact_consumed_identity() {
+    for change in ["none", "successor", "epoch", "retired"] {
+        let mut f = Fixture::local(true, 2);
+        f.check().await;
+        let arguments = install(true).to_string();
+        let run = f.install();
+        f.prompt().await.decide(ApprovalDecision::Approve).unwrap();
+        f.package.entered.notified().await;
+        let consumed = f.owner.consumed_readback_for_test(&arguments);
+        match change {
+            "successor" => f.owner.replace_proposal_for_test(&arguments),
+            "epoch" => f.package.epoch.store(8, Ordering::SeqCst),
+            "retired" => f.owner.retire(),
+            _ => {}
+        }
+        let restored = f.owner.restore_after_certified_refusal_for_test(
+            f.install_name(),
+            &arguments,
+            &f.session,
+            &consumed,
+        );
+        assert_eq!(
+            restored,
+            change == "none",
+            "{change}: restored only with the consumed identity intact"
+        );
+        let expected = if matches!(change, "none" | "successor") {
+            (false, false)
+        } else {
+            (true, true)
+        };
+        assert_eq!(
+            f.owner.proposal_use_for_test(&arguments),
+            expected,
+            "{change}: the proposal under the key"
+        );
+        // Test only: drop the inert in-flight fake; its custody stays as the
+        // unchanged cancellation path leaves it.
+        run.abort();
+        assert!(run.await.unwrap_err().is_cancelled());
+        assert!(f.approvals.has_uncertain_dispatch());
+    }
+}
+
 struct RefusePreparedOperation;
 impl meerkat_core::authorization::WorkAuthorization for RefusePreparedOperation {
     fn prepare(

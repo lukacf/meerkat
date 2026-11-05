@@ -26,6 +26,13 @@ pub(super) enum FindChoice {
 pub(super) fn request_arguments(tag: &str) -> Value {
     json!({"request":format!("sdk-child-{tag}: inspect and prepare the selected inert software; report activation honestly")})
 }
+/// A Find that ran and answered `retry_safe`: its helper input was definitely
+/// not admitted, and only a fresh Find of the same run replays it.
+pub(super) fn retry_safe(result: &ToolResult) -> bool {
+    !result.is_error
+        && serde_json::from_str::<Value>(&result.text_content())
+            .is_ok_and(|reply| reply["worker"]["state"] == "retry_safe")
+}
 pub(super) fn canonical_unavailable(result: &ToolResult) -> bool {
     result.is_error
         && result.settlement_failures.is_empty()
@@ -111,7 +118,17 @@ impl Script {
             .get(key)
             .expect("another model choice requires the actual previous result");
         if !result.is_error {
-            return FindChoice::Accepted;
+            // A Find that answered retry_safe admitted no helper input; the
+            // product's documented replay is one fresh Find in the same run,
+            // within the same two-proposal bound.
+            if !retry_safe(result) {
+                return FindChoice::Accepted;
+            }
+            return if find.len() == 1 {
+                FindChoice::Emit("find-fresh")
+            } else {
+                FindChoice::Exhausted
+            };
         }
         // Two distinct pre-entry signals permit the one fresh proposal: the
         // local canonical unavailability, and Core's certified refusal of a
@@ -433,7 +450,11 @@ impl Case {
                         "the fresh-proposal fixture requires complete actual pre-entry evidence"
                     );
                 } else {
-                    successful += 1;
+                    // A retry_safe answer ran the Find's effect but admitted no
+                    // helper input; the run's fresh Find is the accepted one.
+                    if !retry_safe(result) {
+                        successful += 1;
+                    }
                     assert!(history.iter().any(|r| matches!(
                         r.observation.observation,
                         AuditObservation::Prepared { .. }
@@ -990,6 +1011,48 @@ mod tests {
             script.response(&helper_request(vec![certified, fresh]))
         }));
         assert!(outcome.is_err(), "a second refusal is not tolerated");
+    }
+
+    // A Find that answered retry_safe admitted no helper input: the model
+    // replays it with its one fresh Find in the same run, and a second
+    // retry_safe answer spends the two-proposal bound. Each answer is counted.
+    #[test]
+    fn retry_safe_find_is_replayed_once_within_the_bound() {
+        let retry = |call: &str| {
+            ToolResult::new(
+                call.into(),
+                json!({"worker": {"state": "retry_safe"}}).to_string(),
+                false,
+            )
+        };
+        let script = new_script();
+        assert_eq!(
+            selected(&script.response(&request(vec![]))),
+            vec!["a-original-find"]
+        );
+        assert_eq!(
+            selected(&script.response(&request(vec![retry("a-original-find")]))),
+            vec!["a-original-find-fresh"],
+            "a retry_safe answer is replayed by the one fresh Find"
+        );
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            script.response(&request(vec![
+                retry("a-original-find"),
+                retry("a-original-find-fresh"),
+            ]))
+        }));
+        assert!(
+            outcome.is_err(),
+            "a second retry_safe answer spends the bound"
+        );
+        assert_eq!(script.retry_safe_answers.load(Ordering::SeqCst), 2);
+        let accepted = ToolResult::new(
+            "a-original-find".into(),
+            json!({"worker": {"state": "input_admitted"}}).to_string(),
+            false,
+        );
+        assert!(!retry_safe(&accepted));
+        assert!(!retry_safe(&unavailable("a-original-find")));
     }
 
     fn event() -> (PrivateAuthenticatedEvent, String) {

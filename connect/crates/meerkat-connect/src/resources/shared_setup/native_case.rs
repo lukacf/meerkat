@@ -168,6 +168,8 @@ struct Script {
     results: Mutex<BTreeMap<String, Value>>,
     finished: AtomicUsize,
     cancel_requested: AtomicBool,
+    // Find answers of retry_safe this case met, each replayed by a fresh Find.
+    retry_safe_answers: AtomicUsize,
 }
 impl Script {
     fn require_loaded_catalog(prefix: &str, value: Value, names: &[&str]) {
@@ -332,6 +334,23 @@ impl Script {
                                 })
                             );
                         }
+                        // Counted for the census, never a gate: the model
+                        // replays a retry_safe Find with its one fresh Find.
+                        if first_observation
+                            && !helper
+                            && operation == toolkit_mobkit::FIND_AND_INSTALL
+                            && find_feedback::retry_safe(result)
+                        {
+                            let answers =
+                                self.retry_safe_answers.fetch_add(1, Ordering::SeqCst) + 1;
+                            eprintln!(
+                                "{}",
+                                json!({
+                                    "event":"sdk_find_retry_safe", "member":prefix,
+                                    "call":result.tool_use_id, "answers":answers,
+                                })
+                            );
+                        }
                         let bounded_find_feedback = !helper
                             && operation == toolkit_mobkit::FIND_AND_INSTALL
                             && (find_feedback::canonical_unavailable(result)
@@ -436,7 +455,9 @@ impl Script {
                     return done("Both bounded Find proposals were refused before entry.");
                 }
                 find_feedback::FindChoice::Exhausted => {
-                    panic!("{prefix}: both bounded Find proposals were refused before entry")
+                    panic!(
+                        "{prefix}: both bounded Find proposals were spent (refused before entry or answered retry_safe)"
+                    )
                 }
             }
             if tag == "b" {

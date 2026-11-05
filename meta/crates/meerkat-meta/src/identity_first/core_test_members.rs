@@ -49,9 +49,10 @@ pub(crate) struct CoreTestMembers {
     /// Bindings a rebind ended: Core's history still names the sessions an
     /// identity's member was bound to before (who owned a session).
     ended: Mutex<Vec<(AgentIdentity, TestMember)>>,
-    /// The member lifecycle facts the binds and retires journaled, in order;
-    /// a fact's cursor is its position from one.
-    facts: Mutex<Vec<MemberLifecycleFact>>,
+    /// The member lifecycle facts the binds and retires journaled, in order,
+    /// each with the time it was appended (Unix milliseconds, strictly
+    /// increasing); a fact's cursor is its position from one.
+    facts: Mutex<Vec<(MemberLifecycleFact, u64)>>,
     /// Set by [`Self::keep_journal`]: the journal reads answer.
     journal: AtomicBool,
     /// The identities whose member a host made directly on the mob
@@ -590,11 +591,20 @@ impl CoreTestMembers {
         self.journal.store(true, Ordering::SeqCst);
     }
 
+    /// Journal `fact` at the wall-clock time, as Core appends an event; a
+    /// fact appended within the previous one's millisecond is a millisecond
+    /// later, so no two facts share a time.
     fn journal_fact(&self, fact: MemberLifecycleFact) {
-        self.facts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(fact);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| {
+                u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+            });
+        let mut facts = self.facts.lock().unwrap_or_else(PoisonError::into_inner);
+        let appended_at = facts
+            .last()
+            .map_or(now_ms, |(_, last)| now_ms.max(last.saturating_add(1)));
+        facts.push((fact, appended_at));
     }
 
     pub(crate) fn journal_head(&self) -> Result<MemberLifecycleJournalHead, BridgeError> {
@@ -624,9 +634,9 @@ impl CoreTestMembers {
         let records = facts
             .iter()
             .enumerate()
-            .map(|(index, fact)| MemberLifecycleFactRecord {
-                cursor: index as u64 + 1,
-                fact: fact.clone(),
+            .map(|(index, (fact, appended_at))| {
+                MemberLifecycleFactRecord::new(index as u64 + 1, fact.clone())
+                    .with_recorded_at_ms(*appended_at)
             })
             .filter(|record| record.cursor > after)
             .take(limit.max(1))

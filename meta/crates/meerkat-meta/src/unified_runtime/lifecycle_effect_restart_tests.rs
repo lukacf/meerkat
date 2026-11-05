@@ -450,6 +450,31 @@ async fn pending_harvests_of(
         .collect()
 }
 
+/// The `retired_at_ms` of each exit interview `store` holds pending for
+/// `identity`: the key of its harvest, which the Console shows as the
+/// retirement's time.
+async fn pending_harvest_times_of(
+    store: &SqliteAgentMemoryStore,
+    identity: &AgentIdentity,
+) -> Vec<u64> {
+    store
+        .pending_harvests(REALM, 64)
+        .await
+        .expect("read the exit-interview queue")
+        .into_iter()
+        .filter(|harvest| harvest.identity == identity.as_str())
+        .map(|harvest| harvest.retired_at_ms)
+        .collect()
+}
+
+/// The wall-clock time, in Unix milliseconds.
+fn wall_clock_ms() -> u64 {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock reads after the Unix epoch");
+    u64::try_from(elapsed.as_millis()).expect("milliseconds fit a u64")
+}
+
 /// A customizer that changes no build and records each `after_create`.
 #[derive(Default)]
 struct RecordingCustomizer {
@@ -858,13 +883,17 @@ async fn a_first_boot_fresh_row_distills_the_retired_session_like_an_online_rese
 /// The roster stops listing an identity, Core retires its member, and
 /// the process is killed inside the host's retirement hook. The next start
 /// hands the retired incarnation to its hook, once, cause `unlisted`; the
-/// exit interview the unlisting queued before the hook stays queued once;
-/// and nothing the killed process completed before the unlisting (the
-/// seats' `after_create`) is told again.
+/// exit interview the unlisting queued before the hook stays queued once,
+/// keyed by the time Core journaled the retirement: a wall-clock time
+/// between the roster's change and the restart's read, which the replay
+/// reads again; and nothing the killed process completed before the
+/// unlisting (the seats' `after_create`) is told again.
 ///
 /// RED before lifecycle effects were projected from Core's journal: the hook
 /// was called once, from the roster pass, and never again, so a kill inside
-/// it lost the call.
+/// it lost the call. RED while that key was the journal cursor of the
+/// retirement: stable across the replay, but no time, so the Console showed
+/// the harvest as retired in 1970 and the queue read it first.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_kill_inside_the_unlisted_hook_delivers_it_once_after_the_restart() {
     const NAME: &str = "a_kill_inside_the_unlisted_hook_delivers_it_once_after_the_restart";
@@ -898,6 +927,8 @@ async fn a_kill_inside_the_unlisted_hook_delivers_it_once_after_the_restart() {
             boot.generation_of(&beta.identity).await.to_string(),
         )
         .expect("note the generation the unlisting retires");
+        std::fs::write(state.join("unlisted-at-ms"), wall_clock_ms().to_string())
+            .expect("note when the roster stops listing the identity");
         assert!(boot.roster.remove(&beta.identity));
         // The hook ends the process.
         let _ = boot.context.refresh_desired_topology_tracked().await;
@@ -910,6 +941,10 @@ async fn a_kill_inside_the_unlisted_hook_delivers_it_once_after_the_restart() {
         .expect("the child noted the retired generation")
         .parse()
         .expect("a generation");
+    let unlisted_at_ms: u64 = std::fs::read_to_string(temp.path().join("unlisted-at-ms"))
+        .expect("the child noted when the roster stopped listing the identity")
+        .parse()
+        .expect("a time");
 
     let seen = Arc::new(Mutex::new(Vec::new()));
     let customizer = Arc::new(RecordingCustomizer::default());
@@ -947,6 +982,14 @@ async fn a_kill_inside_the_unlisted_hook_delivers_it_once_after_the_restart() {
         pending_harvests_of(&memory_store, &beta.identity).await,
         vec!["retire".to_string()],
         "the exit interview is queued once, however often its step is replayed"
+    );
+    let read_at_ms = wall_clock_ms();
+    let keyed = pending_harvest_times_of(&memory_store, &beta.identity).await;
+    assert!(
+        matches!(keyed.as_slice(), [at] if (unlisted_at_ms..=read_at_ms).contains(at)),
+        "the exit interview is keyed by the time Core journaled the retirement, a \
+         wall-clock time after the roster stopped listing the identity: {keyed:?} \
+         (window {unlisted_at_ms}..={read_at_ms})"
     );
     assert!(
         customizer.told().is_empty(),

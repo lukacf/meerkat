@@ -98,6 +98,13 @@ each package is accepted only on evidence for that exact package, and the
   store. The text report prints the same counts. The format stays
   `meerkat-meta.identity-census` version 1: the field is additive.
 
+- `MemberLifecycleFactRecord::recorded_at_ms`, with
+  `MemberLifecycleFactRecord::with_recorded_at_ms`: when Core appended the
+  fact's journal event, in Unix milliseconds. The session bridge over a Core
+  mob sets it from Core's journal; a bridge that builds its records with
+  `MemberLifecycleFactRecord::new` alone leaves it `None`. The struct is
+  `#[non_exhaustive]`, so the field is additive.
+
 ### Changed
 
 - Registering an identity (`IdentityRuntime::register`) or updating its spec
@@ -180,8 +187,13 @@ each package is accepted only on evidence for that exact package, and the
   unlisted the identity) is queued once when the process stops inside the
   retirement's side effects and the next start delivers them again. Its
   pending harvest was keyed by the time the side effect ran, so the replay
-  after the restart queued a second one; it is now keyed by Core's journal
-  position of the retirement, which the replay reads again.
+  after the restart queued a second one; it is now keyed by the time Core
+  journaled the retirement, which the replay reads again. The harvest's
+  `retired_at_ms` stays a wall-clock time (the Console shows it as the
+  retirement's time, and the harvest queue reads oldest first by it). With
+  a session bridge whose journal records carry no time
+  (`MemberLifecycleFactRecord::recorded_at_ms` is `None`), the key stays
+  the time the side effect runs.
 - The roster pass no longer retires a member a host spawned under an
   identity's member id and labelled with the identity when the roster never
   declared that identity.

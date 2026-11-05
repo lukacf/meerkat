@@ -4607,11 +4607,31 @@ impl MemberStanding {
 pub struct MemberLifecycleFactRecord {
     pub cursor: u64,
     pub fact: MemberLifecycleFact,
+    /// When Core appended the fact's journal event, in Unix milliseconds
+    /// (`meerkat_mob::MemberLifecycleRecord::timestamp`): stored with the
+    /// event, so a later read of the journal reads the same time again. The
+    /// lifecycle projection keys the exit interview of a retirement no Meta
+    /// verb asked for by it. `None` from a bridge that does not carry it
+    /// ([`Self::new`] alone): that exit interview is then keyed by the time
+    /// its side effects run.
+    pub recorded_at_ms: Option<u64>,
 }
 
 impl MemberLifecycleFactRecord {
     pub fn new(cursor: u64, fact: MemberLifecycleFact) -> Self {
-        Self { cursor, fact }
+        Self {
+            cursor,
+            fact,
+            recorded_at_ms: None,
+        }
+    }
+
+    /// The record, with the time Core appended its journal event, in Unix
+    /// milliseconds ([`Self::recorded_at_ms`]).
+    #[must_use]
+    pub fn with_recorded_at_ms(mut self, recorded_at_ms: u64) -> Self {
+        self.recorded_at_ms = Some(recorded_at_ms);
+        self
     }
 }
 
@@ -9486,8 +9506,12 @@ impl SessionBridge for MobSessionBridge {
             .into_iter()
             .filter_map(|record| {
                 let cursor = record.cursor.get();
-                member_lifecycle_fact(record.event)
-                    .map(|fact| MemberLifecycleFactRecord::new(cursor, fact))
+                // A time before the Unix epoch is no time Core appends at.
+                let recorded_at_ms =
+                    u64::try_from(record.timestamp.timestamp_millis()).unwrap_or_default();
+                member_lifecycle_fact(record.event).map(|fact| {
+                    MemberLifecycleFactRecord::new(cursor, fact).with_recorded_at_ms(recorded_at_ms)
+                })
             })
             .collect();
         Ok(MemberLifecycleJournalPage::new(records, page.next.get()))

@@ -999,10 +999,12 @@ struct Retirement {
     generation: u64,
     session: Option<SessionId>,
     cause: RetiredIdentityCause,
-    /// When its step was asked: the key of the exit interview it queues.
-    /// `None` for a retirement no Meta verb asked for, whose exit interview
-    /// the journal cursor of the event that owes it keys.
-    asked_at_ms: Option<u64>,
+    /// The key of the exit interview it queues, a wall-clock time a replay
+    /// after a restart reads again: when its step was asked, or, for a
+    /// retirement no Meta verb asked for, when Core journaled the event that
+    /// owes it ([`MemberLifecycleFactRecord::recorded_at_ms`]). `None` when
+    /// neither is known (a bridge whose journal records carry no time).
+    retired_at_ms: Option<u64>,
     /// The retired incarnation's role, for its retirement hook. `None` for
     /// an incarnation Core had retired before the step that owes its memory
     /// side effects (a reset or a delete of an identity no member held): its
@@ -1197,6 +1199,9 @@ struct PendingSeat {
 /// rotation onto a fresh session no Meta verb asked for.
 struct PendingRotation {
     cursor: u64,
+    /// When Core journaled the retirement
+    /// ([`MemberLifecycleFactRecord::recorded_at_ms`]).
+    recorded_at_ms: Option<u64>,
     identity: AgentIdentity,
     member: meerkat_mob::AgentIdentity,
     generation: u64,
@@ -1213,6 +1218,9 @@ struct PendingRotation {
 /// session.
 struct PendingRespawn {
     cursor: u64,
+    /// When Core journaled the seat
+    /// ([`MemberLifecycleFactRecord::recorded_at_ms`]).
+    recorded_at_ms: Option<u64>,
     identity: AgentIdentity,
     member: meerkat_mob::AgentIdentity,
     predecessor: u64,
@@ -2933,6 +2941,7 @@ impl IdentityRuntime {
                             {
                                 pending.respawns.push(PendingRespawn {
                                     cursor: record.cursor,
+                                    recorded_at_ms: record.recorded_at_ms,
                                     identity: identity.clone(),
                                     member: member.clone(),
                                     predecessor: predecessor.get(),
@@ -3073,9 +3082,10 @@ impl IdentityRuntime {
                                     generation: *generation,
                                     session,
                                     cause,
-                                    asked_at_ms: intent
+                                    retired_at_ms: intent
                                         .as_ref()
-                                        .map(|intent| intent.recorded_at_ms),
+                                        .map(|intent| intent.recorded_at_ms)
+                                        .or(record.recorded_at_ms),
                                     hook_role: Some(role.clone()),
                                 }),
                             ));
@@ -3083,6 +3093,7 @@ impl IdentityRuntime {
                         RetirementOwes::IdentitysMember(cause) => {
                             pending.rotations.push(PendingRotation {
                                 cursor: record.cursor,
+                                recorded_at_ms: record.recorded_at_ms,
                                 identity,
                                 member: member.clone(),
                                 generation: *generation,
@@ -3257,7 +3268,7 @@ impl IdentityRuntime {
                 generation: predecessor,
                 session: intent.session_id,
                 cause,
-                asked_at_ms: Some(intent.recorded_at_ms),
+                retired_at_ms: Some(intent.recorded_at_ms),
                 hook_role: None,
             });
         }
@@ -3471,7 +3482,7 @@ impl IdentityRuntime {
                     generation: respawn.predecessor,
                     session: Some(retired_session),
                     cause,
-                    asked_at_ms: None,
+                    retired_at_ms: respawn.recorded_at_ms,
                     hook_role: Some(retired_role),
                 }),
             ));
@@ -3494,7 +3505,7 @@ impl IdentityRuntime {
                     generation: rotation.generation,
                     session: rotation.session,
                     cause: rotation.cause,
-                    asked_at_ms: None,
+                    retired_at_ms: rotation.recorded_at_ms,
                     hook_role: Some(rotation.role),
                 }),
             ));
@@ -3680,11 +3691,11 @@ impl IdentityRuntime {
         let limits = self.lifecycle_projection.limits();
         let memory = self.agent_memory.read().await.clone();
         let session_key = retirement.session.as_ref().map(ToString::to_string);
-        // The exit interview's key: when the step that owes it was asked, or,
-        // for a retirement no Meta verb asked for (Core's seal unlisted the
-        // identity, say), the journal cursor of the event that owes it, which
-        // a replay after a restart reads again, so it is queued once.
-        let asked_at_ms = retirement.asked_at_ms.unwrap_or(owed.cursor);
+        // The exit interview's key ([`Retirement::retired_at_ms`]): a
+        // wall-clock time a replay after a restart reads again, so the
+        // interview is queued once. When neither is known (a bridge whose
+        // journal records carry no time), the time the side effects run.
+        let retired_at_ms = retirement.retired_at_ms.unwrap_or_else(unix_ms_now);
         let owes = RetirementMemory::of(retirement.cause);
         if let Some(memory) = memory.as_ref() {
             if let Some(session_key) = session_key.as_deref() {
@@ -3737,7 +3748,7 @@ impl IdentityRuntime {
                 let key = session_key.as_deref();
                 let queued = bounded(limits, move || async move {
                     memory
-                        .record_identity_retired_at(identity, key, harvest, asked_at_ms)
+                        .record_identity_retired_at(identity, key, harvest, retired_at_ms)
                         .await
                         .map_err(|error| error.to_string())
                 })

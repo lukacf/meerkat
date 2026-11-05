@@ -199,6 +199,15 @@ import type {
   BlobPayload as RpcBlobPayload,
   CreateProfileParams as RpcCreateProfileParams,
   CreateScheduleRequest as RpcCreateScheduleRequest,
+  DecisionGetParams as RpcDecisionGetParams,
+  DecisionListParams as RpcDecisionListParams,
+  DecisionListResult as RpcDecisionListResult,
+  DecisionPresentationRequest as RpcDecisionPresentationRequest,
+  DecisionPresentParams as RpcDecisionPresentParams,
+  DecisionRenderingParams as RpcDecisionRenderingParams,
+  DecisionRenderingResult as RpcDecisionRenderingResult,
+  DecisionResult as RpcDecisionResult,
+  DecisionWithdrawParams as RpcDecisionWithdrawParams,
   DeferredCreateResult as RpcDeferredCreateResult,
   DeviceCompleteParams as RpcDeviceCompleteParams,
   DeviceStartParams as RpcDeviceStartParams,
@@ -2293,6 +2302,81 @@ export class MeerkatClient {
     if (options?.afterSequence !== undefined) params.after_sequence = options.afterSequence;
     if (options?.limit !== undefined) params.limit = options.limit;
     return this.request("tool_grants/audit", params);
+  }
+
+  /**
+   * List a page of the server's durable decisions, in decision id order.
+   * Every given filter must match; `requester` is a principal key. A page
+   * holds 100 decisions unless `limit` asks for another size, at most 500.
+   * While the result carries `next_after`, pass it as the next page's
+   * `after`. A server whose persistence keeps no durable decisions answers
+   * capability unavailable.
+   */
+  async listDecisions(options?: {
+    kind?: string;
+    phase?: RpcDecisionListParams["phase"];
+    approverId?: string;
+    requester?: string;
+    after?: string;
+    limit?: number;
+  }): Promise<RpcDecisionListResult> {
+    const params: RpcDecisionListParams = {};
+    if (options?.kind !== undefined) params.kind = options.kind;
+    if (options?.phase !== undefined) params.phase = options.phase;
+    if (options?.approverId !== undefined) params.approver_id = options.approverId;
+    if (options?.requester !== undefined) params.requester = options.requester;
+    if (options?.after !== undefined) params.after = options.after;
+    if (options?.limit !== undefined) params.limit = options.limit;
+    return this.request("decision/list", params);
+  }
+
+  /**
+   * Read one durable decision, its expiry recorded once its deadline
+   * passed. The held request is in the answer only with `includeRequest`.
+   */
+  async getDecision(
+    decisionId: string,
+    options?: { includeRequest?: boolean },
+  ): Promise<RpcDecisionResult> {
+    const params: RpcDecisionGetParams = { decision_id: decisionId };
+    if (options?.includeRequest) params.include_request = true;
+    return this.request("decision/get", params);
+  }
+
+  /**
+   * Read a durable decision's rendering and its canonical parts for a part
+   * size; without `maxPartBytes` the rendering is one part.
+   */
+  async decisionRendering(
+    decisionId: string,
+    options?: { maxPartBytes?: number },
+  ): Promise<RpcDecisionRenderingResult> {
+    const params: RpcDecisionRenderingParams = { decision_id: decisionId };
+    if (options?.maxPartBytes !== undefined) params.max_part_bytes = options.maxPartBytes;
+    return this.request("decision/rendering", params);
+  }
+
+  /**
+   * Record what a host presenter showed of a durable decision: the audience,
+   * the subject digest shown, the parts shown, the channel and message
+   * references and the host clock reading `at_ms`. It counts only when it
+   * shows every canonical part to the party that decides now.
+   */
+  async presentDecision(
+    decisionId: string,
+    presentation: RpcDecisionPresentationRequest,
+  ): Promise<RpcDecisionResult> {
+    const params: RpcDecisionPresentParams = { decision_id: decisionId, presentation };
+    return this.request("decision/present", params);
+  }
+
+  /**
+   * Withdraw an open durable decision as the host; a decision no longer
+   * open is refused with the `not_open` decision refusal.
+   */
+  async withdrawDecision(decisionId: string): Promise<RpcDecisionResult> {
+    const params: RpcDecisionWithdrawParams = { decision_id: decisionId };
+    return this.request("decision/withdraw", params);
   }
 
   async listArtifacts(

@@ -2709,6 +2709,94 @@ class MeerkatClient:
             params["limit"] = limit
         return await self._request("tool_grants/audit", params)
 
+    async def list_decisions(
+        self,
+        *,
+        kind: str | None = None,
+        phase: str | None = None,
+        approver_id: str | None = None,
+        requester: str | None = None,
+        after: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """List a page of the server's durable decisions, in decision id order.
+
+        Every given filter must match; ``requester`` is a principal key. A
+        page holds 100 decisions unless ``limit`` asks for another size, at
+        most 500. Returns ``{"decisions": [...], "unreadable": [...]}``, with
+        ``"next_after"`` while more decisions may follow: pass it as the next
+        page's ``after``. A server whose persistence keeps no durable
+        decisions answers capability unavailable.
+        """
+        params: dict[str, Any] = {}
+        if kind is not None:
+            params["kind"] = kind
+        if phase is not None:
+            params["phase"] = phase
+        if approver_id is not None:
+            params["approver_id"] = approver_id
+        if requester is not None:
+            params["requester"] = requester
+        if after is not None:
+            params["after"] = after
+        if limit is not None:
+            params["limit"] = limit
+        return await self._request("decision/list", params)
+
+    async def get_decision(
+        self, decision_id: str, *, include_request: bool = False
+    ) -> dict[str, Any]:
+        """Read one durable decision, its expiry recorded once its deadline passed.
+
+        The held request is in the answer only with ``include_request``.
+        Returns ``{"decision": {...}}``.
+        """
+        params: dict[str, Any] = {"decision_id": decision_id}
+        if include_request:
+            params["include_request"] = True
+        return await self._request("decision/get", params)
+
+    async def decision_rendering(
+        self, decision_id: str, *, max_part_bytes: int | None = None
+    ) -> dict[str, Any]:
+        """Read a durable decision's rendering and its canonical parts.
+
+        Without ``max_part_bytes`` the rendering is one part. Returns the
+        rendering, its renderer and subject digest, and ``"parts"``, each
+        with its index, count and digest.
+        """
+        params: dict[str, Any] = {"decision_id": decision_id}
+        if max_part_bytes is not None:
+            params["max_part_bytes"] = max_part_bytes
+        return await self._request("decision/rendering", params)
+
+    async def present_decision(
+        self, decision_id: str, presentation: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Record what a host presenter showed of a durable decision.
+
+        ``presentation`` names the ``audience`` (``{"kind": "approver",
+        "approver_id": ...}`` or ``{"kind": "reviewer", "reviewer": ...}``),
+        the ``subject_digest`` shown, the ``parts_shown``, the
+        ``channel_ref`` and ``message_ref`` and the host clock reading
+        ``at_ms``. It counts only when it shows every canonical part to the
+        party that decides now. Returns ``{"decision": {...}}``.
+        """
+        params: dict[str, Any] = {
+            "decision_id": decision_id,
+            "presentation": presentation,
+        }
+        return await self._request("decision/present", params)
+
+    async def withdraw_decision(self, decision_id: str) -> dict[str, Any]:
+        """Withdraw an open durable decision as the host.
+
+        Returns ``{"decision": {...}}``; a decision no longer open is refused
+        with the ``not_open`` decision refusal.
+        """
+        params: dict[str, Any] = {"decision_id": decision_id}
+        return await self._request("decision/withdraw", params)
+
     async def list_artifacts(
         self, params: dict[str, Any] | None = None
     ) -> dict[str, Any]:

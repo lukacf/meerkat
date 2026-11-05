@@ -181,7 +181,8 @@ plan selects:
 
 A change that only touches a crate's `tests/*.rs` targets runs just those
 targets, with the features they need (cargo's `required-features`, or a
-crate-level `#![cfg(feature = "...")]`). A target that needs live provider
+crate-level `#![cfg(feature = "...")]`), and again with the features of an
+integration suite that CI runs them in. A target that needs live provider
 credentials, or whose tests are all `#[ignore]`d for a lane, is named on stderr
 with that lane instead of run. The summary names what CI runs beyond the list
 (governance gates, rustdoc, feature-combination checks and so on), so a green

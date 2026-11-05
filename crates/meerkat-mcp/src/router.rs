@@ -212,7 +212,8 @@ struct AwaitingAuthorization {
     /// this target completed while the release's own removal was still
     /// staged or settling. The server is staged again at the first boundary
     /// after that removal settles, with no further sign-in; the flag stays
-    /// set until the owner accepts that add.
+    /// set until the owner accepts that add, or until the re-add is refused
+    /// for the record's governance (reported once).
     signed_in_during_release: bool,
 }
 
@@ -266,7 +267,9 @@ pub enum AuthorizedRetry {
     /// The server's credential was released and the removal that release
     /// staged has not settled yet. The sign-in is retained: the server is
     /// staged again at the first boundary after that removal settles, with
-    /// no further sign-in.
+    /// no further sign-in. A governed server without a control that covers
+    /// it is refused there instead, and that boundary reports the refusal
+    /// once as a failed add.
     AfterRelease,
     /// The router was shut down.
     RouterClosed,
@@ -3476,9 +3479,12 @@ impl McpRouter {
     /// A newer staged intent or an operation in flight for the server wins
     /// and the sign-in stays kept. A governed server is staged again only
     /// with the control it was attached under ([`Self::retry_authorized`]).
-    /// A staging refusal, a governed record without its control included,
-    /// is reported as a failed add lifecycle action in this boundary's
-    /// result and the sign-in stays kept, so a later boundary tries again.
+    /// A staging refusal is reported as a failed add lifecycle action in this
+    /// boundary's result and the sign-in stays kept, so a later boundary tries
+    /// again. A governance refusal (a governed record without a control that
+    /// covers its exact descriptor) is reported the same way once: it answers
+    /// the sign-in, the record stays for the host's status, and a later
+    /// sign-in gets the typed refusal from [`Self::retry_authorized`].
     /// Once the owner accepts the add, its payload (and a governed record's
     /// control) is installed before the lifecycle mirror, and a mirror
     /// refusal is reported the same way without undoing the accepted intent.
@@ -3507,23 +3513,33 @@ impl McpRouter {
             let Some(awaiting) = self.awaiting_authorization.get(&server_name).cloned() else {
                 continue;
             };
-            let staged = self
-                .re_add_control(&server_name, &awaiting)
-                .and_then(|control| {
-                    Self::validate_tool_names(&awaiting.config)?;
-                    self.surface_owner
-                        .apply(ExternalToolSurfaceInput::StageAdd { surface_id })
-                        .map(drop)
-                        .map_err(McpError::from)?;
-                    Ok(control)
-                });
+            let governance = self.re_add_control(&server_name, &awaiting);
+            let refused_for_governance = governance.is_err();
+            let staged = governance.and_then(|control| {
+                Self::validate_tool_names(&awaiting.config)?;
+                self.surface_owner
+                    .apply(ExternalToolSurfaceInput::StageAdd { surface_id })
+                    .map(drop)
+                    .map_err(McpError::from)?;
+                Ok(control)
+            });
             let control = match staged {
                 Ok(control) => control,
                 Err(error) => {
+                    // A governance refusal answers the kept sign-in: no later
+                    // boundary can re-add the server, so it is reported once
+                    // and the record stays for the host's status. Any other
+                    // refusal keeps the sign-in for the next boundary.
+                    if refused_for_governance
+                        && let Some(record) = self.awaiting_authorization.get_mut(&server_name)
+                    {
+                        record.signed_in_during_release = false;
+                    }
                     tracing::warn!(
                         server = %server_name,
                         %error,
-                        "could not stage the released server again after its sign-in; kept for the next boundary"
+                        kept_for_next_boundary = !refused_for_governance,
+                        "could not stage the released server again after its sign-in"
                     );
                     delta.lifecycle_actions.push(
                         McpLifecycleAction::new(

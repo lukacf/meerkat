@@ -4112,6 +4112,14 @@ async fn subscribe_agent_events_for_console_forwarder(
         meerkat_core::comms::SessionEventCursor::Live
     };
     let subscription = handle.subscribe_agent_events_from(identity, cursor).await?;
+    // Opened while the member was not materialized (released, or still
+    // waking, after the pass found it materialized), the subscription would
+    // attach only at the member's wake. The pass skips such a member, and
+    // the end of its wake runs the pass again; dropping the subscription
+    // ends its wait.
+    if subscription.attached_epoch.is_some() {
+        return Ok(ForwarderSubscription::NotMaterialized);
+    }
     // The identity health monitor does not hold successors back, so it
     // leaves the actor untracked (its departed streams are cut off instead).
     let actor = if console { subscription.actor } else { None };

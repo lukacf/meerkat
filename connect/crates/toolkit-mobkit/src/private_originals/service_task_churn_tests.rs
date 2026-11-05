@@ -517,6 +517,14 @@ async fn persistent_owner_change_at_the_reservation_check_ends_typed_within_the_
         1,
         "no reservation after the bound"
     );
+    let Err(ServiceTaskError::ReprepareRequired(refusal)) = reserved.result else {
+        unreachable!()
+    };
+    assert_eq!(
+        refusal.dispatch(),
+        meerkat_core::authorization::RefusalDispatch::NotDispatched,
+        "the reservation's check ran before anything was sent: certified not dispatched"
+    );
 }
 
 /// What the held report call answered once its dispatch resumed, with an
@@ -529,7 +537,7 @@ struct Reported {
     remaining: Option<Duration>,
 }
 
-async fn report_with(hold: Duration) -> Reported {
+async fn report_with(hold: Option<Duration>) -> Reported {
     let script = acquisition_denial::Script::for_approved();
     let report = Report::new(script.tools().result_tool());
     let (fixture, _runtime_store) =
@@ -557,7 +565,7 @@ async fn report_with(hold: Duration) -> Reported {
                         return;
                     }
                     if let Some(hold) = act.lock().unwrap().take() {
-                        let change = HeldChange::begin(publication.clone(), Some(hold));
+                        let change = HeldChange::begin(publication.clone(), hold);
                         assert!(probe.lock().unwrap().replace(change).is_none());
                     }
                 }));
@@ -601,14 +609,9 @@ async fn report_with(hold: Duration) -> Reported {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn settled_owner_change_at_the_report_check_is_waited_out_and_reported() {
     let hold = Duration::from_millis(200);
-    let reported = report_with(hold).await;
+    let reported = report_with(Some(hold)).await;
     assert_tool_time_covers_the_wait(reported.remaining);
-    assert_eq!(
-        reported.feedback.len(),
-        1,
-        "the report's result reached the helper: {:?}",
-        reported.feedback
-    );
+    assert_one_report_result(&reported.feedback);
     assert!(
         !reported.feedback[0].is_error,
         "a settled owner change at the report's check is waited out, not refused: {:?}",
@@ -620,6 +623,37 @@ async fn settled_owner_change_at_the_report_check_is_waited_out_and_reported() {
     assert!(
         reported.elapsed >= hold - Duration::from_millis(50),
         "the report waited for the change: {:?}",
+        reported.elapsed
+    );
+}
+
+/// Every helper model request after the report carries its one result.
+fn assert_one_report_result(feedback: &[ToolResult]) {
+    assert!(
+        !feedback.is_empty() && feedback.iter().all(|seen| seen == &feedback[0]),
+        "the report's one result reached the helper: {feedback:?}"
+    );
+}
+
+// A change held past Core's bound at the report's first check: the check
+// waits out the bound and refuses typed. Nothing of the report ran yet, so the
+// refusal is certified not dispatched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persistent_owner_change_at_the_report_check_is_refused_certified_after_the_bound() {
+    let reported = report_with(Some(OWNER_CHANGE_WAIT_BOUND + Duration::from_millis(500))).await;
+    assert_tool_time_covers_the_wait(reported.remaining);
+    assert_one_report_result(&reported.feedback);
+    assert!(reported.feedback[0].is_error, "{:?}", reported.feedback);
+    let refusal: serde_json::Value =
+        serde_json::from_str(&reported.feedback[0].text_content()).unwrap();
+    assert_eq!(
+        refusal["data"],
+        serde_json::json!({"kind": "reprepare_required", "tool_invoked": false}),
+        "refused typed after the bound, before anything of the report ran: {refusal}"
+    );
+    assert!(
+        reported.elapsed >= OWNER_CHANGE_WAIT_BOUND - Duration::from_millis(100),
+        "the report's check waited out its bound: {:?}",
         reported.elapsed
     );
 }

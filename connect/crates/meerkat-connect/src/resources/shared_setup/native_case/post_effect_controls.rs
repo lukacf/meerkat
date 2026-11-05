@@ -6,7 +6,11 @@
 //! check typed and uncertified, with no replay of the join or the release.
 //! A reviewed install's check before its physical dispatch, which holds the
 //! install's dispatch guard, answers a change at once: refused, certified
-//! not dispatched and typed, and the model's one fresh install goes on.
+//! not dispatched and typed, and the model's one fresh install goes on. An
+//! install that already consumed its checked proposal and meets a change
+//! outlasting the bound at its shared entry reservation is refused there,
+//! certified, settles as failed and gets its proposal back: its fresh
+//! install is reviewed afresh and installs once.
 use super::*;
 use crate::service_install::shared_check_probe::{self, Step};
 use meerkat_authorization::publication::LocalAuthorizationPublication;
@@ -101,7 +105,7 @@ fn install(
             return None;
         }
         match step {
-            Step::JoinedRefused | Step::ReleasedRefused => {
+            Step::JoinedRefused | Step::ReleasedRefused | Step::InstallInnerRefused => {
                 if let Some(release) = release.lock().unwrap().take() {
                     let _ = release.send(());
                 }
@@ -325,5 +329,56 @@ fn owner_change_at_the_install_check_is_refused_certified_and_installed_fresh() 
             .expect("the fresh install's result")
             .is_error,
         "the one fresh install succeeded"
+    );
+}
+
+// B's first install consumed its checked proposal when its inner call meets
+// an owner change held past the bound at the shared entry reservation. The
+// reservation waits the bound out and refuses, certified not dispatched:
+// nothing of the install was sent. The install then settles as failed, not
+// uncertain, and its proposal is restored, so the model's one fresh install
+// is reviewed afresh, consumes the same checked proposal and installs once.
+#[test]
+fn owner_change_outlasting_the_install_reservation_is_refused_certified_and_installed_fresh() {
+    let (observed, script) = control_at(Step::InstallConsumed, INSTALL_CALL, Hold::UntilRefused);
+    let consumed = observed.at(Step::InstallConsumed, INSTALL_CALL);
+    let refused = observed.at(Step::InstallInnerRefused, INSTALL_CALL);
+    assert_eq!(
+        consumed.len(),
+        1,
+        "the refused install consumed its proposal once"
+    );
+    assert_eq!(refused.len(), 1, "its inner call refused once");
+    assert!(
+        refused[0].duration_since(consumed[0]) >= Duration::from_secs(1),
+        "the reservation waited for the change before it refused: {:?}",
+        refused[0].duration_since(consumed[0])
+    );
+    assert!(
+        observed.change_ended() >= refused[0],
+        "the change was held until the reservation refused"
+    );
+    let fresh = format!("{INSTALL_CALL}-fresh");
+    assert_eq!(
+        observed.count(Step::InstallConsumed, &fresh),
+        1,
+        "the fresh install consumed the restored proposal once"
+    );
+    assert_eq!(observed.count(Step::InstallInnerRefused, &fresh), 0);
+    let seen = script.seen_results.lock().unwrap();
+    let first = seen
+        .get(INSTALL_CALL)
+        .expect("the refused install's result");
+    assert!(
+        first.is_error && find_feedback::certified_reprepare(first),
+        "refused after the bound, typed and certified not dispatched: {}",
+        first.text_content()
+    );
+    assert!(
+        !seen
+            .get(&fresh)
+            .expect("the fresh install's result")
+            .is_error,
+        "the one fresh install was reviewed afresh and installed"
     );
 }

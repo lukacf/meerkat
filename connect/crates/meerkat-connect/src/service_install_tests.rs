@@ -156,11 +156,20 @@ impl Package {
                 self.reply.lock().unwrap().clone()
             }
             "setup_install" | "setup_selected_install" => {
-                self.installs.fetch_add(1, Ordering::SeqCst);
+                let attempt = self.installs.fetch_add(1, Ordering::SeqCst);
                 let mut expected = install(self.selected);
                 expected["validation_id"] = self.reply.lock().unwrap()["validation_id"].clone();
                 assert_eq!(call.parse_args::<Value>().unwrap(), expected);
                 self.entered.notify_one();
+                // The first install's inner call refuses without Core's
+                // certification (9): it claims nothing about the install.
+                if attempt == 0 && self.behavior == 9 {
+                    return Err(ToolError::AuthorizationRefused {
+                        refusal: meerkat_core::authorization::OperationRefused::new(
+                            meerkat_core::authorization::OperationRefusalKind::ReprepareRequired,
+                        ),
+                    });
+                }
                 if matches!(self.behavior, 2 | 5) {
                     self.release.notified().await;
                 }
@@ -1874,6 +1883,45 @@ async fn owner_local_settlement_matches_call_and_session_and_retains_failure_met
             .custody,
         Custody::Settled(LiveBridgeEffectOutcome::Committed)
     );
+}
+
+fn attempt_custody(f: &Fixture) -> Custody {
+    f.approvals
+        .shared
+        .state()
+        .unwrap()
+        .attempt
+        .as_ref()
+        .unwrap()
+        .custody
+}
+
+// The negative control: an inner call's refusal without the certification
+// claims nothing about whether the install ran. The attempt stays uncertain,
+// the proposal stays used, and a fresh install is refused without a review.
+#[tokio::test]
+async fn uncertified_refusal_after_consume_stays_uncertain_and_refuses_the_retry() {
+    for selected in [false, true] {
+        let mut f = Fixture::local(selected, 9);
+        f.check().await;
+        let arguments = install(selected).to_string();
+        let run = f.install();
+        f.prompt().await.decide(ApprovalDecision::Approve).unwrap();
+        let refused = run.await.unwrap().unwrap_err();
+        assert!(matches!(
+            refused.primary_error(),
+            ToolError::AuthorizationRefused { refusal }
+                if refusal.dispatch() == meerkat_core::authorization::RefusalDispatch::Unknown
+        ));
+        assert_eq!(f.count(), 1);
+        assert_eq!(attempt_custody(&f), Custody::SpentUncertain);
+        assert!(f.approvals.has_uncertain_dispatch());
+        assert_eq!(f.owner.proposal_use_for_test(&arguments), (true, true));
+        let fresh = f.start("install-fresh", f.install_name(), install(selected), true);
+        assert!(fresh.await.unwrap().is_err(), "the retry is refused");
+        assert!(f.presenter.as_mut().unwrap().prompts.try_recv().is_err());
+        assert_eq!(f.count(), 1);
+    }
 }
 
 struct RefusePreparedOperation;

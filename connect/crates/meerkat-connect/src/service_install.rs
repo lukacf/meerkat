@@ -63,6 +63,13 @@ pub(crate) mod shared_check_probe {
         /// A reviewed install holds its dispatch guard; its check before the
         /// physical dispatch runs next.
         InstallGuarded,
+        /// A reviewed install consumed its checked proposal; its inner call
+        /// (the shared entry reservation, then the physical dispatch) runs
+        /// next.
+        InstallConsumed,
+        /// The inner call of an install that consumed its proposal returned
+        /// an error.
+        InstallInnerRefused,
     }
     type Probe = Arc<dyn Fn(Step, &str) -> Option<std::time::Duration> + Send + Sync>;
     static PROBE: Mutex<Option<Probe>> = Mutex::new(None);
@@ -1132,6 +1139,17 @@ impl CheckedInstalls {
         }));
         assert!(poisoned.is_err());
         assert!(self.state.is_poisoned());
+    }
+
+    /// Test seam: whether the proposal an install call's arguments name is
+    /// used, and whether it holds a readback.
+    #[cfg(test)]
+    pub(crate) fn proposal_use_for_test(&self, install_arguments: &str) -> (bool, bool) {
+        let arguments = document(install_arguments).unwrap();
+        let key = proposal_key(&arguments, hex(&arguments, "validation_id", 32).unwrap()).unwrap();
+        let state = self.state.lock().unwrap();
+        let proposal = &state.proposals[&key];
+        (proposal.used, proposal.readback.is_some())
     }
 
     pub(crate) fn retire(&self) {
@@ -2238,7 +2256,16 @@ impl CheckedInstalls {
         } else {
             None
         };
-        let outcome = operation.await?;
+        #[cfg(all(test, unix))]
+        if readback.is_some() {
+            shared_check_probe::observe(shared_check_probe::Step::InstallConsumed, call.id);
+        }
+        let outcome = operation.await;
+        #[cfg(all(test, unix))]
+        if readback.is_some() && outcome.is_err() {
+            shared_check_probe::observe(shared_check_probe::Step::InstallInnerRefused, call.id);
+        }
+        let outcome = outcome?;
         #[cfg(unix)]
         let outcome = if call.name == SELECTED_CHECK && self.shared_peer.is_some() {
             box_in_own_frame(|| self.release_shared_check(call, context, plan, outcome)).await?

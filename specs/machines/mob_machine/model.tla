@@ -161,6 +161,7 @@ OptionFrameIdValues == {None} \cup {Some(x) : x \in FrameIdValues}
 OptionFrameStatusValues == {None} \cup {Some(x) : x \in FrameStatusValues}
 OptionGenerationValues == {None} \cup {Some(x) : x \in GenerationValues}
 OptionHostIdValues == {None} \cup {Some(x) : x \in HostIdValues}
+OptionIdentityEntryVerdictValues == {None} \cup {Some(x) : x \in IdentityEntryVerdictValues}
 OptionLiveWsEndpointUrlValues == {None} \cup {Some(x) : x \in LiveWsEndpointUrlValues}
 OptionLoopInstanceIdValues == {None} \cup {Some(x) : x \in LoopInstanceIdValues}
 OptionMemberPeerEndpointValues == {None} \cup {Some(x) : x \in MemberPeerEndpointValues}

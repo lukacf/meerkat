@@ -18,10 +18,11 @@ use crate::runtime::actor::member_wake::MemberWakeFailure;
 use crate::runtime::dormant_seat::fresh_seat_session_id;
 use crate::runtime::{
     DECLARED_APPLY_CHUNK, DeclaredBuild, DeclaredEntry, DeclaredEntryOutcome, DeclaredEntryRefusal,
-    DeclaredRoster, DeclaredRosterOutcome, DormantSeatOutcome, EntryStanding, FirstBootRequest,
-    HistoryUnavailable, HostPreparationCause, IDENTITY_ENTRY_PAGE_MAX, IdentityEntryRead,
-    MemberIdentityManagement, MemberLifecycleEvent, MemberRetirementCause, MobCompositionAuthority,
-    MobJournalCursor, NotAdoptedReason, UnlistedEntryOutcome, UnseatedEntryCause,
+    DeclaredEntryVerdict, DeclaredRoster, DeclaredRosterOutcome, DormantSeatOutcome, EntryStanding,
+    FirstBootRequest, HistoryUnavailable, HostPreparationCause, IDENTITY_ENTRY_PAGE_MAX,
+    IdentityEntryRead, MemberIdentityManagement, MemberLifecycleEvent, MemberRetirementCause,
+    MobCompositionAuthority, MobJournalCursor, NotAdoptedReason, UnlistedEntryOutcome,
+    UnseatedEntryCause,
 };
 
 const STEP: Duration = Duration::from_mins(1);
@@ -1031,8 +1032,10 @@ async fn a_placed_identity_is_hosted_on_its_first_use_and_never_seated_dormant()
 
 /// A candidate composition (non-authoritative, over the mob's store)
 /// declares nothing: every identity of its apply is answered `Refused` with
-/// `NonAuthoritative`, typed, its seal unlists nothing, and the journal, the
-/// roster and the entries are as they were.
+/// `NonAuthoritative`, typed, carrying the verdict an authoritative
+/// composition would give it (the listed member is kept, the new identity is
+/// owed its seat); its seal unlists nothing, and the journal, the roster and
+/// the entries are as they were.
 ///
 /// RED: drop the composition authority from the verdict helper (decide a
 /// candidate's declarations as an authoritative composition's): the listed
@@ -1061,13 +1064,16 @@ async fn candidate_apply_writes_nothing_and_answers_every_identity_typed() {
             declared("new"),
         ]))
         .await;
-    for name in ["listed", "new"] {
+    for (name, would_be) in [
+        ("listed", DeclaredEntryVerdict::Kept),
+        ("new", DeclaredEntryVerdict::SeatOwed),
+    ] {
         assert!(
             matches!(
                 answer(&outcome, name),
                 DeclaredEntryOutcome::Refused {
-                    refusal: DeclaredEntryRefusal::NonAuthoritative
-                }
+                    refusal: DeclaredEntryRefusal::NonAuthoritative { would_be: answered }
+                } if *answered == would_be
             ),
             "{name}: {outcome:?}"
         );

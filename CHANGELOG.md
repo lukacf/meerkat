@@ -52,6 +52,14 @@ them.
 
 ### Breaking
 
+- `meerkat-mob`: `DeclaredEntryRefusal::NonAuthoritative` carries `would_be:
+  DeclaredEntryVerdict`, the verdict an authoritative composition would give
+  the same declaration over the same state. MobMachine's candidate arm
+  decides it with the same verdict rule its other arms apply; it is advisory
+  and never applied, and a candidate still writes nothing. A match on the
+  variant needs `NonAuthoritative { .. }`. `meerkat-machine-kernels`: the
+  MobMachine effect `IdentityEntryDeclared` gains `would_be`, set on a
+  candidate's refusal only.
 - Behaviour-only (not measured by the gate): `meerkat-mob`:
   `MobHandle::apply_declared_roster` with a complete roster also retires a
   member the roster does not list when the member's spawn row carries both
@@ -131,6 +139,10 @@ them.
 
 ### Added
 
+- `meerkat-mob`: `DeclaredEntryVerdict`, the public form of MobMachine's
+  declared-apply verdict a candidate composition reports
+  (`DeclaredEntryRefusal::NonAuthoritative`). Its vocabulary is closed, so a
+  host's projection matches every verdict.
 - GitHub Copilot configured once: `[realm.<realm>.copilot]` states a Copilot
   account's credential source once (`source`, an `env` or
   `external_resolver` source; optional `options`, the client identity

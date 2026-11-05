@@ -14927,6 +14927,240 @@ mod tests {
         assert_eq!(authority.state(), &before, "a candidate writes nothing");
     }
 
+    /// The declared apply's verdict for one identity and the verdict its
+    /// effect reports an authoritative composition would give
+    /// (`would_be`).
+    fn declare_reported(
+        authority: &mut MobMachineAuthority,
+        identity: &AgentIdentity,
+        declaration: Declaration<'_>,
+    ) -> (IdentityEntryVerdict, Option<IdentityEntryVerdict>) {
+        let transition = MobMachineMutator::apply(authority, declare_input(identity, declaration))
+            .expect("the declared apply answers every declaration");
+        transition
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                MobMachineEffect::IdentityEntryDeclared {
+                    agent_identity,
+                    verdict,
+                    would_be,
+                    ..
+                } if agent_identity == identity => Some((*verdict, *would_be)),
+                _ => None,
+            })
+            .expect("the declaration emits its verdict")
+    }
+
+    /// Why the declared apply's verdict rule (`identity_entry_verdict`) never
+    /// gives `verdict` to an authoritative composition; `None` when it does.
+    /// Exhaustive: a new verdict is classified here, and the candidate
+    /// comparison covers every one the rule gives.
+    fn not_given_by_the_verdict_rule(verdict: IdentityEntryVerdict) -> Option<&'static str> {
+        match verdict {
+            IdentityEntryVerdict::Kept
+            | IdentityEntryVerdict::SeatOwed
+            | IdentityEntryVerdict::HostedOnFirstUse
+            | IdentityEntryVerdict::AwaitHeldCreation
+            | IdentityEntryVerdict::PreparationPending
+            | IdentityEntryVerdict::RuntimeModeRestamp
+            | IdentityEntryVerdict::RoleMigrate
+            | IdentityEntryVerdict::RoleRotate
+            | IdentityEntryVerdict::RoleMigrationHeld
+            | IdentityEntryVerdict::LifecycleInFlight
+            | IdentityEntryVerdict::RefusedNameHeldByWorker
+            | IdentityEntryVerdict::RefusedHostAdopted
+            | IdentityEntryVerdict::RecordOnly => None,
+            IdentityEntryVerdict::RefusedNonAuthoritative => Some("a candidate's own refusal"),
+            IdentityEntryVerdict::MobNotRunning => Some("a stopped mob is answered first"),
+            IdentityEntryVerdict::RefusedNameOwnedByCreated
+            | IdentityEntryVerdict::RefusedNameTombstoned
+            | IdentityEntryVerdict::RefusedNameUnreadable => {
+                Some("a reserved or store-owned name is answered first")
+            }
+        }
+    }
+
+    /// The number of verdicts the declared apply's rule gives an
+    /// authoritative composition (`not_given_by_the_verdict_rule` answers
+    /// `None`).
+    const AUTHORITATIVE_VERDICTS: usize = 13;
+
+    /// A candidate composition's refusal reports, as `would_be`, the verdict
+    /// an authoritative composition gives the same declaration over the
+    /// same state, for every verdict the declared apply's rule gives an
+    /// authoritative composition: each shape is declared to an authoritative
+    /// mob and to a candidate mob whose state differs only in its
+    /// composition authority. The candidate writes nothing, and an
+    /// authoritative declaration reports no would-be verdict.
+    ///
+    /// RED: pass `false` for `intent_managed` in the candidate arm's would-be
+    /// call: the host-adopted shape reports `SeatOwed`, not
+    /// `RefusedHostAdopted`.
+    #[test]
+    fn a_candidate_refusal_reports_the_authoritative_verdict_of_every_shape() {
+        let mut base = MobMachineAuthority::new();
+        let seated = seat_live_entry_member(&mut base, "would-be-seated", 81);
+        let worker = seat_live_member_with_endpoint(&mut base, "would-be-worker", 82);
+        let archived = AgentIdentity::from("would-be-archived");
+        recover_created(&mut base, &archived, RecoveredPresence::Archived, None);
+        let in_flight = SeatedMember {
+            identity: AgentIdentity::from("would-be-ladder"),
+            runtime_id: AgentRuntimeId::from("would-be-ladder:0"),
+            session_id: SessionId::from("would-be-ladder-session"),
+            fence_token: FenceToken(19),
+        };
+        open_seat_ladder(&mut base, &in_flight, Generation(0));
+        let fresh = AgentIdentity::from("would-be-fresh");
+        let state = base.state().clone();
+
+        type Shape<'a> = (
+            &'a AgentIdentity,
+            fn() -> Declaration<'static>,
+            IdentityEntryVerdict,
+        );
+        let shapes: [Shape<'_>; AUTHORITATIVE_VERDICTS] = [
+            (
+                &seated.identity,
+                Declaration::default,
+                IdentityEntryVerdict::Kept,
+            ),
+            (&fresh, Declaration::default, IdentityEntryVerdict::SeatOwed),
+            (
+                &fresh,
+                || Declaration {
+                    placement: EntryPlacementKind::Placed,
+                    ..Declaration::default()
+                },
+                IdentityEntryVerdict::HostedOnFirstUse,
+            ),
+            (
+                &fresh,
+                || Declaration {
+                    held_creation: true,
+                    ..Declaration::default()
+                },
+                IdentityEntryVerdict::AwaitHeldCreation,
+            ),
+            (
+                &fresh,
+                || Declaration {
+                    preparation_required: true,
+                    ..Declaration::default()
+                },
+                IdentityEntryVerdict::PreparationPending,
+            ),
+            (
+                &seated.identity,
+                || Declaration {
+                    runtime_mode: SpawnPolicyRuntimeMode::TurnDriven,
+                    ..Declaration::default()
+                },
+                IdentityEntryVerdict::RuntimeModeRestamp,
+            ),
+            (
+                &seated.identity,
+                || Declaration {
+                    profile: "lead",
+                    migration_from: Some("test"),
+                    ..Declaration::default()
+                },
+                IdentityEntryVerdict::RoleMigrate,
+            ),
+            (
+                &seated.identity,
+                || Declaration {
+                    profile: "lead",
+                    session_memory_only: true,
+                    ..Declaration::default()
+                },
+                IdentityEntryVerdict::RoleRotate,
+            ),
+            (
+                &seated.identity,
+                || Declaration {
+                    profile: "lead",
+                    ..Declaration::default()
+                },
+                IdentityEntryVerdict::RoleMigrationHeld,
+            ),
+            (
+                &in_flight.identity,
+                Declaration::default,
+                IdentityEntryVerdict::LifecycleInFlight,
+            ),
+            (
+                &worker.identity,
+                Declaration::default,
+                IdentityEntryVerdict::RefusedNameHeldByWorker,
+            ),
+            (
+                &fresh,
+                || Declaration {
+                    intent_managed: true,
+                    ..Declaration::default()
+                },
+                IdentityEntryVerdict::RefusedHostAdopted,
+            ),
+            (
+                &archived,
+                || Declaration {
+                    created_custody: true,
+                    ..Declaration::default()
+                },
+                IdentityEntryVerdict::RecordOnly,
+            ),
+        ];
+
+        let mut covered = std::collections::BTreeSet::new();
+        for (identity, declaration, expected) in shapes {
+            let mut authoritative = MobMachineAuthority::recover_from_state(state.clone())
+                .expect("the authoritative composition recovers");
+            let (verdict, would_be) = declare_reported(&mut authoritative, identity, declaration());
+            assert_eq!(
+                verdict, expected,
+                "{identity:?}: the shape's authoritative verdict"
+            );
+            assert_eq!(
+                would_be, None,
+                "{identity:?}: an authoritative declaration reports no would-be verdict"
+            );
+
+            let mut candidate_state = state.clone();
+            candidate_state.composition_authority = CompositionAuthorityKind::NonAuthoritative;
+            let mut candidate = MobMachineAuthority::recover_from_state(candidate_state.clone())
+                .expect("the candidate composition recovers");
+            let (refusal, would_be) = declare_reported(&mut candidate, identity, declaration());
+            assert_eq!(
+                refusal,
+                IdentityEntryVerdict::RefusedNonAuthoritative,
+                "{identity:?}: a candidate declares nothing"
+            );
+            assert_eq!(
+                would_be,
+                Some(verdict),
+                "{identity:?}: the candidate reports the authoritative verdict"
+            );
+            assert_eq!(
+                candidate.state(),
+                &candidate_state,
+                "{identity:?}: a candidate writes nothing"
+            );
+            assert_eq!(
+                not_given_by_the_verdict_rule(verdict),
+                None,
+                "{identity:?}: {verdict:?}"
+            );
+            covered.insert(verdict);
+        }
+        assert_eq!(
+            covered.len(),
+            AUTHORITATIVE_VERDICTS,
+            "every verdict the rule gives an authoritative composition is compared once: \
+             {covered:?}"
+        );
+    }
+
     /// The seal of a complete roster unlists Declared entries only: a seated
     /// one is marked, an unseated one is removed at once, a worker is never
     /// touched, and an entry listed again before its retirement started

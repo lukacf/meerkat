@@ -875,7 +875,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LegacyIdentityEntryAdoptionResolved`(agent_identity: AgentIdentity, verdict: LegacyIdentityEntryAdoptionKind)
 - `AgentLaneMemberAdmissionResolved`(agent_identity: AgentIdentity, admission: AgentLaneMemberAdmissionKind)
 - `RespawnRefused`(agent_identity: AgentIdentity, reason: RespawnRefusalReason)
-- `IdentityEntryDeclared`(agent_identity: AgentIdentity, verdict: IdentityEntryVerdict, archived_session: Option<SessionId>)
+- `IdentityEntryDeclared`(agent_identity: AgentIdentity, verdict: IdentityEntryVerdict, archived_session: Option<SessionId>, would_be: Option<IdentityEntryVerdict>)
 - `DeclaredRosterSealed`(verdict: DeclaredRosterSealVerdict)
 - `ArchivedSessionForgotten`(agent_identity: AgentIdentity, session_id: SessionId, reason: ArchivedSessionForgetReason)
 - `ExplicitResumeMemberHeld`(agent_identity: AgentIdentity, cause: HostPreparationCause)

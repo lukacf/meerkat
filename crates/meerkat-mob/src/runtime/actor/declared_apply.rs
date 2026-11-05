@@ -218,10 +218,13 @@ impl MobActor {
                     agent_identity,
                     verdict,
                     archived_session,
-                } if agent_identity == &dsl_identity => Some((*verdict, archived_session.clone())),
+                    would_be,
+                } if agent_identity == &dsl_identity => {
+                    Some((*verdict, archived_session.clone(), *would_be))
+                }
                 _ => None,
             });
-            let Some((verdict, archived_session)) = decided else {
+            let Some((verdict, archived_session, would_be)) = decided else {
                 return Err(MobError::Internal(format!(
                     "MobMachine answered no declared apply verdict for '{agent_identity}'"
                 )));
@@ -244,6 +247,7 @@ impl MobActor {
                     verdict,
                     runtime_mode,
                     archived_session,
+                    would_be,
                 }),
             });
         }

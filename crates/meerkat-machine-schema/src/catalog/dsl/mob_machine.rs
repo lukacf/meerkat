@@ -2883,8 +2883,11 @@ macro_rules! mob_catalog_machine_dsl {
             // which the shell realizes (a seat, a rotation, a release) or
             // answers. archived_session is the identity's archived session
             // record after the step: the seat a SeatOwed verdict owes revives
-            // the entry on it.
-            IdentityEntryDeclared { agent_identity: AgentIdentity, verdict: Enum<IdentityEntryVerdict>, archived_session: Option<SessionId> },
+            // the entry on it. would_be is set on a candidate composition's
+            // refusal only (RefusedNonAuthoritative): the verdict an
+            // authoritative composition would give the same declaration over
+            // the same state, reported and never applied.
+            IdentityEntryDeclared { agent_identity: AgentIdentity, verdict: Enum<IdentityEntryVerdict>, archived_session: Option<SessionId>, would_be: Option<Enum<IdentityEntryVerdict>> },
             // The verdict of the seal of a declared roster
             // (SealDeclaredRoster): the shell retires the member of every
             // entry the seal marked (identity_entry_retiring).
@@ -31220,7 +31223,7 @@ macro_rules! mob_catalog_machine_dsl {
                 }
             }
             to Running
-            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::Kept, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::Kept, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity), would_be: None }
         }
 
         // A local entry no member holds is owed its seat: the declared apply
@@ -31302,7 +31305,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.members_to_retire.remove(agent_identity);
             }
             to Running
-            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::SeatOwed, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::SeatOwed, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity), would_be: None }
         }
 
         // A placed or externally bound entry no member holds is hosted on
@@ -31374,7 +31377,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.members_to_retire.remove(agent_identity);
             }
             to Running
-            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::HostedOnFirstUse, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::HostedOnFirstUse, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity), would_be: None }
         }
 
         // An entry the host declares held and that was never created awaits
@@ -31445,7 +31448,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.members_to_retire.remove(agent_identity);
             }
             to Running
-            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::AwaitHeldCreation, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::AwaitHeldCreation, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity), would_be: None }
         }
 
         // An entry never created whose host's rule requires its preparation
@@ -31507,7 +31510,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.members_to_retire.remove(agent_identity);
             }
             to Running
-            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::PreparationPending, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::PreparationPending, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity), would_be: None }
         }
 
         // A store-owned update of an archived identity, or of one awaiting
@@ -31560,7 +31563,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             update {}
             to Running
-            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RecordOnly, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RecordOnly, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity), would_be: None }
         }
 
         // A seated entry declared with another runtime mode is restamped on
@@ -31632,7 +31635,7 @@ macro_rules! mob_catalog_machine_dsl {
                 }
             }
             to Running
-            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RuntimeModeRestamp, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RuntimeModeRestamp, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity), would_be: None }
         }
 
         // A seated entry declared under another role, with the migration
@@ -31704,7 +31707,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_entry_retiring.remove(agent_identity);
             }
             to Running
-            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RoleMigrate, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RoleMigrate, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity), would_be: None }
         }
 
         // A seated entry whose role or runtime mode changes on a session that
@@ -31779,7 +31782,7 @@ macro_rules! mob_catalog_machine_dsl {
                 }
             }
             to Running
-            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RoleRotate, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RoleRotate, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity), would_be: None }
         }
 
         // A seated entry declared under another role with no migration
@@ -31866,7 +31869,7 @@ macro_rules! mob_catalog_machine_dsl {
                 }
             }
             to Running
-            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RoleMigrationHeld, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RoleMigrationHeld, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity), would_be: None }
         }
 
         // A member whose spawn, wake, retirement, removal or archive, or an
@@ -31925,7 +31928,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             update {}
             to Running
-            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::LifecycleInFlight, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::LifecycleInFlight, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity), would_be: None }
         }
 
         // A worker member holds the name: refused for this identity alone,
@@ -31983,7 +31986,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             update {}
             to Running
-            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RefusedNameHeldByWorker, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RefusedNameHeldByWorker, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity), would_be: None }
         }
 
         // The identity store manages the identity (an intent row): refused,
@@ -32041,11 +32044,14 @@ macro_rules! mob_catalog_machine_dsl {
             }
             update {}
             to Running
-            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RefusedHostAdopted, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RefusedHostAdopted, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity), would_be: None }
         }
 
         // A candidate composition declares nothing: refused, and nothing is
-        // written.
+        // written. The refusal reports the verdict an authoritative
+        // composition would give the same declaration over the same state
+        // (would_be), by the one verdict helper; it is advisory and never
+        // applied.
         transition DeclareIdentityEntryRefusedNonAuthoritative {
             on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required }
             guard { self.lifecycle_phase == Phase::Running }
@@ -32099,7 +32105,42 @@ macro_rules! mob_catalog_machine_dsl {
             }
             update {}
             to Running
-            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RefusedNonAuthoritative, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
+            emit IdentityEntryDeclared {
+                agent_identity: agent_identity,
+                verdict: IdentityEntryVerdict::RefusedNonAuthoritative,
+                archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity),
+                // The authoritative verdict: the same call, made by an
+                // authoritative composition over this state.
+                would_be: Some(
+                    identity_entry_verdict(
+                        true,
+                        intent_managed,
+                        self.identity_to_runtime.contains_key(agent_identity) == true && self.identity_entry_origins.contains_key(agent_identity) == false,
+                        self.spawn_exec_phase.contains_key(agent_identity) == true
+                            || self.member_wake_attempts.contains_key(agent_identity) == true
+                            || (self.identity_to_runtime.contains_key(agent_identity) == true
+                                && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                            || self.identity_entry_removing.contains(agent_identity) == true
+                            || self.identity_entry_archiving.contains(agent_identity) == true
+                            || self.identity_entry_constructions_held.contains_key(agent_identity) == true
+                            || self.identity_entry_constructions_activating.contains_key(agent_identity) == true,
+                        self.identity_to_runtime.contains_key(agent_identity),
+                        self.identity_runtime_generations.contains_key(agent_identity),
+                        placement,
+                        held_creation,
+                        self.member_profile_names.get_cloned(agent_identity) == Some(profile_name),
+                        declared_migration_from != None && declared_migration_from == self.member_profile_names.get_cloned(agent_identity),
+                        session_memory_only,
+                        self.member_runtime_modes.get_cloned(agent_identity) == Some(runtime_mode),
+                        resume_session_role != None && resume_session_role != Some(profile_name),
+                        declared_migration_from != None && declared_migration_from == resume_session_role,
+                        preparation_required == true && created_custody == false,
+                        created_custody == true
+                            && (self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)
+                                || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::PreparationPending))
+                    )
+                )
+            }
         }
 
         // A name the declared apply never declares over, refused typed for
@@ -32123,7 +32164,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             update {}
             to Running
-            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RefusedNameOwnedByCreated, archived_session: None }
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RefusedNameOwnedByCreated, archived_session: None, would_be: None }
         }
 
         transition DeclareIdentityEntryRefusedNameTombstoned {
@@ -32133,7 +32174,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "name_readable" { self.identity_entry_unreadable.contains(agent_identity) == false }
             update {}
             to Running
-            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RefusedNameTombstoned, archived_session: None }
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RefusedNameTombstoned, archived_session: None, would_be: None }
         }
 
         transition DeclareIdentityEntryRefusedNameUnreadable {
@@ -32142,7 +32183,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "name_unreadable" { self.identity_entry_unreadable.contains(agent_identity) == true }
             update {}
             to Running
-            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RefusedNameUnreadable, archived_session: None }
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RefusedNameUnreadable, archived_session: None, would_be: None }
         }
 
         // A mob that is not running declares nothing.
@@ -32151,7 +32192,7 @@ macro_rules! mob_catalog_machine_dsl {
             on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required }
             update {}
             to Running
-            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::MobNotRunning, archived_session: None }
+            emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::MobNotRunning, archived_session: None, would_be: None }
         }
 
         // The seal of a complete declared roster, by an explicit check on

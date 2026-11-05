@@ -419,7 +419,7 @@ seats); the agent lane is refused `MobError::ScopeDenied`.
 | A worker holds the name, the identity store manages it (a host adoption), declared twice, or a first-boot request for an undeclared identity | Refused for that identity alone (`Refused`, `DeclaredEntryRefusal`). |
 | A created (store-owned) entry holds the name | Left as it is (`Noted`, `DeclaredEntryNote::OwnedByStore`): a quiet steady state. The listing changes nothing and retires nothing, so a roster that keeps listing an identity after its adoption into store custody (a rollback to an earlier roster generation included) is harmless. |
 | The name is removed or unreadable | Refused for that identity alone (`DeclaredEntryRefusal::NameTombstoned`, `NameUnreadable`): the apply never declares over a reserved name. |
-| Any, in a candidate composition | Refused `NonAuthoritative`: a candidate declares nothing and writes nothing. |
+| Any, in a candidate composition | Refused `NonAuthoritative { would_be }`: a candidate declares nothing and writes nothing. `would_be` is the verdict an authoritative composition would give the same declaration over the same state, decided by the same verdict rule (`DeclaredEntryVerdict`); it is advisory and never applied. |
 
 A legacy member listed under its own name is adopted first
 (`adopt_legacy_identity_entry`) and then declared as the entry it is. A

@@ -14458,6 +14458,7 @@ pub mod effects {
         pub agent_identity: AgentIdentity,
         pub verdict: IdentityEntryVerdict,
         pub archived_session: Option<SessionId>,
+        pub would_be: Option<IdentityEntryVerdict>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DeclaredRosterSealed {

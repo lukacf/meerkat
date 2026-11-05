@@ -324,8 +324,11 @@ pub enum DeclaredEntryRefusal {
     /// host adoption): the declared apply does not drive it.
     HostAdopted,
     /// This composition of the mob is not authoritative (a candidate): it
-    /// declares nothing.
-    NonAuthoritative,
+    /// declares nothing. `would_be` is the verdict an authoritative
+    /// composition would give the same declaration over the same state,
+    /// decided by MobMachine's one verdict rule: it is reported and never
+    /// applied.
+    NonAuthoritative { would_be: DeclaredEntryVerdict },
     /// The roster declares the identity more than once.
     DuplicateDeclaration,
     /// The roster carries a first-boot request for an identity it does not
@@ -338,6 +341,85 @@ pub enum DeclaredEntryRefusal {
     /// The name's entry is one this build cannot read
     /// ([`super::IdentityEntryRead::Unreadable`]): nothing acts on it.
     NameUnreadable,
+}
+
+/// The verdict an authoritative composition of the mob would give one
+/// declaration ([`DeclaredEntryRefusal::NonAuthoritative`]'s `would_be`): what
+/// its declared apply would do with the identity over the same state. A
+/// candidate composition reports it and applies nothing. The vocabulary is
+/// closed, so a host's projection of it matches every verdict: a new verdict
+/// is a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclaredEntryVerdict {
+    /// The identity's member keeps its seat ([`DeclaredEntryOutcome::Kept`]),
+    /// or starts its fresh life when a first-boot `Fresh` request names it.
+    Kept,
+    /// The identity is owed its seat: it is seated Dormant, on a first-boot
+    /// request's session, its archived session or a fresh one
+    /// ([`DeclaredEntryOutcome::Seated`]).
+    SeatOwed,
+    /// The identity is hosted on its first use
+    /// ([`DeclaredEntryOutcome::HostedOnFirstUse`]).
+    HostedOnFirstUse,
+    /// The identity awaits its held creation
+    /// ([`DeclaredEntryOutcome::AwaitingHeldCreation`]).
+    AwaitHeldCreation,
+    /// The identity, never seated, awaits its host's preparation
+    /// ([`DeclaredEntryOutcome::PreparationPending`]).
+    PreparationPending,
+    /// The member is restamped with its declared runtime mode on its own
+    /// session ([`DeclaredEntryOutcome::Restamped`]).
+    RuntimeModeRestamp,
+    /// The member is restamped under its declared role on its own session
+    /// ([`DeclaredEntryOutcome::RoleMigrated`]).
+    RoleMigrate,
+    /// The member moves to a fresh session under its declared role
+    /// ([`DeclaredEntryOutcome::RoleRotated`]).
+    RoleRotate,
+    /// The member's role move is held: the roster declares no migration from
+    /// its role ([`DeclaredEntryOutcome::RoleMigrationHeld`]).
+    RoleMigrationHeld,
+    /// The member's spawn, wake, retirement, removal or archive, or the
+    /// identity's held construction, is in flight: the apply leaves it to
+    /// the next one ([`DeclaredEntryOutcome::Deferred`]).
+    LifecycleInFlight,
+    /// A worker member holds the name
+    /// ([`DeclaredEntryRefusal::NameHeldByWorker`]).
+    NameHeldByWorker,
+    /// The identity store manages the identity
+    /// ([`DeclaredEntryRefusal::HostAdopted`]).
+    HostAdopted,
+    /// A store-owned update of an archived identity, or of one awaiting its
+    /// host's preparation: its row is the whole change.
+    RecordOnly,
+}
+
+impl DeclaredEntryVerdict {
+    /// The public form of MobMachine's verdict for a declaration an
+    /// authoritative composition decided; `None` for a verdict only a
+    /// candidate composition, a stopped mob or a reserved name answers.
+    fn of_authoritative(verdict: mob_dsl::IdentityEntryVerdict) -> Option<Self> {
+        Some(match verdict {
+            mob_dsl::IdentityEntryVerdict::Kept => Self::Kept,
+            mob_dsl::IdentityEntryVerdict::SeatOwed => Self::SeatOwed,
+            mob_dsl::IdentityEntryVerdict::HostedOnFirstUse => Self::HostedOnFirstUse,
+            mob_dsl::IdentityEntryVerdict::AwaitHeldCreation => Self::AwaitHeldCreation,
+            mob_dsl::IdentityEntryVerdict::PreparationPending => Self::PreparationPending,
+            mob_dsl::IdentityEntryVerdict::RuntimeModeRestamp => Self::RuntimeModeRestamp,
+            mob_dsl::IdentityEntryVerdict::RoleMigrate => Self::RoleMigrate,
+            mob_dsl::IdentityEntryVerdict::RoleRotate => Self::RoleRotate,
+            mob_dsl::IdentityEntryVerdict::RoleMigrationHeld => Self::RoleMigrationHeld,
+            mob_dsl::IdentityEntryVerdict::LifecycleInFlight => Self::LifecycleInFlight,
+            mob_dsl::IdentityEntryVerdict::RefusedNameHeldByWorker => Self::NameHeldByWorker,
+            mob_dsl::IdentityEntryVerdict::RefusedHostAdopted => Self::HostAdopted,
+            mob_dsl::IdentityEntryVerdict::RecordOnly => Self::RecordOnly,
+            mob_dsl::IdentityEntryVerdict::RefusedNonAuthoritative
+            | mob_dsl::IdentityEntryVerdict::MobNotRunning
+            | mob_dsl::IdentityEntryVerdict::RefusedNameOwnedByCreated
+            | mob_dsl::IdentityEntryVerdict::RefusedNameTombstoned
+            | mob_dsl::IdentityEntryVerdict::RefusedNameUnreadable => return None,
+        })
+    }
 }
 
 /// The declared apply's answer for one identity.
@@ -567,11 +649,14 @@ pub(in crate::runtime) struct DeclarationStep {
     pub(in crate::runtime) change: Option<super::identity_change::DeclaredChangeAnswer>,
 }
 
-/// One decided declaration ([`DeclarationVerdict`]).
+/// One decided declaration ([`DeclarationVerdict`]). `would_be` is the
+/// verdict MobMachine's candidate refusal reports an authoritative
+/// composition would give ([`DeclaredEntryRefusal::NonAuthoritative`]).
 pub(in crate::runtime) struct DecidedDeclaration {
     pub(in crate::runtime) verdict: mob_dsl::IdentityEntryVerdict,
     pub(in crate::runtime) runtime_mode: crate::MobRuntimeMode,
     pub(in crate::runtime) archived_session: Option<SessionId>,
+    pub(in crate::runtime) would_be: Option<mob_dsl::IdentityEntryVerdict>,
 }
 
 /// The seal's answer: its verdict, the Declared entries it marked (their
@@ -1276,6 +1361,7 @@ impl super::MobHandle {
                 verdict,
                 runtime_mode,
                 archived_session,
+                would_be,
             } = match verdict {
                 Ok(decided) => decided,
                 Err(error) => {
@@ -1289,6 +1375,24 @@ impl super::MobHandle {
                 // A store-owned update of an archived or pending identity:
                 // its row is the whole change, and no member is acted on.
                 (mob_dsl::IdentityEntryVerdict::RecordOnly, _) => {}
+                // A candidate composition declares nothing: its refusal
+                // carries the verdict MobMachine reports an authoritative
+                // composition would give.
+                (mob_dsl::IdentityEntryVerdict::RefusedNonAuthoritative, _) => {
+                    let answer = match would_be.and_then(DeclaredEntryVerdict::of_authoritative) {
+                        Some(would_be) => DeclaredEntryOutcome::Refused {
+                            refusal: DeclaredEntryRefusal::NonAuthoritative { would_be },
+                        },
+                        None => DeclaredEntryOutcome::Failed {
+                            error: MobError::Internal(format!(
+                                "MobMachine refused '{agent_identity}' as a candidate's \
+                                 declaration without the verdict it would give \
+                                 ({would_be:?})"
+                            )),
+                        },
+                    };
+                    outcome.entries.insert(agent_identity, answer);
+                }
                 // A member is never built from a declaration of facts only:
                 // the seat waits for the host's composed build, and nothing
                 // of the seat is done (an archived session is not let go).
@@ -2038,11 +2142,6 @@ impl super::MobHandle {
             mob_dsl::IdentityEntryVerdict::RefusedHostAdopted => DeclaredEntryOutcome::Refused {
                 refusal: DeclaredEntryRefusal::HostAdopted,
             },
-            mob_dsl::IdentityEntryVerdict::RefusedNonAuthoritative => {
-                DeclaredEntryOutcome::Refused {
-                    refusal: DeclaredEntryRefusal::NonAuthoritative,
-                }
-            }
             // A store-owned identity's name: the roster's listing of it is a
             // quiet steady state (the store is its owner), not a refusal.
             mob_dsl::IdentityEntryVerdict::RefusedNameOwnedByCreated => {
@@ -2056,10 +2155,12 @@ impl super::MobHandle {
             mob_dsl::IdentityEntryVerdict::RefusedNameUnreadable => DeclaredEntryOutcome::Refused {
                 refusal: DeclaredEntryRefusal::NameUnreadable,
             },
-            // A seat verdict is realized by the seat step, and a mob that is
-            // not running fails the declaration step itself.
+            // A seat verdict is realized by the seat step, a candidate's
+            // refusal is answered with its would-be verdict there too, and a
+            // mob that is not running fails the declaration step itself.
             mob_dsl::IdentityEntryVerdict::SeatOwed
             | mob_dsl::IdentityEntryVerdict::RecordOnly
+            | mob_dsl::IdentityEntryVerdict::RefusedNonAuthoritative
             | mob_dsl::IdentityEntryVerdict::MobNotRunning => DeclaredEntryOutcome::Failed {
                 error: MobError::Internal(format!(
                     "the declared apply realized '{identity}''s verdict {verdict:?} outside its \

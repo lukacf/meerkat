@@ -472,7 +472,13 @@ impl Mount {
     fn capture(path: &Path, baseline: bool, writable: bool) -> Result<Self, ConfinementRefusal> {
         let canonical =
             std::fs::canonicalize(path).map_err(|_| ConfinementRefusal::UnsupportedRequirement)?;
-        if !baseline && canonical != path {
+        // A granted path is canonical, except that a read-only file grant may
+        // name a symbolic link as its final component (`/etc/resolv.conf` on
+        // systemd-resolved hosts): its canonical regular-file target is then
+        // pinned, revalidated and bound at the link's own path. Ancestors stay
+        // real directories.
+        let link = !baseline && canonical != path;
+        if link && (writable || !Self::is_final_link(path)?) {
             return Err(ConfinementRefusal::UnsupportedRequirement);
         }
         let file = OpenOptions::new()
@@ -493,7 +499,7 @@ impl Mount {
         if !metadata.is_dir() && !metadata.is_file() && !device {
             return Err(ConfinementRefusal::UnsupportedRequirement);
         }
-        if metadata.is_file() && metadata.nlink() != 1 {
+        if (metadata.is_file() && metadata.nlink() != 1) || (link && !metadata.is_file()) {
             return Err(ConfinementRefusal::UnsupportedRequirement);
         }
         let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::uninit();
@@ -569,6 +575,18 @@ impl Mount {
             device,
             noexec,
         })
+    }
+
+    // Whether `path` is a symbolic link under a canonical parent directory.
+    fn is_final_link(path: &Path) -> Result<bool, ConfinementRefusal> {
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return Ok(false);
+        };
+        let parent = std::fs::canonicalize(parent)
+            .map_err(|_| ConfinementRefusal::UnsupportedRequirement)?;
+        let named = std::fs::symlink_metadata(path)
+            .map_err(|_| ConfinementRefusal::UnsupportedRequirement)?;
+        Ok(parent.join(name) == path && named.file_type().is_symlink())
     }
 
     fn validate(&self) -> Result<(), ConfinementRefusal> {
@@ -1208,6 +1226,109 @@ mod tests {
         std::fs::create_dir(&work).unwrap();
         assert_eq!(
             directory.reopen(),
+            Err(SetupFailure {
+                step: SetupStep::MountIdentity,
+                errno: libc::ESTALE,
+            })
+        );
+    }
+
+    /// A read-only file grant may name a symbolic link as its final
+    /// component: the link's canonical regular-file target is pinned and bound
+    /// at the link's own path. Directory, dangling and writable links, and a
+    /// link under a symlinked ancestor, stay refused. No namespace is entered.
+    #[test]
+    fn a_final_component_link_grants_its_regular_file_target_read_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let etc = root.join("etc");
+        let run = root.join("run");
+        std::fs::create_dir(&etc).unwrap();
+        std::fs::create_dir(&run).unwrap();
+        let target = run.join("stub-resolv.conf");
+        std::fs::write(&target, b"nameserver 127.0.0.53\n").unwrap();
+        let link = etc.join("resolv.conf");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let mount = Mount::capture(&link, false, false).unwrap();
+        assert_eq!(mount.path, link);
+        assert_eq!(mount.canonical, target);
+        assert_eq!(mount.source.as_bytes(), target.as_os_str().as_bytes());
+        assert_eq!(
+            mount.destination.as_bytes(),
+            Path::new("/tmp")
+                .join(link.strip_prefix("/").unwrap())
+                .as_os_str()
+                .as_bytes()
+        );
+        assert_eq!(
+            mount.components.last().map(|name| name.as_bytes()),
+            Some(&b"resolv.conf"[..])
+        );
+        assert!(!mount.directory && !mount.writable);
+        assert!(mount.ancestors.iter().any(|(path, _, _)| path == &run));
+        assert_eq!(mount.validate(), Ok(()));
+        let source = mount.reopen().unwrap();
+        assert_eq!(stat_identity(source), Ok(mount.pinned));
+        unsafe { libc::close(source) };
+
+        let refused = Some(ConfinementRefusal::UnsupportedRequirement);
+        // Writable grant of a link.
+        assert_eq!(Mount::capture(&link, false, true).err(), refused);
+        // Link to a directory.
+        let directory_link = etc.join("run");
+        std::os::unix::fs::symlink(&run, &directory_link).unwrap();
+        assert_eq!(Mount::capture(&directory_link, false, false).err(), refused);
+        // Dangling link.
+        let dangling = etc.join("dangling");
+        std::os::unix::fs::symlink(run.join("missing"), &dangling).unwrap();
+        assert_eq!(Mount::capture(&dangling, false, false).err(), refused);
+        // A link reached through a symlinked ancestor.
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&etc, &alias).unwrap();
+        assert_eq!(
+            Mount::capture(&alias.join("resolv.conf"), false, false).err(),
+            refused
+        );
+        // A link chain still resolves to the regular file; a `..` route
+        // does not.
+        let chained = etc.join("chained");
+        std::os::unix::fs::symlink(&link, &chained).unwrap();
+        assert_eq!(
+            Mount::capture(&chained, false, false).unwrap().canonical,
+            target
+        );
+        assert_eq!(
+            Mount::capture(
+                &run.join("..").join("etc").join("resolv.conf"),
+                false,
+                false
+            )
+            .err(),
+            refused
+        );
+
+        // Retargeting the link after capture fails validation, and so does
+        // replacing the pinned target under the same name.
+        let other = run.join("other.conf");
+        std::fs::write(&other, b"nameserver 192.0.2.1\n").unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&other, &link).unwrap();
+        assert_eq!(
+            mount.validate(),
+            Err(ConfinementRefusal::BackendUnavailable)
+        );
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(mount.validate(), Ok(()));
+        std::fs::rename(&target, run.join("retained")).unwrap();
+        std::fs::write(&target, b"nameserver 192.0.2.2\n").unwrap();
+        assert_eq!(
+            mount.validate(),
+            Err(ConfinementRefusal::BackendUnavailable)
+        );
+        assert_eq!(
+            mount.reopen(),
             Err(SetupFailure {
                 step: SetupStep::MountIdentity,
                 errno: libc::ESTALE,

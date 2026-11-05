@@ -67,6 +67,14 @@ them.
   (`--config-dir` overrides; an existing `~/.config/rkat-tui` is used with a
   notice until the new directory exists). See `crates/meerkat-tui/README.md`.
 
+### Changed
+
+- `meerkat-sandbox`: on Linux, a read-only file grant may now name a symbolic
+  link to a regular file (its parent directories still real, not links), and
+  the confined process sees the target read-only at the link's own path, so a
+  systemd-resolved host's `/etc/resolv.conf` can be granted and DNS works
+  inside the sandbox; `rkat-tui` grants it this way.
+
 ## [0.9.10] - 2026-11-04
 
 ### Highlights

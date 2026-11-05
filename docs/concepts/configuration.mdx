@@ -633,7 +633,9 @@ that every launch of the kind is refused), what keeps the host's own inputs
 from its confined processes, and each convention source it does not trust.
 macOS uses Seatbelt. Linux uses namespaces and seccomp: it needs unprivileged
 user namespaces, and it refuses deny lists, Unix socket grants, nested grants,
-and granted paths that do not exist or pass through a symbolic link. Other
+and granted paths that do not exist or pass through a symbolic link; a
+read-only file grant may itself be a symbolic link to a regular file, whose
+target is then visible at the link's path. Other
 platforms refuse every confined launch. A confined process finds its program,
 libraries and data only inside its granted subtrees and the platform
 baseline; grant anything else it needs with `read`. A confined command hook,

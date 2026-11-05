@@ -1013,6 +1013,58 @@ fn linux_initial_backend_compiles_a_supported_profile() {
     assert_eq!(compiled.capabilities().requirement(), &supported);
 }
 
+/// A read-only file grant naming a symbolic link (`/etc/resolv.conf` on a
+/// systemd-resolved host) shows the link's regular-file target at the link's
+/// own path, read-only, and nothing else of the target's directory.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "Linux positive confinement acceptance lane; requires an eligible host"
+)]
+async fn linux_file_grant_through_a_final_symlink_binds_its_target_at_the_link() {
+    let fixture = Fixture::new();
+    let root = fixture.work.parent().unwrap();
+    let etc = root.join("etc");
+    let run = root.join("run");
+    std::fs::create_dir(&etc).unwrap();
+    std::fs::create_dir(&run).unwrap();
+    let target = run.join("stub-resolv.conf");
+    std::fs::write(&target, "nameserver 127.0.0.53\n").unwrap();
+    std::fs::write(run.join("sibling"), "private sibling\n").unwrap();
+    let link = etc.join("resolv.conf");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let mut spec = fixture.spec();
+    let FilesystemAccess::Paths(read) = &mut spec.read else {
+        unreachable!("the fixture grants paths");
+    };
+    read.push(PathAccess::Literal(link.clone()));
+    let output = fixture
+        .shell(
+            spec,
+            r#"
+        test -L "$1" && exit 10
+        test "$(cat "$1")" = 'nameserver 127.0.0.53' || exit 11
+        if printf 'changed' > "$1"; then exit 12; fi
+        if test -e "$2"; then exit 13; fi
+        if cat "$3"; then exit 14; fi
+        printf 'completed'
+    "#,
+            &[
+                link.into_os_string(),
+                target.as_os_str().to_owned(),
+                run.join("sibling").into_os_string(),
+            ],
+        )
+        .await;
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"completed");
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "nameserver 127.0.0.53\n"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 #[cfg_attr(

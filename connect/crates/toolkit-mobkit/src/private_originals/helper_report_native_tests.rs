@@ -518,6 +518,9 @@ mod service_task_churn;
 #[path = "helper_admission_writer_tests.rs"]
 mod helper_admission_writer;
 
+#[path = "find_entry_wait_tests.rs"]
+mod find_entry_wait;
+
 #[path = "warm_service_issuance_tests.rs"]
 mod warm_service_issuance;
 

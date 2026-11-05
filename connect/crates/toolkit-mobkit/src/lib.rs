@@ -534,6 +534,8 @@ impl AgentToolDispatcher for FindAndInstallTool {
         }
         let owner = self.execution_owner()?;
         let request = Self::parse_request(call, context)?;
+        #[cfg(test)]
+        find_entry_probe::observe(call.id);
         // Spend the exact native review once before host admission can retain
         // work. Actual entered handoffs keep clones if this caller is lost.
         let (entering, custody) = context.enter_reviewed_effect_held(call, None)?;
@@ -785,3 +787,28 @@ impl FindAndInstallTool {
 
 #[cfg(test)]
 mod protocol_tests;
+
+/// Test seam: observe a Find just before its own effect entry, by call ID. A
+/// control can begin an owner change on the shared publication there, as
+/// another original's first binding does.
+#[cfg(test)]
+pub(crate) mod find_entry_probe {
+    use std::sync::{Arc, Mutex};
+    type Probe = Arc<dyn Fn(&str) + Send + Sync>;
+    static PROBE: Mutex<Option<Probe>> = Mutex::new(None);
+    // Only the native-host Find controls install a probe.
+    #[cfg(all(feature = "native-host", unix))]
+    pub(crate) fn install(probe: Probe) {
+        *PROBE.lock().unwrap() = Some(probe);
+    }
+    #[cfg(all(feature = "native-host", unix))]
+    pub(crate) fn clear() {
+        PROBE.lock().unwrap().take();
+    }
+    pub(crate) fn observe(call: &str) {
+        let probe = PROBE.lock().unwrap().clone();
+        if let Some(probe) = probe {
+            probe(call);
+        }
+    }
+}

@@ -395,3 +395,7 @@ pub fn handle_decide_event(
         Err(error_value) => decision_error_to_response(id, error_value),
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests;

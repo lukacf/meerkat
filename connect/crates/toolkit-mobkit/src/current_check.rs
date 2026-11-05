@@ -16,6 +16,11 @@
 //! dispatched while no effect of the dispatch has entered, so its caller may
 //! retry it safely; every other check claims nothing about whether the
 //! call's tool code ran.
+//!
+//! An attempt through a governed helper admission fence (a Find's helper
+//! observation, for example), which ran nothing when its fence refused while
+//! Core names an owner change in progress, waits for that change with
+//! [`wait_for_owner_change`] and is made again through a fresh fence.
 
 use meerkat_core::authorization::OwnerChangeChurn;
 use meerkat_core::{ResolvedToolExecutionPlan, ToolCallView, ToolDispatchContext, ToolError};
@@ -85,6 +90,36 @@ pub async fn wait_after_refusal(
         )
         .await
         .settled()
+}
+
+/// After an attempt that ran nothing and that an owner change in progress on
+/// the work's own publication refuses (a governed helper admission fence's
+/// `Unavailable`: the fence refuses while another actor changes the owners
+/// or holds their exclusion), Core's bounded wait for that change with
+/// `churn`, as [`wait_after_refusal`] waits, but only while Core names a
+/// change in progress: true when it settled and the caller may make the
+/// same attempt again, through a fresh fence. With no change in progress it
+/// answers false at once and the refusal stands, as it does once the bounds
+/// ran out.
+///
+/// Call it holding nothing, as [`wait_after_refusal`].
+pub async fn wait_for_owner_change(
+    context: &ToolDispatchContext,
+    churn: &mut OwnerChangeChurn,
+    site: &'static str,
+) -> bool {
+    let Some(work) = context.work_authorization() else {
+        return false;
+    };
+    churn
+        .wait_for_settled_change(
+            work.authorization().as_ref(),
+            context.remaining_tool_time(),
+            site,
+            None,
+        )
+        .await
+        .is_some_and(|wait| wait.settled())
 }
 
 /// [`check`] for a caller that holds nothing, checked again after each

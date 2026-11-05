@@ -357,6 +357,14 @@ impl PrivateOriginals {
     #[allow(clippy::too_many_arguments)]
     /// Current M1 replay disclosure for a live invocation only. This is not
     /// independent host-private recovery after originating work is cancelled.
+    ///
+    /// Each observation takes the source writer and its checks afresh and
+    /// reads through a fresh fence of its own, holding nothing between
+    /// attempts. A fence refused while Core names an owner change in progress
+    /// on the work's own publication (another original's first binding, for
+    /// example) ran nothing: that change is waited out with this call's one
+    /// churn and the same observation made again. A refusal with no change in
+    /// progress, and one the churn's bounds outlast, stand as they are.
     pub(crate) async fn observe_setup_helper_for_live_replay(
         self: &Arc<Self>,
         context: &ToolDispatchContext,
@@ -370,25 +378,40 @@ impl PrivateOriginals {
     ) -> Result<Option<Arc<AdmittedHelperWork>>, PrivateOriginalError> {
         let original = self.acquisition_original(context).await?;
         self.require_helper_selection(&selection)?;
-        self.owner
-            .observe_fenced_helper(
-                entered,
-                self.store.as_ref(),
-                &self.scope,
-                service,
-                key,
-                request,
-                operation,
-                original.setup_origin(),
-                &original.original,
-                &original.contributors,
-                &original.own_originals,
-                selection,
-                review,
-            )
-            .await
-            .map(|observed| observed.map(Arc::new))
-            .map_err(helper_error)
+        let mut churn = context.owner_change_churn();
+        loop {
+            let observed = self
+                .owner
+                .observe_fenced_helper(
+                    entered,
+                    self.store.as_ref(),
+                    &self.scope,
+                    service,
+                    key.clone(),
+                    request.clone(),
+                    operation.clone(),
+                    original.setup_origin(),
+                    &original.original,
+                    &original.contributors,
+                    &original.own_originals,
+                    selection.clone(),
+                    review.clone(),
+                )
+                .await;
+            if matches!(observed, Err(OriginalWriterError::Unavailable))
+                && crate::current_check::wait_for_owner_change(
+                    context,
+                    &mut churn,
+                    "toolkit.find.observe_helper",
+                )
+                .await
+            {
+                continue;
+            }
+            return observed
+                .map(|observed| observed.map(Arc::new))
+                .map_err(helper_error);
+        }
     }
 
     fn require_helper_selection(

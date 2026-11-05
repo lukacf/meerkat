@@ -106,6 +106,16 @@ const READBACK_SCOPE: &str = "retained_payload_and_launch_binding_only";
 fn refused(name: &str) -> ToolError {
     ToolError::access_denied(name)
 }
+/// Whether `error` is a refusal Core certified as not dispatched
+/// (`tool_invoked: false`): none of the tool code its certifier guards ran.
+/// Only Core certifies; any other error claims nothing.
+fn certified_not_dispatched(error: &ToolError) -> bool {
+    matches!(
+        error.primary_error(),
+        ToolError::AuthorizationRefused { refusal }
+            if refusal.dispatch() == meerkat_core::authorization::RefusalDispatch::NotDispatched
+    )
+}
 fn setup_dispatch_refusal(stage: &'static str, error: &ToolError) {
     let kind = match error.primary_error() {
         ToolError::AccessDenied { .. } => "access_denied",
@@ -1739,6 +1749,56 @@ impl CheckedInstalls {
         Ok(held.readback)
     }
 
+    /// Undo `consume` for exactly the identity this install call consumed,
+    /// after its inner call was refused certified not dispatched: none of
+    /// the install ran. Under this state owner, the proposal its arguments
+    /// name must still be the consumed one (its readback is `consumed`),
+    /// for the same session and binding epoch, on an owner that is not
+    /// retired. Then it is unused again, with no readback; its operation
+    /// metadata stays, and the arm stays spent: a retry is a fresh review,
+    /// approval and call of the same checked proposal. A successor under
+    /// the key, a moved epoch or a retired owner restores nothing, and the
+    /// install settles as before. True when restored.
+    fn restore_after_certified_refusal(
+        &self,
+        call: ToolCallView<'_>,
+        session: &SessionId,
+        consumed: &Readback,
+    ) -> bool {
+        let Ok(arguments) = document(call.args.get()) else {
+            return false;
+        };
+        let Some(Ok(key)) =
+            hex(&arguments, "validation_id", 32).map(|key| proposal_key(&arguments, key))
+        else {
+            return false;
+        };
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if state.retired {
+            return false;
+        }
+        let epoch = self.inner.execution_binding_epoch(call.name);
+        let Some(proposal) = state.proposals.get_mut(&key) else {
+            return false;
+        };
+        let exact = proposal.used
+            && proposal.session == *session
+            && consumed.session == *session
+            && proposal.epoch == consumed.epoch
+            && proposal.epoch == epoch
+            && proposal
+                .readback
+                .as_ref()
+                .is_some_and(|saved| Arc::ptr_eq(&saved.receipt, &consumed.receipt));
+        if exact {
+            proposal.used = false;
+            proposal.readback = None;
+        }
+        exact
+    }
+
     async fn observe_readback(
         &self,
         call: ToolCallView<'_>,
@@ -1982,6 +2042,7 @@ impl CheckedInstalls {
                     call,
                     context,
                     plan,
+                    None,
                     box_in_own_frame(|| self.inner_call(call, context, plan)),
                 )
                 .await;
@@ -2065,8 +2126,9 @@ impl CheckedInstalls {
             );
         }
         let mut physical = None;
+        let mut restored = false;
         let result = self
-            .delegate(call, current, plan, async {
+            .delegate(call, current, plan, Some(&mut restored), async {
                 let result = box_in_own_frame(|| self.inner_call(call, current, plan)).await;
                 // The package owner's return is distinct from later local capture
                 // failures. A malformed software receipt does not undo entry.
@@ -2078,15 +2140,17 @@ impl CheckedInstalls {
                 result
             })
             .await;
+        // A refusal Core certified as not dispatched ran none of the install,
+        // and its consumed proposal is restored (`delegate`): it settles as
+        // failed. Every other error after the consume stays uncertain.
+        let physical = if restored {
+            meerkat_core::LiveBridgeEffectOutcome::Failed
+        } else {
+            physical.unwrap_or(meerkat_core::LiveBridgeEffectOutcome::Failed)
+        };
         // No later await separates the actual result from local settlement.
         // Dropping an entered future leaves the existing SpentUncertain state.
-        approvals.settle_service_result(
-            self,
-            call,
-            current,
-            physical.unwrap_or(meerkat_core::LiveBridgeEffectOutcome::Failed),
-            result,
-        )
+        approvals.settle_service_result(self, call, current, physical, result)
     }
 
     async fn inner_call(
@@ -2222,11 +2286,18 @@ impl CheckedInstalls {
         outcome
     }
 
+    /// Run `operation`, an install's or a check's inner call, around this
+    /// owner's proposal custody: an install consumes its armed proposal
+    /// first, with no await before the operation is polled. With `restore`,
+    /// an install whose operation is refused certified not dispatched gets
+    /// exactly its consumed proposal back, and `restore` answers whether it
+    /// did.
     async fn delegate(
         &self,
         call: ToolCallView<'_>,
         context: &ToolDispatchContext,
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
+        restore: Option<&mut bool>,
         operation: impl Future<Output = Result<ToolDispatchOutcome, ToolError>>,
     ) -> Result<ToolDispatchOutcome, ToolError> {
         if call.name == "setup_export_recipe" {
@@ -2261,6 +2332,14 @@ impl CheckedInstalls {
             shared_check_probe::observe(shared_check_probe::Step::InstallConsumed, call.id);
         }
         let outcome = operation.await;
+        if let (Err(error), Some(restored), Some(consumed)) = (&outcome, restore, &readback)
+            && certified_not_dispatched(error)
+        {
+            // None of the install ran. Exactly the proposal this call
+            // consumed is restored, with no await since the refusal, so the
+            // model's fresh install can be reviewed and armed afresh.
+            *restored = self.restore_after_certified_refusal(call, session, consumed);
+        }
         #[cfg(all(test, unix))]
         if readback.is_some() && outcome.is_err() {
             shared_check_probe::observe(shared_check_probe::Step::InstallInnerRefused, call.id);

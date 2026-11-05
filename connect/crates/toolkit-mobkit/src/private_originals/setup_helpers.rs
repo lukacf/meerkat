@@ -938,6 +938,12 @@ impl PrivateOriginals {
 
     /// Submit the exact source under the same existing identity owner. Real
     /// native acceptance/dedup/uncertainty controls the custody settlement.
+    ///
+    /// The submission's source checks outside Core's bind (before its first
+    /// native call, and before each rebind once its wait settled) meet a
+    /// source collection held by another owner's short section as contention:
+    /// they wait it out, holding nothing, until the submission's one
+    /// deadline, from its start (never past the source deadline).
     pub(crate) async fn submit_setup_helper(
         self: &Arc<Self>,
         prepared: &PreparedHelperController,
@@ -948,6 +954,10 @@ impl PrivateOriginals {
         review: crate::review_custody::ReviewCustody,
         dispatch: Option<&ToolDispatchContext>,
     ) -> Result<SetupHelperSubmission, PrivateOriginalError> {
+        let contended_until = std::cmp::min(
+            source_deadline,
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+        );
         self.with_new_work_admission(|| ())?;
         if tokio::time::Instant::now() >= source_deadline {
             return Err(PrivateOriginalError::Denied);
@@ -977,7 +987,8 @@ impl PrivateOriginals {
             crate::source_hold_probe::retain(self.hold_sources_for_test(hold));
         }
         self.owner
-            .check_admitted_helper(&prepared.admitted)
+            .check_admitted_helper_until(&prepared.admitted, contended_until)
+            .await
             .map_err(helper_error)?;
         self.require_helper_selection(prepared.admitted.selection())?;
         held.bind_setup_deadline(snapshot)?;
@@ -1051,7 +1062,13 @@ impl PrivateOriginals {
                     (Some(context), Some(churn)) => {
                         if tokio::time::Instant::now() < source_deadline
                             && !self
-                                .helper_rebind_after_wait(prepared, context, churn, source_deadline)
+                                .helper_rebind_after_wait(
+                                    prepared,
+                                    context,
+                                    churn,
+                                    source_deadline,
+                                    contended_until,
+                                )
                                 .await
                             && tokio::time::Instant::now() < source_deadline
                         {
@@ -1107,9 +1124,10 @@ impl PrivateOriginals {
         context: &ToolDispatchContext,
         churn: &mut meerkat_core::authorization::OwnerChangeChurn,
         source_deadline: tokio::time::Instant,
+        contended_until: tokio::time::Instant,
     ) -> bool {
         let Some(stop) = self
-            .helper_rebind_stop(prepared, context, churn, source_deadline)
+            .helper_rebind_stop(prepared, context, churn, source_deadline, contended_until)
             .await
         else {
             return true;
@@ -1145,13 +1163,16 @@ impl PrivateOriginals {
     /// (never reset), and then the checks the rebind relies on. None only when
     /// the dispatch has its work authority, budget was left for the wait, the
     /// wait settled, budget is still left, and the helper's source still admits
-    /// work with its admitted helper work and selection current.
+    /// work with its admitted helper work and selection current. The source
+    /// check waits out a source collection held by another owner's short
+    /// section until `contended_until`, the submission's one deadline.
     async fn helper_rebind_stop(
         &self,
         prepared: &PreparedHelperController,
         context: &ToolDispatchContext,
         churn: &mut meerkat_core::authorization::OwnerChangeChurn,
         source_deadline: tokio::time::Instant,
+        contended_until: tokio::time::Instant,
     ) -> Option<HelperRebindStop> {
         let remaining = || {
             let request = source_deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -1194,7 +1215,8 @@ impl PrivateOriginals {
         }
         if self
             .owner
-            .check_admitted_helper(&prepared.admitted)
+            .check_admitted_helper_until(&prepared.admitted, contended_until)
+            .await
             .is_err()
         {
             return Some(HelperRebindStop::HelperNotCurrent);

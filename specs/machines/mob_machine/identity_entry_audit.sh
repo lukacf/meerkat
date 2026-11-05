@@ -20,10 +20,12 @@
 # - entry (identity_entry_audit.tla; three identities, two runtime ids, fence
 #   tokens 1..2, generations 0..1, two sessions): a replayed member and a
 #   member seated by the spawn ladder with or without entry custody, the
-#   replay of entry rows, every arm of the legacy adoption, the admission
-#   probe, the agent lane's member admission, the worker reconcile and
-#   ensure, the build seed's composition authority, the seal, Stop and
-#   Resume. It checks every generated invariant (the entry invariants among
+#   replay of entry rows, every arm of the legacy adoption over all sixteen
+#   combinations of the shell's raw observations (the member bound to a
+#   session or to none), the admission probe, the agent lane's member
+#   admission, the worker reconcile and ensure, the build seed's composition
+#   authority, the seal, Stop and Resume. It checks every generated
+#   invariant (the entry invariants among
 #   them: every entry is seated or unseated with a typed cause, no worker
 #   reconcile spawns or retires an entry, entry custody belongs to an open
 #   ladder), that exactly one arm of the admission probe, of the agent lane's
@@ -31,9 +33,13 @@
 #   (AuditProbeExactlyOne, AuditAgentLaneExactlyOne, AuditAdoptionExactlyOne),
 #   that an entry's name probed without custody is refused as an entry's
 #   (AuditProbeRefusesEntryName), that an identity becomes an entry only by
-#   the declared apply, a custody commit, an observed adoption or the replay
-#   of its row (AuditEntryOnlyWithCause), and that an adoption without the
-#   legacy observation records nothing (AuditAdoptionNeedsObservation).
+#   the declared apply, a custody commit, an adoption from qualifying legacy
+#   marks or the replay of its row (AuditEntryOnlyWithCause), that an
+#   adoption records an entry only from qualifying legacy marks
+#   (AuditAdoptionNeedsObservation), and that the retirement without an
+#   adoption answers only an unlisted member with both marks and no intent
+#   row, placed or bound to no session, and not retiring
+#   (AuditRetireUnadoptedQualifies).
 # - lifecycle (identity_entry_lifecycle_audit.tla, over
 #   member_residency_audit's retire run and its domains: two identities,
 #   three runtime ids, fence tokens 1..3, generations 0..1, three sessions,
@@ -130,8 +136,11 @@
 # copy of the generated model and requires TLC to refuse each with the
 # invariant or property it breaks: in the entry run, a reconcile that
 # retires an entry, an admission probe that answers an entry's name without
-# custody as a plain duplicate, an adoption without the observation and the
-# replay of an entry row on an unseated identity; in the lifecycle run, an
+# custody as a plain duplicate, an adoption without the observation, an
+# unlisted adoption that takes one legacy mark and a retirement without an
+# adoption that ignores the host's intent row (each refused by its target
+# action property alone), and the replay of an entry row on an unseated
+# identity; in the lifecycle run, an
 # archive terminal that drops the kept entry's unseated cause, the destroy's
 # member archive that keeps the entry, a DestroyMob that keeps the entries,
 # a DestroyFromAny that keeps an open ladder's entry custody, a rotation's
@@ -195,7 +204,7 @@ in_part() {
 entry_states=12960
 lifecycle_states=12024
 apply_states=1476
-legacy_states=1952
+legacy_states=3904
 roles_states=1224
 held_states=2404
 placed_states=192
@@ -216,7 +225,9 @@ entry_covered_actions=(
   RecoverIdentityEntrySeatedRunning
   RecoverIdentityEntrySeatedStopped
   AdoptLegacyIdentityEntryAdopted
+  AdoptLegacyIdentityEntryAdoptedUnlisted
   AdoptLegacyIdentityEntryNameHeldByWorker
+  AdoptLegacyIdentityEntryRetireUnadopted
   AdoptLegacyIdentityEntryNotAdoptable
   AdoptLegacyIdentityEntryStaleObservation
   AdoptLegacyIdentityEntryNotSeated
@@ -360,7 +371,9 @@ legacy_covered_actions=(
   PlanBootMaterializationStayDormant
   SealBootMaterializationPlan
   AdoptLegacyIdentityEntryAdopted
+  AdoptLegacyIdentityEntryAdoptedUnlisted
   AdoptLegacyIdentityEntryNameHeldByWorker
+  AdoptLegacyIdentityEntryRetireUnadopted
   AdoptLegacyIdentityEntryNotAdoptable
   AdoptLegacyIdentityEntryNotSeated
   AdoptLegacyIdentityEntryAlreadyAnEntry
@@ -471,6 +484,8 @@ placed_covered_actions=(
   DeclareIdentityEntryHostedOnFirstUse
   DeclareIdentityEntryLifecycleInFlight
   DeclareIdentityEntryRefusedNameHeldByWorker
+  AdoptLegacyIdentityEntryRetireUnadopted
+  AdoptLegacyIdentityEntryNotAdoptable
 )
 
 hold_covered_actions=(
@@ -606,7 +621,8 @@ write_cfg() {
       spec="AuditSpec"
       run_properties="
   AuditEntryOnlyWithCause
-  AuditAdoptionNeedsObservation"
+  AuditAdoptionNeedsObservation
+  AuditRetireUnadoptedQualifies"
       run_invariants="
   AuditProbeExactlyOne
   AuditProbeRefusesEntryName
@@ -685,7 +701,8 @@ write_cfg() {
   AuditDeclareExactlyOne
   AuditSealExactlyOne
   AuditMarkReplayExactlyOne
-  AuditResetPreflightAgrees"
+  AuditResetPreflightAgrees
+  AuditAdoptionExactlyOneArm"
           ;;
         roles)
           spec="RolesSpec"
@@ -714,7 +731,8 @@ write_cfg() {
   AuditRemoteCommitSeatsEntry
   AuditPlacedEndKeepsHosted"
           run_invariants="
-  AuditPlacedDeclareExactlyOne"
+  AuditPlacedDeclareExactlyOne
+  AuditAdoptionExactlyOneArm"
           ;;
         hold)
           spec="HoldSpec"
@@ -1165,7 +1183,8 @@ text = text[: block.start()] + "\n".join(lines) + text[block.end():]
 open(path, "w").write(text)
 PY
 
-  # An adoption without the shell's legacy observation.
+  # An adoption without the shell's legacy observation: the listed
+  # adoption takes any marks.
   mutate entry adoption_without_observation \
     "Invariant AuditAdoptionExactlyOne|Action property AuditAdoptionNeedsObservation|Action property AuditEntryOnlyWithCause" <<'PY'
 import os, re
@@ -1174,11 +1193,28 @@ text = open(path).read()
 block = re.search(r"^AdoptLegacyIdentityEntryAdopted\(.*?\n\n", text, re.S | re.M)
 assert block, "AdoptLegacyIdentityEntryAdopted not found"
 lines = block.group(0).split("\n")
-guard = [i for i, line in enumerate(lines) if "(legacy_roster_member = TRUE)" in line]
+guard = [i for i, line in enumerate(lines)
+         if "(listed = TRUE) /\\ (IF (durable_identity_marker = TRUE)" in line]
 assert len(guard) == 1, "expected one observation guard in AdoptLegacyIdentityEntryAdopted"
 del lines[guard[0]]
 text = text[: block.start()] + "\n".join(lines) + text[block.end():]
 open(path, "w").write(text)
+PY
+
+  # An unlisted adoption that takes one legacy mark: refused by the rule
+  # that an entry is recorded only from qualifying marks, alone.
+  mutate_target entry unlisted_adoption_takes_one_mark \
+    "Action property" AuditAdoptionNeedsObservation <<'PY'
+replace_in_arm("AdoptLegacyIdentityEntryAdoptedUnlisted",
+               "(durable_identity_marker = TRUE) /\\ (own_identity_label = TRUE)",
+               "(IF (durable_identity_marker = TRUE) THEN TRUE ELSE (own_identity_label = TRUE))")
+PY
+
+  # A retirement without an adoption that ignores the host's intent row:
+  # refused by the rule that names the one member it answers, alone.
+  mutate_target entry retire_unadopted_ignores_intent_row \
+    "Action property" AuditRetireUnadoptedQualifies <<'PY'
+replace_in_arm("AdoptLegacyIdentityEntryRetireUnadopted", " /\\ (intent_row = FALSE))", ")")
 PY
 
   # The replay of an entry row on an identity that is not seated.

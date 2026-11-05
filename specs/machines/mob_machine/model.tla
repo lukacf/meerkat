@@ -23797,7 +23797,7 @@ RecoverIdentityEntrySeatedStopped(agent_identity, agent_runtime_id, origin) ==
     /\ UnchangedFrame_87dd23f3d60e2555
 
 
-AdoptLegacyIdentityEntryAdopted(agent_identity, generation, legacy_roster_member) ==
+AdoptLegacyIdentityEntryAdopted(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row) ==
     /\ phase = "Running"
     /\ (composition_authority = "Authoritative")
     /\ ((agent_identity \in DOMAIN identity_entry_origins) = FALSE)
@@ -23805,7 +23805,7 @@ AdoptLegacyIdentityEntryAdopted(agent_identity, generation, legacy_roster_member
     /\ ((agent_identity \in DOMAIN identity_to_runtime) = TRUE)
     /\ ((IF (agent_identity \in DOMAIN identity_runtime_generations) THEN Some((IF agent_identity \in DOMAIN identity_runtime_generations THEN identity_runtime_generations[agent_identity] ELSE "None")) ELSE None) = Some(generation))
     /\ ((IF ~(((agent_identity \in DOMAIN member_placement) = FALSE)) THEN TRUE ELSE (IF ~(((agent_identity \in DOMAIN member_session_bindings) = TRUE)) THEN TRUE ELSE (agent_identity \in DOMAIN identity_to_runtime))) /\ (((agent_identity \in DOMAIN member_placement) = FALSE) /\ ((agent_identity \in DOMAIN member_session_bindings) = TRUE) /\ ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))
-    /\ (legacy_roster_member = TRUE)
+    /\ ((listed = TRUE) /\ (IF (durable_identity_marker = TRUE) THEN TRUE ELSE (own_identity_label = TRUE)))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ members_to_spawn' = (members_to_spawn \ {agent_identity})
@@ -23814,7 +23814,7 @@ AdoptLegacyIdentityEntryAdopted(agent_identity, generation, legacy_roster_member
     /\ UnchangedFrame_87dd23f3d60e2555
 
 
-AdoptLegacyIdentityEntryNameHeldByWorker(agent_identity, generation, legacy_roster_member) ==
+AdoptLegacyIdentityEntryAdoptedUnlisted(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row) ==
     /\ phase = "Running"
     /\ (composition_authority = "Authoritative")
     /\ ((agent_identity \in DOMAIN identity_entry_origins) = FALSE)
@@ -23822,26 +23822,56 @@ AdoptLegacyIdentityEntryNameHeldByWorker(agent_identity, generation, legacy_rost
     /\ ((agent_identity \in DOMAIN identity_to_runtime) = TRUE)
     /\ ((IF (agent_identity \in DOMAIN identity_runtime_generations) THEN Some((IF agent_identity \in DOMAIN identity_runtime_generations THEN identity_runtime_generations[agent_identity] ELSE "None")) ELSE None) = Some(generation))
     /\ ((IF ~(((agent_identity \in DOMAIN member_placement) = FALSE)) THEN TRUE ELSE (IF ~(((agent_identity \in DOMAIN member_session_bindings) = TRUE)) THEN TRUE ELSE (agent_identity \in DOMAIN identity_to_runtime))) /\ (((agent_identity \in DOMAIN member_placement) = FALSE) /\ ((agent_identity \in DOMAIN member_session_bindings) = TRUE) /\ ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))
-    /\ (legacy_roster_member = FALSE)
+    /\ ((listed = FALSE) /\ (durable_identity_marker = TRUE) /\ (own_identity_label = TRUE) /\ (intent_row = FALSE))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_cfdef6b57e7dfed0
+    /\ members_to_spawn' = (members_to_spawn \ {agent_identity})
+    /\ members_to_retire' = (members_to_retire \ {agent_identity})
+    /\ identity_entry_origins' = MapSet(identity_entry_origins, agent_identity, "Declared")
+    /\ UnchangedFrame_87dd23f3d60e2555
 
 
-AdoptLegacyIdentityEntryNotAdoptable(agent_identity, generation, legacy_roster_member) ==
+AdoptLegacyIdentityEntryNameHeldByWorker(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row) ==
     /\ phase = "Running"
     /\ (composition_authority = "Authoritative")
     /\ ((agent_identity \in DOMAIN identity_entry_origins) = FALSE)
     /\ (((agent_identity \in identity_entry_tombstones) = FALSE) /\ ((agent_identity \in identity_entry_unreadable) = FALSE))
     /\ ((agent_identity \in DOMAIN identity_to_runtime) = TRUE)
     /\ ((IF (agent_identity \in DOMAIN identity_runtime_generations) THEN Some((IF agent_identity \in DOMAIN identity_runtime_generations THEN identity_runtime_generations[agent_identity] ELSE "None")) ELSE None) = Some(generation))
-    /\ ((IF ((agent_identity \in DOMAIN member_placement) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_session_bindings) = FALSE) THEN TRUE ELSE (agent_identity \in DOMAIN identity_to_runtime))) /\ (IF ((agent_identity \in DOMAIN member_placement) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_session_bindings) = FALSE) THEN TRUE ELSE ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) = Some("Retiring")))))
+    /\ ((IF ~((listed = TRUE)) THEN TRUE ELSE (IF ~((durable_identity_marker = FALSE)) THEN TRUE ELSE (IF ~((own_identity_label = FALSE)) THEN TRUE ELSE (IF ~(((agent_identity \in DOMAIN member_placement) = FALSE)) THEN TRUE ELSE (IF ~(((agent_identity \in DOMAIN member_session_bindings) = TRUE)) THEN TRUE ELSE (agent_identity \in DOMAIN identity_to_runtime)))))) /\ (IF ((listed = TRUE) /\ (durable_identity_marker = FALSE) /\ (own_identity_label = FALSE) /\ ((agent_identity \in DOMAIN member_placement) = FALSE) /\ ((agent_identity \in DOMAIN member_session_bindings) = TRUE) /\ ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))) THEN TRUE ELSE ((listed = FALSE) /\ (IF (durable_identity_marker = FALSE) THEN TRUE ELSE (IF (own_identity_label = FALSE) THEN TRUE ELSE (intent_row = TRUE))))))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_cfdef6b57e7dfed0
 
 
-AdoptLegacyIdentityEntryStaleObservation(agent_identity, generation, legacy_roster_member) ==
+AdoptLegacyIdentityEntryRetireUnadopted(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row) ==
+    /\ phase = "Running"
+    /\ (composition_authority = "Authoritative")
+    /\ ((agent_identity \in DOMAIN identity_entry_origins) = FALSE)
+    /\ (((agent_identity \in identity_entry_tombstones) = FALSE) /\ ((agent_identity \in identity_entry_unreadable) = FALSE))
+    /\ ((agent_identity \in DOMAIN identity_to_runtime) = TRUE)
+    /\ ((IF (agent_identity \in DOMAIN identity_runtime_generations) THEN Some((IF agent_identity \in DOMAIN identity_runtime_generations THEN identity_runtime_generations[agent_identity] ELSE "None")) ELSE None) = Some(generation))
+    /\ ((listed = FALSE) /\ (durable_identity_marker = TRUE) /\ (own_identity_label = TRUE) /\ (intent_row = FALSE))
+    /\ ((IF ~((IF ((agent_identity \in DOMAIN member_placement) = TRUE) THEN TRUE ELSE ((agent_identity \in DOMAIN member_session_bindings) = FALSE))) THEN TRUE ELSE (agent_identity \in DOMAIN identity_to_runtime)) /\ ((IF ((agent_identity \in DOMAIN member_placement) = TRUE) THEN TRUE ELSE ((agent_identity \in DOMAIN member_session_bindings) = FALSE)) /\ ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_cfdef6b57e7dfed0
+
+
+AdoptLegacyIdentityEntryNotAdoptable(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row) ==
+    /\ phase = "Running"
+    /\ (composition_authority = "Authoritative")
+    /\ ((agent_identity \in DOMAIN identity_entry_origins) = FALSE)
+    /\ (((agent_identity \in identity_entry_tombstones) = FALSE) /\ ((agent_identity \in identity_entry_unreadable) = FALSE))
+    /\ ((agent_identity \in DOMAIN identity_to_runtime) = TRUE)
+    /\ ((IF (agent_identity \in DOMAIN identity_runtime_generations) THEN Some((IF agent_identity \in DOMAIN identity_runtime_generations THEN identity_runtime_generations[agent_identity] ELSE "None")) ELSE None) = Some(generation))
+    /\ (((IF ~((listed = TRUE)) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_placement) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_session_bindings) = FALSE) THEN TRUE ELSE (agent_identity \in DOMAIN identity_to_runtime)))) /\ (IF ((listed = TRUE) /\ (IF ((agent_identity \in DOMAIN member_placement) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_session_bindings) = FALSE) THEN TRUE ELSE ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))) THEN TRUE ELSE (IF ~((listed = FALSE)) THEN TRUE ELSE (IF ~((durable_identity_marker = TRUE)) THEN TRUE ELSE (IF ~((own_identity_label = TRUE)) THEN TRUE ELSE (IF ~((intent_row = FALSE)) THEN TRUE ELSE (agent_identity \in DOMAIN identity_to_runtime))))))) /\ (IF ((listed = TRUE) /\ (IF ((agent_identity \in DOMAIN member_placement) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_session_bindings) = FALSE) THEN TRUE ELSE ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))) THEN TRUE ELSE ((listed = FALSE) /\ (durable_identity_marker = TRUE) /\ (own_identity_label = TRUE) /\ (intent_row = FALSE) /\ ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) = Some("Retiring")))))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_cfdef6b57e7dfed0
+
+
+AdoptLegacyIdentityEntryStaleObservation(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row) ==
     /\ phase = "Running"
     /\ (composition_authority = "Authoritative")
     /\ ((agent_identity \in DOMAIN identity_entry_origins) = FALSE)
@@ -23853,7 +23883,7 @@ AdoptLegacyIdentityEntryStaleObservation(agent_identity, generation, legacy_rost
     /\ UnchangedFrame_cfdef6b57e7dfed0
 
 
-AdoptLegacyIdentityEntryNotSeated(agent_identity, generation, legacy_roster_member) ==
+AdoptLegacyIdentityEntryNotSeated(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row) ==
     /\ phase = "Running"
     /\ (composition_authority = "Authoritative")
     /\ ((agent_identity \in DOMAIN identity_entry_origins) = FALSE)
@@ -23864,7 +23894,7 @@ AdoptLegacyIdentityEntryNotSeated(agent_identity, generation, legacy_roster_memb
     /\ UnchangedFrame_cfdef6b57e7dfed0
 
 
-AdoptLegacyIdentityEntryAlreadyAnEntry(agent_identity, generation, legacy_roster_member) ==
+AdoptLegacyIdentityEntryAlreadyAnEntry(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row) ==
     /\ phase = "Running"
     /\ (composition_authority = "Authoritative")
     /\ ((agent_identity \in DOMAIN identity_entry_origins) = TRUE)
@@ -23875,7 +23905,7 @@ AdoptLegacyIdentityEntryAlreadyAnEntry(agent_identity, generation, legacy_roster
     /\ UnchangedFrame_cfdef6b57e7dfed0
 
 
-AdoptLegacyIdentityEntryOtherCustody(agent_identity, generation, legacy_roster_member) ==
+AdoptLegacyIdentityEntryOtherCustody(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row) ==
     /\ phase = "Running"
     /\ (composition_authority = "Authoritative")
     /\ (IF (((agent_identity \in DOMAIN identity_entry_origins) = TRUE) /\ ((IF (agent_identity \in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) # Some("Declared"))) THEN TRUE ELSE (IF ((agent_identity \in identity_entry_tombstones) = TRUE) THEN TRUE ELSE ((agent_identity \in identity_entry_unreadable) = TRUE)))
@@ -23884,7 +23914,7 @@ AdoptLegacyIdentityEntryOtherCustody(agent_identity, generation, legacy_roster_m
     /\ UnchangedFrame_cfdef6b57e7dfed0
 
 
-AdoptLegacyIdentityEntryNonAuthoritative(agent_identity, generation, legacy_roster_member) ==
+AdoptLegacyIdentityEntryNonAuthoritative(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row) ==
     /\ phase = "Running"
     /\ (composition_authority = "NonAuthoritative")
     /\ phase' = "Running"
@@ -23892,21 +23922,21 @@ AdoptLegacyIdentityEntryNonAuthoritative(agent_identity, generation, legacy_rost
     /\ UnchangedFrame_cfdef6b57e7dfed0
 
 
-AdoptLegacyIdentityEntryMobNotRunningStopped(agent_identity, generation, legacy_roster_member) ==
+AdoptLegacyIdentityEntryMobNotRunningStopped(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row) ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_cfdef6b57e7dfed0
 
 
-AdoptLegacyIdentityEntryMobNotRunningCompleted(agent_identity, generation, legacy_roster_member) ==
+AdoptLegacyIdentityEntryMobNotRunningCompleted(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row) ==
     /\ phase = "Completed"
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_cfdef6b57e7dfed0
 
 
-AdoptLegacyIdentityEntryMobNotRunningDestroyed(agent_identity, generation, legacy_roster_member) ==
+AdoptLegacyIdentityEntryMobNotRunningDestroyed(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row) ==
     /\ phase = "Destroyed"
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
@@ -28371,17 +28401,19 @@ Next ==
     \/ (phase = "Stopped") /\ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : ExemptMemberFromDefinitionWiringSeatedStopped(agent_identity, agent_runtime_id)
     \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E origin \in IdentityEntryOriginValues : RecoverIdentityEntrySeatedRunning(agent_identity, agent_runtime_id, origin)
     \/ (phase = "Stopped") /\ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E origin \in IdentityEntryOriginValues : RecoverIdentityEntrySeatedStopped(agent_identity, agent_runtime_id, origin)
-    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : AdoptLegacyIdentityEntryAdopted(agent_identity, generation, TRUE)
-    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : AdoptLegacyIdentityEntryNameHeldByWorker(agent_identity, generation, FALSE)
-    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : \E legacy_roster_member \in BOOLEAN : AdoptLegacyIdentityEntryNotAdoptable(agent_identity, generation, legacy_roster_member)
-    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : \E legacy_roster_member \in BOOLEAN : AdoptLegacyIdentityEntryStaleObservation(agent_identity, generation, legacy_roster_member)
-    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : \E legacy_roster_member \in BOOLEAN : AdoptLegacyIdentityEntryNotSeated(agent_identity, generation, legacy_roster_member)
-    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : \E legacy_roster_member \in BOOLEAN : AdoptLegacyIdentityEntryAlreadyAnEntry(agent_identity, generation, legacy_roster_member)
-    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : \E legacy_roster_member \in BOOLEAN : AdoptLegacyIdentityEntryOtherCustody(agent_identity, generation, legacy_roster_member)
-    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : \E legacy_roster_member \in BOOLEAN : AdoptLegacyIdentityEntryNonAuthoritative(agent_identity, generation, legacy_roster_member)
-    \/ (phase = "Stopped") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : \E legacy_roster_member \in BOOLEAN : AdoptLegacyIdentityEntryMobNotRunningStopped(agent_identity, generation, legacy_roster_member)
-    \/ (phase = "Completed") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : \E legacy_roster_member \in BOOLEAN : AdoptLegacyIdentityEntryMobNotRunningCompleted(agent_identity, generation, legacy_roster_member)
-    \/ (phase = "Destroyed") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : \E legacy_roster_member \in BOOLEAN : AdoptLegacyIdentityEntryMobNotRunningDestroyed(agent_identity, generation, legacy_roster_member)
+    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : \E durable_identity_marker \in BOOLEAN : \E own_identity_label \in BOOLEAN : \E intent_row \in BOOLEAN : AdoptLegacyIdentityEntryAdopted(agent_identity, generation, durable_identity_marker, own_identity_label, TRUE, intent_row)
+    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : AdoptLegacyIdentityEntryAdoptedUnlisted(agent_identity, generation, TRUE, TRUE, FALSE, FALSE)
+    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : \E durable_identity_marker \in BOOLEAN : \E own_identity_label \in BOOLEAN : \E listed \in BOOLEAN : \E intent_row \in BOOLEAN : AdoptLegacyIdentityEntryNameHeldByWorker(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
+    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : AdoptLegacyIdentityEntryRetireUnadopted(agent_identity, generation, TRUE, TRUE, FALSE, FALSE)
+    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : \E durable_identity_marker \in BOOLEAN : \E own_identity_label \in BOOLEAN : \E listed \in BOOLEAN : \E intent_row \in BOOLEAN : AdoptLegacyIdentityEntryNotAdoptable(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
+    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : \E durable_identity_marker \in BOOLEAN : \E own_identity_label \in BOOLEAN : \E listed \in BOOLEAN : \E intent_row \in BOOLEAN : AdoptLegacyIdentityEntryStaleObservation(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
+    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : \E durable_identity_marker \in BOOLEAN : \E own_identity_label \in BOOLEAN : \E listed \in BOOLEAN : \E intent_row \in BOOLEAN : AdoptLegacyIdentityEntryNotSeated(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
+    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : \E durable_identity_marker \in BOOLEAN : \E own_identity_label \in BOOLEAN : \E listed \in BOOLEAN : \E intent_row \in BOOLEAN : AdoptLegacyIdentityEntryAlreadyAnEntry(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
+    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : \E durable_identity_marker \in BOOLEAN : \E own_identity_label \in BOOLEAN : \E listed \in BOOLEAN : \E intent_row \in BOOLEAN : AdoptLegacyIdentityEntryOtherCustody(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
+    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : \E durable_identity_marker \in BOOLEAN : \E own_identity_label \in BOOLEAN : \E listed \in BOOLEAN : \E intent_row \in BOOLEAN : AdoptLegacyIdentityEntryNonAuthoritative(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
+    \/ (phase = "Stopped") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : \E durable_identity_marker \in BOOLEAN : \E own_identity_label \in BOOLEAN : \E listed \in BOOLEAN : \E intent_row \in BOOLEAN : AdoptLegacyIdentityEntryMobNotRunningStopped(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
+    \/ (phase = "Completed") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : \E durable_identity_marker \in BOOLEAN : \E own_identity_label \in BOOLEAN : \E listed \in BOOLEAN : \E intent_row \in BOOLEAN : AdoptLegacyIdentityEntryMobNotRunningCompleted(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
+    \/ (phase = "Destroyed") /\ \E agent_identity \in AgentIdentityValues : \E generation \in GenerationValues : \E durable_identity_marker \in BOOLEAN : \E own_identity_label \in BOOLEAN : \E listed \in BOOLEAN : \E intent_row \in BOOLEAN : AdoptLegacyIdentityEntryMobNotRunningDestroyed(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
     \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : ResolveAgentLaneMemberAdmissionAdmittedRunning(agent_identity)
     \/ (phase = "Stopped") /\ \E agent_identity \in AgentIdentityValues : ResolveAgentLaneMemberAdmissionAdmittedStopped(agent_identity)
     \/ (phase = "Completed") /\ \E agent_identity \in AgentIdentityValues : ResolveAgentLaneMemberAdmissionAdmittedCompleted(agent_identity)

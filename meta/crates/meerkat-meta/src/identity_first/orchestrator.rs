@@ -387,8 +387,8 @@ async fn restore_registered_member(
 }
 
 /// Execute the full restore flow per REQ-12 sequencing, for part of the
-/// host's roster: no identity it does not list is unlisted (see
-/// [`restore_roster`]).
+/// host's roster: no identity it does not list is unlisted (the complete
+/// roster's flow is the private `restore_roster`).
 pub async fn restore_flow(
     runtime: &IdentityRuntime,
     roster: &[DurableAgentSpec],
@@ -519,8 +519,8 @@ pub(crate) async fn restore_roster(
 
 /// Register the roster and topology metadata, and make every identity a
 /// member of Core's mob without materializing any, for part of the host's
-/// roster: no identity it does not list is unlisted (see
-/// [`lazy_register_roster`]).
+/// roster: no identity it does not list is unlisted (the complete roster's
+/// registration is the private `lazy_register_roster`).
 pub async fn lazy_register_flow(
     runtime: &IdentityRuntime,
     roster: &[DurableAgentSpec],
@@ -555,8 +555,25 @@ pub(crate) async fn lazy_register_roster(
         complete,
     )
     .await?;
+    // A lazy pass wakes nothing: each identity it registered is reported
+    // registered without a wake (`Dormant`, with the build it was declared
+    // with), whatever Core seated or kept for it, as the lazy modes have
+    // always reported it; a refusal stays typed.
+    let outcomes = registered
+        .outcomes
+        .into_iter()
+        .map(|(identity, outcome)| {
+            let outcome = match outcome {
+                RestoreOutcome::Created { draft, .. } | RestoreOutcome::Resumed { draft, .. } => {
+                    RestoreOutcome::Dormant { draft }
+                }
+                outcome @ (RestoreOutcome::Dormant { .. } | RestoreOutcome::Refused(_)) => outcome,
+            };
+            (identity, outcome)
+        })
+        .collect();
     Ok(RestoreFlowResult {
-        outcomes: registered.outcomes,
+        outcomes,
         managed_edges: registered.managed_edges,
         unlisted: registered.unlisted,
     })
@@ -587,8 +604,8 @@ struct RegisteredRoster {
 
 /// Validate the roster and topology, then declare the roster in Core's mob
 /// ([`IdentityRuntime::declare_roster_pass`]), the host's whole roster when
-/// `complete`, registering each identity whose answer stands as its
-/// registration: every listed identity Core can seat is a member of Core's
+/// `complete`, registering each listed identity whatever Core answered for
+/// it: every listed identity Core can seat is a member of Core's
 /// mob afterwards, and none is materialized. Meta keeps no Core fact: the
 /// registration is the roster's policy only, and every Core fact is read
 /// per call. A roster entry naming a host-adopted identity is registered

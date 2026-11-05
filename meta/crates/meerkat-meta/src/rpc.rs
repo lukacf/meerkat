@@ -15042,8 +15042,14 @@ comms = true
                 default_timeout: None,
             }));
             let identity = AgentIdentity::parse(durable)?;
+            // Declared as Core holds its member (turn-driven), so the
+            // registration's declaration keeps the member as it is: a
+            // declared runtime mode that differs restamps the member, whose
+            // successor's comms runtime the wiring could reach before it is up.
+            let mut spec = rpc_durable_spec(identity.as_str(), "worker");
+            spec.runtime_mode_override = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
             identity_rt
-                .register(rpc_durable_spec(identity.as_str(), "worker"))
+                .register(spec)
                 .await
                 .expect("the identity registers");
             runtime.attach_identity_first_context(Arc::new(

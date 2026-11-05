@@ -1917,9 +1917,11 @@ impl std::error::Error for IdentityRuntimeError {}
 impl IdentityRuntimeError {
     /// Whether the refusal clears on its own: Core's history or wake could
     /// not answer now, a first-boot row or a held completion is still
-    /// owed, the admission backlog is full, or Core refused the wake
-    /// retryably. Nothing was delivered or changed, and the same request,
-    /// made again, can succeed.
+    /// owed, the admission backlog is full, Core refused the wake
+    /// retryably, or a declaration was not applied, retryably (another apply
+    /// of the mob was in progress, or the lifecycle projection could not be
+    /// prepared yet). Nothing was delivered or changed, and the same
+    /// request, made again, can succeed.
     pub(crate) fn clears_on_its_own(&self) -> bool {
         matches!(
             self,
@@ -1930,6 +1932,10 @@ impl IdentityRuntimeError {
                 | Self::FirstBootRowPending { .. }
                 | Self::HeldCompletionOwed { .. }
                 | Self::AdmissionBacklogFull { .. }
+                | Self::DeclarationNotApplied {
+                    retryable: true,
+                    ..
+                }
         )
     }
 
@@ -2204,6 +2210,14 @@ pub(crate) struct IdentityEntry {
     pub last_delivery_error: Option<DeliveryErrorRecord>,
     /// The most recent reload attempt and how it ended (see `member_health`).
     pub last_reload: Option<ReloadAttemptRecord>,
+    /// Core refused the identity's last declaration for good (a worker holds
+    /// its name, its name is a removed entry's or unreadable, its first-boot
+    /// `Resume` row names a session Core holds no copy of, the host rejects
+    /// its build every time): no member Core holds under its name is the
+    /// identity's, so its views read it Broken with no member, never live,
+    /// until Core answers a later declaration otherwise. Process-local and
+    /// never read as truth: every door declares the identity again.
+    pub declaration_refused: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -4041,9 +4055,33 @@ struct CoreViewFacts {
     generation: Option<meerkat_mob::Generation>,
     /// Core holds an identity intent row for the identity.
     intent_managed: bool,
+    /// Core refused the identity's last declaration for good
+    /// ([`IdentityEntry::declaration_refused`]): no member is read for it,
+    /// and its view reads Broken.
+    declaration_refused: bool,
 }
 
 impl CoreViewFacts {
+    /// [`Self::of`] for a registered identity whose last declaration Core
+    /// refused for good when `declaration_refused`: no member Core holds
+    /// under its name is the identity's then, so none is read (only its
+    /// intent management is), and its views read it Broken, never live.
+    fn of_entry(
+        history: Option<&meerkat_mob::MemberBindingHistory>,
+        identity: &AgentIdentity,
+        declaration_refused: bool,
+    ) -> Self {
+        let facts = Self::of(history, identity);
+        if !declaration_refused {
+            return facts;
+        }
+        Self {
+            intent_managed: facts.intent_managed,
+            declaration_refused: true,
+            ..Self::default()
+        }
+    }
+
     /// Read `identity` out of `history` (`None` without a bridge: nothing
     /// is live).
     fn of(history: Option<&meerkat_mob::MemberBindingHistory>, identity: &AgentIdentity) -> Self {
@@ -4069,6 +4107,7 @@ impl CoreViewFacts {
             member_id: Some(binding.identity().as_str().to_string()),
             generation: Some(binding.generation()),
             intent_managed,
+            declaration_refused: false,
         }
     }
 }
@@ -7031,16 +7070,16 @@ impl IdentityRuntime {
     /// a restamp, a held role move, a refusal) and Core realizes it. The
     /// answer is Core's, typed; Meta decides nothing about the member.
     ///
-    /// A declaration Core decided registers the spec, under the identity's
-    /// lifecycle lock: replacing an entry replaces its registered row, which
-    /// a governed or row-checked send holding that lock delivers under. So
-    /// does Core's answer that a host or the identity store drives the
-    /// identity, or that this composition of the mob is not authoritative:
-    /// the spec is then shown read-only
-    /// ([`DeclaredIdentityAnswer::registers_spec`]). A deferred, refused or
-    /// failed declaration leaves the previous registration as it was. A
-    /// recorded wake refusal survives a re-registration, because it describes
-    /// Core's session rather than the spec, until the next successful wake.
+    /// The spec is registered whatever Core answers, under the identity's
+    /// lifecycle lock: the registration is the host's declaration, and
+    /// replacing an entry replaces its registered row, which a governed or
+    /// row-checked send holding that lock delivers under. Core's answer is
+    /// returned typed, and the identity's doors answer a refusal typed,
+    /// declaring the identity again: a host or the identity store driving
+    /// the identity, or a composition of the mob that is not authoritative,
+    /// shows the spec read-only. A recorded wake refusal survives a
+    /// re-registration, because it describes Core's session rather than the
+    /// spec, until the next successful wake.
     ///
     /// The host's customizer composes the member build only when Core
     /// answers that the identity's verdict builds a member; an identity Core
@@ -7070,12 +7109,13 @@ impl IdentityRuntime {
         let bootstrap_generation = self.identity_bootstrap_status_with_generation().0;
         {
             let mut entries = self.entries.write().await;
-            let (wake_refusal, replaced_session) = entries
+            let (wake_refusal, replaced_session, declaration_refused) = entries
                 .get(&identity)
                 .map(|existing| {
                     (
                         existing.wake_refusal.clone(),
                         existing.replaced_session.clone(),
+                        existing.declaration_refused,
                     )
                 })
                 .unwrap_or_default();
@@ -7088,6 +7128,7 @@ impl IdentityRuntime {
                     replaced_session,
                     last_delivery_error: None,
                     last_reload: None,
+                    declaration_refused,
                 },
             );
         }
@@ -12876,11 +12917,13 @@ impl IdentityRuntime {
 
     /// The identity's status, read from Core on every call: Active
     /// while Core holds its member, Broken while Core holds that member
-    /// Broken (it could not restore it) or after a FINAL refused wake,
-    /// Dormant otherwise. The Core facts come from one read of Core's member
-    /// history, a store read that never waits on the mob actor, and one read
-    /// of Core's member list; a history read fault is typed history
-    /// unavailable, never a guess.
+    /// Broken (it could not restore it), after a FINAL refused wake, or while
+    /// Core refuses the identity's last declaration for good (no member is
+    /// named then: a member Core holds under its name is not the
+    /// identity's), Dormant otherwise. The Core facts come from one read of
+    /// Core's member history, a store read that never waits on the mob
+    /// actor, and one read of Core's member list; a history read fault is
+    /// typed history unavailable, never a guess.
     pub async fn status(
         &self,
         identity: &AgentIdentity,
@@ -12911,7 +12954,7 @@ impl IdentityRuntime {
         history: Option<&meerkat_mob::MemberBindingHistory>,
         broken: &BTreeMap<meerkat_mob::AgentIdentity, String>,
     ) -> Result<IdentityStatus, IdentityRuntimeError> {
-        let (spec, wake_refusal, replaced_session) = {
+        let (spec, wake_refusal, replaced_session, declaration_refused) = {
             let entries = self.entries.read().await;
             let entry = entries
                 .get(identity)
@@ -12920,9 +12963,10 @@ impl IdentityRuntime {
                 entry.spec.clone(),
                 entry.wake_refusal.clone(),
                 entry.replaced_session.clone(),
+                entry.declaration_refused,
             )
         };
-        let facts = CoreViewFacts::of(history, identity);
+        let facts = CoreViewFacts::of_entry(history, identity, declaration_refused);
         let convergence = if facts.intent_managed {
             self.core_convergence(identity).await
         } else {
@@ -12982,8 +13026,8 @@ impl IdentityRuntime {
     }
 
     /// The view state of `identity` from Core's facts: Broken while Core
-    /// holds its live member Broken (it could not restore it), otherwise as
-    /// [`Self::view_state`] answers.
+    /// refuses its last declaration for good or holds its live member Broken
+    /// (it could not restore it), otherwise as [`Self::view_state`] answers.
     fn core_view_state(
         &self,
         identity: &AgentIdentity,
@@ -12991,6 +13035,9 @@ impl IdentityRuntime {
         broken: &BTreeMap<meerkat_mob::AgentIdentity, String>,
         wake_refusal: Option<&super::types::WakeRefusal>,
     ) -> IdentityLifecycleState {
+        if facts.declaration_refused {
+            return IdentityLifecycleState::Broken;
+        }
         let core_broken = facts.live
             && broken.contains_key(&crate::member_comms_id::roster_member_id_for_identity(
                 identity.as_str(),
@@ -13709,7 +13756,7 @@ impl IdentityRuntime {
         &self,
         identity: &AgentIdentity,
     ) -> Result<MemberHealthReport, IdentityRuntimeError> {
-        let (last_delivery_error, last_reload, wake_refusal) = {
+        let (last_delivery_error, last_reload, wake_refusal, declaration_refused) = {
             let entries = self.entries.read().await;
             let entry = entries
                 .get(identity)
@@ -13718,6 +13765,7 @@ impl IdentityRuntime {
                 entry.last_delivery_error.clone(),
                 entry.last_reload.clone(),
                 entry.wake_refusal.clone(),
+                entry.declaration_refused,
             )
         };
         let history = self.core_view_history().await.map_err(|error| {
@@ -13726,7 +13774,7 @@ impl IdentityRuntime {
                 detail: format!("reading Core's member history: {error}"),
             }
         })?;
-        let facts = CoreViewFacts::of(history.as_ref(), identity);
+        let facts = CoreViewFacts::of_entry(history.as_ref(), identity, declaration_refused);
         let broken = self.core_broken_members().await.map_err(|error| {
             IdentityRuntimeError::IdentityHistoryUnavailable {
                 identity: identity.clone(),
@@ -13853,12 +13901,11 @@ impl IdentityRuntime {
     /// holds no member for is simply woken.
     ///
     /// Core keeps a built member's session archived once it retired it, so
-    /// the wake's seat revives the identity on it, and that revival is the
-    /// member's one build: the host's customizer is asked once
-    /// (`customize_build`, then `after_create` for the same session), and
-    /// Core's wake finds the member live. A member Core never built (its
-    /// session unborn) is seated again unborn, and the wake builds it as a
-    /// first build does, after its own `customize_build`.
+    /// the wake's declaration seats the identity again on it, Dormant and
+    /// building nothing, and Core's wake then builds the member once on that
+    /// session; the customizer's `after_create` is told of the session
+    /// once. A member Core never built (its session unborn) is seated again
+    /// unborn, and the wake builds it as a first build does.
     ///
     /// Core's retirement ends every edge of the member it retires, so once
     /// the wake answers, the respawn wires the identity's managed edges
@@ -14633,13 +14680,17 @@ impl IdentityRuntime {
     }
 
     /// Whether an identity is registered AND Core holds its member (read from
-    /// Core's member history; a failed read answers `false`).
+    /// Core's member history; a failed read answers `false`). An identity
+    /// whose last declaration Core refused for good is not active.
     pub async fn is_active(&self, identity: &AgentIdentity) -> bool {
-        if !self.entries.read().await.contains_key(identity) {
-            return false;
-        }
+        let declaration_refused = match self.entries.read().await.get(identity) {
+            Some(entry) => entry.declaration_refused,
+            None => return false,
+        };
         match self.core_view_history().await {
-            Ok(history) => CoreViewFacts::of(history.as_ref(), identity).live,
+            Ok(history) => {
+                CoreViewFacts::of_entry(history.as_ref(), identity, declaration_refused).live
+            }
             Err(error) => {
                 tracing::debug!(%identity, %error, "is_active: Core's member history read failed");
                 false
@@ -16530,10 +16581,7 @@ mod reset_reprofile_tests {
             bridge: Some(bridge),
             default_timeout: None,
         }));
-        runtime
-            .register(durable_spec(identity, "domain"))
-            .await
-            .expect("the identity registers");
+        runtime.register(durable_spec(identity, "domain")).await?;
         Ok((runtime, alias))
     }
 
@@ -17109,10 +17157,7 @@ mod reset_reprofile_tests {
             bridge: Some(bridge.clone()),
             default_timeout: None,
         }));
-        runtime
-            .register(spec.clone())
-            .await
-            .expect("the identity registers");
+        runtime.register(spec.clone()).await?;
 
         let active_generation =
             runtime.begin_identity_bootstrap_pending(IdentityBootstrapMode::LazyMaterialize);
@@ -17765,10 +17810,7 @@ mod completion_wait_tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let runtime = runtime()?;
         let identity = AgentIdentity::parse("agent:gone")?;
-        runtime
-            .register(spec(&identity))
-            .await
-            .expect("the identity registers");
+        runtime.register(spec(&identity)).await?;
         let baseline = runtime.completion_cursor(&identity).await;
         let wait = runtime.await_completion(&identity, Some(baseline), Duration::from_mins(10));
         let remove = async {
@@ -17803,10 +17845,7 @@ mod completion_wait_tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let runtime = runtime()?;
         let identity = AgentIdentity::parse("agent:closing")?;
-        runtime
-            .register(spec(&identity))
-            .await
-            .expect("the identity registers");
+        runtime.register(spec(&identity)).await?;
         let baseline = runtime.completion_cursor(&identity).await;
         let completion =
             runtime.await_completion(&identity, Some(baseline), Duration::from_mins(10));
@@ -18784,6 +18823,22 @@ mod admission_first_topology_tests {
         register_active_as(runtime, bridge, spec(identity), generation).await
     }
 
+    /// Core retires `identity`'s member, as a host's retire does: the
+    /// identity stays registered, and Core holds no member of it.
+    async fn retire_core_member(
+        runtime: &IdentityRuntime,
+        bridge: &WedgeableTopologyBridge,
+        identity: &AgentIdentity,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let runtime_id = runtime
+            .status(identity)
+            .await?
+            .agent_runtime_id
+            .ok_or("Core holds the identity's member")?;
+        bridge.core.retire(&runtime_id);
+        Ok(())
+    }
+
     /// [`register_active`] with an explicit spec (for example a profile):
     /// Core holds the identity's live member at `generation`.
     async fn register_active_as(
@@ -18804,10 +18859,7 @@ mod admission_first_topology_tests {
             },
             &spec.profile,
         );
-        runtime
-            .register(spec)
-            .await
-            .expect("the identity registers");
+        runtime.register(spec).await?;
         Ok(runtime_id)
     }
 
@@ -18969,10 +19021,9 @@ mod admission_first_topology_tests {
         let bridge = Arc::new(bridge);
         let runtime = runtime_with(bridge.clone(), "delivery-wakes-no-peer")?;
         let target_rt = register_active(&runtime, &bridge, &target, 0).await?;
-        runtime
-            .register(spec(&peer))
-            .await
-            .expect("the identity registers");
+        runtime.register(spec(&peer)).await?;
+        // The registration's declaration seated the peer, Dormant.
+        let seated_before = bridge.seated();
         runtime
             .set_desired_peer_edges(vec![ManagedPeerEdge::new(target.clone(), peer.clone())?])
             .await;
@@ -18999,8 +19050,9 @@ mod admission_first_topology_tests {
             ]
         );
         assert_eq!(bridge.builds(), 0, "no member was built for the peer");
-        assert!(
-            bridge.seated().is_empty(),
+        assert_eq!(
+            bridge.seated(),
+            seated_before,
             "no peer was seated by a delivery to the target"
         );
         Ok(())
@@ -19073,11 +19125,12 @@ mod admission_first_topology_tests {
         Ok(())
     }
 
-    /// A registered identity Core does not hold yet is seated for its first
-    /// delivery, and its managed edges are reconciled before the input is
-    /// admitted, so its first turn can message its peer: the bridge sees the
-    /// wire before the admission. The seat builds nothing: Core materializes
-    /// the member for the delivery.
+    /// A registered identity Core holds no member of (the registration
+    /// seated it, and Core retired that member since) is seated for its
+    /// first delivery, and its managed edges are reconciled before the input
+    /// is admitted, so its first turn can message its peer: the bridge sees
+    /// the wire before the admission. The seat builds nothing: Core
+    /// materializes the member for the delivery.
     #[tokio::test]
     async fn seating_a_member_for_its_first_delivery_wires_its_peers_before_admitting_it()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -19087,10 +19140,9 @@ mod admission_first_topology_tests {
         let bridge = Arc::new(WedgeableTopologyBridge::new(gate));
         let runtime = runtime_with(bridge.clone(), "wake-wires-before-admission")?;
         let peer_rt = register_active(&runtime, &bridge, &peer, 0).await?;
-        runtime
-            .register(spec(&sleeper))
-            .await
-            .expect("the identity registers");
+        runtime.register(spec(&sleeper)).await?;
+        retire_core_member(&runtime, &bridge, &sleeper).await?;
+        let seated_before = bridge.seated().len();
         runtime
             .set_desired_peer_edges(vec![ManagedPeerEdge::new(sleeper.clone(), peer.clone())?])
             .await;
@@ -19106,7 +19158,11 @@ mod admission_first_topology_tests {
         .await
         .map_err(|_| "the first delivery should be admitted")??;
 
-        assert_eq!(bridge.seated(), vec![sleeper.clone()], "one seat");
+        assert_eq!(
+            bridge.seated()[seated_before..].to_vec(),
+            vec![sleeper.clone()],
+            "one seat"
+        );
         assert_eq!(bridge.builds(), 0, "the seat builds nothing");
         let sleeper_rt = runtime
             .status(&sleeper)
@@ -19760,10 +19816,7 @@ model = "gpt-5.5"
                 },
                 &spec.profile,
             );
-            runtime
-                .register(spec)
-                .await
-                .expect("the identity registers");
+            runtime.register(spec).await?;
             runtime_ids.push(runtime_id);
         }
         let edge = ManagedPeerEdge::new(alpha.clone(), beta.clone())?;
@@ -19869,7 +19922,9 @@ model = "gpt-5.5"
     /// The seat path's target reconcile is bounded end to end: when its
     /// topology locks stay held past the budget, it settles as
     /// `PeerWiringTimedOut { operation: "wake_topology_locks" }`, which is
-    /// logged, and the seated member's input is still admitted.
+    /// logged, and the seated member's input is still admitted. (The
+    /// registration seated the identity; Core retired that member since, so
+    /// the delivery seats it.)
     #[tokio::test(start_paused = true)]
     async fn a_wake_topology_lock_timeout_does_not_refuse_admission()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -19879,10 +19934,8 @@ model = "gpt-5.5"
         let bridge = Arc::new(WedgeableTopologyBridge::new(gate));
         let runtime = runtime_with(bridge.clone(), "wake-lock-timeout")?;
         register_active(&runtime, &bridge, &peer, 0).await?;
-        runtime
-            .register(spec(&sleeper))
-            .await
-            .expect("the identity registers");
+        runtime.register(spec(&sleeper)).await?;
+        retire_core_member(&runtime, &bridge, &sleeper).await?;
         runtime
             .set_desired_peer_edges(vec![ManagedPeerEdge::new(sleeper.clone(), peer.clone())?])
             .await;
@@ -21394,6 +21447,10 @@ mod wake_per_reason_tests {
             .register(spec(&identity))
             .await
             .expect("the identity registers");
+        // The registration's declaration asked Core for the identity's seat
+        // once, and Core refused it as it refuses every creation.
+        let registered = bridge.creates.load(Ordering::SeqCst);
+        assert_eq!(registered, 1, "the registration asks Core once");
 
         for attempt in 1..=2 {
             let error = match runtime.materialize(&identity).await {
@@ -21421,7 +21478,7 @@ mod wake_per_reason_tests {
             );
             assert_eq!(
                 bridge.creates.load(Ordering::SeqCst),
-                attempt,
+                registered + attempt,
                 "attempt {attempt}: one spawn per wake, no retry loop"
             );
         }
@@ -21437,13 +21494,13 @@ mod wake_per_reason_tests {
         assert!(runtime.materialize_all().await?.is_empty());
         assert_eq!(
             bridge.creates.load(Ordering::SeqCst),
-            3,
+            registered + 3,
             "the operator pass asks Core once"
         );
         assert!(runtime.materialize_all().await?.is_empty());
         assert_eq!(
             bridge.creates.load(Ordering::SeqCst),
-            4,
+            registered + 4,
             "the next pass asks Core again: no backoff window"
         );
         Ok(())
@@ -21474,6 +21531,10 @@ mod wake_per_reason_tests {
             .register(spec(&identity))
             .await
             .expect("the identity registers");
+        // The registration's declaration asked Core for the identity's seat
+        // once, and Core refused it as it refuses every creation.
+        let registered = bridge.creates.load(Ordering::SeqCst);
+        assert_eq!(registered, 1, "the registration asks Core once");
 
         for attempt in 1..=2 {
             let Err(error) = runtime.materialize(&identity).await else {
@@ -21501,7 +21562,7 @@ mod wake_per_reason_tests {
             );
             assert_eq!(
                 bridge.creates.load(Ordering::SeqCst),
-                attempt,
+                registered + attempt,
                 "attempt {attempt}: one spawn per wake, no retry loop"
             );
         }

@@ -1574,12 +1574,10 @@ async fn console_send_selected_skills_refused_before_reservation_for_external_or
     placed.placement = Some(meerkat_contracts::WireHostRef("remote-host".to_string()));
     for spec in [external, placed] {
         let identity = spec.identity.to_string();
-        let answer = h
-            .identity_runtime
+        h.identity_runtime
             .register(spec)
             .await
             .expect("the identity registers");
-        assert!(answer.registers_spec(), "{identity}: {answer:?}");
         let request = ConsoleSendRequest {
             identity: identity.clone(),
             skill_refs: vec![selected_skill()],

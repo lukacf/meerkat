@@ -66,6 +66,9 @@ pub(crate) struct CoreTestMembers {
     /// Core's standing of these identities' members as it answers it,
     /// whatever Core holds ([`Self::pin_standing`]).
     pinned_standing: Mutex<BTreeMap<AgentIdentity, MemberStanding>>,
+    /// The cause each retirement Core started for one was journaled for
+    /// ([`Self::start_unlisting`]), by incarnation, until its end records it.
+    retirement_causes: Mutex<BTreeMap<AgentRuntimeId, meerkat_mob::MemberRetirementCause>>,
 }
 
 impl CoreTestMembers {
@@ -389,9 +392,37 @@ impl CoreTestMembers {
         }
     }
 
+    /// Core's seal started the retirement of the live incarnation
+    /// `runtime_id` of an entry the complete roster no longer lists, and has
+    /// not ended it: its start is journaled with the cause the seal's rows
+    /// record ([`meerkat_mob::MemberRetirementCause::Unlisted`]), and the
+    /// member reads retiring until [`Self::retire`] ends it, with that cause.
+    pub(crate) fn start_unlisting(&self, runtime_id: &AgentRuntimeId) {
+        let mut members = self.members.lock().unwrap_or_else(PoisonError::into_inner);
+        for (identity, member) in members.iter_mut() {
+            if member.runtime_id == *runtime_id && member.live && !member.retiring {
+                member.retiring = true;
+                self.retirement_causes
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(
+                        runtime_id.clone(),
+                        meerkat_mob::MemberRetirementCause::Unlisted,
+                    );
+                self.journal_fact(MemberLifecycleFact::retirement_started(
+                    member_id(identity),
+                    member.generation,
+                    None,
+                    Some(meerkat_mob::MemberRetirementCause::Unlisted),
+                ));
+            }
+        }
+    }
+
     /// Core retired the member whose runtime id is `runtime_id`, its
     /// retirement's start journaled first (unless Core started it already);
-    /// its binding stays in the history as retired.
+    /// its binding stays in the history as retired. The end records the
+    /// cause its start was journaled for, if any.
     pub(crate) fn retire(&self, runtime_id: &AgentRuntimeId) {
         let mut members = self.members.lock().unwrap_or_else(PoisonError::into_inner);
         for (identity, member) in members.iter_mut() {
@@ -406,13 +437,19 @@ impl CoreTestMembers {
                 }
                 member.live = false;
                 member.retiring = false;
+                let cause = self
+                    .retirement_causes
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(runtime_id);
                 self.journal_fact(
                     MemberLifecycleFact::retired(
                         member_id(identity),
                         member.generation,
                         member.profile.clone(),
                     )
-                    .with_session(member.session_id.clone()),
+                    .with_session(member.session_id.clone())
+                    .with_cause(cause),
                 );
             }
         }

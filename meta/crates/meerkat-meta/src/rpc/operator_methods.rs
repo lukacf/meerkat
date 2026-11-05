@@ -1006,7 +1006,7 @@ async fn rebuild_member_for_fresh_build(
     identity_rt
         .register(spec)
         .await
-        .expect("the identity registers");
+        .map_err(|err| format!("registration: {err}"))?;
     identity_rt
         .materialize_tracked(identity)
         .await

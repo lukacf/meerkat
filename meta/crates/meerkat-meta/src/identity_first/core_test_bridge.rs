@@ -22,7 +22,8 @@
 //! retirement, as a store fault does. Its declared apply holds each
 //! identity it declares declared from then on, keeps whatever Core holds of
 //! it, and seats nothing; a complete roster unlists each identity held
-//! declared that it does not list, through a retire ([`DeclaredSet`]).
+//! declared that it does not list, through a retire journaled as unlisted,
+//! as Core's seal journals it ([`DeclaredSet`]).
 //! A double that seats members answers Core's declared apply through its
 //! own seat, rotation and revival ([`apply_through_seats`]). Its member
 //! lifecycle journal reads
@@ -192,7 +193,7 @@ pub(crate) async fn register_live(
     runtime
         .register(spec)
         .await
-        .expect("the identity registers");
+        .map_err(|error| BridgeError::Mob(format!("the identity registers: {error}")))?;
     Ok(runtime_id)
 }
 
@@ -513,6 +514,10 @@ pub(crate) struct CoreReadsBridge {
     standing_reads_refused: AtomicBool,
     /// The identities Core holds declared.
     declared: DeclaredSet,
+    /// Set while the declared apply unlists ([`DeclaredSet::apply`]): each
+    /// retirement it starts is journaled for that cause, as Core's seal
+    /// journals it.
+    sealing: AtomicBool,
 }
 
 /// The reads of Core's member history that still answer, then the reads
@@ -827,9 +832,9 @@ impl SessionBridge for CoreReadsBridge {
         })
     }
 
-    /// Core retires the live incarnation `runtime_id` names. The retirement
-    /// of a member [`Self::refuse_retire_of`] names fails, and changes
-    /// nothing.
+    /// Core retires the live incarnation `runtime_id` names, journaled as
+    /// unlisted while the declared apply unlists. The retirement of a member
+    /// [`Self::refuse_retire_of`] names fails, and changes nothing.
     async fn retire_member(&self, runtime_id: &AgentRuntimeId) -> Result<(), BridgeError> {
         let refused = self
             .retire_refusals
@@ -846,6 +851,9 @@ impl SessionBridge for CoreReadsBridge {
                     "Core could not retire {identity}'s member (test fault)"
                 )));
             }
+        }
+        if self.sealing.load(Ordering::SeqCst) {
+            self.core.start_unlisting(runtime_id);
         }
         self.core.retire(runtime_id);
         Ok(())
@@ -900,14 +908,29 @@ impl SessionBridge for CoreReadsBridge {
     /// identity keeps whatever Core holds of it
     /// ([`DeclaredIdentityAnswer::Kept`]); this bridge seats nothing. A
     /// complete roster unlists each identity held declared that it does not
-    /// list ([`DeclaredSet::apply`]): a retirement [`Self::refuse_retire_of`]
-    /// names answers `Failed`.
+    /// list ([`DeclaredSet::apply`]), each retirement journaled for that
+    /// cause, as Core's seal journals it: a retirement
+    /// [`Self::refuse_retire_of`] names answers `Failed`.
     async fn apply_declared_roster(
         &self,
         roster: DeclaredRosterRequest,
     ) -> Result<DeclaredRosterAnswer, BridgeError> {
         let mut answer = DeclaredRosterAnswer::kept_for(&roster);
-        answer.unlisted = self.declared.apply(self, &roster).await?;
+        // An identity that owes its host a held creation, and that Core
+        // holds no member of, awaits it, as Core's verdict answers.
+        for declared in &roster.identities {
+            let identity = &declared.spec.identity;
+            if declared.held_creation && self.core.live_member(identity)?.is_none() {
+                answer.identities.insert(
+                    identity.clone(),
+                    DeclaredIdentityAnswer::AwaitingHeldCreation,
+                );
+            }
+        }
+        self.sealing.store(true, Ordering::SeqCst);
+        let unlisted = self.declared.apply(self, &roster).await;
+        self.sealing.store(false, Ordering::SeqCst);
+        answer.unlisted = unlisted?;
         Ok(answer)
     }
 }

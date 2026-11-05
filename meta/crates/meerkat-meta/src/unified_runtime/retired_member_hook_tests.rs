@@ -802,7 +802,10 @@ async fn a_scoped_retire_reaches_the_hook_while_its_scope_names_the_current_inca
 
 /// A retirement the roster pass made before a later step of the same pass
 /// failed still reaches the hook, and the pass's error still reaches its
-/// caller.
+/// caller. Core's seal unlists the identity the roster no longer lists and
+/// retires its member; the pass's later step, the wiring of the managed edge
+/// between the two identities it still lists, fails (this bridge wires no
+/// peer), so the pass fails after the retirement.
 #[tokio::test]
 async fn a_retirement_before_a_failed_step_still_reaches_the_hook() {
     let bridge = Arc::new(CoreReadsBridge::default());
@@ -820,33 +823,67 @@ async fn a_retirement_before_a_failed_step_still_reaches_the_hook() {
     let seen = Seen::default();
     identities.set_retired_member_observer(Some(recording(&seen, Ok(()))));
     let gone = AgentIdentity::parse("retired-hook-partial-gone").unwrap();
-    register_live(
-        &identities,
-        &bridge.core,
-        member(&gone),
-        1,
-        meerkat_core::types::SessionId::new(),
-    )
-    .await
-    .expect("a live registered member");
+    let kept = [
+        AgentIdentity::parse("retired-hook-partial-alpha").unwrap(),
+        AgentIdentity::parse("retired-hook-partial-beta").unwrap(),
+    ];
+    for identity in std::iter::once(&gone).chain(&kept) {
+        register_live(
+            &identities,
+            &bridge.core,
+            member(identity),
+            1,
+            meerkat_core::types::SessionId::new(),
+        )
+        .await
+        .expect("a live registered member");
+    }
     let context = IdentityFirstRuntimeContext::new(
         Arc::clone(&identities),
-        Arc::new(MutableRosterProvider::new(Vec::new())),
-        None,
+        Arc::new(MutableRosterProvider::new(
+            kept.iter().map(member).collect::<Vec<_>>(),
+        )),
+        Some(Arc::new(EveryPairWired)),
         None,
         None,
     );
-    // The pass retires the unlisted member, then fails reading Core's
-    // durable members: this bridge does not answer that read.
     context
         .refresh_desired_topology()
         .await
-        .expect_err("the pass fails after its first retire");
+        .expect_err("the pass fails after its retire, at the edge's wiring");
     let calls = seen.at_least(1).await;
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert_eq!(calls[0].identity, gone);
     assert_eq!(calls[0].cause, RetiredIdentityCause::Unlisted);
     assert_eq!(calls[0].generation, 1);
+}
+
+/// Every pair of the roster's identities is a managed edge.
+struct EveryPairWired;
+
+#[async_trait::async_trait]
+impl crate::identity_first::contracts::TopologyProvider for EveryPairWired {
+    async fn compute_edges(
+        &self,
+        _target_identities: &[AgentIdentity],
+        context: &crate::identity_first::TopologyContext,
+    ) -> Result<Vec<crate::identity_first::ManagedPeerEdge>, crate::identity_first::TopologyError>
+    {
+        let identities: Vec<&AgentIdentity> =
+            context.roster.iter().map(|spec| &spec.identity).collect();
+        let mut edges = Vec::new();
+        for (index, a) in identities.iter().enumerate() {
+            for b in &identities[index + 1..] {
+                edges.push(
+                    crate::identity_first::ManagedPeerEdge::new((*a).clone(), (*b).clone())
+                        .map_err(|error| {
+                            crate::identity_first::TopologyError::InvalidEdge(format!("{error:?}"))
+                        })?,
+                );
+            }
+        }
+        Ok(edges)
+    }
 }
 
 /// The runtime machine that holds the fixture's member registrations.

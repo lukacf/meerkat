@@ -4080,6 +4080,11 @@ impl DeclaredIdentity {
 /// ([`meerkat_mob::DeclaredBuild`]).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one per declared identity of a roster request, built and lowered once; boxing the \
+              draft would only add an allocation per declaration"
+)]
 pub enum DeclaredIdentityBuild {
     /// The member build its host composed: the spec's base draft with the
     /// host's `customize_build` applied. A verdict that seats the identity
@@ -4229,39 +4234,6 @@ impl DeclaredIdentityAnswer {
             | Self::RoleRotated { session_id }
             | Self::FreshLife { session_id } => Some(session_id),
             _ => None,
-        }
-    }
-
-    /// Whether the declared spec stands as the identity's registration
-    /// after this answer: Core decided the declaration (whatever it did, or
-    /// held, of the member), Core answered that a host or the identity store
-    /// drives the identity or that this composition of the mob is not
-    /// authoritative (the spec is shown, read-only), or nothing was
-    /// declared because there is no Core mob. A deferred, refused or failed
-    /// declaration, and one whose verdict still needs its composed build,
-    /// leaves the previous registration as it was.
-    #[must_use]
-    pub fn registers_spec(&self) -> bool {
-        match self {
-            Self::Seated { .. }
-            | Self::Embodied { .. }
-            | Self::Kept
-            | Self::Restamped { .. }
-            | Self::RoleMigrated { .. }
-            | Self::RoleRotated { .. }
-            | Self::FreshLife { .. }
-            | Self::RoleMigrationHeld { .. }
-            | Self::AwaitingHeldCreation
-            | Self::PreparationPending
-            | Self::HostedOnFirstUse
-            | Self::Noted { .. }
-            | Self::RecordedOnly => true,
-            Self::Refused { refusal } => matches!(
-                refusal,
-                meerkat_mob::DeclaredEntryRefusal::HostAdopted
-                    | meerkat_mob::DeclaredEntryRefusal::NonAuthoritative { .. }
-            ),
-            Self::BuildRequired | Self::Deferred { .. } | Self::Failed { .. } => false,
         }
     }
 }
@@ -8687,6 +8659,10 @@ impl SessionBridge for MobSessionBridge {
         successor.identity = roster_id.clone();
         successor.launch_mode = meerkat_mob::launch::MemberLaunchMode::Fresh;
         successor.auto_wire_parent = false;
+        // The fresh life of an identity Core holds no member for is a seat of
+        // its name, which takes a declared entry's name only with the
+        // entry's custody, as the create paths carry it.
+        successor.entry_custody = self.declared_entry_custody(&roster_id);
         let session_id =
             self.handle
                 .rotate_member(successor)

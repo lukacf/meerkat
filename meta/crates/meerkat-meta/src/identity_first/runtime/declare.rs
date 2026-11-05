@@ -48,7 +48,7 @@ use meerkat_core::types::SessionId;
 
 use super::super::bridge::{
     BridgeError, DeclaredIdentity, DeclaredIdentityAnswer, DeclaredRosterRequest,
-    MemberRuntimeBinding, UnlistedIdentityAnswer,
+    MemberRuntimeBinding, ResumeSessionOutcome, UnlistedIdentityAnswer,
 };
 use super::super::contracts::AgentCustomizer;
 use super::super::first_boot_manifest::FirstBootRowKind;
@@ -178,6 +178,20 @@ pub(crate) struct SeatOutcome {
     pub(crate) draft: AgentBuildDraft,
 }
 
+/// The reset a declaration recorded for a first-boot `Fresh` row before it
+/// asked Core ([`IdentityRuntime::apply_declaration`]): what settles or takes
+/// back the record once Core answered.
+struct FreshReset {
+    identity: AgentIdentity,
+    /// The retirement record the reset owes (`None` when Core held no
+    /// incarnation of the identity's that the rotation ends or follows).
+    retiring: Option<super::lifecycle_projection::PreparedRetirement>,
+    /// The head of Core's journal before Core was asked.
+    asked_after: Option<u64>,
+    /// The fact the rotation journals first.
+    first: super::lifecycle_projection::StepFirstFact,
+}
+
 /// One declaration's answers, and what settles once the declared
 /// identities' lifecycle locks are released
 /// ([`IdentityRuntime::finish_declaration`]).
@@ -198,8 +212,11 @@ pub(super) struct AppliedDeclaration {
 
 impl IdentityRuntime {
     /// Declare `spec`'s identity in Core's mob ([`Self::register`],
-    /// [`Self::update_spec`]) and record what the answer registers, under
-    /// the identity's lifecycle lock. With no session bridge there is no
+    /// [`Self::update_spec`]) and record the spec as the identity's
+    /// registration, whatever Core answers (a refusal before Core is asked
+    /// included), under the identity's lifecycle lock: the registration is
+    /// the host's declaration, and the identity's doors answer Core's
+    /// refusal typed, declaring it again. With no session bridge there is no
     /// Core mob: the spec is recorded and the answer is
     /// [`DeclaredIdentityAnswer::RecordedOnly`].
     pub(super) async fn declare_registration(
@@ -219,7 +236,14 @@ impl IdentityRuntime {
         let pending_deadline = Instant::now() + DECLARED_APPLY_PENDING_WAIT;
         let mut pending_backoff = DECLARED_APPLY_PENDING_FIRST_BACKOFF;
         loop {
-            let inputs = self.declaration_inputs(&bridge, specs).await?;
+            let inputs = match self.declaration_inputs(&bridge, specs).await {
+                Ok(inputs) => inputs,
+                Err(error) => {
+                    let _lifecycle_guard = lifecycle_lock.lock().await;
+                    self.record_registration(spec.clone(), registration).await?;
+                    return Err(error);
+                }
+            };
             let (outcome, bound, rows_settled) = {
                 let _lifecycle_guard = lifecycle_lock.lock().await;
                 if registration == Registration::Update
@@ -238,10 +262,14 @@ impl IdentityRuntime {
                                 detail: format!("Core answered no declaration of {identity}"),
                             })
                         });
-                        if let Ok(answer) = &outcome
-                            && answer.registers_spec()
-                        {
+                        // The first round of a verdict that builds a member
+                        // asks for its build: the round that declares it with
+                        // the build answers.
+                        let build_owed = composed.is_empty()
+                            && matches!(&outcome, Ok(DeclaredIdentityAnswer::BuildRequired));
+                        if !build_owed {
                             self.record_registration(spec.clone(), registration).await?;
+                            self.note_declaration_answer(&identity, &outcome).await;
                         }
                         (outcome, applied.bound, applied.rows_settled)
                     }
@@ -306,10 +334,11 @@ impl IdentityRuntime {
     /// a roster Core keeps calls no customizer. The builds name the roster's
     /// identities and the registered ones as their active peers.
     ///
-    /// With `register`, each identity whose answer stands as its
-    /// registration ([`DeclaredIdentityAnswer::registers_spec`]) is
-    /// registered with its spec, under its lifecycle lock; any other answer
-    /// leaves its previous registration, if any, as it was.
+    /// With `register`, each identity Core answered is registered with its
+    /// spec, under its lifecycle lock, in its apply's step, whatever the
+    /// answer: the registration is the host's declaration. Each answer is
+    /// noted for the views then ([`Self::note_declaration_answer`]): an
+    /// identity Core refuses for good reads Broken with no member.
     ///
     /// An apply that meets another apply of the mob in progress is applied
     /// again after a short wait, within [`DECLARED_APPLY_PENDING_WAIT`]. A
@@ -430,14 +459,30 @@ impl IdentityRuntime {
             };
             let mut guards = Vec::new();
             if locks == DeclarationLocks::Take {
-                let ordered = specs
+                let mut ordered = specs
                     .iter()
                     .map(|spec| spec.identity.clone())
                     .collect::<BTreeSet<_>>();
+                // A complete roster's apply unlists each identity Core holds
+                // declared that it does not list, and retires its member:
+                // each registered identity it does not list is this step's
+                // too, so the side effects of that retirement wait for the
+                // step's answer, as a listed identity's do.
+                if complete {
+                    ordered.extend(self.entries.read().await.keys().cloned());
+                }
                 for identity in &ordered {
                     guards.push(self.lifecycle_lock_for(identity).await.lock_owned().await);
                 }
             }
+            // The incarnations the complete roster's seal may retire, kept
+            // for their retirement hook under their lifecycle locks before
+            // Core is asked, with the registrations their sessions hold.
+            let unlisting = if complete && locks == DeclarationLocks::Take {
+                self.keep_unlisting_incarnations(specs).await
+            } else {
+                Vec::new()
+            };
             let applied = match self
                 .apply_declaration(bridge, specs, inputs, composed, complete)
                 .await
@@ -450,6 +495,8 @@ impl IdentityRuntime {
                     retryable: true,
                     detail,
                 }) if Instant::now() + pending_backoff < pending_deadline => {
+                    self.settle_unlisting_incarnations(unlisting, &BTreeMap::new())
+                        .await;
                     drop(guards);
                     tracing::debug!(
                         identities = specs.len(),
@@ -461,17 +508,37 @@ impl IdentityRuntime {
                     continue;
                 }
                 Err(error) => {
+                    self.settle_unlisting_incarnations(unlisting, &BTreeMap::new())
+                        .await;
                     drop(guards);
                     return (refused_alike(specs, &error), BTreeMap::new());
                 }
             };
-            if register {
-                for spec in specs {
-                    if let Some(Ok(answer)) = applied.outcomes.get(&spec.identity)
-                        && answer.registers_spec()
-                    {
+            self.settle_unlisting_incarnations(unlisting, &applied.unlisted)
+                .await;
+            for spec in specs {
+                // The first round of a verdict that builds a member asks
+                // for its build: the round that declares it with the build
+                // registers it, and answers it for the views. An identity
+                // not registered yet is registered now, so the builds the
+                // round composes, which name the roster's identities as
+                // their peers, reach it.
+                let build_owed = !composed.contains_key(&spec.identity)
+                    && matches!(
+                        applied.outcomes.get(&spec.identity),
+                        Some(Ok(DeclaredIdentityAnswer::BuildRequired))
+                    );
+                if build_owed {
+                    if register && !self.entries.read().await.contains_key(&spec.identity) {
                         self.register_locked(spec.clone()).await;
                     }
+                    continue;
+                }
+                if register {
+                    self.register_locked(spec.clone()).await;
+                }
+                if let Some(outcome) = applied.outcomes.get(&spec.identity) {
+                    self.note_declaration_answer(&spec.identity, outcome).await;
                 }
             }
             drop(guards);
@@ -526,16 +593,17 @@ impl IdentityRuntime {
     ///   fresh seat, a fresh life, a move to a fresh session), from one read
     ///   of Core's member history after the declaration; `Dormant` when no
     ///   binding reads;
-    /// - an identity awaiting its held creation: `Dormant` (the held pass
-    ///   creates it);
+    /// - an identity awaiting its held creation: `Dormant` when a held pass
+    ///   in progress covers it (that pass creates it), and refused typed
+    ///   (`HeldCompletionOwed`: it owes its host a held completion) otherwise;
     /// - an identity hosted on its first use: created through its host now
     ///   ([`HostedIdentities::CreateNow`]), or left `Dormant` for its first
     ///   use;
     /// - any other answer, and a refusal before Core was asked: `Refused`,
     ///   typed ([`Self::declared_answer_error`]).
     ///
-    /// With `register`, each identity whose answer stands as its
-    /// registration is registered with its spec. Each identity Core retired
+    /// With `register`, each listed identity is registered with its spec,
+    /// whatever Core answered for it. Each identity Core retired
     /// or removed because the complete roster does not list it leaves the
     /// registry. Without a session bridge there is no Core mob: each spec is
     /// registered (with `register`) and `Dormant`.
@@ -581,6 +649,24 @@ impl IdentityRuntime {
                 customizer,
             )
             .await;
+        // The roster's listing registers each identity it lists, whatever
+        // Core answered: an identity Core answered was registered in its
+        // apply's step, and one refused before Core was asked (or whose
+        // build could not be composed) is registered here with its listed
+        // spec, so its views show it and its doors answer its refusal typed
+        // (they declare it again) rather than not knowing it.
+        if register {
+            for spec in specs {
+                if !matches!(declaration.outcomes.get(&spec.identity), Some(Ok(_))) {
+                    let lifecycle_lock = self.lifecycle_lock_for(&spec.identity).await;
+                    let _lifecycle_guard = lifecycle_lock.lock().await;
+                    self.register_locked(spec.clone()).await;
+                }
+            }
+            // A pending first-boot row of a listed identity now waits for its
+            // carry-out, not for a roster.
+            self.publish_first_boot_pending().await;
+        }
         // The roster is registered: the runtime is composed. Every member
         // Core built held before now has its customizer tools published and
         // its hold released, and every later build of a registered identity
@@ -623,10 +709,15 @@ impl IdentityRuntime {
                     | DeclaredIdentityAnswer::Restamped { .. }
                     | DeclaredIdentityAnswer::RoleMigrated { .. },
                 ) => member_outcome(after.as_ref(), identity, draft, false),
-                Ok(
-                    DeclaredIdentityAnswer::AwaitingHeldCreation
-                    | DeclaredIdentityAnswer::RecordedOnly,
-                ) => RestoreOutcome::Dormant { draft },
+                Ok(DeclaredIdentityAnswer::RecordedOnly) => RestoreOutcome::Dormant { draft },
+                // An identity awaiting its held creation is the held pass's
+                // to create when a held pass in progress covers it; with none,
+                // it owes its host a held completion, the typed refusal below.
+                Ok(DeclaredIdentityAnswer::AwaitingHeldCreation)
+                    if held_pass.as_ref().is_some_and(|pass| pass.covers(identity)) =>
+                {
+                    RestoreOutcome::Dormant { draft }
+                }
                 // A candidate launch: Core declares nothing, and the identity
                 // is deferred to the authoritative launch when the verdict
                 // Core reports that launch would give changes its member.
@@ -879,10 +970,7 @@ impl IdentityRuntime {
                 })
             }
             answer => {
-                let history = match self.core_view_history().await {
-                    Ok(history) => history,
-                    Err(_) => None,
-                };
+                let history = self.core_view_history().await.ok().flatten();
                 let error = self
                     .declared_answer_error(identity, answer, history.as_ref())
                     .unwrap_or_else(|| {
@@ -928,12 +1016,29 @@ impl IdentityRuntime {
             | DeclaredIdentityAnswer::HostedOnFirstUse
             | DeclaredIdentityAnswer::RecordedOnly => return None,
             DeclaredIdentityAnswer::RoleMigrationHeld { from, to } => {
-                let detail = format!(
-                    "the roster moves {identity} from role '{from}' to '{to}', and this \
-                     activation declared no migration from '{from}': Core holds the member \
-                     under its previous role and refuses its wakes until a roster declares \
-                     the migration or restores the role"
-                );
+                // A migration this activation declared from another role
+                // than the member's durable one does not describe this
+                // member: the detail names it, so the host sees which
+                // declaration was not applied and why.
+                let declared_from = self
+                    .bridge
+                    .as_ref()
+                    .and_then(|bridge| bridge.declared_role_migration(identity));
+                let detail = match declared_from {
+                    Some(declared) if declared != from => format!(
+                        "declared role migration of {identity} from '{declared}' to '{to}' was \
+                         not applied: the member's durable role is '{from}', not the declared \
+                         predecessor role. Core holds the member under '{from}' and refuses \
+                         its wakes until a roster declares the migration from '{from}' or \
+                         restores the role"
+                    ),
+                    _ => format!(
+                        "the roster moves {identity} from role '{from}' to '{to}', and this \
+                         activation declared no migration from '{from}': Core holds the member \
+                         under its previous role and refuses its wakes until a roster declares \
+                         the migration or restores the role"
+                    ),
+                };
                 match last_session() {
                     Some(session_id) => IdentityRuntimeError::WakeHeld {
                         identity: identity.clone(),
@@ -997,9 +1102,117 @@ impl IdentityRuntime {
                 },
             },
             DeclaredIdentityAnswer::Failed { error } => {
-                classify_wake_failure(identity, None, error)
+                let row = self.pending_first_boot_rows_snapshot().remove(identity);
+                if let Some(refusal) = self.first_boot_resume_refusal(identity, &error) {
+                    return Some(refusal);
+                }
+                // A build the host's launch refuses the same way every time
+                // is final and typed.
+                if let Some(reason) = deterministic_build_rejection_reason(&error) {
+                    return Some(IdentityRuntimeError::HostRejectedBuild {
+                        identity: identity.clone(),
+                        reason,
+                    });
+                }
+                // A refused resume is read on the session Core names for it
+                // (a revival of the identity's archived session, a first-boot
+                // row's session): a session Core refuses for good is the
+                // identity's final typed refusal, never a retryable failure.
+                let session = match &error {
+                    BridgeError::ResumeRejected { session_id, .. } => Some(session_id.clone()),
+                    _ => row.as_ref().map(|row| row.session().clone()),
+                };
+                classify_wake_failure(identity, session.as_ref(), error)
             }
         })
+    }
+
+    /// A first-boot `Resume` row of `identity`'s whose session Core holds
+    /// no durable copy of, when Core's failure `error` says so: the row's
+    /// own typed refusal (the identity is not seated on another session).
+    fn first_boot_resume_refusal(
+        &self,
+        identity: &AgentIdentity,
+        error: &BridgeError,
+    ) -> Option<IdentityRuntimeError> {
+        let row = self.pending_first_boot_rows_snapshot().remove(identity)?;
+        let session_absent = matches!(
+            error,
+            BridgeError::ResumeRejected {
+                kind: super::super::bridge::ResumeRejectionKind::Unavailable {
+                    reason: meerkat_mob::error::SessionResumeUnavailableReason::Absent,
+                },
+                ..
+            }
+        );
+        (matches!(row, FirstBootRow::Resume { .. }) && session_absent).then(|| {
+            IdentityRuntimeError::FirstBootRowRefused {
+                identity: identity.clone(),
+                kind: row.kind(),
+                manifest_session: row.session().clone(),
+                core_session: None,
+                detail: format!("Core holds no durable copy of session {}", row.session()),
+            }
+        })
+    }
+
+    /// Whether Core's answer `outcome` for `identity`'s declaration refuses
+    /// it for good: Core seats no member of the identity's on it, and none
+    /// stands until the host or an operator acts (a worker holds its name,
+    /// the name is a removed entry's or one this build cannot read, the
+    /// roster's declaration of it is malformed, its first-boot `Resume` row
+    /// names a session Core holds no copy of, the host rejects its build
+    /// every time). A host's adoption is not one (the identity's member is
+    /// the host's to drive), nor is a candidate's report, a held, deferred
+    /// or pending declaration, a failure a retry may clear, or a refusal
+    /// before Core was asked.
+    fn refuses_for_good(
+        &self,
+        identity: &AgentIdentity,
+        outcome: &Result<DeclaredIdentityAnswer, IdentityRuntimeError>,
+    ) -> bool {
+        match outcome {
+            Ok(DeclaredIdentityAnswer::Refused { refusal }) => !matches!(
+                refusal,
+                meerkat_mob::DeclaredEntryRefusal::HostAdopted
+                    | meerkat_mob::DeclaredEntryRefusal::NonAuthoritative { .. }
+            ),
+            Ok(DeclaredIdentityAnswer::Failed { error }) => {
+                self.first_boot_resume_refusal(identity, error).is_some()
+                    || deterministic_build_rejection_reason(error).is_some()
+            }
+            Ok(_) | Err(_) => false,
+        }
+    }
+
+    /// Note Core's answer `outcome` for registered `identity`'s declaration
+    /// for the views ([`super::IdentityEntry::declaration_refused`]): set
+    /// while Core refuses it for good ([`Self::refuses_for_good`]), cleared
+    /// by any other answer Core gives. A refusal before Core was asked
+    /// leaves the note as it was.
+    pub(super) async fn note_declaration_answer(
+        &self,
+        identity: &AgentIdentity,
+        outcome: &Result<DeclaredIdentityAnswer, IdentityRuntimeError>,
+    ) {
+        if outcome.is_err() {
+            return;
+        }
+        let refused = self.refuses_for_good(identity, outcome);
+        // Only a change is written: every write wakes the completion
+        // waiters, and an unchanged note changes no view.
+        let unchanged = self
+            .entries
+            .read()
+            .await
+            .get(identity)
+            .is_none_or(|entry| entry.declaration_refused == refused);
+        if unchanged {
+            return;
+        }
+        if let Some(entry) = self.entries.write().await.get_mut(identity) {
+            entry.declaration_refused = refused;
+        }
     }
 
     /// Why a candidate launch defers `spec`'s identity to the authoritative
@@ -1172,6 +1385,14 @@ impl IdentityRuntime {
     /// The create of [`Self::create_hosted_member`] under the identity's
     /// lifecycle lock, which the caller holds: the build `draft` is the
     /// one its seat's `after_create` reports.
+    ///
+    /// The host's own creation carries out the identity's pending first-boot
+    /// `Resume` row, which Core's declared apply leaves to the host for an
+    /// identity hosted on its first use: the member is created on the row's
+    /// session ([`SessionBridge::resume_session`]), its history kept, and the
+    /// row is settled. A session Core holds no durable copy of is the row's
+    /// typed refusal ([`IdentityRuntimeError::FirstBootRowRefused`]), and
+    /// nothing is created in its place.
     async fn create_hosted_member_locked(
         &self,
         bridge: &Arc<dyn SessionBridge>,
@@ -1180,16 +1401,28 @@ impl IdentityRuntime {
     ) -> Result<MemberRuntimeBinding, IdentityRuntimeError> {
         let identity = &spec.identity;
         refuse_runtime_plane_creation(identity)?;
-        let binding = bridge
-            .create_session(identity, spec, draft)
-            .await
-            .map_err(|error| match deterministic_build_rejection_reason(&error) {
-                Some(reason) => IdentityRuntimeError::HostRejectedBuild {
-                    identity: identity.clone(),
-                    reason,
-                },
-                None => IdentityRuntimeError::Internal(format!("bridge create_session: {error}")),
-            });
+        let resume_row = match self.pending_first_boot_rows_snapshot().remove(identity) {
+            Some(FirstBootRow::Resume { session, .. }) => Some(session),
+            Some(FirstBootRow::Fresh { .. }) | None => None,
+        };
+        let binding = match resume_row.as_ref() {
+            Some(session) => {
+                self.resume_hosted_member_on_row(bridge, spec, draft, session)
+                    .await
+            }
+            None => bridge
+                .create_session(identity, spec, draft)
+                .await
+                .map_err(|error| match deterministic_build_rejection_reason(&error) {
+                    Some(reason) => IdentityRuntimeError::HostRejectedBuild {
+                        identity: identity.clone(),
+                        reason,
+                    },
+                    None => {
+                        IdentityRuntimeError::Internal(format!("bridge create_session: {error}"))
+                    }
+                }),
+        };
         match binding
             .as_ref()
             .ok()
@@ -1198,7 +1431,51 @@ impl IdentityRuntime {
             Some(session) => self.bind_lifecycle_build(identity, session),
             None => self.forget_lifecycle_build(identity),
         }
+        if resume_row.is_some() && binding.is_ok() {
+            self.settle_first_boot_row_in_memory(identity);
+            self.rewrite_first_boot_manifest().await;
+            self.publish_first_boot_pending().await;
+        }
         binding
+    }
+
+    /// The hosted create of `spec`'s identity on its pending first-boot
+    /// `Resume` row's `session` ([`Self::create_hosted_member_locked`]),
+    /// with the role migration this activation declared for it.
+    async fn resume_hosted_member_on_row(
+        &self,
+        bridge: &Arc<dyn SessionBridge>,
+        spec: &DurableAgentSpec,
+        draft: &AgentBuildDraft,
+        session: &SessionId,
+    ) -> Result<MemberRuntimeBinding, IdentityRuntimeError> {
+        let identity = &spec.identity;
+        let resume_from_role = bridge.declared_role_migration(identity);
+        match bridge
+            .resume_session(identity, spec, draft, session, resume_from_role.as_ref())
+            .await
+        {
+            Ok(ResumeSessionOutcome::Resumed {
+                session_id,
+                agent_runtime_id,
+            }) => Ok(MemberRuntimeBinding {
+                agent_runtime_id,
+                session_id: Some(session_id),
+            }),
+            Ok(other) => Err(IdentityRuntimeError::Internal(format!(
+                "the hosted create of {identity} on its first-boot session {session} left a \
+                 member that is not resumed: {other:?}"
+            ))),
+            Err(error) => Err(self
+                .first_boot_resume_refusal(identity, &error)
+                .unwrap_or_else(|| match deterministic_build_rejection_reason(&error) {
+                    Some(reason) => IdentityRuntimeError::HostRejectedBuild {
+                        identity: identity.clone(),
+                        reason,
+                    },
+                    None => classify_wake_failure(identity, Some(session), error),
+                })),
+        }
     }
 
     /// Drop the registration of an identity Core retired or removed because
@@ -1488,9 +1765,23 @@ impl IdentityRuntime {
         } else {
             complete
         };
+        // A runtime-plane identity (`_system`) is never a member of Core's
+        // mob: it is refused typed before Core is asked. No declaration ever
+        // names it, so it is never an entry Core holds, and a complete roster
+        // that lists it still unlists what it no longer lists.
+        let reserved: BTreeMap<AgentIdentity, IdentityRuntimeError> = specs
+            .iter()
+            .filter_map(|spec| {
+                refuse_runtime_plane_creation(&spec.identity)
+                    .err()
+                    .map(|error| (spec.identity.clone(), error))
+            })
+            .collect();
         let declared = specs
             .iter()
-            .filter(|spec| !refused.contains_key(&spec.identity))
+            .filter(|spec| {
+                !refused.contains_key(&spec.identity) && !reserved.contains_key(&spec.identity)
+            })
             .map(|spec| {
                 let declared = match composed.get(&spec.identity) {
                     Some(draft) => DeclaredIdentity::composed(spec.clone(), draft.clone()),
@@ -1504,12 +1795,13 @@ impl IdentityRuntime {
             DeclaredRosterRequest::partial(declared)
         };
         for (identity, request) in first_boot {
-            if !refused.contains_key(&identity) {
+            if !refused.contains_key(&identity) && !reserved.contains_key(&identity) {
                 roster = roster.with_first_boot_request(identity, request);
             }
         }
         let mut outcomes: BTreeMap<_, _> = refused
             .into_iter()
+            .chain(reserved)
             .map(|(identity, error)| (identity, Err(error)))
             .collect();
         // A partial roster with nothing left to declare asks Core nothing; a
@@ -1523,10 +1815,41 @@ impl IdentityRuntime {
                 rows_settled: settled,
             });
         }
-        let answer = bridge
-            .apply_declared_roster(roster)
-            .await
-            .map_err(declaration_not_applied)?;
+        // A first-boot `Fresh` row is the identity's reset while the
+        // directory was stopped: Core's rotation of it owes a reset's side
+        // effects, so the reset is recorded before Core is asked, as the
+        // reset verb records its own, with the head of Core's journal the
+        // step read first. A candidate launch, which Core declares nothing
+        // for, records nothing.
+        let mut fresh_resets = Vec::new();
+        for (identity, request) in &roster.first_boot_requests {
+            if self.is_candidate_launch()
+                || !matches!(request, meerkat_mob::FirstBootRequest::Fresh)
+            {
+                continue;
+            }
+            match self.prepare_fresh_reset(identity).await {
+                Ok(reset) => fresh_resets.push(reset),
+                Err(error) => {
+                    // Nothing was asked of Core: every reset this
+                    // declaration recorded is taken back.
+                    for reset in fresh_resets {
+                        self.abandon_lifecycle_retirement(reset.retiring).await;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        let answer = match bridge.apply_declared_roster(roster).await {
+            Ok(answer) => answer,
+            Err(error) => {
+                self.settle_fresh_resets(fresh_resets, &BTreeSet::new())
+                    .await;
+                return Err(declaration_not_applied(error));
+            }
+        };
+        self.settle_fresh_resets(fresh_resets, &answer.first_boot_requests_carried_out)
+            .await;
         // The rows Core carried out leave the manifest; Core ended their
         // first-boot preparation in the step that carried them out.
         for identity in &answer.first_boot_requests_carried_out {
@@ -1565,6 +1888,58 @@ impl IdentityRuntime {
         })
     }
 
+    /// Record the reset a first-boot `Fresh` row of `identity` owes, before
+    /// the declaration that carries the row asks Core
+    /// ([`Self::apply_declaration`]): the head of Core's journal, the fact
+    /// the rotation journals first, and the retirement record, as the reset
+    /// verb records them.
+    async fn prepare_fresh_reset(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<FreshReset, IdentityRuntimeError> {
+        let asked_after = self.lifecycle_journal_head(identity).await?;
+        let last = self.core_last_binding(identity).await?;
+        let first = super::lifecycle_projection::StepFirstFact::of(last.as_ref());
+        let retiring = self
+            .prepare_lifecycle_retirement_of(
+                identity,
+                last,
+                crate::runtime::LifecycleEffectVerb::Reset,
+                asked_after,
+            )
+            .await?;
+        Ok(FreshReset {
+            identity: identity.clone(),
+            retiring,
+            asked_after,
+            first,
+        })
+    }
+
+    /// What the resets a declaration recorded for its first-boot `Fresh`
+    /// rows (`resets`) leave once Core answered: a row Core carried out
+    /// (`carried_out`) settles its record, which the rotation's retirement
+    /// reads; one it did not carry out keeps its record while the rotation
+    /// may have reached Core (Core finishes it, and its end owes the reset's
+    /// side effects), and takes it back otherwise.
+    async fn settle_fresh_resets(
+        &self,
+        resets: Vec<FreshReset>,
+        carried_out: &BTreeSet<AgentIdentity>,
+    ) {
+        for reset in resets {
+            if carried_out.contains(&reset.identity) {
+                self.settle_lifecycle_retirement(reset.retiring).await;
+            } else if self
+                .lifecycle_step_reach(&reset.identity, reset.asked_after, reset.first)
+                .await
+                == super::lifecycle_projection::StepReach::NotReached
+            {
+                self.abandon_lifecycle_retirement(reset.retiring).await;
+            }
+        }
+    }
+
     /// What a declaration settles once the declared identities' lifecycle
     /// locks are released: the lifecycle projection reads Core's journal,
     /// the manifest drops the settled rows, and each identity Core bound to
@@ -1572,6 +1947,19 @@ impl IdentityRuntime {
     pub(super) async fn finish_declaration(&self, bound: &[AgentIdentity], rows_settled: bool) {
         self.kick_lifecycle_projection();
         if rows_settled {
+            // Test seam: the window between the rows' settle in memory and
+            // the manifest rewrite.
+            #[cfg(test)]
+            {
+                let hook = self
+                    .first_boot_batch_hook
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some(hook) = hook {
+                    hook().await;
+                }
+            }
             self.rewrite_first_boot_manifest().await;
             self.publish_first_boot_pending().await;
         }

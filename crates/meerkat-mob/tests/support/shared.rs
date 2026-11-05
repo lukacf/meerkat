@@ -4795,7 +4795,7 @@ async fn create_controlling_mob_composed_with_client(
         Arc::clone(&identity_status),
     )
     .with_forked_participant_store(Some(Arc::clone(&forked_participants)));
-    let (storage, identity) = compose_storage(&*events_in_memory, storage, identity);
+    let (storage, identity) = compose_storage(&events_in_memory, storage, identity);
 
     let mob_service: Arc<dyn meerkat_mob::MobSessionService> = service.clone();
     let runtime_adapter = mob_service

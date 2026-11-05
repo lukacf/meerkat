@@ -463,8 +463,11 @@ impl InstalledAcquisition {
                 source_error(error)
             })?;
         progress.enter(AdmissionStage::RecoverHelper);
+        // One churn for this recovery's waits: its retention's lineage
+        // resolution.
+        let mut churn = context.owner_change_churn();
         let held = originals
-            .recover_setup_helper_source(&prepared)
+            .recover_setup_helper_source(&prepared, context, &mut churn)
             .await
             .map_err(|error| {
                 #[cfg(test)]
@@ -646,8 +649,8 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
         let originals = &acquisition.host.originals;
         let operation = self.operation(preparation)?;
         // One churn for this work step's owner-change waits: its helper
-        // admission and its two reads after the helper's grants were issued
-        // and its source bound.
+        // admission, its retention's lineage resolution and its two reads
+        // after the helper's grants were issued and its source bound.
         let mut churn = self.context.owner_change_churn();
         // Observation is historical metadata only. Creation or replay must
         // enter the actual native current full-source fence on every attempt.
@@ -688,7 +691,7 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
                 source_error(error)
             })?;
         let held = match originals
-            .recover_setup_helper_source(&prepared)
+            .recover_setup_helper_source(&prepared, self.context, &mut churn)
             .await
             .map_err(|error| {
                 #[cfg(test)]
@@ -715,7 +718,13 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
                         source_error(error)
                     })?;
                 originals
-                    .retain_setup_helper_source(&prepared, lineage, operation_basis)
+                    .retain_setup_helper_source(
+                        &prepared,
+                        lineage,
+                        operation_basis,
+                        self.context,
+                        &mut churn,
+                    )
                     .await
                     .map_err(|error| {
                         #[cfg(test)]

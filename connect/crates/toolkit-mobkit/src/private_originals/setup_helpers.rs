@@ -535,10 +535,14 @@ impl PrivateOriginals {
 
     /// Recover only a previously retained source for this exact work and
     /// actual native controller/session. A missing source stays missing; this
-    /// method issues no grant and cannot replace the saved destination.
+    /// method issues no grant and cannot replace the saved destination. Its
+    /// retention's lineage resolution waits with `churn`, the step's one churn
+    /// ([`Self::retain_setup_helper_source`]).
     pub(crate) async fn recover_setup_helper_source(
         self: &Arc<Self>,
         prepared: &PreparedHelperController,
+        context: &ToolDispatchContext,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
     ) -> Result<Option<Arc<HeldSetupHelper>>, PrivateOriginalError> {
         if !prepared
             .source
@@ -565,6 +569,8 @@ impl PrivateOriginals {
             prepared,
             binding.controller_grant_lineage,
             binding.authority_basis,
+            context,
+            churn,
         )
         .await
         .map(Some)
@@ -576,11 +582,20 @@ impl PrivateOriginals {
     /// Before the binding write, a source collection held by another owner's
     /// short section is waited out within Core's owner-change bound, holding
     /// nothing; the write itself is never made again.
+    ///
+    /// The issued lineage is resolved and checked current as an observation
+    /// of the grant owner's publication. An owner change published during it
+    /// (another helper's first binding, for example) is a stale read, never a
+    /// denial: it is waited out with `churn`, the step's one churn, holding
+    /// nothing, and the resolution made again. Past the churn's bounds it
+    /// stays typed, unavailable. Only the owner's own refusal is a denial.
     pub(crate) async fn retain_setup_helper_source(
         self: &Arc<Self>,
         prepared: &PreparedHelperController,
         issued_controller_lineage: Vec<GrantLineageRef>,
         operation_basis: WorkAuthorityBasis,
+        context: &ToolDispatchContext,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
     ) -> Result<Arc<HeldSetupHelper>, PrivateOriginalError> {
         if !prepared
             .source
@@ -609,19 +624,39 @@ impl PrivateOriginals {
         ) {
             crate::source_hold_probe::retain(self.hold_sources_for_test(hold));
         }
-        let controller_ceiling = {
-            let grants = self.owner.grants();
-            let resolved = grants
-                .resolve_controller_lineage(
+        let controller_ceiling = loop {
+            // True for a stale read; the owner's own answer otherwise.
+            let stale = {
+                use meerkat_authorization::grants::{GrantRefusal, LineageResolutionRefusal};
+                use meerkat_authorization::publication::PublicationError;
+                let grants = self.owner.grants();
+                match grants.resolve_controller_lineage_observed(
                     &issued_controller_lineage,
                     &selected.logical_executor,
                     selected.represented_subject.as_ref(),
+                ) {
+                    Ok(resolved) => match resolved.check_current() {
+                        Ok(()) => break resolved.restrictions().clone(),
+                        Err(PublicationError::Changed) => true,
+                        Err(PublicationError::Unavailable) => false,
+                    },
+                    Err(LineageResolutionRefusal::Changed) => true,
+                    Err(LineageResolutionRefusal::Refused(GrantRefusal::Unavailable)) => false,
+                    Err(LineageResolutionRefusal::Refused(_)) => {
+                        return Err(PrivateOriginalError::Denied);
+                    }
+                }
+            };
+            if !stale
+                || !crate::current_check::wait_after_refusal(
+                    context,
+                    churn,
+                    "toolkit.helper.retain_lineage",
                 )
-                .map_err(|_| PrivateOriginalError::Denied)?;
-            resolved
-                .check_current()
-                .map_err(|_| PrivateOriginalError::Unavailable)?;
-            resolved.restrictions().clone()
+                .await
+            {
+                return Err(PrivateOriginalError::Unavailable);
+            }
         };
         let binding = HelperNativeBinding {
             ingress_actor: selected.ingress_actor.clone(),

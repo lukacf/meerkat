@@ -15,7 +15,9 @@
 //! channel, under the notice's id, at that clock reading. A crash or a closed
 //! pipe between the notice and the record leaves a shown but unrecorded
 //! presentation, which a decide refuses; never the reverse. The answered
-//! page carries each presented decision as recorded.
+//! page carries each presented decision as recorded. When the realm's
+//! configuration cannot be read, the list presents nothing and answers its
+//! page as plain dispatch does.
 //!
 //! The operator decides through `decision/decide` only a decision this
 //! connection presented, while the connection is open and the decision's
@@ -58,7 +60,7 @@ use super::{
 };
 use crate::error;
 use crate::handlers::{RpcResponseExt, parse_params};
-use crate::protocol::{RpcId, RpcNotification, RpcResponse};
+use crate::protocol::{RpcError, RpcId, RpcNotification, RpcResponse};
 use crate::server::AcknowledgedNotification;
 use crate::session_runtime::SessionRuntime;
 
@@ -150,7 +152,7 @@ impl DecisionOperator {
 
     /// `decision/list` on this connection: the page the client asks for,
     /// after presenting its decisions the operator acts for and was not shown
-    /// here yet.
+    /// here yet. Without the realm's configuration it presents nothing.
     pub(crate) async fn handle_list(
         &self,
         id: Option<RpcId>,
@@ -170,9 +172,17 @@ impl DecisionOperator {
             .map(|(index, _)| index)
             .collect();
         if !waiting.is_empty() {
-            let listed = match operator_approver_ids(id.clone(), runtime).await {
+            let listed = match operator_approver_ids(runtime).await {
                 Ok(listed) => listed,
-                Err(response) => return response,
+                Err(error_value) => {
+                    // The operator's approver ids are unknown: the page
+                    // answers as on plain dispatch, and nothing is shown.
+                    tracing::warn!(
+                        error = %error_value.message,
+                        "the realm's configuration cannot be read; the list presents nothing"
+                    );
+                    return RpcResponse::success(id, wire_decision_listing(&listing));
+                }
             };
             for index in waiting {
                 let Some(row) = listing.decisions.get(index) else {
@@ -295,9 +305,9 @@ impl DecisionOperator {
             Ok(row) => row,
             Err(error_value) => return decision_error_to_response(id, error_value),
         };
-        let listed = match operator_approver_ids(id.clone(), &runtime).await {
+        let listed = match operator_approver_ids(&runtime).await {
             Ok(listed) => listed,
-            Err(response) => return response,
+            Err(error_value) => return RpcResponse::from_error(id, error_value),
         };
         let eligible =
             presented.contains(&decision_id) && listed.lists(row.descriptor.approver_id.as_str());
@@ -347,18 +357,15 @@ fn awaits_the_operator(row: &StoredDecision) -> bool {
 /// The approver ids the realm's configuration lists for the operator now:
 /// the runtime's effective configuration (on a governed pipe, its host's
 /// configuration as it started).
-#[allow(clippy::result_large_err)]
 async fn operator_approver_ids(
-    id: Option<RpcId>,
     runtime: &SessionRuntime,
-) -> Result<DecisionGovernanceConfig, RpcResponse> {
-    match runtime.effective_config().await {
-        Ok(config) => Ok(config
+) -> Result<DecisionGovernanceConfig, RpcError> {
+    runtime.effective_config().await.map(|config| {
+        config
             .governance
             .map(|governance| governance.decisions)
-            .unwrap_or_default()),
-        Err(error_value) => Err(RpcResponse::from_error(id, error_value)),
-    }
+            .unwrap_or_default()
+    })
 }
 
 /// The `presented` notice of `row`: the whole rendering, as one canonical

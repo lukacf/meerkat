@@ -1256,13 +1256,16 @@ mod operator_connections {
     use meerkat_core::approval::decision::{
         DecisionId, DecisionPhase, DecisionPrincipalKey, DecisionStage, StoredDecision,
     };
-    use meerkat_core::{ApprovalAssurance, PrincipalKind};
+    use meerkat_core::{
+        ApprovalAssurance, Config, ConfigDelta, ConfigError, ConfigRuntime, ConfigStore,
+        PrincipalKind,
+    };
     use serde_json::json;
     use serde_json::value::RawValue;
     use tokio::sync::mpsc;
 
     use super::{
-        INVALID_PARAMS, error_code, error_data, hold_request, hold_request_until, now_ms,
+        INVALID_PARAMS, call, error_code, error_data, hold_request, hold_request_until, now_ms,
         persistent_router, principal, realm_bundle, result, router_over, stored_row,
         subject_digest, wait_past,
     };
@@ -1566,5 +1569,60 @@ mod operator_connections {
         );
         assert_eq!(stored_row(&store_path, &in_review.decision_id), in_review);
         assert_eq!(stored_row(&store_path, &lapsing.decision_id), lapsing);
+    }
+
+    /// A configuration store whose every read fails.
+    struct UnreadableConfig;
+
+    #[async_trait::async_trait]
+    impl ConfigStore for UnreadableConfig {
+        async fn get(&self) -> Result<Config, ConfigError> {
+            Err(ConfigError::Validation("unreadable".to_string()))
+        }
+
+        async fn set(&self, _config: Config) -> Result<(), ConfigError> {
+            Err(ConfigError::Validation("unreadable".to_string()))
+        }
+
+        async fn patch(&self, _delta: ConfigDelta) -> Result<Config, ConfigError> {
+            Err(ConfigError::Validation("unreadable".to_string()))
+        }
+    }
+
+    /// When the realm's configuration cannot be read, the operator's
+    /// approver ids are unknown: a list on the connection answers its page as
+    /// plain dispatch does, and presents and records nothing.
+    #[tokio::test]
+    async fn a_list_without_the_configuration_answers_its_page_and_presents_nothing() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (router, runtime) = persistent_router(root.path()).await;
+        runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+            Arc::new(UnreadableConfig),
+            root.path().join("config_state.json"),
+        )));
+        let decisions = runtime.decision_service();
+        let held = decisions
+            .hold(hold_request("release", "build-1", "operator"), false)
+            .expect("hold");
+        let before = decisions.get(&held.decision_id).expect("read");
+        let connection = Connection::open("stdio:operator:unconfigured");
+
+        let page = connection.list(&runtime).await;
+        assert_eq!(
+            page["decisions"][0]["decision_id"],
+            held.decision_id.to_string(),
+            "{page}"
+        );
+        assert_eq!(
+            page,
+            result(&call(&router, "decision/list", json!({})).await),
+            "the operator's page differs from plain dispatch's"
+        );
+        assert!(
+            connection.notices().is_empty(),
+            "{:?}",
+            connection.notices()
+        );
+        assert_eq!(decisions.get(&held.decision_id).expect("read"), before);
     }
 }

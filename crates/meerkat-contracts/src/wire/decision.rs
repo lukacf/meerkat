@@ -131,10 +131,12 @@ pub enum WireDecisionReviewVerdict {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 // Closed for the request that carries it (`DecisionPresentationRequest`).
 // Results carry it too (`WirePresentationRecord`, `DecisionRenderingResult`),
-// and no client parses a result with this type: the server only serializes
-// results, and the Python and TypeScript SDKs return a result as the server
-// wrote it. A client that deserializes results with it needs a result form
-// that tolerates added fields first.
+// and so does the `decision/notice` notification
+// (`WireDecisionNoticePresentation`). No client parses a result or a notice
+// with this type: the server only serializes them, the Python and TypeScript
+// SDKs return a result as the server wrote it, and neither parses a notice.
+// A client that deserializes results or notices with it needs a form that
+// tolerates added fields first.
 #[serde(deny_unknown_fields)]
 pub struct WireCanonicalPart {
     /// The part's position, from 0.

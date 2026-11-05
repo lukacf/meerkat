@@ -91,7 +91,8 @@ The package exports more than the core session lifecycle. The `MeerkatClient` al
 - scoped tool grants: `grantTool`, `revokeToolGrant`, `listToolGrants`,
   `toolGrantAudit`
 - durable decisions: `listDecisions`, `getDecision`, `decisionRendering`,
-  `presentDecision`, `withdrawDecision`
+  `presentDecision`, `withdrawDecision` (a 0.9.11 or newer server; an older
+  one's method not found, `-32601`, is raised naming the method)
 - projected event recovery: `latestEventCursor`, `listEventsSince`,
   `eventSnapshot` when host event projection is enabled
 - live-channel helpers: `liveOpen`, `liveStatus`, `liveClose`, `liveSendInput`,

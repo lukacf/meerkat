@@ -2164,9 +2164,10 @@ requester or the host withdraws it, or its deadline passes (see
 [durable decisions](/concepts/authorization)). The `decision/*` methods read
 and act on the decisions of the runtime's persistence, one row or one index
 page per call: `decision/list`, `decision/get`, `decision/rendering`,
-`decision/present` and `decision/withdraw`. A runtime whose persistence keeps
-no durable decisions answers them capability unavailable, with
-`data.kind = "no_decision_store"`.
+`decision/present` and `decision/withdraw`. They are served since 0.9.11; an
+older server answers them method not found (`-32601`). A runtime whose
+persistence keeps no durable decisions answers them capability unavailable,
+with `data.kind = "no_decision_store"`.
 
 ```json Request
 {

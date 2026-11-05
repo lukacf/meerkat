@@ -203,7 +203,9 @@ them.
   the methods as `list_decisions`, `get_decision`, `decision_rendering`,
   `present_decision` and `withdraw_decision`, the TypeScript SDK as
   `listDecisions`, `getDecision`, `decisionRendering`, `presentDecision` and
-  `withdrawDecision`; neither decides a decision.
+  `withdrawDecision`; neither decides a decision. The wrappers need a 0.9.11
+  or newer server: an older one answers method not found (`-32601`), which
+  both SDKs raise as an error that names the method.
 - Host-adapter decide: `meerkat-rpc`:
   `MethodRouter::dispatch_with_decision_event` decides `decision/decide`
   (`DECISION_DECIDE_METHOD`) with an `AuthenticatedDecisionEvent` the host

@@ -351,7 +351,9 @@ the replay APIs.
 ### Durable decisions
 
 A server whose persistence keeps durable decisions reads, presents and
-withdraws them; one that keeps none answers capability unavailable.
+withdraws them; one that keeps none answers capability unavailable. The
+methods need a Meerkat 0.9.11 or newer server: an older one answers method
+not found (`-32601`), raised as a `MeerkatError` that names the method.
 
 ```python
 page = await client.list_decisions(phase="open", approver_id="team:owners", limit=50)

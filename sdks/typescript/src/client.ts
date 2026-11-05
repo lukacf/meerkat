@@ -2310,7 +2310,9 @@ export class MeerkatClient {
    * holds 100 decisions unless `limit` asks for another size, at most 500.
    * While the result carries `next_after`, pass it as the next page's
    * `after`. A server whose persistence keeps no durable decisions answers
-   * capability unavailable.
+   * capability unavailable. Needs a Meerkat 0.9.11 or newer server: an
+   * older one answers method not found (`-32601`), raised as a
+   * `MeerkatError` that names the method.
    */
   async listDecisions(options?: {
     kind?: string;
@@ -2327,12 +2329,16 @@ export class MeerkatClient {
     if (options?.requester !== undefined) params.requester = options.requester;
     if (options?.after !== undefined) params.after = options.after;
     if (options?.limit !== undefined) params.limit = options.limit;
-    return this.request("decision/list", params);
+    return this.request("decision/list", params).catch(
+      MeerkatClient.decisionMethodServed("decision/list"),
+    );
   }
 
   /**
    * Read one durable decision, its expiry recorded once its deadline
    * passed. The held request is in the answer only with `includeRequest`.
+   * Needs a Meerkat 0.9.11 or newer server: an older one answers method not
+   * found (`-32601`), raised as a `MeerkatError` that names the method.
    */
   async getDecision(
     decisionId: string,
@@ -2340,12 +2346,16 @@ export class MeerkatClient {
   ): Promise<RpcDecisionResult> {
     const params: RpcDecisionGetParams = { decision_id: decisionId };
     if (options?.includeRequest) params.include_request = true;
-    return this.request("decision/get", params);
+    return this.request("decision/get", params).catch(
+      MeerkatClient.decisionMethodServed("decision/get"),
+    );
   }
 
   /**
    * Read a durable decision's rendering and its canonical parts for a part
-   * size; without `maxPartBytes` the rendering is one part.
+   * size; without `maxPartBytes` the rendering is one part. Needs a Meerkat
+   * 0.9.11 or newer server: an older one answers method not found
+   * (`-32601`), raised as a `MeerkatError` that names the method.
    */
   async decisionRendering(
     decisionId: string,
@@ -2353,30 +2363,59 @@ export class MeerkatClient {
   ): Promise<RpcDecisionRenderingResult> {
     const params: RpcDecisionRenderingParams = { decision_id: decisionId };
     if (options?.maxPartBytes !== undefined) params.max_part_bytes = options.maxPartBytes;
-    return this.request("decision/rendering", params);
+    return this.request("decision/rendering", params).catch(
+      MeerkatClient.decisionMethodServed("decision/rendering"),
+    );
   }
 
   /**
    * Record what a host presenter showed of a durable decision: the audience,
    * the subject digest shown, the parts shown, the channel and message
    * references and the host clock reading `at_ms`. It counts only when it
-   * shows every canonical part to the party that decides now.
+   * shows every canonical part to the party that decides now. Needs a
+   * Meerkat 0.9.11 or newer server: an older one answers method not found
+   * (`-32601`), raised as a `MeerkatError` that names the method.
    */
   async presentDecision(
     decisionId: string,
     presentation: RpcDecisionPresentationRequest,
   ): Promise<RpcDecisionResult> {
     const params: RpcDecisionPresentParams = { decision_id: decisionId, presentation };
-    return this.request("decision/present", params);
+    return this.request("decision/present", params).catch(
+      MeerkatClient.decisionMethodServed("decision/present"),
+    );
   }
 
   /**
    * Withdraw an open durable decision as the host; a decision no longer
-   * open is refused with the `not_open` decision refusal.
+   * open is refused with the `not_open` decision refusal. Needs a Meerkat
+   * 0.9.11 or newer server: an older one answers method not found
+   * (`-32601`), raised as a `MeerkatError` that names the method.
    */
   async withdrawDecision(decisionId: string): Promise<RpcDecisionResult> {
     const params: RpcDecisionWithdrawParams = { decision_id: decisionId };
-    return this.request("decision/withdraw", params);
+    return this.request("decision/withdraw", params).catch(
+      MeerkatClient.decisionMethodServed("decision/withdraw"),
+    );
+  }
+
+  /**
+   * The `decision/*` methods need a 0.9.11 or newer server. The SDK sets no
+   * contract floor for them: an older server answers method not found
+   * (`-32601`), which already fails closed, in words that need not name the
+   * method. Raise that answer as an error that names it.
+   */
+  private static decisionMethodServed(method: string): (error: unknown) => never {
+    return (error: unknown) => {
+      if (error instanceof MeerkatError && error.code === "-32601") {
+        throw new MeerkatError(
+          error.code,
+          `${method} needs a Meerkat 0.9.11 or newer server: ${error.message}`,
+          error.details,
+        );
+      }
+      throw error;
+    };
   }
 
   async listArtifacts(

@@ -550,6 +550,11 @@ impl InstalledServiceTaskSource {
                 })?,
             None => None,
         };
+        #[cfg(test)]
+        owner
+            .host
+            .originals
+            .observe_service_task_stage_for_test("prepare.snapshot");
         let (snapshot, selected_helper) = if let Some(custody) = &workflow {
             owner
                 .host

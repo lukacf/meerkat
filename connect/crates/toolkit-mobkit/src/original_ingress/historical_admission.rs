@@ -134,6 +134,26 @@ impl ToolkitOriginalOwner {
         thread
     }
 
+    /// Hold this owner's source writer on a thread of its own for `hold`, as
+    /// another writer holds it across its durable write. Returns once it is
+    /// held; the returned thread releases it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn hold_writer_for_test(
+        self: &Arc<Self>,
+        hold: std::time::Duration,
+    ) -> std::thread::JoinHandle<()> {
+        let owner = self.clone();
+        let (held, holding) = std::sync::mpsc::sync_channel(0);
+        let thread = std::thread::spawn(move || {
+            let writer = owner.mutation.blocking_lock();
+            let _ = held.send(());
+            std::thread::sleep(hold);
+            drop(writer);
+        });
+        assert!(holding.recv().is_ok(), "the control's writer hold began");
+        thread
+    }
+
     /// This owner's publication, for a control's own owner change on it.
     #[cfg(test)]
     pub(crate) fn publication_for_test(&self) -> &LocalAuthorizationPublication {

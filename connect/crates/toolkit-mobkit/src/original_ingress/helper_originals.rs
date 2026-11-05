@@ -955,6 +955,15 @@ impl ToolkitOriginalOwner {
         .await
         .map_err(|_| OriginalWriterError::Unavailable)?;
         let outcome = helper_admission_result(result, report.refusal())?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::FencedAfter,
+            admission.key.as_str(),
+        ) {
+            crate::source_hold_probe::retain(
+                self.hold_sources_for_test(hold.owner_change, hold.duration),
+            );
+        }
         let Some(outcome) = outcome else {
             self.check_helper_sources(contributor, contributors, own_originals)?;
             return Ok(None);
@@ -1162,6 +1171,17 @@ impl ToolkitOriginalOwner {
         let saved = match &record.state {
             HelperSourceState::ControllerPending => {
                 record.controller.check_binding(self, admitted, &binding)?;
+                // The collection held from here is still held when the
+                // first binding write tries it inside its owner change.
+                #[cfg(any(test, feature = "test-support"))]
+                if let Some(hold) = crate::source_hold_probe::observe(
+                    crate::source_hold_probe::Site::FirstWrite,
+                    &key.id,
+                ) {
+                    crate::source_hold_probe::retain(
+                        self.hold_sources_for_test(hold.owner_change, hold.duration),
+                    );
+                }
                 self.retain_first_binding_write(
                     store,
                     &admitted.source_scope,

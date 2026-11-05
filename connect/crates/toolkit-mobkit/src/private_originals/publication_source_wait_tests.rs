@@ -244,9 +244,6 @@ pub(super) async fn finds_with_hold_at(
                 let effect = work_effect(&fixture, &row).await;
                 rows.push((row, effect));
             }
-            if fresh_finds == 0 {
-                assert_eq!(rows.len(), 1, "one canonical source row of this helper");
-            }
             Found {
                 feedback,
                 helpers: fixture.source.helper_sources.lock().unwrap().len(),
@@ -305,6 +302,11 @@ pub(super) fn assert_waited_out(found: &Found, hold: Duration) {
         found.issued.len(),
         1,
         "the controller grant was issued once"
+    );
+    assert_eq!(
+        found.rows.len(),
+        1,
+        "one canonical source row of this helper"
     );
     assert!(
         found.answered_after >= hold - Duration::from_millis(50),
@@ -371,6 +373,11 @@ async fn publication_source_read_held_past_the_bound_is_refused_typed_and_not_re
         found.issued.len(),
         1,
         "the controller grant was issued once"
+    );
+    assert_eq!(
+        found.rows.len(),
+        1,
+        "one canonical source row of this helper"
     );
     assert!(
         found.answered_after >= OWNER_CHANGE_WAIT_BOUND - Duration::from_millis(100)

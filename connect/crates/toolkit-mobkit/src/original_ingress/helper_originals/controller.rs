@@ -242,10 +242,26 @@ impl ToolkitOriginalOwner {
             .capabilities()
             .require_durable_contract()
             .map_err(|_| OriginalWriterError::Unavailable)?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::IntentsWriter,
+            &admitted.facts.item.to_string(),
+        ) {
+            crate::source_hold_probe::retain(self.hold_writer_for_test(hold.duration));
+        }
         let _mutation = self
             .mutation
             .try_lock()
             .map_err(|_| OriginalWriterError::Unavailable)?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::Intents,
+            &admitted.facts.item.to_string(),
+        ) {
+            crate::source_hold_probe::retain(
+                self.hold_sources_for_test(hold.owner_change, hold.duration),
+            );
+        }
         self.check_admitted_helper(admitted)?;
         controller.validate(admitted)?;
         let key = admitted.source_key()?;
@@ -284,6 +300,15 @@ impl ToolkitOriginalOwner {
         }
         // Cancellation may occur during storage. A retained pending intent is
         // kept for reconciliation, but it is never permission to issue a child.
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::IntentsWritten,
+            &admitted.facts.item.to_string(),
+        ) {
+            crate::source_hold_probe::retain(
+                self.hold_sources_for_test(hold.owner_change, hold.duration),
+            );
+        }
         self.check_admitted_helper(admitted)?;
         let report = retained
             .controller

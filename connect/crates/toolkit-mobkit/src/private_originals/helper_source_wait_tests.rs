@@ -9,7 +9,14 @@
 //! - `Resolve`: a retention resolving the helper's issued lineage, the work
 //!   step's and the recovery's own;
 //! - `Observe`: the Find's live-replay helper observation
-//!   (`advance.observe_helper`).
+//!   (`advance.observe_helper`);
+//! - the census sites (round 21): `FencedAfter` (a fenced helper create or
+//!   read just done, before its source check under the writer),
+//!   `IntentsWriter`, `Intents` and `IntentsWritten` (a helper's grant
+//!   issuance taking the source writer, then before and after its intent
+//!   write), `FirstWrite` (a first binding write trying the collection inside
+//!   its owner change), `PrepareBind` (a helper preparation's capture binder)
+//!   and `Submit` (a helper submission's source check).
 //!
 //! A held collection is waited out within Core's owner-change bound, and an
 //! owner change met by the lineage resolution is a stale read, waited out
@@ -185,4 +192,135 @@ async fn retain_lineage_resolution_past_the_bounds_is_unavailable_never_denied()
         reply(first)
     );
     assert_eq!(found.helpers, 0, "nothing was retained");
+}
+
+/// The Find refused typed once its step's one deadline ran out, before the
+/// hold ended: tool_unavailable, nothing retained.
+fn assert_refused_at_the_bound(found: &Found, hold: Duration) {
+    assert!(found.turn_completed, "the original's turn completed");
+    assert_eq!(found.feedback.len(), 1, "{:?}", found.feedback);
+    let first = &found.feedback[0];
+    assert!(first.is_error, "{}", reply(first));
+    assert_eq!(
+        reply(first)["error"],
+        "tool_unavailable",
+        "{}",
+        reply(first)
+    );
+    assert_eq!(found.helpers, 0, "nothing was retained");
+    assert!(
+        found.answered_after >= OWNER_CHANGE_WAIT_BOUND - Duration::from_millis(500)
+            && found.answered_after < hold,
+        "refused once the step's deadline ran out, before the hold ended: {:?}",
+        found.answered_after
+    );
+}
+
+fn held_past_the_bound() -> Hold {
+    Hold {
+        owner_change: false,
+        duration: OWNER_CHANGE_WAIT_BOUND + Duration::from_millis(500),
+    }
+}
+
+// The work step's fenced create of the helper's work item just done: its
+// check of the helper's sources under the source writer meets the held
+// collection and waits it out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admitted_helper_after_its_fenced_create_waits_out_a_held_source_collection() {
+    let found = finds_with_hold_at(Site::FencedAfter, 1, collection_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+}
+
+// The Find's live-replay observation, its fenced read just done: the same
+// source check waits the hold out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn observed_helper_after_its_fenced_read_waits_out_a_held_source_collection() {
+    let found = finds_with_hold_at(Site::FencedAfter, 2, collection_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+}
+
+// The helper's grant issuance meets the source writer held by another
+// writer before its intent write: it waits for the writer within the
+// issuance's deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issuance_waits_out_a_held_source_writer_before_its_intent_write() {
+    let found = finds_with_hold_at(Site::IntentsWriter, 1, collection_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+}
+
+// With the writer taken, the issuance's source check before its intent
+// write meets the held collection and waits it out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issuance_waits_out_a_held_source_collection_before_its_intent_write() {
+    let found = finds_with_hold_at(Site::Intents, 1, collection_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+}
+
+// After the intent write, the issuance's source check meets the held
+// collection and waits it out; the intent is never written again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issuance_waits_out_a_held_source_collection_after_its_intent_write() {
+    let found = finds_with_hold_at(Site::IntentsWritten, 1, collection_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+}
+
+// The first binding write tries the collection inside its owner change and
+// finds it held: the change ends with nothing changed, the collection is
+// waited for outside it, and the change begins again, before the CAS.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_binding_write_waits_out_a_held_source_collection_outside_its_change() {
+    let found = finds_with_hold_at(Site::FirstWrite, 1, collection_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+}
+
+// The work step's helper preparation: its capture binder meets the held
+// collection inside Core's governed bind. It refuses with nothing captured;
+// the preparation waits for the collection outside the bind and binds again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn helper_preparation_binds_again_after_a_held_source_collection() {
+    let found = finds_with_hold_at(Site::PrepareBind, 1, collection_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+}
+
+// The same at the Find's own helper preparation after the work step
+// (`advance.prepare_helper`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn find_helper_preparation_binds_again_after_a_held_source_collection() {
+    let found = finds_with_hold_at(Site::PrepareBind, 2, collection_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+}
+
+// The helper's submission (`advance.submit_helper`): its source check meets
+// the held collection and waits it out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn submission_waits_out_a_held_source_collection() {
+    let found = finds_with_hold_at(Site::Submit, 1, collection_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+}
+
+// Negative controls, held past Core's owner-change bound: each step answers
+// tool_unavailable once its one deadline ran out, before the hold ended, and
+// nothing is retained.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issuance_writer_held_past_the_bound_is_refused_typed() {
+    let hold = held_past_the_bound();
+    let found = finds_with_hold_at(Site::IntentsWriter, 1, hold, 0, false).await;
+    assert_refused_at_the_bound(&found, hold.duration);
+    assert!(found.issued.is_empty(), "nothing was issued");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_binding_write_held_past_the_bound_is_refused_typed() {
+    let hold = held_past_the_bound();
+    let found = finds_with_hold_at(Site::FirstWrite, 1, hold, 0, false).await;
+    assert_refused_at_the_bound(&found, hold.duration);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn helper_preparation_held_past_the_bound_is_refused_typed() {
+    let hold = held_past_the_bound();
+    let found = finds_with_hold_at(Site::PrepareBind, 1, hold, 0, false).await;
+    assert_refused_at_the_bound(&found, hold.duration);
+    assert!(found.issued.is_empty(), "nothing was issued");
 }

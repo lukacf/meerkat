@@ -44,11 +44,14 @@ impl HeldChange {
 }
 
 /// What the preparation reached: each stage's count, and the change begun at
-/// the first arrival at the selected stage.
+/// the first arrival at the selected stage, with the record change made
+/// behind it.
 #[derive(Default)]
 struct Reached {
     stages: Mutex<BTreeMap<&'static str, usize>>,
     change: Mutex<Option<HeldChange>>,
+    record_change: Mutex<Option<tokio::task::JoinHandle<toolkit_store::StoreResult<()>>>>,
+    record_pause: Mutex<Option<Arc<RecordChangePause>>>,
 }
 impl Reached {
     fn count(&self, stage: &str) -> usize {
@@ -61,6 +64,45 @@ enum AtCheck {
     OwnerChange(Option<Duration>),
     /// The original's operations really cancelled.
     Cancellation,
+    /// A record change of the owner's store holding the store's one
+    /// connection, and an owner change in progress, both for `hold`: the
+    /// record change then waits for the owner change, so every other
+    /// operation of the store waits as long.
+    RecordChangeBehind(Duration),
+}
+
+/// The owner's next record change, paused once it holds the store's one
+/// connection, just before it begins its owner change: it signals that it
+/// entered, then waits until released or until `hold` elapsed.
+struct RecordChangePause {
+    entered: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
+    released: (Mutex<bool>, std::sync::Condvar),
+    hold: Duration,
+}
+impl RecordChangePause {
+    fn release(&self) {
+        *self.released.0.lock().unwrap() = true;
+        self.released.1.notify_all();
+    }
+}
+struct RecordChangePauseGuard;
+impl toolkit_store::RecordChangeGuard for RecordChangePauseGuard {}
+impl toolkit_store::RecordChangePublication for RecordChangePause {
+    fn begin_record_change(
+        &self,
+    ) -> toolkit_store::StoreResult<Box<dyn toolkit_store::RecordChangeGuard + '_>> {
+        if let Some(entered) = self.entered.lock().unwrap().take() {
+            let _ = entered.send(());
+        }
+        let (released, ready) = &self.released;
+        let released = released.lock().unwrap();
+        drop(
+            ready
+                .wait_timeout_while(released, self.hold, |released| !*released)
+                .unwrap(),
+        );
+        Ok(Box::new(RecordChangePauseGuard))
+    }
 }
 
 struct Prepared {
@@ -97,6 +139,34 @@ async fn prepare_with(stage: &'static str, act: AtCheck) -> Prepared {
             let publication = fixture.source.owner.publication();
             let source = fixture.source.clone();
             let original = fixture.submission.original.clone();
+            // A row of the owner's store for the record change made behind
+            // the owner change, written before the preparation starts.
+            let record_row = if matches!(act, AtCheck::RecordChangeBehind(_)) {
+                let row = fixture
+                    .store
+                    .admit(toolkit_store::AdmissionRequest {
+                        key: toolkit_store::StoreKey {
+                            realm: fixture.scope.realm.clone(),
+                            owner: "toolkit/test-record-change".into(),
+                            id: "behind-owner-change".into(),
+                        },
+                        admission_key: "test-record-change-behind-owner-change".into(),
+                        data: toolkit_store::RecordData {
+                            schema: "toolkit.test.record_change".into(),
+                            version: 1,
+                            body: serde_json::json!({}),
+                        },
+                        events: vec![],
+                        effects: vec![],
+                    })
+                    .await
+                    .unwrap()
+                    .record()
+                    .clone();
+                Some((fixture.store.clone(), row))
+            } else {
+                None
+            };
             let probe = reached.clone();
             let act = Mutex::new(Some(act));
             let runtime = tokio::runtime::Handle::current();
@@ -126,6 +196,57 @@ async fn prepare_with(stage: &'static str, act: AtCheck) -> Prepared {
                             .join()
                             .unwrap();
                         }
+                        Some(AtCheck::RecordChangeBehind(hold)) => {
+                            // The pause first: the next record change takes
+                            // the store's one connection and pauses there for
+                            // the hold; then the held owner change begins.
+                            let (entered, entering) = std::sync::mpsc::sync_channel(1);
+                            let pause = Arc::new(RecordChangePause {
+                                entered: Mutex::new(Some(entered)),
+                                released: (Mutex::new(false), std::sync::Condvar::new()),
+                                hold,
+                            });
+                            source
+                                .owner
+                                .observe_next_record_change_for_test(pause.clone());
+                            let (store, row) = record_row.clone().expect("the record's row");
+                            // A blocking thread, not a task: this hook blocks
+                            // its worker below, and a task spawned from that
+                            // worker would wait in its LIFO slot, which no
+                            // other worker steals.
+                            let writer = runtime.clone();
+                            let writing = runtime.spawn_blocking(move || {
+                                writer.block_on(async move {
+                                    store
+                                        .compare_and_swap(toolkit_store::Transition {
+                                            key: row.key.clone(),
+                                            expected_revision: row.revision,
+                                            expected_digest: Some(row.content_digest.clone()),
+                                            claim: None,
+                                            data: row.data.clone(),
+                                            events: vec![],
+                                            effects: vec![],
+                                        })
+                                        .await
+                                        .map(|_| ())
+                                })
+                            });
+                            assert!(
+                                entering.recv_timeout(Duration::from_secs(10)).is_ok(),
+                                "a record change holds the store's connection"
+                            );
+                            let change = HeldChange::begin(publication.clone(), Some(hold));
+                            assert!(probe.change.lock().unwrap().replace(change).is_none());
+                            assert!(
+                                probe
+                                    .record_change
+                                    .lock()
+                                    .unwrap()
+                                    .replace(writing)
+                                    .is_none()
+                            );
+                            assert!(probe.record_pause.lock().unwrap().replace(pause).is_none());
+                        }
                         None => {}
                     }
                 }));
@@ -134,16 +255,30 @@ async fn prepare_with(stage: &'static str, act: AtCheck) -> Prepared {
                 .prepare_task(&tasks, ReportPreparation::Software)
                 .await;
             let elapsed = started.elapsed();
+            if let Some(pause) = reached.record_pause.lock().unwrap().take() {
+                pause.release();
+            }
             if let Some(change) = reached.change.lock().unwrap().take() {
                 change.release();
+            }
+            let record_change = reached.record_change.lock().unwrap().take();
+            if let Some(writing) = record_change {
+                writing.await.unwrap().unwrap();
             }
             (result, elapsed, remaining)
         }),
     ))
     .catch_unwind()
     .await;
+    if let Some(pause) = reached.record_pause.lock().unwrap().take() {
+        pause.release();
+    }
     if let Some(change) = reached.change.lock().unwrap().take() {
         change.release();
+    }
+    let record_change = reached.record_change.lock().unwrap().take();
+    if let Some(writing) = record_change {
+        let _ = writing.await;
     }
     report.release();
     report.leaf.context.lock().unwrap().take();
@@ -231,6 +366,67 @@ async fn real_denial_at_the_task_check_stays_denied_without_waiting() {
     assert_eq!(prepared.reached.count("prepare.service_task"), 0);
 }
 
+// A selected install's outlasting await, named by the round 20 prints: the
+// preparation's snapshot reads the owner's store, whose one connection a
+// record change holds while it waits for an owner change of the shared
+// publication held past Core's bound. The preparation's one deadline, from
+// its start, ends that wait: it answers ReprepareRequired at the bound,
+// typed, and nothing past the snapshot is made.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owner_change_held_behind_a_record_change_at_the_snapshot_ends_typed_within_the_bound() {
+    let prepared = prepare_with(
+        "prepare.snapshot",
+        AtCheck::RecordChangeBehind(OWNER_CHANGE_WAIT_BOUND * 2),
+    )
+    .await;
+    assert_tool_time_covers_the_wait(prepared.remaining);
+    assert!(
+        matches!(prepared.result, Err(ServiceTaskError::ReprepareRequired(_))),
+        "a change that outlasts the preparation's deadline stays a typed refusal to rebuild: {:?}",
+        prepared.result.as_ref().err()
+    );
+    assert!(
+        prepared.elapsed >= OWNER_CHANGE_WAIT_BOUND - Duration::from_millis(100)
+            && prepared.elapsed < OWNER_CHANGE_WAIT_BOUND + Duration::from_secs(1),
+        "the preparation waits until its one deadline, not for the whole hold: {:?}",
+        prepared.elapsed
+    );
+    assert_eq!(prepared.reached.count("prepare.snapshot"), 1);
+    assert_eq!(
+        prepared.reached.count("prepare.authorization"),
+        0,
+        "nothing past the snapshot was made"
+    );
+    assert_eq!(prepared.reached.count("prepare.service_task"), 0);
+}
+
+// The same record change behind an owner change that ends within the bound:
+// the snapshot's reads wait it out and the preparation completes once, as
+// before the deadline (an invariant row, the same before and after it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owner_change_settled_behind_a_record_change_at_the_snapshot_is_waited_out() {
+    let hold = Duration::from_millis(300);
+    let prepared = prepare_with("prepare.snapshot", AtCheck::RecordChangeBehind(hold)).await;
+    assert_tool_time_covers_the_wait(prepared.remaining);
+    let task = prepared
+        .result
+        .expect("a record change behind a settled change is waited out");
+    assert_eq!(task.consumer_member(), Some(MEMBER));
+    assert!(
+        prepared.elapsed >= hold - Duration::from_millis(50),
+        "the snapshot waited for the record change: {:?}",
+        prepared.elapsed
+    );
+    for stage in [
+        "prepare.snapshot",
+        "prepare.authorization",
+        "prepare.service_task",
+        "prepare.final_authorization",
+    ] {
+        assert_eq!(prepared.reached.count(stage), 1, "{stage}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn settled_owner_change_at_the_final_check_keeps_one_preparation() {
     let hold = Duration::from_millis(200);
@@ -296,6 +492,11 @@ async fn check_after_effect_with(act: AtCheck) -> CheckedAfterEffect {
                         .record_operation_cancelled(&fixture.submission.original)
                         .await
                         .unwrap();
+                }
+                AtCheck::RecordChangeBehind(_) => {
+                    unreachable!(
+                        "a record change behind an owner change acts at a preparation stage"
+                    )
                 }
             }
             let started = Instant::now();

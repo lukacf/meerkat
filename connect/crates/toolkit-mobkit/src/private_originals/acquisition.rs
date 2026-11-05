@@ -368,6 +368,13 @@ impl PrivateOriginals {
         if own {
             return Ok(());
         }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::BasisRead,
+            claims.original_work.work.as_str(),
+        ) {
+            crate::source_hold_probe::retain(self.hold_sources_for_test(hold));
+        }
         let basis = self
             .owner
             .admitted_original_basis(&claims.ingress_namespace, &claims.original_work)
@@ -1082,6 +1089,47 @@ mod tests {
             fixture.adapter.acquisition_original(&context).await,
             Err(PrivateOriginalError::Denied)
         ));
+    }
+
+    // A named-only ancestor's admitted basis read (the parent's and the
+    // grandparent's, named by the child's own association) meets the source
+    // collection held by another owner's short section: it waits the hold out
+    // within its deadline, and the acquisition original resolves.
+    #[tokio::test]
+    async fn named_only_ancestor_basis_read_waits_out_a_held_source_collection() {
+        let fixture = Fixture::new(true).await;
+        let (parent, _, _) = fixture.descendant("parent", &fixture.original).await;
+        let (child, _, input) = fixture.descendant("child", &parent).await;
+        let context = fixture.context(
+            fixture.session.clone(),
+            input.clone(),
+            fixture.identity_for(&child, &input, &input),
+        );
+        let hold = std::time::Duration::from_millis(150);
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = hits.clone();
+        crate::source_hold_probe::install(Arc::new(move |site, _key| {
+            (site == crate::source_hold_probe::Site::BasisRead
+                && seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0)
+                .then_some(crate::source_hold_probe::Hold {
+                    owner_change: false,
+                    duration: hold,
+                })
+        }));
+        let started = std::time::Instant::now();
+        let resolved = fixture.adapter.acquisition_original(&context).await;
+        let elapsed = started.elapsed();
+        crate::source_hold_probe::clear();
+        let resolved = resolved.expect("a held collection is waited out, not refused");
+        assert_eq!(resolved.contributors.len(), 3);
+        assert!(
+            hits.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "a named-only basis read was made"
+        );
+        assert!(
+            elapsed >= hold - std::time::Duration::from_millis(50),
+            "the read waited for the hold: {elapsed:?}"
+        );
     }
 
     #[tokio::test]

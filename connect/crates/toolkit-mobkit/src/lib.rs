@@ -855,9 +855,11 @@ pub mod observe_helper_probe {
 /// Test seam: a step of a Find's helper work at which a control can have the
 /// owner's originals collection held on a thread of its own, inside an owner
 /// change on the owner's publication or without one, as another helper's
-/// first binding write holds them. Each site is named by its [`Site`] and a
-/// key: the Find's call ID where the step has it, else the helper's work item
-/// or its work admission key.
+/// first binding write holds them (at [`Site::IntentsWriter`], the owner's
+/// source writer instead, as another writer holds it across its durable
+/// write). Each site is named by its [`Site`] and a key: the Find's call ID
+/// where the step has it, else the helper's work item, its work admission
+/// key, a source row's ID or an original work.
 #[cfg(any(test, feature = "test-support"))]
 pub mod source_hold_probe {
     use std::sync::{Arc, Mutex, PoisonError};
@@ -893,6 +895,37 @@ pub mod source_hold_probe {
         /// is read, just before the observation's first fenced access; keyed
         /// by the helper's work admission key.
         Observe,
+        /// A fenced helper admission or observation (the work step's create,
+        /// then the Find's live-replay observation), its create or read just
+        /// done, before its check of the helper's sources under the source
+        /// writer; keyed by the helper's work admission key.
+        FencedAfter,
+        /// A helper's grant issuance just before its intent write takes the
+        /// source writer; the hold is of the source writer itself, not the
+        /// collection; keyed by work item.
+        IntentsWriter,
+        /// A helper's grant issuance with the source writer taken, before
+        /// its source check and its intent write; keyed by work item.
+        Intents,
+        /// A helper's grant issuance, its intent write just done, before its
+        /// source check; keyed by work item.
+        IntentsWritten,
+        /// A first binding write inside its owner change, just before it
+        /// takes the collection; keyed by the source row's ID.
+        FirstWrite,
+        /// A helper preparation's capture binder, inside Core's governed
+        /// bind, before its source check; keyed by work item.
+        PrepareBind,
+        /// A helper submission (`advance.submit_helper`) before its source
+        /// check; keyed by work item.
+        Submit,
+        /// A helper submission's rebind, its wait settled, before its source
+        /// check; keyed by work item.
+        RebindStop,
+        /// A named-only contributor's admitted basis read (a Find's
+        /// acquisition original, a result source), just before it takes the
+        /// collection; keyed by the contributor's original work.
+        BasisRead,
     }
     /// A control's answer at a site, given its key.
     pub type Probe = Arc<dyn Fn(Site, &str) -> Option<Hold> + Send + Sync>;

@@ -942,6 +942,13 @@ impl PrivateOriginals {
         {
             return Err(PrivateOriginalError::Denied);
         }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::Submit,
+            &prepared.admitted.item_id().to_string(),
+        ) {
+            crate::source_hold_probe::retain(self.hold_sources_for_test(hold));
+        }
         self.owner
             .check_admitted_helper(&prepared.admitted)
             .map_err(helper_error)?;
@@ -1151,6 +1158,13 @@ impl PrivateOriginals {
         if self.with_new_work_admission(|| ()).is_err() {
             return Some(HelperRebindStop::SourceClosed);
         }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::RebindStop,
+            &prepared.admitted.item_id().to_string(),
+        ) {
+            crate::source_hold_probe::retain(self.hold_sources_for_test(hold));
+        }
         if self
             .owner
             .check_admitted_helper(&prepared.admitted)
@@ -1314,6 +1328,13 @@ impl GovernedInputBinder for PrepareHelperBinder {
             .source
             .upgrade()
             .ok_or("Toolkit helper source is unavailable")?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::PrepareBind,
+            &self.admitted.item_id().to_string(),
+        ) {
+            crate::source_hold_probe::retain(source.hold_sources_for_test(hold));
+        }
         source
             .owner
             .check_admitted_helper(&self.admitted)

@@ -267,6 +267,13 @@ impl PrivateOriginals {
         if own {
             return Ok(());
         }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::BasisRead,
+            claims.original_work.work.as_str(),
+        ) {
+            crate::source_hold_probe::retain(self.hold_sources_for_test(hold));
+        }
         let basis = self
             .owner
             .admitted_original_basis(&claims.ingress_namespace, &claims.original_work)
@@ -347,5 +354,63 @@ mod tests {
             adapter.require_result_source(&foreign, true),
             Err(PrivateOriginalError::Unavailable)
         ));
+    }
+
+    // A named-only result source's admitted basis read meets the source
+    // collection held by another owner's short section: it waits the hold out
+    // within its deadline, and the admitted source answers current.
+    #[tokio::test]
+    async fn named_only_result_source_basis_read_waits_out_a_held_source_collection() {
+        let directory = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let owner = initialized(&directory.path().join("grants"));
+        let adapter =
+            private_originals(owner.clone(), &directory.path().join("source.sqlite3")).await;
+        let base = owner
+            .grants()
+            .issue_root(
+                &principal("admin"),
+                EvidenceId::new("held-result-source-base").unwrap(),
+                principal("admin"),
+                None,
+                ExecutionRestrictions::unrestricted(),
+            )
+            .unwrap();
+        let association = claims("held-result-source", &base);
+        let original = owner
+            .enroll_new_authenticated(
+                association.clone(),
+                source(&association),
+                &principal("user"),
+                &principal("frontend"),
+                &principal("admin"),
+                EvidenceId::new("held-result-source-child").unwrap(),
+                ExecutionRestrictions::unrestricted(),
+                |_| Ok(None),
+            )
+            .unwrap();
+        owner.record_candidate(&original).unwrap().admit().unwrap();
+        let association = original.association();
+        adapter.require_result_source(association, false).unwrap();
+        let hold = std::time::Duration::from_millis(150);
+        crate::source_hold_probe::install(Arc::new(move |site, _key| {
+            (site == crate::source_hold_probe::Site::BasisRead).then_some(
+                crate::source_hold_probe::Hold {
+                    owner_change: false,
+                    duration: hold,
+                },
+            )
+        }));
+        let started = std::time::Instant::now();
+        let checked = adapter.require_result_source(association, false);
+        let elapsed = started.elapsed();
+        crate::source_hold_probe::clear();
+        checked.expect("a held collection is waited out, not refused");
+        assert!(
+            elapsed >= hold - std::time::Duration::from_millis(50),
+            "the read waited for the hold: {elapsed:?}"
+        );
     }
 }

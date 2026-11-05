@@ -538,7 +538,19 @@ impl AgentToolDispatcher for FindAndInstallTool {
         find_entry_probe::observe(call.id);
         // Spend the exact native review once before host admission can retain
         // work. Actual entered handoffs keep clones if this caller is lost.
-        let (entering, custody) = context.enter_reviewed_effect_held(call, None)?;
+        // The entry waits out an owner change of the work's owners that
+        // another actor is making (another original's admission or binding
+        // publishing on the shared publication), within this dispatch
+        // attempt's own owner-change bounds, and then stages again from the
+        // current owners. It never repeats the dispatch: the review is still
+        // spent once, after the staging that passed, and a refusal met before
+        // the effect stays certified not dispatched. At R2 a change met here
+        // supersedes the reviewed decision, so the entry settles as
+        // review_unsatisfied (context_changed) instead of entering, by
+        // design: no effect runs under a decision that was not reviewed.
+        let (entering, custody) = context
+            .enter_reviewed_effect_held_after_owner_change(call, None)
+            .await?;
         let context = entering.as_ref().unwrap_or(context);
         // Convert this exact refreshed dispatch and its single entry. A
         // conversion refusal is post-entry; preserve Core's unknown outcome.

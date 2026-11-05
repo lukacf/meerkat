@@ -1602,9 +1602,13 @@ async fn disabled_and_read_only_modes_fail_closed_at_the_runtime_surface() {
 
 /// A runtime (mob id `authority`, unique per test: mob ids name process-wide
 /// comms participants) whose identity-first context wants one managed edge
-/// from an active identity to a dormant one, and the edge reconcile expects
-/// to skip it: the dormant endpoint is not a member.
-async fn runtime_with_a_dormant_edge_endpoint(
+/// from an active identity to another one Core holds no member of, and the
+/// edge reconcile expects to skip it: that endpoint is not a member. Each
+/// registration declares its identity in Core's mob, which seats it Dormant
+/// (and Core wires a Dormant member's edges without materializing it), so
+/// the second endpoint's member is retired after its registration, as a
+/// host's retire does.
+async fn runtime_with_an_unheld_edge_endpoint(
     root: &Path,
     authority: &str,
 ) -> (UnifiedRuntime, DesiredPeerEdge) {
@@ -1666,6 +1670,11 @@ async fn runtime_with_a_dormant_edge_endpoint(
         .register(dormant_spec.clone())
         .await
         .expect("the identity registers");
+    unified
+        .mob_handle()
+        .retire(meerkat_meta::member_comms_id::roster_member_id_for_identity(dormant.as_str()))
+        .await
+        .expect("Core retires the second endpoint's member");
     let managed = ManagedPeerEdge::new(active.clone(), dormant.clone()).expect("managed edge");
     identity_runtime.set_desired_peer_edges(vec![managed]).await;
     unified.attach_identity_first_context(Arc::new(IdentityFirstRuntimeContext::new(
@@ -1681,10 +1690,10 @@ async fn runtime_with_a_dormant_edge_endpoint(
 }
 
 #[tokio::test]
-async fn identity_reconcile_reports_dormant_endpoint_as_missing_and_incomplete() {
+async fn identity_reconcile_reports_an_unheld_endpoint_as_missing_and_incomplete() {
     let root = tempfile::tempdir().expect("tempdir");
     let (unified, expected) =
-        runtime_with_a_dormant_edge_endpoint(root.path(), "identity-dormant").await;
+        runtime_with_an_unheld_edge_endpoint(root.path(), "identity-dormant").await;
 
     let report = unified.reconcile_edges().await;
     assert_eq!(report.desired_edges, vec![expected.clone()]);
@@ -1693,20 +1702,20 @@ async fn identity_reconcile_reports_dormant_endpoint_as_missing_and_incomplete()
     assert!(report.failures.is_empty());
     assert!(
         !report.is_complete(),
-        "a desired edge with a dormant endpoint must remain incomplete"
+        "a desired edge with an endpoint Core holds no member of must remain incomplete"
     );
 
     shutdown(&unified).await;
 }
 
 /// An edge reconcile that only skipped edges failed nothing, so it does not
-/// page: lazy identity bootstrap leaves an edge to a dormant endpoint
-/// pending by design, on every boot. The report still lists the edge.
+/// page: an edge to an endpoint Core holds no member of stays pending until
+/// the identity is seated again. The report still lists the edge.
 #[tokio::test]
 async fn an_edge_reconcile_that_only_skipped_edges_does_not_page() {
     let root = tempfile::tempdir().expect("tempdir");
     let (mut unified, expected) =
-        runtime_with_a_dormant_edge_endpoint(root.path(), "identity-dormant-alert").await;
+        runtime_with_an_unheld_edge_endpoint(root.path(), "identity-dormant-alert").await;
     let captured: Arc<tokio::sync::Mutex<Vec<meerkat_meta::ErrorEvent>>> =
         Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let sink = captured.clone();

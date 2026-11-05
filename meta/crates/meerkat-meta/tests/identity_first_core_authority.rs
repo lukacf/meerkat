@@ -650,14 +650,6 @@ impl Boot {
             })
     }
 
-    /// The roster compile's refusal, for a roster the compile must refuse.
-    async fn compile_refusal(&self, roster: &[DurableAgentSpec]) -> IdentityRuntimeError {
-        match self.context.bootstrap_roster(roster).await {
-            Ok(compiled) => panic!("the roster compile must refuse: {compiled:?}"),
-            Err(error) => error,
-        }
-    }
-
     /// A host adopts `identity`'s live member through Core, exactly as it
     /// runs now: Core then holds an identity intent row for it and its
     /// reconciler drives it.
@@ -3399,13 +3391,15 @@ async fn the_first_boot_keeps_an_unmarked_rostered_member_and_leaves_a_dropped_o
 
 /// A member the host made directly on the mob under an identity's member id
 /// carries no `agent_identity` label naming the identity. A roster that
-/// later declares the identity does not adopt it: the compile refuses typed,
-/// naming the member and its session, before it registers anything, and
+/// later declares the identity does not adopt it: Core refuses that
+/// identity's declaration typed, naming the member and its session, and
 /// leaves the member as the host made it (no respawn, its transcript stays
-/// its own). Once the host labels the member for the identity on its
-/// session, the next compile adopts it the way it adopts a member Meta 0.9.3
-/// spawned: one respawn onto the same session, marked, with the transcript
-/// kept.
+/// its own). The refused spec is registered, so its doors answer the
+/// refusal, but it never reads live: its status, the status list and its
+/// health read it Broken and name no member, and it is not active. Once the
+/// host labels the member for the identity on its session, the next compile
+/// adopts it as it is (Core's legacy adoption takes either legacy mark): no
+/// respawn, the same session and transcript, and the identity reads live.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_raw_member_under_a_declared_identitys_member_id_is_refused_until_labelled() {
     let temp = tempfile::TempDir::new().expect("temp dir");
@@ -3433,23 +3427,38 @@ async fn a_raw_member_under_a_declared_identitys_member_id_is_refused_until_labe
         "Core restores the raw member: {raw:?}"
     );
     for compile in ["first", "second"] {
-        let refusal = boot.compile_refusal(&roster).await;
-        assert!(
-            matches!(
-                &refusal,
-                IdentityRuntimeError::IdentityNameHeldByRawMember {
-                    identity,
-                    session_id,
-                    ..
-                } if *identity == alice && session_id.as_ref() == Some(&session)
+        let compiled = boot.compile_outcomes(&roster).await;
+        match compiled.outcomes.get(&alice) {
+            Some(RestoreOutcome::Refused(error)) => assert!(
+                matches!(
+                    error.as_ref(),
+                    IdentityRuntimeError::IdentityNameHeldByRawMember {
+                        identity,
+                        session_id,
+                        ..
+                    } if *identity == alice && session_id.as_ref() == Some(&session)
+                ),
+                "{compile} compile: a roster entry under a raw member's member id is that \
+                 identity's typed refusal: {error:?}"
             ),
-            "{compile} compile: a roster entry under a raw member's member id is a typed \
-             refusal: {refusal:?}"
-        );
+            other => panic!(
+                "{compile} compile: a roster entry under a raw member's member id is that \
+                 identity's typed refusal: {other:?}"
+            ),
+        }
         assert_eq!(
             boot.core_last_binding(&alice).await,
             raw,
             "{compile} compile: the refusal leaves the member as the host made it, unrespawned"
+        );
+        assert_refused_spec_never_reads_live(&boot, &alice, compile).await;
+        assert!(
+            matches!(
+                boot.runtime().materialize(&alice).await,
+                Err(IdentityRuntimeError::IdentityNameHeldByRawMember { ref identity, .. })
+                    if *identity == alice
+            ),
+            "{compile} compile: the door answers the typed refusal"
         );
     }
 
@@ -3462,17 +3471,30 @@ async fn a_raw_member_under_a_declared_identitys_member_id_is_refused_until_labe
         ]),
     )
     .await;
+    let labelled = boot.core_last_binding(&alice).await;
+    assert!(labelled.live, "the relabelled member is live: {labelled:?}");
     boot.compile(&roster).await;
     let adopted = boot.core_last_binding(&alice).await;
-    assert!(
-        adopted.live && adopted.marked,
-        "the labelled member is adopted and marked: {adopted:?}"
+    assert_eq!(
+        adopted, labelled,
+        "the labelled member is adopted as it is: no respawn"
     );
     assert_eq!(
         adopted.session,
         Some(session.clone()),
         "the adoption keeps the session"
     );
+    let status = boot
+        .runtime()
+        .status(&alice)
+        .await
+        .expect("status of alice");
+    assert_eq!(
+        status.state,
+        meerkat_meta::identity_first::IdentityLifecycleState::Active,
+        "the adopted member is alice's: she reads live"
+    );
+    assert_eq!(status.session_id, Some(session.clone()));
     boot.send(&alice, "Which token did I give you?").await;
     let request = boot
         .capture
@@ -3481,6 +3503,60 @@ async fn a_raw_member_under_a_declared_identitys_member_id_is_refused_until_labe
     assert!(request.contains(TOKEN), "the adoption keeps the transcript");
     boot.assert_continuity_and_leases_unread();
     boot.stop().await;
+}
+
+/// A spec Core refused for good never reads live: its status, its entry in
+/// the status list and its health read it Broken and name no member, and it
+/// is not active.
+async fn assert_refused_spec_never_reads_live(boot: &Boot, identity: &AgentIdentity, after: &str) {
+    let runtime = boot.runtime();
+    let status = runtime
+        .status(identity)
+        .await
+        .unwrap_or_else(|error| panic!("{after}: the refused spec is registered: {error}"));
+    assert_eq!(
+        status.state,
+        meerkat_meta::identity_first::IdentityLifecycleState::Broken,
+        "{after}: the refused spec reads Broken"
+    );
+    assert!(
+        status.agent_runtime_id.is_none()
+            && status.session_id.is_none()
+            && status.member_id.is_none()
+            && status.generation.is_none(),
+        "{after}: the refused spec names no member: {status:?}"
+    );
+    let listed = runtime.statuses().await.expect("the status list");
+    let listed = listed
+        .iter()
+        .find(|status| status.identity == *identity)
+        .unwrap_or_else(|| panic!("{after}: the status list names the refused spec"));
+    assert_eq!(
+        listed.state,
+        meerkat_meta::identity_first::IdentityLifecycleState::Broken,
+        "{after}: the status list reads the refused spec Broken"
+    );
+    assert!(
+        listed.session_id.is_none() && listed.agent_runtime_id.is_none(),
+        "{after}: the status list names no member for the refused spec: {listed:?}"
+    );
+    let health = runtime
+        .member_health(identity)
+        .await
+        .unwrap_or_else(|error| panic!("{after}: the refused spec's health: {error}"));
+    assert_eq!(
+        health.state,
+        meerkat_meta::identity_first::IdentityLifecycleState::Broken,
+        "{after}: the refused spec's health reads Broken"
+    );
+    assert!(
+        health.member_id.is_none() && health.session_id.is_none(),
+        "{after}: the refused spec's health names no member: {health:?}"
+    );
+    assert!(
+        !runtime.is_active(identity).await,
+        "{after}: the refused spec is not active"
+    );
 }
 
 /// The other remedy: the host retires its raw member before a roster
@@ -3533,13 +3609,15 @@ async fn a_retired_raw_member_never_becomes_a_declared_identitys_history() {
     boot.stop().await;
 }
 
-/// Delete reads the identity's previous life as the wake does. After Core
-/// retired alice's member (as a host does: Meta's own retire only releases
-/// it), the host made and retired a raw member under her member id, so
-/// Core's last binding of the member id is that raw member's. The delete
-/// finds no life of alice's to end: it answers as for an identity Core never
-/// spawned and leaves Core's last binding as the raw member left it, rather
-/// than distilling that member's session and starting a fresh life over it.
+/// Delete reads the identity's previous life as the wake does. Before any
+/// roster declared alice, the host made a raw member under her member id;
+/// the roster that then lists her is refused for her alone (the raw member
+/// holds the name: a declared identity's entry would refuse the raw spawn
+/// instead), and the host retires the raw member, so Core's last binding of
+/// the member id is that raw member's. The delete finds no life of alice's
+/// to end: it answers as for an identity Core never spawned and leaves
+/// Core's last binding as the raw member left it, rather than distilling
+/// that member's session and starting a fresh life over it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_delete_never_takes_a_retired_raw_members_session_as_the_identitys_life() {
     let temp = tempfile::TempDir::new().expect("temp dir");
@@ -3550,8 +3628,7 @@ async fn a_delete_never_takes_a_retired_raw_members_session_as_the_identitys_lif
     const TOKEN: &str = "MARKER-RAW-DELETE-8-MIKE";
 
     let boot = Boot::start(&state, &mob_id, &roster).await;
-    boot.compile(&roster).await;
-    boot.retire_core_member(&alice).await;
+    boot.compile(&[]).await;
     let raw_session = boot
         .spawn_core_member(
             &alice,
@@ -3559,6 +3636,18 @@ async fn a_delete_never_takes_a_retired_raw_members_session_as_the_identitys_lif
             BTreeMap::from([("team".to_string(), "direct".to_string())]),
         )
         .await;
+    let compiled = boot.compile_outcomes(&roster).await;
+    assert!(
+        matches!(
+            compiled.outcomes.get(&alice),
+            Some(RestoreOutcome::Refused(error)) if matches!(
+                error.as_ref(),
+                IdentityRuntimeError::IdentityNameHeldByRawMember { identity, .. }
+                    if *identity == alice
+            )
+        ),
+        "the raw member holds alice's member id: {compiled:?}"
+    );
     boot.retire_core_member(&alice).await;
     let before = boot.core_last_binding(&alice).await;
     assert!(
@@ -3586,8 +3675,10 @@ async fn a_delete_never_takes_a_retired_raw_members_session_as_the_identitys_lif
 /// the roster lists it: the compile reports the typed host-adopted conflict
 /// and leaves Core's binding as it was. Nor does the compile retire an
 /// adopted member whose identity the roster does not list, although the
-/// member carries Meta's identity label. An unmarked identity beside them is
-/// respawned by the same compile.
+/// member carries Meta's identity label. A member Meta 0.9.3 seated beside
+/// them (Meta's identity label, no marker) is adopted by the same compile as
+/// it is: Core's legacy adoption takes either legacy mark, and nothing
+/// respawns the member.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_roster_compile_never_respawns_or_retires_a_host_adopted_member() {
     let temp = tempfile::TempDir::new().expect("temp dir");
@@ -3643,13 +3734,14 @@ async fn the_roster_compile_never_respawns_or_retires_a_host_adopted_member() {
         adopted_unlisted,
         "the compile never retires an adopted member the roster does not list"
     );
-    let respawned = boot.core_last_binding(&bob).await;
-    assert!(
-        respawned.live && respawned.marked && respawned.generation > unmarked.generation,
-        "the unmarked identity beside them is respawned by the same compile: {unmarked:?} -> \
-         {respawned:?}"
+    let kept = boot.core_last_binding(&bob).await;
+    assert_eq!(
+        kept, unmarked,
+        "the member Meta 0.9.3 seated beside them is adopted as it is by the same compile: no \
+         respawn"
     );
-    assert_eq!(respawned.session, Some(bob_session), "onto its session");
+    assert!(kept.live, "bob's member stays live: {kept:?}");
+    assert_eq!(kept.session, Some(bob_session), "on its session");
     boot.assert_continuity_and_leases_unread();
     boot.stop().await;
 }
@@ -3887,15 +3979,16 @@ async fn registration_declares_the_identity_and_core_seats_it_dormant_then_keeps
     boot.stop().await;
 }
 
-/// A declaration Core refuses registers nothing. A raw member a host
-/// spawned under the identity's member id with no legacy mark holds the
-/// name, so Core refuses the identity (`NameHeldByWorker`): the identity
-/// stays unregistered and Core's member is untouched.
-///
-/// RED (`RED-1b-records-refused.patch`): every answer registers the spec,
-/// and the refused identity is registered.
+/// A declaration Core refuses still records the spec as the identity's
+/// registration (the registration is the host's declaration), and the
+/// refused spec never reads ready or live. A raw member a host spawned under
+/// the identity's member id with no legacy mark holds the name, so Core
+/// refuses the identity (`NameHeldByWorker`): the spec is registered, its
+/// views read it Broken and name no member, it is not active, its door
+/// declares it again and answers the typed refusal, and Core's member is
+/// untouched.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_registration_core_refuses_registers_nothing() {
+async fn a_registration_core_refuses_records_the_spec_and_never_reads_live() {
     let temp = tempfile::TempDir::new().expect("temp dir");
     let state = temp.path().join("state");
     let mob_id = unique_mob_id("register-refused");
@@ -3923,11 +4016,17 @@ async fn a_registration_core_refuses_registers_nothing() {
         "{answer:?}"
     );
     assert!(
+        boot.runtime().registered_spec(&bob).await.is_ok(),
+        "the refused declaration records the spec"
+    );
+    assert_refused_spec_never_reads_live(&boot, &bob, "the refused registration").await;
+    assert!(
         matches!(
-            boot.runtime().registered_spec(&bob).await,
-            Err(IdentityRuntimeError::UnknownIdentity(_))
+            boot.runtime().materialize(&bob).await,
+            Err(IdentityRuntimeError::IdentityNameHeldByRawMember { ref identity, .. })
+                if *identity == bob
         ),
-        "a refused declaration registers nothing"
+        "the door answers the typed refusal"
     );
     assert_eq!(raw.session, Some(session));
     assert_eq!(

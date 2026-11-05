@@ -89,6 +89,8 @@ fn make_runtime(store: Arc<dyn ContinuityStore>, lease: Arc<dyn LeaseProvider>) 
 mod core_bridge;
 #[path = "support/core_members.rs"]
 mod core_members;
+#[path = "support/declared_apply.rs"]
+mod declared_apply;
 
 /// [`make_runtime`] with a session bridge whose Core is the members fixture,
 /// for scenarios that need Core to seat members.

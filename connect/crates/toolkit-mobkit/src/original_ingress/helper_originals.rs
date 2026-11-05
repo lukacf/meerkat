@@ -761,6 +761,10 @@ impl ToolkitOriginalOwner {
     /// creating anything. Current complete originating operation bounds still
     /// apply. This is NOT independent host-private recovery/settlement policy.
     /// `None` is an absence observation, never a no-effects or replay permit.
+    /// With `contended_until`, a source collection held by another owner's
+    /// short section at its source check is waited out until then, the writer
+    /// released while waiting, and the check made again; the observation
+    /// creates nothing either way.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn observe_fenced_helper(
         self: &Arc<Self>,
@@ -777,6 +781,7 @@ impl ToolkitOriginalOwner {
         own_originals: &[Arc<RetainedToolkitOriginal>],
         selection: HelperAdmissionSelection,
         review: crate::review_custody::ReviewCustody,
+        contended_until: Option<tokio::time::Instant>,
     ) -> Result<Option<AdmittedHelperWork>, OriginalWriterError> {
         self.access_fenced_helper(
             entered,
@@ -793,7 +798,7 @@ impl ToolkitOriginalOwner {
             selection,
             HelperAdmissionUse::Observe,
             review,
-            None,
+            contended_until,
         )
         .await
     }

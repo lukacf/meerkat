@@ -390,6 +390,12 @@ impl PrivateOriginals {
     /// example) ran nothing: that change is waited out with this call's one
     /// churn and the same observation made again. A refusal with no change in
     /// progress, and one the churn's bounds outlast, stand as they are.
+    ///
+    /// A source collection held by another owner's short section at the
+    /// observation's source check is contention, not an answer: it is waited
+    /// out with bounded pauses until Core's owner-change bound from this
+    /// call's first observation, the writer released while waiting, and the
+    /// check made again. The observation creates nothing.
     pub(crate) async fn observe_setup_helper_for_live_replay(
         self: &Arc<Self>,
         context: &ToolDispatchContext,
@@ -404,6 +410,8 @@ impl PrivateOriginals {
         let original = self.acquisition_original(context).await?;
         self.require_helper_selection(&selection)?;
         let mut churn = context.owner_change_churn();
+        let contended_until =
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
         loop {
             let observed = self
                 .owner
@@ -421,6 +429,7 @@ impl PrivateOriginals {
                     &original.own_originals,
                     selection.clone(),
                     review.clone(),
+                    Some(contended_until),
                 )
                 .await;
             if matches!(observed, Err(OriginalWriterError::Unavailable))

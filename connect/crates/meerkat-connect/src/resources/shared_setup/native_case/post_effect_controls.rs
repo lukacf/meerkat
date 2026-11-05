@@ -23,6 +23,8 @@ const CALL: &str = "b-helper-check";
 const INSTALL_CALL: &str = "b-helper-install";
 /// A's first install: the call the pending-at-cancel control acts on.
 const A_INSTALL_CALL: &str = "a-helper-install";
+/// A's one fresh install after that first install was refused.
+const A_FRESH_INSTALL_CALL: &str = "a-helper-install-fresh";
 /// How often the check's held entry close looks again whether the check
 /// after the join answered, and the longest it is held: the entry stays
 /// unsettled while that check runs.
@@ -146,6 +148,18 @@ fn control(at: Step, hold: Hold) -> (Arc<Observed>, Arc<Script>) {
 
 /// [`control`] with the change held at `at` of B's call `target`.
 fn control_at(at: Step, target: &'static str, hold: Hold) -> (Arc<Observed>, Arc<Script>) {
+    control_at_gated(at, target, hold, None)
+}
+
+/// [`control_at`], with `gate` (its name and condition on what the calls
+/// went through) set as the case's cancel gate: the case cancels A only once
+/// it holds.
+fn control_at_gated(
+    at: Step,
+    target: &'static str,
+    hold: Hold,
+    gate: Option<(&'static str, fn(&Observed) -> bool)>,
+) -> (Arc<Observed>, Arc<Script>) {
     let (pipes, parent) = SdkParent::pair();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
@@ -165,6 +179,19 @@ fn control_at(at: Step, target: &'static str, hold: Hold) -> (Arc<Observed>, Arc
                 .authorization_publication_for_test()
                 .expect("the host's private originals share one publication");
             install(&seen, publication, at, target, hold);
+            if let Some((name, open)) = gate {
+                let observed = seen.clone();
+                assert!(
+                    case.script
+                        .cancel_gate
+                        .set(CancelGate {
+                            name,
+                            open: Box::new(move || open(&observed)),
+                            opened: AtomicBool::new(false),
+                        })
+                        .is_ok()
+                );
+            }
             case.run().await;
         })
         .catch_unwind()
@@ -342,18 +369,38 @@ fn owner_change_at_the_install_check_is_refused_certified_and_installed_fresh() 
 // not see its result. The case's proofs hold for it all the same: its first
 // attempt refused certified with nothing run, the fresh install approved
 // once and joined, nothing done twice.
+//
+// The case cancels A once both helpers' current installs were approved, so
+// without the gate A's cancel can come before A's model saw the refusal,
+// and then no fresh install is made at all. The control's cancel gate makes
+// the case cancel A only once A's fresh install holds its own guard, and the
+// control asserts the gate opened: the scenario happens in every run.
 #[test]
 fn a_fresh_install_pending_at_its_members_cancel_keeps_its_proofs() {
     let hold = Duration::from_millis(120);
-    let (observed, script) = control_at(Step::InstallGuarded, A_INSTALL_CALL, Hold::For(hold));
+    let (observed, script) = control_at_gated(
+        Step::InstallGuarded,
+        A_INSTALL_CALL,
+        Hold::For(hold),
+        Some((
+            "A's fresh install holds its own guard",
+            |observed: &Observed| observed.count(Step::InstallGuarded, A_FRESH_INSTALL_CALL) > 0,
+        )),
+    );
+    assert!(
+        script
+            .cancel_gate
+            .get()
+            .is_some_and(|gate| gate.opened.load(Ordering::SeqCst)),
+        "the case cancelled A only once A's fresh install held its own guard"
+    );
     assert_eq!(
         observed.count(Step::InstallGuarded, A_INSTALL_CALL),
         1,
         "A's refused install's check ran once"
     );
-    let fresh = format!("{A_INSTALL_CALL}-fresh");
     assert_eq!(
-        observed.count(Step::InstallGuarded, &fresh),
+        observed.count(Step::InstallGuarded, A_FRESH_INSTALL_CALL),
         1,
         "A's fresh install held its own guard once"
     );

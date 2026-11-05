@@ -180,6 +180,18 @@ struct Script {
     // A's helper's calls still pending when the case cancelled A: emitted in
     // its current run, with no result recorded then.
     pending_at_cancel: Mutex<std::collections::BTreeSet<String>>,
+    // A control's own condition for cancelling A. Never set in the case
+    // itself, so the case's timing is unchanged.
+    cancel_gate: std::sync::OnceLock<CancelGate>,
+}
+
+/// A control's condition for the case's cancel of A: once both helpers have
+/// joined, the case waits for it within BOUND, before it reviews the
+/// approvals and cancels A. A gate never met fails the case with its name.
+struct CancelGate {
+    name: &'static str,
+    open: Box<dyn Fn() -> bool + Send + Sync>,
+    opened: AtomicBool,
 }
 /// The input and the run a model request was made in, as Core's binding
 /// names them.
@@ -1939,6 +1951,16 @@ impl Case {
         })
         .await
         .expect("two ordinary helpers must join while one physical worker is held");
+        if let Some(gate) = self.script.cancel_gate.get() {
+            tokio::time::timeout(BOUND, async {
+                while !(gate.open)() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("the control's cancel gate was never met: {}", gate.name));
+            gate.opened.store(true, Ordering::SeqCst);
+        }
         assert_eq!(entered["closed"], false);
         assert!(entered["completion"].is_null());
         let observations = launch.observations();

@@ -310,8 +310,8 @@ impl DecisionExecutorLoop {
     /// kind the loop does not hold, then the decisions due an expiry
     /// observation (their expiry is recorded), then the owed ones (approved
     /// decisions are settled first and executed; ended ones get their
-    /// notice). A decision of a kind with no executor in this loop is left
-    /// as stored.
+    /// notice). A decision of a kind with no executor in this loop, or of a
+    /// kind whose claim it does not hold, is left as stored.
     ///
     /// A pass may be dropped at any await: a permit it issued and did not
     /// settle stays outstanding, and the next pass, of this loop or the

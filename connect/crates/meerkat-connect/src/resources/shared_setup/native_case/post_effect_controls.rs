@@ -17,9 +17,11 @@ use std::time::Instant;
 const CALL: &str = "b-helper-check";
 /// B's first install: the call the install control acts on.
 const INSTALL_CALL: &str = "b-helper-install";
-/// How long the check's entry close waits, so the entry stays unsettled
-/// while the check after the join runs.
-const CLOSE_DELAY: Duration = Duration::from_millis(800);
+/// How often the check's held entry close looks again whether the check
+/// after the join answered, and the longest it is held: the entry stays
+/// unsettled while that check runs.
+const CLOSE_POLL: Duration = Duration::from_millis(10);
+const CLOSE_HOLD_LIMIT: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 struct Observed {
@@ -61,7 +63,7 @@ enum Hold {
 
 /// At `at` of B's call `target`, begin an owner change on `publication` on a
 /// thread of its own, held per `hold`. A control of B's first check also
-/// delays that check's entry close.
+/// holds that check's entry close until the check after the join answered.
 fn install(
     observed: &Arc<Observed>,
     publication: LocalAuthorizationPublication,
@@ -74,6 +76,22 @@ fn install(
     let released = Mutex::new(Some(released));
     let observed = observed.clone();
     shared_check_probe::install(Arc::new(move |step, call| {
+        let closing = step == Step::EntryClosing && call == CALL && target == CALL;
+        if closing {
+            let first = observed.count(Step::EntryClosing, CALL) == 0;
+            if first {
+                observed
+                    .steps
+                    .lock()
+                    .unwrap()
+                    .push((step, call.to_owned(), Instant::now()));
+            }
+            let since = observed.at(Step::EntryClosing, CALL)[0];
+            let answered = observed.count(Step::JoinedChecked, CALL)
+                + observed.count(Step::JoinedRefused, CALL)
+                > 0;
+            return (!answered && since.elapsed() < CLOSE_HOLD_LIMIT).then_some(CLOSE_POLL);
+        }
         observed
             .steps
             .lock()
@@ -83,7 +101,6 @@ fn install(
             return None;
         }
         match step {
-            Step::EntryClosing if target == CALL => return Some(CLOSE_DELAY),
             Step::JoinedRefused | Step::ReleasedRefused => {
                 if let Some(release) = release.lock().unwrap().take() {
                     let _ = release.send(());

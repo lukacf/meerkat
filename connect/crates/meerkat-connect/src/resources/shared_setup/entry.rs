@@ -338,8 +338,9 @@ impl McpCallContextProvider for SharedSetupCallContext {
             }
             // The private close is serialized with initial dispatch, not the
             // physical worker. Delayed emitted metadata cannot reenter after it.
+            // A control may hold the close, one pause after another.
             #[cfg(test)]
-            if let Some(pause) = crate::service_install::shared_check_probe::observe(
+            while let Some(pause) = crate::service_install::shared_check_probe::observe(
                 crate::service_install::shared_check_probe::Step::EntryClosing,
                 &monitor.id,
             ) {

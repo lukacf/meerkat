@@ -47,7 +47,14 @@ async fn find_with_change_at_entry(hold: Duration) -> Found {
             fixture.finish(&first).await.unwrap();
             let elapsed = started.elapsed();
             let (feedback, _, dispatched) = script.observations();
-            assert_eq!(feedback.len(), 1, "one Find result");
+            // Every model request after the Find carries its one result; a
+            // model request refused meanwhile by the held change is made
+            // again with the same history.
+            assert!(!feedback.is_empty(), "the Find result reached the model");
+            assert!(
+                feedback.iter().all(|seen| seen == &feedback[0]),
+                "one Find result: {feedback:?}"
+            );
             let result = feedback[0].clone();
             let reply: serde_json::Value = serde_json::from_str(&result.text_content()).unwrap();
             let helpers = fixture.source.helper_sources.lock().unwrap().len();

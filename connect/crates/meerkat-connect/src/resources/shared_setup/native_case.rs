@@ -1814,14 +1814,25 @@ impl Case {
         assert_eq!(child("a")["work"]["parent"], child("b")["work"]["parent"]);
         assert_ne!(child("a")["work"]["child"], child("b")["work"]["child"]);
         let approved = self.approved.lock().unwrap().clone();
-        assert_eq!(approved.len(), 2);
-        assert_ne!(approved[0].approval_id, approved[1].approval_id);
+        // One approval per install call that reached its review: each
+        // helper's install that went through, and a first install refused
+        // certified not dispatched after its review, whose one fresh install
+        // has its own.
+        let approval_ids = approved
+            .iter()
+            .map(|record| &record.approval_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(approval_ids.len(), approved.len());
         assert_ne!(
             self.audit_sessions["helper-a"],
             self.audit_sessions["helper-b"]
         );
         let emitted = self.script.calls.lock().unwrap().clone();
         let returned = self.script.results.lock().unwrap().clone();
+        let installed = |tag: &str| {
+            let prefix = format!("{tag}-helper");
+            format!("{prefix}-{}", self.script.retry_suffix(&prefix, "install"))
+        };
         let reviewed = approved
             .iter()
             .map(|record| {
@@ -1837,7 +1848,18 @@ impl Case {
                 assert_eq!(record.proposed_action.kind, meerkat_core::ApprovalActionKind::ToolCall);
                 assert_eq!(record.proposed_action.summary,
                     "Ask the selected package owner to install this exact checked software configuration once. The returned job and receipt are software-only observations; this does not authenticate an account, attach usable tools, grant access or complete the original task.");
-                let call_id = format!("{tag}-helper-install");
+                let call_id = record
+                    .proposed_action
+                    .body
+                    .as_ref()
+                    .and_then(|body| body["call_id"].as_str())
+                    .expect("each approval names its install call")
+                    .to_owned();
+                let first = format!("{tag}-helper-install");
+                assert!(
+                    call_id == installed(tag) || call_id == first,
+                    "an approval reviews the helper's install or its refused first attempt: {call_id}"
+                );
                 let matching = emitted.iter().filter(|(id, _, _)| id == &call_id).collect::<Vec<_>>();
                 assert_eq!(matching.len(), 1, "each approval must match one emitted call");
                 assert_eq!(matching[0].1, "setup_selected_install");
@@ -1863,9 +1885,19 @@ impl Case {
             .iter()
             .map(|(call_id, _)| call_id.as_str())
             .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(call_ids, ["a-helper-install", "b-helper-install"].into());
         assert_eq!(
-            reviewed[0].1, reviewed[1].1,
+            call_ids.len(),
+            approved.len(),
+            "one approval per install call"
+        );
+        for tag in ["a", "b"] {
+            assert!(
+                call_ids.contains(installed(tag).as_str()),
+                "helper {tag}'s install was reviewed"
+            );
+        }
+        assert!(
+            reviewed.windows(2).all(|pair| pair[0].1 == pair[1].1),
             "each exact native call independently reviews the same checked software proposal"
         );
         self.script.cancel_requested.store(true, Ordering::SeqCst);

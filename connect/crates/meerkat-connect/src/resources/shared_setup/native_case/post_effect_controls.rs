@@ -238,7 +238,10 @@ fn owner_change_outlasting_the_check_after_the_join_ends_typed_without_replay() 
         "the check waited for the change before it refused: {:?}",
         refused[0].duration_since(joined[0])
     );
-    drop(observed.change_ended());
+    assert!(
+        observed.change_ended() >= refused[0],
+        "the change was held until the check refused"
+    );
     let seen = script.seen_results.lock().unwrap();
     let result = seen.get(CALL).expect("the refused check's result");
     assert!(

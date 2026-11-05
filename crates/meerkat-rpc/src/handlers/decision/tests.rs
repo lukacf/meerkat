@@ -3,19 +3,23 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use meerkat::AgentFactory;
 use meerkat_core::approval::decision::{
-    ApproverId, DecisionHoldRequest, DecisionKind, DecisionOperationId, DecisionPhase,
+    ApproverId, DecisionHoldRequest, DecisionId, DecisionKind, DecisionOperationId, DecisionPhase,
     DecisionPrincipalKey, DecisionReference, DecisionRenderer, DecisionRendering,
-    DecisionRequestBody, DecisionSubjectKey, PresentationAudience, PresentationRecord,
-    Sha256Digest,
+    DecisionRequestBody, DecisionRow, DecisionStore, DecisionSubjectKey, PresentationAudience,
+    PresentationRecord, Sha256Digest, StoredDecision,
 };
 use meerkat_core::{
     Config, ConfigStore, MemoryConfigStore, PrincipalKind, PrincipalRef, TrustDomainId,
 };
+use meerkat_runtime::decision::{DecisionError, DecisionRefusal};
+use meerkat_store::SqliteDecisionStore;
 use serde_json::json;
 
+use super::decision_error_to_response;
 use crate::protocol::{RpcId, RpcRequest, RpcResponse};
 use crate::router::{MethodRouter, NotificationSink};
 use crate::session_runtime::SessionRuntime;
@@ -23,7 +27,11 @@ use crate::session_runtime::SessionRuntime;
 const RENDERING: &str = "Release build 7 to production, with the change log attached.";
 const METHOD_NOT_FOUND: i32 = -32601;
 const INVALID_PARAMS: i32 = -32602;
+const INTERNAL_ERROR: i32 = -32603;
 const CAPABILITY_UNAVAILABLE: i32 = -32020;
+const STORE_UNAVAILABLE: i32 = -32033;
+const STORE_CONFLICT: i32 = -32034;
+const COMMIT_UNKNOWN: i32 = -32035;
 
 fn principal(kind: PrincipalKind, id: &str) -> PrincipalRef {
     PrincipalRef::in_domain(
@@ -45,6 +53,16 @@ fn subject_digest() -> String {
 
 /// The hold of `subject` of `kind` for `approver`, until far in the future.
 fn hold_request(kind: &str, subject: &str, approver: &str) -> DecisionHoldRequest {
+    hold_request_until(kind, subject, approver, u64::MAX / 2)
+}
+
+/// The hold of `subject` of `kind` for `approver`, until `deadline_at_ms`.
+fn hold_request_until(
+    kind: &str,
+    subject: &str,
+    approver: &str,
+    deadline_at_ms: u64,
+) -> DecisionHoldRequest {
     DecisionHoldRequest::new(
         DecisionKind::new(kind).expect("kind"),
         DecisionSubjectKey::new(subject).expect("subject key"),
@@ -53,14 +71,30 @@ fn hold_request(kind: &str, subject: &str, approver: &str) -> DecisionHoldReques
         DecisionRequestBody::from_value(&json!({"build": 7})).expect("request body"),
         requester_key(),
         ApproverId::new(approver).expect("approver id"),
-        u64::MAX / 2,
+        deadline_at_ms,
         DecisionRendering::new(RENDERING).expect("rendering"),
         DecisionRenderer::new("render.v1").expect("renderer"),
     )
 }
 
-/// A router over a realm whose persistence keeps durable decisions.
-async fn persistent_router(root: &Path) -> (MethodRouter, Arc<SessionRuntime>) {
+/// The host wall clock in milliseconds, the clock a realm's decision owner
+/// reads.
+fn now_ms() -> u64 {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("a clock after the epoch");
+    u64::try_from(elapsed.as_millis()).expect("milliseconds")
+}
+
+/// Sleep until the wall clock is past `at_ms`.
+async fn wait_past(at_ms: u64) {
+    while now_ms() <= at_ms {
+        tokio::time::sleep(Duration::from_millis(at_ms.saturating_sub(now_ms()) + 10)).await;
+    }
+}
+
+/// The persistence of a realm under `root` whose decisions are durable.
+async fn realm_bundle(root: &Path) -> meerkat::PersistenceBundle {
     let (_, bundle) = meerkat::open_realm_persistence_in(
         root,
         "decisions",
@@ -69,6 +103,29 @@ async fn persistent_router(root: &Path) -> (MethodRouter, Arc<SessionRuntime>) {
     )
     .await
     .expect("open the realm");
+    bundle
+}
+
+/// The row of `decision_id` as the realm's decision store holds it, read
+/// past the owner.
+fn stored_row(store_path: &Path, decision_id: &DecisionId) -> StoredDecision {
+    match SqliteDecisionStore::in_store_path(store_path)
+        .get(decision_id)
+        .expect("read the decision store")
+        .expect("a stored row")
+    {
+        DecisionRow::Readable(row) => *row,
+        DecisionRow::Unreadable(row) => panic!("the stored row is unreadable: {row:?}"),
+    }
+}
+
+/// A router over a realm whose persistence keeps durable decisions.
+async fn persistent_router(root: &Path) -> (MethodRouter, Arc<SessionRuntime>) {
+    router_over(realm_bundle(root).await)
+}
+
+/// A router over `bundle`.
+fn router_over(bundle: meerkat::PersistenceBundle) -> (MethodRouter, Arc<SessionRuntime>) {
     let runtime = Arc::new(
         SessionRuntime::new(
             AgentFactory::minimal(),
@@ -258,6 +315,29 @@ async fn decision_list_pages_by_after_and_filters_by_kind_phase_and_approver() {
         let refused = call(&router, "decision/list", params.clone()).await;
         assert_eq!(error_code(&refused), INVALID_PARAMS, "{params}");
     }
+}
+
+#[tokio::test]
+async fn a_decision_page_of_no_decisions_is_invalid_params() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (router, runtime) = persistent_router(root.path()).await;
+    let decisions = runtime.decision_service();
+    for subject in ["build-1", "build-2"] {
+        decisions
+            .hold(hold_request("release", subject, "team:owners"), false)
+            .expect("hold");
+    }
+
+    let refused = call(&router, "decision/list", json!({"limit": 0})).await;
+    assert_eq!(error_code(&refused), INVALID_PARAMS, "{refused:?}");
+    assert!(error_data(&refused).is_null(), "{refused:?}");
+
+    let one = result(&call(&router, "decision/list", json!({"limit": 1})).await);
+    assert_eq!(decision_ids(&one).len(), 1);
+    assert!(one.get("next_after").is_some(), "{one}");
+    // A larger page than the store's reads as the store's.
+    let all = result(&call(&router, "decision/list", json!({"limit": u32::MAX})).await);
+    assert_eq!(decision_ids(&all).len(), 2);
 }
 
 #[tokio::test]
@@ -573,6 +653,255 @@ async fn an_ephemeral_runtime_answers_decision_methods_capability_unavailable() 
             error_data(&answer),
             json!({"kind": "no_decision_store"}),
             "{method}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_candidate_launch_reads_decisions_and_refuses_every_write() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let bundle = realm_bundle(root.path()).await;
+    let store_path = bundle
+        .store_path()
+        .expect("a realm's store path")
+        .to_path_buf();
+    // Held by the admitted owner, before the launch narrows it.
+    let admitted = bundle.decision_owner();
+    let held = admitted
+        .hold(hold_request("release", "build-1", "team:owners"), false)
+        .expect("hold");
+    let deadline_at_ms = now_ms() + 1_000;
+    let lapsing = admitted
+        .hold(
+            hold_request_until("release", "build-2", "team:owners", deadline_at_ms),
+            false,
+        )
+        .expect("hold");
+    let (router, _runtime) = router_over(bundle.with_candidate_launch_decisions());
+    let decision_id = held.decision_id.to_string();
+
+    // Reads answer.
+    let listing = result(&call(&router, "decision/list", json!({})).await);
+    let mut all = vec![decision_id.clone(), lapsing.decision_id.to_string()];
+    all.sort();
+    assert_eq!(decision_ids(&listing), all);
+    let read = result(&call(&router, "decision/get", json!({"decision_id": decision_id})).await);
+    assert_eq!(read["decision"]["phase"], "open");
+    let rendering = result(
+        &call(
+            &router,
+            "decision/rendering",
+            json!({"decision_id": decision_id}),
+        )
+        .await,
+    );
+    assert_eq!(rendering["rendering"], RENDERING);
+
+    // Every write is refused, typed, and nothing is written.
+    for (method, params) in [
+        (
+            "decision/present",
+            json!({"decision_id": decision_id, "presentation": complete_presentation(2_000)}),
+        ),
+        ("decision/withdraw", json!({"decision_id": decision_id})),
+    ] {
+        let refused = call(&router, method, params).await;
+        assert_eq!(
+            error_code(&refused),
+            CAPABILITY_UNAVAILABLE,
+            "{method}: {refused:?}"
+        );
+        assert_eq!(
+            error_data(&refused),
+            json!({"kind": "candidate_launch"}),
+            "{method}"
+        );
+    }
+    assert_eq!(stored_row(&store_path, &held.decision_id), held);
+
+    // Past its deadline a decision reads as expired, and nothing records the
+    // expiry.
+    wait_past(deadline_at_ms).await;
+    let lapsed = result(
+        &call(
+            &router,
+            "decision/get",
+            json!({"decision_id": lapsing.decision_id.to_string()}),
+        )
+        .await,
+    );
+    assert_eq!(lapsed["decision"]["phase"], "expired");
+    assert_eq!(lapsed["decision"]["revision"], lapsing.revision);
+    assert_eq!(stored_row(&store_path, &lapsing.decision_id), lapsing);
+}
+
+#[tokio::test]
+async fn a_torn_decision_row_answers_decision_unreadable() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let bundle = realm_bundle(root.path()).await;
+    let store_path = bundle
+        .store_path()
+        .expect("a realm's store path")
+        .to_path_buf();
+    let (router, runtime) = router_over(bundle);
+    let held = runtime
+        .decision_service()
+        .hold(hold_request("release", "build-1", "team:owners"), false)
+        .expect("hold");
+    let decision_id = held.decision_id.to_string();
+    // An open decision with a permit outstanding breaks an invariant of its
+    // machine: the row is torn.
+    let mut torn = held.clone();
+    torn.state.permit_issued = true;
+    SqliteDecisionStore::in_store_path(&store_path)
+        .replace_if_revision(held.revision, &torn)
+        .expect("tear the row");
+
+    for method in ["decision/get", "decision/rendering"] {
+        let unreadable = call(&router, method, json!({"decision_id": decision_id})).await;
+        assert_eq!(
+            error_code(&unreadable),
+            INTERNAL_ERROR,
+            "{method}: {unreadable:?}"
+        );
+        assert_eq!(
+            error_data(&unreadable),
+            json!({"kind": "decision_unreadable"}),
+            "{method}"
+        );
+    }
+    let listing = result(&call(&router, "decision/list", json!({})).await);
+    assert_eq!(listing["decisions"], json!([]));
+    let unreadable = listing["unreadable"].as_array().expect("unreadable rows");
+    assert_eq!(unreadable.len(), 1, "{listing}");
+    assert_eq!(unreadable[0]["decision_id"], decision_id);
+}
+
+fn a_decision_id() -> DecisionId {
+    DecisionId::derive(
+        &DecisionKind::new("release").expect("kind"),
+        &DecisionSubjectKey::new("build-1").expect("subject key"),
+    )
+}
+
+#[test]
+fn a_decision_error_answers_its_code_and_typed_data() {
+    let decision_id = a_decision_id();
+    let invalid = DecisionKind::new("Not A Kind").expect_err("an invalid kind");
+    let none = serde_json::Value::Null;
+    for (error_value, code, data) in [
+        (
+            DecisionError::NotFound(decision_id.clone()),
+            INVALID_PARAMS,
+            json!({"kind": "decision_not_found"}),
+        ),
+        (
+            DecisionError::Unreadable {
+                decision_id: decision_id.to_string(),
+                reason: "torn".to_owned(),
+            },
+            INTERNAL_ERROR,
+            json!({"kind": "decision_unreadable"}),
+        ),
+        (
+            DecisionError::CandidateLaunch,
+            CAPABILITY_UNAVAILABLE,
+            json!({"kind": "candidate_launch"}),
+        ),
+        // Store faults keep their commitment truth apart, with the approval
+        // store codes.
+        (
+            DecisionError::Unavailable("the store is locked".to_owned()),
+            STORE_UNAVAILABLE,
+            none.clone(),
+        ),
+        (
+            DecisionError::Unsettled(decision_id.clone()),
+            STORE_UNAVAILABLE,
+            none.clone(),
+        ),
+        (
+            DecisionError::Conflict(decision_id.clone()),
+            STORE_CONFLICT,
+            none.clone(),
+        ),
+        (
+            DecisionError::CommitUnknown(decision_id),
+            COMMIT_UNKNOWN,
+            none.clone(),
+        ),
+        (
+            DecisionError::Invalid(invalid),
+            INVALID_PARAMS,
+            none.clone(),
+        ),
+        (DecisionError::NotAReceipt, INVALID_PARAMS, none.clone()),
+        (DecisionError::Clock, INTERNAL_ERROR, none.clone()),
+        (
+            DecisionError::Machine("no transition".to_owned()),
+            INTERNAL_ERROR,
+            none.clone(),
+        ),
+        (DecisionError::ExecutorHeld, INTERNAL_ERROR, none),
+    ] {
+        let answer = decision_error_to_response(Some(RpcId::Num(1)), error_value.clone());
+        assert_eq!(error_code(&answer), code, "{error_value:?}");
+        assert_eq!(error_data(&answer), data, "{error_value:?}");
+    }
+}
+
+#[test]
+fn every_decision_refusal_answers_decision_refused_with_its_kind() {
+    let refusals = [
+        (DecisionRefusal::InvalidWindow, "invalid_window"),
+        (DecisionRefusal::SelfReview, "self_review"),
+        (DecisionRefusal::HoldConflict, "hold_conflict"),
+        (DecisionRefusal::NotOpen, "not_open"),
+        (DecisionRefusal::Expired, "expired"),
+        (DecisionRefusal::SubjectChanged, "subject_changed"),
+        (
+            DecisionRefusal::PresentationIncomplete,
+            "presentation_incomplete",
+        ),
+        (DecisionRefusal::WrongAudience, "wrong_audience"),
+        (DecisionRefusal::ReviewStage, "review_stage"),
+        (DecisionRefusal::HumanStage, "human_stage"),
+        (DecisionRefusal::EvidenceRequired, "evidence_required"),
+        (DecisionRefusal::NotEligible, "not_eligible"),
+        (DecisionRefusal::SelfApproval, "self_approval"),
+        (DecisionRefusal::WrongReviewer, "wrong_reviewer"),
+        (DecisionRefusal::NotRequester, "not_requester"),
+        (DecisionRefusal::NotApproved, "not_approved"),
+        (DecisionRefusal::BindingMismatch, "binding_mismatch"),
+        (DecisionRefusal::NotAuthorized, "not_authorized"),
+        (DecisionRefusal::SettlementOwed, "settlement_owed"),
+        (DecisionRefusal::NotOwed, "not_owed"),
+        (
+            DecisionRefusal::DecidedBeforePresentation,
+            "decided_before_presentation",
+        ),
+    ];
+    let distinct: std::collections::HashSet<DecisionRefusal> =
+        refusals.iter().map(|(refusal, _)| *refusal).collect();
+    let kinds: std::collections::HashSet<&str> = refusals.iter().map(|(_, kind)| *kind).collect();
+    assert_eq!(
+        (distinct.len(), kinds.len()),
+        (21, 21),
+        "every refusal once"
+    );
+    for (refusal, kind) in refusals {
+        let answer = decision_error_to_response(
+            Some(RpcId::Num(1)),
+            DecisionError::Refused {
+                decision_id: a_decision_id(),
+                refusal,
+            },
+        );
+        assert_eq!(error_code(&answer), INVALID_PARAMS, "{kind}");
+        assert_eq!(
+            error_data(&answer),
+            json!({"kind": "decision_refused", "decision_refusal": {"kind": kind}}),
+            "{kind}"
         );
     }
 }

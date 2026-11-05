@@ -1622,24 +1622,58 @@ impl Case {
             let mut close = self.review_close.subscribe();
             let approved = self.approved.clone();
             self.review_tasks.push(tokio::spawn(async move {
-                let mut prompt = tokio::select! {
-                    _ = close.changed() => return Ok(()),
-                    prompt = presenter.next() => prompt.ok_or("software presenter closed before review")?,
-                };
-                let record = prompt.record().clone();
-                if record.status != meerkat_core::ApprovalStatus::Pending {
-                    return Err("software review is not a fresh native decision".into());
+                // Every prompt of this helper's presenter is approved: its
+                // install, and the one fresh install the case allows after a
+                // first install refused certified not dispatched after its
+                // review. The proofs check which calls were reviewed.
+                let mut decided = Vec::new();
+                loop {
+                    let prompt = tokio::select! {
+                        _ = close.changed() => break,
+                        prompt = presenter.next() => prompt,
+                    };
+                    let Some(mut prompt) = prompt else {
+                        if decided.is_empty() {
+                            return Err("software presenter closed before review".into());
+                        }
+                        break;
+                    };
+                    let record = prompt.record().clone();
+                    if record.status != meerkat_core::ApprovalStatus::Pending {
+                        return Err("software review is not a fresh native decision".into());
+                    }
+                    prompt
+                        .decide(meerkat_core::ApprovalDecision::Approve)
+                        .map_err(|error| error.to_string())?;
+                    approved.lock().unwrap().push(record);
+                    // The exact presenter and its decided prompts stay alive
+                    // through the entered calls. Dropping them immediately
+                    // after decide would retire their owner.
+                    decided.push(prompt);
                 }
-                prompt.decide(meerkat_core::ApprovalDecision::Approve).map_err(|error|error.to_string())?;
-                approved.lock().unwrap().push(record);
-                // The exact presenter stays alive through the entered call.
-                // Dropping it immediately after decide would retire its owner.
-                if !*close.borrow() { let _ = close.changed().await; }
-                drop(prompt);
+                if !*close.borrow() {
+                    let _ = close.changed().await;
+                }
+                drop(decided);
                 drop(presenter);
                 Ok(())
             }));
         }
+    }
+
+    /// Whether helper `tag`'s current install call (its first, or its one
+    /// fresh install after a certified refusal) was approved.
+    fn install_approved(&self, tag: &str) -> bool {
+        let prefix = format!("{tag}-helper");
+        let call = format!("{prefix}-{}", self.script.retry_suffix(&prefix, "install"));
+        self.approved.lock().unwrap().iter().any(|record| {
+            record
+                .proposed_action
+                .body
+                .as_ref()
+                .and_then(|body| body["call_id"].as_str())
+                == Some(call.as_str())
+        })
     }
 
     async fn preparation(&self) -> Option<Value> {
@@ -1771,7 +1805,7 @@ impl Case {
             loop {
                 if let (Some(row), Some(worker)) = (self.preparation().await, self.worker())
                     && row["members"].as_object().unwrap().len() == 2
-                    && self.approved.lock().unwrap().len() == 2
+                    && ["a", "b"].into_iter().all(|tag| self.install_approved(tag))
                 {
                     assert_eq!(worker["entries"].as_array().unwrap().len(), 1);
                     break row;

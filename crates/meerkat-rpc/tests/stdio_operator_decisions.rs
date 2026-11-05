@@ -6,7 +6,8 @@
 //! open. When the client lists (`decision/list`), the connection presents to
 //! its operator the open decisions of the returned page that are addressed to
 //! an approver id its realm configuration lists for the operator (`operator`
-//! unless `[decisions] operator_approver_ids` says otherwise), each once, as a
+//! unless `[governance.decisions] operator_approver_ids` says otherwise),
+//! each once, as a
 //! `decision/notice` carrying the whole rendering, and records what it showed
 //! as a presentation to the approver on its own channel. The operator decides
 //! through `decision/decide` only a decision the connection presented, and
@@ -575,7 +576,9 @@ fn a_decision_held_while_the_connection_is_open_is_presented_when_the_client_lis
 #[test]
 fn an_approver_id_the_config_lists_for_the_operator_is_presented_and_decided() {
     let realm = Realm::new();
-    realm.write_config("[decisions]\noperator_approver_ids = [\"operator\", \"team:owners\"]\n");
+    realm.write_config(
+        "[governance.decisions]\noperator_approver_ids = [\"operator\", \"team:owners\"]\n",
+    );
     let decision_id = realm.hold("build-8", "team:owners");
 
     let mut server = Server::start(&realm);
@@ -595,7 +598,9 @@ fn an_approver_id_the_config_lists_for_the_operator_is_presented_and_decided() {
 #[test]
 fn an_approver_id_no_longer_listed_is_refused_at_decide() {
     let realm = Realm::new();
-    realm.write_config("[decisions]\noperator_approver_ids = [\"operator\", \"team:owners\"]\n");
+    realm.write_config(
+        "[governance.decisions]\noperator_approver_ids = [\"operator\", \"team:owners\"]\n",
+    );
     let decision_id = realm.hold("build-8", "team:owners");
 
     let mut server = Server::start(&realm);
@@ -603,7 +608,7 @@ fn an_approver_id_no_longer_listed_is_refused_at_decide() {
     server.presented(&decision_id);
     // The operator's currentness is that its configuration still lists the
     // approver id when the decide arrives.
-    realm.write_config("[decisions]\noperator_approver_ids = [\"operator\"]\n");
+    realm.write_config("[governance.decisions]\noperator_approver_ids = [\"operator\"]\n");
     let refused = server.decide(&decision_id, true);
 
     assert_refused(&refused, "not_eligible");

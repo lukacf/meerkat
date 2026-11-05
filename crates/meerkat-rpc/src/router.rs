@@ -18710,6 +18710,97 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
         assert_eq!(kept["config"]["confinement"], section);
     }
 
+    /// The approver ids the stdio operator decides for
+    /// (`[governance.decisions] operator_approver_ids`) are approver
+    /// authority, administered by the host in the realm document with the
+    /// rest of `[governance]`: a config write that adds, changes or removes
+    /// them is the caller's error carrying governance's typed refusal, and
+    /// writes nothing. A write that keeps them commits.
+    #[tokio::test]
+    async fn config_writes_cannot_administer_the_operators_approver_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let unstated = "max_tokens = 4096\n";
+        tokio::fs::write(&path, unstated).await.unwrap();
+        let (router, _notif_rx) = test_router_with_config_store(Arc::new(
+            meerkat_core::FileConfigStore::new(path.clone(), meerkat_models::canonical()),
+        ))
+        .await;
+        let refusal = |response: &RpcResponse| {
+            (
+                error_code(response),
+                response.error.as_ref().and_then(|error| error.data.clone()),
+            )
+        };
+        let governance_refusal = (
+            error::INVALID_PARAMS,
+            Some(serde_json::json!({ "type": "governance_administration_required" })),
+        );
+        let listing = |ids: serde_json::Value| serde_json::json!({ "governance": { "decisions": { "operator_approver_ids": ids } } });
+
+        let added = router
+            .dispatch(make_request(
+                "config/patch",
+                serde_json::json!({ "patch": listing(serde_json::json!(["operator", "team:owners"])) }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(refusal(&added), governance_refusal);
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), unstated);
+
+        let stated = "max_tokens = 4096\n\n[governance.decisions]\noperator_approver_ids = [\"operator\", \"team:owners\"]\n";
+        tokio::fs::write(&path, stated).await.unwrap();
+        let current = router
+            .dispatch(make_request_no_params("config/get"))
+            .await
+            .unwrap();
+        let section = result_value(&current)["config"]["governance"].clone();
+        assert_eq!(
+            section["decisions"]["operator_approver_ids"],
+            serde_json::json!(["operator", "team:owners"]),
+            "{section}"
+        );
+        let mut omitted = result_value(&current)["config"].clone();
+        omitted.as_object_mut().unwrap().remove("governance");
+        let mut widened = result_value(&current)["config"].clone();
+        widened["governance"]["decisions"]["operator_approver_ids"] =
+            serde_json::json!(["operator", "team:owners", "team:admins"]);
+        for (method, params) in [
+            (
+                "config/patch",
+                serde_json::json!({ "patch": listing(serde_json::json!(["operator", "team:owners", "team:admins"])) }),
+            ),
+            (
+                "config/patch",
+                serde_json::json!({ "patch": listing(serde_json::json!([])) }),
+            ),
+            (
+                "config/patch",
+                serde_json::json!({ "patch": { "governance": null } }),
+            ),
+            ("config/set", serde_json::json!({ "config": omitted })),
+            ("config/set", serde_json::json!({ "config": widened })),
+        ] {
+            let refused = router
+                .dispatch(make_request(method, params.clone()))
+                .await
+                .unwrap();
+            assert_eq!(refusal(&refused), governance_refusal, "{method} {params}");
+            assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), stated);
+        }
+
+        let kept = router
+            .dispatch(make_request(
+                "config/patch",
+                serde_json::json!({ "patch": { "max_tokens": 2048 } }),
+            ))
+            .await
+            .unwrap();
+        let kept = result_value(&kept);
+        assert_eq!(kept["config"]["max_tokens"], 2048);
+        assert_eq!(kept["config"]["governance"], section);
+    }
+
     /// A credential command runs as the host, outside its confinement: a
     /// JSON-RPC config write that adds one, or changes what it runs, is the
     /// caller's error carrying confinement's typed refusal and naming the

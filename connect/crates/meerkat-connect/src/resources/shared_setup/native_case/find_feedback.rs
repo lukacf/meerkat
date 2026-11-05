@@ -344,7 +344,7 @@ impl Case {
             let runs = self.script.run_prefixes(&prefix);
             assert_eq!(
                 runs,
-                [prefix.clone()],
+                std::slice::from_ref(&prefix),
                 "{prefix}: the Find proof covers the input's one run; Core ran it again"
             );
             let audit = self.find_audits(tag, self.script.find_only).await;

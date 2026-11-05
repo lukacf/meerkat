@@ -1172,7 +1172,9 @@ async fn late_birth_step<T>(
 /// runtime labelled but Core never marked resolves no principal, in this
 /// process and in a fresh one, and an unrelated worker stays a worker. The
 /// fresh process's boot roster compile retires the late identity (the
-/// roster does not list it), so only the other two are resolved there.
+/// roster does not list it, and its spawn carries both legacy marks) and
+/// leaves the labelled member as the host made it (one mark is no roster
+/// custody), so only the other two are resolved there.
 async fn late_birth_phase(path: &std::path::Path, phase: &str) {
     let (runtime, context, _) = late_birth_step(
         phase,
@@ -1244,23 +1246,26 @@ async fn late_birth_phase(path: &std::path::Path, phase: &str) {
             labelled_session
         );
     } else {
-        // The fresh process's roster pass retires a live member that
-        // carries the identity-first label for an identity the roster does
-        // not list (StableRoster lists only alice), marker or not.
+        // The fresh process's roster pass (StableRoster lists only alice)
+        // leaves a live member that carries the identity-first label alone
+        // as the host made it: the roster never declared that identity, and
+        // one legacy mark is no roster custody (Core answers it
+        // `NameHeldByWorker`, as the core_authority row
+        // `a_host_raw_spawn_labelled_agent_identity_and_unlisted_is_not_retired`
+        // pins).
         assert!(
             late_birth_step(
                 phase,
-                "verify the roster pass retired the labelled member",
+                "verify the roster pass left the labelled member",
                 runtime.mob_handle().get_member(&labelled),
             )
             .await
             .unwrap()
-            .is_none(),
-            "the roster pass retires the labelled member the roster does not list"
+            .is_some(),
+            "the roster pass leaves the labelled member the roster never declared"
         );
     }
-    // Live and labelled, or retired: either way its session resolves no
-    // principal.
+    // Live and labelled: its session resolves no principal.
     eprintln!("{phase}: resolving the labelled member without the marker");
     assert!(matches!(
         tokio::time::timeout(

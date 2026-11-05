@@ -31,7 +31,19 @@
 \* Resume. Identity 1 is bound to no session until its binding's replay, so
 \* the adoption meets a member bound to a session and one bound to none.
 \*
-\* The run explores its whole reachable space under a VIEW that leaves out
+\* The runner checks this space in two runs that split the adoption's
+\* observations by the roster's listing (AuditListings): the listed run
+\* drives the eight combinations of a listed identity, the unlisted run the
+\* eight of an unlisted one, and each checks AuditAdoptionExactlyOne and
+\* AuditRetireUnadoptedQualifies over its own eight. Under the VIEW every
+\* adoption arm but the two that record an entry is a self-loop, and those
+\* two (Adopted, AdoptedUnlisted) make the same update under the same guards
+\* but their observation conjunct, so each run reaches every state of the
+\* single run over all sixteen, and every adoption step is a step of the run
+\* its listing belongs to: the two runs check every state and step the
+\* single run checked (the runner checks that shape of the generated model).
+\*
+\* Each run explores its whole reachable space under a VIEW that leaves out
 \* model_step_count and topology_epoch, which no guard reads, with TLC
 \* coverage. Properties:
 \*   every generated invariant of ci.cfg (kept), among them the entry ones:
@@ -77,6 +89,12 @@ EXTENDS model
 \* The positions of model_step_count and topology_epoch in the generated
 \* `vars` tuple; the runner reads them from model.tla.
 CONSTANTS AuditStepIndex, AuditEpochIndex
+
+\* The values of the roster's listing (the adoption's `listed` observation)
+\* this run drives the legacy adoption with: {TRUE} in the listed run and
+\* {FALSE} in the unlisted run, which together drive all sixteen
+\* combinations of the shell's raw observations (see the header).
+CONSTANTS AuditListings
 
 Id1 == "agentidentity_1"
 Id2 == "agentidentity_2"
@@ -198,7 +216,8 @@ AuditNext ==
     \/ L2Commit
     \/ L2Abort
     \/ \E id \in AuditIds, rid \in AuditRids : ReplayArm(id, rid)
-    \/ \E id \in AuditIds, g \in AuditGenerations, m, l, li, i \in BOOLEAN : AdoptArm(id, g, m, l, li, i)
+    \/ \E id \in AuditIds, g \in AuditGenerations, m, l, i \in BOOLEAN, li \in AuditListings :
+           AdoptArm(id, g, m, l, li, i)
     \/ \E id \in AuditIds, custody \in BOOLEAN : ProbeArm(id, custody)
     \/ \E id \in AuditIds : LaneArm(id)
     \/ \E desired \in SUBSET AuditIds, stale \in BOOLEAN : ReconcileArm(desired, stale)
@@ -274,10 +293,10 @@ AuditAdoptionVerdicts(id, g, m, l, li, i) ==
       ENABLED AdoptLegacyIdentityEntryMobNotRunningStopped(id, g, m, l, li, i)>>
 
 \* The legacy adoption is total and its arms never overlap, for every one of
-\* the sixteen observations.
+\* the run's eight observations (the sixteen over both runs).
 AuditAdoptionExactlyOne ==
     phase \in {"Running", "Stopped"} =>
-        \A id \in AuditIds, g \in AuditGenerations, m, l, li, i \in BOOLEAN :
+        \A id \in AuditIds, g \in AuditGenerations, m, l, i \in BOOLEAN, li \in AuditListings :
             Cardinality({k \in 1..11 : AuditAdoptionVerdicts(id, g, m, l, li, i)[k]}) = 1
 
 \* An identity becomes an entry only by the declared apply (which records the
@@ -305,9 +324,11 @@ AuditAdoptionNeedsObservation ==
 \* RetireUnadopted answers only an unlisted member with both legacy marks and
 \* no host's intent row naming it, placed on a member host or bound to no
 \* session, and not retiring: the one member the complete roster's apply
-\* retires without adopting it.
+\* retires without adopting it. It reads the run's eight observations: a step
+\* that answers another observation is a step of the other run, which checks
+\* it.
 AuditRetireUnadoptedQualifies ==
-    [][\A id \in AuditIds, g \in AuditGenerations, m, l, li, i \in BOOLEAN :
+    [][\A id \in AuditIds, g \in AuditGenerations, m, l, i \in BOOLEAN, li \in AuditListings :
          AdoptLegacyIdentityEntryRetireUnadopted(id, g, m, l, li, i)
            => /\ ~li /\ m /\ l /\ ~i
               /\ (id \in DOMAIN member_placement \/ id \notin DOMAIN member_session_bindings)

@@ -13,9 +13,9 @@ the Meta source import. Preserve those exact source selections with the build
 record: Cargo's lock does not encode the Git revision of a path dependency.
 
 The [TypeScript manifest](sdk/typescript/package.json) and
-[lock](sdk/typescript/package-lock.json) select `@rkat/sdk` 0.9.8 and
-`@rkat/meta-sdk` 0.9.7. The [Python native-host extra](sdk/python/pyproject.toml)
-selects `meerkat-meta==0.9.7`. See [SDKs](#sdks) for package versions and validation.
+[lock](sdk/typescript/package-lock.json) select `@rkat/sdk` 0.9.10 and
+`@rkat/meta-sdk` 0.9.10. The [Python native-host extra](sdk/python/pyproject.toml)
+selects `meerkat-meta==0.9.10`. See [SDKs](#sdks) for package versions and validation.
 
 Use the [development build instructions](#build-a-compatible-development-checkout)
 with the current checkout's selected sources. Complete products also need their
@@ -333,8 +333,8 @@ GitHub release assets; no Toolkit registry upload is required.
 
 For current development, use Connect's `sdk/python` and `sdk/typescript` from
 the same finalized Connect source as the native binaries. The TypeScript
-manifest and lock select published `@rkat/sdk` 0.9.8 and `@rkat/meta-sdk` 0.9.7;
-the Python native-host extra selects `meerkat-meta==0.9.7`. Package installation
+manifest and lock select published `@rkat/sdk` 0.9.10 and `@rkat/meta-sdk` 0.9.10;
+the Python native-host extra selects `meerkat-meta==0.9.10`. Package installation
 and SDK component checks do not qualify native or installed execution.
 
 Earlier source-selected SDK checks used these development trees. Preserve their
@@ -372,11 +372,11 @@ for the selection above.
 See [follow-up scope](docs/releases/follow-up.md#current-integration-status)
 for exact results, the upstream correction's status and remaining installed qualification.
 
-Connect's [Python metadata](sdk/python/pyproject.toml) is 0.9.9, with the native-host
-extra requiring `meerkat-meta==0.9.9`. Connect's own
-[TypeScript package version](sdk/typescript/package.json) is 0.9.9; its
-development and optional peer dependencies are `@rkat/meta-sdk` 0.9.7 and
-`@rkat/sdk` 0.9.9. The [TypeScript lock](sdk/typescript/package-lock.json) selects
+Connect's [Python metadata](sdk/python/pyproject.toml) is 0.9.10, with the native-host
+extra requiring `meerkat-meta==0.9.10`. Connect's own
+[TypeScript package version](sdk/typescript/package.json) is 0.9.10; its
+development and optional peer dependencies are `@rkat/meta-sdk` 0.9.10 and
+`@rkat/sdk` 0.9.10. The [TypeScript lock](sdk/typescript/package-lock.json) selects
 those published tarballs and their actual integrity hashes. The
 `10e5b80` validation
 records the earlier 0.9.5 dependency update; missing-distribution checks from

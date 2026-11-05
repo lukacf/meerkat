@@ -5,7 +5,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.9.10] - 2026-11-05
+
+### Breaking
+
+- Connect's paired-host contract no longer names one host product. Every
+  option, tool, field and stored name that carried that product's name now
+  says `paired-host` or `paired_host`: among them the `--paired-host` and
+  `--paired-host-memory-only` options, the `paired_host_*` tools and pairing
+  fields, the pairing cookies (`paired_host_pair`, `paired_host_device`), the
+  prepared-change digest prefix (`paired-host-change-v1:sha256:`), the device
+  credential's OS keyring service id
+  (`ai.rkat.meerkat-connect.paired-host-device.v1`) and item label ("Meerkat
+  Connect paired host device"), and the Python SDK's live-image extra and
+  module (`paired-host-live`, `meerkat_toolkit.frontend.paired_host_live`). A
+  host, device or script that uses the earlier names needs the steps in
+  Upgrade notes.
+
 ### Changed
+
+- Connect builds in the single Cargo workspace of the Meerkat repository.
+  Its six crates are members of the root workspace: they inherit its
+  `rust-version` (1.97.0; Connect's own workspace declared 1.94) and take
+  Core and Meta at the workspace's exact pins, and the standalone
+  `connect/Cargo.toml` and `native-candidate/` workspaces are gone. Build and
+  test from the repository root, for example
+  `./scripts/repo-cargo build -p meerkat-connect`.
+
+- The bundled discovery catalog (revision `discovery-2026-10-28.1`) no longer
+  carries one paired host's device extension recipe, and its Telegram recipe
+  is a generic bot frontend that points at the Python SDK's public frontend
+  modules instead of one host's extension package. It holds 9 discovery
+  recipes; with the adopted library the combined catalog holds 110 records.
 
 - A Find whose setup helper submission native admission refuses because an
   authorization change landed under it now rebinds after each settled wait
@@ -15,6 +46,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   that bound; a fresh Find of the same run then replays the helper input.
 
 ### Fixed
+
+- Setup: when a setup check answered again for a validation it had already
+  accepted, with something that is not a valid proposal (for example a file
+  list that names both a declaration and an activation document), the check
+  was refused but the selection made from the earlier proposal stayed in
+  force. Such an answer now withdraws the earlier proposal, as a changed
+  answer already did, so a selection made from it no longer applies.
+
+- Provider setup and first-target setup read a realm's model targets as
+  Meerkat resolves them, so a realm whose GitHub Copilot account is
+  configured once, by a `[realm.<realm>.copilot]` section, lists the
+  account's routes (`copilot_openai`, `copilot_anthropic` and
+  `copilot_gemini`) as configured targets, and first-target setup is refused
+  next to the section. For a model whose provider family Meerkat knows
+  locally (a catalog model or a `[models.<id>]` entry), the lists of
+  existing targets, in the terminal and in the private-pipe setup
+  conversation's provider prompt, offer only the targets a session for that
+  model runs on, and the chosen target's details show the route that
+  session runs on; for a model only the Copilot account lists, see Known
+  limitations. Before, such a realm looked unconfigured there, and the lists
+  offered each Copilot route for a model of one provider family: choosing
+  `copilot_openai` for an Anthropic model ran the session on
+  `copilot_anthropic`.
 
 - A Find whose own entry meets an authorization change that another task is
   making no longer fails as `operation_refused` with kind
@@ -104,64 +158,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   stays unknown), so a retry follows the caller's own operation, idempotency
   and settlement rules, never a blind replay of the whole call. A real denial
   is still refused at once.
-
-## [0.9.9] - 2026-11-03
-
-### Breaking
-
-- Connect's paired-host contract no longer names one host product. Every
-  option, tool, field and stored name that carried that product's name now
-  says `paired-host` or `paired_host`: among them the `--paired-host` and
-  `--paired-host-memory-only` options, the `paired_host_*` tools and pairing
-  fields, the pairing cookies (`paired_host_pair`, `paired_host_device`), the
-  prepared-change digest prefix (`paired-host-change-v1:sha256:`), the device
-  credential's OS keyring service id
-  (`ai.rkat.meerkat-connect.paired-host-device.v1`) and item label ("Meerkat
-  Connect paired host device"), and the Python SDK's live-image extra and
-  module (`paired-host-live`, `meerkat_toolkit.frontend.paired_host_live`). A
-  host, device or script that uses the earlier names needs the steps in
-  Upgrade notes.
-
-### Changed
-
-- Connect builds in the single Cargo workspace of the Meerkat repository.
-  Its six crates are members of the root workspace: they inherit its
-  `rust-version` (1.97.0; Connect's own workspace declared 1.94) and take
-  Core and Meta at the workspace's exact pins, and the standalone
-  `connect/Cargo.toml` and `native-candidate/` workspaces are gone. Build and
-  test from the repository root, for example
-  `./scripts/repo-cargo build -p meerkat-connect`.
-
-- The bundled discovery catalog (revision `discovery-2026-10-28.1`) no longer
-  carries one paired host's device extension recipe, and its Telegram recipe
-  is a generic bot frontend that points at the Python SDK's public frontend
-  modules instead of one host's extension package. It holds 9 discovery
-  recipes; with the adopted library the combined catalog holds 110 records.
-
-### Fixed
-
-- Setup: when a setup check answered again for a validation it had already
-  accepted, with something that is not a valid proposal (for example a file
-  list that names both a declaration and an activation document), the check
-  was refused but the selection made from the earlier proposal stayed in
-  force. Such an answer now withdraws the earlier proposal, as a changed
-  answer already did, so a selection made from it no longer applies.
-
-- Provider setup and first-target setup read a realm's model targets as
-  Meerkat resolves them, so a realm whose GitHub Copilot account is
-  configured once, by a `[realm.<realm>.copilot]` section, lists the
-  account's routes (`copilot_openai`, `copilot_anthropic` and
-  `copilot_gemini`) as configured targets, and first-target setup is refused
-  next to the section. For a model whose provider family Meerkat knows
-  locally (a catalog model or a `[models.<id>]` entry), the lists of
-  existing targets, in the terminal and in the private-pipe setup
-  conversation's provider prompt, offer only the targets a session for that
-  model runs on, and the chosen target's details show the route that
-  session runs on; for a model only the Copilot account lists, see Known
-  limitations. Before, such a realm looked unconfigured there, and the lists
-  offered each Copilot route for a model of one provider family: choosing
-  `copilot_openai` for an Anthropic model ran the session on
-  `copilot_anthropic`.
 
 ### Upgrade notes
 

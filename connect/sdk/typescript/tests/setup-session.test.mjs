@@ -231,7 +231,7 @@ test("original sending view shows the notice wait after its joined completion wi
 
 test("component controls use exact released SDK Session, parser and EventStream", async () => {
   const metadata = JSON.parse(await readFile(new URL("../node_modules/@rkat/sdk/package.json", import.meta.url)));
-  assert.equal(metadata.version, "0.9.9");
+  assert.equal(metadata.version, "0.9.10");
   const h = harness(), events = [];
   assert.ok(h.session instanceof Session);
   const message = "  Set up Gmail and a Slack frontend.\nKeep my complete request.  ";

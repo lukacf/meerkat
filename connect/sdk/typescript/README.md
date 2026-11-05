@@ -7,10 +7,10 @@ npm install https://github.com/lukacf/meerkat-connect/releases/download/v0.9.0/r
 ```
 
 This is the Connect release asset, not a Toolkit npm registry selection.
-Current source package metadata declares `0.9.9`; the tagged asset does not
+Current source package metadata declares `0.9.10`; the tagged asset does not
 select the current development code. For source development, follow the local
 packaging commands below. The source manifest and lock select published
-`@rkat/sdk` 0.9.9 and `@rkat/meta-sdk` 0.9.7. Native-host composition also needs
+`@rkat/sdk` 0.9.10 and `@rkat/meta-sdk` 0.9.10. Native-host composition also needs
 the matching gateway; see [SDK selection](../../BUILDING.md#sdks) for the
 distinction between package checks and installed qualification.
 

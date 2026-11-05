@@ -574,6 +574,9 @@ mod observe_helper_wait;
 #[path = "publication_source_wait_tests.rs"]
 mod publication_source_wait;
 
+#[path = "helper_source_wait_tests.rs"]
+mod helper_source_wait;
+
 #[path = "warm_service_issuance_tests.rs"]
 mod warm_service_issuance;
 

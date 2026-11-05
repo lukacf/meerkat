@@ -408,9 +408,20 @@ impl SetupToolHost for InstalledSetupAdmission {
         let deadline =
             tokio::time::Instant::now() + Duration::from_millis(self.limits.admission_timeout_ms);
         let churn = tokio::sync::Mutex::new(meerkat_core::authorization::OwnerChangeChurn::new());
+        // The original's basis reads wait for a held source collection within
+        // the same admission's deadline, and never past Core's owner-change
+        // bound.
         let original = self
             .originals
-            .acquisition_original(context)
+            .acquisition_original_until(
+                context,
+                std::cmp::min(
+                    deadline,
+                    tokio::time::Instant::now()
+                        + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+                )
+                .into_std(),
+            )
             .await
             .map_err(source_admission_error)
             .inspect_err(|error| crate::aa1_admission_failure("admission.original", error))?;

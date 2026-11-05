@@ -170,6 +170,11 @@ struct Script {
     results: Mutex<BTreeMap<String, Value>>,
     finished: AtomicUsize,
     cancel_requested: AtomicBool,
+    // Held by A's model across one whole response (its check of the cancel
+    // flag, its recording of results and its emission of a call), and by
+    // the case across setting the flag and recording A's pending calls: a
+    // response is wholly before the cancel or wholly after it.
+    cancel_section: Mutex<()>,
     // Find answers of retry_safe this case met, each replayed by a fresh Find.
     retry_safe_answers: AtomicUsize,
     // The runs each member's input was served in, in order: a later run of
@@ -177,6 +182,21 @@ struct Script {
     runs: Mutex<BTreeMap<(String, String), Vec<String>>>,
     // Each member's call ID prefixes, one per run attempt, in order.
     prefixes: Mutex<BTreeMap<String, Vec<String>>>,
+    // A's helper's calls still pending when the case cancelled A: emitted in
+    // its current run, with no result recorded then.
+    pending_at_cancel: Mutex<std::collections::BTreeSet<String>>,
+    // A control's own condition for cancelling A. Never set in the case
+    // itself, so the case's timing is unchanged.
+    cancel_gate: std::sync::OnceLock<CancelGate>,
+}
+
+/// A control's condition for the case's cancel of A: once both helpers have
+/// joined, the case waits for it within BOUND, before it reviews the
+/// approvals and cancels A. A gate never met fails the case with its name.
+struct CancelGate {
+    name: &'static str,
+    open: Box<dyn Fn() -> bool + Send + Sync>,
+    opened: AtomicBool,
 }
 /// The input and the run a model request was made in, as Core's binding
 /// names them.
@@ -253,6 +273,24 @@ impl Script {
         self.run_prefixes(member)
             .pop()
             .unwrap_or_else(|| member.to_owned())
+    }
+    /// Record `member`'s calls still pending as the case cancels its
+    /// original: emitted in its latest run, with no result recorded yet.
+    fn record_pending_at_cancel(&self, member: &str) {
+        let prefix = self.current_prefix(member);
+        let emitted = self
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _, _)| in_run(id, &prefix))
+            .map(|(id, _, _)| id.clone())
+            .collect::<Vec<_>>();
+        let seen = self.seen_results.lock().unwrap();
+        *self.pending_at_cancel.lock().unwrap() = emitted
+            .into_iter()
+            .filter(|id| !seen.contains_key(id))
+            .collect();
     }
     fn require_loaded_catalog(prefix: &str, value: Value, names: &[&str]) {
         #[derive(serde::Deserialize)]
@@ -341,6 +379,10 @@ impl Script {
         } else {
             panic!("controlled response has no exact child input")
         };
+        // A's whole response, from its check of the cancel flag to its
+        // emission, holds the cancel section: the case's cancel of A falls
+        // wholly before or wholly after it.
+        let _cancel_section = (tag == "a").then(|| self.cancel_section.lock().unwrap());
         let helper = request
             .tools
             .iter()
@@ -1779,15 +1821,6 @@ impl Case {
         })
     }
 
-    /// Whether helper `tag`'s current install call's result reached its
-    /// model: a refused first install's fresh install becomes its current
-    /// install once that refusal was recorded.
-    fn install_result_recorded(&self, tag: &str) -> bool {
-        let prefix = self.script.current_prefix(&format!("{tag}-helper"));
-        let call = format!("{prefix}-{}", self.script.retry_suffix(&prefix, "install"));
-        self.script.seen_results.lock().unwrap().contains_key(&call)
-    }
-
     async fn preparation(&self) -> Option<Value> {
         use std::os::unix::fs::MetadataExt;
         // Backend evidence only. The installed host remains the sole Toolkit
@@ -1927,22 +1960,16 @@ impl Case {
         })
         .await
         .expect("two ordinary helpers must join while one physical worker is held");
-        // A helper's model records its install's result with its next model
-        // request, which can come after its install joined the held worker and
-        // was approved, and after a refused first install's fresh install went
-        // through. Wait within the bound until each helper's current install
-        // result is recorded before the approvals are read and A is cancelled;
-        // the check proof still decides, so a result that never arrives still
-        // fails it.
-        let _ = tokio::time::timeout(BOUND, async {
-            while !["a", "b"]
-                .into_iter()
-                .all(|tag| self.install_result_recorded(tag))
-            {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await;
+        if let Some(gate) = self.script.cancel_gate.get() {
+            tokio::time::timeout(BOUND, async {
+                while !(gate.open)() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("the control's cancel gate was never met: {}", gate.name));
+            gate.opened.store(true, Ordering::SeqCst);
+        }
         assert_eq!(entered["closed"], false);
         assert!(entered["completion"].is_null());
         let observations = launch.observations();
@@ -2073,7 +2100,19 @@ impl Case {
             reviewed.windows(2).all(|pair| pair[0].1 == pair[1].1),
             "each exact native call independently reviews the same checked software proposal"
         );
-        self.script.cancel_requested.store(true, Ordering::SeqCst);
+        // The worker is released only after A's cancellation is acknowledged,
+        // so an install of A that joined it is still pending here, and a
+        // cancelled member need not see its result. The check proof holds
+        // such a call to its safety proofs instead. The flag and the record
+        // are taken together under the cancel section, which A's model holds
+        // across each whole response: a response before them has emitted
+        // its calls, and one after them answers an error result as cancelled
+        // and emits nothing.
+        {
+            let _cancel_section = self.script.cancel_section.lock().unwrap();
+            self.script.cancel_requested.store(true, Ordering::SeqCst);
+            self.script.record_pending_at_cancel("a-helper");
+        }
         let cancelled = self
             .client
             .lock()

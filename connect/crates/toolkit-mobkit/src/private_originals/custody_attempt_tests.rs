@@ -156,7 +156,8 @@ impl Fixture {
                                         &adapter.scope,
                                         &key,
                                         Arc::new(rewritten(&before, encode(changed).unwrap())),
-                                        &association
+                                        &association,
+                                        None,
                                     )
                                     .is_err()
                             );
@@ -826,7 +827,8 @@ async fn first_binding_failed_write_rebases_same_origin_and_keeps_prewrite_witne
             &f.adapter.scope,
             &key,
             Arc::new(wrong_key),
-            f.original.association()
+            f.original.association(),
+            None,
         ),
         Err(OriginalWriterError::WrongOwner)
     ));

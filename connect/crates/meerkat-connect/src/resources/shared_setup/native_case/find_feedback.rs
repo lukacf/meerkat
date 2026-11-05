@@ -799,6 +799,13 @@ impl Case {
         }
         // Every other helper call: one fresh attempt only after a
         // certified NotDispatched refusal of its first, and it succeeded.
+        // A fresh install still pending when the case cancelled its member
+        // (it joined the held worker, which is released only after that
+        // cancellation) need not have reached the cancelled member's model:
+        // it was approved exactly once instead, its first attempt refused
+        // certified with nothing run (the audit proof below), and the case
+        // proved the one physical worker entry and one approval per install
+        // call.
         for base in ["load", "install", "job", "report"] {
             let fresh = format!("{prefix}-{base}-fresh");
             if !calls.iter().any(|(key, _, _)| key == &fresh) {
@@ -812,10 +819,43 @@ impl Case {
                 ),
                 "{first}: only a certified NotDispatched refusal permits a fresh attempt"
             );
-            assert!(
-                settled(&fresh),
-                "{fresh}: the one fresh attempt must succeed"
-            );
+            if base == "install"
+                && !seen.contains_key(&fresh)
+                && self
+                    .script
+                    .pending_at_cancel
+                    .lock()
+                    .unwrap()
+                    .contains(&fresh)
+            {
+                let approvals = self
+                    .approved
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|record| {
+                        record
+                            .proposed_action
+                            .body
+                            .as_ref()
+                            .and_then(|body| body["call_id"].as_str())
+                            == Some(fresh.as_str())
+                    })
+                    .count();
+                assert_eq!(
+                    approvals, 1,
+                    "{fresh}: pending at its member's cancel, approved exactly once"
+                );
+                eprintln!(
+                    "{}",
+                    json!({"event":"sdk_fresh_install_pending_at_cancel", "call_id":fresh})
+                );
+            } else {
+                assert!(
+                    settled(&fresh),
+                    "{fresh}: the one fresh attempt must succeed"
+                );
+            }
             let session = self.audit_sessions.get(&format!("helper-{tag}")).unwrap();
             let audit = self.session_audits(session, prefix, false).await;
             assert!(

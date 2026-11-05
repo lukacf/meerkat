@@ -118,6 +118,17 @@ there are no Connect releases numbered 0.9.7 to 0.9.9.
   refusal without `tool_invoked: false` still leaves the install uncertain
   and refuses its retry.
 
+- A selected setup task's call (for example a reviewed install's shared
+  setup step, a shared setup's check, join or stop, a setup helper's
+  report, an account or public-service request, or a software review) no
+  longer waits for as long as another task holds an authorization change
+  while its task is prepared. The preparation now ends at the owner-change
+  bound, including its reads of the setup store that wait behind a write
+  held up by that change. If the change is still in progress then, the
+  call is refused as `operation_refused` with kind `reprepare_required`
+  and `tool_invoked: false`, before any of its work ran, so it can be
+  retried; otherwise it answers temporarily unavailable.
+
 - A Find no longer fails as temporarily unavailable (`tool_unavailable`)
   when it reads its setup helper's admission while another original's
   first binding is changing the shared authorization. The read waits out
@@ -132,6 +143,36 @@ there are no Connect releases numbered 0.9.7 to 0.9.9.
   bound; no step is made twice. A hold that outlasts the bound still
   answers `tool_unavailable`, and nothing the Find already did is made
   again.
+
+- A Find is no longer refused as not allowed by policy (`access_denied`)
+  when another original's setup helper changes the shared authorization
+  while the Find retains or recovers its own helper's source. That change
+  is waited out within the owner-change bound and the helper's grant
+  resolved again; a change that outlasts the bound answers
+  `tool_unavailable`, and only a real refusal is a denial.
+
+- A Find no longer fails as temporarily unavailable (`tool_unavailable`)
+  when its setup helper's source binding is checked and published, or its
+  bound source recovered, or its helper observed, during another owner's
+  brief hold on the shared source state. The check or the publication
+  waits that out within the owner-change bound; the binding is never
+  written twice, and a hold that outlasts the bound still answers
+  `tool_unavailable`.
+
+- A Find no longer fails as temporarily unavailable (`tool_unavailable`)
+  when another owner's brief hold on the shared source state meets its
+  setup helper's admission right after its create (or the create's
+  replay), its helper's observation right after its read, its grant
+  issuance before or after the grant intent is written, its first source
+  binding write, its helper's preparation or submission, or a
+  contributor's admitted-source read (also in a selected setup task's
+  result source). Each step waits that hold out within the owner-change
+  bound, and the grant issuance also waits for another writer of the
+  source state; nothing the Find already did is made again. A hold that
+  outlasts the bound still answers `tool_unavailable`, except at the
+  submission's check before it binds again after an authorization change:
+  there it ends the Find as `retry_safe` (nothing admitted), as a change
+  that outlasts the bound does.
 
 - A Find no longer fails as temporarily unavailable (`tool_unavailable`)
   while another original's Find is writing the shared source state. Its

@@ -852,13 +852,17 @@ pub mod observe_helper_probe {
     }
 }
 
-/// Test seam: a Find's work step just before its helper publication-source
-/// read (`complete.publication_source`), by call ID. A control can have the
-/// owner's originals collection held there on a thread of its own, inside an
-/// owner change on the owner's publication or without one, as another
-/// helper's first binding write holds them.
+/// Test seam: a step of a Find's helper work at which a control can have the
+/// owner's originals collection held on a thread of its own, inside an owner
+/// change on the owner's publication or without one, as another helper's
+/// first binding write holds them (at
+/// [`source_hold_probe::Site::IntentsWriter`], the owner's source writer
+/// instead, as another writer holds it across its durable write). Each site
+/// is named by its [`source_hold_probe::Site`] and a key: the Find's call ID
+/// where the step has it, else the helper's work item, its work admission
+/// key, a source row's ID or an original work.
 #[cfg(any(test, feature = "test-support"))]
-pub mod publication_source_probe {
+pub mod source_hold_probe {
     use std::sync::{Arc, Mutex, PoisonError};
     use std::thread::JoinHandle;
     use std::time::Duration;
@@ -870,8 +874,64 @@ pub mod publication_source_probe {
         pub owner_change: bool,
         pub duration: Duration,
     }
-    /// A control's answer at the step, given the Find's call ID.
-    pub type Probe = Arc<dyn Fn(&str) -> Option<Hold> + Send + Sync>;
+    /// Where the hold begins.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Site {
+        /// The work step just before its helper publication-source read
+        /// (`complete.publication_source`); keyed by call ID.
+        PublicationSource,
+        /// The retention of a helper source just before its issued lineage
+        /// is resolved (the work step's retain, and the recovery's own
+        /// retain); keyed by work item.
+        Resolve,
+        /// A helper source's first binding write just done, before its
+        /// contributors' check and its publication; keyed by work item.
+        Retain,
+        /// A bound helper source's exact replay (nothing written), before
+        /// its contributors' check and its publication (the Find's
+        /// `advance.recover_helper`); keyed by work item.
+        Recover,
+        /// The Find's live-replay helper observation
+        /// (`advance.observe_helper`), once the call's acquisition original
+        /// is read, just before the observation's first fenced access; keyed
+        /// by the helper's work admission key.
+        Observe,
+        /// A fenced helper admission or observation (the work step's create,
+        /// then the Find's live-replay observation), its create or read just
+        /// done, before its check of the helper's sources under the source
+        /// writer; keyed by the helper's work admission key.
+        FencedAfter,
+        /// A helper's grant issuance just before its intent write takes the
+        /// source writer; the hold is of the source writer itself, not the
+        /// collection; keyed by work item.
+        IntentsWriter,
+        /// A helper's grant issuance with the source writer taken, before
+        /// its source check and its intent write; keyed by work item.
+        Intents,
+        /// A helper's grant issuance, its intent write just done, before its
+        /// source check; keyed by work item.
+        IntentsWritten,
+        /// A helper source's first binding write, just before it begins its
+        /// owner change (`retain_first_binding_write`); the hold lasts into
+        /// that change, where the write tries the collection; keyed by the
+        /// source row's ID.
+        FirstWrite,
+        /// A helper preparation's capture binder, inside Core's governed
+        /// bind, before its source check; keyed by work item.
+        PrepareBind,
+        /// A helper submission (`advance.submit_helper`) before its source
+        /// check; keyed by work item.
+        Submit,
+        /// A helper submission's rebind, its wait settled, before its source
+        /// check; keyed by work item.
+        RebindStop,
+        /// A named-only contributor's admitted basis read (a Find's
+        /// acquisition original, a result source), just before it takes the
+        /// collection; keyed by the contributor's original work.
+        BasisRead,
+    }
+    /// A control's answer at a site, given its key.
+    pub type Probe = Arc<dyn Fn(Site, &str) -> Option<Hold> + Send + Sync>;
     static PROBE: Mutex<Option<Probe>> = Mutex::new(None);
     static HOLDS: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new());
     /// Install the control's probe, replacing any earlier one.
@@ -886,9 +946,9 @@ pub mod publication_source_probe {
             let _ = hold.join();
         }
     }
-    pub(crate) fn observe(call: &str) -> Option<Hold> {
+    pub(crate) fn observe(site: Site, key: &str) -> Option<Hold> {
         let probe = PROBE.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        probe.and_then(|probe| probe(call))
+        probe.and_then(|probe| probe(site, key))
     }
     pub(crate) fn retain(hold: JoinHandle<()>) {
         HOLDS

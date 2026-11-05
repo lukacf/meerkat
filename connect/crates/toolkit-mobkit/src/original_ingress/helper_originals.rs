@@ -761,6 +761,10 @@ impl ToolkitOriginalOwner {
     /// creating anything. Current complete originating operation bounds still
     /// apply. This is NOT independent host-private recovery/settlement policy.
     /// `None` is an absence observation, never a no-effects or replay permit.
+    /// With `contended_until`, a source collection held by another owner's
+    /// short section at its source check is waited out until then, the writer
+    /// released while waiting, and the check made again; the observation
+    /// creates nothing either way.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn observe_fenced_helper(
         self: &Arc<Self>,
@@ -777,6 +781,7 @@ impl ToolkitOriginalOwner {
         own_originals: &[Arc<RetainedToolkitOriginal>],
         selection: HelperAdmissionSelection,
         review: crate::review_custody::ReviewCustody,
+        contended_until: Option<tokio::time::Instant>,
     ) -> Result<Option<AdmittedHelperWork>, OriginalWriterError> {
         self.access_fenced_helper(
             entered,
@@ -793,7 +798,7 @@ impl ToolkitOriginalOwner {
             selection,
             HelperAdmissionUse::Observe,
             review,
-            None,
+            contended_until,
         )
         .await
     }
@@ -950,8 +955,26 @@ impl ToolkitOriginalOwner {
         .await
         .map_err(|_| OriginalWriterError::Unavailable)?;
         let outcome = helper_admission_result(result, report.refusal())?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::FencedAfter,
+            admission.key.as_str(),
+        ) {
+            crate::source_hold_probe::retain(
+                self.hold_sources_for_test(hold.owner_change, hold.duration),
+            );
+        }
+        // After the fenced create or read, the sources are checked again
+        // under the same writer; a held collection is waited out until the
+        // step's deadline, keeping the writer, and only the check repeats.
         let Some(outcome) = outcome else {
-            self.check_helper_sources(contributor, contributors, own_originals)?;
+            self.check_helper_sources_within(
+                contributor,
+                contributors,
+                own_originals,
+                contended_until,
+            )
+            .await?;
             return Ok(None);
         };
         let item = match outcome {
@@ -976,7 +999,8 @@ impl ToolkitOriginalOwner {
                 .collect(),
             selection,
         };
-        self.check_helper_sources(contributor, contributors, own_originals)?;
+        self.check_helper_sources_within(contributor, contributors, own_originals, contended_until)
+            .await?;
         Ok(Some(AdmittedHelperWork {
             owner: self.clone(),
             source_scope: source_scope.clone(),
@@ -1044,7 +1068,10 @@ impl ToolkitOriginalOwner {
     /// another owner's short section before the binding write waited out
     /// until `contended_until`: the source writer is released while waiting,
     /// and the check made again under the writer taken afresh. Nothing is
-    /// written before that check.
+    /// written before that check. After the write, or its exact replay, the
+    /// contributors' check and the publication wait out a held collection
+    /// until the same `contended_until`, keeping the writer the publication
+    /// needs, and only they are made again, never the write.
     pub(crate) async fn bind_admitted_helper_until(
         self: &Arc<Self>,
         store: &dyn ToolkitStore,
@@ -1149,15 +1176,29 @@ impl ToolkitOriginalOwner {
             binding: Box::new(binding.clone()),
             association: association.clone(),
         };
+        #[cfg(any(test, feature = "test-support"))]
+        let first_write = matches!(record.state, HelperSourceState::ControllerPending);
         let saved = match &record.state {
             HelperSourceState::ControllerPending => {
                 record.controller.check_binding(self, admitted, &binding)?;
+                // The collection held from here is still held when the
+                // first binding write tries it inside its owner change.
+                #[cfg(any(test, feature = "test-support"))]
+                if let Some(hold) = crate::source_hold_probe::observe(
+                    crate::source_hold_probe::Site::FirstWrite,
+                    &key.id,
+                ) {
+                    crate::source_hold_probe::retain(
+                        self.hold_sources_for_test(hold.owner_change, hold.duration),
+                    );
+                }
                 self.retain_first_binding_write(
                     store,
                     &admitted.source_scope,
                     &key,
                     Arc::new(prior.clone()),
                     &association,
+                    contended_until.map(tokio::time::Instant::into_std),
                 )?;
                 record.state = state;
                 store
@@ -1187,9 +1228,42 @@ impl ToolkitOriginalOwner {
         if saved.key != key || settled != record {
             return Err(OriginalWriterError::Conflict);
         }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            if first_write {
+                crate::source_hold_probe::Site::Retain
+            } else {
+                crate::source_hold_probe::Site::Recover
+            },
+            &facts.item.to_string(),
+        ) {
+            crate::source_hold_probe::retain(
+                self.hold_sources_for_test(hold.owner_change, hold.duration),
+            );
+        }
         // Cancellation after WorkGraph commit cannot confer source custody.
         // Retain the immutable row for exact reconciliation, but refuse binding.
-        self.check_helper_contributors(contributor, contributors)?;
+        // After the binding write, or its exact replay, this check and the
+        // publication below meet a source collection held by another owner's
+        // short section as contention: with `contended_until` (this bind's
+        // one budget, from its start) it is waited out, keeping this source
+        // writer, which the publication needs. Only the check or the
+        // publication is made again, never the write. No holder of the
+        // collection or of an owner change of the shared publication waits
+        // for this writer: neither is ever held while the writer is taken,
+        // and their holders never await.
+        loop {
+            let settlement = self.observe_helper_sources(contributor, contributors, &[])?;
+            if settlement == HelperSourceSettlement::Contended
+                && let Some(deadline) = contended_until
+                && tokio::time::Instant::now() < deadline
+            {
+                contention_pause(deadline).await;
+                continue;
+            }
+            helper_settlement_result(settlement)?;
+            break;
+        }
         let c = association.candidate();
         let custody = AuthenticatedOriginal {
             original_work: c.original_work.clone(),
@@ -1204,12 +1278,21 @@ impl ToolkitOriginalOwner {
             &association,
             settled.custody_attempt.as_ref(),
         )?;
-        let original = self.publish_binding(
-            association,
-            custody,
-            OriginalGrantBinding::Helper,
-            observation,
-        )?;
+        let original = match contended_until {
+            Some(deadline) => self.publish_binding_within(
+                association,
+                custody,
+                OriginalGrantBinding::Helper,
+                observation,
+                deadline.into_std(),
+            )?,
+            None => self.publish_binding(
+                association,
+                custody,
+                OriginalGrantBinding::Helper,
+                observation,
+            )?,
+        };
         Ok(RetainedHelperSource {
             original,
             source_record: Arc::new(saved),
@@ -1518,6 +1601,21 @@ impl ToolkitOriginalOwner {
         helper_settlement_result(self.admitted_helper_settlement(admitted)?)
     }
 
+    /// [`Self::check_admitted_helper`] for a caller that must not wait where
+    /// it runs (a native binder inside Core's governed bind): `Ok(false)` when
+    /// the source collection is held by another owner's short section and
+    /// nothing was checked, `Ok(true)` when the check passed, and the check's
+    /// own refusal otherwise.
+    pub(crate) fn try_check_admitted_helper(
+        self: &Arc<Self>,
+        admitted: &AdmittedHelperWork,
+    ) -> Result<bool, OriginalWriterError> {
+        match self.admitted_helper_settlement(admitted)? {
+            HelperSourceSettlement::Contended => Ok(false),
+            settlement => helper_settlement_result(settlement).map(|()| true),
+        }
+    }
+
     /// [`Self::check_admitted_helper`] for an async caller that holds no
     /// owner change or reservation of the shared publication (the helper
     /// recovery observation): a held source collection is contention, not an
@@ -1622,6 +1720,9 @@ impl ToolkitOriginalOwner {
         self.observe_helper_sources(&admitted.contributor, &admitted.contributors, &[])
     }
 
+    // The bind makes this check itself, with its wait for a held collection;
+    // the cold-helper fixture and the contributor rows still use this form.
+    #[cfg(test)]
     fn check_helper_contributors(
         &self,
         contributor: &Arc<RetainedToolkitOriginal>,
@@ -1636,6 +1737,10 @@ impl ToolkitOriginalOwner {
     /// canonical lookup and still enter native with the same operation witness.
     /// Native checks all accepted associations, ceilings
     /// and current permission; this source check never substitutes for that.
+    /// The fenced helper access makes this check itself, with its wait for a
+    /// held collection ([`Self::check_helper_sources_within`]); the fixtures
+    /// and source rows still use this form.
+    #[cfg(test)]
     fn check_helper_sources(
         &self,
         contributor: &Arc<RetainedToolkitOriginal>,
@@ -1647,6 +1752,35 @@ impl ToolkitOriginalOwner {
             contributors,
             own_originals,
         )?)
+    }
+
+    /// The same source check after a fenced helper create or read, under the
+    /// caller's source writer, which it keeps: a source collection held by
+    /// another owner's short section is contention, not an answer, so with
+    /// `contended_until` (the step's one deadline) it is waited out with
+    /// bounded pauses and the check made again; without it the check answers
+    /// at once. Every other answer is final at once. The collection's holders
+    /// never wait for the source writer: it is always taken before the
+    /// collection, never under it.
+    async fn check_helper_sources_within(
+        &self,
+        contributor: &Arc<RetainedToolkitOriginal>,
+        contributors: &[Arc<RetainedToolkitOriginal>],
+        own_originals: &[Arc<RetainedToolkitOriginal>],
+        contended_until: Option<tokio::time::Instant>,
+    ) -> Result<(), OriginalWriterError> {
+        loop {
+            let settlement =
+                self.observe_helper_sources(contributor, contributors, own_originals)?;
+            if settlement == HelperSourceSettlement::Contended
+                && let Some(deadline) = contended_until
+                && tokio::time::Instant::now() < deadline
+            {
+                contention_pause(deadline).await;
+                continue;
+            }
+            return helper_settlement_result(settlement);
+        }
     }
 
     // This is the same strict source check, with transient observations kept
@@ -3002,7 +3136,13 @@ mod tests {
         ));
         assert!(matches!(
             owner
-                .retain_helper_operation_intents(&other, &admitted, intent)
+                .retain_helper_operation_intents(
+                    &other,
+                    &admitted,
+                    intent,
+                    tokio::time::Instant::now()
+                        + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+                )
                 .await,
             Err(OriginalWriterError::WrongOwner)
         ));
@@ -3050,7 +3190,8 @@ mod tests {
                 &admitted.source_scope,
                 &key,
                 Arc::new(wrong_key),
-                source.original.association()
+                source.original.association(),
+                None,
             ),
             Err(OriginalWriterError::WrongOwner)
         ));

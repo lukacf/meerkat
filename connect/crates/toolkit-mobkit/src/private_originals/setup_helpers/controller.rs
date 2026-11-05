@@ -72,7 +72,12 @@ impl PrivateOriginals {
         // actual session, model, route or intent refuses the existing row.
         let (intent, report_intent, account_intent, public_intent, catalog_intent) = self
             .owner
-            .retain_helper_operation_intents(self.store.as_ref(), &prepared.admitted, candidate)
+            .retain_helper_operation_intents(
+                self.store.as_ref(),
+                &prepared.admitted,
+                candidate,
+                contended_until,
+            )
             .await
             .map_err(helper_error)?;
         self.require_helper_selection(prepared.admitted.selection())?;

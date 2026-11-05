@@ -136,6 +136,13 @@ pub(crate) enum CanonicalBindingObservation {
     },
 }
 
+/// A canonical binding observation's cancellation record and historical
+/// custody decision, as a binding's publication applies them.
+type BindingObserved = (
+    Option<Arc<toolkit_store::StoredRecord>>,
+    Option<custody_attempt::CustodyDecision>,
+);
+
 impl From<Option<Arc<toolkit_store::StoredRecord>>> for CanonicalBindingObservation {
     fn from(record: Option<Arc<toolkit_store::StoredRecord>>) -> Self {
         match record {
@@ -1819,6 +1826,14 @@ impl ToolkitOriginalOwner {
     /// Called under the existing source mutation writer immediately before the
     /// first canonical association CAS. The caller validated this exact unbound
     /// row; native's tracked foreground owns the entered asynchronous write.
+    ///
+    /// Inside its owner change the collection is only tried. With
+    /// `contended_until`, a collection held by another owner's short section
+    /// ends the change with nothing changed, is waited for outside any change
+    /// until that deadline, and the change begins again
+    /// ([`Self::change_with_collection_within`]); the in-memory record is
+    /// applied at most once, and the CAS after it is the caller's. Without it
+    /// a held collection is unavailable at once, as before.
     pub(crate) fn retain_first_binding_write(
         &self,
         store: &dyn toolkit_store::ToolkitStore,
@@ -1826,6 +1841,7 @@ impl ToolkitOriginalOwner {
         expected_key: &toolkit_store::StoreKey,
         source_record: Arc<toolkit_store::StoredRecord>,
         association: &InputAuthorityAssociation,
+        contended_until: Option<std::time::Instant>,
     ) -> Result<(), OriginalWriterError> {
         self.check_canonical_source(store, scope)?;
         // Each trusted caller derives its exact canonical key. Helper rows use
@@ -1834,47 +1850,59 @@ impl ToolkitOriginalOwner {
             return Err(OriginalWriterError::WrongOwner);
         }
         let claims = association.candidate();
-        let _publication = self
-            .publication
-            .begin_owner_change()
-            .map_err(|_| OriginalWriterError::Unavailable)?;
-        let mut originals = self
-            .originals
-            .try_lock()
-            .map_err(|_| OriginalWriterError::Unavailable)?;
-        if let Some(existing) = originals
-            .iter()
-            .find(|entry| entry.names(&claims.ingress_namespace.realm, &claims.original_work))
-        {
-            return match existing {
-                OriginalRecord::UnboundCancellation {
-                    source_record: prior,
-                    operation: OriginalOperationDisposition::Open,
-                    first_binding: Some(first),
-                    ..
-                } if first == association
-                    && prior.key == source_record.key
-                    && (crate::private_originals::same_source_origin(prior, &source_record)
-                        || helper_originals::same_unbound_source(prior, &source_record)) =>
-                {
-                    Ok(())
-                }
-                OriginalRecord::UnboundCancellation {
-                    operation: OriginalOperationDisposition::Cancelled { .. },
-                    ..
-                } => Err(OriginalWriterError::OperationCancelled),
-                _ => Err(OriginalWriterError::Unavailable),
-            };
+        let retain = |originals: &mut Vec<OriginalRecord>| -> Result<(), OriginalWriterError> {
+            if let Some(existing) = originals
+                .iter()
+                .find(|entry| entry.names(&claims.ingress_namespace.realm, &claims.original_work))
+            {
+                return match existing {
+                    OriginalRecord::UnboundCancellation {
+                        source_record: prior,
+                        operation: OriginalOperationDisposition::Open,
+                        first_binding: Some(first),
+                        ..
+                    } if first == association
+                        && prior.key == source_record.key
+                        && (crate::private_originals::same_source_origin(
+                            prior,
+                            &source_record,
+                        ) || helper_originals::same_unbound_source(prior, &source_record)) =>
+                    {
+                        Ok(())
+                    }
+                    OriginalRecord::UnboundCancellation {
+                        operation: OriginalOperationDisposition::Cancelled { .. },
+                        ..
+                    } => Err(OriginalWriterError::OperationCancelled),
+                    _ => Err(OriginalWriterError::Unavailable),
+                };
+            }
+            originals.push(OriginalRecord::UnboundCancellation {
+                realm: claims.ingress_namespace.realm.clone(),
+                original: claims.original_work.clone(),
+                source_record: source_record.clone(),
+                operation: OriginalOperationDisposition::Open,
+                first_binding: Some(association.clone()),
+                withdrawn_association: None,
+            });
+            Ok(())
+        };
+        match contended_until {
+            Some(deadline) => {
+                self.change_with_collection_within(deadline, std::thread::sleep, || {}, retain)
+            }
+            None => {
+                let _publication = self
+                    .publication
+                    .begin_owner_change()
+                    .map_err(|_| OriginalWriterError::Unavailable)?;
+                let mut originals = self
+                    .originals
+                    .try_lock()
+                    .map_err(|_| OriginalWriterError::Unavailable)?;
+                retain(&mut originals)
+            }
         }
-        originals.push(OriginalRecord::UnboundCancellation {
-            realm: claims.ingress_namespace.realm.clone(),
-            original: claims.original_work.clone(),
-            source_record,
-            operation: OriginalOperationDisposition::Open,
-            first_binding: Some(association.clone()),
-            withdrawn_association: None,
-        });
-        Ok(())
     }
 
     /// Publish a validated, durable withdrawal in the existing source owner.
@@ -1963,20 +1991,7 @@ impl ToolkitOriginalOwner {
         grant_binding: OriginalGrantBinding,
         observation: CanonicalBindingObservation,
     ) -> Result<Arc<RetainedToolkitOriginal>, OriginalWriterError> {
-        let (cancelled_record, historical_decision) = match observation {
-            CanonicalBindingObservation::Unretained => (None, None),
-            CanonicalBindingObservation::Cancelled(record) => (Some(record), None),
-            CanonicalBindingObservation::Historical {
-                association: observed,
-                attempt,
-            } => {
-                if observed != association {
-                    return Err(OriginalWriterError::Conflict);
-                }
-                attempt.validate_binding(&association)?;
-                (None, Some(attempt.decision()))
-            }
-        };
+        let observed = Self::binding_observation(&association, observation)?;
         // The existing writer mutex spans durable observation and this write.
         // Native publication is acquired only after storage I/O has finished.
         let _publication = self
@@ -1987,6 +2002,83 @@ impl ToolkitOriginalOwner {
             .originals
             .try_lock()
             .map_err(|_| OriginalWriterError::Unavailable)?;
+        Self::publish_into(
+            &mut originals,
+            association,
+            source_custody,
+            grant_binding,
+            observed,
+        )
+    }
+
+    /// [`Self::publish_binding`] for a caller that holds no owner change of
+    /// the shared publication and may wait until `deadline`: a source
+    /// collection held by another owner's short section ends the change with
+    /// no fact changed, is waited for outside any change, and the change
+    /// begins again ([`Self::change_with_collection_within`]). Past
+    /// `deadline` it is unavailable, as before. The publication is made at
+    /// most once. The collection's holders never wait for a lock the caller
+    /// holds: the source writer and the publication writer are always taken
+    /// before the collection, never under it.
+    fn publish_binding_within(
+        &self,
+        association: InputAuthorityAssociation,
+        source_custody: AuthenticatedOriginal,
+        grant_binding: OriginalGrantBinding,
+        observation: CanonicalBindingObservation,
+        deadline: std::time::Instant,
+    ) -> Result<Arc<RetainedToolkitOriginal>, OriginalWriterError> {
+        let observed = Self::binding_observation(&association, observation)?;
+        let mut publication = Some((association, source_custody, grant_binding, observed));
+        self.change_with_collection_within(
+            deadline,
+            std::thread::sleep,
+            || {},
+            |originals| {
+                let (association, source_custody, grant_binding, observed) =
+                    publication.take().ok_or(OriginalWriterError::Unavailable)?;
+                Self::publish_into(
+                    originals,
+                    association,
+                    source_custody,
+                    grant_binding,
+                    observed,
+                )
+            },
+        )
+    }
+
+    /// A canonical binding observation's cancellation record and historical
+    /// custody decision, validated against `association`.
+    fn binding_observation(
+        association: &InputAuthorityAssociation,
+        observation: CanonicalBindingObservation,
+    ) -> Result<BindingObserved, OriginalWriterError> {
+        Ok(match observation {
+            CanonicalBindingObservation::Unretained => (None, None),
+            CanonicalBindingObservation::Cancelled(record) => (Some(record), None),
+            CanonicalBindingObservation::Historical {
+                association: observed,
+                attempt,
+            } => {
+                if &observed != association {
+                    return Err(OriginalWriterError::Conflict);
+                }
+                attempt.validate_binding(association)?;
+                (None, Some(attempt.decision()))
+            }
+        })
+    }
+
+    /// Publish a binding into the owner's held collection, inside an open
+    /// owner change of the shared publication. Never waits.
+    fn publish_into(
+        originals: &mut Vec<OriginalRecord>,
+        association: InputAuthorityAssociation,
+        source_custody: AuthenticatedOriginal,
+        grant_binding: OriginalGrantBinding,
+        (cancelled_record, historical_decision): BindingObserved,
+    ) -> Result<Arc<RetainedToolkitOriginal>, OriginalWriterError> {
         let claims = association.candidate();
         let mut first_binding = None;
         let mut first_index = None;
@@ -3207,15 +3299,39 @@ impl ToolkitOriginalOwner {
             .originals
             .try_lock()
             .map_err(|_| ControllerReadinessFailure::PolicyUnavailable)?;
-        Ok(originals
-            .iter()
-            .filter_map(OriginalRecord::bound)
-            .find(|retained| {
-                retained.source_custody == Some(SourceCustody::Admitted)
-                    && retained.names(namespace, original)
-            })
-            .map(|retained| retained.custody.authority_basis.clone()))
+        Ok(admitted_basis_in(&originals, namespace, original))
     }
+
+    /// [`Self::admitted_original_basis`] for a reader that holds no owner
+    /// change, reservation or other guard: a source collection held by
+    /// another owner's short section is contention, waited for until
+    /// `deadline` (the reader's step's one deadline), as the native readers
+    /// wait. Past the deadline, or poisoned, it is unavailable.
+    pub(crate) fn admitted_original_basis_until(
+        &self,
+        namespace: &QualifiedIngressNamespace,
+        original: &OriginalWorkRef,
+        deadline: std::time::Instant,
+    ) -> Result<Option<WorkAuthorityBasis>, ControllerReadinessFailure> {
+        let originals = wait_for_lock(&self.originals, deadline, std::thread::sleep)?;
+        Ok(admitted_basis_in(&originals, namespace, original))
+    }
+}
+
+/// The admitted custody's retained basis of `original`, when it has one.
+fn admitted_basis_in(
+    originals: &[OriginalRecord],
+    namespace: &QualifiedIngressNamespace,
+    original: &OriginalWorkRef,
+) -> Option<WorkAuthorityBasis> {
+    originals
+        .iter()
+        .filter_map(OriginalRecord::bound)
+        .find(|retained| {
+            retained.source_custody == Some(SourceCustody::Admitted)
+                && retained.names(namespace, original)
+        })
+        .map(|retained| retained.custody.authority_basis.clone())
 }
 
 #[cfg(test)]

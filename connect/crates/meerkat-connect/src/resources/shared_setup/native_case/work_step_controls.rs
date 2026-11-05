@@ -9,7 +9,7 @@
 //! of its own, where no other Find's steps share the change.
 use super::*;
 use std::time::Instant;
-use toolkit_mobkit::publication_source_probe::{self, Hold};
+use toolkit_mobkit::source_hold_probe::{self, Hold, Site};
 
 /// B's Find: the call the control acts on.
 const FIND: &str = "b-original-find";
@@ -29,8 +29,8 @@ fn source_collection_held_at_b_finds_publication_source_is_waited_out_and_read_a
         let mut case = Case::new(parent.enter());
         let result = std::panic::AssertUnwindSafe(async {
             case.construct(pipes).await;
-            publication_source_probe::install(Arc::new(move |call| {
-                if call != FIND {
+            source_hold_probe::install(Arc::new(move |site, call| {
+                if site != Site::PublicationSource || call != FIND {
                     return None;
                 }
                 let mut seen = seen.lock().unwrap();
@@ -44,7 +44,7 @@ fn source_collection_held_at_b_finds_publication_source_is_waited_out_and_read_a
         })
         .catch_unwind()
         .await;
-        publication_source_probe::clear();
+        source_hold_probe::clear();
         if result.is_err() {
             case.retain_failed_audits().await;
         }

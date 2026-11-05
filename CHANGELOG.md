@@ -354,6 +354,12 @@ them.
   staging, and a refusal met before any effect stays certified as not
   dispatched.
 
+- `meerkat-core`:
+  `ToolDispatchContext::check_tool_authorization_before_effect` checks a tool
+  call's authorization before the tool code it guards runs, without recording
+  an entry or spending the review. An operation refusal met while no effect of
+  the dispatch has entered is certified as not dispatched.
+
 ### Changed
 
 - Host store refusals are typed and scoped to the families a read needs

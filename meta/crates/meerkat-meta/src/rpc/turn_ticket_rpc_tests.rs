@@ -519,8 +519,13 @@ impl SessionBridge for TicketBridge {
             );
             Ok(())
         };
-        crate::identity_first::core_test_bridge::apply_through_seats(self, &roster, Some(&revive))
-            .await
+        crate::identity_first::core_test_bridge::apply_through_seats(
+            self,
+            &roster,
+            Some(&revive),
+            None,
+        )
+        .await
     }
 }
 

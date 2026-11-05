@@ -7,8 +7,8 @@
 //! pending first-boot row is carried out by its identity's declaration; a
 //! rotation a crash interrupted is Core's to finish; and the lifecycle
 //! projection tells each seat and retirement once. The double answers
-//! Core's declared apply through its own seat, rotation and revival
-//! ([`apply_through_seats`]), and unlists as Core's seal does
+//! Core's declared apply through its own seat, rotation, revival and
+//! restamp ([`apply_through_seats`]), and unlists as Core's seal does
 //! ([`DeclaredSet`]).
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
@@ -120,14 +120,17 @@ struct SeatCore {
     history_reads: AtomicUsize,
     creates: AtomicUsize,
     resumes: AtomicUsize,
+    /// Every restamp of a declared role migration Core's declared apply made
+    /// (`apply_declared_roster`): the successor seated Dormant, nothing built.
+    restamps: AtomicUsize,
     wakes: AtomicUsize,
     /// Core keeps these sessions archived: a seat that names one, for an
     /// identity Core does not hold, answers `SessionArchived` and writes
     /// nothing.
     archived: Vec<SessionId>,
-    /// Core's resume binds the identity on the named session at its next
-    /// generation (a revival, or a declared role migration's restamp)
-    /// instead of refusing it.
+    /// Core's resume, and a declared role migration's restamp, bind the
+    /// identity on the named session at its next generation instead of
+    /// refusing it.
     resumes_onto_session: bool,
     /// The role migration this activation declares, by identity.
     migrations: BTreeMap<AgentIdentity, meerkat_mob::ProfileName>,
@@ -175,9 +178,10 @@ struct SeatCore {
     /// the gateway's build check off Core's typed refusal: the live spawn
     /// of a fresh seat that owes a kickoff, and of the rotation of an
     /// identity Core does not hold that owes one (each refused before
-    /// anything is seated), and a resume (an archived session's revival, a
-    /// declared role migration). A seat or a rotation that owes no kickoff
-    /// builds nothing, so it is not refused here.
+    /// anything is seated), and a resume ([`SessionBridge::resume_session`]).
+    /// A seat (an archived session's revival in Core's declared apply
+    /// included), a declared role migration's restamp or a rotation that
+    /// owes no kickoff builds nothing, so it is not refused here.
     route_refused: Vec<AgentIdentity>,
     /// Every rotation asked of Core, refused or carried out.
     rotation_calls: AtomicUsize,
@@ -846,7 +850,35 @@ impl SessionBridge for SeatCore {
             lock(&self.host_pending).remove(identity);
             Ok(())
         };
-        let mut answer = apply_through_seats(self, &roster, Some(&revive)).await?;
+        // A declared role migration, once the member was released: Core's
+        // rotation onto its own session under the new role, the successor
+        // seated Dormant with nothing built (the next wake builds it). Core
+        // refuses the occupant's retirement while its host preparation is
+        // pending.
+        let restamp = |identity: &AgentIdentity, spec: &DurableAgentSpec, session: &SessionId| {
+            self.restamps.fetch_add(1, Ordering::SeqCst);
+            if !self.resumes_onto_session {
+                return Err(BridgeError::Mob(format!(
+                    "{identity}: a seat restamps no member"
+                )));
+            }
+            if lock(&self.host_pending).contains(identity) {
+                return Err(BridgeError::Mob(format!(
+                    "{identity}: Core refuses retiring the occupant while its host preparation \
+                     is pending"
+                )));
+            }
+            let generation = self.next_generation(identity)?;
+            rotate_live(
+                &self.core,
+                identity,
+                &spec.profile,
+                generation,
+                Some(session.clone()),
+            )?;
+            Ok(generation)
+        };
+        let mut answer = apply_through_seats(self, &roster, Some(&revive), Some(&restamp)).await?;
         answer.first_boot_requests_carried_out.extend(carried_out);
         // Core ends an identity's host preparation in the step that carries
         // its first-boot request out.
@@ -992,8 +1024,11 @@ fn hold_at_rewrite(
 /// one declared apply of the whole roster's facts, and, since Core's
 /// verdict seats each identity, one more of the whole roster with the builds
 /// Core asked for. Core seats every identity it does not hold Dormant, in
-/// one step. Nothing is created, resumed or woken: each identity is a member
-/// bound to a fresh session Core minted, and a delivery materializes it.
+/// one step, and the pass reads Core's member history a fixed number of
+/// times, two at most, however many identities the roster lists: no read
+/// per identity. Nothing is created, resumed or woken: each identity is a
+/// member bound to a fresh session Core minted, and a delivery materializes
+/// it.
 #[tokio::test]
 async fn x3_r15_a_compile_seats_every_unheld_identity_in_one_core_call_and_wakes_none() {
     let core = Arc::new(SeatCore::default());
@@ -1028,13 +1063,21 @@ async fn x3_r15_a_compile_seats_every_unheld_identity_in_one_core_call_and_wakes
             .map(|spec| (spec.identity.clone(), None))
             .collect::<Vec<_>>()
     );
+    let history_reads = core.history_reads.load(Ordering::SeqCst);
+    assert!(
+        history_reads <= 2,
+        "two reads of Core's member history at most for the whole pass of three \
+         identities: {history_reads}"
+    );
     assert_eq!(core.creates.load(Ordering::SeqCst), 0);
     assert_eq!(core.resumes.load(Ordering::SeqCst), 0);
     assert_eq!(core.wakes.load(Ordering::SeqCst), 0, "a seat wakes nothing");
 }
 
 /// A roster pass over identities Core already holds seats nothing again:
-/// Core keeps every member, and nothing is seated, rotated or woken.
+/// Core keeps every member, nothing is seated, rotated or woken, and the
+/// pass reads Core's member history two times at most, as a pass that
+/// seats does: no read per identity.
 #[tokio::test]
 async fn r15_a_compile_over_seated_identities_seats_nothing_again() {
     let core = Arc::new(SeatCore::default());
@@ -1043,6 +1086,7 @@ async fn r15_a_compile_over_seated_identities_seats_nothing_again() {
         .map(|name| spec(&identity(name)))
         .to_vec();
     roster_pass(&runtime, &specs, None).await;
+    let history_reads = core.history_reads.load(Ordering::SeqCst);
 
     let outcomes = roster_pass(&runtime, &specs, None).await;
 
@@ -1055,6 +1099,11 @@ async fn r15_a_compile_over_seated_identities_seats_nothing_again() {
     assert_eq!(lock(&core.seat_calls).len(), 1, "no second seat");
     assert!(lock(&core.rotations).is_empty(), "nothing is rotated");
     assert_eq!(core.wakes.load(Ordering::SeqCst), 0, "nothing is woken");
+    let pass_reads = core.history_reads.load(Ordering::SeqCst) - history_reads;
+    assert!(
+        pass_reads <= 2,
+        "two reads of Core's member history at most for the pass: {pass_reads}"
+    );
 }
 
 /// The first-boot carry-out: each pending `Resume` row is its identity's
@@ -3133,9 +3182,10 @@ async fn the_roster_pass_revives_an_archived_session_dormant() {
 }
 
 /// A declared role migration is the identity's declaration's: the
-/// registration that declares the new role has Core restamp the member onto
-/// its own session under that role and release it, and the materialization
-/// after it has Core's wake build the member under the new role, once.
+/// registration that declares the new role has Core release the member and
+/// then seat its successor on its own session under that role, Dormant, so
+/// the registration builds nothing; the materialization after it has Core's
+/// wake build the member under the new role, once.
 #[tokio::test]
 async fn a_declared_migration_then_a_materialization_builds_the_member_once() {
     let alice = identity("personal:alice");
@@ -3154,13 +3204,26 @@ async fn a_declared_migration_then_a_materialization_builds_the_member_once() {
         .register(spec(&alice))
         .await
         .expect("the identity registers");
-    assert_eq!(core.resumes.load(Ordering::SeqCst), 1, "one restamp");
+    assert_eq!(core.restamps.load(Ordering::SeqCst), 1, "one restamp");
+    assert_eq!(
+        core.resumes.load(Ordering::SeqCst),
+        0,
+        "Meta resumes nothing: Core's declaration restamps the member"
+    );
     assert_eq!(
         lock(&core.releases).as_slice(),
         std::slice::from_ref(&alice),
-        "the declaration releases the restamp"
+        "the declaration releases the member before its restamp"
     );
-    let built = core.builds.load(Ordering::SeqCst);
+    assert_eq!(
+        core.builds.load(Ordering::SeqCst),
+        0,
+        "the registration builds nothing: the successor is seated Dormant"
+    );
+    assert!(
+        lock(&core.materialized).is_empty(),
+        "nothing is materialized before the wake"
+    );
 
     let scope = runtime
         .materialize(&alice)
@@ -3178,12 +3241,12 @@ async fn a_declared_migration_then_a_materialization_builds_the_member_once() {
         "the member runs the new role"
     );
     assert_eq!(
-        core.resumes.load(Ordering::SeqCst),
+        core.restamps.load(Ordering::SeqCst),
         1,
         "the materialization restamps nothing again"
     );
     assert_eq!(
-        core.builds.load(Ordering::SeqCst) - built,
+        core.builds.load(Ordering::SeqCst),
         1,
         "the materialization's wake builds the member once"
     );
@@ -3193,9 +3256,9 @@ async fn a_declared_migration_then_a_materialization_builds_the_member_once() {
 /// already shows done: the pass declares the row's `Resume` request again
 /// with the migration, and Core carries the request out (it ends the host
 /// preparation Meta asked for at start, which would refuse the restamp's
-/// retirement of the member under its previous role) and restamps the
-/// member onto its own session under the new role, releasing it. The
-/// identity's next delivery goes through.
+/// retirement of the member under its previous role), releases the member
+/// and seats its successor on its own session under the new role, Dormant.
+/// The identity's next delivery goes through.
 #[tokio::test]
 async fn a_declared_migration_over_a_done_first_boot_row_ends_its_host_preparation() {
     let alice = identity("personal:alice");
@@ -3392,9 +3455,9 @@ async fn a_reprofiled_identity_without_a_declared_migration_stays_seated_and_hel
     );
 }
 
-/// The same move with the migration declared: Core restamps the member
-/// onto its own session under the new role and releases it, and its next
-/// delivery goes through.
+/// The same move with the migration declared: Core releases the member and
+/// seats its successor on its own session under the new role, Dormant, and
+/// its next delivery goes through.
 #[tokio::test]
 async fn a_reprofiled_identity_with_a_declared_migration_moves_onto_its_own_session() {
     let alice = identity("personal:alice");
@@ -3434,7 +3497,7 @@ async fn a_reprofiled_identity_with_a_declared_migration_moves_onto_its_own_sess
     );
     assert!(
         lock(&core.materialized).is_empty(),
-        "the roster pass releases the restamp: the member is not materialized after it"
+        "the restamp seats the successor Dormant: the member is not materialized after the pass"
     );
     runtime
         .send(&alice, &text("hello"))

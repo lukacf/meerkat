@@ -25,7 +25,7 @@
 //! declared that it does not list, through a retire journaled as unlisted,
 //! as Core's seal journals it ([`DeclaredSet`]).
 //! A double that seats members answers Core's declared apply through its
-//! own seat, rotation and revival ([`apply_through_seats`]). Its member
+//! own seat, rotation, revival and restamp ([`apply_through_seats`]). Its member
 //! lifecycle journal reads
 //! answer once its members keep the journal
 //! ([`CoreTestMembers::keep_journal`]);
@@ -258,6 +258,16 @@ pub(crate) type ArchivedSeat<'a> = dyn Fn(&AgentIdentity, &DurableAgentSpec, &Se
     + Sync
     + 'a;
 
+/// A double's restamp of a declared role migration
+/// ([`apply_through_seats`]), once the member was released: Core's rotation
+/// of the identity's member onto its own session under the role the spec
+/// names, its successor seated Dormant. It builds nothing (the next wake
+/// builds the member) and answers the successor's generation.
+pub(crate) type DormantRestamp<'a> = dyn Fn(&AgentIdentity, &DurableAgentSpec, &SessionId) -> Result<u64, BridgeError>
+    + Send
+    + Sync
+    + 'a;
+
 /// Core's declared apply (`MobHandle::apply_declared_roster`) as a double
 /// that seats members emulates it, through the double's own steps:
 /// - an identity whose member Core holds keeps it, and a first-boot
@@ -266,8 +276,11 @@ pub(crate) type ArchivedSeat<'a> = dyn Fn(&AgentIdentity, &DurableAgentSpec, &Se
 ///   fresh session when its sessions live in memory only
 ///   ([`SessionBridge::session_outlives_member`] answers `false`), is
 ///   restamped onto its own session when the activation declared that
-///   migration ([`SessionBridge::resume_session`]), and is held under its
-///   previous role otherwise, its materialization released;
+///   migration, in Core's order: released first
+///   ([`SessionBridge::release_member`]), then its successor seated Dormant
+///   under the new role with nothing built (`restamp`, the double's own
+///   rotation; a double with no restamp answers it `Failed`), and is held
+///   under its previous role otherwise, its materialization released;
 /// - a first-boot `Fresh` request starts the identity's fresh life
 ///   ([`SessionBridge::rotate_member`]);
 /// - an identity Core holds no member of awaits its held creation when its
@@ -289,6 +302,7 @@ pub(crate) async fn apply_through_seats(
     bridge: &dyn SessionBridge,
     roster: &DeclaredRosterRequest,
     revive: Option<&ArchivedSeat<'_>>,
+    restamp: Option<&DormantRestamp<'_>>,
 ) -> Result<DeclaredRosterAnswer, BridgeError> {
     let mut answer = DeclaredRosterAnswer::default();
     let mut seats = Vec::new();
@@ -363,22 +377,32 @@ pub(crate) async fn apply_through_seats(
                                         "{identity}'s member is bound to no session to migrate on"
                                     )),
                                 },
-                                (Some(draft), Some(session)) => match bridge
-                                    .resume_session(identity, spec, draft, session, Some(&role))
-                                    .await
-                                {
-                                    Ok(_) => {
-                                        let _ = bridge.release_member(identity).await;
-                                        let generation = bridge
-                                            .last_member_binding(identity)
-                                            .await
-                                            .ok()
-                                            .flatten()
-                                            .map_or(0, |binding| binding.generation().get());
-                                        DeclaredIdentityAnswer::RoleMigrated { generation }
+                                (Some(_), Some(session)) => {
+                                    // Core's order: the release first (its
+                                    // idle check), then the successor seated
+                                    // on the kept session under the new role,
+                                    // Dormant: nothing is built until the
+                                    // wake.
+                                    match bridge.release_member(identity).await {
+                                        Err(error) => DeclaredIdentityAnswer::Failed { error },
+                                        Ok(()) => match restamp
+                                            .map(|restamp| restamp(identity, spec, session))
+                                        {
+                                            Some(Ok(generation)) => {
+                                                DeclaredIdentityAnswer::RoleMigrated { generation }
+                                            }
+                                            Some(Err(error)) => {
+                                                DeclaredIdentityAnswer::Failed { error }
+                                            }
+                                            None => DeclaredIdentityAnswer::Failed {
+                                                error: BridgeError::Unsupported {
+                                                    operation: "restamp a member onto its own \
+                                                                session",
+                                                },
+                                            },
+                                        },
                                     }
-                                    Err(error) => DeclaredIdentityAnswer::Failed { error },
-                                },
+                                }
                             }
                         }
                     }

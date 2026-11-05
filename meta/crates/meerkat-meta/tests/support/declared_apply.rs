@@ -121,6 +121,10 @@ impl DeclaredSet {
 /// - a declaration of facts only whose verdict seats or starts a member
 ///   answers `BuildRequired` and takes no step.
 ///
+/// Unlike Core, it answers `Kept` for any member Core holds live under the
+/// spec's role, with none of Core's mark, label or custody checks: only the
+/// rows over a real Core mob pin the legacy adoption.
+///
 /// Nothing is unlisted ([`DeclaredSet::apply`] does that). Each identity's
 /// answer is its own: a refused seat, rotation or revival is that identity's
 /// `Failed`.

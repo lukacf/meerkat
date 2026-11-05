@@ -1739,10 +1739,11 @@ async fn a_live_redispatch_reads_the_original_reply_or_no_own_result() {
 ///   declaration moves the member to the declared mode (a memory-only
 ///   session onto a fresh one), so the send is tracked and reports its own
 ///   reply;
-/// - a host's raw repair respawn of the member (a retire, then a spawn of
-///   its name that drops the override) is refused (`IdentityMember`): the
-///   name is a declared identity's, so the live mode cannot drift from the
-///   spec that way.
+/// - a member spawned with the turn_driven override of an autonomous_host
+///   profile runs turn_driven, so its send is tracked; a host's raw repair
+///   respawn of it (a retire, then a spawn of its name that drops the
+///   override) is refused (`IdentityMember`): the name is a declared
+///   identity's, so the live mode cannot drift from the spec that way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn trackability_follows_the_live_runtime_mode() {
     use meerkat_mob::MobRuntimeMode::{AutonomousHost, TurnDriven};
@@ -1860,12 +1861,27 @@ async fn trackability_follows_the_live_runtime_mode() {
     );
     live.runtime.shutdown().await;
 
-    // A host's raw repair respawn of the member (a retire, then a spawn of
-    // its name that drops the override) is refused: the name is a declared
-    // identity's, and the spawn carries no entry custody.
+    // A member spawned with the turn_driven override (the profile declares
+    // autonomous_host) runs turn_driven, so its send is tracked. A host's
+    // raw repair respawn of it (a retire, then a spawn of its name that
+    // drops the override) is refused: the name is a declared identity's,
+    // and the spawn carries no entry custody.
     let client = NamedReplyClient::default();
     let live = live_runtime_with(AutonomousHost, Some(TurnDriven), &client).await;
+    let tracked = rpc(
+        &live.runtime,
+        &live.ctx,
+        "meta/send",
+        json!({"identity": "keeper", "content": "foreign", "track_turn": true}),
+    )
+    .await;
+    let ticket = tracked["turn"]["ticket"]
+        .as_str()
+        .unwrap_or_else(|| panic!("spawned with the turn_driven override: {tracked}"))
+        .to_string();
+    await_turn(&live.runtime, &live.ctx, &ticket).await;
     let member = live.live_member().await;
+    assert_eq!(member.runtime_mode, TurnDriven);
     let session = member.session.clone().expect("bridge session");
     let handle = live.runtime.mob_handle();
     handle

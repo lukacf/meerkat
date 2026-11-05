@@ -143,22 +143,21 @@ home directory is there, and Unix sockets are refused. Why each grant:
 - `/etc/gitconfig`: git's system defaults.
 
 The sandbox grants only directories and single regular files, at their own
-path, never through a symbolic link and never overlapping each other or the
-baseline: that is why `/etc` is granted file by file, and a path that does
-not exist on the host (or is a link) is left out.
+path, never through a symbolic link on the way and never overlapping each
+other or the baseline: that is why `/etc` is granted file by file, and a
+path that does not exist on the host is left out. A granted file may itself
+be a symbolic link to a regular file: the sandbox shows the target's content
+read-only at the link's path.
 
 **Name resolution.** `localhost` and other `/etc/hosts` names always
-resolve. DNS needs `/etc/resolv.conf` itself. Where it is a symbolic link,
-as with systemd-resolved (`/etc/resolv.conf` → `/run/systemd/resolve/stub-resolv.conf`),
-it cannot be granted, and granting the link's target directory would not
-help (the C library reads only `/etc/resolv.conf`, and the resolver's
-`nss-resolve` socket is a Unix socket the sandbox refuses). There, DNS
-lookups fail in confined commands, and the start-up notices say so. The
-ways out: `--no-confinement` for the session, or make `/etc/resolv.conf` a
-regular file holding the stub resolver's address (`sudo cp --remove-destination
-/run/systemd/resolve/stub-resolv.conf /etc/resolv.conf`; systemd-resolved
-supports this static mode, but search domains then no longer follow network
-changes).
+resolve, and DNS works from the granted `/etc/resolv.conf` wherever the
+network is allowed (`workspace`, not `strict`). Where `/etc/resolv.conf` is
+a symbolic link, as with systemd-resolved (`/etc/resolv.conf` →
+`/run/systemd/resolve/stub-resolv.conf`), confined commands read the
+target's content, read-only, at `/etc/resolv.conf` (the stub resolver
+`127.0.0.53`) and see nothing else of the target's directory. The
+resolver's `nss-resolve` socket stays unreachable (the sandbox refuses Unix
+sockets), so lookups go through `resolv.conf`'s DNS server.
 
 **More directories.** `--confinement-read <dir>` and `--confinement-write
 <dir>` (repeatable) add directories. Each must be absolute, exist, be a
@@ -546,9 +545,9 @@ The confinement tests probe the host's sandbox backend directly (a confined
 `/bin/true` launch) and skip themselves with a `SKIPPED:` line naming the
 reason where it is unavailable (for example Ubuntu's user-namespace
 restriction). The name-resolution test resolves `localhost` inside the
-sandbox and, where `/etc/resolv.conf` is a regular file and the host itself
-resolves `example.com`, that name too; otherwise its DNS half prints
-`SKIPPED:`.
+sandbox and, where the host has an `/etc/resolv.conf` (a regular file or a
+link) and itself resolves `example.com`, that name too; otherwise its DNS
+half prints `SKIPPED:`.
 
 The live lanes are ignored by default and skip a provider whose key is not in
 the environment:

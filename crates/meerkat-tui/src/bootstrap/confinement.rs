@@ -24,20 +24,22 @@
 //! at its own path and refuses a grant that overlaps another or the
 //! baseline (so `/etc` and `/usr` cannot be granted whole), that does not
 //! exist, that passes through a symbolic link, or that is a file with more
-//! than one hard link. [`grants`] keeps each detected path only when it
-//! exists, is canonical, and is disjoint from the other grants and the
-//! baseline; single files (`PathAccess::Literal`) give a confined command
-//! name resolution and user lookup without the rest of `/etc`.
+//! than one hard link. One exception: a read-only file grant may itself be
+//! a symbolic link (its directories still real), and the backend binds the
+//! link's regular-file target at the link's own path. [`grants`] keeps each
+//! detected path only when it exists, is canonical (a file grant: up to a
+//! final link to a regular file, on Linux), and is disjoint from the other
+//! grants and the baseline; single files (`PathAccess::Literal`) give a
+//! confined command name resolution and user lookup without the rest of
+//! `/etc`.
 //!
 //! **Name resolution.** `getent hosts localhost` works from the granted
-//! `/etc/hosts` and `/etc/nsswitch.conf`. DNS needs `/etc/resolv.conf` at
-//! that path: a host whose `/etc/resolv.conf` is a symbolic link (systemd's
-//! stub resolver: `/run/systemd/resolve/stub-resolv.conf`) cannot have it
-//! granted, and granting the link's target directory does not help (glibc
-//! reads only `/etc/resolv.conf`, and the sandbox refuses `AF_UNIX`
-//! sockets, so `nss-resolve`'s socket is unreachable too). There, confined
-//! commands resolve names from `/etc/hosts` only, and [`plan`] says so in a
-//! start-up notice ([`HostPaths::resolv_conf_link`]).
+//! `/etc/hosts` and `/etc/nsswitch.conf`; DNS from the granted
+//! `/etc/resolv.conf`. Where that is a symbolic link (systemd-resolved:
+//! `/run/systemd/resolve/stub-resolv.conf`), the confined command sees the
+//! target's content, read-only, at `/etc/resolv.conf` and nothing else of the
+//! target's directory; the stub resolver's `127.0.0.53` is reachable
+//! wherever the IP network is (`workspace`, not `strict`).
 //!
 //! **Extra grants.** `--confinement-read <dir>` and `--confinement-write
 //! <dir>` ([`ExtraGrants`]) add directories. Each must be absolute,
@@ -342,8 +344,7 @@ const SYSTEM_READ_DIRS: &[&str] = &[
     "/etc/ca-certificates",
 ];
 
-/// Read-only system files: name resolution (`resolv.conf` only when it is a
-/// regular file, see the module docs), user lookup, git defaults.
+/// Read-only system files: name resolution, user lookup, git defaults.
 const SYSTEM_READ_FILES: &[&str] = &[
     "/etc/resolv.conf",
     "/etc/hosts",
@@ -357,9 +358,6 @@ const SYSTEM_READ_FILES: &[&str] = &[
     "/etc/gitconfig",
 ];
 
-/// The resolver configuration glibc reads.
-const RESOLV_CONF: &str = "/etc/resolv.conf";
-
 /// Paths outside the workspace a confined shell commonly needs, as found on
 /// this host (not yet filtered; see [`grants`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -370,10 +368,6 @@ pub struct HostPaths {
     pub read: Vec<PathBuf>,
     /// Read-only files: name resolution, user lookup.
     pub read_files: Vec<PathBuf>,
-    /// Where `/etc/resolv.conf` points when it is a symbolic link (which
-    /// the Linux sandbox cannot grant: DNS fails inside it, see the module
-    /// docs); `None` when it is a regular file or missing.
-    pub resolv_conf_link: Option<PathBuf>,
 }
 
 impl HostPaths {
@@ -388,14 +382,6 @@ impl HostPaths {
         };
         let mut read: Vec<PathBuf> = env_or_home("RUSTUP_HOME", ".rustup").into_iter().collect();
         read.extend(SYSTEM_READ_DIRS.iter().map(PathBuf::from));
-        let resolv_conf_link = std::fs::symlink_metadata(RESOLV_CONF)
-            .ok()
-            .filter(|meta| meta.file_type().is_symlink())
-            .map(|_| {
-                std::fs::canonicalize(RESOLV_CONF)
-                    .or_else(|_| std::fs::read_link(RESOLV_CONF))
-                    .unwrap_or_else(|_| PathBuf::from(RESOLV_CONF))
-            });
         Self {
             write: [
                 Some(std::env::temp_dir()),
@@ -407,7 +393,6 @@ impl HostPaths {
             .collect(),
             read,
             read_files: SYSTEM_READ_FILES.iter().map(PathBuf::from).collect(),
-            resolv_conf_link,
         }
     }
 }
@@ -644,15 +629,23 @@ fn overlaps(a: &Path, b: &Path) -> bool {
 }
 
 /// `path` when it exists as a directory (`dir`) or a regular file, and is
-/// absolute and canonical: no symbolic link on the way.
+/// absolute and canonical: no symbolic link on the way. On Linux a file may
+/// itself be a symbolic link to a regular file (under canonical
+/// directories): the backend binds the target at the link's path.
 fn canonical(path: &Path, dir: bool) -> Option<PathBuf> {
     let resolved = std::fs::canonicalize(path).ok()?;
-    let kind_ok = if dir {
-        resolved.is_dir()
-    } else {
-        resolved.is_file()
-    };
-    (path.is_absolute() && resolved == path && kind_ok).then_some(resolved)
+    if dir {
+        return (path.is_absolute() && resolved == path && resolved.is_dir()).then_some(resolved);
+    }
+    let in_place = resolved == path
+        || (cfg!(target_os = "linux")
+            && std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+            && path
+                .parent()
+                .zip(path.file_name())
+                .and_then(|(parent, name)| Some(std::fs::canonicalize(parent).ok()?.join(name)))
+                .is_some_and(|named| named == path));
+    (path.is_absolute() && in_place && resolved.is_file()).then(|| path.to_path_buf())
 }
 
 /// What the TUI installs for the shell, and what to tell the user.
@@ -916,29 +909,11 @@ pub fn plan(
             source,
         }
     })?;
-    if let Some(notice) = resolver_notice(mode, floor.is_some(), host) {
-        notices.push(notice);
-    }
     Ok(ConfinementPlan {
         mode,
         shell: ShellConfinement::Required { requirement },
         notices,
     })
-}
-
-/// The notice for a host whose `/etc/resolv.conf` the Linux sandbox cannot
-/// grant (see the module docs): `workspace` mode only (`strict` has no
-/// network to resolve for), and not under a realm floor (upstream's
-/// preset decides that view).
-fn resolver_notice(mode: ConfinementArg, floor: bool, host: &HostPaths) -> Option<String> {
-    if !cfg!(target_os = "linux") || floor || mode != ConfinementArg::Workspace {
-        return None;
-    }
-    let target = host.resolv_conf_link.as_ref()?;
-    Some(format!(
-        "confinement: {RESOLV_CONF} is a symbolic link (to {}), which the sandbox cannot grant: confined commands resolve names from /etc/hosts only, DNS lookups fail (use --no-confinement for commands that need DNS, or see the README's \"Name resolution\")",
-        target.display()
-    ))
 }
 
 fn mode_name(mode: ConfinementArg) -> &'static str {
@@ -982,7 +957,6 @@ mod tests {
             write: vec![cache.clone()],
             read: vec![tools.clone()],
             read_files: vec![file.clone()],
-            resolv_conf_link: None,
         };
         Fixture {
             _dir: dir,
@@ -1063,7 +1037,6 @@ mod tests {
                 PathBuf::from("/does/not/exist"),
             ],
             read_files: vec![f.file.clone(), PathBuf::from("/etc/ld.so.cache")],
-            resolv_conf_link: None,
         };
         let (write, read, files) = grants(&f.ws, &host);
         // The workspace's parent contains every fixture path: it is the only
@@ -1077,7 +1050,14 @@ mod tests {
         let (write, read, files) = grants(&f.ws, &HostPaths::detect());
         let all: Vec<&PathBuf> = write.iter().chain(&read).chain(&files).collect();
         for (i, path) in all.iter().enumerate() {
-            assert_eq!(&&std::fs::canonicalize(path).unwrap(), path);
+            // A file grant may be a final link; its directory is canonical.
+            let named = if files.contains(path) {
+                let parent = std::fs::canonicalize(path.parent().unwrap()).unwrap();
+                parent.join(path.file_name().unwrap())
+            } else {
+                std::fs::canonicalize(path).unwrap()
+            };
+            assert_eq!(&&named, path);
             for other in &all[i + 1..] {
                 assert!(
                     !path.starts_with(other) && !other.starts_with(path),
@@ -1087,6 +1067,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_file_grant_may_be_a_final_link_to_a_regular_file_on_linux() {
+        let f = fixture();
+        let root = f.ws.parent().unwrap().to_path_buf();
+        let etc = root.join("etc");
+        let run = root.join("run");
+        std::fs::create_dir_all(&etc).unwrap();
+        std::fs::create_dir_all(&run).unwrap();
+        let target = run.join("stub-resolv.conf");
+        std::fs::write(&target, "nameserver 127.0.0.53\n").unwrap();
+        let link = etc.join("resolv.conf");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let dir_link = etc.join("dir");
+        std::os::unix::fs::symlink(&run, &dir_link).unwrap();
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&etc, &alias).unwrap();
+        let linux = cfg!(target_os = "linux");
+
+        assert_eq!(canonical(&link, false), linux.then(|| link.clone()));
+        // A regular file stays grantable; a link to a directory, a file
+        // reached through a symlinked directory, and a dangling link are
+        // refused.
+        assert_eq!(canonical(&target, false), Some(target.clone()));
+        assert_eq!(canonical(&dir_link, false), None);
+        assert_eq!(canonical(&alias.join("resolv.conf"), false), None);
+        std::os::unix::fs::symlink(run.join("missing"), etc.join("dangling")).unwrap();
+        assert_eq!(canonical(&etc.join("dangling"), false), None);
+
+        // The link alone is granted, as a read-only file at its own path;
+        // nothing of the target's directory is.
+        let host = HostPaths {
+            write: vec![],
+            read: vec![],
+            read_files: vec![link.clone()],
+        };
+        let (write, read, files) = grants(&f.ws, &host);
+        assert_eq!(write, vec![f.ws.clone()]);
+        assert!(read.is_empty(), "{read:?}");
+        assert_eq!(files, if linux { vec![link] } else { vec![] });
+        let host = HostPaths {
+            write: vec![root.clone()],
+            ..host
+        };
+        let (write, read, files) = grants(&f.ws, &host);
+        assert_eq!(write, vec![root]);
+        assert!(read.is_empty() && files.is_empty(), "{read:?} {files:?}");
     }
 
     fn realm_with(shell: LaunchConfinement) -> Config {
@@ -1333,25 +1361,6 @@ mod tests {
         // Under `off` they only earn a notice.
         let off = plan(ConfinementArg::Off, &f.ws, &Config::default(), &f.host, &extra).unwrap();
         assert!(off.notices.iter().any(|n| n.contains("no effect")), "{:?}", off.notices);
-    }
-
-    #[test]
-    fn a_symlinked_resolv_conf_earns_a_notice_in_workspace_mode_only() {
-        let host = HostPaths {
-            resolv_conf_link: Some(PathBuf::from("/run/systemd/resolve/stub-resolv.conf")),
-            ..HostPaths::default()
-        };
-        let notice = resolver_notice(ConfinementArg::Workspace, false, &host);
-        if cfg!(target_os = "linux") {
-            let notice = notice.unwrap();
-            assert!(notice.contains("/run/systemd/resolve/stub-resolv.conf"), "{notice}");
-            assert!(notice.contains("/etc/hosts only"), "{notice}");
-        } else {
-            assert!(notice.is_none());
-        }
-        assert!(resolver_notice(ConfinementArg::Strict, false, &host).is_none());
-        assert!(resolver_notice(ConfinementArg::Workspace, true, &host).is_none());
-        assert!(resolver_notice(ConfinementArg::Workspace, false, &HostPaths::default()).is_none());
     }
 
     #[test]

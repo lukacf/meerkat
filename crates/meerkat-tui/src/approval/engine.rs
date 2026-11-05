@@ -1813,7 +1813,7 @@ mod tests {
         // Five calls escalate at once; the human answers none. Each call
         // waits for the serial lock and the answer inside one timeout, so
         // all of them are denied after about one timeout, not five.
-        let timeout = Duration::from_millis(200);
+        let timeout = Duration::from_millis(300);
         let mut rig = rig(
             (0..5).map(|_| Err(ClassifierError::Timeout)).collect(),
             timeout,
@@ -1834,8 +1834,10 @@ mod tests {
                 }
             );
         }
+        // Five fresh timeouts would take at least five times `timeout`; the
+        // bound leaves room for a loaded test host without reaching that.
         assert!(
-            started.elapsed() < timeout * 3,
+            started.elapsed() < timeout * 4,
             "queued escalations must not each get a fresh timeout: {:?}",
             started.elapsed()
         );

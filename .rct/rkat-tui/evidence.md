@@ -117,8 +117,8 @@ timestamp, and output excerpts.
   (`unshare -Ur true` fails the same way). Not `#[ignore]`d: they run wherever the backend works.
 - Gap: on this host (and stock Ubuntu 24.04+) the default `workspace` mode refuses to start; users need
   `--no-confinement` or an AppArmor profile allowing user namespaces for `rkat-tui`. Also, where `/etc/resolv.conf` is a
-  symlink (systemd-resolved), it cannot be granted, so DNS fails inside the Linux sandbox (cargo fetches by name fail)
-  even in `workspace` mode; upstream would need a resolver grant.
+  symlink (systemd-resolved), it could not be granted, so DNS failed inside the Linux sandbox even in `workspace` mode.
+  **Resolved on-branch** (2026-11-06): see the DNS entry below.
 
 ## Phase 4 (models, endpoints, cost) — 2026-11-05
 
@@ -497,9 +497,17 @@ The A4 regression (Tier-1 `read_file`/`memory_search` reaching the classifier) w
   `/etc`, `/run`, `/proc`, `/sys`; grants bound at their own path; single regular files (nlink 1) are grantable as
   `Literal`; symlinked paths and overlaps refused; seccomp admits only `AF_INET`/`AF_INET6` sockets (no `AF_UNIX`).
 - DNS: `/etc/{host.conf,gai.conf,services,protocols}` added as file grants. A symlinked `/etc/resolv.conf`
-  (systemd-resolved) cannot be granted, and granting its target's parent (`/run/systemd/resolve`) would not help
-  (glibc reads only `/etc/resolv.conf`; nss-resolve needs `AF_UNIX`): not granted; a start-up notice names it
-  (`HostPaths::resolv_conf_link`). Upstream ask: the Linux backend binding a symlink's target at the link's path.
+  (systemd-resolved) could not be granted, and granting its target's parent (`/run/systemd/resolve`) would not help
+  (glibc reads only `/etc/resolv.conf`; nss-resolve needs `AF_UNIX`). Upstream ask: the Linux backend binding a
+  symlink's target at the link's path. **Resolved on-branch** (2026-11-06, the branch's one engine change):
+  `meerkat-sandbox`'s Linux `Mount::capture` accepts a read-only file grant whose final component is a symlink to a
+  regular file (ancestors real directories) and binds the pinned canonical target at the link's path; `validate()`
+  still re-resolves the link to the pinned target, so a retargeted link fails closed. Unit:
+  `linux::tests::a_final_component_link_grants_its_regular_file_target_read_only`; positive lane (ignored here, no
+  user namespaces): `linux_file_grant_through_a_final_symlink_binds_its_target_at_the_link`. The TUI now grants the
+  link only (`canonical` admits a final file link on Linux; the target's directory is not granted); the
+  `resolv_conf_link` notice is gone, and
+  `workspace_mode_resolves_localhost_and_dns_names` no longer skips DNS for a link.
 - Extra grants: `--confinement-read`/`--confinement-write <dir>` (`ExtraGrants`, validated by `grants_with`: absolute,
   existing, canonical, directory, off baseline/`/proc`/`/sys`/`/dev`, disjoint from the workspace and each other,
   not redundant; typed `ConfinementError::ExtraGrant`); refused under a realm floor. `ConfinementSection`

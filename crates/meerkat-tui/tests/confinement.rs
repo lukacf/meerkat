@@ -182,10 +182,10 @@ async fn workspace_mode_confines_writes_to_the_workspace() {
 /// Name resolution inside workspace mode, with this host's real system
 /// paths (`HostPaths::detect`): `localhost` resolves from the granted
 /// `/etc/hosts`, and a DNS name resolves through the stub resolver named in
-/// a granted `/etc/resolv.conf`. A host whose `/etc/resolv.conf` is a
-/// symbolic link (systemd-resolved) cannot have it granted: the DNS half
-/// prints `SKIPPED:` there, as it does when the host itself cannot resolve
-/// the name (no network).
+/// a granted `/etc/resolv.conf`, a regular file or a symbolic link
+/// (systemd-resolved: the sandbox binds the link's target at
+/// `/etc/resolv.conf`). The DNS half prints `SKIPPED:` only when the host
+/// itself cannot resolve the name (no network).
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn workspace_mode_resolves_localhost_and_dns_names() {
@@ -196,12 +196,7 @@ async fn workspace_mode_resolves_localhost_and_dns_names() {
         return;
     }
     let host = HostPaths::detect();
-    let dns_skip = if let Some(target) = &host.resolv_conf_link {
-        Some(format!(
-            "/etc/resolv.conf is a symbolic link (to {}), which the sandbox cannot grant",
-            target.display()
-        ))
-    } else if !Path::new("/etc/resolv.conf").is_file() {
+    let dns_skip = if !Path::new("/etc/resolv.conf").is_file() {
         Some("this host has no /etc/resolv.conf".to_string())
     } else if ("example.com", 80).to_socket_addrs().is_err() {
         Some("the host itself cannot resolve example.com".to_string())

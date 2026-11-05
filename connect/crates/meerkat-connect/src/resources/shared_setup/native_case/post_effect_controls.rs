@@ -151,6 +151,8 @@ fn control_at(at: Step, target: &'static str, hold: Hold) -> (Arc<Observed>, Arc
     control_at_gated(at, target, hold, None)
 }
 
+type GateCondition = (&'static str, fn(&Observed) -> bool);
+
 /// [`control_at`], with `gate` (its name and condition on what the calls
 /// went through) set as the case's cancel gate: the case cancels A only once
 /// it holds.
@@ -158,7 +160,7 @@ fn control_at_gated(
     at: Step,
     target: &'static str,
     hold: Hold,
-    gate: Option<(&'static str, fn(&Observed) -> bool)>,
+    gate: Option<GateCondition>,
 ) -> (Arc<Observed>, Arc<Script>) {
     let (pipes, parent) = SdkParent::pair();
     let runtime = tokio::runtime::Builder::new_multi_thread()

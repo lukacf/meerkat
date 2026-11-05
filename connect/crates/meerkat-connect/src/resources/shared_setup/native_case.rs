@@ -2094,9 +2094,11 @@ impl Case {
         // The worker is released only after A's cancellation is acknowledged,
         // so an install of A that joined it is still pending here, and a
         // cancelled member need not see its result. The check proof holds
-        // such a call to its safety proofs instead.
-        self.script.record_pending_at_cancel("a-helper");
+        // such a call to its safety proofs instead. The flag goes first: an
+        // error result of A that lands after it is answered as cancelled,
+        // so A's model emits nothing after the calls recorded here.
         self.script.cancel_requested.store(true, Ordering::SeqCst);
+        self.script.record_pending_at_cancel("a-helper");
         let cancelled = self
             .client
             .lock()

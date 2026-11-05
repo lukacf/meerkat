@@ -112,6 +112,7 @@ rust_library(
         "//crates/meerkat-mob-mcp:__pkg__",
         "//crates/meerkat-rpc:__pkg__",
         "//crates/meerkat-session:__pkg__",
+        "//crates/meerkat-tui:__pkg__",
         "//crates/meerkat-web-runtime:__pkg__",
         "//tests/integration:__pkg__",
     ],

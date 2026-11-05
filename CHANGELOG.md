@@ -35,6 +35,13 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- `meerkat-tui`: a new crate whose `rkat-tui` binary is an interactive
+  terminal coding harness on the runtime-backed session path. This release
+  adds the crate skeleton only: its command line (`rkat-tui --help`) and
+  error type, with the session, approval gate and terminal UI to follow.
+
 ## [0.9.10] - 2026-11-04
 
 ### Highlights

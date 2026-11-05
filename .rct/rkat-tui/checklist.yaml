@@ -1,0 +1,160 @@
+project: "rkat-tui terminal coding harness"
+last_updated: "2026-11-05"
+phases:
+  - id: 0
+    title: "Skeleton And Verbatim Ports"
+    status: done
+    reviewers: [rct-guardian, spec-auditor]
+    verification_commands:
+      - "./scripts/repo-cargo check -p meerkat-tui"
+      - "./scripts/repo-cargo clippy -p meerkat-tui --all-targets --all-features -- -D warnings"
+      - "./scripts/repo-cargo nextest run -p meerkat-tui"
+      - "./scripts/repo-cargo run -p meerkat-tui --bin rkat-tui -- --help"
+      - "make check-rust-release-config"
+      - "make verify-bazel-locks"
+    tasks:
+      - id: P0-T001
+        spec_id: CONTRACT-001
+        text: "Create crates/meerkat-tui with workspace package fields, workspace lints and the rkat-tui bin target."
+        done: true
+        done_when: "./scripts/repo-cargo check -p meerkat-tui succeeds."
+      - id: P0-T002
+        spec_id: CONTRACT-001
+        text: "Run the async main through meerkat_runtime::host_stack::run_host after parsing arguments."
+        done: true
+        done_when: "src/main.rs has no #[tokio::main] and calls run_host."
+      - id: P0-T003
+        spec_id: TYPE-001
+        text: "Port cli.rs with the --confinement/--no-confinement flags and the upstream realm backends."
+        done: true
+        done_when: "cli::tests pass, including confinement_defaults_to_workspace_and_no_confinement_wins."
+      - id: P0-T004
+        spec_id: TYPE-002
+        text: "Port error.rs with an exhaustive exit_code()."
+        done: true
+        done_when: "The crate compiles with every variant mapped in exit_code()."
+      - id: P0-T005
+        spec_id: REQ-001
+        text: "Register the crate in scripts/release-rust-crates.sh, the workspace dependencies, CLAUDE.md's derived claims and CHANGELOG [Unreleased]."
+        done: true
+        done_when: "make check-rust-release-config passes."
+      - id: P0-T006
+        spec_id: REQ-001
+        text: "Generate the crate's BUILD.bazel and refresh MODULE.bazel.lock for the Cargo.lock change."
+        done: true
+        done_when: "make verify-bazel-locks passes with the bb gate run, not skipped."
+      - id: P0-T007
+        spec_id: E2E-001
+        text: "Smoke the binary's help."
+        done: true
+        done_when: "rkat-tui --help exits 0 with stdin closed."
+      - id: P0-T008
+        spec_id: TYPE-003
+        text: "Port approval policy, rules, shell, prompts, counters, escalation and transcript modules verbatim."
+        done: true
+        done_when: "Their unit tests pass under nextest -p meerkat-tui."
+      - id: P0-T009
+        spec_id: TYPE-004
+        text: "Port paths, overlay and pricing verbatim."
+        done: true
+        done_when: "Their unit tests pass, including the tui.toml overlay round-trips."
+      - id: P0-T010
+        spec_id: TYPE-005
+        text: "Port delivery types and the ui modules verbatim."
+        done: true
+        done_when: "Their unit tests pass; AgentEvent mapping in ui/transcript.rs is re-audited against 0.9.10."
+      - id: P0-T011
+        spec_id: REQ-001
+        text: "Port the in-crate file tools."
+        done: true
+        done_when: "Their unit tests pass and the machete ignore list in Cargo.toml no longer names their dependencies."
+  - id: 1
+    title: "Session On The Runtime Path"
+    status: pending
+    reviewers: [rct-guardian, integration-sheriff, spec-auditor]
+    verification_commands:
+      - "./scripts/repo-cargo nextest run -p meerkat-tui"
+    tasks:
+      - id: P1-T001
+        spec_id: CONTRACT-002
+        text: "Bootstrap the realm, config and PersistentSessionService with MeerkatMachine bindings."
+        done: false
+        done_when: "A headless test creates a session through the real service."
+      - id: P1-T002
+        spec_id: REQ-002
+        text: "Submit turns through runtime input admission with Queue and Steer handling."
+        done: false
+        done_when: "The headless test observes a queued and a steered turn complete."
+      - id: P1-T003
+        spec_id: REQ-003
+        text: "Resume and continue sessions."
+        done: false
+        done_when: "The headless test resumes the session it created."
+  - id: 2
+    title: "Approval Gate"
+    status: pending
+    reviewers: [rct-guardian, integration-sheriff, spec-auditor]
+    verification_commands:
+      - "./scripts/repo-cargo nextest run -p meerkat-tui"
+    tasks:
+      - id: P2-T001
+        spec_id: CONTRACT-003
+        text: "Install the approval gate as a ToolDispatchAdmission through the SessionAgentBuilder wrapper."
+        done: false
+        done_when: "An end-to-end test blocks a tier-3 call through the real service."
+      - id: P2-T002
+        spec_id: CONTRACT-004
+        text: "Run the classifier on meerkat-llm-core clients."
+        done: false
+        done_when: "A scripted-client test returns a classifier verdict that the gate applies."
+  - id: 3
+    title: "Confinement And Custody"
+    status: pending
+    reviewers: [spec-auditor]
+    verification_commands:
+      - "./scripts/repo-cargo nextest run -p meerkat-tui"
+    tasks:
+      - id: P3-T001
+        spec_id: CONTRACT-006
+        text: "Wire --confinement into AgentFactory::with_shell_confinement."
+        done: false
+        done_when: "A test proves each mode reaches the launch confinement."
+  - id: 4
+    title: "Models, Endpoints, Cost"
+    status: pending
+    reviewers: [spec-auditor]
+    verification_commands:
+      - "./scripts/repo-cargo nextest run -p meerkat-tui"
+    tasks:
+      - id: P4-T001
+        spec_id: REQ-004
+        text: "Hot-swap the session model from the picker."
+        done: false
+        done_when: "A test switches the model mid-session and the next turn uses it."
+  - id: 5
+    title: "Mobs"
+    status: pending
+    reviewers: [integration-sheriff, spec-auditor]
+    verification_commands:
+      - "./scripts/repo-cargo nextest run -p meerkat-tui"
+    tasks:
+      - id: P5-T001
+        spec_id: REQ-005
+        text: "Enable delegate/fork_off with the admission gate inherited by members."
+        done: false
+        done_when: "A test proves a member's tool call passes the same gate."
+  - id: 6
+    title: "Context, Memory, Compaction Policy, Docs, Review"
+    status: pending
+    reviewers: [rct-guardian, integration-sheriff, spec-auditor, methodology-integrity]
+    verification_commands:
+      - "make lint"
+      - "make test"
+      - "make check-rust-release-config"
+      - "make verify-bazel-locks"
+    tasks:
+      - id: P6-T001
+        spec_id: REQ-006
+        text: "Instruction files, notes, native memory and the compaction policy on native auto-compaction."
+        done: false
+        done_when: "Tests prove instructions reach the prompt and auto-compaction triggers at the configured threshold."

@@ -1,0 +1,45 @@
+project: "rkat-tui terminal coding harness"
+last_updated: "2026-11-05"
+phases:
+  - id: 0
+    title: "Skeleton And Verbatim Ports"
+    gate: 0
+    goal: "Register crates/meerkat-tui with a run_host main and port the upstream-independent modules (ui, approval policy/rules/shell/prompts, tools, paths, overlay, pricing, delivery, cli) with compile-only fixes."
+    spec_ids: [TYPE-001, TYPE-002, TYPE-003, TYPE-004, TYPE-005, CONTRACT-001, REQ-001, E2E-001]
+    done_when: "rkat-tui --help works, the release config and Bazel lock gates pass, and every ported module's unit tests are green."
+  - id: 1
+    title: "Session On The Runtime Path"
+    gate: 1
+    goal: "Bootstrap, persistence, MeerkatMachine, Queue/Steer turns, events, interrupt, resume and -c; delivery UI driven by admission acks."
+    spec_ids: [CONTRACT-002, CONTRACT-005, REQ-002, REQ-003, E2E-002]
+    done_when: "A headless integration test with a scripted client drives create, queue, steer, interrupt and resume through the real service."
+  - id: 2
+    title: "Approval Gate"
+    gate: 2
+    goal: "ToolDispatchAdmission + ApprovalService; classifier on meerkat-llm-core; escalation modal; transcript seeding on resume."
+    spec_ids: [CONTRACT-003, CONTRACT-004, E2E-003]
+    done_when: "An end-to-end approval test through the real service blocks, allows and escalates as the tiers and rules require."
+  - id: 3
+    title: "Confinement And Custody"
+    gate: 2
+    goal: "with_shell_confinement, process custody, --confinement/--no-confinement, tier adjustments for what the sandbox prevents."
+    spec_ids: [CONTRACT-006]
+    done_when: "Confined launches are proven per mode on the platforms meerkat-sandbox supports."
+  - id: 4
+    title: "Models, Endpoints, Cost"
+    gate: 2
+    goal: "Native catalog, auth bindings, self-hosted servers, model picker, hot swap, pricing from native usage."
+    spec_ids: [REQ-004]
+    done_when: "Model switch mid-session keeps the session and the cost readout prices the native usage."
+  - id: 5
+    title: "Mobs"
+    gate: 2
+    goal: "delegate/fork_off enabled; admission gate and hooks reach helpers; member events and usage in the UI."
+    spec_ids: [REQ-005]
+    done_when: "A helper's tool call passes the same admission gate and its usage rolls up in the readout."
+  - id: 6
+    title: "Context, Memory, Compaction Policy, Docs, Review"
+    gate: 3
+    goal: "Instruction files, notes, native memory, compaction warn/auto, README, CHANGELOG, dogma/zealot/quality reviews."
+    spec_ids: [REQ-006]
+    done_when: "make lint, make test, make check-rust-release-config and make verify-bazel-locks pass; pty smoke and a real-terminal session pass; every MUST is validated in traceability.md."

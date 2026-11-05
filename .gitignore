@@ -37,6 +37,8 @@ examples/*/.work/
 .rct/*
 !.rct/round5/
 !.rct/round5/**
+!.rct/rkat-tui/
+!.rct/rkat-tui/**
 test-project/
 .cache/
 .codemob-mcp/

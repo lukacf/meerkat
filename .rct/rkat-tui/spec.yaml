@@ -1,0 +1,71 @@
+project: "rkat-tui terminal coding harness"
+last_updated: "2026-11-05"
+source_doc: ".rct/rkat-tui/source-of-truth.md"
+
+types:
+  - id: TYPE-001
+    text: "Command-line contract `Args` (clap): optional initial prompt, model/endpoint selection, `--set` overlay, allow/deny rules, endpoint definitions, resume/continue, workspace and config roots, realm selection (`--realm`, `--isolated`, `--realm-backend`, `--state-root`), auto mode, classifier model, mouse, MCP wait, compaction policy, pricing fetch, and `--confinement <workspace|strict|off>` / `--no-confinement`."
+    priority: must
+  - id: TYPE-002
+    text: "Surface error `TuiError` with a total `exit_code()` mapping: usage/configuration errors exit 2, runtime failures exit 1."
+    priority: must
+  - id: TYPE-003
+    text: "Approval vocabulary: tiers (1 pass, 2 in-project edit, 3 classified), allow/deny rules with tool + glob, decisions (allow, block with reason, escalate), denial counters, and escalation records."
+    priority: must
+  - id: TYPE-004
+    text: "`tui.toml` settings document (global, realm, project layers plus the command-line overlay): endpoints, models, auto-mode, compaction policy, pricing, rules; round-trips through TOML."
+    priority: must
+  - id: TYPE-005
+    text: "Prompt delivery states (queued, steered, admitted, completed, cancelled) driven by runtime input admission acknowledgements."
+    priority: must
+
+contracts:
+  - id: CONTRACT-001
+    text: "Surface: `rkat-tui` is a host binary of the `meerkat-tui` crate; it parses arguments before touching the terminal or runtime and runs its async main through `meerkat_runtime::host_stack::run_host` (no `#[tokio::main]`, no sized thread stacks)."
+    priority: must
+  - id: CONTRACT-002
+    text: "Sessions run on the runtime-backed path: `PersistentSessionService` with `MeerkatMachine` bindings (`RuntimeBuildMode::SessionOwned`), agents built only by `AgentFactory` through a `SessionAgentBuilder` wrapper around `FactoryAgentBuilder`."
+    priority: must
+  - id: CONTRACT-003
+    text: "Approval gate: every tool call passes a `ToolDispatchAdmission` installed through `AgentBuildConfig.tool_dispatch_admission` (so resumed and helper agents inherit it); a block is an ordinary `access_denied` tool error carrying the deny message; escalations persist through `ApprovalService`; hooks only observe."
+    priority: must
+  - id: CONTRACT-004
+    text: "Classifier: reasoning-blind (sees the user prompts and the proposed action, never the agent's reasoning), runs on `meerkat-llm-core` clients with its own read-only tools, and its verdict is advisory to the tier/rule decision."
+    priority: must
+  - id: CONTRACT-005
+    text: "State layout: realm state under `<workspace>/.rkat/tui/` by default (or the realm named by `--realm`, an isolated realm with `--isolated`, or `--state-root`); user-global files (AGENTS.md, SYSTEM.md, tui.toml, notes, history) under `$XDG_CONFIG_HOME/rkat-tui` or `--config-dir`; project settings in `<workspace>/.rkat/tui.toml`. `.rkat/sessions/` projections are never read as authority."
+    priority: must
+  - id: CONTRACT-006
+    text: "Confinement: shell, command hooks and MCP stdio servers launch under `meerkat-sandbox` workspace confinement by default; `strict` denies IP network access; `off` / `--no-confinement` launches unconfined."
+    priority: must
+
+requirements:
+  - id: REQ-001
+    text: "The crate is a registered workspace member: release crate list, workspace dependency entry, generated Bazel BUILD, CHANGELOG entry; `make check-rust-release-config` and the Bazel lock gates pass."
+    priority: must
+  - id: REQ-002
+    text: "Turns are submitted by runtime input admission with Queue or Steer handling, idempotency keys and completion handles; interrupt cancels the in-flight input."
+    priority: must
+  - id: REQ-003
+    text: "Resume (`--resume`, `-c`) reopens a persisted session and seeds the approval transcript from it."
+    priority: must
+  - id: REQ-004
+    text: "Model switch hot-swaps the session LLM identity; models come from the native catalog, auth bindings and self-hosted servers; cost readout prices native usage."
+    priority: must
+  - id: REQ-005
+    text: "Sub-agents are mob members (`delegate`, `fork_off`) that inherit the approval gate; member events and usage render in the UI."
+    priority: must
+  - id: REQ-006
+    text: "Context: instruction files and persona via `additional_instructions`; memory notes and native semantic memory; compaction warn/auto policy on native auto-compaction."
+    priority: must
+
+e2e:
+  - id: E2E-001
+    text: "`rkat-tui --help` renders without a terminal and exits 0."
+    priority: must
+  - id: E2E-002
+    text: "Headless scripted-client session: create, queue a turn, steer a turn, interrupt, resume, with events reaching the runner."
+    priority: must
+  - id: E2E-003
+    text: "A tier-3 tool call is classified and blocked through the real session service; repeated blocks escalate to the human modal."
+    priority: must

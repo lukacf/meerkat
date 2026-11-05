@@ -132,6 +132,7 @@ meerkat-mcp = { version = "=0.9.10", path = "crates/meerkat-mcp" }
 meerkat-mcp-server = { version = "=0.9.10", path = "crates/meerkat-mcp-server" }
 meerkat-cli = { version = "=0.9.10", path = "crates/meerkat-cli" }
 meerkat-rest = { version = "=0.9.10", path = "crates/meerkat-rest" }
+meerkat-tui = { version = "=0.9.10", path = "crates/meerkat-tui" }
 meerkat = { version = "=0.9.10", path = "crates/meerkat", default-features = false }
 meerkat-comms = { version = "=0.9.10", path = "crates/meerkat-comms", default-features = false }
 meerkat-hooks = { version = "=0.9.10", path = "crates/meerkat-hooks" }

@@ -71,4 +71,5 @@ printf '%s\n' \
   meerkat-mcp-server \
   meerkat-rpc \
   meerkat-rest \
-  rkat
+  rkat \
+  meerkat-tui

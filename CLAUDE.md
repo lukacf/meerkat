@@ -199,6 +199,7 @@ meerkat-workgraph → Work graph (work items, dependencies) + agent-facing workg
 meerkat-runtime   → Runtime control plane (MeerkatMachine, ops lifecycle, runtime handles) between surfaces and core
 meerkat-live      → Live multimodal WebSocket transport plus feature-gated WebRTC signaling/media
 meerkat-cli       → CLI binary (produces `rkat`)
+meerkat-tui       → Interactive terminal coding harness (produces `rkat-tui`)
 meerkat           → Facade crate, re-exports, AgentFactory, SDK helpers
 meerkat-web-runtime → WASM browser deployment target (wasm_bindgen exports)
 meerkat-machine-* → Machine authority toolchain (schema catalog, DSL, codegen, kernels, derive)
@@ -825,7 +826,7 @@ or from the release branch of the tag's version; PR and manual artifacts are pre
 | `publish_github_release` | Tags or manual asset recovery | The trailing publisher: after exact-commit CI (`require_ci_green`) and the full gate, downloads artifacts (a prebuild's once that run's full binary build gate passed, verified exactly like an `assets_run_id` recovery), adds the archives not yet on the release (never replacing one), then writes the complete `checksums.sha256` + `index.json` once (refusing to change a published one) |
 | `update_homebrew` | After the trailing publisher | Updates the Homebrew tap formula from the complete release's published checksums |
 | `publish_semver_baseline` / `attach_semver_baseline` | Tags or asset recovery, alongside publication | `publish_semver_baseline` generates rustdoc JSON for every publishable library crate on the release tag as soon as `require_ci_green` passes; `attach_semver_baseline` attaches it as `semver-rustdoc-<version>.tar.zst` once the GitHub release is published (add-only: a baseline already attached stays). It is the baseline the next release's semver gate compares against; no job waits for either |
-| `publish_registries` | Tags or manual `publish_release_packages=true` | Publishes 47 Rust crates → crates.io by dependency level (concurrently within a level), Python SDK → PyPI, TypeScript SDK → npm; before the SDK packages build, it waits for the release's complete manifest (`scripts/release-await-binary-manifest`), verifies each `rkat-rpc` archive's build attestation and stamps the archive and binary digests into both (`scripts/release-stamp-sdk-binary-digests`), and each publish step refuses a package that does not pin them for its version |
+| `publish_registries` | Tags or manual `publish_release_packages=true` | Publishes 48 Rust crates → crates.io by dependency level (concurrently within a level), Python SDK → PyPI, TypeScript SDK → npm; before the SDK packages build, it waits for the release's complete manifest (`scripts/release-await-binary-manifest`), verifies each `rkat-rpc` archive's build attestation and stamps the archive and binary digests into both (`scripts/release-stamp-sdk-binary-digests`), and each publish step refuses a package that does not pin them for its version |
 | `publish_web_sdk` | Tags or manual package/Web recovery | After `require_ci_green`, `release_validate_gate` and `release_semver_gate` (both skipped only on Web-only recovery), the registry credential preflight and the build (or a found prebuild), checks the artifact's stamp against the release commit (and a reused artifact's source run), verifies a prebuild's package attestation and version, then publishes `@rkat/web` → npm |
 
 **Build matrix:**
@@ -979,7 +980,7 @@ Six files must agree on the same version:
 | `sdks/web/package.json` | `version` |
 | `artifacts/schemas/version.json` | `contract_version` |
 
-Additionally, all internal crate dependencies in `Cargo.toml` (47 path deps) must require the workspace version exactly (`version = "=X.Y.Z"`; cargo-release keeps the `=` when it bumps). 0.x patch releases may break API, so every requirement a release crate publishes on a workspace crate is exact; `make check-rust-release-config` checks the manifests and `make check-rust-release-packaging` the packaged archives.
+Additionally, all internal crate dependencies in `Cargo.toml` (48 path deps) must require the workspace version exactly (`version = "=X.Y.Z"`; cargo-release keeps the `=` when it bumps). 0.x patch releases may break API, so every requirement a release crate publishes on a workspace crate is exact; `make check-rust-release-config` checks the manifests and `make check-rust-release-packaging` the packaged archives.
 
 **`make verify-version-parity`** runs in CI and fails on any drift. After changing versions or wire types:
 
@@ -1080,7 +1081,7 @@ After publication merge the tag into `main` by pull request; never set
 ### Dry-run Publishing
 
 ```bash
-make publish-dry-run              # Parallel dry-run for all 47 publishable Rust crates
+make publish-dry-run              # Parallel dry-run for all 48 publishable Rust crates
 make publish-dry-run-python       # Build + twine check (no upload)
 make publish-dry-run-typescript   # npm publish --dry-run
 make release-dry-run              # Full preflight + all registry dry-runs
@@ -1096,8 +1097,8 @@ Required GitHub Actions secrets for full release:
 
 ### Crate Publish Order
 
-The canonical publish order lives in `scripts/release-rust-crates.sh` (47 crates, dependency order):
-`meerkat-sqlite` → `meerkat-machine-derive` → `meerkat-machine-dsl-core` → `meerkat-agent-build-authority` → `meerkat-core` → `meerkat-sandbox` → `meerkat-authorization-contracts` → `meerkat-atif` → `meerkat-store-conformance` → `meerkat-models` → `meerkat-capabilities` → `meerkat-machine-dsl` → `meerkat-machine-schema` → `meerkat-machine-codegen` → `meerkat-authorization` → `meerkat-machine-kernels` → `meerkat-skills` → `meerkat-schedule` → `meerkat-jobs` → `meerkat-workgraph` → `meerkat-contracts` → `meerkat-store` → `meerkat-llm-core` → `meerkat-live` → `meerkat-auth-core` → `meerkat-memory` → `meerkat-mcp` → `meerkat-hooks` → `meerkat-comms` → `meerkat-runtime` → `meerkat-copilot` → `meerkat-anthropic` → `meerkat-openai` → `meerkat-gemini` → `meerkat-providers` → `meerkat-tools` → `meerkat-session` → `meerkat-client` → `meerkat` → `meerkat-mob` → `meerkat-mob-adaptive` → `meerkat-mob-mcp` → `meerkat-mob-pack` → `meerkat-mcp-server` → `meerkat-rpc` → `meerkat-rest` → `rkat`
+The canonical publish order lives in `scripts/release-rust-crates.sh` (48 crates, dependency order):
+`meerkat-sqlite` → `meerkat-machine-derive` → `meerkat-machine-dsl-core` → `meerkat-agent-build-authority` → `meerkat-core` → `meerkat-sandbox` → `meerkat-authorization-contracts` → `meerkat-atif` → `meerkat-store-conformance` → `meerkat-models` → `meerkat-capabilities` → `meerkat-machine-dsl` → `meerkat-machine-schema` → `meerkat-machine-codegen` → `meerkat-authorization` → `meerkat-machine-kernels` → `meerkat-skills` → `meerkat-schedule` → `meerkat-jobs` → `meerkat-workgraph` → `meerkat-contracts` → `meerkat-store` → `meerkat-llm-core` → `meerkat-live` → `meerkat-auth-core` → `meerkat-memory` → `meerkat-mcp` → `meerkat-hooks` → `meerkat-comms` → `meerkat-runtime` → `meerkat-copilot` → `meerkat-anthropic` → `meerkat-openai` → `meerkat-gemini` → `meerkat-providers` → `meerkat-tools` → `meerkat-session` → `meerkat-client` → `meerkat` → `meerkat-mob` → `meerkat-mob-adaptive` → `meerkat-mob-mcp` → `meerkat-mob-pack` → `meerkat-mcp-server` → `meerkat-rpc` → `meerkat-rest` → `rkat` → `meerkat-tui`
 
 Publication walks the dependency levels derived from this order and
 `cargo metadata` (`scripts/release-rust-crates.sh --levels`, computed by

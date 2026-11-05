@@ -1546,6 +1546,7 @@ rust_test(
         "//crates/meerkat-store-conformance:package_runfiles",
         "//crates/meerkat-store:package_runfiles",
         "//crates/meerkat-tools:package_runfiles",
+        "//crates/meerkat-tui:package_runfiles",
         "//crates/meerkat-web-runtime:package_runfiles",
         "//crates/meerkat-workgraph:package_runfiles",
         "//crates/meerkat:package_runfiles",

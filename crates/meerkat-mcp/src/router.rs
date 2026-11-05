@@ -8202,6 +8202,158 @@ pub(crate) mod tests {
         router.shutdown().await;
     }
 
+    /// A server released while its name was governed with no control held,
+    /// whose sign-in lands once the release's removal has settled (so the
+    /// name is no longer governed): the retry is refused, typed, and never
+    /// re-added plainly. Nothing is staged and the record is kept.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_retry_of_a_governed_record_without_a_control_is_refused() {
+        let (mut router, target, resolver, _server) = router_connected_under_credential().await;
+        // The name is governed, and the router holds no control for it.
+        router.governed_servers.insert("guarded".to_string());
+        *resolver.stored_token_for_testing() = None;
+        assert_eq!(
+            router.credential_released(&target).unwrap(),
+            ReleasedCredential::Unpublished
+        );
+        router.apply_staged().await.expect("apply the release");
+        assert!(router.active_server_names().is_empty());
+        assert!(
+            !router.governed_servers.contains("guarded"),
+            "the removal's disposition released the name"
+        );
+
+        *resolver.stored_token_for_testing() = Some("interactive-token".into());
+        let refused = router.retry_authorized(&target);
+        assert!(
+            matches!(
+                refused,
+                Err(McpError::AttachmentRefused(McpAttachmentRefusal::Mismatch))
+            ),
+            "{refused:?}"
+        );
+        assert!(!router.has_staged_intent("guarded"), "nothing is staged");
+        assert!(!router.staged_payloads.contains_key("guarded"));
+        assert!(!router.staged_controls.contains_key("guarded"));
+        assert_eq!(
+            router.servers_awaiting_authorization(),
+            vec![target],
+            "the record is kept"
+        );
+        router.apply_staged().await.expect("apply nothing");
+        assert!(router.active_server_names().is_empty(), "nothing connects");
+        router.shutdown().await;
+    }
+
+    /// A router with "guarded" connected under `control`, after a governed
+    /// replacement of the name under `replacement` (another descriptor)
+    /// failed to connect: the earlier connection stays published, and the
+    /// control the router holds for the name covers the replacement's
+    /// descriptor, not the connected one.
+    #[cfg(feature = "workspace-tests")]
+    async fn governed_router_after_a_failed_replacement(
+        config: McpServerConfig,
+        control: &Arc<CountingControl>,
+        replacement: &Arc<CountingControl>,
+    ) -> (
+        McpRouter,
+        McpServerIdentity,
+        Arc<crate::connection::tests::FakeMcpAuthResolver>,
+    ) {
+        use crate::connection::tests::FakeMcpAuthResolver;
+
+        let target = McpServerIdentity::from_config(&config).unwrap();
+        let resolver = Arc::new(
+            FakeMcpAuthResolver::new(Some("interactive-token"), "unused")
+                .with_human_authorization_required(),
+        );
+        let mut router = generated_handle_owner_router()
+            .with_mcp_auth(McpAuthMode::Interactive, Some(resolver.clone()));
+        let as_control: Arc<dyn McpAttachmentAuthority> = control.clone();
+        router
+            .stage_add_governed(config, as_control)
+            .expect("stage the governed add");
+        router.apply_staged().await.expect("apply the governed add");
+        wait_for_phase(&mut router, McpLifecyclePhase::Applied).await;
+
+        let as_replacement: Arc<dyn McpAttachmentAuthority> = replacement.clone();
+        router
+            .stage_add_governed(replacement.server.clone(), as_replacement)
+            .expect("stage the governed replacement");
+        router.apply_staged().await.expect("apply the replacement");
+        let settled = wait_until_settled(&mut router).await;
+        assert_eq!(settled.phase, McpLifecyclePhase::Failed, "{settled:?}");
+        assert_eq!(router.active_server_names(), vec!["guarded".to_string()]);
+        assert!(router.list_tools().iter().any(|tool| tool.name == "echo"));
+        assert!(
+            router
+                .governed_controls
+                .get("guarded")
+                .is_some_and(|held| held.server() == &replacement.server),
+            "the router holds the replacement's control"
+        );
+        (router, target, resolver)
+    }
+
+    /// A released server's retry record carries the control the router held
+    /// for its name. When that control covers another descriptor (a governed
+    /// replacement of the name failed, so the earlier connection stayed), the
+    /// retry after sign-in is refused, typed: a control never covers a
+    /// connection it was not made for. Nothing is staged, no control is
+    /// asked and the record is kept.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_retry_under_a_control_for_another_descriptor_is_refused() {
+        use crate::connection::tests::spawn_http_mcp_server;
+
+        let (url, _server) = spawn_http_mcp_server("interactive-token").await;
+        let config = selected_account_http_config(url);
+        let control = CountingControl::new(&config);
+        // Nothing listens on this descriptor's port.
+        let replacement = CountingControl::new(&selected_account_http_config(
+            "http://127.0.0.1:1/mcp".into(),
+        ));
+        let (mut router, target, resolver) =
+            governed_router_after_a_failed_replacement(config, &control, &replacement).await;
+        let asked = (control.asked(), replacement.asked());
+
+        // Sign-out releases the connected server, and its removal settles.
+        *resolver.stored_token_for_testing() = None;
+        assert_eq!(
+            router.credential_released(&target).unwrap(),
+            ReleasedCredential::Unpublished
+        );
+        router.apply_staged().await.expect("apply the release");
+        assert!(router.active_server_names().is_empty());
+
+        *resolver.stored_token_for_testing() = Some("interactive-token".into());
+        let refused = router.retry_authorized(&target);
+        assert!(
+            matches!(
+                refused,
+                Err(McpError::AttachmentRefused(McpAttachmentRefusal::Mismatch))
+            ),
+            "{refused:?}"
+        );
+        assert!(!router.has_staged_intent("guarded"), "nothing is staged");
+        assert!(!router.staged_payloads.contains_key("guarded"));
+        assert!(!router.staged_controls.contains_key("guarded"));
+        assert_eq!(
+            router.servers_awaiting_authorization(),
+            vec![target],
+            "the record is kept"
+        );
+        router.apply_staged().await.expect("apply nothing");
+        assert!(router.active_server_names().is_empty(), "nothing connects");
+        assert_eq!(
+            (control.asked(), replacement.asked()),
+            asked,
+            "no control was asked again"
+        );
+        router.shutdown().await;
+    }
+
     #[cfg(feature = "workspace-tests")]
     #[tokio::test]
     async fn retry_touches_only_the_exact_retained_target() {

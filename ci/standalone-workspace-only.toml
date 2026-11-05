@@ -970,6 +970,8 @@ tests = [
     "router::tests::a_released_governed_name_without_a_retained_control_is_not_restaged",
     "router::tests::a_released_governed_server_is_restaged_under_its_control",
     "router::tests::a_remove_staged_ahead_of_the_old_failure_wins",
+    "router::tests::a_retry_of_a_governed_record_without_a_control_is_refused",
+    "router::tests::a_retry_under_a_control_for_another_descriptor_is_refused",
     "router::tests::a_sign_in_before_a_queued_call_refusal_keeps_the_server_published",
     "router::tests::a_sign_in_before_the_release_boundary_restores_the_server_without_another_sign_in",
     "router::tests::a_sign_out_after_a_retained_sign_in_supersedes_it",

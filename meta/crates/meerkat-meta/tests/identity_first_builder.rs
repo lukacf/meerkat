@@ -6975,3 +6975,98 @@ async fn raw_spec_empty_identity_root_is_refused_before_bootstrap() {
         );
     }
 }
+
+/// Boot the one-identity roster of the interrupted-rotation row over the mob
+/// journal and the state under `state`.
+async fn boot_listed_identity(
+    state: &std::path::Path,
+    mob_id: &str,
+    identity: &AgentIdentity,
+) -> meerkat_meta::UnifiedRuntime {
+    let (mob_storage, mob_provenance) =
+        meerkat_meta::mob_composition_manifest::persistent_mob_storage(state.join("mob.sqlite3"))
+            .expect("open persistent mob journal");
+    Box::pin(
+        UnifiedRuntimeBuilder::default()
+            .definition(test_definition_with_id(mob_id))
+            .mob_storage(mob_storage, mob_provenance)
+            .persistent_state(state)
+            .roster_provider(Arc::new(StubRosterProvider::new(vec![durable_spec(
+                identity.as_str(),
+            )])))
+            .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+            .build(),
+    )
+    .await
+    .expect("boot the runtime")
+}
+
+/// A rotation a crash interrupted leaves Meta's record of it behind, and the
+/// next start hands the mob no host preparation for it: Core finishes an
+/// interrupted rotation from its own record, so no start waits for Meta to
+/// issue it again. A listed identity whose rotation record the restart finds
+/// takes its deliveries after the restart.
+///
+/// RED: hand the mob the identities Meta's rotation records name again at the
+/// start (`host_pending_members_before_build`): the mob holds the identity for
+/// a host preparation no declaration ends, and its delivery is refused.
+#[tokio::test]
+async fn an_interrupted_rotation_of_a_listed_identity_never_leaves_its_wakes_refused() {
+    use meerkat_meta::PersistentMetadataStore as _;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let state = tmp.path().join("root");
+    let mob_id = unique_builder_mob_id();
+    let identity = AgentIdentity::parse("agent:rotated").unwrap();
+
+    let runtime = boot_listed_identity(&state, &mob_id, &identity).await;
+    let identities = runtime.identity_runtime().unwrap();
+    identities
+        .send_awaiting_commit(
+            &identity,
+            &meerkat_core::ContentInput::Text("before the restart".to_string()),
+        )
+        .await
+        .expect("the first life's turn commits");
+    let generation = identities
+        .status(&identity)
+        .await
+        .expect("the identity's status")
+        .generation
+        .map(meerkat_mob::Generation::get);
+    // What a reset leaves behind when the process ends inside its rotation:
+    // Meta's record of the rotation, written before Core was asked.
+    let recorded_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock reads")
+        .as_millis();
+    runtime
+        .persistent_metadata()
+        .set_identity_rotation_intent(&meerkat_meta::IdentityRotationIntent {
+            mob_id: runtime.mob_handle().mob_id().as_str().to_string(),
+            identity: identity.as_str().to_string(),
+            verb: "reset".to_string(),
+            from_generation: generation,
+            recorded_at_ms: u64::try_from(recorded_at_ms).expect("milliseconds fit"),
+        })
+        .await
+        .expect("the rotation record is written");
+    let shutdown = runtime.shutdown().await;
+    assert!(shutdown.cleanup_completed(), "{shutdown:?}");
+
+    let runtime = boot_listed_identity(&state, &mob_id, &identity).await;
+    let identities = runtime.identity_runtime().unwrap();
+    assert!(identities.identity_bootstrap_status().ready);
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        identities.send_awaiting_commit(
+            &identity,
+            &meerkat_core::ContentInput::Text("after the restart".to_string()),
+        ),
+    )
+    .await
+    .expect("the delivery answers")
+    .expect("the identity takes its delivery after the restart");
+    let shutdown = runtime.shutdown().await;
+    assert!(shutdown.cleanup_completed(), "{shutdown:?}");
+}

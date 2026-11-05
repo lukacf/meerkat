@@ -3913,6 +3913,64 @@ async fn declared_apply_rows_are_served_by_097() {
     .await;
 }
 
+/// Rollback of Meta's roster pass onto the declared apply, Core leg (the
+/// support window is the previous matched release). The previous Meta
+/// release seats an identity Core holds no member for with a dormant seat
+/// that carries no entry custody. Over an identity entry that a retirement
+/// outside a seal left unseated, that seat is refused typed
+/// (`IdentityMember`) and writes nothing: the entry stays the identity's,
+/// unseated, every pass is refused the same way with nothing moved, and no
+/// second member takes the identity's name. The upgrade guide's step for a
+/// rollback wakes such identities first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_previous_meta_seat_of_an_unseated_entry_is_refused_typed_and_writes_nothing() {
+    let mob = ApplyMob::new("apply-rollback-unseated").await;
+    let outcome = mob
+        .apply(DeclaredRoster::complete([declared("unseated")]))
+        .await;
+    assert!(
+        matches!(seated_on(&outcome, "unseated"), Some((_, None))),
+        "{outcome:?}"
+    );
+    mob.handle
+        .retire(id("unseated"))
+        .await
+        .expect("a retirement outside a seal");
+    mob.retirement_ended("unseated").await;
+    assert!(
+        matches!(mob.standing("unseated"), Some(EntryStanding::Unseated(_))),
+        "the retirement leaves the entry unseated"
+    );
+    let journal = mob.journal().await.len();
+
+    for pass in 0..2 {
+        let outcomes = mob
+            .handle
+            .seat_dormant_members(vec![worker_spec("unseated")])
+            .await
+            .expect("the seat batch answers");
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [DormantSeatOutcome::Refused {
+                    error: MobError::IdentityMember { member_id },
+                    ..
+                }] if *member_id == id("unseated")
+            ),
+            "pass {pass}: {outcomes:?}"
+        );
+    }
+    assert_eq!(mob.journal().await.len(), journal, "no refusal wrote a row");
+    assert!(
+        !mob.is_member("unseated").await,
+        "no member takes the identity's name"
+    );
+    assert!(
+        matches!(mob.standing("unseated"), Some(EntryStanding::Unseated(_))),
+        "the entry stays the identity's, unseated"
+    );
+}
+
 fn rollback_fixture_dir(name: &str) -> std::path::PathBuf {
     let dir = std::path::PathBuf::from(
         std::env::var_os("MEERKAT_ROLLBACK_FIXTURE_DIR")

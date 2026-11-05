@@ -293,6 +293,45 @@ async fn a_member_is_added_held_while_the_roster_keeps_running() {
     let _ = fixture.runtime.shutdown().await;
 }
 
+/// A held add declares its identity in Core's mob held: Core seats nothing
+/// for it, and the held pass creates its member with the entry's custody,
+/// so Core holds the identity as a declared entry seated on that member.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_declared_held_identity_is_created_by_the_held_pass_with_custody() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = Fixture::start(&dir, "held-custody").await;
+    let result = activated(
+        fixture
+            .add(tokio::time::Instant::now() + HOLD, None)
+            .await
+            .expect("the held add starts"),
+    );
+    assert!(
+        matches!(
+            result.outcomes.get(&fixture.added),
+            Some(RestoreOutcome::Created { .. })
+        ),
+        "{:?}",
+        result.outcomes
+    );
+    let member = crate::member_comms_id::roster_member_id_for_identity(fixture.added.as_str());
+    let entry = fixture
+        .runtime
+        .mob_handle()
+        .identity_entry(&member)
+        .expect("Core's entry read");
+    assert!(
+        matches!(
+            &entry,
+            meerkat_mob::IdentityEntryRead::Entry(view)
+                if view.origin == meerkat_mob::IdentityEntryOrigin::Declared
+                    && matches!(view.standing, meerkat_mob::EntryStanding::Seated(_))
+        ),
+        "Core holds the held identity as a declared entry seated on its member: {entry:?}"
+    );
+    let _ = fixture.runtime.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_add_the_deadline_ends_settles_its_member_and_leaves_the_roster_alone() {
     let dir = tempfile::tempdir().unwrap();

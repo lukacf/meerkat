@@ -19,7 +19,13 @@
 //! refuse a member's release, retryably, as Core does while the member is
 //! being woken or has work in flight, and
 //! [`CoreReadsBridge::refuse_retire_of`] has Core fail a member's
-//! retirement, as a store fault does. Its member lifecycle journal reads
+//! retirement, as a store fault does. Its declared apply holds each
+//! identity it declares declared from then on, keeps whatever Core holds of
+//! it, and seats nothing; a complete roster unlists each identity held
+//! declared that it does not list, through a retire ([`DeclaredSet`]).
+//! A double that seats members answers Core's declared apply through its
+//! own seat, rotation and revival ([`apply_through_seats`]). Its member
+//! lifecycle journal reads
 //! answer once its members keep the journal
 //! ([`CoreTestMembers::keep_journal`]);
 //! [`CoreReadsBridge::refuse_journal_pages`],
@@ -27,7 +33,7 @@
 //! [`CoreReadsBridge::refuse_standing_reads`] have reads answer
 //! `Unsupported` as a bridge without them does.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
@@ -35,9 +41,11 @@ use meerkat_core::types::SessionId;
 
 use super::IdentityRuntime;
 use super::bridge::{
-    BridgeDelivery, BridgeError, BridgeMemberReload, HostHumanInputError,
-    MemberLifecycleJournalHead, MemberLifecycleJournalPage, MemberRuntimeBinding, MemberStanding,
-    ResumeSessionOutcome, SessionBridge,
+    BridgeDelivery, BridgeError, BridgeMemberReload, DeclaredIdentityAnswer, DeclaredIdentityBuild,
+    DeclaredRosterAnswer, DeclaredRosterRequest, DormantSeatRequest, DormantSeatResult,
+    HostHumanInputError, MemberLifecycleJournalHead, MemberLifecycleJournalPage,
+    MemberRuntimeBinding, MemberStanding, ResumeSessionOutcome, SessionBridge,
+    UnlistedIdentityAnswer,
 };
 use super::core_test_members::CoreTestMembers;
 use super::types::{
@@ -188,6 +196,285 @@ pub(crate) async fn register_live(
     Ok(runtime_id)
 }
 
+/// The identities a double's Core holds declared: each one a declared apply
+/// declared, until a complete roster that does not list it unlists it
+/// ([`Self::apply`]).
+#[derive(Default)]
+pub(crate) struct DeclaredSet(Mutex<BTreeSet<AgentIdentity>>);
+
+impl DeclaredSet {
+    /// Hold `roster`'s identities declared and, for a complete roster,
+    /// unlist each identity held declared that it does not list, as Core's
+    /// seal does: `bridge` retires its live member
+    /// ([`SessionBridge::retire_member`]; a failed retirement answers
+    /// `Failed` and keeps the identity declared, so the next complete
+    /// roster retires it again), or the declaration is removed when no
+    /// member holds it.
+    pub(crate) async fn apply(
+        &self,
+        bridge: &dyn SessionBridge,
+        roster: &DeclaredRosterRequest,
+    ) -> Result<BTreeMap<AgentIdentity, UnlistedIdentityAnswer>, BridgeError> {
+        let listed: BTreeSet<AgentIdentity> = roster
+            .identities
+            .iter()
+            .map(|declared| declared.spec.identity.clone())
+            .collect();
+        let unlisted: Vec<AgentIdentity> = {
+            let mut declared = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            declared.extend(listed.iter().cloned());
+            if roster.complete {
+                declared.difference(&listed).cloned().collect()
+            } else {
+                Vec::new()
+            }
+        };
+        let mut ended = BTreeMap::new();
+        for identity in unlisted {
+            let outcome = match bridge.live_member(&identity).await? {
+                Some(live) => match bridge.retire_member(&live.agent_runtime_id).await {
+                    Ok(()) => UnlistedIdentityAnswer::Retired,
+                    Err(error) => UnlistedIdentityAnswer::Failed { error },
+                },
+                None => UnlistedIdentityAnswer::Removed,
+            };
+            ended.insert(identity, outcome);
+        }
+        let mut declared = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        for (identity, outcome) in &ended {
+            if !matches!(outcome, UnlistedIdentityAnswer::Failed { .. }) {
+                declared.remove(identity);
+            }
+        }
+        Ok(ended)
+    }
+}
+
+/// A double's seat of an identity, Dormant, onto the archived session it
+/// names ([`apply_through_seats`]): it builds nothing.
+pub(crate) type ArchivedSeat<'a> = dyn Fn(&AgentIdentity, &DurableAgentSpec, &SessionId) -> Result<(), BridgeError>
+    + Send
+    + Sync
+    + 'a;
+
+/// Core's declared apply (`MobHandle::apply_declared_roster`) as a double
+/// that seats members emulates it, through the double's own steps:
+/// - an identity whose member Core holds keeps it, and a first-boot
+///   `Resume` request of the session the member is bound to is carried out
+///   with it; a member the roster moves to another role is rotated onto a
+///   fresh session when its sessions live in memory only
+///   ([`SessionBridge::session_outlives_member`] answers `false`), is
+///   restamped onto its own session when the activation declared that
+///   migration ([`SessionBridge::resume_session`]), and is held under its
+///   previous role otherwise, its materialization released;
+/// - a first-boot `Fresh` request starts the identity's fresh life
+///   ([`SessionBridge::rotate_member`]);
+/// - an identity Core holds no member of awaits its held creation when its
+///   host holds it, is hosted on its first use when it is placed or bound
+///   to an external runtime, and is otherwise seated Dormant, all of them in
+///   one seat call ([`SessionBridge::seat_dormant_members`]): on its
+///   first-boot request's session, else on its last binding's session, else
+///   on a fresh one. A seat the double answers archived is revived as Core's
+///   declared apply revives it, Dormant on that session with nothing built
+///   (`revive`, the double's own seat onto an archived session); a double
+///   with no revival answers it `Failed`;
+/// - a declaration of facts only whose verdict seats or starts a member
+///   answers `BuildRequired` and takes no step.
+///
+/// Nothing is unlisted ([`DeclaredSet::apply`] does that). Each identity's
+/// answer is its own: a refused seat, rotation or revival is that
+/// identity's `Failed`.
+pub(crate) async fn apply_through_seats(
+    bridge: &dyn SessionBridge,
+    roster: &DeclaredRosterRequest,
+    revive: Option<&ArchivedSeat<'_>>,
+) -> Result<DeclaredRosterAnswer, BridgeError> {
+    let mut answer = DeclaredRosterAnswer::default();
+    let mut seats = Vec::new();
+    for declared in &roster.identities {
+        let spec = &declared.spec;
+        let identity = &spec.identity;
+        let request = roster.first_boot_requests.get(identity);
+        let draft = match &declared.build {
+            DeclaredIdentityBuild::Composed(draft) => Some(draft),
+            DeclaredIdentityBuild::FactsOnly => None,
+        };
+        let live = bridge.live_member(identity).await?;
+        let outcome = match (live, request) {
+            (_, Some(meerkat_mob::FirstBootRequest::Fresh)) => match draft {
+                None => DeclaredIdentityAnswer::BuildRequired,
+                Some(draft) => match bridge.rotate_member(identity, spec, draft).await {
+                    Ok(session_id) => {
+                        answer
+                            .first_boot_requests_carried_out
+                            .insert(identity.clone());
+                        DeclaredIdentityAnswer::FreshLife { session_id }
+                    }
+                    Err(error) => DeclaredIdentityAnswer::Failed { error },
+                },
+            },
+            (Some(live), request) => {
+                let role = bridge
+                    .last_member_binding(identity)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|binding| binding.role().clone());
+                match role {
+                    // The roster moves the member to another role: Core
+                    // restamps it onto its own session when this activation
+                    // declared that migration, and holds it under its
+                    // previous role otherwise; either way the previous
+                    // role's materialization goes.
+                    Some(role) if role != spec.profile => {
+                        // A session that does not outlive its member has
+                        // nothing to carry to the new role: Core rotates the
+                        // member onto a fresh session, declared or not.
+                        let memory_only = match live.session_id.as_ref() {
+                            Some(session) => {
+                                matches!(bridge.session_outlives_member(session).await, Ok(false))
+                            }
+                            None => false,
+                        };
+                        if memory_only {
+                            match draft {
+                                None => DeclaredIdentityAnswer::BuildRequired,
+                                Some(draft) => {
+                                    match bridge.rotate_member(identity, spec, draft).await {
+                                        Ok(session_id) => {
+                                            DeclaredIdentityAnswer::RoleRotated { session_id }
+                                        }
+                                        Err(error) => DeclaredIdentityAnswer::Failed { error },
+                                    }
+                                }
+                            }
+                        } else if bridge.declared_role_migration(identity).as_ref() != Some(&role) {
+                            let _ = bridge.release_member(identity).await;
+                            DeclaredIdentityAnswer::RoleMigrationHeld {
+                                from: role,
+                                to: spec.profile.clone(),
+                            }
+                        } else {
+                            match (draft, live.session_id.as_ref()) {
+                                (None, _) => DeclaredIdentityAnswer::BuildRequired,
+                                (Some(_), None) => DeclaredIdentityAnswer::Failed {
+                                    error: BridgeError::Mob(format!(
+                                        "{identity}'s member is bound to no session to migrate on"
+                                    )),
+                                },
+                                (Some(draft), Some(session)) => match bridge
+                                    .resume_session(identity, spec, draft, session, Some(&role))
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        let _ = bridge.release_member(identity).await;
+                                        let generation = bridge
+                                            .last_member_binding(identity)
+                                            .await
+                                            .ok()
+                                            .flatten()
+                                            .map_or(0, |binding| binding.generation().get());
+                                        DeclaredIdentityAnswer::RoleMigrated { generation }
+                                    }
+                                    Err(error) => DeclaredIdentityAnswer::Failed { error },
+                                },
+                            }
+                        }
+                    }
+                    _ => {
+                        if let Some(meerkat_mob::FirstBootRequest::Resume { session_id }) = request
+                            && live.session_id.as_ref() == Some(session_id)
+                        {
+                            answer
+                                .first_boot_requests_carried_out
+                                .insert(identity.clone());
+                        }
+                        DeclaredIdentityAnswer::Kept
+                    }
+                }
+            }
+            (None, _) if declared.held_creation => DeclaredIdentityAnswer::AwaitingHeldCreation,
+            (None, _) if spec.placement.is_some() || spec.binding.is_some() => {
+                DeclaredIdentityAnswer::HostedOnFirstUse
+            }
+            (None, request) => match draft {
+                None => DeclaredIdentityAnswer::BuildRequired,
+                Some(draft) => {
+                    let session = match request {
+                        Some(meerkat_mob::FirstBootRequest::Resume { session_id }) => {
+                            Some(session_id.clone())
+                        }
+                        _ => bridge
+                            .last_member_binding(identity)
+                            .await
+                            .ok()
+                            .flatten()
+                            .and_then(|binding| binding.session_id().cloned()),
+                    };
+                    seats.push(DormantSeatRequest {
+                        identity: identity.clone(),
+                        spec: spec.clone(),
+                        draft: draft.clone(),
+                        session,
+                        resume_from_role: None,
+                    });
+                    continue;
+                }
+            },
+        };
+        answer.identities.insert(identity.clone(), outcome);
+    }
+    if seats.is_empty() {
+        return Ok(answer);
+    }
+    let requested: BTreeMap<AgentIdentity, DormantSeatRequest> = seats
+        .iter()
+        .map(|request| (request.identity.clone(), request.clone()))
+        .collect();
+    for (identity, result) in bridge.seat_dormant_members(seats).await? {
+        let Some(request) = requested.get(&identity) else {
+            continue;
+        };
+        let first_boot = matches!(
+            roster.first_boot_requests.get(&identity),
+            Some(meerkat_mob::FirstBootRequest::Resume { .. })
+        );
+        let outcome = match result {
+            DormantSeatResult::Seated { session_id } => DeclaredIdentityAnswer::Seated {
+                session_id,
+                history_unavailable: None,
+            },
+            DormantSeatResult::AlreadySeated { .. } => DeclaredIdentityAnswer::Kept,
+            DormantSeatResult::SessionArchived { session_id } => {
+                match revive.map(|revive| revive(&identity, &request.spec, &session_id)) {
+                    Some(Ok(())) => DeclaredIdentityAnswer::Seated {
+                        session_id,
+                        history_unavailable: None,
+                    },
+                    Some(Err(error)) => DeclaredIdentityAnswer::Failed { error },
+                    None => DeclaredIdentityAnswer::Failed {
+                        error: BridgeError::Unsupported {
+                            operation: "revive an archived session",
+                        },
+                    },
+                }
+            }
+            DormantSeatResult::Embodied { session_id } => DeclaredIdentityAnswer::Embodied {
+                session_id,
+                history_unavailable: None,
+            },
+            DormantSeatResult::Refused(error) => DeclaredIdentityAnswer::Failed { error },
+        };
+        if first_boot && outcome.bound_session().is_some() {
+            answer
+                .first_boot_requests_carried_out
+                .insert(identity.clone());
+        }
+        answer.identities.insert(identity, outcome);
+    }
+    Ok(answer)
+}
+
 /// A bridge that answers Core's member reads from [`Self::core`] and commits
 /// nothing but retires and releases.
 #[derive(Default)]
@@ -224,6 +511,8 @@ pub(crate) struct CoreReadsBridge {
     binding_reads_refused: AtomicBool,
     /// Set by [`Self::refuse_standing_reads`].
     standing_reads_refused: AtomicBool,
+    /// The identities Core holds declared.
+    declared: DeclaredSet,
 }
 
 /// The reads of Core's member history that still answer, then the reads
@@ -607,13 +896,18 @@ impl SessionBridge for CoreReadsBridge {
         }
     }
 
+    /// Core's declared apply, as far as this bridge writes: each declared
+    /// identity keeps whatever Core holds of it
+    /// ([`DeclaredIdentityAnswer::Kept`]); this bridge seats nothing. A
+    /// complete roster unlists each identity held declared that it does not
+    /// list ([`DeclaredSet::apply`]): a retirement [`Self::refuse_retire_of`]
+    /// names answers `Failed`.
     async fn apply_declared_roster(
         &self,
-        roster: crate::identity_first::DeclaredRosterRequest,
-    ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
-    {
-        Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
-            &roster,
-        ))
+        roster: DeclaredRosterRequest,
+    ) -> Result<DeclaredRosterAnswer, BridgeError> {
+        let mut answer = DeclaredRosterAnswer::kept_for(&roster);
+        answer.unlisted = self.declared.apply(self, &roster).await?;
+        Ok(answer)
     }
 }

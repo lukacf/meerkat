@@ -1,8 +1,11 @@
-//! Rows for the seat step and the first-boot carry-out: every roster
-//! identity Core does not hold is seated Dormant in one Core call, with
-//! nothing materialized; a pending first-boot row is carried out by its
-//! identity's seat; and a rotation a crash interrupted is driven to its end
-//! by the next compile.
+//! Rows for the seats a roster's declaration in Core's mob makes and the
+//! first-boot carry-out: every roster identity Core does not hold is seated
+//! Dormant in one Core call, with nothing materialized; a pending first-boot
+//! row is carried out by its identity's declaration; and a rotation a crash
+//! interrupted is driven to its end by the next compile. The double answers
+//! Core's declared apply through its own seat, rotation and revival
+//! ([`apply_through_seats`]), and unlists as Core's seal does
+//! ([`DeclaredSet`]).
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
@@ -13,6 +16,7 @@ use std::time::Duration;
 use meerkat_core::types::HandlingMode;
 use tokio::sync::oneshot;
 
+use super::declare::SeatOutcome;
 use super::*;
 use crate::identity_first::bridge::{
     BridgeDelivery, BridgeError, DormantSeatRequest, DormantSeatResult, MemberLifecycleJournalHead,
@@ -20,8 +24,8 @@ use crate::identity_first::bridge::{
     ResumeSessionOutcome, SessionBridge,
 };
 use crate::identity_first::core_test_bridge::{
-    CoreReadsBridge, bind_live, register_live, respawn_live, respawn_live_unretired,
-    respawn_seat_live, rotate_live,
+    CoreReadsBridge, DeclaredSet, apply_through_seats, bind_live, register_live, respawn_live,
+    respawn_live_unretired, respawn_seat_live, rotate_live,
 };
 use crate::identity_first::core_test_members::CoreTestMembers;
 use crate::identity_first::first_boot_manifest::FirstBootManifest;
@@ -125,7 +129,8 @@ struct SeatCore {
     /// The role migration this activation declares, by identity.
     migrations: BTreeMap<AgentIdentity, meerkat_mob::ProfileName>,
     /// The identities Core keeps host-pending: a delivery to one is refused
-    /// until a seat of it, or its rotation, ends the mark.
+    /// until the declaration that carries its first-boot request out, a
+    /// revival of its archived session, or its rotation, ends the mark.
     host_pending: StdMutex<BTreeSet<AgentIdentity>>,
     /// Core's member history read fails.
     history_read_fails: std::sync::atomic::AtomicBool,
@@ -207,6 +212,8 @@ struct SeatCore {
     /// Every member build Core made: each revival, and each wake or delivery
     /// that found its member not materialized.
     builds: AtomicUsize,
+    /// The identities Core holds declared.
+    declared: DeclaredSet,
 }
 
 /// Takes one from `counter` when it is above zero: whether it was.
@@ -778,14 +785,95 @@ impl SessionBridge for SeatCore {
         self.core.journal_page(after, limit)
     }
 
+    /// Core's declared apply through this double's own seat, rotation and
+    /// role restamp ([`apply_through_seats`]). Core revives an archived
+    /// session as a Dormant seat at the identity's next generation, which
+    /// ends its host preparation and builds nothing, and unlists as its seal
+    /// does ([`DeclaredSet`]).
     async fn apply_declared_roster(
         &self,
         roster: crate::identity_first::DeclaredRosterRequest,
     ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
     {
-        Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
-            &roster,
-        ))
+        let revive = |identity: &AgentIdentity, spec: &DurableAgentSpec, session: &SessionId| {
+            let generation = self.next_generation(identity)?;
+            bind_live(
+                &self.core,
+                identity,
+                &spec.profile,
+                generation,
+                Some(session.clone()),
+            )?;
+            lock(&self.host_pending).remove(identity);
+            Ok(())
+        };
+        let mut answer = apply_through_seats(self, &roster, Some(&revive)).await?;
+        // Core ends an identity's host preparation in the step that carries
+        // its first-boot request out.
+        for identity in &answer.first_boot_requests_carried_out {
+            lock(&self.host_pending).remove(identity);
+        }
+        answer.unlisted = self.declared.apply(self, &roster).await?;
+        Ok(answer)
+    }
+}
+
+impl IdentityRuntime {
+    /// The seat step the roster's declaration replaced, as these rows drive
+    /// it: `specs` declared in Core's mob as one partial roster under their
+    /// lifecycle locks ([`Self::declare_roster`]), and each identity's seat
+    /// from Core's answer, as a door takes it ([`Self::door_seat`], under
+    /// the identity's lifecycle lock): kept, seated on a session, moved or
+    /// created, or its typed refusal.
+    async fn seat_identities(
+        &self,
+        specs: &[DurableAgentSpec],
+        customizer: Option<&dyn AgentCustomizer>,
+    ) -> BTreeMap<AgentIdentity, Result<SeatOutcome, IdentityRuntimeError>> {
+        let bridge = Arc::clone(
+            self.bridge
+                .as_ref()
+                .expect("the rows run over a session bridge"),
+        );
+        let before = self.sessions_held_before(specs).await;
+        let mut declaration = self
+            .declare_roster(
+                &bridge,
+                specs,
+                false,
+                super::declare::DeclarationLocks::Take,
+                false,
+                customizer,
+            )
+            .await;
+        let mut seats = BTreeMap::new();
+        for spec in specs {
+            let identity = &spec.identity;
+            let draft = declaration
+                .composed
+                .remove(identity)
+                .unwrap_or_else(|| Self::base_build_draft(spec));
+            let answer = declaration.outcomes.remove(identity).unwrap_or_else(|| {
+                Err(IdentityRuntimeError::DeclarationNotApplied {
+                    retryable: false,
+                    detail: format!("Core answered no declaration of {identity}"),
+                })
+            });
+            let lifecycle_lock = self.lifecycle_lock_for(identity).await;
+            let _lifecycle_guard = lifecycle_lock.lock().await;
+            let seat = self
+                .door_seat(
+                    &bridge,
+                    spec,
+                    answer,
+                    before.get(identity),
+                    draft,
+                    customizer,
+                )
+                .await;
+            seats.insert(identity.clone(), seat);
+        }
+        seats
     }
 }
 
@@ -1044,6 +1132,103 @@ async fn a_refused_first_boot_seat_fails_alone_and_stays_in_the_rewritten_manife
             .map(|row| row.identity)
             .collect::<Vec<_>>(),
         vec![refused]
+    );
+}
+
+/// A host customizer that refuses every build until it is let build.
+#[derive(Default)]
+struct RefusesBuilds(std::sync::atomic::AtomicBool);
+
+#[async_trait::async_trait]
+impl AgentCustomizer for RefusesBuilds {
+    async fn customize_build(
+        &self,
+        _context: &AgentBuildContext,
+        _spec: &DurableAgentSpec,
+        _draft: &mut AgentBuildDraft,
+    ) -> Result<(), crate::identity_first::CustomizerError> {
+        if self.0.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(crate::identity_first::CustomizerError::BuildFailed(
+                "the host refuses the build".to_string(),
+            ))
+        }
+    }
+
+    async fn after_create(
+        &self,
+        _identity: &AgentIdentity,
+        _session_id: &SessionId,
+        _context: &crate::mob_handle_runtime::SessionCreatedContext,
+    ) -> Result<(), crate::identity_first::CustomizerError> {
+        Ok(())
+    }
+}
+
+/// A first-boot row leaves the manifest only when Core names its request
+/// carried out. Core answers the first round of a compile `BuildRequired` for
+/// the row's identity, keeping the request and carrying nothing out; when the
+/// host's customizer then refuses the build, the identity fails, nothing is
+/// seated, and the row stays. The next compile, whose build the customizer
+/// composes, seats the identity on the row's session and carries the row out.
+///
+/// RED: settle the row of every identity Core answers, whatever it answered:
+/// the first compile's `BuildRequired` consumes the row.
+#[tokio::test]
+async fn a_first_boot_row_is_consumed_only_when_core_carried_it_out() {
+    let alice = identity("personal:alice");
+    let row_session = SessionId::new();
+    let state_dir = tempfile::tempdir().expect("state dir");
+    FirstBootManifest::write_new(
+        state_dir.path(),
+        vec![FirstBootRow::Resume {
+            identity: alice.clone(),
+            session: row_session.clone(),
+        }],
+    )
+    .expect("the manifest writes");
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(Some(state_dir.path()), &core);
+    register_all(&runtime, &[spec(&alice)]).await;
+    let customizer = RefusesBuilds::default();
+
+    let refused = runtime
+        .seat_identities(&[spec(&alice)], Some(&customizer))
+        .await;
+    assert!(
+        refused[&alice].is_err(),
+        "the refused build fails the identity: {:?}",
+        refused[&alice].as_ref().map(|seat| seat.session_id.clone())
+    );
+    assert_eq!(core.session_of(&alice), None, "nothing is seated");
+    let left = FirstBootManifest::read(state_dir.path())
+        .expect("reads")
+        .expect("Core carried nothing out, so the row stays")
+        .into_rows();
+    assert_eq!(
+        left.iter().map(FirstBootRow::identity).collect::<Vec<_>>(),
+        vec![&alice]
+    );
+
+    customizer.0.store(true, Ordering::SeqCst);
+    let seated = runtime
+        .seat_identities(&[spec(&alice)], Some(&customizer))
+        .await;
+    assert!(
+        seated[&alice].is_ok(),
+        "{:?}",
+        seated[&alice].as_ref().err()
+    );
+    assert_eq!(
+        core.session_of(&alice).as_ref(),
+        Some(&row_session),
+        "the identity is seated on its row's session"
+    );
+    assert_eq!(
+        FirstBootManifest::read(state_dir.path()).expect("reads"),
+        None,
+        "the row Core carried out leaves the manifest"
     );
 }
 
@@ -1663,11 +1848,12 @@ async fn r64_a_first_boot_fresh_row_is_a_dormant_seat_on_a_fresh_session() {
     );
 }
 
-/// A rotation (`reset`, `delete_identity`) a crash interrupted is
-/// recorded; the next compile drives it to its end through Core's rotation,
-/// and removes the record once Core answered.
+/// A rotation (`reset`, `delete_identity`) a crash interrupted is Core's to
+/// finish, from its own record: the compile declares the identity Core holds
+/// and asks Core for no rotation, and Meta's record of the rotation stays
+/// written, for a rollback.
 #[tokio::test]
-async fn r114_an_interrupted_rotation_is_driven_to_its_end_by_the_next_compile() {
+async fn r114_an_interrupted_rotation_is_core_s_to_finish_and_no_compile_drives_it() {
     let alice = identity("personal:alice");
     let core = Arc::new(SeatCore::default());
     let old_session = SessionId::new();
@@ -1689,57 +1875,22 @@ async fn r114_an_interrupted_rotation_is_driven_to_its_end_by_the_next_compile()
 
     let outcomes = runtime.seat_identities(&specs, None).await;
 
-    let seat = outcomes[&alice].as_ref().expect("rotated");
-    assert!(seat.minted);
-    assert_eq!(lock(&core.rotations).clone(), vec![alice.clone()]);
-    assert_eq!(core.generation_of(&alice), Some(2));
-    assert_ne!(core.session_of(&alice), Some(old_session));
-    assert!(
-        runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .is_empty(),
-        "the finished rotation's record is removed"
+    let seat = outcomes[&alice].as_ref().expect("kept");
+    assert!(seat.already_seated, "Core keeps the member it holds");
+    assert_eq!(
+        core.rotation_calls.load(Ordering::SeqCst),
+        0,
+        "the compile asks Core for no rotation"
     );
-}
-
-/// When Core already finished the recorded rotation (the crash came
-/// after its terminal step), the compile settles the record with a seat
-/// step that writes nothing, and no second rotation runs.
-#[tokio::test]
-async fn r114_a_rotation_core_finished_settles_its_record_without_a_second_rotation() {
-    let alice = identity("personal:alice");
-    let core = Arc::new(SeatCore::default());
-    let new_session = SessionId::new();
-    bind_live(
-        &core.core,
-        &alice,
-        &meerkat_mob::ProfileName::from("personal"),
-        2,
-        Some(new_session.clone()),
-    )
-    .expect("bound");
-    let runtime = runtime_over(None, &core);
-    let specs = vec![spec(&alice)];
-    register_all(&runtime, &specs).await;
-    runtime
-        .record_rotation_intent(&alice, "delete_identity", Some(1))
-        .await
-        .expect("the rotation is recorded");
-
-    let outcomes = runtime.seat_identities(&specs, None).await;
-
-    let seat = outcomes[&alice].as_ref().expect("settled");
-    assert!(seat.already_seated, "Core holds the rotated member already");
-    assert!(lock(&core.rotations).is_empty(), "no second rotation");
-    assert_eq!(core.session_of(&alice), Some(new_session));
+    assert_eq!(core.generation_of(&alice), Some(1));
+    assert_eq!(core.session_of(&alice), Some(old_session));
     assert!(
         runtime
             .pending_rotation_intents()
             .await
             .expect("the records read")
-            .is_empty()
+            .contains_key(&alice),
+        "Meta's record of the rotation stays written"
     );
 }
 
@@ -1876,7 +2027,10 @@ async fn a_retire_core_refuses_while_the_member_is_busy_is_typed_retryable_and_i
 fn r68_f9_the_identity_runtime_keeps_no_wake_policy_of_its_own() {
     let sources = [
         ("identity_first/runtime.rs", include_str!("../runtime.rs")),
-        ("identity_first/runtime/seat.rs", include_str!("seat.rs")),
+        (
+            "identity_first/runtime/declare.rs",
+            include_str!("declare.rs"),
+        ),
         (
             "identity_first/runtime/records.rs",
             include_str!("records.rs"),
@@ -2966,9 +3120,9 @@ async fn a_reset_core_refuses_before_it_starts_leaves_no_rotation_to_carry_out()
 }
 
 /// A roster pass that moves a seated identity to another profile keeps it a
-/// member: its live member is released, never retired, and with no
-/// migration declared the seat step holds it typed under its previous role.
-/// Its deliveries are refused typed and Core's binding stays as it was.
+/// member: with no migration declared, Core holds it typed under its
+/// previous role and releases its live member, never retiring it. Its
+/// deliveries are refused typed and Core's binding stays as it was.
 #[tokio::test]
 async fn a_reprofiled_identity_without_a_declared_migration_stays_seated_and_held() {
     let alice = identity("personal:alice");
@@ -2983,21 +3137,6 @@ async fn a_reprofiled_identity_without_a_declared_migration_stays_seated_and_hel
     register_live(&runtime, &core.core, registered, 0, session.clone())
         .await
         .expect("registered live");
-
-    runtime
-        .reconcile_roster_members(&[spec(&alice)], 1)
-        .await
-        .expect("the pass reconciles the roster");
-    assert_eq!(
-        lock(&core.releases).as_slice(),
-        std::slice::from_ref(&alice),
-        "the live member is released"
-    );
-    assert_eq!(
-        core.generation_of(&alice),
-        Some(0),
-        "never retired: the binding keeps its generation"
-    );
 
     let outcome = runtime
         .seat_identities(&[spec(&alice)], None)
@@ -3014,6 +3153,16 @@ async fn a_reprofiled_identity_without_a_declared_migration_stays_seated_and_hel
         ),
         "{:?}",
         outcome.as_ref().err()
+    );
+    assert_eq!(
+        lock(&core.releases).as_slice(),
+        std::slice::from_ref(&alice),
+        "the live member is released"
+    );
+    assert_eq!(
+        core.generation_of(&alice),
+        Some(0),
+        "never retired: the binding keeps its generation"
     );
     let refused = runtime.send(&alice, &text("hello")).await;
     assert!(
@@ -3037,9 +3186,9 @@ async fn a_reprofiled_identity_without_a_declared_migration_stays_seated_and_hel
     );
 }
 
-/// The same move with the migration declared: the seat step restamps the
-/// member onto its own session under the new role and releases it, and its
-/// next delivery goes through.
+/// The same move with the migration declared: Core restamps the member
+/// onto its own session under the new role and releases it, and its next
+/// delivery goes through.
 #[tokio::test]
 async fn a_reprofiled_identity_with_a_declared_migration_moves_onto_its_own_session() {
     let alice = identity("personal:alice");
@@ -3058,15 +3207,6 @@ async fn a_reprofiled_identity_with_a_declared_migration_moves_onto_its_own_sess
         .await
         .expect("registered live");
 
-    runtime
-        .reconcile_roster_members(&[spec(&alice)], 1)
-        .await
-        .expect("the pass reconciles the roster");
-    assert_eq!(
-        core.generation_of(&alice),
-        Some(0),
-        "the pass retires nobody: the binding keeps its generation"
-    );
     let outcome = runtime
         .seat_identities(&[spec(&alice)], None)
         .await
@@ -3100,17 +3240,21 @@ async fn a_reprofiled_identity_with_a_declared_migration_moves_onto_its_own_sess
 /// The bootstrap pass's snapshot of one seated identity, `Active` and
 /// ready, bound to the runtime's identity entry.
 async fn ready_bootstrap_entry(runtime: &IdentityRuntime, identity: &AgentIdentity) {
-    let generation = runtime
-        .begin_identity_bootstrap_pending(super::super::IdentityBootstrapMode::EagerMaterialize);
-    runtime
-        .accept_bootstrap_spec_locked(spec(identity), generation)
-        .await
-        .expect("the entry is bound to the pass");
+    let generation =
+        runtime.begin_identity_bootstrap_pending(super::IdentityBootstrapMode::EagerMaterialize);
+    {
+        let mut entries = runtime.entries.write().await;
+        let entry = entries
+            .get_mut(identity)
+            .expect("the entry is bound to the pass");
+        entry.spec = spec(identity);
+        entry.bootstrap_generation = generation;
+    }
     runtime.modify_bootstrap_status(Some(generation), |snapshot| {
         snapshot.identities.insert(
             identity.clone(),
-            super::super::IdentityBootstrapEntry {
-                state: super::super::IdentityBootstrapState::Active,
+            super::IdentityBootstrapEntry {
+                state: super::IdentityBootstrapState::Active,
                 error: None,
                 restore: None,
             },
@@ -3159,7 +3303,7 @@ async fn a_warm_core_refuses_retryably_puts_the_bootstrap_entry_back_as_it_was()
     let status = runtime.identity_bootstrap_status();
     assert_eq!(
         status.identities.get(&alice).map(|entry| entry.state),
-        Some(super::super::IdentityBootstrapState::Active),
+        Some(super::IdentityBootstrapState::Active),
         "the entry is back as it was: {status:?}"
     );
     assert_eq!(status.counts.warming, 0, "{status:?}");
@@ -3175,7 +3319,7 @@ async fn a_warm_core_refuses_retryably_puts_the_bootstrap_entry_back_as_it_was()
     let status = runtime.identity_bootstrap_status();
     assert_eq!(
         status.identities.get(&alice).map(|entry| entry.state),
-        Some(super::super::IdentityBootstrapState::Broken),
+        Some(super::IdentityBootstrapState::Broken),
         "{status:?}"
     );
     assert!(!status.ready, "{status:?}");
@@ -3448,13 +3592,24 @@ impl AgentCustomizer for WakesWhileBuilding {
     }
 }
 
-/// A seeded identity Core already holds, with nothing owed (its seat step
-/// plans no Core call): the step still ends the host preparation Meta asked
-/// for at start, with one settles-only seat on the identity's session.
+/// A seeded identity Core already holds on its first-boot row's session (the
+/// row is done, and Core's mark still stands) has its host preparation ended
+/// by its declaration: the compile declares the row's `Resume` request again,
+/// Core keeps the member and carries the request out in the same step, and
+/// the row leaves the manifest. Nothing is seated or rotated.
 #[tokio::test]
 async fn a_seeded_identity_core_already_holds_has_its_host_preparation_ended() {
     let alice = identity("personal:alice");
     let session = SessionId::new();
+    let state_dir = tempfile::tempdir().expect("state dir");
+    FirstBootManifest::write_new(
+        state_dir.path(),
+        vec![FirstBootRow::Resume {
+            identity: alice.clone(),
+            session: session.clone(),
+        }],
+    )
+    .expect("the manifest writes");
     let core = Arc::new(SeatCore {
         admits_deliveries: true,
         ..SeatCore::default()
@@ -3468,7 +3623,7 @@ async fn a_seeded_identity_core_already_holds_has_its_host_preparation_ended() {
     )
     .expect("Core holds alice");
     lock(&core.host_pending).insert(alice.clone());
-    let runtime = runtime_over(None, &core);
+    let runtime = runtime_over(Some(state_dir.path()), &core);
     runtime.seed_host_pending([member_id(&alice)]);
     register_all(&runtime, &[spec(&alice)]).await;
 
@@ -3479,21 +3634,23 @@ async fn a_seeded_identity_core_already_holds_has_its_host_preparation_ended() {
         "{:?}",
         outcomes[&alice].as_ref().err()
     );
-    assert_eq!(
-        lock(&core.seat_calls).as_slice(),
-        &[vec![(alice.clone(), Some(session.clone()))]],
-        "one settles-only seat on the identity's own session"
-    );
+    assert!(lock(&core.seat_calls).is_empty(), "nothing is seated");
     assert!(
         !lock(&core.host_pending).contains(&alice),
-        "the step ended the host preparation Meta asked for"
+        "the declaration ended the host preparation Meta asked for"
     );
     assert_eq!(core.generation_of(&alice), Some(0), "nothing was rotated");
+    assert_eq!(
+        FirstBootManifest::read(state_dir.path()).expect("reads"),
+        None,
+        "the carried-out row leaves the manifest"
+    );
 }
 
-/// A delivery to a seeded identity Core holds takes the seat step instead of
-/// going straight to Core, so the mark is ended before the delivery, which
-/// goes through.
+/// A delivery to an identity whose first-boot row is still owed declares the
+/// identity first, with the row's `Resume` request: Core keeps the member it
+/// holds on the row's session and carries the request out, which ends its
+/// host preparation, so the delivery goes through. Nothing is seated.
 #[tokio::test]
 async fn a_delivery_to_a_seeded_identity_ends_its_host_preparation_first() {
     let alice = identity("personal:alice");
@@ -3502,11 +3659,23 @@ async fn a_delivery_to_a_seeded_identity_ends_its_host_preparation_first() {
         admits_deliveries: true,
         ..SeatCore::default()
     });
-    lock(&core.host_pending).insert(alice.clone());
     let runtime = runtime_over(None, &core);
     register_live(&runtime, &core.core, spec(&alice), 0, session.clone())
         .await
         .expect("registered live");
+    // The start found the identity's first-boot row, and asked Core to hold
+    // the identity for the row's preparation.
+    let state_dir = tempfile::tempdir().expect("state dir");
+    FirstBootManifest::write_new(
+        state_dir.path(),
+        vec![FirstBootRow::Resume {
+            identity: alice.clone(),
+            session: session.clone(),
+        }],
+    )
+    .expect("the manifest writes");
+    runtime.set_first_boot_state_dir(Some(state_dir.path().to_path_buf()));
+    lock(&core.host_pending).insert(alice.clone());
     runtime.seed_host_pending([member_id(&alice)]);
 
     runtime
@@ -3516,14 +3685,15 @@ async fn a_delivery_to_a_seeded_identity_ends_its_host_preparation_first() {
 
     assert!(
         !lock(&core.host_pending).contains(&alice),
-        "the delivery's seat step ended the mark"
+        "the delivery's declaration ended the mark"
     );
-    assert_eq!(
-        lock(&core.seat_calls).as_slice(),
-        &[vec![(alice.clone(), Some(session))]],
-        "one settles-only seat, before the delivery"
-    );
+    assert!(lock(&core.seat_calls).is_empty(), "nothing is seated");
     assert_eq!(lock(&core.delivered).len(), 1, "one delivery");
+    assert_eq!(
+        FirstBootManifest::read(state_dir.path()).expect("reads"),
+        None,
+        "the carried-out row leaves the manifest"
+    );
 }
 
 /// The members Meta hands the mob as host-pending before its build name
@@ -3553,21 +3723,19 @@ async fn a_hosted_identity_is_never_handed_to_the_mob_as_host_pending() {
         state_dir.path().to_path_buf(),
     );
 
-    let pending = super::super::host_pending_members_before_build(
-        Some(&location),
-        None,
-        &[spec(&local), placed(&hosted)],
-    )
-    .await;
+    let pending =
+        super::host_pending_members_before_build(Some(&location), &[spec(&local), placed(&hosted)])
+            .await;
 
     assert_eq!(pending, vec![member_id(&local)]);
 }
 
 /// A reset whose rotation fails after it may have started keeps its
-/// rotation record, so the next compile drives the rotation to its end,
-/// once.
+/// rotation record and answers that the rotation may have started: Core
+/// finishes the rotation it started from its own record, so the next compile
+/// asks Core for no rotation, and the record stays written.
 #[tokio::test]
-async fn a_reset_that_may_have_started_keeps_its_record_and_rotates_once_later() {
+async fn a_reset_that_may_have_started_keeps_its_record_and_no_compile_rotates_it() {
     let alice = identity("personal:alice");
     let core = Arc::new(SeatCore::default());
     *lock(&core.rotation_failure) = Some(BridgeError::Mob(
@@ -3579,10 +3747,10 @@ async fn a_reset_that_may_have_started_keeps_its_record_and_rotates_once_later()
         .expect("registered live");
 
     let failed = runtime.reset(&alice).await;
-    assert!(
-        matches!(failed, Err(IdentityRuntimeError::Internal(_))),
-        "{failed:?}"
-    );
+    let Err(IdentityRuntimeError::Internal(detail)) = &failed else {
+        panic!("the reset answers that its rotation may have started: {failed:?}");
+    };
+    assert!(detail.contains("may have started"), "{detail}");
     assert!(
         runtime
             .pending_rotation_intents()
@@ -3591,27 +3759,24 @@ async fn a_reset_that_may_have_started_keeps_its_record_and_rotates_once_later()
             .contains_key(&alice),
         "the record of a rotation that may have started stays"
     );
+    let asked = core.rotation_calls.load(Ordering::SeqCst);
 
-    let outcomes = runtime.seat_identities(&[spec(&alice)], None).await;
-    assert!(
-        outcomes[&alice].is_ok(),
-        "{:?}",
-        outcomes[&alice].as_ref().err()
-    );
+    let _ = runtime.seat_identities(&[spec(&alice)], None).await;
+
     assert_eq!(
-        lock(&core.rotations).as_slice(),
-        std::slice::from_ref(&alice),
-        "the next compile rotates the identity, once"
+        core.rotation_calls.load(Ordering::SeqCst),
+        asked,
+        "the compile asks Core for no rotation"
     );
+    assert!(lock(&core.rotations).is_empty(), "nothing was rotated");
     assert!(
         runtime
             .pending_rotation_intents()
             .await
             .expect("the records read")
-            .is_empty(),
-        "the finished rotation's record is gone"
+            .contains_key(&alice),
+        "the record stays written"
     );
-    assert_eq!(core.generation_of(&alice), Some(1));
 }
 
 /// A reset whose fresh life spec cannot be lowered is refused before Core
@@ -3752,13 +3917,8 @@ async fn a_reset_refused_for_the_member_route_leaves_no_rotation_to_carry_out() 
             .is_empty(),
         "the refused rotation left no record"
     );
-    let store: &dyn crate::runtime::PersistentMetadataStore = &*records;
-    let host_pending = super::super::host_pending_members_before_build(
-        None,
-        Some((store, "route-refused")),
-        &[kickoff_spec(&alice)],
-    )
-    .await;
+    let host_pending =
+        super::host_pending_members_before_build(None, &[kickoff_spec(&alice)]).await;
     assert!(
         host_pending.is_empty(),
         "a restart hands the mob no rotation to carry out: {host_pending:?}"
@@ -3780,62 +3940,6 @@ async fn a_reset_refused_for_the_member_route_leaves_no_rotation_to_carry_out() 
     );
     assert!(lock(&core.rotations).is_empty(), "nothing was rotated");
     assert!(core.session_of(&alice).is_none(), "nothing was seated");
-}
-
-/// A rotation a crash left recorded is driven by the next compile, the seat
-/// step's own rotation. For an identity Core does not hold that owes a
-/// kickoff, that rotation is Core's live spawn of the fresh life. Refused
-/// for its member route, the step answers `HostRejectedBuild`, final, never
-/// the retryable wake refusal: each compile asks the rotation once and is
-/// answered the same way, and the record stays for a compile whose build
-/// passes.
-#[tokio::test]
-async fn a_rotation_redrive_refused_for_the_member_route_is_final_and_typed() {
-    let alice = identity("personal:alice");
-    let core = Arc::new(SeatCore {
-        route_refused: vec![alice.clone()],
-        ..SeatCore::default()
-    });
-    let runtime = runtime_over(None, &core);
-    register_all(&runtime, &[kickoff_spec(&alice)]).await;
-    runtime
-        .record_rotation_intent(&alice, "reset", None)
-        .await
-        .expect("record the interrupted rotation");
-
-    for compile in 1..=2_usize {
-        let outcomes = runtime.seat_identities(&[kickoff_spec(&alice)], None).await;
-        match &outcomes[&alice] {
-            Err(refused @ IdentityRuntimeError::HostRejectedBuild { .. }) => {
-                assert!(
-                    !refused.clears_on_its_own(),
-                    "compile {compile}: {refused:?}"
-                );
-            }
-            other => panic!(
-                "compile {compile} answers the final refusal: {:?}",
-                other.as_ref().err()
-            ),
-        }
-        assert_eq!(
-            core.rotation_calls.load(Ordering::SeqCst),
-            compile,
-            "compile {compile} drives the recorded rotation once"
-        );
-    }
-    assert!(
-        lock(&core.seat_calls).is_empty(),
-        "the re-drive is a rotation, not a seat"
-    );
-    assert!(lock(&core.rotations).is_empty(), "nothing was rotated");
-    assert!(
-        runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .contains_key(&alice),
-        "the record stays for a compile whose build passes"
-    );
 }
 
 /// An archived session's revival is a build Core makes on the seat step
@@ -3891,12 +3995,13 @@ async fn a_failed_member_history_read_is_the_passs_own_error() {
     register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
         .await
         .expect("registered live");
-    let mode = super::super::IdentityBootstrapMode::EagerMaterialize;
+    let mode = super::IdentityBootstrapMode::EagerMaterialize;
     let generation = runtime.begin_identity_bootstrap_pending(mode.clone());
     core.history_read_fails.store(true, Ordering::SeqCst);
     let result = crate::identity_first::orchestrator::RestoreFlowResult {
         outcomes: BTreeMap::new(),
         managed_edges: Vec::new(),
+        unlisted: BTreeMap::new(),
     };
 
     runtime
@@ -3974,6 +4079,74 @@ fn recording_hook(runtime: &IdentityRuntime) -> Arc<StdMutex<Vec<RetiredIdentity
     });
     runtime.set_retired_member_observer(Some(observer));
     seen
+}
+
+/// A complete roster that no longer lists an identity has Core unlist it:
+/// Core's seal retires its member, the identity leaves the registry, and the
+/// host's retirement hook hears of that retirement once, from Core's
+/// journal through the lifecycle projection. The next complete roster
+/// unlists nothing, and the hook hears nothing more.
+#[tokio::test]
+async fn a_seal_unlisting_reaches_the_retirement_hook_once() {
+    let alice = identity("personal:alice");
+    let bob = identity("personal:bob");
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    for who in [&alice, &bob] {
+        register_live(&runtime, &core.core, spec(who), 0, SessionId::new())
+            .await
+            .expect("registered live");
+    }
+    let seen = recording_hook(&runtime);
+    runtime.settle_lifecycle_projection().await;
+
+    let pass = runtime
+        .declare_roster_pass(
+            &[spec(&alice)],
+            true,
+            true,
+            None,
+            HostedIdentities::CreateNow,
+        )
+        .await;
+    assert!(
+        matches!(
+            pass.unlisted.get(&bob),
+            Some(crate::identity_first::bridge::UnlistedIdentityAnswer::Retired)
+        ),
+        "{:?}",
+        pass.unlisted
+    );
+    assert!(
+        core.core
+            .live_member(&bob)
+            .expect("Core's member read")
+            .is_none(),
+        "the seal retires the unlisted member"
+    );
+    assert!(
+        !runtime.entries.read().await.contains_key(&bob),
+        "the unlisted identity leaves the registry"
+    );
+    runtime.settle_lifecycle_projection().await;
+    let heard = lock(&seen).clone();
+    assert_eq!(heard.len(), 1, "{heard:?}");
+    assert_eq!(heard[0].identity, bob);
+
+    let again = runtime
+        .declare_roster_pass(
+            &[spec(&alice)],
+            true,
+            true,
+            None,
+            HostedIdentities::CreateNow,
+        )
+        .await;
+    assert!(again.unlisted.is_empty(), "{:?}", again.unlisted);
+    runtime.settle_lifecycle_projection().await;
+    assert_eq!(lock(&seen).len(), 1, "the hook hears the retirement once");
 }
 
 /// A customizer that changes no build and records each seat it is told of,
@@ -6715,8 +6888,7 @@ async fn a_reset_whose_journal_head_does_not_read_asks_core_nothing() {
 /// A reset refused for its member route over a bridge whose journal does
 /// not read keeps what it recorded (nothing tells it that none of the
 /// rotation reached Core), so its answer says so: the rotation may have
-/// started, and the identity's next roster compile drives it to its end. It
-/// never answers the refusal as final.
+/// started, and Core finishes it. It never answers the refusal as final.
 ///
 /// RED before a kept step's answer said what Meta does with the records:
 /// the refusal still answered "was not started", final.
@@ -6741,7 +6913,7 @@ async fn a_refusal_whose_records_are_kept_says_the_rotation_may_have_started() {
             .await
             .expect("the records read")
             .contains_key(&alice),
-        "the reset's rotation record stays for the next compile"
+        "the reset's rotation record stays written"
     );
 }
 
@@ -7143,7 +7315,7 @@ async fn a_reset_whose_incarnation_a_host_retired_first_keeps_what_it_recorded()
             .await
             .expect("the records read")
             .contains_key(&alice),
-        "the reset's rotation record stays for the next compile"
+        "the reset's rotation record stays written"
     );
 }
 
@@ -7164,7 +7336,10 @@ fn the_identity_runtime_decides_no_fact_core_s_journal_carries() {
             include_str!("lifecycle_projection.rs"),
         ),
         ("identity_first/runtime.rs", include_str!("../runtime.rs")),
-        ("identity_first/runtime/seat.rs", include_str!("seat.rs")),
+        (
+            "identity_first/runtime/declare.rs",
+            include_str!("declare.rs"),
+        ),
     ];
     for (file, source) in sources {
         let production = production_code(source);
@@ -7236,8 +7411,8 @@ fn membership_is_read_from_a_binding_s_label_only_where_allowed() {
             2,
         ),
         (
-            "identity_first/runtime/seat.rs",
-            production_code(include_str!("seat.rs")),
+            "identity_first/runtime/declare.rs",
+            production_code(include_str!("declare.rs")),
             1,
         ),
         (

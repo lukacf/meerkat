@@ -490,9 +490,7 @@ impl SessionBridge for TicketBridge {
         roster: crate::identity_first::DeclaredRosterRequest,
     ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
     {
-        Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
-            &roster,
-        ))
+        crate::identity_first::core_test_bridge::apply_through_seats(self, &roster, None).await
     }
 }
 

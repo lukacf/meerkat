@@ -3285,24 +3285,22 @@ async fn an_unreadable_first_boot_manifest_refuses_every_identity_and_keeps_the_
     boot.stop().await;
 }
 
-/// A member Meta 0.9.3 spawned carries no durable-identity marker, and Core
-/// restores it live across the upgrade, so no Meta wake resumes it and
-/// nothing marks it. The first boot whose roster lists the identity respawns
-/// it through Core, non-destructively: the same session and transcript at a
-/// higher Core generation, with the marker on the new binding, so the
-/// session now resolves as the identity. A member of that era whose identity
-/// the roster dropped still carries Meta's identity label; the same boot
-/// retires it, as it retires a marked member the roster dropped. A second
-/// boot changes neither.
+/// A member Meta 0.9.3 spawned carries Meta's identity label but no
+/// durable-identity marker, and Core restores it live across the upgrade.
+/// The first boot whose roster lists the identity declares it, and Core
+/// adopts the labelled member as the identity's entry and keeps it: the same
+/// session, transcript and Core generation, with nothing respawned. A member
+/// of that era whose identity the roster dropped is a host's raw member to
+/// Core: the boot leaves it live as it is. A second boot changes neither.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_first_boot_respawns_an_unmarked_rostered_member_and_retires_a_dropped_one() {
+async fn the_first_boot_keeps_an_unmarked_rostered_member_and_leaves_a_dropped_one() {
     let temp = tempfile::TempDir::new().expect("temp dir");
     let state = temp.path().join("state");
-    let mob_id = unique_mob_id("unmarked-respawn");
+    let mob_id = unique_mob_id("unmarked-adopt");
     let alice = id("personal:alice");
     let bob = id("personal:bob");
     let roster = vec![spec("personal:alice")];
-    const TOKEN: &str = "MARKER-UNMARKED-RESPAWN-5-TANGO";
+    const TOKEN: &str = "MARKER-UNMARKED-ADOPT-5-TANGO";
 
     let boot = Boot::start(&state, &mob_id, &[]).await;
     boot.compile(&[]).await;
@@ -3325,69 +3323,55 @@ async fn the_first_boot_respawns_an_unmarked_rostered_member_and_retires_a_dropp
         "Core restores the dropped identity's 0.9.3 member live and unmarked: {dropped:?}"
     );
     boot.compile(&roster).await;
-    boot.assert_durable_identity_marker(&alice, "the first boot's respawn")
-        .await;
-    let respawned = boot.core_last_binding(&alice).await;
+    let kept = boot.core_last_binding(&alice).await;
     assert!(
-        respawned.live && respawned.marked,
-        "the respawned binding is live and carries alice's marker: {respawned:?}"
+        kept.live && kept.generation == restored.generation && kept.session == restored.session,
+        "the boot keeps the member, respawning nothing: {kept:?} (was {restored:?})"
     );
+    let handle = boot.unified.mob_handle();
+    let entry = handle
+        .identity_entry(
+            &meerkat_meta::member_comms_id::roster_member_id_for_identity(alice.as_str()),
+        )
+        .expect("Core's entry read");
     assert!(
-        respawned.generation > restored.generation,
-        "the respawn runs under a new Core generation ({} -> {})",
-        restored.generation,
-        respawned.generation
+        matches!(
+            &entry,
+            meerkat_mob::IdentityEntryRead::Entry(view)
+                if view.origin == meerkat_mob::IdentityEntryOrigin::Declared
+                    && matches!(view.standing, meerkat_mob::EntryStanding::Seated(_))
+        ),
+        "Core adopted the labelled member as alice's declared entry: {entry:?}"
     );
     assert_eq!(
-        respawned.session,
-        Some(session.clone()),
-        "the respawn keeps the session"
-    );
-    assert_eq!(
-        boot.core_member_generation(&alice).await,
-        Some(respawned.generation),
-        "Core holds alice live at the respawned generation"
-    );
-    let history = boot.core_history().await;
-    let session_binding = history
-        .binding_for_session(&session)
-        .expect("Core binds the kept session");
-    assert_eq!(
-        session_binding.continuity_intent(),
-        &meerkat_mob::SpawnContinuityIntent::DurableIdentity {
-            continuity_key: alice.as_str().to_string(),
-        },
-        "the binding that names the session carries alice's marker, so the session \
-         resolves as alice"
-    );
-    assert_eq!(
-        boot.runtime()
-            .core_session_owner(&session)
-            .await
-            .expect("Core's session owner read"),
-        Some(alice.clone())
-    );
-    let retired = boot.core_last_binding(&bob).await;
-    assert!(
-        !retired.live,
-        "the boot retires the member of the identity its roster dropped: {retired:?}"
-    );
-    assert_eq!(
-        (retired.generation, retired.session.as_ref(), retired.marked),
-        (dropped.generation, Some(&bob_session), false),
-        "the retirement respawns nothing: the same generation and session, unmarked"
+        boot.core_last_binding(&bob).await,
+        dropped,
+        "the boot leaves the dropped identity's member as it is"
     );
     assert_eq!(
         boot.core_member_generation(&bob).await,
-        None,
-        "Core holds no member for the dropped identity"
+        Some(dropped.generation),
+        "Core still holds the dropped identity's member"
+    );
+    let bob_entry = handle
+        .identity_entry(&meerkat_meta::member_comms_id::roster_member_id_for_identity(bob.as_str()))
+        .expect("Core's entry read");
+    assert!(
+        matches!(
+            &bob_entry,
+            meerkat_mob::IdentityEntryRead::NotAnEntry { worker: Some(_) }
+        ),
+        "to Core the dropped identity's member is a host's raw member: {bob_entry:?}"
     );
     boot.send(&alice, "Which token did I give you?").await;
     let request = boot
         .capture
         .last()
-        .expect("alice's request after the respawn");
-    assert!(request.contains(TOKEN), "the respawn keeps the transcript");
+        .expect("alice's request after the first boot");
+    assert!(
+        request.contains(TOKEN),
+        "the kept member keeps its transcript"
+    );
     boot.assert_continuity_and_leases_unread();
     boot.stop().await;
 
@@ -3395,19 +3379,19 @@ async fn the_first_boot_respawns_an_unmarked_rostered_member_and_retires_a_dropp
     let alice_before = boot.core_last_binding(&alice).await;
     let bob_before = boot.core_last_binding(&bob).await;
     assert!(
-        alice_before.live && alice_before.marked,
-        "alice stays live and marked across the restart: {alice_before:?}"
+        bob_before.live && bob_before.session.as_ref() == Some(&bob_session),
+        "the dropped identity's member stays live on its session: {bob_before:?}"
     );
     boot.compile(&roster).await;
     assert_eq!(
         boot.core_last_binding(&alice).await,
         alice_before,
-        "a second boot respawns nothing"
+        "a second boot changes nothing for alice"
     );
     assert_eq!(
         boot.core_last_binding(&bob).await,
         bob_before,
-        "a second boot leaves the retired member as it is"
+        "a second boot leaves the raw member as it is"
     );
     boot.assert_continuity_and_leases_unread();
     boot.stop().await;
@@ -3994,6 +3978,47 @@ async fn a_door_wakes_a_declared_identity_whose_member_core_retired() {
     assert!(
         woken.generation > seated.generation,
         "the door seated a new incarnation: {woken:?} after {seated:?}"
+    );
+    boot.stop().await;
+}
+
+/// A delivery to an identity entry whose member Core retired outside a
+/// seal (the entry is left unseated) declares the identity again, and Core
+/// seats it on its archived session: the next incarnation revives that
+/// session, so the identity comes back with its history, and no fresh life
+/// starts.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_door_wake_of_an_unseated_entry_revives_its_archived_session() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let mob_id = unique_mob_id("door-revival");
+    let alice = id("team:alice");
+    let roster = vec![spec("team:alice")];
+
+    let boot = Boot::start(&state, &mob_id, &roster).await;
+    boot.compile(&roster).await;
+    boot.send(&alice, "A first turn.").await;
+    let seated = boot.core_last_binding(&alice).await;
+    assert!(
+        seated.live,
+        "alice is live after her first turn: {seated:?}"
+    );
+    boot.retire_core_member(&alice).await;
+    assert!(
+        !boot.core_last_binding(&alice).await.live,
+        "control: Core holds no live member for alice"
+    );
+
+    boot.send(&alice, "A turn after the retirement.").await;
+    let woken = boot.core_last_binding(&alice).await;
+    assert!(woken.live, "the door woke alice: {woken:?}");
+    assert!(
+        woken.generation > seated.generation,
+        "the door seated a new incarnation: {woken:?} after {seated:?}"
+    );
+    assert_eq!(
+        woken.session, seated.session,
+        "the new incarnation revives alice's archived session"
     );
     boot.stop().await;
 }

@@ -1780,6 +1780,72 @@ mod tests {
     }
 
     #[test]
+    fn decision_methods_advertise_concrete_contracts() {
+        let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());
+        for (name, expected_params_type, expected_result_type) in [
+            ("decision/list", "DecisionListParams", "DecisionListResult"),
+            ("decision/get", "DecisionGetParams", "DecisionResult"),
+            (
+                "decision/rendering",
+                "DecisionRenderingParams",
+                "DecisionRenderingResult",
+            ),
+            (
+                "decision/present",
+                "DecisionPresentParams",
+                "DecisionResult",
+            ),
+            (
+                "decision/withdraw",
+                "DecisionWithdrawParams",
+                "DecisionResult",
+            ),
+        ] {
+            let descriptor = methods
+                .iter()
+                .find(|method| method.name == name)
+                .unwrap_or_else(|| panic!("missing descriptor for {name}"));
+            assert_eq!(
+                descriptor.params_type,
+                Some(expected_params_type),
+                "{name} must advertise its concrete params type"
+            );
+            assert_eq!(
+                descriptor.result_type,
+                Some(expected_result_type),
+                "{name} must advertise its concrete result type"
+            );
+            assert_eq!(
+                descriptor.request_lifecycle.resolve(None),
+                RequestLifecycle::InlineObservation,
+                "{name} is an inline call"
+            );
+        }
+
+        // A host adapter decides through its authenticated event only: the
+        // plain catalog never lists decide.
+        assert!(
+            !methods
+                .iter()
+                .any(|method| method.name == "decision/decide"),
+            "decision/decide has no plain route"
+        );
+
+        // The decision owner is the runtime's: a surface without a runtime
+        // advertises none of the methods.
+        let without_runtime = rpc_method_names(RpcMethodCatalogOptions {
+            runtime_available: false,
+            ..RpcMethodCatalogOptions::documented_surface()
+        });
+        assert!(
+            !without_runtime
+                .iter()
+                .any(|method| method.starts_with("decision/")),
+            "{without_runtime:?}"
+        );
+    }
+
+    #[test]
     fn comms_and_session_stream_methods_advertise_concrete_contracts() {
         let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());
         for (name, expected_params_type, expected_result_type) in [

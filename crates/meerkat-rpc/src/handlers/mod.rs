@@ -8,6 +8,9 @@ pub mod capabilities;
 #[cfg(feature = "comms")]
 pub mod comms;
 pub mod config;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod decision_tests;
 // Runtime-backed external-event convenience handler.
 pub mod event;
 pub mod help;

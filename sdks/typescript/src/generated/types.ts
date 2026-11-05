@@ -999,6 +999,8 @@ export type WireDecisionStage = "human" | "review" | "unknown";
 
 export type WireDecisionNoticeState = "not_required" | "not_due" | "owed" | "delivered" | "failed" | "unknown";
 
+export type WireDecisionNoticeEvent = "presented" | "unknown";
+
 export type WireDecisionTier = "human" | "review" | "unknown";
 
 export type WireDecisionAssurance = "person_authenticated" | "service_credential" | "device_trusted" | "unknown";
@@ -1904,6 +1906,24 @@ export interface DecisionPresentParams {
 
 export interface DecisionWithdrawParams {
   decision_id: string;
+}
+
+export interface WireDecisionNoticePresentation {
+  parts: WireCanonicalPart[];
+  renderer: string;
+  rendering: string;
+  subject_digest: string;
+}
+
+export interface WireDecisionNotice {
+  approver_id: string;
+  decision_id: string;
+  event: WireDecisionNoticeEvent;
+  kind: string;
+  notice_id: string;
+  phase: WireDecisionPhase;
+  presentation?: WireDecisionNoticePresentation | null;
+  requester: string;
 }
 
 export interface CallbackToolExecutionFast {

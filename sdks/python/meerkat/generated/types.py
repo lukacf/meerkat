@@ -1234,6 +1234,9 @@ WireDecisionStage = Literal['human', 'review', 'unknown']
 # Where the requester notice of a decision stands.
 WireDecisionNoticeState = Literal['not_required', 'not_due', 'owed', 'delivered', 'failed', 'unknown']
 
+# What a decision notice reports.
+WireDecisionNoticeEvent = Literal['presented', 'unknown']
+
 # Who decided a decision.
 WireDecisionTier = Literal['human', 'review', 'unknown']
 
@@ -2390,6 +2393,38 @@ the party that decides now."""
 class DecisionWithdrawParams:
     """`decision/withdraw` parameters: the connection withdraws as the host."""
     decision_id: str
+
+
+@dataclass
+class WireDecisionNoticePresentation:
+    """The rendering a `presented` notice showed: the decision's whole
+rendering, its renderer and digest, and its canonical parts (one part:
+the whole rendering)."""
+    parts: list[WireCanonicalPart]
+    renderer: str
+    rendering: str
+    subject_digest: str
+
+
+@dataclass
+class WireDecisionNotice:
+    """`decision/notice` parameters: what an `rkat-rpc` stdio connection showed
+its operator about one durable decision. When its client lists
+(`decision/list`), the connection presents each open decision of the
+returned page that is addressed to an approver id its operator acts for
+and that it has not presented yet: it writes a `presented` notice
+carrying the whole rendering, then records that presentation (to the
+approver, with this notice's id as its message reference) before it
+answers the list. A notice grants nothing: the operator decides with
+`decision/decide` on the same connection."""
+    approver_id: str
+    decision_id: str
+    event: WireDecisionNoticeEvent
+    kind: str
+    notice_id: str
+    phase: WireDecisionPhase
+    requester: str
+    presentation: Optional[WireDecisionNoticePresentation] = None
 
 
 # Private host/gateway execution declaration for a callback tool.

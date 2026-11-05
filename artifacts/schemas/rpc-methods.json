@@ -1138,6 +1138,10 @@
       "name": "approval/consent_notice"
     },
     {
+      "description": "One durable decision this stdio connection presented to its operator, with the whole rendering, written before the decision/list answer that caused it",
+      "name": "decision/notice"
+    },
+    {
       "description": "Opaque playback handle for one admitted assistant output (measured playback)",
       "name": "live/assistant_output_available"
     },

@@ -8354,6 +8354,86 @@ pub(crate) mod tests {
         router.shutdown().await;
     }
 
+    /// A released governed server whose re-add after its sign-in is refused
+    /// for its governance (the control the router holds covers another
+    /// descriptor) is reported once: the refusal answers the kept sign-in, so
+    /// a later boundary does not report it again. The record stays for the
+    /// host's status, and a later sign-in gets the typed refusal.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_governance_refused_restage_is_reported_once() {
+        use crate::connection::tests::spawn_http_mcp_server;
+
+        let (url, _server) = spawn_http_mcp_server("interactive-token").await;
+        let config = selected_account_http_config(url);
+        let control = CountingControl::new(&config);
+        // Nothing listens on this descriptor's port.
+        let replacement = CountingControl::new(&selected_account_http_config(
+            "http://127.0.0.1:1/mcp".into(),
+        ));
+        let (mut router, target, resolver) =
+            governed_router_after_a_failed_replacement(config, &control, &replacement).await;
+
+        // Sign-out releases it; the sign-in lands before the removal applies.
+        *resolver.stored_token_for_testing() = None;
+        assert_eq!(
+            router.credential_released(&target).unwrap(),
+            ReleasedCredential::Unpublished
+        );
+        *resolver.stored_token_for_testing() = Some("interactive-token".into());
+        assert_eq!(
+            router.retry_authorized(&target).unwrap(),
+            AuthorizedRetry::AfterRelease
+        );
+        router.apply_staged().await.expect("apply the release");
+        assert!(router.active_server_names().is_empty());
+
+        // The two boundaries after the release report the refused re-add
+        // once, with its typed refusal.
+        let refusal = McpError::AttachmentRefused(McpAttachmentRefusal::Mismatch).to_string();
+        let mut reported = Vec::new();
+        for _ in 0..2 {
+            let result = router.apply_staged().await.expect("the boundary runs");
+            reported.push(
+                result
+                    .delta
+                    .lifecycle_actions
+                    .into_iter()
+                    .filter(|action| {
+                        action.target == "guarded"
+                            && action.operation == ToolConfigChangeOperation::Add
+                            && action.phase == McpLifecyclePhase::Failed
+                    })
+                    .map(|action| action.detail)
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(
+            reported,
+            vec![vec![Some(refusal)], vec![]],
+            "the refused re-add is reported once"
+        );
+        assert!(router.active_server_names().is_empty(), "nothing connects");
+        assert_eq!(
+            router.servers_awaiting_authorization(),
+            vec![target.clone()],
+            "the record stays for the host's status"
+        );
+
+        // A later sign-in gets the typed refusal, and nothing is staged.
+        let refused = router.retry_authorized(&target);
+        assert!(
+            matches!(
+                refused,
+                Err(McpError::AttachmentRefused(McpAttachmentRefusal::Mismatch))
+            ),
+            "{refused:?}"
+        );
+        assert!(!router.has_staged_intent("guarded"), "nothing is staged");
+        assert_eq!(router.servers_awaiting_authorization(), vec![target]);
+        router.shutdown().await;
+    }
+
     #[cfg(feature = "workspace-tests")]
     #[tokio::test]
     async fn retry_touches_only_the_exact_retained_target() {

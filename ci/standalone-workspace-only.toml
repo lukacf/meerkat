@@ -961,6 +961,7 @@ tests = [
     "router::shutdown_report_tests::stdio::shutdown_reports_an_established_servers_settled_close",
     "router::tests::a_call_without_a_usable_credential_unpublishes_at_the_next_boundary",
     "router::tests::a_control_refusing_the_retry_keeps_the_server_unpublished",
+    "router::tests::a_governance_refused_restage_is_reported_once",
     "router::tests::a_governed_name_without_a_retained_control_is_not_retried_plainly",
     "router::tests::a_governed_retry_after_a_challenge_asks_its_control_again",
     "router::tests::a_governed_sign_in_retry_asks_its_control",

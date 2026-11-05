@@ -34,14 +34,19 @@
 //! host's tool factory, and every helper spawn passes the TUI's customizer
 //! (approval gate, model binding, file tools).
 //!
-//! Seams for later phases (deliberately absent here, not stubbed):
-//! - P6 instruction files beyond the native `AGENTS.md` discovery, MCP from
-//!   `.rkat/mcp.toml`, native semantic memory.
+//! Context ([`instructions`], [`memory_probe`], [`mcp`]): a user-global
+//! `SYSTEM.md` becomes the config's `system_prompt_file` when the realm sets
+//! no prompt; the factory runs with native semantic memory (`memory_search`,
+//! compaction-time indexing) when the realm's index opens; the effective
+//! MCP set (realm `[[tools.mcp_servers]]`, project and user `mcp.toml`) is
+//! loaded once and given to every session build as its declarative servers.
 
 pub mod approval;
 pub mod confinement;
 pub mod credentials;
 pub mod dirs;
+pub mod instructions;
+pub mod mcp;
 pub mod persona;
 pub mod scope;
 
@@ -54,7 +59,9 @@ use meerkat::{
     AgentFactory, FactoryAgentBuilder, LlmClient, PersistentSessionService, SessionStore,
 };
 use meerkat_core::connection::RealmId;
-use meerkat_core::{AuthBindingRef, Config, ConfigStore, MemoryConfigStore, Provider};
+use meerkat_core::{
+    AuthBindingRef, Config, ConfigStore, McpServerConfig, MemoryConfigStore, Provider,
+};
 use meerkat_runtime::MeerkatMachine;
 use meerkat_store::{RealmBackend, realm_paths_in};
 use meerkat_tools::builtin::shell::ShellConfinement;
@@ -76,6 +83,7 @@ use meerkat_core::AgentToolDispatcher;
 pub use approval::{ApprovalOverrides, ApprovalParts};
 pub use confinement::{ConfinementPlan, HostPaths};
 pub use dirs::GlobalDirs;
+pub use instructions::InstructionSources;
 pub use persona::{CODING_PERSONA, HELPER_PERSONA};
 pub use scope::{RuntimeScope, load_config, resolve_scope};
 
@@ -149,6 +157,14 @@ pub struct Runtime {
     pub approval: ApprovalParts,
     /// The helper (mob member) host; `None` without the `mob` feature.
     pub helpers: Option<Arc<Helpers>>,
+    /// Where the instruction files of every session build come from.
+    pub instructions: InstructionSources,
+    /// The declarative MCP servers every session build carries.
+    pub mcp_servers: Vec<McpServerConfig>,
+    /// Whether sessions get native semantic memory (`memory_search`).
+    pub memory: bool,
+    /// Start-up notices (warnings) for the transcript.
+    pub notices: Vec<String>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -292,6 +308,7 @@ pub async fn bootstrap_with(
     let (choice, models) = plan_model(args, &config, &endpoints, &lister).await?;
 
     let mut effective = config.clone();
+    instructions::apply_system_md(&mut effective, scope.global.as_ref());
     lower_into(&mut effective, endpoints.as_slice())?;
     let listed = models
         .as_ref()
@@ -319,10 +336,17 @@ pub async fn bootstrap_with(
         .store_path()
         .map_or_else(|| realm_root.clone(), PathBuf::from);
 
+    let mut notices = Vec::new();
+    let memory = memory_probe(&store_path, manifest.backend, &mut notices);
+    let mcp = mcp::load(&scope, &config).await?;
+    notices.extend(mcp.notices);
     let factory = build_factory(
         &scope,
         store_path,
-        options.llm_override.is_none(),
+        FactoryToggles {
+            token_store: options.llm_override.is_none(),
+            memory,
+        },
         &confinement.shell,
     );
     let pricing = PricingSetup::load(
@@ -355,6 +379,7 @@ pub async fn bootstrap_with(
         Arc::clone(&config_store) as Arc<dyn ConfigStore>,
     );
     builder.default_llm_client.clone_from(&options.llm_override);
+    builder.wait_for_mcp = args.wait_for_mcp;
     let mob_tools_slot = Arc::clone(&builder.default_mob_tools);
     let workgraph = meerkat::WorkGraphService::with_scope(
         persistence.workgraph_store(),
@@ -377,6 +402,8 @@ pub async fn bootstrap_with(
         workgraph,
     )?;
 
+    let scope_workspace = scope.context_root.clone();
+    let scope_global = scope.global.clone();
     Ok(Runtime {
         scope,
         config,
@@ -394,7 +421,52 @@ pub async fn bootstrap_with(
         backend: manifest.backend,
         approval,
         helpers,
+        instructions: InstructionSources {
+            workspace: scope_workspace,
+            global: scope_global,
+            home: dirs_home(),
+        },
+        mcp_servers: mcp.servers,
+        memory,
+        notices,
     })
+}
+
+/// The canonical home directory, if any.
+fn dirs_home() -> Option<PathBuf> {
+    ::dirs::home_dir().map(|home| std::fs::canonicalize(&home).unwrap_or(home))
+}
+
+/// Directory of the realm's semantic-memory index (where the factory opens
+/// its `HnswMemoryStore`).
+#[must_use]
+pub fn memory_dir(store_path: &std::path::Path) -> PathBuf {
+    store_path.join("memory")
+}
+
+/// Whether sessions get native semantic memory: the realm keeps files (not
+/// an in-memory backend) and its index opens. The index is opened once
+/// here so a failure (an unwritable or damaged index) degrades
+/// to a start-up notice instead of failing every session build.
+fn memory_probe(
+    store_path: &std::path::Path,
+    backend: RealmBackend,
+    notices: &mut Vec<String>,
+) -> bool {
+    if backend == RealmBackend::Memory {
+        return false;
+    }
+    let dir = memory_dir(store_path);
+    match meerkat_memory::HnswMemoryStore::open(&dir) {
+        Ok(_) => true,
+        Err(err) => {
+            notices.push(format!(
+                "semantic memory is off for this run (memory_search unavailable, compaction does not index): cannot open {}: {err}",
+                dir.display()
+            ));
+            false
+        }
+    }
 }
 
 /// The slot every session build takes its mob tools from.
@@ -453,17 +525,27 @@ fn start_helpers(
 /// tools and the shell are on: every call passes the approval gate each
 /// session installs, and the shell runs under the OS confinement the caller
 /// installs ([`confinement::plan`]). Mob tools are on with the `mob` feature
-/// (helpers, see [`crate::mobs`]). The file
+/// (helpers, see [`crate::mobs`]); semantic memory when `toggles.memory`
+/// (the index lives under `store_path`, see [`memory_dir`]). The file
 /// and note tools come in per session as external tools (see
 /// [`crate::session`]). The factory's `runtime_root` is the realm, so every
 /// shell call runs in durable process custody (`<realm>/process_custody`),
 /// which the runtime-backed composition settles on every attachment.
 /// `with_token_store` attaches the user's provider token store, so OAuth and
 /// stored keys resolve like they do for `rkat`.
+/// Optional factory capabilities.
+#[derive(Debug, Clone, Copy)]
+struct FactoryToggles {
+    /// Attach the user's provider token store.
+    token_store: bool,
+    /// Native semantic memory (`memory_search`, compaction indexing).
+    memory: bool,
+}
+
 fn build_factory(
     scope: &RuntimeScope,
     store_path: PathBuf,
-    with_token_store: bool,
+    toggles: FactoryToggles,
     shell_confinement: &ShellConfinement,
 ) -> AgentFactory {
     let mut factory = AgentFactory::new(store_path)
@@ -473,11 +555,12 @@ fn build_factory(
         .context_root(scope.context_root.clone())
         .builtins(true)
         .shell(true)
+        .memory(toggles.memory)
         .mob(cfg!(feature = "mob"));
     if let Some(user_root) = &scope.user_config_root {
         factory = factory.user_config_root(user_root.clone());
     }
-    if with_token_store {
+    if toggles.token_store {
         factory = match factory.clone().with_default_token_store() {
             Ok(with_store) => with_store,
             Err(err) => {
@@ -682,7 +765,15 @@ mod tests {
                 Some(requirement) => ShellConfinement::Required { requirement },
                 None => ShellConfinement::TrustedHost,
             };
-            let factory = build_factory(&scope, ws.join("store"), false, &shell);
+            let factory = build_factory(
+                &scope,
+                ws.join("store"),
+                FactoryToggles {
+                    token_store: false,
+                    memory: false,
+                },
+                &shell,
+            );
             assert_eq!(factory.shell_confinement(), &shell, "{mode}");
             assert_eq!(
                 mode == "off",

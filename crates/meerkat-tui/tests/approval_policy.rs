@@ -301,3 +301,44 @@ fn shell_deny_rule_matches_hidden_segments() {
         );
     }
 }
+
+/// MCP tools keep the names their servers give them; the policy knows none
+/// of them, so each reaches the classifier unless a user rule decides it.
+#[test]
+fn mcp_tools_reach_the_classifier_unless_a_rule_decides() {
+    let h = harness(Options::default());
+    for (name, args) in [
+        ("create_issue", json!({"title": "x"})),
+        ("search_repositories", json!({"query": "meerkat"})),
+        ("fetch", json!({"url": "https://example.com"})),
+    ] {
+        let decision = h.decide(name, &args);
+        assert_eq!(decision.tier, Tier::Classifier, "{name}");
+        assert!(decision.detail.contains("requires review"), "{decision:?}");
+    }
+
+    let mut rules = RuleSet::default();
+    rules.push(
+        Rule::new(
+            RuleKind::Allow,
+            "search_repositories",
+            None,
+            RuleOrigin::Realm,
+        )
+        .unwrap(),
+    );
+    rules.push(Rule::new(RuleKind::Deny, "create_issue", None, RuleOrigin::Realm).unwrap());
+    let h = harness(Options {
+        rules,
+        ..Options::default()
+    });
+    assert_eq!(
+        h.tier("search_repositories", json!({"query": "meerkat"})),
+        Tier::AlwaysAllow
+    );
+    assert_eq!(
+        h.tier("create_issue", json!({"title": "x"})),
+        Tier::UserDeny
+    );
+    assert_eq!(h.tier("fetch", json!({"url": "x"})), Tier::Classifier);
+}

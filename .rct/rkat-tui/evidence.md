@@ -249,3 +249,97 @@ timestamp, and output excerpts.
   panic.
 - `node scripts/generate-bazel-rust-builds.mjs`: `mobs_test` added to `crates/meerkat-tui/BUILD.bazel` and the root
   `BUILD.bazel`; `--check` clean. `Cargo.toml`: `meerkat-mob`, `meerkat-mob-mcp` left the machete `ignored` list.
+
+## P6 — Context, memory, compaction policy, docs (2026-11-05)
+
+- Base commit: `568b33af83` (P5), uncommitted working tree; lane `RUST_LANE_ID=tui-port`.
+- Instruction files (`src/bootstrap/instructions.rs`): `InstructionSources { workspace, global, home }` discovers
+  user-global `AGENTS.md` → ancestor `AGENTS.md`/`.rkat/AGENTS.md` from the git root (nearest `.git` dir or file; the
+  walk stops below `$HOME`, so a dotfiles repo in home never adopts `~/AGENTS.md`) down to the workspace's parent →
+  workspace `AGENTS.local.md`/`.rkat/AGENTS.local.md`; per file `normalize_agents_md_content` (upstream's
+  `AGENTS_MD_MAX_BYTES` cap, truncation marker), total 96 KiB, empty/unreadable skipped; rendered
+  `# Instructions (from <path>)` into `SessionBuildOptions.additional_instructions` after `CODING_PERSONA`, notes index
+  last. Re-discovered by `Template::options` on every create/resume. The workspace `AGENTS.md` stays native (factory
+  context root). Upstream's `find_project_agents_md_in` is no longer public (prompt assembly's
+  `load_project_agents_md_in` is private), so the TUI mirrors its two candidates. `apply_system_md` sets
+  `config.agent.system_prompt_file` on the factory's effective config when the realm sets neither prompt field.
+- `/remember` / `#text` (`src/runner/context.rs`): `append_remember_line` on `remember_target(workspace)` (header on
+  create), then `SessionHandle::append_system_context` → `SessionServiceControlExt::append_system_context`
+  (`AppendSystemContextRequest::from_text("# Remembered instruction\n\n<line>")`, source `rkat-tui`, idempotency key
+  `rkat-tui:remember:<hash of line>` per session); Info notice "… fully applied (as part of AGENTS.md) from the next
+  session", Warn notice when the live append is refused (file still written).
+- Native memory: `bootstrap::memory_probe` opens `HnswMemoryStore` at `<store_path>/memory` once (skipped for the
+  memory backend); success → `AgentFactory::memory(true)` (`memory_search` composed by the factory, compaction indexes
+  discarded history); failure → memory off + start-up notice (`Runtime::notices`). `HnswMemoryStore` is SQLite-backed
+  now (no single-writer lock), so a second process no longer fails the open; the probe still catches a damaged or
+  unwritable index, which would otherwise fail every build closed (`CapabilityUnavailable`).
+- Read-only tiers: `READ_ONLY_BUILTINS` gains `blob_inspect`, `peers`; drops the stale v0.4 names `agent_status`,
+  `agent_list` (no upstream tool has them; keeping them would make a same-named MCP tool Tier 1). New
+  `REVIEWED_BUILTINS` names the acting builtins (shell family, `apply_patch`, `blob_save_file`, `blob_load_file`,
+  `skill_invoke_function`, `web_search`, `brain_swap`, `generate_image`, comms sends, `council`,
+  `conclude_objective`). `approval::policy::tests::upstream_builtins_are_all_classified` pins every name of upstream's
+  `SHELL/COMMS/UTILITY/SKILL/WEB_SEARCH/BRAIN_SWAP_TOOL_NAMES` and `image_generation::TOOL_NAMES` into exactly one list
+  and their tiers; `tests/semantic_recall.rs::every_offered_builtin_is_classified_and_memory_search_is_tier_one` checks
+  every tool a real session offers the model (found `council` and `conclude_objective`, now classified).
+- MCP (`src/bootstrap/mcp.rs`): `McpConfig::effective_servers_from_roots(config.tools.mcp_servers, workspace,
+  user_config_root)` loaded once at start-up → `Runtime::mcp_servers` → every build's `SessionBuildOptions::mcp_servers`
+  (factory session-owned router; `[MCP_PENDING]` native); `--wait-for-mcp` → `FactoryAgentBuilder::wait_for_mcp`.
+  Project-scoped servers named in a start-up notice. No `HostConfinement` trust predicate (the TUI confines only the
+  shell, P3), so a project `mcp.toml` is trusted like `rkat run` without confinement; the approval policy's protected
+  `.rkat/` paths keep the model from editing it. MCP tools: `ActionKind::Other` → classifier unless a rule decides
+  (`tests/approval_policy.rs::mcp_tools_reach_the_classifier_unless_a_rule_decides`).
+- Compaction (`src/ui/compaction.rs`, `src/runner/context.rs`): mechanism = per-build
+  `SessionBuildOptions::auto_compact_threshold_override`. `warn` → `NonZeroU64::MAX` (size trigger off; upstream still
+  compacts on byte-cap/context-refusal recovery), gauge warns at `compact_warn_percent` once and every turn from
+  `compact_auto_percent`; `auto` → `compact_auto_percent × window` (window: endpoint list > registry > 128k default, the
+  gauge's number). The handle remembers its threshold; `ensure_threshold` rebuilds the idle session (retire + resume)
+  after a model switch, a resume onto another model or a model-list fetch that moves it. `/compact` reports the policy;
+  `/compact now` (idle, after ≥1 turn) retires and resumes the session with threshold `NonZeroU64::MIN` for one turn
+  (the reconfigure host has no threshold field, so no live change), `Msg::CompactArmed`; `finish_turn` rebuilds it on the
+  policy threshold after that turn. Not "half the context": a rebuilt agent restarts with `last_input_tokens = 0`
+  (observed `CompactionStarted { input_tokens: 0 }`), so only a history/forecast threshold below the transcript fires.
+  Gauge: `CompactionCompleted.estimated_history_tokens_after` (fallback `summary_tokens`), warning re-armed.
+- Gaps / upstream asks:
+  1. **On-demand compaction API** (ask): no `SessionService`/runtime call compacts now; `/compact now` costs two
+     rebuilds and, with a one-token threshold, a long tool loop in the armed turn compacts again after
+     `min_turns_between_compactions` (3) boundaries. Ask: `compact_session(id)` or a one-shot "compact before the next
+     model call" flag on the runtime.
+  2. `auto_compact_threshold_override` is not live-reconfigurable and is dropped by `session_recovery` (recovered builds
+     set it `None`), so a session the runtime rebuilds on its own falls back to upstream's model-aware default.
+  3. With a `DurableStaged` memory store (Hnsw), `CompactionCompleted` is published only when the runtime finalizes the
+     memory projection at the session's next run (`finalize_committed_compaction_projections` via
+     `default_event_tx`), and after a retire-and-resume between the two it never reached the session event stream in the
+     tests. The compaction itself, the summary and the indexing work (asserted on the requests and `memory_search`).
+  4. A resumed session keeps its persisted system prompt (factory: bare resume does not reassemble), so edited instruction
+     files apply to new sessions; `/remember` covers the live session through system context.
+  5. The admission gate sees only the tool name and arguments (`ToolDispatchContext` carries no provenance), so an MCP
+     tool that shares a read-only builtin's name would be Tier 1. Ask: provenance in the dispatch context.
+  6. `MODULE.bazel.lock` records the hash of `crates/meerkat-tui/Cargo.toml` (stale since P0; P6 changed the manifest
+     again): `make buildbuddy-lock-update` needed before CI (outside this phase's edit scope).
+- Machete: `meerkat-memory` now used (probe); `meerkat-hooks` and `meerkat-session` were never used (hooks only observe;
+  compaction is native) and are removed from `[dependencies]`; the `[package.metadata.cargo-machete]` section is gone.
+  Side effects: `Cargo.lock` (meerkat-tui's dependency list) and the generated `crates/meerkat-session/BUILD.bazel`
+  visibility (drops `//crates/meerkat-tui`) change.
+- Tests: `tests/instructions.rs` (SYSTEM.md replaces the base prompt; order SYSTEM.md < workspace AGENTS.md < persona <
+  global < ancestor (via a `.git` file) < local; 32 KiB truncation marker; `/remember` twice → two file lines, one system
+  message, next session's prompt carries the line from AGENTS.md), `tests/compact.rs` (auto: native compaction at the
+  threshold, summary call, compacted request, `CompactionCompleted.estimated_history_tokens_after < 60k` on the next run;
+  warn: no compaction past the threshold, the policy's gauge warns, `/compact now` arms → next turn compacts → disarmed,
+  no second compaction), `tests/semantic_recall.rs` (offered tools classified; a fact compacted away is returned by
+  `memory_search`), `tests/approval_policy.rs` MCP test; unit: instructions (order, `.rkat` local, truncation, total
+  cap, `.git` file, home never root, empty skipped, SYSTEM.md rules, remember target/append), mcp loader, compaction
+  policy/gauge/describe, UI `/compact` + `/compact now` flows, remember key.
+- `./scripts/repo-cargo fmt -p meerkat-tui -- --check`: clean; `clippy -p meerkat-tui --all-targets --all-features -- -D
+  warnings`: exit 0.
+- `./scripts/repo-cargo nextest run -p meerkat-tui`: 522 run, 522 passed, 6 skipped; lib+bin 428, approval_policy 16,
+  approval_service 6, classifier_llm 15, compact 2, confinement 3, file_tools 22, instructions 2, integrator 8,
+  memory_tools 2, mobs 3, models 2, render_snapshot 11, semantic_recall 2. `--test compact --test instructions --test
+  semantic_recall --test integrator --test mobs` ×5: 17/17 each.
+- `rkat-tui --help`: exit 0. PTY smoke (`--no-confinement`, fake key, 160×60): `/help`, `#note from hash`, `/remember x`,
+  `/compact`, `/compact now` ("nothing to compact yet"), `/quit` → exit 0, no panic, workspace `AGENTS.md` =
+  `# AGENTS.md\n\n- note from hash\n- x\n`.
+- `node scripts/generate-bazel-rust-builds.mjs`: `compact_test`, `instructions_test`, `semantic_recall_test` added to
+  `crates/meerkat-tui/BUILD.bazel` and the root `BUILD.bazel`; `--check` clean. `make docs-check`: OK (covers the
+  Mintlify docs only; the README is not under `docs/`). `make check-published-crates-standalone-guard`: meerkat-tui OK
+  (no `standalone-tests` metadata: plain `cargo test`; README prints the ignored live-lane commands).
+- README: `crates/meerkat-tui/README.md` rewritten for the port. CHANGELOG `[Unreleased]` `### Added` entry completed.

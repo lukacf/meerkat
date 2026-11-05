@@ -122,7 +122,13 @@ impl Runner {
             .runtime
             .choice_for(&self.current_choice())
             .unwrap_or_else(|_| self.runtime.choice.clone());
-        match SessionHandle::create(&self.runtime, self.template.options(Some(choice))).await {
+        let threshold = self.session_threshold();
+        match SessionHandle::create(
+            &self.runtime,
+            self.template.options(Some(choice), threshold),
+        )
+        .await
+        {
             Ok(session) => self.switch_to(session, None).await,
             Err(err) => self.notice(
                 NoticeLevel::Error,
@@ -147,8 +153,11 @@ impl Runner {
             self.notice(NoticeLevel::Info, "already in this session");
             return;
         }
+        let threshold = self.session_threshold();
         let opened =
-            match SessionHandle::resume(&self.runtime, &id, self.template.options(None)).await {
+            match SessionHandle::resume(&self.runtime, &id, self.template.options(None, threshold))
+                .await
+            {
                 Ok(session) => session,
                 Err(err) => {
                     self.notice(
@@ -201,11 +210,14 @@ impl Runner {
     /// and reseed the UI.
     async fn switch_to(&mut self, session: SessionHandle, transcript: Option<Session>) {
         let previous = std::mem::replace(&mut self.session, session);
+        self.compact_armed = false;
         self.follow_events().await;
         if let Err(err) = previous.retire().await {
             tracing::warn!(error = %err, session = %previous.id(), "could not retire the previous session");
         }
         self.show_session(transcript.as_ref(), true);
+        // A resumed session on another model than the current one.
+        self.ensure_threshold().await;
     }
 
     /// Seed the UI with the current session: its endpoint, status, cost

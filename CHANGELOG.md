@@ -38,9 +38,19 @@ them.
 ### Added
 
 - `meerkat-tui`: a new crate whose `rkat-tui` binary is an interactive
-  terminal coding harness on the runtime-backed session path. This release
-  adds the crate skeleton only: its command line (`rkat-tui --help`) and
-  error type, with the session, approval gate and terminal UI to follow.
+  terminal coding harness. Its sessions run on the runtime-backed session
+  path (durable Queue/Steer input while the agent works, interrupt, resume
+  with `-c`/`/resume`); every tool call, helpers' included, passes an
+  auto-mode approval gate (tiers, user rules, a reasoning-blind two-stage
+  classifier, escalation dialogs) installed as the build's
+  `ToolDispatchAdmission`; the shell runs under OS confinement by default
+  (`--confinement workspace|strict|off`, `--no-confinement`); models come
+  from live endpoint lists with hot swap and a per-model cost readout;
+  `delegate` runs helpers as mob members; instruction files (user-global
+  `SYSTEM.md`/`AGENTS.md`, ancestor `AGENTS.md`, `AGENTS.local.md`),
+  `/remember`, memory notes, native semantic memory, MCP servers from
+  `mcp.toml`, and a warn/auto policy over native auto-compaction with
+  `/compact now`. See `crates/meerkat-tui/README.md`.
 
 ## [0.9.10] - 2026-11-04
 

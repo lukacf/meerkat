@@ -61,6 +61,9 @@ pub enum TuiError {
     /// A session service operation failed.
     #[error("session error: {0}")]
     Session(#[from] meerkat_core::service::SessionError),
+    /// A session control operation (system-context append) failed.
+    #[error("session control error: {0}")]
+    SessionControl(#[from] meerkat_core::service::SessionControlError),
     /// A session reference (`last`, `~N`, id, or prefix) did not resolve.
     #[error("cannot resolve session `{reference}`: {reason}")]
     SessionRef {
@@ -143,6 +146,7 @@ impl TuiError {
             | Self::SessionStore(_)
             | Self::LlmClient(_)
             | Self::Session(_)
+            | Self::SessionControl(_)
             | Self::Mcp(_)
             | Self::Composition(_)
             | Self::Materialize(_)

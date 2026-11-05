@@ -30,6 +30,11 @@
 //!   ([`crate::approval::admission::install`]); a resumed session's
 //!   classifier transcript is seeded from its authoritative history, and
 //!   every prompt or steer the user submits is recorded in it.
+//! - Every build carries the runtime's declarative MCP servers
+//!   ([`crate::bootstrap::mcp`]) and the native auto-compaction threshold
+//!   the caller chose ([`SessionOptions::auto_compact_threshold`]); the
+//!   handle remembers the threshold its agent was built with
+//!   ([`SessionHandle::compaction_threshold`]).
 //! - With the runtime's helper host ([`crate::mobs`]) every build enables
 //!   the mob tools (`delegate`, `mob_*`) explicitly, the session registers
 //!   its model and binding for its helpers to inherit, and
@@ -37,6 +42,7 @@
 
 pub mod resolve;
 
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use meerkat::surface::{
@@ -45,7 +51,8 @@ use meerkat::surface::{
 use meerkat_core::comms::EventStream;
 use meerkat_core::lifecycle::run_primitive::{RuntimeTurnMetadata, TurnMetadataOverride};
 use meerkat_core::service::{
-    CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions,
+    AppendSystemContextRequest, AppendSystemContextStatus, CreateSessionRequest,
+    DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions, SessionServiceControlExt,
 };
 use meerkat_core::{
     AgentToolDispatcher, AuthBindingRef, ContentInput, HandlingMode, InputId, Provider, Session,
@@ -64,6 +71,9 @@ use crate::mobs::Helpers;
 
 pub use resolve::{list_sessions, resolve_session_ref};
 
+/// Source recorded with the system context the TUI appends (`/remember`).
+const SYSTEM_CONTEXT_SOURCE: &str = "rkat-tui";
+
 /// Reason recorded with every interrupt and cancellation the TUI requests.
 const INTERRUPT_REASON: &str = "rkat-tui: interrupted by the user";
 
@@ -81,6 +91,11 @@ pub struct SessionOptions {
     /// The approval engine whose gate every tool call of the session passes.
     /// `None` runs tools ungated (embedders and tests only).
     pub approval: Option<Arc<ApprovalEngine>>,
+    /// The native auto-compaction threshold of the build
+    /// (`SessionBuildOptions::auto_compact_threshold_override`, see
+    /// [`crate::ui::compaction`]); `None` keeps upstream's model-aware
+    /// default.
+    pub auto_compact_threshold: Option<NonZeroU64>,
 }
 
 /// An input the runtime accepted.
@@ -106,6 +121,8 @@ pub struct SessionHandle {
     profiles: u64,
     approval: Option<Arc<ApprovalEngine>>,
     helpers: Option<Arc<Helpers>>,
+    /// The native auto-compaction threshold the agent was built with.
+    threshold: Option<NonZeroU64>,
 }
 
 impl std::fmt::Debug for SessionHandle {
@@ -132,7 +149,7 @@ impl SessionHandle {
             .clone()
             .unwrap_or_else(|| runtime.choice.clone());
         let approval = options.approval.clone();
-        let mut build = build_options(options, choice.provider, runtime.helpers.is_some());
+        let mut build = build_options(options, choice.provider, runtime);
         build.auth_binding.clone_from(&choice.auth_binding);
         build.mint_session_with_id(session.id().clone());
         if let Some(engine) = &approval {
@@ -173,7 +190,7 @@ impl SessionHandle {
         // needs its profile again before the agent is rebuilt.
         runtime.ensure_profile(&choice, None).await?;
         let approval = options.approval.clone();
-        let mut build = build_options(options, choice.provider, runtime.helpers.is_some());
+        let mut build = build_options(options, choice.provider, runtime);
         build.auth_binding.clone_from(&choice.auth_binding);
         build.resume_existing_session(session.clone());
         if let Some(engine) = &approval {
@@ -197,6 +214,7 @@ impl SessionHandle {
             ..
         } = choice;
         let profiles = runtime.profiles();
+        let threshold = build.auto_compact_threshold_override;
         let id = session.id().clone();
         if let Some(helpers) = &runtime.helpers {
             helpers.register_session(&id, &model, auth_binding.as_ref());
@@ -240,7 +258,15 @@ impl SessionHandle {
             profiles,
             approval,
             helpers: runtime.helpers.clone(),
+            threshold,
         })
+    }
+
+    /// The native auto-compaction threshold the session's agent was built
+    /// with (`None`: upstream's model-aware default).
+    #[must_use]
+    pub fn compaction_threshold(&self) -> Option<NonZeroU64> {
+        self.threshold
     }
 
     /// Session id.
@@ -452,6 +478,29 @@ impl SessionHandle {
             .await?)
     }
 
+    /// Append `text` to the live session as an ordinary durable System
+    /// message (`SessionServiceControlExt::append_system_context`). The
+    /// append is idempotent per `idempotency_key`; the model reads it from
+    /// its next request on.
+    ///
+    /// # Errors
+    ///
+    /// [`TuiError::SessionControl`] when the service refuses the append.
+    pub async fn append_system_context(
+        &self,
+        text: String,
+        idempotency_key: String,
+    ) -> Result<AppendSystemContextStatus, TuiError> {
+        let mut request = AppendSystemContextRequest::from_text(text);
+        request.source = Some(SYSTEM_CONTEXT_SOURCE.to_string());
+        request.idempotency_key = Some(idempotency_key);
+        Ok(self
+            .service
+            .append_system_context(&self.id, request)
+            .await?
+            .status)
+    }
+
     /// The session's committed transcript and metadata.
     ///
     /// # Errors
@@ -490,17 +539,19 @@ impl SessionHandle {
 }
 
 /// Build options shared by fresh and resumed sessions: the persona plus the
-/// caller's instruction sections, the external tools, and (with `helpers`)
+/// caller's instruction sections, the external tools, the runtime's MCP
+/// servers, the compaction threshold, and (with the runtime's helper host)
 /// the mob tools enabled explicitly, which a resumed session's metadata
 /// alone never does.
 fn build_options(
     options: SessionOptions,
     provider: Provider,
-    helpers: bool,
+    runtime: &Runtime,
 ) -> SessionBuildOptions {
     let SessionOptions {
         external_tools,
         additional_instructions,
+        auto_compact_threshold,
         ..
     } = options;
     let mut instructions = Vec::with_capacity(1 + additional_instructions.len());
@@ -510,9 +561,11 @@ fn build_options(
         provider: Some(provider),
         external_tools,
         additional_instructions: Some(instructions),
+        mcp_servers: runtime.mcp_servers.clone(),
+        auto_compact_threshold_override: auto_compact_threshold,
         ..SessionBuildOptions::default()
     };
-    if helpers {
+    if runtime.helpers.is_some() {
         build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::Enable);
     }
     build

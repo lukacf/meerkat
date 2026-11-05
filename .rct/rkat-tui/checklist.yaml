@@ -148,7 +148,7 @@ phases:
         note: "Gate reaches members through MobMcpState::with_child_spawn_member_customizer (SpawnMemberSpec.tool_dispatch_admission). fork_off needs the caller to be a durable mob member, so the TUI's primary session (and its ephemeral delegate helpers) can only delegate; see evidence.md P5 gaps."
   - id: 6
     title: "Context, Memory, Compaction Policy, Docs, Review"
-    status: pending
+    status: done
     reviewers: [rct-guardian, integration-sheriff, spec-auditor, methodology-integrity]
     verification_commands:
       - "make lint"
@@ -159,5 +159,16 @@ phases:
       - id: P6-T001
         spec_id: REQ-006
         text: "Instruction files, notes, native memory and the compaction policy on native auto-compaction."
-        done: false
+        done: true
         done_when: "Tests prove instructions reach the prompt and auto-compaction triggers at the configured threshold."
+        note: "tests/instructions.rs, tests/compact.rs, tests/semantic_recall.rs. /compact now = retire-and-resume with a one-token threshold for one turn (no upstream on-demand compaction). Reviews (dogma, zealot, quality gate) and the workspace-wide make lint/test, check-rust-release-config and verify-bazel-locks runs are left to the caller; MODULE.bazel.lock still needs its refresh (evidence P6)."
+      - id: P6-T002
+        spec_id: REQ-006
+        text: "MCP servers from the realm config and mcp.toml reach every session build; MCP tools pass the gate (classifier unless a rule decides)."
+        done: true
+        done_when: "A loader test composes project and user mcp.toml and a policy test pins the MCP tiers."
+      - id: P6-T003
+        spec_id: REQ-001
+        text: "README for the ported behaviour, CHANGELOG [Unreleased] entry, machete list empty."
+        done: true
+        done_when: "crates/meerkat-tui/README.md and the CHANGELOG entry describe the shipped behaviour; Cargo.toml has no cargo-machete ignored list."

@@ -18,17 +18,16 @@ path = "src/main.rs"
 
 [dependencies]
 # Meerkat engine: the runtime-backed persistent session path (SQLite realm
-# store, auto-compaction), skills, MCP, comms and semantic memory.
+# store, auto-compaction), skills, MCP, comms and semantic memory
+# (`meerkat-memory` directly for the start-up index probe).
 meerkat = { workspace = true, features = ["anthropic", "openai", "gemini", "session-store", "jsonl-store", "session-compaction", "memory-store-session", "skills", "comms"] }
 meerkat-core = { workspace = true }
 meerkat-runtime = { workspace = true, features = ["sqlite-store"] }
-meerkat-session = { workspace = true }
 meerkat-store = { workspace = true }
 meerkat-sqlite = { workspace = true }
 meerkat-tools = { workspace = true }
 meerkat-models = { workspace = true }
 meerkat-llm-core = { workspace = true }
-meerkat-hooks = { workspace = true }
 meerkat-memory = { workspace = true }
 meerkat-sandbox = { workspace = true }
 meerkat-mob = { workspace = true, optional = true }
@@ -74,17 +73,6 @@ mob = ["dep:meerkat-mob", "dep:meerkat-mob-mcp"]
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = { workspace = true }
-
-# Dependencies of the modules the following port phases land (session,
-# runner, bootstrap, mobs, confinement, native memory). Each entry leaves
-# this list with the phase that first uses it; the list is empty once the
-# port is complete.
-[package.metadata.cargo-machete]
-ignored = [
-    "meerkat-hooks",
-    "meerkat-memory",
-    "meerkat-session",
-]
 
 [lints]
 workspace = true

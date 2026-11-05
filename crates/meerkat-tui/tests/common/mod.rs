@@ -47,6 +47,8 @@ pub async fn within<F: Future>(future: F) -> F::Output {
 pub enum Step {
     /// Text, then `Done(EndTurn)`.
     Text(&'static str),
+    /// Text reporting `input` input tokens, then `Done(EndTurn)`.
+    TextUsage(&'static str, u64),
     /// A single tool call, then `Done(ToolUse)`.
     Tool {
         id: &'static str,
@@ -74,12 +76,16 @@ impl Step {
     }
 
     fn events(self, model: &str) -> Vec<Result<LlmEvent, LlmError>> {
+        let input_tokens = match self {
+            Self::TextUsage(_, input) => input,
+            _ => 10,
+        };
         let usage = Ok(LlmEvent::UsageUpdate {
             usage: TurnUsage::host_declared(
                 Provider::Anthropic,
                 model,
                 Usage {
-                    input_tokens: 10,
+                    input_tokens,
                     output_tokens: 5,
                     ..Usage::default()
                 },
@@ -91,7 +97,7 @@ impl Step {
             })
         };
         match self {
-            Self::Text(text) => vec![
+            Self::Text(text) | Self::TextUsage(text, _) => vec![
                 Ok(LlmEvent::TextDelta {
                     delta: text.to_string(),
                     meta: None,

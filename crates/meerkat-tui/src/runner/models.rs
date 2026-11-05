@@ -20,9 +20,11 @@
 //! number for the model (the catalog or a `[models.<id>]` entry); else
 //! [`DEFAULT_CONTEXT_WINDOW`], shown as an estimate.
 
+use meerkat_core::Provider;
 use tokio::task::JoinHandle;
 
 use super::Runner;
+use crate::bootstrap::Runtime;
 use crate::endpoints::registry_context_window;
 use crate::endpoints::{EndpointRef, ModelRefError, needs_lookup, parse_model_ref, save_choice};
 use crate::models::{FetchResults, ModelCache, ModelGroup, with_current};
@@ -144,6 +146,8 @@ impl Runner {
         };
         self.models = Some(cache);
         self.push_context_window();
+        // The listed window may move an auto-mode threshold (idle only).
+        self.ensure_threshold().await;
         if std::mem::take(&mut self.picker_waiting) {
             self.send(Msg::ShowModelPicker(self.picker_groups()));
         }
@@ -218,7 +222,7 @@ impl Runner {
         // The live agent's model registry predates the profile: rebuild the
         // agent from the persisted session first.
         if self.session.profiles() < self.runtime.profiles()
-            && let Err(err) = self.rebuild_session().await
+            && let Err(err) = self.rebuild_session(self.session_threshold()).await
         {
             self.notice(NoticeLevel::Error, failed(err.to_string()));
             return;
@@ -232,37 +236,67 @@ impl Runner {
                 }));
                 self.push_context_window();
                 self.save_current_choice();
+                // The new model's window moves an auto-mode threshold.
+                self.ensure_threshold().await;
             }
             Err(err) => self.notice(NoticeLevel::Error, failed(err.to_string())),
         }
     }
 
     /// Take the session off the runtime and make it live again, so its agent
-    /// is rebuilt from the current config (between turns only).
-    async fn rebuild_session(&mut self) -> Result<(), crate::error::TuiError> {
+    /// is rebuilt from the current config with native auto-compaction
+    /// `threshold` (between turns only).
+    pub(super) async fn rebuild_session(
+        &mut self,
+        threshold: std::num::NonZeroU64,
+    ) -> Result<(), crate::error::TuiError> {
         let id = self.session.id().clone();
         self.session.retire().await?;
-        self.session =
-            crate::session::SessionHandle::resume(&self.runtime, &id, self.template.options(None))
-                .await?;
+        self.session = crate::session::SessionHandle::resume(
+            &self.runtime,
+            &id,
+            self.template.options(None, threshold),
+        )
+        .await?;
         self.follow_events().await;
         Ok(())
     }
 
+    /// The current model's context window: known, or
+    /// [`DEFAULT_CONTEXT_WINDOW`] as an estimate (`true`).
+    pub(super) fn context_window(&self) -> (u64, bool) {
+        window_of(
+            &self.runtime,
+            self.models.as_ref(),
+            &self.current_endpoint,
+            self.session.provider(),
+            self.session.model(),
+        )
+    }
+
     /// Push the current model's context window (see the module docs).
     pub(super) fn push_context_window(&self) {
-        let model = self.session.model();
-        let listed = self
-            .models
-            .as_ref()
-            .and_then(|cache| cache.entry(&self.current_endpoint, model))
-            .and_then(|entry| entry.context_window);
-        let update = match listed.or_else(|| {
-            registry_context_window(&self.runtime.config, self.session.provider(), model)
-        }) {
-            Some(window) => StatusUpdate::ContextWindow(Some(window)),
-            None => StatusUpdate::ApproxContextWindow(DEFAULT_CONTEXT_WINDOW),
+        let update = match self.context_window() {
+            (window, false) => StatusUpdate::ContextWindow(Some(window)),
+            (window, true) => StatusUpdate::ApproxContextWindow(window),
         };
         self.send(Msg::Status(update));
     }
+}
+
+/// The context window of `model` on `endpoint`: the endpoint's listed
+/// number, else the engine registry's, else [`DEFAULT_CONTEXT_WINDOW`] as an
+/// estimate (`true`).
+pub(crate) fn window_of(
+    runtime: &Runtime,
+    models: Option<&ModelCache>,
+    endpoint: &str,
+    provider: Provider,
+    model: &str,
+) -> (u64, bool) {
+    models
+        .and_then(|cache| cache.entry(endpoint, model))
+        .and_then(|entry| entry.context_window)
+        .or_else(|| registry_context_window(&runtime.config, provider, model))
+        .map_or((DEFAULT_CONTEXT_WINDOW, true), |window| (window, false))
 }

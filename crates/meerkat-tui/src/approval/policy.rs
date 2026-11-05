@@ -103,6 +103,11 @@ impl VerdictSummary {
 }
 
 /// Builtins that only read state or manage the agent's own bookkeeping.
+///
+/// Every upstream builtin the TUI's sessions can be offered is either here
+/// or in [`REVIEWED_BUILTINS`]; `upstream_builtins_are_all_classified`
+/// pins the upstream families, and the `builtin_tiers` integration test
+/// every tool a real session offers the model.
 pub const READ_ONLY_BUILTINS: &[&str] = &[
     "task_create",
     "task_get",
@@ -111,14 +116,16 @@ pub const READ_ONLY_BUILTINS: &[&str] = &[
     "datetime",
     "view_image",
     "wait",
+    "blob_inspect",
     "browse_skills",
     "load_skill",
     "skill_list_resources",
     "skill_read_resource",
-    "agent_status",
-    "agent_list",
     "shell_jobs",
     "shell_job_status",
+    "peers",
+    // Native semantic memory (`AgentFactory::memory`): searches the
+    // session's own compacted history.
     "memory_search",
     // Mob queries (see [`crate::mobs`]).
     "mob_list",
@@ -127,6 +134,33 @@ pub const READ_ONLY_BUILTINS: &[&str] = &[
     "mob_profile_get",
     "mob_profile_list",
     "mob_profile_list_sources",
+];
+
+/// Upstream builtins that act (or read outside the project) and so pass the
+/// classifier unless a user rule decides them: the shell and its job
+/// controls, file blobs, skill functions, web search, model switch, image
+/// generation, comms sends, councils and objective conclusions. The
+/// mutating `mob_*` tools need review too (any `mob_*` not in
+/// [`READ_ONLY_BUILTINS`]).
+pub const REVIEWED_BUILTINS: &[&str] = &[
+    "shell",
+    "shell_job_cancel",
+    "monitor_start",
+    "apply_patch",
+    "blob_save_file",
+    "blob_load_file",
+    "skill_invoke_function",
+    "web_search",
+    "brain_swap",
+    "generate_image",
+    "send_message",
+    "reply_to_peer",
+    "send_request",
+    "send_response",
+    // Mob tools beyond `delegate`: a temporary council of helpers, and a
+    // member concluding its kickoff objective.
+    "council",
+    "conclude_objective",
 ];
 
 /// Tools that hand work to a helper (a mob member, see [`crate::mobs`]).
@@ -577,6 +611,48 @@ mod tests {
                 ActionKind::Other,
                 "{bad}"
             );
+        }
+    }
+
+    #[test]
+    fn upstream_builtins_are_all_classified() {
+        use meerkat_tools::builtin::{
+            BRAIN_SWAP_TOOL_NAMES, COMMS_TOOL_NAMES, SHELL_TOOL_NAMES, SKILL_TOOL_NAMES,
+            UTILITY_TOOL_NAMES, WEB_SEARCH_TOOL_NAMES,
+        };
+        let upstream = [
+            SHELL_TOOL_NAMES,
+            COMMS_TOOL_NAMES,
+            UTILITY_TOOL_NAMES,
+            SKILL_TOOL_NAMES,
+            WEB_SEARCH_TOOL_NAMES,
+            BRAIN_SWAP_TOOL_NAMES,
+            meerkat_tools::builtin::image_generation::TOOL_NAMES,
+        ];
+        for name in upstream.into_iter().flatten() {
+            let read_only = READ_ONLY_BUILTINS.contains(name);
+            let reviewed = REVIEWED_BUILTINS.contains(name);
+            assert!(
+                read_only != reviewed,
+                "upstream builtin `{name}` must be in exactly one of READ_ONLY_BUILTINS and REVIEWED_BUILTINS"
+            );
+        }
+        let (_dir, root) = project();
+        let ctx = PolicyContext {
+            root: &root,
+            trust_project_builds: true,
+            posix_shell: true,
+        };
+        let rules = RuleSet::default();
+        for name in READ_ONLY_BUILTINS {
+            let args = json!({});
+            let tier = classify_tier(&Action::parse(name, &args), &rules, &ctx).tier;
+            assert_eq!(tier, Tier::AlwaysAllow, "{name}");
+        }
+        for name in REVIEWED_BUILTINS {
+            let args = json!({});
+            let tier = classify_tier(&Action::parse(name, &args), &rules, &ctx).tier;
+            assert_eq!(tier, Tier::Classifier, "{name}");
         }
     }
 

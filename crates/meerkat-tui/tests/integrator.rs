@@ -322,15 +322,10 @@ async fn workspace_state_survives_a_rename() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn later_phase_effects_answer_honestly() {
+async fn a_steer_without_a_running_turn_is_refused() {
     let ws = Workspace::new();
     let llm = ScriptedLlmClient::new(vec![]);
     let mut rig = Rig::start(&ws.root, &llm, Start::New).await;
-    rig.send(Effect::Compact);
-    let msg = rig
-        .wait_for(|msg| matches!(msg, Msg::CompactFinished(_)))
-        .await;
-    assert!(matches!(msg, Msg::CompactFinished(Err(_))), "{msg:?}");
     // A steer without a running turn is refused so the UI sends it as a turn.
     rig.send(steer(7, "idle"));
     let msg = rig

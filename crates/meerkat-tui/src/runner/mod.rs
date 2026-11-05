@@ -24,11 +24,11 @@
 //! [`StatusUpdate::Helpers`]; an interrupt cancels the session's helpers
 //! (see [`SessionHandle::interrupt`]).
 //!
-//! Effects of later phases are answered honestly instead of being stubbed:
-//! `/remember` (P6) and manual `/compact` (the runtime compacts on its own; a
-//! manual trigger needs an upstream primitive).
+//! `/remember` and the compaction threshold (`/compact now`, model
+//! switches) live in [`context`].
 
 mod approval;
+mod context;
 mod cost;
 mod lifecycle;
 mod models;
@@ -37,6 +37,7 @@ mod quit;
 pub mod testing;
 
 use std::io::IsTerminal;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,7 +51,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 
 use crate::approval::ApprovalEngine;
-use crate::bootstrap::{self, BootstrapOptions, ModelChoice, Runtime};
+use crate::bootstrap::{self, BootstrapOptions, InstructionSources, ModelChoice, Runtime};
 use crate::cli::Args;
 use crate::delivery::{PendingId, SteerFailure};
 use crate::error::TuiError;
@@ -59,8 +60,8 @@ use crate::mobs::HelperUpdate;
 use crate::session::{Admission, SessionHandle, SessionOptions};
 use crate::tools::{FileDiff, FileToolDispatcher};
 use crate::ui::{
-    App, CompactFailure, Effect, History, Msg, NoticeLevel, StatusInfo, StatusUpdate, TurnOutcome,
-    TurnSummary, UiChannels, run_ui,
+    App, CompactionPolicy, Effect, History, Msg, NoticeLevel, StatusInfo, StatusUpdate,
+    TurnOutcome, TurnSummary, UiChannels, run_ui,
 };
 
 pub use lifecycle::{Start, blocks_from_session, open_start, session_endpoint, session_messages};
@@ -91,7 +92,9 @@ pub async fn run(args: Args) -> Result<(), TuiError> {
         bootstrap::bootstrap_with(scope, config, &args, BootstrapOptions::default()).await?;
     let (template, diff_rx) = Template::new(&runtime)?;
     let start = Start::from_args(&args);
-    let (session, transcript) = open_start(&runtime, template.options(None), &start).await?;
+    let threshold = template.startup_threshold(&runtime);
+    let (session, transcript) =
+        open_start(&runtime, template.options(None, threshold), &start).await?;
 
     let mut status = StatusInfo::default();
     status.set_model(&runtime.choice.endpoint, session.model());
@@ -104,6 +107,7 @@ pub async fn run(args: Args) -> Result<(), TuiError> {
         .as_ref()
         .map(|global| History::load(global.history_file()));
     let mut app = App::new(status)
+        .with_compaction_policy(template.policy)
         .with_history(history.entries().to_vec())
         .with_global_history(
             global_history
@@ -199,11 +203,14 @@ fn workspace_notes_dir(workspace: &Path) -> PathBuf {
 }
 
 /// What every session build shares: the external tools (file and note
-/// tools) and where the notes index comes from.
+/// tools), where the instruction files and the notes index come from, and
+/// the compaction policy.
 pub(crate) struct Template {
     external_tools: Arc<dyn AgentToolDispatcher>,
     notes: Arc<MemoryToolDispatcher>,
     approval: Arc<ApprovalEngine>,
+    instructions: InstructionSources,
+    policy: CompactionPolicy,
 }
 
 impl Template {
@@ -233,28 +240,58 @@ impl Template {
             .add_dispatcher(Arc::clone(&notes) as Arc<dyn AgentToolDispatcher>)
             .build()
             .map_err(|e| TuiError::Mcp(format!("compose tool dispatchers: {e}")))?;
+        let policy = runtime
+            .approval
+            .engine
+            .settings()
+            .compaction_policy(None)
+            .normalized()
+            .0;
         Ok((
             Self {
                 external_tools: Arc::new(gateway),
                 notes,
                 approval: Arc::clone(&runtime.approval.engine),
+                instructions: runtime.instructions.clone(),
+                policy,
             },
             diff_rx,
         ))
     }
 
     /// Options for a session build on `choice` (`None`: the start-up
-    /// choice). The notes index is re-read every time, so `/new` and
-    /// `/resume` pick up notes saved meanwhile.
-    pub(crate) fn options(&self, choice: Option<ModelChoice>) -> SessionOptions {
+    /// choice) with native auto-compaction `threshold`. The instruction
+    /// files and the notes index are re-read every time, so `/new` and
+    /// `/resume` pick up what changed meanwhile.
+    pub(crate) fn options(
+        &self,
+        choice: Option<ModelChoice>,
+        threshold: NonZeroU64,
+    ) -> SessionOptions {
+        let mut additional_instructions = self.instructions.render();
+        additional_instructions.extend(prompt_index(self.notes.user(), self.notes.workspace()));
         SessionOptions {
             external_tools: Some(Arc::clone(&self.external_tools)),
-            additional_instructions: prompt_index(self.notes.user(), self.notes.workspace())
-                .into_iter()
-                .collect(),
+            additional_instructions,
             choice,
             approval: Some(Arc::clone(&self.approval)),
+            auto_compact_threshold: Some(threshold),
         }
+    }
+
+    /// The threshold of the start session: the policy's for the start-up
+    /// model (a resumed session on another model is rebuilt by
+    /// [`Runner::ensure_threshold`] once the runner runs).
+    pub(crate) fn startup_threshold(&self, runtime: &Runtime) -> NonZeroU64 {
+        let choice = &runtime.choice;
+        let (window, _) = models::window_of(
+            runtime,
+            runtime.models.as_ref(),
+            &choice.endpoint,
+            choice.provider,
+            &choice.model,
+        );
+        self.policy.native_threshold(Some(window))
     }
 }
 
@@ -423,6 +460,8 @@ pub(crate) struct Runner {
     price_fetch: Option<cost::PriceFetch>,
     /// Helper events and the running set.
     helper_updates: Option<mpsc::UnboundedReceiver<HelperUpdate>>,
+    /// The session runs on `/compact now`'s one-turn threshold.
+    compact_armed: bool,
 }
 
 impl Runner {
@@ -474,12 +513,16 @@ impl Runner {
             prices,
             price_fetch,
             helper_updates,
+            compact_armed: false,
         };
         runner.push_auto_status();
         for notice in runner.runtime.confinement.notices.clone() {
             runner.notice(NoticeLevel::Info, notice);
         }
-        for notice in notices {
+        for notice in notices
+            .into_iter()
+            .chain(std::mem::take(&mut runner.runtime.notices))
+        {
             runner.notice(NoticeLevel::Warn, notice);
         }
         runner.push_prices();
@@ -490,6 +533,8 @@ impl Runner {
             runner.ensure_fetch(false);
         }
         runner.follow_events().await;
+        // A resumed start session on another model than the start-up one.
+        runner.ensure_threshold().await;
         runner
     }
 
@@ -582,14 +627,8 @@ impl Runner {
             | Effect::ResumeAutoMode) => self.handle_approval_effect(effect),
             Effect::SetModel(reference) => self.set_model(reference).await,
             Effect::RequestModelPicker { refresh } => self.request_model_picker(refresh),
-            Effect::Remember(_) => self.notice(
-                NoticeLevel::Warn,
-                "/remember is not available in this build yet; edit AGENTS.md instead",
-            ),
-            Effect::Compact => self.send(Msg::CompactFinished(Err(CompactFailure::Other(
-                "manual compaction is not available: the runtime compacts the context automatically"
-                    .to_string(),
-            )))),
+            Effect::Remember(text) => self.remember(&text).await,
+            Effect::CompactNow => self.compact_now().await,
             Effect::CostSnapshot(snapshot) => self.save_cost_snapshot(&snapshot),
         }
     }
@@ -896,6 +935,8 @@ impl Runner {
             result,
             undelivered,
         }));
+        // Effects the UI sends on the outcome wait for this rebuild.
+        self.disarm_compaction().await;
     }
 }
 

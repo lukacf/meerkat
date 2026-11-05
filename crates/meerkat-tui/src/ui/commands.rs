@@ -73,8 +73,12 @@ pub enum Command {
     /// `/remember <text>` or a single-line `#text` input: append a line to the
     /// workspace AGENTS.md.
     Remember(String),
-    /// `/compact`: summarise the session's context.
-    Compact,
+    /// `/compact` (report the compaction policy) or `/compact now` (compact
+    /// before the next turn's first model call).
+    Compact {
+        /// `/compact now`.
+        now: bool,
+    },
     /// `/cost`: the session's token cost by model.
     Cost,
 }
@@ -116,10 +120,12 @@ Commands:
   /model                         pick a model from every endpoint's list (type to filter)
   /model [endpoint:]<id>         switch to a model (idle only); a bare id is looked up
   /model refresh                 refetch every endpoint's model list and pick
-  /remember <text>, #<text>      add a line to the workspace AGENTS.md (\\# sends a literal #)
-  /compact                       summarise the conversation to free context (idle only)
-                                 (tui.toml [auto] compact = \"warn\" (default) warns at 75%;
-                                 \"auto\" or --auto-compact runs it at 85%)
+  /remember <text>, #<text>      add a line to the workspace AGENTS.md and to this session
+                                 (\\# sends a literal #)
+  /compact                       show the compaction policy (tui.toml [auto] compact =
+                                 \"warn\" (default) warns at 75% and 85%; \"auto\" or
+                                 --auto-compact lets the runtime compact at 85%)
+  /compact now                   compact before the next turn's first model call (idle only)
   /cost                          token usage and cost per model (footer: $0.42, ~ estimate, $? unpriced)
 Keys:
   Enter                          send; while the agent is working, queues the message
@@ -198,8 +204,9 @@ fn parse_command(name: &str, args: &[&str]) -> Result<Command, CommandError> {
             _ => Err(CommandError::Usage("/cost")),
         },
         "compact" => match args {
-            [] => Ok(Command::Compact),
-            _ => Err(CommandError::Usage("/compact")),
+            [] => Ok(Command::Compact { now: false }),
+            ["now"] => Ok(Command::Compact { now: true }),
+            _ => Err(CommandError::Usage("/compact [now]")),
         },
         "resume" => match args {
             [] => Ok(Command::Resume(None)),
@@ -293,13 +300,14 @@ mod tests {
             parse("/remember"),
             Some(Err(CommandError::Usage("/remember <text>")))
         );
-        assert_eq!(ok("/compact"), Command::Compact);
+        assert_eq!(ok("/compact"), Command::Compact { now: false });
+        assert_eq!(ok("/compact now"), Command::Compact { now: true });
         assert_eq!(ok("/cost"), Command::Cost);
         assert_eq!(parse("/cost now"), Some(Err(CommandError::Usage("/cost"))));
-        assert!(matches!(
-            parse("/compact now"),
-            Some(Err(CommandError::Usage(_)))
-        ));
+        assert_eq!(
+            parse("/compact later"),
+            Some(Err(CommandError::Usage("/compact [now]")))
+        );
     }
 
     #[test]

@@ -33,7 +33,7 @@ use ratatui::layout::Rect;
 use ratatui::text::Line;
 
 pub use commands::{AutoCommand, Command, CommandError, ModelCommand, RuleEffect, RulesCommand};
-pub use compaction::{CompactFailure, CompactMode, CompactionGauge, CompactionPolicy, GaugeAction};
+pub use compaction::{CompactFailure, CompactMode, CompactionGauge, CompactionPolicy};
 pub use cost::{CostReadout, SessionCost, SessionCostSnapshot, UsageTotals};
 pub use delivery::{Pending, PendingQueue, PendingState};
 pub use history::History;
@@ -266,11 +266,16 @@ pub enum Msg {
     ShowModelPicker(Vec<ModelGroup>),
     /// Replace the transcript (e.g. after resuming a session).
     ResetTranscript(Vec<Block>),
-    /// `/compact` finished (the integrator rebuilt the session).
-    CompactFinished(Result<(), CompactFailure>),
+    /// `/compact now` armed (the integrator rebuilt the session with a
+    /// one-turn compaction threshold), or why it could not.
+    CompactArmed(Result<(), CompactFailure>),
     /// Animation tick.
     Tick,
 }
+
+/// Notice shown once `/compact now` armed the next turn.
+pub const COMPACT_ARMED: &str =
+    "compaction armed: the next turn compacts the context before its first model call";
 
 /// Side effect requested by [`App::update`], executed by the integrator.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -332,9 +337,10 @@ pub enum Effect {
     },
     /// Append a line to the workspace AGENTS.md and push it live.
     Remember(String),
-    /// Compact the session's context (idle only); answered with
-    /// [`Msg::CompactFinished`].
-    Compact,
+    /// `/compact now` (idle only): rebuild the session so its next turn
+    /// compacts before the first model call; answered with
+    /// [`Msg::CompactArmed`].
+    CompactNow,
     /// The session's cost totals after a model call; the integrator
     /// persists them next to the session.
     CostSnapshot(SessionCostSnapshot),
@@ -567,13 +573,13 @@ pub struct App {
     pub mode: InputMode,
     /// When Ctrl-X was pressed, while a chord is pending.
     pub chord: Option<Instant>,
-    /// Whether `/compact` is running ([`Effect::Compact`] sent, no
-    /// [`Msg::CompactFinished`] yet). Prompts are deferred meanwhile.
+    /// Whether `/compact now` is arming ([`Effect::CompactNow`] sent, no
+    /// [`Msg::CompactArmed`] yet). Prompts are deferred meanwhile.
     pub compacting: bool,
     /// When a Ctrl-D / `/quit` was refused because work is in flight; a
     /// second one within [`QUIT_CONFIRM_WINDOW`] quits anyway.
     pub quit_confirm: Option<Instant>,
-    /// Context-gauge policy: warn about or auto-compact a filling context.
+    /// Context-gauge policy: warn about a filling context (warn mode).
     gauge: CompactionGauge,
     /// Whether assistant text streamed during the current turn (the turn
     /// summary is shown only when nothing did).
@@ -1043,9 +1049,17 @@ impl App {
                         self.status.cost.record(&model, usage);
                         fx.push(Effect::CostSnapshot(self.status.cost.clone()));
                     }
-                    AgentEvent::CompactionCompleted { summary_tokens, .. } => {
-                        self.status.context_used = Some(*summary_tokens);
+                    AgentEvent::CompactionCompleted {
+                        summary_tokens,
+                        estimated_history_tokens_after,
+                        ..
+                    } => {
+                        // The history estimate the rewrite left (the
+                        // summary alone for a completion that reports none).
+                        self.status.context_used =
+                            Some(estimated_history_tokens_after.unwrap_or(*summary_tokens));
                         self.status.context_approx = true;
+                        self.gauge.compacted();
                         // Only the summary size is reported: count it as output.
                         self.status
                             .cost
@@ -1147,7 +1161,7 @@ impl App {
                 self.run_first_block = self.transcript.len();
                 self.scroll.bottom();
             }
-            Msg::CompactFinished(result) => self.compact_finished(result, now, &mut fx),
+            Msg::CompactArmed(result) => self.compact_armed(result, now, &mut fx),
             Msg::Tick => {
                 dirty = self.status.running_since.is_some()
                     || self.status.classifying
@@ -1369,7 +1383,7 @@ impl App {
         } else if self.compacting {
             self.transcript.push_notice(
                 NoticeLevel::Warn,
-                "compaction is running; wait for it to finish",
+                "compaction is being armed; wait for it to finish",
             );
             false
         } else {
@@ -1470,25 +1484,24 @@ impl App {
         self.scroll.bottom();
     }
 
-    /// `/compact` finished: send what was typed meanwhile, or hand it back to
-    /// the editor when compaction failed.
-    fn compact_finished(
+    /// `/compact now` armed (or failed): send what was typed meanwhile, or
+    /// hand it back to the editor when arming failed.
+    fn compact_armed(
         &mut self,
         result: Result<(), CompactFailure>,
         now: Instant,
         fx: &mut Vec<Effect>,
     ) {
         self.compacting = false;
-        let auto = self.gauge.auto_running();
-        self.gauge.finished(&result);
         let deferred = self
             .pending
             .take_where(|p| p.state == PendingState::Deferred);
         match result {
             Ok(()) => {
-                self.transcript.push_notice(NoticeLevel::Info, "compacted");
+                self.transcript
+                    .push_notice(NoticeLevel::Info, COMPACT_ARMED);
                 if self.running {
-                    // Cannot happen (compaction is idle-only); keep them for
+                    // Cannot happen (arming is idle-only); keep them for
                     // the post-turn logic rather than starting a second turn.
                     for item in deferred {
                         self.pending.push(item);
@@ -1498,13 +1511,8 @@ impl App {
                 }
             }
             Err(err) => {
-                if auto && err.is_no_gain() {
-                    self.transcript
-                        .push_notice(NoticeLevel::Info, format!("auto-compaction skipped: {err}"));
-                } else {
-                    self.transcript
-                        .push_notice(NoticeLevel::Error, format!("compaction failed: {err}"));
-                }
+                self.transcript
+                    .push_notice(NoticeLevel::Error, format!("/compact now failed: {err}"));
                 self.drop_blocks(deferred.iter().map(|p| p.block));
                 self.prepend_to_editor(deferred.into_iter().map(|p| p.text).collect());
             }
@@ -1703,35 +1711,17 @@ impl App {
         self.streamed_text = false;
         let unsent = self.collect_unsent(&undelivered);
         self.next_after_turn(unsent, interrupted, succeeded, now, fx);
-        self.check_context(fx);
+        self.check_context();
     }
 
-    /// After a turn: let the context gauge warn or start an automatic
-    /// compaction (only when nothing else is going on).
-    fn check_context(&mut self, fx: &mut Vec<Effect>) {
+    /// After a turn: let the context gauge warn (warn mode; in auto mode
+    /// the engine compacts on its own).
+    fn check_context(&mut self) {
         let Some(used) = self.status.context_used else {
             return;
         };
-        let idle = !self.running
-            && !self.compacting
-            && self.pending.is_empty()
-            && self.send_next.is_none()
-            && self.modal.is_none()
-            && self.pending_escalations.is_empty();
-        match self
-            .gauge
-            .after_turn(used, self.status.context_window, idle)
-        {
-            None => {}
-            Some(GaugeAction::Warn(text)) => {
-                self.transcript.push_notice(NoticeLevel::Warn, text);
-            }
-            Some(GaugeAction::Compact(text)) => {
-                self.compacting = true;
-                self.transcript.push_notice(NoticeLevel::Info, text);
-                self.scroll.bottom();
-                fx.push(Effect::Compact);
-            }
+        if let Some(text) = self.gauge.after_turn(used, self.status.context_window) {
+            self.transcript.push_notice(NoticeLevel::Warn, text);
         }
     }
 
@@ -1888,7 +1878,7 @@ impl App {
         let compacting = |app: &mut Self| {
             app.transcript.push_notice(
                 NoticeLevel::Warn,
-                "compaction is running; wait for it to finish",
+                "compaction is being armed; wait for it to finish",
             );
         };
         match cmd {
@@ -1936,7 +1926,11 @@ impl App {
                     .push_notice(NoticeLevel::Info, format!("remembering: {text}"));
                 fx.push(Effect::Remember(text));
             }
-            Command::Compact => {
+            Command::Compact { now: false } => {
+                let text = self.gauge.policy().describe(self.status.context_window);
+                self.transcript.push_notice(NoticeLevel::Info, text);
+            }
+            Command::Compact { now: true } => {
                 if self.compacting {
                     compacting(self);
                 } else if self.running || !self.pending.is_empty() {
@@ -1944,13 +1938,15 @@ impl App {
                         NoticeLevel::Warn,
                         "finish or interrupt the current turn first",
                     );
-                } else {
+                } else if self.status.context_used.is_some() {
                     self.compacting = true;
-                    self.gauge.started(self.status.context_used);
                     self.transcript
-                        .push_notice(NoticeLevel::Info, "compacting…");
+                        .push_notice(NoticeLevel::Info, "arming compaction…");
                     self.scroll.bottom();
-                    fx.push(Effect::Compact);
+                    fx.push(Effect::CompactNow);
+                } else {
+                    self.transcript
+                        .push_notice(NoticeLevel::Info, CompactFailure::NothingYet.to_string());
                 }
             }
             Command::Model(ModelCommand::Set(model)) => self.switch_model(model, fx),
@@ -3476,104 +3472,6 @@ mod tests {
     }
 
     #[test]
-    fn compact_refused_while_running_or_pending() {
-        let mut app = running_app();
-        assert!(submit(&mut app, "/compact").is_empty());
-        assert_eq!(
-            last_notice(&app),
-            Some((
-                NoticeLevel::Warn,
-                "finish or interrupt the current turn first".into()
-            ))
-        );
-        submit(&mut app, "two");
-        app.update(finished(Ok(summary()), &[]));
-        assert!(!app.is_running());
-        assert_eq!(app.status.queued, 1);
-        assert!(submit(&mut app, "/compact").is_empty());
-        assert!(!app.compacting);
-        assert_eq!(last_notice(&app).map(|(l, _)| l), Some(NoticeLevel::Warn));
-    }
-
-    #[test]
-    fn prompts_are_deferred_while_compacting_and_sent_after() {
-        let mut app = App::new(StatusInfo::default());
-        assert_eq!(submit(&mut app, "/compact"), vec![Effect::Compact]);
-        assert!(app.compacting);
-        assert_eq!(
-            last_notice(&app),
-            Some((NoticeLevel::Info, "compacting…".into()))
-        );
-        assert!(submit(&mut app, "one").is_empty());
-        assert!(submit(&mut app, "two").is_empty());
-        assert_eq!(app.status.queued, 2);
-        assert_eq!(
-            app.transcript.blocks().last(),
-            Some(&queued_block(2, "two", QueuedLabel::Deferred))
-        );
-        // Lifecycle commands are refused; /remember is not.
-        for cmd in ["/clear", "/resume last", "/compact"] {
-            assert!(submit(&mut app, cmd).is_empty(), "{cmd}");
-            assert_eq!(
-                last_notice(&app).map(|(l, _)| l),
-                Some(NoticeLevel::Warn),
-                "{cmd}"
-            );
-        }
-        assert_eq!(submit(&mut app, "#x"), vec![Effect::Remember("x".into())]);
-        let fx = app.update(Msg::CompactFinished(Ok(())));
-        assert_eq!(fx, vec![Effect::StartTurn("one\n\ntwo".into())]);
-        assert!(!app.compacting);
-        assert!(app.is_running());
-        assert_eq!(app.status.queued, 0);
-        assert!(app.transcript.blocks().contains(&user("one")));
-        assert!(app.transcript.blocks().contains(&user("two")));
-        assert!(app.transcript.blocks().iter().any(
-            |b| matches!(b, Block::Notice { level: NoticeLevel::Info, text } if text == "compacted")
-        ));
-    }
-
-    #[test]
-    fn compact_success_without_deferred_sends_nothing() {
-        let mut app = App::new(StatusInfo::default());
-        submit(&mut app, "/compact");
-        assert!(app.update(Msg::CompactFinished(Ok(()))).is_empty());
-        assert!(!app.is_running());
-        assert_eq!(
-            last_notice(&app),
-            Some((NoticeLevel::Info, "compacted".into()))
-        );
-    }
-
-    #[test]
-    fn failed_compaction_returns_deferred_to_the_editor() {
-        let mut app = App::new(StatusInfo::default());
-        submit(&mut app, "/compact");
-        submit(&mut app, "one");
-        submit(&mut app, "two");
-        type_str(&mut app, "draft");
-        let fx = app.update(Msg::CompactFinished(Err(CompactFailure::Other(
-            "boom".into(),
-        ))));
-        assert!(fx.is_empty());
-        assert!(!app.compacting);
-        assert!(!app.is_running());
-        assert!(app.pending.is_empty());
-        assert_eq!(app.status.queued, 0);
-        assert_eq!(app.input.text(), "one\ntwo\ndraft");
-        assert_eq!(
-            last_notice(&app),
-            Some((NoticeLevel::Error, "compaction failed: boom".into()))
-        );
-        assert!(
-            !app.transcript
-                .blocks()
-                .iter()
-                .any(|b| matches!(b, Block::Queued { .. }))
-        );
-    }
-
-    #[test]
     fn context_gauge_tracks_usage_compaction_and_clear() {
         let mut app = App::new(StatusInfo::default());
         app.update(Msg::Status(StatusUpdate::ContextWindow(Some(200_000))));
@@ -3675,7 +3573,7 @@ mod tests {
             last_notice(&app),
             Some((
                 NoticeLevel::Warn,
-                "context 76% full (76k/100k tokens); run /compact to free space".into()
+                "context 76% full (76k/100k tokens); run /compact now to free space".into()
             ))
         );
         assert!(turn_at(&mut app, 80_000).is_empty());
@@ -3695,109 +3593,164 @@ mod tests {
     }
 
     #[test]
-    fn auto_mode_compacts_when_idle_and_full() {
+    fn compact_now_refused_while_running_or_pending() {
+        let mut app = running_app();
+        app.status.context_used = Some(10_000);
+        assert!(submit(&mut app, "/compact now").is_empty());
+        assert_eq!(
+            last_notice(&app),
+            Some((
+                NoticeLevel::Warn,
+                "finish or interrupt the current turn first".into()
+            ))
+        );
+        submit(&mut app, "two");
+        app.update(finished(Ok(summary()), &[]));
+        assert!(!app.is_running());
+        assert_eq!(app.status.queued, 1);
+        assert!(submit(&mut app, "/compact now").is_empty());
+        assert!(!app.compacting);
+        assert_eq!(last_notice(&app).map(|(l, _)| l), Some(NoticeLevel::Warn));
+    }
+
+    #[test]
+    fn compact_reports_the_policy_and_now_needs_context() {
         let mut app = gauge_app(CompactMode::Auto);
-        assert!(turn_at(&mut app, 80_000).is_empty());
-        assert_eq!(warn_count(&app), 0);
-        assert_eq!(turn_at(&mut app, 90_000), vec![Effect::Compact]);
+        assert!(submit(&mut app, "/compact").is_empty());
+        assert!(
+            last_notice(&app).is_some_and(|(level, text)| level == NoticeLevel::Info
+                && text.contains("auto-compaction is on")
+                && text.contains("85k tokens"))
+        );
+        let mut app = gauge_app(CompactMode::Warn);
+        assert!(submit(&mut app, "/compact").is_empty());
+        assert!(last_notice(&app).is_some_and(|(_, text)| text.contains("auto-compaction is off")));
+        // Nothing reported yet: nothing to compact.
+        assert!(submit(&mut app, "/compact now").is_empty());
+        assert_eq!(
+            last_notice(&app),
+            Some((NoticeLevel::Info, "nothing to compact yet".into()))
+        );
+        assert!(!app.compacting);
+    }
+
+    #[test]
+    fn prompts_are_deferred_while_arming_and_sent_after() {
+        let mut app = App::new(StatusInfo::default());
+        app.status.context_used = Some(40_000);
+        assert_eq!(submit(&mut app, "/compact now"), vec![Effect::CompactNow]);
         assert!(app.compacting);
         assert_eq!(
             last_notice(&app),
-            Some((
-                NoticeLevel::Info,
-                "context 90% full (90k/100k tokens), compacting…".into()
-            ))
+            Some((NoticeLevel::Info, "arming compaction…".into()))
         );
-        // Prompts typed meanwhile are deferred like for a manual /compact.
-        assert!(submit(&mut app, "next").is_empty());
-        let fx = app.update(Msg::CompactFinished(Ok(())));
-        assert_eq!(fx, vec![Effect::StartTurn("next".into())]);
-    }
-
-    #[test]
-    fn auto_mode_waits_while_messages_are_pending() {
-        let mut app = gauge_app(CompactMode::Auto);
-        assert_eq!(submit(&mut app, "go"), vec![Effect::StartTurn("go".into())]);
-        // Typed mid-turn and never delivered: the next turn sends it.
-        submit(&mut app, "more");
-        app.update(agent(AgentEvent::TurnCompleted {
-            stop_reason: StopReason::EndTurn,
-            usage: test_usage(Usage {
-                input_tokens: 90_000,
-                ..Usage::default()
-            }),
-            assistant_message_id: None,
-        }));
-        app.update(ack(1, Err(SteerFailure::NotRunning)));
-        let fx = app.update(finished(Ok(summary()), &[]));
-        assert!(!fx.contains(&Effect::Compact), "{fx:?}");
+        assert!(submit(&mut app, "one").is_empty());
+        assert!(submit(&mut app, "two").is_empty());
+        assert_eq!(app.status.queued, 2);
+        assert_eq!(
+            app.transcript.blocks().last(),
+            Some(&queued_block(2, "two", QueuedLabel::Deferred))
+        );
+        // Lifecycle commands are refused; /remember is not.
+        for cmd in ["/clear", "/resume last", "/compact now"] {
+            assert!(submit(&mut app, cmd).is_empty(), "{cmd}");
+            assert_eq!(
+                last_notice(&app).map(|(l, _)| l),
+                Some(NoticeLevel::Warn),
+                "{cmd}"
+            );
+        }
+        assert_eq!(submit(&mut app, "#x"), vec![Effect::Remember("x".into())]);
+        let fx = app.update(Msg::CompactArmed(Ok(())));
+        assert_eq!(fx, vec![Effect::StartTurn("one\n\ntwo".into())]);
+        assert!(!app.compacting);
         assert!(app.is_running());
-        assert!(!app.compacting);
+        assert_eq!(app.status.queued, 0);
+        assert!(app.transcript.blocks().contains(&user("one")));
+        assert!(app.transcript.blocks().contains(&user("two")));
+        assert!(app.transcript.blocks().iter().any(
+            |b| matches!(b, Block::Notice { level: NoticeLevel::Info, text } if text == COMPACT_ARMED)
+        ));
     }
 
     #[test]
-    fn auto_mode_not_while_running_or_compacting() {
-        let mut app = gauge_app(CompactMode::Auto);
-        // Still running: TurnCompleted alone does not compact.
-        assert_eq!(submit(&mut app, "go"), vec![Effect::StartTurn("go".into())]);
-        let fx = app.update(agent(AgentEvent::TurnCompleted {
-            stop_reason: StopReason::EndTurn,
-            usage: test_usage(Usage {
-                input_tokens: 95_000,
-                ..Usage::default()
-            }),
-            assistant_message_id: None,
-        }));
-        assert!(
-            fx.iter().all(|e| matches!(e, Effect::CostSnapshot(_))),
-            "{fx:?}"
+    fn armed_without_deferred_sends_nothing() {
+        let mut app = App::new(StatusInfo::default());
+        app.status.context_used = Some(1);
+        submit(&mut app, "/compact now");
+        assert!(app.update(Msg::CompactArmed(Ok(()))).is_empty());
+        assert!(!app.is_running());
+        assert_eq!(
+            last_notice(&app),
+            Some((NoticeLevel::Info, COMPACT_ARMED.into()))
         );
-        assert!(!app.compacting);
-        // A manual /compact is running: no second one.
-        let mut app = gauge_app(CompactMode::Auto);
-        app.status.context_used = Some(95_000);
-        assert_eq!(submit(&mut app, "/compact"), vec![Effect::Compact]);
-        let mut fx = Vec::new();
-        app.check_context(&mut fx);
+    }
+
+    #[test]
+    fn failed_arming_returns_deferred_to_the_editor() {
+        let mut app = App::new(StatusInfo::default());
+        app.status.context_used = Some(1);
+        submit(&mut app, "/compact now");
+        submit(&mut app, "one");
+        submit(&mut app, "two");
+        type_str(&mut app, "draft");
+        let fx = app.update(Msg::CompactArmed(Err(CompactFailure::Rebuild(
+            "boom".into(),
+        ))));
         assert!(fx.is_empty());
-    }
-
-    #[test]
-    fn auto_mode_backs_off_after_no_gain() {
-        let mut app = gauge_app(CompactMode::Auto);
-        assert_eq!(turn_at(&mut app, 86_000), vec![Effect::Compact]);
-        assert!(
-            app.update(Msg::CompactFinished(Err(CompactFailure::NoGain(6))))
-                .is_empty()
-        );
+        assert!(!app.compacting);
+        assert!(!app.is_running());
+        assert!(app.pending.is_empty());
+        assert_eq!(app.status.queued, 0);
+        assert_eq!(app.input.text(), "one\ntwo\ndraft");
         assert_eq!(
             last_notice(&app),
             Some((
-                NoticeLevel::Info,
-                "auto-compaction skipped: nothing to compact: all 6 messages are recent turns"
-                    .into()
+                NoticeLevel::Error,
+                "/compact now failed: could not rebuild the session: boom".into()
             ))
         );
-        assert!(turn_at(&mut app, 90_000).is_empty());
-        assert!(turn_at(&mut app, 95_000).is_empty());
-        assert_eq!(turn_at(&mut app, 96_000), vec![Effect::Compact]);
+        assert!(
+            !app.transcript
+                .blocks()
+                .iter()
+                .any(|b| matches!(b, Block::Queued { .. }))
+        );
     }
 
     #[test]
-    fn unknown_window_falls_back_to_token_thresholds() {
+    fn auto_mode_neither_warns_nor_compacts_itself() {
+        let mut app = gauge_app(CompactMode::Auto);
+        for used in [80_000, 90_000, 99_000] {
+            assert!(turn_at(&mut app, used).is_empty());
+        }
+        assert_eq!(warn_count(&app), 0);
+        assert!(!app.compacting);
+        // Unknown window: no warning in auto mode either.
         let mut app = App::new(StatusInfo::default()).with_compaction_policy(CompactionPolicy {
             mode: CompactMode::Auto,
             ..CompactionPolicy::default()
         });
-        assert!(turn_at(&mut app, 149_000).is_empty());
-        assert_eq!(turn_at(&mut app, 150_000), vec![Effect::Compact]);
-        assert_eq!(
-            last_notice(&app),
-            Some((
-                NoticeLevel::Info,
-                "context at 150k tokens, compacting…".into()
-            ))
-        );
+        assert!(turn_at(&mut app, 150_000).is_empty());
+        assert_eq!(warn_count(&app), 0);
+    }
+
+    #[test]
+    fn a_native_compaction_rearms_the_warning() {
+        let mut app = gauge_app(CompactMode::Warn);
+        assert!(turn_at(&mut app, 76_000).is_empty());
+        assert_eq!(warn_count(&app), 1);
+        app.update(agent(AgentEvent::CompactionCompleted {
+            summary_tokens: 500,
+            messages_before: 40,
+            messages_after: 3,
+            summary_source: None,
+            estimated_history_tokens_after: Some(4_000),
+        }));
+        assert_eq!(app.status.context_used, Some(4_000));
+        assert!(app.status.context_approx);
+        assert!(turn_at(&mut app, 77_000).is_empty());
+        assert_eq!(warn_count(&app), 2);
     }
 
     #[test]

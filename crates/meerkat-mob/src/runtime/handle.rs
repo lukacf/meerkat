@@ -10655,6 +10655,25 @@ impl MobHandle {
         &self,
         identity: &AgentIdentity,
     ) -> Result<super::LegacyIdentityEntryAdoption, MobError> {
+        self.adopt_listed_legacy_member(identity)
+            .await
+            .map(|(adoption, _)| adoption)
+    }
+
+    /// [`Self::adopt_legacy_identity_entry`], with the observation
+    /// MobMachine decided the adoption on: `None` for a declared entry,
+    /// which answers without its spawn row being read. The declared apply
+    /// carries the observation into the identity's declaration.
+    pub(super) async fn adopt_listed_legacy_member(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<
+        (
+            super::LegacyIdentityEntryAdoption,
+            Option<super::identity_entry::ObservedLegacyMember>,
+        ),
+        MobError,
+    > {
         // The scope and the lane first: nothing is answered, not even from
         // the entry, to a caller the adoption is refused to.
         self.admit_control_scope_for(
@@ -10674,16 +10693,24 @@ impl MobHandle {
                     .contains(&mob_dsl::AgentIdentity::from_domain(identity))
         };
         if already_an_entry {
-            return Ok(super::LegacyIdentityEntryAdoption::AlreadyAnEntry);
+            return Ok((super::LegacyIdentityEntryAdoption::AlreadyAnEntry, None));
         }
         // The host names the identity: its member is observed as listed.
-        let (_, verdict) = self.adopt_observed_legacy_member(identity, true).await?;
-        super::identity_entry::legacy_adoption_answer(verdict).ok_or_else(|| {
+        let (generation, observation, verdict) =
+            self.adopt_observed_legacy_member(identity, true).await?;
+        let adoption = super::identity_entry::legacy_adoption_answer(verdict).ok_or_else(|| {
             MobError::Internal(format!(
                 "MobMachine answered the adoption of member '{identity}' with no answer: \
                  {verdict:?}"
             ))
-        })
+        })?;
+        Ok((
+            adoption,
+            Some(super::identity_entry::ObservedLegacyMember {
+                generation,
+                marks: observation.marks,
+            }),
+        ))
     }
 
     /// The legacy adoption's observation and MobMachine's decision for an
@@ -10696,7 +10723,7 @@ impl MobHandle {
     /// verdict from that observation. An observation whose incarnation moved
     /// before MobMachine decided is observed again, a bounded number of
     /// times. The answer is MobMachine's verdict, with the generation of the
-    /// incarnation it decided on.
+    /// incarnation it decided on and the observation it decided from.
     pub(super) async fn adopt_observed_legacy_member(
         &self,
         identity: &AgentIdentity,
@@ -10704,6 +10731,7 @@ impl MobHandle {
     ) -> Result<
         (
             crate::ids::Generation,
+            super::identity_entry::LegacyMemberObservation,
             mob_dsl::LegacyIdentityEntryAdoptionKind,
         ),
         MobError,
@@ -10753,7 +10781,7 @@ impl MobHandle {
                 })
                 .await??;
             if super::identity_entry::legacy_adoption_answer(verdict).is_some() {
-                return Ok((generation, verdict));
+                return Ok((generation, observation, verdict));
             }
         }
         Err(MobError::LifecycleOperationPending {

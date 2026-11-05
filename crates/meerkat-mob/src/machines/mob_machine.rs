@@ -14481,6 +14481,12 @@ mod tests {
         /// Whether the host's rule requires the identity's preparation
         /// before its first seat.
         preparation_required: bool,
+        /// The listed legacy member's observation the apply's adoption
+        /// decided on: the marks on its spawn row and the generation of its
+        /// incarnation. Neither mark by default.
+        legacy_marker: bool,
+        legacy_label: bool,
+        legacy_generation: Generation,
     }
 
     impl Default for Declaration<'_> {
@@ -14497,6 +14503,9 @@ mod tests {
                 first_boot: FirstBootRequestKind::None,
                 created_custody: false,
                 preparation_required: false,
+                legacy_marker: false,
+                legacy_label: false,
+                legacy_generation: Generation(0),
             }
         }
     }
@@ -14515,6 +14524,9 @@ mod tests {
             first_boot: declaration.first_boot,
             created_custody: declaration.created_custody,
             preparation_required: declaration.preparation_required,
+            legacy_marker: declaration.legacy_marker,
+            legacy_label: declaration.legacy_label,
+            legacy_generation: declaration.legacy_generation,
         }
     }
 

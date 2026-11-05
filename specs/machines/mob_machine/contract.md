@@ -583,7 +583,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyMemberRelease`(agent_identity: AgentIdentity, scope_agent_runtime_id: Option<AgentRuntimeId>, scope_fence_token: Option<FenceToken>, scope_session_id: Option<SessionId>)
 - `AdoptLegacyIdentityEntry`(agent_identity: AgentIdentity, generation: Generation, durable_identity_marker: Bool, own_identity_label: Bool, listed: Bool, intent_row: Bool)
 - `ResolveAgentLaneMemberAdmission`(agent_identity: AgentIdentity)
-- `DeclareIdentityEntry`(agent_identity: AgentIdentity, profile_name: String, runtime_mode: SpawnPolicyRuntimeMode, placement: EntryPlacementKind, held_creation: Bool, declared_migration_from: Option<String>, intent_managed: Bool, session_memory_only: Bool, resume_session_role: Option<String>, first_boot: FirstBootRequestKind, created_custody: Bool, preparation_required: Bool)
+- `DeclareIdentityEntry`(agent_identity: AgentIdentity, profile_name: String, runtime_mode: SpawnPolicyRuntimeMode, placement: EntryPlacementKind, held_creation: Bool, declared_migration_from: Option<String>, intent_managed: Bool, session_memory_only: Bool, resume_session_role: Option<String>, first_boot: FirstBootRequestKind, created_custody: Bool, preparation_required: Bool, legacy_marker: Bool, legacy_label: Bool, legacy_generation: Generation)
 - `SealDeclaredRoster`(desired: Set<AgentIdentity>)
 - `ForgetArchivedSession`(agent_identity: AgentIdentity, session_id: SessionId, reason: ArchivedSessionForgetReason)
 - `OpenDeclaredApply`
@@ -899,6 +899,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Helpers
 - `identity_reconcile_decision`(intent: IdentityAuthorityCondition, lease: IdentityLeaseCondition, replacement: IdentityReplacementCondition, external_binding_required: Bool, initial_delivery_required: Bool, session_creation_receipt: IdentityReceiptCondition, retirement_receipt: IdentityReceiptCondition, session: IdentitySessionCondition, runtime: IdentityResourceCondition, member: IdentityResourceCondition, external_binding_receipt: IdentityReceiptCondition, external_trust: IdentityExternalTrustCondition, external_ceremony: IdentityExternalCeremonyCondition, initial_delivery_receipt: IdentityReceiptCondition, initial_delivery: IdentityInitialDeliveryCondition, wiring: IdentityResourceCondition) -> `IdentityReconcileDecision`
+- `legacy_adoption_verdict`(is_entry: Bool, declared_entry: Bool, name_reserved: Bool, seated: Bool, observation_current: Bool, durable_identity_marker: Bool, own_identity_label: Bool, listed: Bool, intent_row: Bool, hosted: Bool, session_bound: Bool, retiring: Bool) -> `LegacyIdentityEntryAdoptionKind`
 - `identity_entry_verdict`(composition_authoritative: Bool, intent_managed: Bool, worker_holds_name: Bool, lifecycle_in_flight: Bool, seated: Bool, ever_created: Bool, placement: EntryPlacementKind, held_creation: Bool, profile_matches: Bool, migration_declared_from_current: Bool, session_memory_only: Bool, mode_matches: Bool, resume_role_moved: Bool, migration_declared_from_resume_role: Bool, preparation_required: Bool, record_only: Bool) -> `IdentityEntryVerdict`
 - `identity_change_admission`(composition_authoritative: Bool, receipt: IdentityChangeReceiptKind, changes_held: Bool, consent: IdentityChangeConsentKind, permit_binds: Bool, permit_admits: Bool, host_operator: Bool, grant_current: Bool, spec_current: Bool) -> `IdentityChangeAdmissionKind`
 - `created_identity_record_verdict`(composition_authoritative: Bool, changes_held: Bool, name_unreadable: Bool, name_tombstoned: Bool, held_by_identity: Bool, held_by_worker: Bool) -> `CreatedIdentityRecordVerdict`
@@ -17571,12 +17572,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
-  - `not_an_entry`
-  - `name_not_reserved`
-  - `member_seated`
-  - `observed_incarnation_current`
-  - `member_adoptable`
-  - `listed_legacy_member`
+  - `legacy_adoption_verdict`
+  - `listed`
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Running`
 
@@ -17585,12 +17582,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
-  - `not_an_entry`
-  - `name_not_reserved`
-  - `member_seated`
-  - `observed_incarnation_current`
-  - `member_adoptable`
-  - `unlisted_legacy_member`
+  - `legacy_adoption_verdict`
+  - `unlisted`
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Running`
 
@@ -17599,11 +17592,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
-  - `not_an_entry`
-  - `name_not_reserved`
-  - `member_seated`
-  - `observed_incarnation_current`
-  - `legacy_marks_not_observed`
+  - `legacy_adoption_verdict`
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Running`
 
@@ -17612,12 +17601,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
-  - `not_an_entry`
-  - `name_not_reserved`
-  - `member_seated`
-  - `observed_incarnation_current`
-  - `unlisted_legacy_member`
-  - `member_hosted_or_bound_to_no_session`
+  - `legacy_adoption_verdict`
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Running`
 
@@ -17626,11 +17610,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
-  - `not_an_entry`
-  - `name_not_reserved`
-  - `member_seated`
-  - `observed_incarnation_current`
-  - `member_not_adoptable`
+  - `legacy_adoption_verdict`
+  - `entry_free_name`
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Running`
 
@@ -17639,10 +17620,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
-  - `not_an_entry`
-  - `name_not_reserved`
-  - `member_seated`
-  - `observed_incarnation_stale`
+  - `legacy_adoption_verdict`
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Running`
 
@@ -17651,9 +17629,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
-  - `not_an_entry`
-  - `name_not_reserved`
-  - `member_not_seated`
+  - `legacy_adoption_verdict`
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Running`
 
@@ -17662,9 +17638,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
-  - `identity_entry`
-  - `declared_entry`
-  - `name_not_reserved`
+  - `legacy_adoption_verdict`
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Running`
 
@@ -17673,7 +17647,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
-  - `created_or_reserved_name`
+  - `legacy_adoption_verdict`
+  - `other_custody_or_reserved_name`
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Running`
 
@@ -17809,7 +17784,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryKept`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation)
 - Guards:
   - `entry_of_the_declared_custody`
   - `name_not_reserved`
@@ -17819,7 +17794,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntrySeatOwed`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation)
 - Guards:
   - `entry_of_the_declared_custody`
   - `name_not_reserved`
@@ -17829,7 +17804,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryHostedOnFirstUse`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation)
 - Guards:
   - `entry_of_the_declared_custody`
   - `name_not_reserved`
@@ -17839,7 +17814,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryAwaitHeldCreation`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation)
 - Guards:
   - `entry_of_the_declared_custody`
   - `name_not_reserved`
@@ -17849,7 +17824,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryPreparationPending`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation)
 - Guards:
   - `entry_of_the_declared_custody`
   - `name_not_reserved`
@@ -17859,7 +17834,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryRecordOnly`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation)
 - Guards:
   - `entry_of_the_declared_custody`
   - `name_not_reserved`
@@ -17869,7 +17844,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryRuntimeModeRestamp`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation)
 - Guards:
   - `entry_of_the_declared_custody`
   - `name_not_reserved`
@@ -17879,7 +17854,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryRoleMigrate`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation)
 - Guards:
   - `entry_of_the_declared_custody`
   - `name_not_reserved`
@@ -17889,7 +17864,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryRoleRotate`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation)
 - Guards:
   - `entry_of_the_declared_custody`
   - `name_not_reserved`
@@ -17899,7 +17874,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryRoleMigrationHeld`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation)
 - Guards:
   - `entry_of_the_declared_custody`
   - `name_not_reserved`
@@ -17909,7 +17884,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryLifecycleInFlight`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation)
 - Guards:
   - `entry_of_the_declared_custody`
   - `name_not_reserved`
@@ -17919,7 +17894,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryRefusedNameHeldByWorker`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation)
 - Guards:
   - `entry_of_the_declared_custody`
   - `name_not_reserved`
@@ -17929,7 +17904,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryRefusedHostAdopted`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation)
 - Guards:
   - `entry_of_the_declared_custody`
   - `name_not_reserved`
@@ -17939,7 +17914,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryRefusedNonAuthoritative`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation)
 - Guards:
   - `entry_of_the_declared_custody`
   - `name_not_reserved`
@@ -17949,7 +17924,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryRefusedNameOwnedByCreated`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation)
 - Guards:
   - `roster_custody`
   - `created_entry`
@@ -17959,7 +17934,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryRefusedNameTombstoned`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation)
 - Guards:
   - `name_tombstoned`
   - `name_readable`
@@ -17968,7 +17943,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryRefusedNameUnreadable`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation)
 - Guards:
   - `name_unreadable`
 - Emits: `IdentityEntryDeclared`
@@ -17976,19 +17951,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryMobNotRunningStopped`
 - From: `Stopped`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation)
 - Emits: `IdentityEntryDeclared`
 - To: `Stopped`
 
 ### `DeclareIdentityEntryMobNotRunningCompleted`
 - From: `Completed`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation)
 - Emits: `IdentityEntryDeclared`
 - To: `Completed`
 
 ### `DeclareIdentityEntryMobNotRunningDestroyed`
 - From: `Destroyed`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation)
 - Emits: `IdentityEntryDeclared`
 - To: `Destroyed`
 

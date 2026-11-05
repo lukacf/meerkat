@@ -1374,16 +1374,20 @@ replace_in_loops("SealDeclaredRosterSealed",
                  " /\\ ((id \\in identity_entry_unreadable) = FALSE)", "")
 PY
 
-  # The legacy adoption adopts a reserved name (its name_not_reserved guard
-  # dropped).
+  # The legacy adoption adopts a reserved name (its call of the adoption's
+  # verdict rule passes no reserved name).
   mutate names adopt_reserved "Invariant AuditNamesAdoptionExactlyOne" <<'PY'
-drop_guard("AdoptLegacyIdentityEntryAdopted", "identity_entry_tombstones) = FALSE)")
+replace_in_arm("AdoptLegacyIdentityEntryAdopted",
+               "(IF ((agent_identity \\in identity_entry_tombstones) = TRUE) THEN TRUE ELSE ((agent_identity \\in identity_entry_unreadable) = TRUE))",
+               "FALSE")
 PY
 
-  # A Created entry answers the adoption as already an entry (its
-  # declared_entry guard dropped).
+  # A Created entry answers the adoption as already an entry (its call of
+  # the adoption's verdict rule takes any entry as a declared one).
   mutate names already_entry_over_created "Invariant AuditNamesAdoptionExactlyOne" <<'PY'
-drop_guard("AdoptLegacyIdentityEntryAlreadyAnEntry", 'Some("Declared"))')
+replace_in_arm("AdoptLegacyIdentityEntryAlreadyAnEntry",
+               '((IF (agent_identity \\in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \\in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) = Some("Declared"))',
+               "TRUE")
 PY
 
   # The agent lane admits an unreadable name (its name_readable guard

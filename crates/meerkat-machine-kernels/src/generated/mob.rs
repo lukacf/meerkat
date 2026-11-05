@@ -11633,6 +11633,9 @@ pub mod inputs {
         pub first_boot: FirstBootRequestKind,
         pub created_custody: bool,
         pub preparation_required: bool,
+        pub legacy_marker: bool,
+        pub legacy_label: bool,
+        pub legacy_generation: Generation,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SealDeclaredRoster {

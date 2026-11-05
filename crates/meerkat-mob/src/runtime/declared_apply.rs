@@ -603,6 +603,16 @@ pub(in crate::runtime) struct IdentityDeclaration {
     /// its first seat ([`DeclaredEntry::preparation`]): a roster's
     /// declaration only, never a store-owned identity's.
     pub(in crate::runtime) preparation_required: bool,
+    /// The listed legacy member's observation the declared apply's
+    /// adoption decided on: the generation of the member's incarnation and
+    /// the legacy marks on its spawn row. `None` when the apply offered no
+    /// adoption (no member holds the identity, it is an entry already, the
+    /// identity store manages it, or a store-owned update declares it),
+    /// which declares neither mark. MobMachine reads it only in a candidate
+    /// composition, whose adoption adopts nothing: it decides the verdict
+    /// an authoritative composition would give on the basis that
+    /// composition's adoption of the member gives.
+    pub(in crate::runtime) legacy: Option<super::identity_entry::ObservedLegacyMember>,
 }
 
 impl IdentityDeclaration {
@@ -611,6 +621,14 @@ impl IdentityDeclaration {
         &self,
         runtime_mode: crate::MobRuntimeMode,
     ) -> mob_dsl::MobMachineInput {
+        // No observation declares neither mark: MobMachine adopts no member
+        // on it, whatever the generation.
+        let legacy = self
+            .legacy
+            .unwrap_or(super::identity_entry::ObservedLegacyMember {
+                generation: crate::ids::Generation::INITIAL,
+                marks: super::identity_entry::LegacyRosterMarks::default(),
+            });
         mob_dsl::MobMachineInput::DeclareIdentityEntry {
             agent_identity: mob_dsl::AgentIdentity::from_domain(&self.agent_identity),
             profile_name: self.profile_name.as_str().to_string(),
@@ -630,6 +648,9 @@ impl IdentityDeclaration {
             first_boot: self.first_boot,
             created_custody: self.created_custody,
             preparation_required: self.preparation_required,
+            legacy_marker: legacy.marks.durable_identity,
+            legacy_label: legacy.marks.own_identity_label,
+            legacy_generation: mob_dsl::Generation::from_domain(legacy.generation),
         }
     }
 }
@@ -1223,6 +1244,10 @@ impl super::MobHandle {
         // A legacy member listed under its own name is adopted first, once:
         // MobMachine then declares it as the entry it is. A store-owned
         // update's declaration adopts nothing: its identity is the store's.
+        // The identity's declaration carries the observation the adoption
+        // decided on: a candidate composition adopts nothing, and MobMachine
+        // decides the verdict it reports an authoritative composition would
+        // give on the basis that composition's adoption gives.
         let legacy: Vec<AgentIdentity> = {
             let state = self.machine_state_watch_rx.borrow();
             declared
@@ -1237,10 +1262,20 @@ impl super::MobHandle {
                 .map(|(identity, _)| identity.clone())
                 .collect()
         };
+        let mut legacy_observed: BTreeMap<
+            AgentIdentity,
+            super::identity_entry::ObservedLegacyMember,
+        > = BTreeMap::new();
         for identity in legacy {
-            if let Err(error) = self.adopt_legacy_identity_entry(&identity).await {
-                declared.remove(&identity);
-                outcome.entries.insert(identity, failure_outcome(error));
+            match self.adopt_listed_legacy_member(&identity).await {
+                Ok((_, Some(observed))) => {
+                    legacy_observed.insert(identity, observed);
+                }
+                Ok((_, None)) => {}
+                Err(error) => {
+                    declared.remove(&identity);
+                    outcome.entries.insert(identity, failure_outcome(error));
+                }
             }
         }
         // A complete roster also offers MobMachine each member it does not
@@ -1256,7 +1291,11 @@ impl super::MobHandle {
         if complete {
             for identity in self.unlisted_legacy_candidates(history.as_ref(), &listed) {
                 let answer = match self.adopt_observed_legacy_member(&identity, false).await {
-                    Ok((generation, mob_dsl::LegacyIdentityEntryAdoptionKind::RetireUnadopted)) => {
+                    Ok((
+                        generation,
+                        _,
+                        mob_dsl::LegacyIdentityEntryAdoptionKind::RetireUnadopted,
+                    )) => {
                         match self
                             .retire_unadopted_legacy_member(&identity, generation)
                             .await
@@ -1267,7 +1306,7 @@ impl super::MobHandle {
                     }
                     // The one unlisted legacy member MobMachine does not
                     // adopt: its retirement started already.
-                    Ok((_, mob_dsl::LegacyIdentityEntryAdoptionKind::NotAdoptable)) => {
+                    Ok((_, _, mob_dsl::LegacyIdentityEntryAdoptionKind::NotAdoptable)) => {
                         UnlistedEntryOutcome::NotAdopted {
                             reason: NotAdoptedReason::Retiring,
                         }
@@ -1333,6 +1372,7 @@ impl super::MobHandle {
             created_custody: entry.spec.created_custody,
             preparation_required: !entry.spec.created_custody
                 && super::identity_preparation::preparation_required(entry.preparation),
+            legacy: legacy_observed.get(&entry.spec.identity).copied(),
         };
         let declarations: Vec<IdentityDeclaration> = declared.values().map(declare).collect();
         let (verdicts, change) = self.declare_identity_entries(declarations, change).await?;

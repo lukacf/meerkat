@@ -1485,6 +1485,19 @@ impl LegacyMemberObservation {
     }
 }
 
+/// The legacy adoption's observation of one listed member, as the declared
+/// apply's adoption decided on it: the generation of the member's
+/// incarnation and the legacy marks on that incarnation's spawn row. The
+/// identity's declaration carries it (`DeclareIdentityEntry`): a candidate
+/// composition adopts nothing, and MobMachine decides the verdict it
+/// reports an authoritative composition would give on the basis that
+/// composition's adoption of the member gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ObservedLegacyMember {
+    pub(crate) generation: crate::ids::Generation,
+    pub(crate) marks: LegacyRosterMarks,
+}
+
 /// The shell's raw observation of a legacy roster member: whether the spawn
 /// row of the binding's incarnation carries the durable-identity continuity
 /// marker, and whether it carries the legacy identity label naming the

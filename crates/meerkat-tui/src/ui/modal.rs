@@ -38,6 +38,8 @@ pub enum EscalationAnswer {
 /// What the escalation dialog shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EscalationPrompt {
+    /// The helper making the call (`None`: the session's own agent).
+    pub agent: Option<String>,
     /// Tool name.
     pub tool: String,
     /// Human-readable preview of the arguments.
@@ -230,13 +232,25 @@ pub fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &Modal) {
 
 fn escalation_lines(prompt: &EscalationPrompt, width: usize) -> Vec<Line<'static>> {
     let dim = Style::default().add_modifier(Modifier::DIM);
-    let mut lines = vec![Line::from(vec![
+    let mut lines = Vec::new();
+    if let Some(agent) = &prompt.agent {
+        lines.push(Line::from(vec![
+            Span::styled("Helper: ", dim),
+            Span::styled(
+                agent.clone(),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+    lines.push(Line::from(vec![
         Span::styled("Tool: ", dim),
         Span::styled(
             prompt.tool.clone(),
             Style::default().add_modifier(Modifier::BOLD),
         ),
-    ])];
+    ]));
     let args = wrap_text(&prompt.args_preview, width);
     let extra = args.len().saturating_sub(MAX_ARGS_LINES);
     lines.extend(args.into_iter().take(MAX_ARGS_LINES).map(Line::from));

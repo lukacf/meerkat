@@ -346,6 +346,16 @@ pub fn status_bar(status: &StatusInfo, now: Instant) -> Line<'static> {
     if status.queued > 0 {
         segs.push(Span::raw(format!("queued {}", status.queued)));
     }
+    if status.helpers > 0 {
+        segs.push(Span::styled(
+            format!(
+                "{} helper{}",
+                status.helpers,
+                if status.helpers == 1 { "" } else { "s" }
+            ),
+            Style::default().fg(Color::Magenta),
+        ));
+    }
     let mut spans = Vec::with_capacity(segs.len() * 2 + 1);
     spans.push(Span::raw(" "));
     for (i, seg) in segs.into_iter().enumerate() {

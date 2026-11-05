@@ -1018,6 +1018,9 @@ struct ChoiceFile {
     /// `[cost."<model>"]`: token totals per model.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     cost: IndexMap<String, UsageTotals>,
+    /// `[helper_cost.<label>."<model>"]`: the helpers' share of `cost`.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    helper_cost: IndexMap<String, IndexMap<String, UsageTotals>>,
 }
 
 impl ChoiceFile {
@@ -1027,6 +1030,7 @@ impl ChoiceFile {
             model: choice.model.clone(),
             cost_estimated: cost.is_some_and(|c| !c.known),
             cost: cost.map(|c| c.per_model.clone()).unwrap_or_default(),
+            helper_cost: cost.map(|c| c.helpers.clone()).unwrap_or_default(),
         }
     }
 
@@ -1034,6 +1038,7 @@ impl ChoiceFile {
         (!self.cost.is_empty()).then_some(SessionCost {
             per_model: self.cost,
             known: !self.cost_estimated,
+            helpers: self.helper_cost,
         })
     }
 }

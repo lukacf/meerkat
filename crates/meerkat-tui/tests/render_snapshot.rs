@@ -149,6 +149,7 @@ fn escalation_modal_is_drawn_over_the_transcript() {
     let mut app = sample_app();
     app.update(Msg::Escalation(
         EscalationPrompt {
+            agent: Some("researcher".into()),
             tool: "shell".into(),
             args_preview: "rm -rf build".into(),
             hint: None,
@@ -158,6 +159,7 @@ fn escalation_modal_is_drawn_over_the_transcript() {
     let rows = render(&mut app, Instant::now());
     let joined = rows.join("\n");
     assert!(joined.contains("Approval needed"), "{joined}");
+    assert!(joined.contains("Helper: researcher"), "{joined}");
     assert!(joined.contains("Tool: shell"), "{joined}");
     assert!(joined.contains("rm -rf build"), "{joined}");
     assert!(joined.contains("[y] allow once"), "{joined}");

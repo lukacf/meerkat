@@ -3,7 +3,9 @@
 //! The UI adds every `TurnCompleted` usage to the totals of the model the
 //! provider accounted it to (the identity `TurnUsage` carries; the status
 //! bar's model when it names none), every classifier call to the classifier
-//! model, and prices the totals with a [`PriceTable`] whenever the
+//! model, every helper's `TurnCompleted` usage to its model *and* to the
+//! helper's own totals ([`SessionCost::helpers`], the `/cost` breakdown per
+//! helper), and prices the totals with a [`PriceTable`] whenever the
 //! footer is drawn or `/cost` is asked for. Meerkat reports
 //! `input_tokens` without the prompt-cache tokens (Anthropic semantics; the
 //! other clients report no cache tokens), so the cost of one model is
@@ -80,6 +82,9 @@ impl UsageTotals {
     }
 }
 
+/// Token totals by model id, in first-use order.
+pub type ModelTotals = IndexMap<String, UsageTotals>;
+
 /// Token totals of a session by model, in first-use order.
 ///
 /// `known` is false when the totals were derived from the session's
@@ -87,10 +92,13 @@ impl UsageTotals {
 /// models are then a guess and the readout is marked approximate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionCost {
-    /// Totals by model id.
-    pub per_model: IndexMap<String, UsageTotals>,
+    /// Totals by model id (the session's own calls and its helpers').
+    pub per_model: ModelTotals,
     /// Whether every total is attributed to the model that produced it.
     pub known: bool,
+    /// The helpers' share of `per_model`, by helper label.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub helpers: IndexMap<String, ModelTotals>,
 }
 
 /// What [`crate::ui::Effect::CostSnapshot`] carries and the sidecar stores.
@@ -101,6 +109,7 @@ impl Default for SessionCost {
         Self {
             per_model: IndexMap::new(),
             known: true,
+            helpers: IndexMap::new(),
         }
     }
 }
@@ -135,20 +144,28 @@ impl SessionCost {
         Self {
             per_model: IndexMap::from([(model.to_string(), totals)]),
             known: false,
+            helpers: IndexMap::new(),
         }
     }
 
     /// Add `totals` to `model`.
     pub fn add(&mut self, model: &str, totals: &UsageTotals) {
+        add_to(&mut self.per_model, model, totals);
+    }
+
+    /// Add one model call of the helper `label` (on `model`): to the
+    /// session's totals and to the helper's own.
+    pub fn record_helper(&mut self, label: &str, model: &str, usage: &Usage) {
+        let totals = UsageTotals::from_usage(usage);
         if totals.is_zero() {
             return;
         }
-        match self.per_model.get_mut(model) {
-            Some(existing) => existing.add(totals),
-            None => {
-                self.per_model.insert(model.to_string(), *totals);
-            }
-        }
+        self.add(model, &totals);
+        add_to(
+            self.helpers.entry(label.to_string()).or_default(),
+            model,
+            &totals,
+        );
     }
 
     /// Add one model call's usage to `model`.
@@ -239,6 +256,7 @@ impl SessionCost {
                 totals.input, totals.output, totals.cache_read, totals.cache_write
             );
         }
+        self.write_helpers(&mut out, prices);
         let total = match self.readout(prices) {
             CostReadout::Usd { usd, approx } => {
                 format!("{}{}", if approx { "~" } else { "" }, fmt_usd(usd))
@@ -252,6 +270,47 @@ impl SessionCost {
             );
         }
         out
+    }
+}
+
+impl SessionCost {
+    /// The helpers' lines of the `/cost` breakdown (their tokens are
+    /// already in the per-model lines above them).
+    fn write_helpers(&self, out: &mut String, prices: &PriceTable) {
+        let helpers: Vec<_> = self
+            .helpers
+            .iter()
+            .flat_map(|(label, models)| models.iter().map(move |(model, t)| (label, model, t)))
+            .filter(|(_, _, totals)| !totals.is_zero())
+            .collect();
+        if helpers.is_empty() {
+            return;
+        }
+        out.push_str("\n  of which helpers:");
+        for (label, model, totals) in helpers {
+            let usd = prices.lookup(model).map_or_else(
+                || "$?".to_string(),
+                |(price, _)| fmt_usd(totals.cost(&price)),
+            );
+            let _ = write!(
+                out,
+                "\n    {label} ({model}): in {} · out {} · cache read {} · cache write {} · {usd}",
+                totals.input, totals.output, totals.cache_read, totals.cache_write
+            );
+        }
+    }
+}
+
+/// Add `totals` to `model` in `per_model`.
+fn add_to(per_model: &mut ModelTotals, model: &str, totals: &UsageTotals) {
+    if totals.is_zero() {
+        return;
+    }
+    match per_model.get_mut(model) {
+        Some(existing) => existing.add(totals),
+        None => {
+            per_model.insert(model.to_string(), *totals);
+        }
     }
 }
 
@@ -394,6 +453,36 @@ mod tests {
             SessionCost::derived("a", &Usage::default()),
             SessionCost::default()
         );
+    }
+
+    #[test]
+    fn helper_usage_rolls_up_and_is_broken_down() {
+        let prices = table(&[
+            ("a", price(1.0, 2.0, None, None)),
+            ("b", price(10.0, 20.0, None, None)),
+        ]);
+        let mut cost = SessionCost::default();
+        cost.record("a", &usage(1_000_000, 0, None, None));
+        cost.record_helper("scout", "a", &usage(500_000, 0, None, None));
+        cost.record_helper("scout", "b", &usage(100_000, 0, None, None));
+        cost.record_helper("idle", "b", &usage(0, 0, None, None));
+        // The footer total includes the helpers: 1.5 × 1 + 0.1 × 10.
+        close(cost.cost_usd(&prices).0, 2.5);
+        assert_eq!(cost.per_model["a"].input, 1_500_000);
+        assert_eq!(cost.helpers["scout"]["b"].input, 100_000);
+        assert!(!cost.helpers.contains_key("idle"));
+        let text = cost.breakdown(&prices);
+        assert!(text.contains("of which helpers:"), "{text}");
+        assert!(text.contains("scout (a): in 500000"), "{text}");
+        assert!(
+            text.contains("scout (b): in 100000 · out 0 · cache read 0 · cache write 0 · $1.00"),
+            "{text}"
+        );
+        assert!(text.contains("total: $2.50"), "{text}");
+        // No helpers, no helper section.
+        let mut plain = SessionCost::default();
+        plain.record("a", &usage(1, 1, None, None));
+        assert!(!plain.breakdown(&prices).contains("helpers"));
     }
 
     #[test]

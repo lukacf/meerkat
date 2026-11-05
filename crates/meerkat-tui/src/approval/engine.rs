@@ -84,6 +84,36 @@ pub struct ApprovalConfig {
 
 type CacheKey = (String, u64);
 
+/// On whose behalf a tool call is decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Caller<'a> {
+    /// The session whose user's intent the call is judged against (a
+    /// helper's calls are attributed to the session that delegated to it).
+    pub session_id: &'a SessionId,
+    /// The helper making the call (`None`: the session's own agent).
+    pub agent: Option<&'a str>,
+}
+
+impl<'a> Caller<'a> {
+    /// The session's own agent.
+    #[must_use]
+    pub fn session(session_id: &'a SessionId) -> Self {
+        Self {
+            session_id,
+            agent: None,
+        }
+    }
+
+    /// A helper (`agent`) working for `session_id`.
+    #[must_use]
+    pub fn helper(session_id: &'a SessionId, agent: &'a str) -> Self {
+        Self {
+            session_id,
+            agent: Some(agent),
+        }
+    }
+}
+
 /// The approval engine, shared behind an [`Arc`] by every session's gate.
 pub struct ApprovalEngine {
     root: ProjectRoot,
@@ -323,8 +353,8 @@ impl ApprovalEngine {
         let _ = self.events.send(event);
     }
 
-    /// Decide one tool call. Records it in the session's approval transcript
-    /// and emits an [`ApprovalEvent::Decision`].
+    /// Decide one tool call of `session_id`'s own agent. Records it in the
+    /// session's approval transcript and emits an [`ApprovalEvent::Decision`].
     pub async fn decide(
         &self,
         session_id: &SessionId,
@@ -332,7 +362,28 @@ impl ApprovalEngine {
         name: &str,
         args: &Value,
     ) -> Verdict {
-        let verdict = self.evaluate(session_id, tool_use_id, name, args).await;
+        self.decide_as(Caller::session(session_id), tool_use_id, name, args)
+            .await
+    }
+
+    /// Decide one tool call made on behalf of `caller.session_id`: by its own
+    /// agent, or by a helper it delegated to ([`Caller::agent`]). A helper's
+    /// call is judged exactly like the session's own: against the session's
+    /// transcript (the user's words; the helper's task text is
+    /// assistant-authored and never recorded as user intent), its allow
+    /// cache, its Stop and the shared denial counters. The escalation dialog
+    /// and the decision event name the helper.
+    pub async fn decide_as(
+        &self,
+        caller: Caller<'_>,
+        tool_use_id: &str,
+        name: &str,
+        args: &Value,
+    ) -> Verdict {
+        let Caller { session_id, agent } = caller;
+        let verdict = self
+            .evaluate(session_id, agent, tool_use_id, name, args)
+            .await;
         let (tier, reason) = match &verdict {
             Verdict::Allow { tier, .. } => (*tier, None),
             Verdict::Deny { tier, reason } => (*tier, Some(reason.to_string())),
@@ -349,6 +400,7 @@ impl ApprovalEngine {
         tracing::debug!(tool = name, %tier, ?summary, "auto-mode decision");
         self.emit(ApprovalEvent::Decision {
             session_id: session_id.clone(),
+            agent: agent.map(str::to_string),
             tool_use_id: tool_use_id.to_string(),
             tool: name.to_string(),
             tier,
@@ -413,6 +465,7 @@ impl ApprovalEngine {
     async fn evaluate(
         &self,
         session_id: &SessionId,
+        agent: Option<&str>,
         tool_use_id: &str,
         name: &str,
         args: &Value,
@@ -453,7 +506,7 @@ impl ApprovalEngine {
                 Err(e) => format!("classifier error: {e}"),
             };
             return self
-                .escalate(session_id, tool_use_id, &action, Some(hint))
+                .escalate(session_id, agent, tool_use_id, &action, Some(hint))
                 .await;
         }
 
@@ -482,6 +535,7 @@ impl ApprovalEngine {
                 if self.broker.is_some() {
                     self.escalate(
                         session_id,
+                        agent,
                         tool_use_id,
                         &action,
                         Some(format!("classifier error: {err}")),
@@ -525,6 +579,7 @@ impl ApprovalEngine {
     async fn escalate(
         &self,
         session_id: &SessionId,
+        agent: Option<&str>,
         tool_use_id: &str,
         action: &Action<'_>,
         hint: Option<String>,
@@ -567,6 +622,7 @@ impl ApprovalEngine {
         let prompt = EscalationPrompt {
             id,
             session_id: session_id.clone(),
+            agent: agent.map(str::to_string),
             tool: action.name.to_string(),
             args_preview: args_preview(action),
             subjects: action.subjects(&self.root),

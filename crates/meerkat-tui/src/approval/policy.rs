@@ -120,7 +120,19 @@ pub const READ_ONLY_BUILTINS: &[&str] = &[
     "shell_jobs",
     "shell_job_status",
     "memory_search",
+    // Mob queries (see [`crate::mobs`]).
+    "mob_list",
+    "mob_list_members",
+    "mob_check_member",
+    "mob_profile_get",
+    "mob_profile_list",
+    "mob_profile_list_sources",
 ];
+
+/// Tools that hand work to a helper (a mob member, see [`crate::mobs`]).
+/// Delegating does nothing by itself: every call the helper makes passes
+/// the delegating session's gate.
+pub const DELEGATION_TOOLS: &[&str] = &["delegate", "fork_off"];
 
 /// What a tool call does, as far as the policy is concerned.
 #[derive(Debug, Clone, PartialEq)]
@@ -153,6 +165,8 @@ pub enum ActionKind<'a> {
     },
     /// A builtin from [`READ_ONLY_BUILTINS`].
     ReadOnlyBuiltin,
+    /// A tool from [`DELEGATION_TOOLS`].
+    Delegation,
     /// `memory_list` / `memory_read`.
     MemoryRead,
     /// `memory_save` / `memory_forget` with a valid scope.
@@ -217,6 +231,7 @@ impl<'a> Action<'a> {
                 }
             }
             n if READ_ONLY_BUILTINS.contains(&n) => ActionKind::ReadOnlyBuiltin,
+            n if DELEGATION_TOOLS.contains(&n) => ActionKind::Delegation,
             _ => ActionKind::Other,
         };
         Self { name, args, kind }
@@ -238,7 +253,10 @@ impl<'a> Action<'a> {
                 let name = slug(name).unwrap_or_else(|_| (*name).to_string());
                 vec![format!("{scope}/{name}")]
             }
-            ActionKind::ReadOnlyBuiltin | ActionKind::MemoryRead | ActionKind::Other => {
+            ActionKind::ReadOnlyBuiltin
+            | ActionKind::Delegation
+            | ActionKind::MemoryRead
+            | ActionKind::Other => {
                 vec![serde_json::to_string_pretty(self.args).unwrap_or_default()]
             }
         }
@@ -353,6 +371,10 @@ fn builtin_tier(action: &Action<'_>, ctx: &PolicyContext<'_>) -> Result<TierDeci
         ActionKind::ReadOnlyBuiltin => {
             Ok(TierDecision::new(Tier::AlwaysAllow, "read-only builtin"))
         }
+        ActionKind::Delegation => Ok(TierDecision::new(
+            Tier::AlwaysAllow,
+            "delegation (the helper's own calls pass this gate)",
+        )),
         ActionKind::MemoryRead => Ok(TierDecision::new(Tier::AlwaysAllow, "memory read")),
         ActionKind::MemoryWrite { scope, .. } => {
             if *scope == Scope::Workspace {
@@ -495,6 +517,40 @@ mod tests {
         );
         assert_eq!(
             tier(&root, &RuleSet::default(), false, "apply_patch", &args),
+            Tier::Classifier
+        );
+    }
+
+    #[test]
+    fn delegation_and_mob_queries_need_no_review_but_mob_changes_do() {
+        let (_dir, root) = project();
+        let task = json!({"member_id": "scout", "task": "rm -rf /", "result_label": "r", "max_text_bytes": 10});
+        assert_eq!(
+            Action::parse("delegate", &task).kind,
+            ActionKind::Delegation
+        );
+        assert_eq!(
+            tier(&root, &RuleSet::default(), false, "delegate", &task),
+            Tier::AlwaysAllow
+        );
+        assert_eq!(
+            tier(
+                &root,
+                &RuleSet::default(),
+                false,
+                "mob_list_members",
+                &json!({})
+            ),
+            Tier::AlwaysAllow
+        );
+        assert_eq!(
+            tier(
+                &root,
+                &RuleSet::default(),
+                false,
+                "mob_destroy",
+                &json!({"mob_id": "x"})
+            ),
             Tier::Classifier
         );
     }

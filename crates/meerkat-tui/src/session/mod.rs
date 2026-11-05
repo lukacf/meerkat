@@ -30,6 +30,10 @@
 //!   ([`crate::approval::admission::install`]); a resumed session's
 //!   classifier transcript is seeded from its authoritative history, and
 //!   every prompt or steer the user submits is recorded in it.
+//! - With the runtime's helper host ([`crate::mobs`]) every build enables
+//!   the mob tools (`delegate`, `mob_*`) explicitly, the session registers
+//!   its model and binding for its helpers to inherit, and
+//!   [`SessionHandle::interrupt`] cancels its running helpers.
 
 pub mod resolve;
 
@@ -45,7 +49,7 @@ use meerkat_core::service::{
 };
 use meerkat_core::{
     AgentToolDispatcher, AuthBindingRef, ContentInput, HandlingMode, InputId, Provider, Session,
-    SessionId, SystemPromptOverride,
+    SessionId, SystemPromptOverride, ToolCategoryOverride,
 };
 use meerkat_runtime::completion::CompletionHandle;
 use meerkat_runtime::{
@@ -56,6 +60,7 @@ use meerkat_runtime::{
 use crate::approval::{ApprovalEngine, admission};
 use crate::bootstrap::{CODING_PERSONA, ModelChoice, Runtime, TuiService};
 use crate::error::TuiError;
+use crate::mobs::Helpers;
 
 pub use resolve::{list_sessions, resolve_session_ref};
 
@@ -100,6 +105,7 @@ pub struct SessionHandle {
     /// The runtime's profile generation when the agent was built.
     profiles: u64,
     approval: Option<Arc<ApprovalEngine>>,
+    helpers: Option<Arc<Helpers>>,
 }
 
 impl std::fmt::Debug for SessionHandle {
@@ -126,7 +132,7 @@ impl SessionHandle {
             .clone()
             .unwrap_or_else(|| runtime.choice.clone());
         let approval = options.approval.clone();
-        let mut build = build_options(options, choice.provider);
+        let mut build = build_options(options, choice.provider, runtime.helpers.is_some());
         build.auth_binding.clone_from(&choice.auth_binding);
         build.mint_session_with_id(session.id().clone());
         if let Some(engine) = &approval {
@@ -167,7 +173,7 @@ impl SessionHandle {
         // needs its profile again before the agent is rebuilt.
         runtime.ensure_profile(&choice, None).await?;
         let approval = options.approval.clone();
-        let mut build = build_options(options, choice.provider);
+        let mut build = build_options(options, choice.provider, runtime.helpers.is_some());
         build.auth_binding.clone_from(&choice.auth_binding);
         build.resume_existing_session(session.clone());
         if let Some(engine) = &approval {
@@ -192,6 +198,9 @@ impl SessionHandle {
         } = choice;
         let profiles = runtime.profiles();
         let id = session.id().clone();
+        if let Some(helpers) = &runtime.helpers {
+            helpers.register_session(&id, &model, auth_binding.as_ref());
+        }
         let request = CreateSessionRequest {
             injected_context: Vec::new(),
             model: model.clone(),
@@ -230,6 +239,7 @@ impl SessionHandle {
             auth_binding,
             profiles,
             approval,
+            helpers: runtime.helpers.clone(),
         })
     }
 
@@ -299,6 +309,9 @@ impl SessionHandle {
         self.model.clone_from(&choice.model);
         self.provider = choice.provider;
         self.auth_binding.clone_from(&choice.auth_binding);
+        if let Some(helpers) = &self.helpers {
+            helpers.register_session(&self.id, &self.model, self.auth_binding.as_ref());
+        }
         Ok(())
     }
 
@@ -395,8 +408,9 @@ impl SessionHandle {
         })
     }
 
-    /// Interrupt: stop the current run, then cancel each of `outstanding`
-    /// (oldest first) that has not reached its terminal.
+    /// Interrupt: cancel the session's running helpers, stop the current
+    /// run, then cancel each of `outstanding` (oldest first) that has not
+    /// reached its terminal.
     ///
     /// Stopping the run (rather than only interrupting it) abandons the
     /// steers that joined it instead of returning them to their lane for a
@@ -407,6 +421,9 @@ impl SessionHandle {
     ///
     /// [`TuiError::Runtime`] when the runtime fails the stop or a cancel.
     pub async fn interrupt(&self, outstanding: &[InputId]) -> Result<(), TuiError> {
+        if let Some(helpers) = &self.helpers {
+            helpers.cancel_for(&self.id).await;
+        }
         if let Some(run_id) = self.machine.current_run(&self.id).await {
             let receipt = self
                 .machine
@@ -473,8 +490,14 @@ impl SessionHandle {
 }
 
 /// Build options shared by fresh and resumed sessions: the persona plus the
-/// caller's instruction sections, and the external tools.
-fn build_options(options: SessionOptions, provider: Provider) -> SessionBuildOptions {
+/// caller's instruction sections, the external tools, and (with `helpers`)
+/// the mob tools enabled explicitly, which a resumed session's metadata
+/// alone never does.
+fn build_options(
+    options: SessionOptions,
+    provider: Provider,
+    helpers: bool,
+) -> SessionBuildOptions {
     let SessionOptions {
         external_tools,
         additional_instructions,
@@ -483,10 +506,14 @@ fn build_options(options: SessionOptions, provider: Provider) -> SessionBuildOpt
     let mut instructions = Vec::with_capacity(1 + additional_instructions.len());
     instructions.push(CODING_PERSONA.to_string());
     instructions.extend(additional_instructions);
-    SessionBuildOptions {
+    let mut build = SessionBuildOptions {
         provider: Some(provider),
         external_tools,
         additional_instructions: Some(instructions),
         ..SessionBuildOptions::default()
+    };
+    if helpers {
+        build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::Enable);
     }
+    build
 }

@@ -28,6 +28,9 @@ pub const MEMORY_LIST: &str = "memory_list";
 /// Names of every tool exposed by [`MemoryToolDispatcher`].
 pub const MEMORY_TOOL_NAMES: &[&str] = &[MEMORY_SAVE, MEMORY_READ, MEMORY_FORGET, MEMORY_LIST];
 
+/// Provenance source id of the note tools (see [`crate::tools::FILE_TOOLS_SOURCE`]).
+pub const NOTES_SOURCE: &str = "rkat-tui.notes";
+
 const USER_UNAVAILABLE: &str = "user-level memory is unavailable (no config directory)";
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -169,7 +172,13 @@ impl MemoryToolDispatcher {
                 meerkat_tools::schema_for::<ListArgs>(),
             )),
         ]
-        .into();
+        .into_iter()
+        .map(|def| {
+            Arc::new(
+                Arc::unwrap_or_clone(def).with_provenance(crate::tools::provenance(NOTES_SOURCE)),
+            )
+        })
+        .collect();
         Self {
             stores: Arc::new(Stores { user, workspace }),
             tools,

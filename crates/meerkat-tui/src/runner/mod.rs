@@ -19,6 +19,11 @@
 //! `/model` and the picker live in [`models`], the price table and the cost
 //! sidecar in [`cost`].
 //!
+//! Helpers ([`crate::mobs`]): their scoped events go to the UI as
+//! [`Msg::Scoped`] (nested blocks, per-helper usage) and the running set as
+//! [`StatusUpdate::Helpers`]; an interrupt cancels the session's helpers
+//! (see [`SessionHandle::interrupt`]).
+//!
 //! Effects of later phases are answered honestly instead of being stubbed:
 //! `/remember` (P6) and manual `/compact` (the runtime compacts on its own; a
 //! manual trigger needs an upstream primitive).
@@ -50,11 +55,12 @@ use crate::cli::Args;
 use crate::delivery::{PendingId, SteerFailure};
 use crate::error::TuiError;
 use crate::memory::{MemoryToolDispatcher, NoteStore, Scope, prompt_index};
+use crate::mobs::HelperUpdate;
 use crate::session::{Admission, SessionHandle, SessionOptions};
 use crate::tools::{FileDiff, FileToolDispatcher};
 use crate::ui::{
-    App, CompactFailure, Effect, History, Msg, NoticeLevel, StatusInfo, TurnOutcome, TurnSummary,
-    UiChannels, run_ui,
+    App, CompactFailure, Effect, History, Msg, NoticeLevel, StatusInfo, StatusUpdate, TurnOutcome,
+    TurnSummary, UiChannels, run_ui,
 };
 
 pub use lifecycle::{Start, blocks_from_session, open_start, session_endpoint, session_messages};
@@ -415,6 +421,8 @@ pub(crate) struct Runner {
     prices: Arc<crate::pricing::PriceTable>,
     /// A community price-list refresh running in the background.
     price_fetch: Option<cost::PriceFetch>,
+    /// Helper events and the running set.
+    helper_updates: Option<mpsc::UnboundedReceiver<HelperUpdate>>,
 }
 
 impl Runner {
@@ -442,6 +450,7 @@ impl Runner {
             cost::spawn_price_fetch(url.to_string(), runtime.pricing.cache_path.clone())
         });
         let current_endpoint = runtime.choice.endpoint.clone();
+        let helper_updates = runtime.helpers.as_ref().and_then(|h| h.take_updates());
         let mut runner = Self {
             runtime,
             template,
@@ -464,6 +473,7 @@ impl Runner {
             pending_set: None,
             prices,
             price_fetch,
+            helper_updates,
         };
         runner.push_auto_status();
         for notice in runner.runtime.confinement.notices.clone() {
@@ -502,6 +512,7 @@ impl Runner {
                 Some(done) = self.completion_rx.recv() => self.on_completed(done).await,
                 Some(request) = recv(&mut self.approval.escalations) => self.on_escalation(request),
                 Some(event) = recv_unbounded(&mut self.approval.events) => self.on_approval_event(event),
+                Some(update) = recv_unbounded(&mut self.helper_updates) => self.on_helper_update(update),
                 joined = join(&mut self.model_fetch) => self.model_fetch_finished(joined).await,
                 joined = join(&mut self.price_fetch) => self.price_fetch_finished(joined),
                 Some(diff) = self.diff_rx.recv() => self.send(Msg::Diff {
@@ -534,6 +545,14 @@ impl Runner {
 
     fn send(&self, msg: Msg) {
         let _ = self.ui_tx.send(msg);
+    }
+
+    /// Forward a helper's event, or the running set, to the UI.
+    fn on_helper_update(&self, update: HelperUpdate) {
+        self.send(match update {
+            HelperUpdate::Event(scoped) => Msg::Scoped(scoped),
+            HelperUpdate::Live(helpers) => Msg::Status(StatusUpdate::Helpers(helpers)),
+        });
     }
 
     fn notice(&self, level: NoticeLevel, text: impl Into<String>) {

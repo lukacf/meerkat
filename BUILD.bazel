@@ -982,6 +982,7 @@ test_suite(
         "//crates/meerkat-tui:integrator_test",
         "//crates/meerkat-tui:meerkat_tui_unit_test",
         "//crates/meerkat-tui:memory_tools_test",
+        "//crates/meerkat-tui:mobs_test",
         "//crates/meerkat-tui:models_test",
         "//crates/meerkat-web-runtime:browser_contract_test",
         "//crates/meerkat-web-runtime:meerkat_web_runtime_unit_test",

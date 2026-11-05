@@ -179,6 +179,8 @@ pub enum StatusUpdate {
     },
     /// The model's context window in tokens, `None` when unknown.
     ContextWindow(Option<u64>),
+    /// The helpers (mob members) running now.
+    Helpers(Vec<crate::mobs::HelperStatus>),
     /// An estimated context window (the model is not in the catalog; the
     /// window is a family or provider default). The gauge shows `~`.
     ApproxContextWindow(u64),
@@ -359,6 +361,8 @@ pub struct StatusInfo {
     pub running_since: Option<Instant>,
     /// Number of messages typed mid-turn that have not been delivered yet.
     pub queued: usize,
+    /// Number of helpers running now.
+    pub helpers: usize,
     /// Whether the classifier is running.
     pub classifying: bool,
     /// Tokens in the last model call, `None` when unknown.
@@ -374,6 +378,10 @@ pub struct StatusInfo {
     /// Prices for the cost readout.
     pub prices: Arc<crate::pricing::PriceTable>,
 }
+
+/// The model a helper's usage is counted under when neither the provider
+/// nor the helper host named one.
+const UNKNOWN_HELPER_MODEL: &str = "unknown";
 
 /// Number of session-id characters shown in the status bar.
 const SESSION_SHORT_LEN: usize = 8;
@@ -433,6 +441,7 @@ impl StatusInfo {
                 self.context_window = Some(window);
                 self.window_approx = true;
             }
+            StatusUpdate::Helpers(helpers) => self.helpers = helpers.len(),
             StatusUpdate::CostTotals(cost) => self.cost = cost,
             StatusUpdate::Prices(prices) => self.prices = prices,
         }
@@ -1050,7 +1059,10 @@ impl App {
                         .add_tokens(usage.input_tokens, usage.output_tokens);
                 }
             }
-            Msg::Scoped(ev) => self.transcript.apply_scoped_event_at(&ev, now),
+            Msg::Scoped(ev) => {
+                self.record_helper_usage(&ev, &mut fx);
+                self.transcript.apply_scoped_event_at(&ev, now);
+            }
             Msg::TurnFinished(outcome) => self.turn_finished(outcome, now, &mut fx),
             Msg::SteerAck { id, result } => self.steer_ack(id, result, now, &mut fx),
             Msg::SteerDelivered(id) => self.settle(id),
@@ -1096,6 +1108,12 @@ impl App {
                 // Envelope sequence numbers restart with every session task.
                 if matches!(update, StatusUpdate::Session(_)) {
                     self.last_seq = 0;
+                }
+                if let StatusUpdate::Helpers(helpers) = &update {
+                    for helper in helpers {
+                        self.transcript
+                            .note_helper_model(&helper.label, &helper.model);
+                    }
                 }
                 self.status.apply(update);
             }
@@ -1629,6 +1647,36 @@ impl App {
         };
         let texts = self.withdraw(&[id]);
         self.prepend_to_editor(texts);
+    }
+
+    /// A helper's model call: count its usage for the helper (on the model
+    /// the provider accounted it to, else the helper's known model).
+    fn record_helper_usage(&mut self, ev: &ScopedAgentEvent, fx: &mut Vec<Effect>) {
+        let AgentEvent::TurnCompleted {
+            usage: Some(usage), ..
+        } = &ev.event
+        else {
+            return;
+        };
+        let Some(label) = ev.scope_path.iter().rev().find_map(|frame| match frame {
+            meerkat_core::StreamScopeFrame::MobMember { agent_identity, .. } => {
+                Some(agent_identity.as_str())
+            }
+            _ => None,
+        }) else {
+            return;
+        };
+        let accounted = usage.accounting().model.trim();
+        let model = if accounted.is_empty() {
+            self.transcript
+                .helper_model(label)
+                .unwrap_or(UNKNOWN_HELPER_MODEL)
+                .to_string()
+        } else {
+            accounted.to_string()
+        };
+        self.status.cost.record_helper(label, &model, usage);
+        fx.push(Effect::CostSnapshot(self.status.cost.clone()));
     }
 
     fn turn_finished(&mut self, outcome: TurnOutcome, now: Instant, fx: &mut Vec<Effect>) {
@@ -2799,6 +2847,7 @@ mod tests {
     fn ctrl_c_with_modal_stops_every_pending_escalation() {
         let mut app = App::new(StatusInfo::default());
         let prompt = |t: &str| EscalationPrompt {
+            agent: None,
             tool: t.into(),
             args_preview: "{}".into(),
             hint: None,
@@ -2829,6 +2878,7 @@ mod tests {
     fn escalation_keys_answer_and_advance() {
         let mut app = App::new(StatusInfo::default());
         let p = EscalationPrompt {
+            agent: None,
             tool: "shell".into(),
             args_preview: "rm x".into(),
             hint: Some("deletes".into()),

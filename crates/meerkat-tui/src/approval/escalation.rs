@@ -30,6 +30,8 @@ pub struct EscalationPrompt {
     pub id: u64,
     /// Session the call belongs to.
     pub session_id: SessionId,
+    /// The helper making the call (`None`: the session's own agent).
+    pub agent: Option<String>,
     /// Tool name.
     pub tool: String,
     /// Short rendering of the arguments.
@@ -49,6 +51,8 @@ pub struct EscalationRequest {
     pub id: u64,
     /// Session the call belongs to.
     pub session_id: SessionId,
+    /// The helper making the call (`None`: the session's own agent).
+    pub agent: Option<String>,
     /// Tool name.
     pub tool: String,
     /// Short rendering of the arguments.
@@ -97,6 +101,7 @@ impl EscalationBroker {
         let request = EscalationRequest {
             id: prompt.id,
             session_id: prompt.session_id,
+            agent: prompt.agent,
             tool: prompt.tool,
             args_preview: prompt.args_preview,
             subjects: prompt.subjects,
@@ -127,6 +132,7 @@ mod tests {
         EscalationPrompt {
             id: 0,
             session_id: SessionId::new(),
+            agent: None,
             tool: tool.into(),
             args_preview: "{}".into(),
             subjects: vec!["{}".into()],

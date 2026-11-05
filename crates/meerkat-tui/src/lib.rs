@@ -21,6 +21,7 @@
 //! - [`endpoints`] — LLM endpoints, `endpoint:model` references, their lowering into realm bindings, per-session choice sidecars
 //! - [`models`] — live model lists of every endpoint (never the catalog)
 //! - [`bootstrap`] — realm/config/factory/service construction, provider credentials
+//! - [`mobs`] — helpers (sub-agents) as mob members: approval gate, model binding, observation
 //! - [`session`] — session handle: create, resume, turns, steer, interrupt
 //! - [`runner`] — the event loop joining the session and the UI
 //! - [`ui`] — ratatui application
@@ -32,6 +33,7 @@ pub mod delivery;
 pub mod endpoints;
 pub mod error;
 pub mod memory;
+pub mod mobs;
 pub mod models;
 pub mod overlay;
 pub mod paths;

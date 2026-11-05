@@ -42,6 +42,20 @@ use tokio::sync::mpsc;
 
 /// Tool name for [`read`].
 pub const READ_FILE: &str = "read_file";
+
+/// Provenance source id of the file tools. Stable across builds: a helper's
+/// inherited tool ceiling (a mob `delegate` with `inherit_parent` tooling)
+/// matches its parent's tools by provenance, so every build tags them alike.
+pub const FILE_TOOLS_SOURCE: &str = "rkat-tui.files";
+
+/// Provenance of a TUI-owned tool: a host callback surface named `source`.
+#[must_use]
+pub fn provenance(source: &str) -> meerkat_core::ToolProvenance {
+    meerkat_core::ToolProvenance::new(
+        meerkat_core::ToolSourceKind::Callback,
+        meerkat_core::ToolSourceId::new(source),
+    )
+}
 /// Tool name for [`write`].
 pub const WRITE_FILE: &str = "write_file";
 /// Tool name for [`edit`].
@@ -282,14 +296,16 @@ impl FileToolDispatcher {
         diff_tx: Option<mpsc::UnboundedSender<FileDiff>>,
         hide_secrets: bool,
     ) -> Self {
-        let tools: Arc<[Arc<ToolDef>]> = vec![
-            Arc::new(read::definition()),
-            Arc::new(write::definition()),
-            Arc::new(edit::definition()),
-            Arc::new(glob::definition()),
-            Arc::new(grep::definition()),
+        let tools: Arc<[Arc<ToolDef>]> = [
+            read::definition(),
+            write::definition(),
+            edit::definition(),
+            glob::definition(),
+            grep::definition(),
         ]
-        .into();
+        .into_iter()
+        .map(|def| Arc::new(def.with_provenance(provenance(FILE_TOOLS_SOURCE))))
+        .collect();
         Self {
             shared: Arc::new(Shared {
                 root,

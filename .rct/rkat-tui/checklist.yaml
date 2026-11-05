@@ -135,7 +135,7 @@ phases:
         done_when: "A test switches the model mid-session and the next turn uses it."
   - id: 5
     title: "Mobs"
-    status: pending
+    status: done
     reviewers: [integration-sheriff, spec-auditor]
     verification_commands:
       - "./scripts/repo-cargo nextest run -p meerkat-tui"
@@ -143,8 +143,9 @@ phases:
       - id: P5-T001
         spec_id: REQ-005
         text: "Enable delegate/fork_off with the admission gate inherited by members."
-        done: false
+        done: true
         done_when: "A test proves a member's tool call passes the same gate."
+        note: "Gate reaches members through MobMcpState::with_child_spawn_member_customizer (SpawnMemberSpec.tool_dispatch_admission). fork_off needs the caller to be a durable mob member, so the TUI's primary session (and its ephemeral delegate helpers) can only delegate; see evidence.md P5 gaps."
   - id: 6
     title: "Context, Memory, Compaction Policy, Docs, Review"
     status: pending

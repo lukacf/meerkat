@@ -188,12 +188,34 @@ pub struct Transcript {
     open_reasoning: Option<BlockId>,
     text_seen_this_turn: bool,
     reasoning_seen_this_turn: bool,
+    /// The model of each helper (by label) the UI has heard of, for block
+    /// labels.
+    helper_models: IndexMap<String, String>,
 }
 
 impl Transcript {
     /// Create an empty transcript.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Remember that the helper `label` runs on `model` (its blocks name it).
+    pub fn note_helper_model(&mut self, label: &str, model: &str) {
+        self.helper_models
+            .insert(label.to_string(), model.to_string());
+    }
+
+    /// The model of the helper `label`, when known.
+    pub fn helper_model(&self, label: &str) -> Option<&str> {
+        self.helper_models.get(label).map(String::as_str)
+    }
+
+    /// `[label · model]`, or `[label]` while the model is unknown.
+    fn helper_tag(&self, label: &str) -> String {
+        match self.helper_model(label) {
+            Some(model) => format!("[{label} · {model}]"),
+            None => format!("[{label}]"),
+        }
     }
 
     /// All blocks in order.
@@ -570,12 +592,13 @@ impl Transcript {
         let Some(label) = label else {
             return;
         };
+        let tag = self.helper_tag(&label);
         let key = |id: &str| format!("{}/{id}", scoped.scope_id);
         match &scoped.event {
             AgentEvent::ToolCallRequested { id, name, args } => {
                 self.request_tool(
                     key(id),
-                    format!("[{label}] {name}"),
+                    format!("{tag} {name}"),
                     args.as_value().clone(),
                     depth,
                 );
@@ -597,7 +620,7 @@ impl Transcript {
             AgentEvent::RunFailed { error_report, .. } => {
                 self.push_notice(
                     NoticeLevel::Error,
-                    format!("[{label}] error: {}", error_report.message),
+                    format!("{tag} error: {}", error_report.message),
                 );
             }
             _ => {}
@@ -1161,6 +1184,23 @@ mod tests {
         // Primary-only scope is ignored.
         t.apply_scoped_event(&ScopedAgentEvent::primary("s", text("dup")));
         assert_eq!(t.len(), 1);
+        // Once its model is known, a helper's blocks name it; a helper of a
+        // helper nests one level deeper.
+        t.note_helper_model("inner", "gpt-5.5");
+        let mut nested = ev.clone();
+        nested.scope_path.push(StreamScopeFrame::MobMember {
+            flow_run_id: String::new(),
+            agent_identity: "inner".into(),
+            agent_runtime_id: None,
+            fence_token: None,
+            generation: None,
+        });
+        nested.scope_id = ScopedAgentEvent::scope_id_from_path(&nested.scope_path);
+        t.apply_scoped_event(&nested);
+        assert!(matches!(
+            &t.blocks()[1],
+            Block::Tool { name, depth: 2, .. } if name == "[inner · gpt-5.5] glob"
+        ));
     }
 
     #[test]

@@ -108,6 +108,7 @@ impl Runner {
     /// Show an escalation to the human.
     pub(super) fn on_escalation(&mut self, request: EscalationRequest) {
         let prompt = EscalationPrompt {
+            agent: request.agent.clone(),
             tool: request.tool.clone(),
             args_preview: request.args_preview.clone(),
             hint: request.classifier_hint,
@@ -183,12 +184,17 @@ impl Runner {
     pub(super) fn on_approval_event(&mut self, event: ApprovalEvent) {
         match event {
             ApprovalEvent::Decision {
+                agent,
                 tool,
                 tier,
                 verdict,
                 reason,
                 ..
             } => {
+                let tool = match agent {
+                    Some(agent) => format!("[{agent}] {tool}"),
+                    None => tool,
+                };
                 let allowed = verdict.is_allowed();
                 // Tier-1/2 allows are routine; only reviewed or denied
                 // actions are worth a line.

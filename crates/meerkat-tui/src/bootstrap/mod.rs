@@ -29,8 +29,12 @@
 //! models only an endpoint knows ([`Runtime::ensure_profile`]). Nothing of it
 //! is written to a realm document.
 //!
+//! With the `mob` feature it hosts helpers ([`crate::mobs`]): the factory's
+//! mob tools are on, the builder's default mob-tools slot carries the mob
+//! host's tool factory, and every helper spawn passes the TUI's customizer
+//! (approval gate, model binding, file tools).
+//!
 //! Seams for later phases (deliberately absent here, not stubbed):
-//! - P5 mobs: `AgentFactory::mob(true)`.
 //! - P6 instruction files beyond the native `AGENTS.md` discovery, MCP from
 //!   `.rkat/mcp.toml`, native semantic memory.
 
@@ -61,13 +65,18 @@ use crate::endpoints::{
     needs_lookup, plan_startup,
 };
 use crate::error::TuiError;
+use crate::mobs::Helpers;
 use crate::models::{ModelCache, ModelEntry, ModelLister, live_lister};
 use crate::pricing::PricingSetup;
+#[cfg(feature = "mob")]
+use crate::tools::FileToolDispatcher;
+#[cfg(feature = "mob")]
+use meerkat_core::AgentToolDispatcher;
 
 pub use approval::{ApprovalOverrides, ApprovalParts};
 pub use confinement::{ConfinementPlan, HostPaths};
 pub use dirs::GlobalDirs;
-pub use persona::CODING_PERSONA;
+pub use persona::{CODING_PERSONA, HELPER_PERSONA};
 pub use scope::{RuntimeScope, load_config, resolve_scope};
 
 /// Live sessions one TUI process may hold (the primary session plus a few
@@ -138,6 +147,8 @@ pub struct Runtime {
     pub backend: RealmBackend,
     /// The approval engine and the channels the runner serves.
     pub approval: ApprovalParts,
+    /// The helper (mob member) host; `None` without the `mob` feature.
+    pub helpers: Option<Arc<Helpers>>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -343,12 +354,27 @@ pub async fn bootstrap_with(
         effective,
         Arc::clone(&config_store) as Arc<dyn ConfigStore>,
     );
-    builder.default_llm_client = options.llm_override;
+    builder.default_llm_client.clone_from(&options.llm_override);
+    let mob_tools_slot = Arc::clone(&builder.default_mob_tools);
+    let workgraph = meerkat::WorkGraphService::with_scope(
+        persistence.workgraph_store(),
+        scope.realm_id.clone(),
+        meerkat::WorkNamespace::default(),
+    );
     let (service, machine) = build_runtime_backed_service_with_default_reconfigure_host(
         builder,
         MAX_SESSIONS,
         persistence,
         realm_root.join(CONFIG_STATE_FILE),
+    )?;
+    let helpers = start_helpers(
+        &service,
+        &machine,
+        &scope,
+        &approval.engine,
+        options.llm_override,
+        &mob_tools_slot,
+        workgraph,
     )?;
 
     Ok(Runtime {
@@ -367,7 +393,57 @@ pub async fn bootstrap_with(
         store,
         backend: manifest.backend,
         approval,
+        helpers,
     })
+}
+
+/// The slot every session build takes its mob tools from.
+type MobToolsSlot = Arc<std::sync::RwLock<Option<Arc<dyn meerkat_core::service::MobToolsFactory>>>>;
+
+/// Host helpers on the composed service and offer their tools to every
+/// session build (see [`crate::mobs`]).
+#[cfg(feature = "mob")]
+fn start_helpers(
+    service: &Arc<TuiService>,
+    machine: &Arc<MeerkatMachine>,
+    scope: &RuntimeScope,
+    engine: &Arc<crate::approval::ApprovalEngine>,
+    llm_override: Option<Arc<dyn LlmClient>>,
+    slot: &MobToolsSlot,
+    workgraph: meerkat::WorkGraphService,
+) -> Result<Option<Arc<Helpers>>, TuiError> {
+    let root = scope.project_root.clone();
+    let tools: crate::mobs::customizer::HelperTools = Arc::new(move || {
+        Arc::new(FileToolDispatcher::new(root.clone(), None)) as Arc<dyn AgentToolDispatcher>
+    });
+    let (helpers, factory) = Helpers::start(crate::mobs::HelperHostParts {
+        service: Arc::clone(service),
+        machine: Arc::clone(machine),
+        realm_root: scope.realm_root(),
+        engine: Arc::clone(engine),
+        tools,
+        llm_override,
+        workgraph,
+    })?;
+    *slot
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(factory);
+    Ok(Some(helpers))
+}
+
+/// Without the `mob` feature no helpers are hosted.
+#[cfg(not(feature = "mob"))]
+#[allow(clippy::unnecessary_wraps)]
+fn start_helpers(
+    _service: &Arc<TuiService>,
+    _machine: &Arc<MeerkatMachine>,
+    _scope: &RuntimeScope,
+    _engine: &Arc<crate::approval::ApprovalEngine>,
+    _llm_override: Option<Arc<dyn LlmClient>>,
+    _slot: &MobToolsSlot,
+    _workgraph: meerkat::WorkGraphService,
+) -> Result<Option<Arc<Helpers>>, TuiError> {
+    Ok(None)
 }
 
 /// The agent factory every session is built with.
@@ -376,7 +452,8 @@ pub async fn bootstrap_with(
 /// native `AGENTS.md`, skills and hooks discovery see the project. Builtin
 /// tools and the shell are on: every call passes the approval gate each
 /// session installs, and the shell runs under the OS confinement the caller
-/// installs ([`confinement::plan`]). Mob tools stay off until P5. The file
+/// installs ([`confinement::plan`]). Mob tools are on with the `mob` feature
+/// (helpers, see [`crate::mobs`]). The file
 /// and note tools come in per session as external tools (see
 /// [`crate::session`]). The factory's `runtime_root` is the realm, so every
 /// shell call runs in durable process custody (`<realm>/process_custody`),
@@ -396,7 +473,7 @@ fn build_factory(
         .context_root(scope.context_root.clone())
         .builtins(true)
         .shell(true)
-        .mob(false);
+        .mob(cfg!(feature = "mob"));
     if let Some(user_root) = &scope.user_config_root {
         factory = factory.user_config_root(user_root.clone());
     }

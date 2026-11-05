@@ -83,8 +83,6 @@ tempfile = { workspace = true }
 ignored = [
     "meerkat-hooks",
     "meerkat-memory",
-    "meerkat-mob",
-    "meerkat-mob-mcp",
     "meerkat-session",
 ]
 

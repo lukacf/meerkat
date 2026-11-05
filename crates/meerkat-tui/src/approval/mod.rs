@@ -47,7 +47,7 @@ use serde::Serialize;
 use std::fmt;
 
 pub use admission::ApprovalGate;
-pub use engine::{ApprovalConfig, ApprovalEngine};
+pub use engine::{ApprovalConfig, ApprovalEngine, Caller};
 
 /// Typed code of the tool error a denial returns to the model
 /// (`ToolError::PolicyDenied`, rendered as `Tool call denied (auto_mode): …`).
@@ -229,6 +229,8 @@ pub enum ApprovalEvent {
     Decision {
         /// Session.
         session_id: SessionId,
+        /// The helper that made the call (`None`: the session's own agent).
+        agent: Option<String>,
         /// Tool-use id.
         tool_use_id: String,
         /// Tool name.

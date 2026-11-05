@@ -17,7 +17,10 @@
 //!
 //! [`install`] composes the gate into a build, after any admission the build
 //! already carries, so every agent the TUI builds (fresh or resumed) runs
-//! behind it.
+//! behind it. A helper the session delegates to (a mob member) gets a gate
+//! from [`ApprovalGate::for_helper`], installed on its spawn spec by the
+//! TUI's spawn customizer ([`crate::mobs`]): its calls are decided as the
+//! delegating session's, naming the helper.
 
 use std::sync::Arc;
 
@@ -30,15 +33,18 @@ use meerkat_core::{
 };
 use serde_json::Value;
 
-use super::engine::ApprovalEngine;
+use super::engine::{ApprovalEngine, Caller};
 use super::{DENIAL_CODE, Verdict, deny_message};
 
-/// One session's view of the approval engine.
+/// One agent's view of the approval engine.
 pub struct ApprovalGate {
     engine: Arc<ApprovalEngine>,
-    /// The session this gate was built for; a dispatch context that names its
-    /// origin session wins.
+    /// The session this gate was built for. For the session's own agent a
+    /// dispatch context that names its origin session wins; a helper's calls
+    /// always count for it.
     session_id: SessionId,
+    /// The helper this gate was built for (`None`: the session's own agent).
+    helper: Option<String>,
     /// An admission the build already carried; it decides first.
     preceding: Option<Arc<dyn ToolDispatchAdmission>>,
 }
@@ -47,6 +53,7 @@ impl std::fmt::Debug for ApprovalGate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ApprovalGate")
             .field("session_id", &self.session_id)
+            .field("helper", &self.helper)
             .field("preceding", &self.preceding.is_some())
             .finish_non_exhaustive()
     }
@@ -59,8 +66,39 @@ impl ApprovalGate {
         Self {
             engine,
             session_id,
+            helper: None,
             preceding: None,
         }
+    }
+
+    /// A gate for the calls of `helper`, which works for `session_id`: they
+    /// are judged with that session's transcript, allow cache and Stop, and
+    /// count against the shared denial counters (see
+    /// [`ApprovalEngine::decide_as`]).
+    #[must_use]
+    pub fn for_helper(
+        engine: Arc<ApprovalEngine>,
+        session_id: SessionId,
+        helper: impl Into<String>,
+    ) -> Self {
+        Self {
+            engine,
+            session_id,
+            helper: Some(helper.into()),
+            preceding: None,
+        }
+    }
+
+    /// The session this gate decides for.
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    /// The helper this gate decides for, if any.
+    #[must_use]
+    pub fn helper(&self) -> Option<&str> {
+        self.helper.as_deref()
     }
 
     /// Run `preceding` before this gate.
@@ -111,13 +149,18 @@ impl ToolDispatchAdmission for ApprovalGate {
                 .await_dispatch_admission(call, context, effect_kind)
                 .await?;
         }
-        let session_id = context
-            .and_then(ToolDispatchContext::origin_session_id)
-            .unwrap_or(&self.session_id);
+        let caller = match &self.helper {
+            Some(helper) => Caller::helper(&self.session_id, helper),
+            None => Caller::session(
+                context
+                    .and_then(ToolDispatchContext::origin_session_id)
+                    .unwrap_or(&self.session_id),
+            ),
+        };
         let args = call_args(call);
         match self
             .engine
-            .decide(session_id, call.id, call.name, &args)
+            .decide_as(caller, call.id, call.name, &args)
             .await
         {
             Verdict::Allow { .. } => Ok(()),

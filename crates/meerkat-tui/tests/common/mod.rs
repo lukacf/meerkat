@@ -280,7 +280,7 @@ impl Workspace {
 }
 
 /// Arguments for a workspace-local realm at `root` (unconfined, no price
-/// fetch), plus `extra`.
+/// fetch, on [`MODEL`] unless `extra` names a `--model`), plus `extra`.
 pub fn args_with(root: &Path, extra: &[&str]) -> Args {
     let root = root.to_str().unwrap();
     let cfg = format!("{root}/.cfg");
@@ -292,10 +292,11 @@ pub fn args_with(root: &Path, extra: &[&str]) -> Args {
         root,
         "--config-dir",
         &cfg,
-        "--model",
-        MODEL,
         "--no-pricing-fetch",
     ];
+    if !extra.contains(&"--model") {
+        argv.extend(["--model", MODEL]);
+    }
     if !extra.iter().any(|arg| arg.starts_with("--confinement")) {
         argv.push("--no-confinement");
     }
@@ -337,6 +338,7 @@ pub struct RigOptions {
 /// A runner over a real runtime-backed service, with its channels.
 pub struct Rig {
     pub service: Arc<TuiService>,
+    pub helpers: Option<Arc<meerkat_tui::mobs::Helpers>>,
     pub approval: Arc<ApprovalEngine>,
     pub store: Arc<dyn meerkat::SessionStore>,
     pub effects: mpsc::UnboundedSender<Effect>,
@@ -405,6 +407,7 @@ impl Rig {
         )
         .await?;
         let service = Arc::clone(&runtime.service);
+        let helpers = runtime.helpers.clone();
         let approval = Arc::clone(&runtime.approval.engine);
         let store = Arc::clone(&runtime.store);
         let RunnerHarness {
@@ -425,6 +428,7 @@ impl Rig {
         });
         Ok(Self {
             service,
+            helpers,
             approval,
             store,
             effects,

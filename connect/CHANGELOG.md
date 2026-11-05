@@ -5,7 +5,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- A Find whose setup helper submission native admission refuses because an
+  authorization change landed under it now rebinds after each settled wait
+  within the owner-change bound, instead of once. Every rebind keeps the same
+  input and rechecks the source, the admitted helper and its selection. The
+  Find answers `retry_safe` (nothing admitted) only when the changes outlast
+  that bound; a fresh Find of the same run then replays the helper input.
+
 ### Fixed
+
+- A Find no longer fails as temporarily unavailable (`tool_unavailable`)
+  while another original's Find is writing the shared source state. Its
+  setup helper admission waits for that write within the owner-change bound;
+  a write that outlasts the bound is still refused as temporarily
+  unavailable, with nothing admitted.
 
 - A shared setup helper is no longer refused as unavailable policy while
   another task briefly holds its original's in-memory source state. Native

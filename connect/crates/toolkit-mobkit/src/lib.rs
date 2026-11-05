@@ -855,9 +855,10 @@ pub mod observe_helper_probe {
 /// Test seam: a step of a Find's helper work at which a control can have the
 /// owner's originals collection held on a thread of its own, inside an owner
 /// change on the owner's publication or without one, as another helper's
-/// first binding write holds them (at [`Site::IntentsWriter`], the owner's
-/// source writer instead, as another writer holds it across its durable
-/// write). Each site is named by its [`Site`] and a key: the Find's call ID
+/// first binding write holds them (at
+/// [`source_hold_probe::Site::IntentsWriter`], the owner's source writer
+/// instead, as another writer holds it across its durable write). Each site
+/// is named by its [`source_hold_probe::Site`] and a key: the Find's call ID
 /// where the step has it, else the helper's work item, its work admission
 /// key, a source row's ID or an original work.
 #[cfg(any(test, feature = "test-support"))]

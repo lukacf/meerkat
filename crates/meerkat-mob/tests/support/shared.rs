@@ -3,7 +3,8 @@
 //!
 //! The entry point supplies `fixture_mob`: integration roots bind the
 //! external library; the lib-test root binds `crate`. Keep that choice
-//! explicit so fixtures never pull the self-dev-dependency into lib tests.
+//! explicit so fixtures never pull a separately compiled copy of the crate
+//! into lib tests.
 //!
 //! Contents:
 //!   * `ProductionExternalTcpTarget` — the production-drain external member

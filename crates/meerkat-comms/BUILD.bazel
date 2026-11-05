@@ -181,7 +181,6 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-capabilities:meerkat_capabilities",
-        "//crates/meerkat-comms:meerkat_comms",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-runtime:meerkat_runtime_test_support",

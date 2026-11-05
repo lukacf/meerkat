@@ -626,6 +626,14 @@ jobs:
           make published-crates-standalone-selftest
           make check-published-crates-standalone-guard
 
+      # The test-feature canary (each Core crate's lib.rs) must stop a test
+      # binary built without the crate's test features and nothing else: a
+      # fixture crate with the same canary, on the pinned toolchain, fails
+      # here if a toolchain evaluates it in check builds or stops evaluating
+      # it in code generation. A few seconds.
+      - name: Test-feature canary trips test code generation only
+        run: make test-feature-canary-selftest
+
       - name: Release doctor workflow assertions still bind
         run: scripts/test-release-doctor-workflow-contract.sh
 
@@ -1436,9 +1444,11 @@ jobs:
               "governed_jsonl::tests::ordinary_rpc_host_materializes_a_scheduled_fire_past_the_mandate_gate",
               "governed_jsonl::tests::rpc_runtimes_compose_the_realms_own_schedule_service",
           ])
+          # workspace-tests: meerkat-rpc's test feature, which every test
+          # build of it passes (scripts/core-workspace-args.mjs --tests).
           command = [
               "./scripts/repo-cargo", "test", "--locked", "-p", "meerkat-rpc", "--lib",
-              "--no-default-features", "--features", "local-authorization",
+              "--no-default-features", "--features", "local-authorization,workspace-tests",
               "governed_jsonl::tests::", "--",
           ]
 

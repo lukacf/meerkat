@@ -576,3 +576,250 @@ async fn an_ephemeral_runtime_answers_decision_methods_capability_unavailable() 
         );
     }
 }
+
+// --- The host adapter's decide: these rows use the authenticated event API,
+// --- so they compile only where it exists.
+mod authenticated_event {
+    use std::sync::Arc;
+
+    use meerkat_core::ApprovalAssurance;
+    use meerkat_core::PrincipalKind;
+    use meerkat_core::approval::consent::{
+        AuthenticatedApprover, ConsentEligibility, ConsentIneligible, HostAuthenticationScope,
+    };
+    use meerkat_core::approval::decision::{
+        ApproverId, AttestedDecision, AuthenticatedDecisionEvent, DecisionId, DecisionIngress,
+        DecisionPhase, DecisionPrincipalKey, DecisionReference, Sha256Digest,
+    };
+    use serde_json::json;
+
+    use super::{
+        INVALID_PARAMS, METHOD_NOT_FOUND, complete_presentation, error_code, error_data,
+        hold_request, persistent_router, principal, request, result, subject_digest,
+    };
+    use crate::router::MethodRouter;
+
+    /// Eligibility that is always current.
+    struct Eligible;
+
+    impl ConsentEligibility for Eligible {
+        fn check_current(&self) -> Result<(), ConsentIneligible> {
+            Ok(())
+        }
+    }
+
+    /// Alice's decision on `decision_id`, authenticated on a chat event the
+    /// chat observed at `observed_at_ms`, in the login `login-7`.
+    fn event(
+        decision_id: &DecisionId,
+        approve: bool,
+        observed_at_ms: u64,
+    ) -> AuthenticatedDecisionEvent {
+        let approver = AuthenticatedApprover::new(
+            principal(PrincipalKind::Human, "alice"),
+            ApprovalAssurance::PersonAuthenticated,
+        )
+        .expect("approver")
+        .with_authentication_scope(HostAuthenticationScope::new("login-7"));
+        let decision = AttestedDecision::new(
+            approver,
+            DecisionIngress::new("chat").expect("ingress"),
+            DecisionReference::new("chat-event-1").expect("event ref"),
+            observed_at_ms,
+            ApproverId::new("team:owners").expect("approver id"),
+            Sha256Digest::new(subject_digest()).expect("digest"),
+            approve,
+        )
+        .expect("attested decision");
+        AuthenticatedDecisionEvent::new(decision_id.clone(), decision, Arc::new(Eligible))
+    }
+
+    fn decide_body(decision_id: &DecisionId, approve: bool) -> serde_json::Value {
+        json!({
+            "decision_id": decision_id.to_string(),
+            "approve": approve,
+            "presented_digest": subject_digest(),
+        })
+    }
+
+    async fn decide(
+        router: &MethodRouter,
+        body: &serde_json::Value,
+        event: AuthenticatedDecisionEvent,
+    ) -> crate::protocol::RpcResponse {
+        router
+            .dispatch_with_decision_event(request("decision/decide", body), event)
+            .await
+    }
+
+    async fn present(router: &MethodRouter, decision_id: &DecisionId, at_ms: u64) {
+        let presented = super::call(
+            router,
+            "decision/present",
+            json!({"decision_id": decision_id.to_string(), "presentation": complete_presentation(at_ms)}),
+        )
+        .await;
+        assert!(presented.error.is_none(), "{presented:?}");
+    }
+
+    #[tokio::test]
+    async fn a_decide_body_that_names_an_approver_is_invalid_params() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (router, runtime) = persistent_router(root.path()).await;
+        let held = runtime
+            .decision_service()
+            .hold(hold_request("release", "build-1", "team:owners"), false)
+            .expect("hold");
+        present(&router, &held.decision_id, 2_000).await;
+
+        for field in [
+            "approver",
+            "approver_id",
+            "actor",
+            "assurance",
+            "authentication_scope",
+        ] {
+            let mut body = decide_body(&held.decision_id, true);
+            body[field] = json!("someone");
+            let refused = decide(&router, &body, event(&held.decision_id, true, 3_000)).await;
+            assert_eq!(error_code(&refused), INVALID_PARAMS, "{field}: {refused:?}");
+        }
+        let row = runtime
+            .decision_service()
+            .get(&held.decision_id)
+            .expect("read");
+        assert_eq!(row.state.phase, DecisionPhase::Open, "nothing was decided");
+    }
+
+    #[tokio::test]
+    async fn an_adapter_event_whose_decision_differs_from_the_body_is_invalid_params() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (router, runtime) = persistent_router(root.path()).await;
+        let decisions = runtime.decision_service();
+        let held = decisions
+            .hold(hold_request("release", "build-1", "team:owners"), false)
+            .expect("hold");
+        let other = decisions
+            .hold(hold_request("release", "build-2", "team:owners"), false)
+            .expect("hold");
+        present(&router, &held.decision_id, 2_000).await;
+
+        let mut other_decision = decide_body(&held.decision_id, true);
+        other_decision["decision_id"] = json!(other.decision_id.to_string());
+        let mut other_digest = decide_body(&held.decision_id, true);
+        other_digest["presented_digest"] =
+            json!(Sha256Digest::of(b"another rendering").to_string());
+        let mut with_reason = decide_body(&held.decision_id, true);
+        with_reason["reason"] = json!("looks fine");
+        for body in [
+            other_decision,
+            decide_body(&held.decision_id, false),
+            other_digest,
+            with_reason,
+        ] {
+            let refused = decide(&router, &body, event(&held.decision_id, true, 3_000)).await;
+            assert_eq!(error_code(&refused), INVALID_PARAMS, "{body}: {refused:?}");
+            assert!(
+                error_data(&refused).is_null(),
+                "refused before the owner is asked"
+            );
+        }
+        for decision_id in [&held.decision_id, &other.decision_id] {
+            let row = decisions.get(decision_id).expect("read");
+            assert_eq!(row.state.phase, DecisionPhase::Open, "nothing was decided");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_decide_observed_before_the_first_presentation_is_refused_over_the_wire() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (router, runtime) = persistent_router(root.path()).await;
+        let held = runtime
+            .decision_service()
+            .hold(hold_request("release", "build-1", "team:owners"), false)
+            .expect("hold");
+        present(&router, &held.decision_id, 2_000).await;
+
+        let early = decide(
+            &router,
+            &decide_body(&held.decision_id, true),
+            event(&held.decision_id, true, 1_000),
+        )
+        .await;
+        assert_eq!(error_code(&early), INVALID_PARAMS, "{early:?}");
+        assert_eq!(
+            error_data(&early),
+            json!({
+                "kind": "decision_refused",
+                "decision_refusal": {"kind": "decided_before_presentation"},
+            })
+        );
+
+        let decided = result(
+            &decide(
+                &router,
+                &decide_body(&held.decision_id, true),
+                event(&held.decision_id, true, 3_000),
+            )
+            .await,
+        );
+        let decision = &decided["decision"];
+        assert_eq!(decision["phase"], "approved");
+        let outcome = &decision["outcome"];
+        assert_eq!(outcome["tier"], "human");
+        let evidence = &outcome["evidence"];
+        assert_eq!(evidence["kind"], "human");
+        let alice = DecisionPrincipalKey::of(&principal(PrincipalKind::Human, "alice"))
+            .expect("principal key");
+        assert_eq!(evidence["decider"], alice.to_string());
+        assert_eq!(evidence["assurance"], "person_authenticated");
+        assert_eq!(evidence["ingress"], "chat");
+        assert_eq!(evidence["event_ref"], "chat-event-1");
+        assert_eq!(evidence["observed_at_ms"], 3_000);
+        assert_eq!(evidence["approve"], true);
+        // The login the event was authenticated in is never projected.
+        assert!(
+            !decided.to_string().contains("login-7"),
+            "no authentication scope on the wire: {decided}"
+        );
+
+        // The first valid decision wins.
+        let second = decide(
+            &router,
+            &decide_body(&held.decision_id, false),
+            event(&held.decision_id, false, 4_000),
+        )
+        .await;
+        assert_eq!(
+            error_data(&second),
+            json!({"kind": "decision_refused", "decision_refusal": {"kind": "not_open"}})
+        );
+    }
+
+    #[tokio::test]
+    async fn an_authenticated_event_only_decides_decision_decide() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (router, runtime) = persistent_router(root.path()).await;
+        let held = runtime
+            .decision_service()
+            .hold(hold_request("release", "build-1", "team:owners"), false)
+            .expect("hold");
+        present(&router, &held.decision_id, 2_000).await;
+
+        let answer = router
+            .dispatch_with_decision_event(
+                request(
+                    "decision/get",
+                    &json!({"decision_id": held.decision_id.to_string()}),
+                ),
+                event(&held.decision_id, true, 3_000),
+            )
+            .await;
+        assert_eq!(error_code(&answer), METHOD_NOT_FOUND, "{answer:?}");
+        let row = runtime
+            .decision_service()
+            .get(&held.decision_id)
+            .expect("read");
+        assert_eq!(row.state.phase, DecisionPhase::Open);
+    }
+}

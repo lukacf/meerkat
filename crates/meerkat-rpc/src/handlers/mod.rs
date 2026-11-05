@@ -8,6 +8,7 @@ pub mod capabilities;
 #[cfg(feature = "comms")]
 pub mod comms;
 pub mod config;
+pub mod decision;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod decision_tests;

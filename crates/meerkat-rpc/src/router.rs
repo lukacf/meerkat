@@ -1655,6 +1655,10 @@ impl RoutedRpcResponse {
 /// [`MethodRouter::dispatch_with_consent_event`].
 pub const CONSENT_DECIDE_METHOD: &str = "approval/consent_decide";
 
+/// The host-only durable decision method, reachable only through
+/// [`MethodRouter::dispatch_with_decision_event`].
+pub const DECISION_DECIDE_METHOD: &str = "decision/decide";
+
 #[derive(Clone)]
 pub struct MethodRouter {
     #[cfg(feature = "local-authorization")]
@@ -2549,6 +2553,49 @@ impl MethodRouter {
         )
     }
 
+    /// Dispatch one durable decision whose human event the embedding host's
+    /// trusted transport adapter authenticated.
+    ///
+    /// This is the only entry to [`DECISION_DECIDE_METHOD`]: plain dispatch
+    /// has no route for it, so caller JSON or a request context can never
+    /// decide a durable decision. The request names the decision, the
+    /// answer, the presented digest and the reason, and must equal what the
+    /// event binds; the event alone supplies who decided, how the decider
+    /// was authenticated and the evidence that they may act for the
+    /// decision's approver id.
+    pub async fn dispatch_with_decision_event(
+        &self,
+        request: RpcRequest,
+        event: meerkat_core::approval::decision::AuthenticatedDecisionEvent,
+    ) -> RpcResponse {
+        let id = request.id.clone();
+        // The same envelope check as plain dispatch, before any handler.
+        if !request.has_supported_version() {
+            return RpcResponse::error(
+                id,
+                error::INVALID_REQUEST,
+                format!(
+                    "Unsupported JSON-RPC version: expected \"{}\", got \"{}\"",
+                    crate::protocol::JSONRPC_VERSION,
+                    request.jsonrpc
+                ),
+            );
+        }
+        if request.method != DECISION_DECIDE_METHOD {
+            return RpcResponse::error(
+                id,
+                error::METHOD_NOT_FOUND,
+                format!("an authenticated decision event only decides {DECISION_DECIDE_METHOD}"),
+            );
+        }
+        handlers::decision::handle_decide_event(
+            id,
+            request.params.as_deref(),
+            self.runtime.clone(),
+            event,
+        )
+    }
+
     /// Dispatch a request to the appropriate handler.
     ///
     /// Returns `None` for notifications (requests without an id) that do not
@@ -3404,6 +3451,28 @@ impl MethodRouter {
             }
             "tool_grants/audit" => {
                 routed_arm(|| handlers::tool_grants::handle_audit(id, params, self.runtime.clone()))
+                    .await
+            }
+            "decision/list" => {
+                routed_arm(|| handlers::decision::handle_list(id, params, self.runtime.clone()))
+                    .await
+            }
+            "decision/get" => {
+                routed_arm(|| handlers::decision::handle_get(id, params, self.runtime.clone()))
+                    .await
+            }
+            "decision/rendering" => {
+                routed_arm(|| {
+                    handlers::decision::handle_rendering(id, params, self.runtime.clone())
+                })
+                .await
+            }
+            "decision/present" => {
+                routed_arm(|| handlers::decision::handle_present(id, params, self.runtime.clone()))
+                    .await
+            }
+            "decision/withdraw" => {
+                routed_arm(|| handlers::decision::handle_withdraw(id, params, self.runtime.clone()))
                     .await
             }
             // Compose the realm chain so an inherited (ancestor-realm) self-hosted

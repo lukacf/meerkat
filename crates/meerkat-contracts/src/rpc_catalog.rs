@@ -508,6 +508,46 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         ]);
     }
 
+    // Durable decisions: served by the persistence's decision owner, one
+    // row or one index page per call. A runtime without a decision store
+    // (an ephemeral persistence) answers them capability unavailable.
+    // `decision/decide` has no plain route: a host adapter decides through
+    // its authenticated event.
+    if options.runtime_available {
+        methods.extend([
+            RpcMethodDescriptor::typed(
+                "decision/list",
+                "List a page of durable decisions, filtered by kind, phase, approver id or requester",
+                "DecisionListParams",
+                "DecisionListResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "decision/get",
+                "Get one durable decision, its expiry recorded when its deadline passed",
+                "DecisionGetParams",
+                "DecisionResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "decision/rendering",
+                "Get a durable decision's rendering and its canonical parts for a part size",
+                "DecisionRenderingParams",
+                "DecisionRenderingResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "decision/present",
+                "Record a host presenter's presentation of a durable decision's rendering",
+                "DecisionPresentParams",
+                "DecisionResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "decision/withdraw",
+                "Withdraw an open durable decision as the host",
+                "DecisionWithdrawParams",
+                "DecisionResult",
+            ),
+        ]);
+    }
+
     if options.blob_enabled {
         methods.extend([
             RpcMethodDescriptor::typed(

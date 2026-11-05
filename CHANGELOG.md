@@ -50,7 +50,7 @@ them.
   `SYSTEM.md`/`AGENTS.md`, ancestor `AGENTS.md`, `AGENTS.local.md`),
   `/remember`, notes (`note_*` tools, indexed as untrusted context), native
   semantic memory, MCP servers from `mcp.toml` (the project file's only once
-  trusted with `/mcp trust` or `--allow-project-mcp`), and a warn/auto
+  trusted with `/mcp trust` or `--allow-project-mcp`), and a native/warn/auto
   policy over native auto-compaction with `/compact now`. Configured
   endpoints and the `[models.<id>]` profiles of models only an endpoint
   knows are written into the realm's own `config.toml`, so `rkat`, REST and

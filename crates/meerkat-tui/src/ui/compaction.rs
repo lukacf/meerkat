@@ -7,12 +7,15 @@
 //! memory and reports `CompactionStarted`/`Completed`/`Failed`. The TUI
 //! only chooses that threshold and watches the gauge:
 //!
-//! - **warn** (default): the native trigger is off
+//! - **native** (default): the engine's own threshold policy decides
+//!   ([`CompactionTrigger::Inherit`]: no override is set). The gauge is
+//!   advisory: one warning when usage crosses `compact_warn_percent`
+//!   (re-armed once usage drops below it or a compaction succeeds), and a
+//!   warning after every turn at or above `compact_auto_percent`.
+//! - **warn**: the native size trigger is off
 //!   ([`CompactionTrigger::Disable`]; upstream still compacts to recover a
-//!   request the provider refused as too large). One warning when usage crosses
-//!   `compact_warn_percent` (re-armed once usage drops below it or a
-//!   compaction succeeds), and a warning after every turn at or above
-//!   `compact_auto_percent`.
+//!   request the provider refused as too large) and the gauge warns as in
+//!   native mode; compaction only on `/compact now`.
 //! - **auto**: the threshold is `compact_auto_percent` of the model's
 //!   context window ([`CompactionPolicy::trigger`]); the engine compacts
 //!   before the first model call that would cross it.
@@ -63,8 +66,10 @@ pub const FALLBACK_AUTO_TOKENS: u64 = 150_000;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CompactMode {
-    /// Warn; compaction only on `/compact now`.
+    /// The engine's own threshold policy; the gauge only warns.
     #[default]
+    Native,
+    /// Warn; compaction only on `/compact now`.
     Warn,
     /// Let the engine compact at `compact_auto_percent`.
     Auto,
@@ -86,7 +91,7 @@ pub struct CompactionPolicy {
 impl Default for CompactionPolicy {
     fn default() -> Self {
         Self {
-            mode: CompactMode::Warn,
+            mode: CompactMode::Native,
             warn_percent: DEFAULT_WARN_PERCENT,
             auto_percent: DEFAULT_AUTO_PERCENT,
         }
@@ -120,11 +125,13 @@ impl CompactionPolicy {
     }
 
     /// The native auto-compaction trigger for a session whose model has
-    /// `window` tokens of context: [`CompactionTrigger::Disable`] in warn
-    /// mode, [`Self::auto_tokens`] in auto mode.
+    /// `window` tokens of context: [`CompactionTrigger::Inherit`] in native
+    /// mode, [`CompactionTrigger::Disable`] in warn mode, [`Self::auto_tokens`]
+    /// in auto mode.
     #[must_use]
     pub fn trigger(&self, window: Option<u64>) -> CompactionTrigger {
         match self.mode {
+            CompactMode::Native => CompactionTrigger::Inherit,
             CompactMode::Warn => CompactionTrigger::Disable,
             CompactMode::Auto => CompactionTrigger::At(
                 NonZeroU64::new(self.auto_tokens(window)).unwrap_or(NonZeroU64::MIN),
@@ -144,6 +151,9 @@ impl CompactionPolicy {
             None => format!("{} tokens", fmt_ctx_tokens(FALLBACK_AUTO_TOKENS)),
         };
         match self.mode {
+            CompactMode::Native => format!(
+                "auto-compaction follows the engine's own threshold (compact = \"native\"; the gauge warns from {at}); /compact now compacts before the next turn's first model call, compact = \"auto\" or --auto-compact sets the threshold to {at} instead"
+            ),
             CompactMode::Auto => format!(
                 "auto-compaction is on: the runtime compacts the context before a model call once it reaches {at}; /compact now compacts before the next turn's first model call"
             ),
@@ -283,6 +293,13 @@ impl CompactionGauge {
                     usage_text(used, window)
                 ))
             }
+            Zone::Auto if self.policy.mode == CompactMode::Native => {
+                self.warned = true;
+                Some(format!(
+                    "{}; the engine compacts at its own threshold: run /compact now to free space earlier",
+                    usage_text(used, window)
+                ))
+            }
             Zone::Auto => {
                 self.warned = true;
                 Some(format!(
@@ -318,6 +335,13 @@ mod tests {
     use super::*;
 
     const W: Option<u64> = Some(100_000);
+
+    fn warn() -> CompactionPolicy {
+        CompactionPolicy {
+            mode: CompactMode::Warn,
+            ..CompactionPolicy::default()
+        }
+    }
 
     fn auto() -> CompactionPolicy {
         CompactionPolicy {
@@ -355,8 +379,9 @@ mod tests {
         };
         assert_eq!(
             CompactionPolicy::default().trigger(W),
-            CompactionTrigger::Disable
+            CompactionTrigger::Inherit
         );
+        assert_eq!(warn().trigger(W), CompactionTrigger::Disable);
         assert_eq!(at(auto().trigger(W)), 85_000);
         assert_eq!(at(auto().trigger(None)), FALLBACK_AUTO_TOKENS);
         assert_eq!(at(auto().trigger(Some(0))), FALLBACK_AUTO_TOKENS);
@@ -392,15 +417,18 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("/compact now"), "{text}");
-        let text = CompactionPolicy::default().describe(None);
+        let text = warn().describe(None);
         assert!(text.contains("auto-compaction is off"), "{text}");
         assert!(text.contains("150k tokens"), "{text}");
         assert!(text.contains("--auto-compact"), "{text}");
+        let text = CompactionPolicy::default().describe(W);
+        assert!(text.contains("engine's own threshold"), "{text}");
+        assert!(text.contains("85k tokens"), "{text}");
     }
 
     #[test]
     fn warn_mode_warns_once_then_every_turn_at_auto() {
-        let mut g = CompactionGauge::default();
+        let mut g = CompactionGauge::new(warn());
         assert_eq!(g.after_turn(70_000, W), None);
         assert_eq!(
             g.after_turn(76_000, W).as_deref(),
@@ -415,6 +443,20 @@ mod tests {
         assert_eq!(g.after_turn(80_000, W), None);
         assert_eq!(g.after_turn(50_000, W), None);
         assert!(g.after_turn(75_000, W).is_some());
+    }
+
+    #[test]
+    fn native_mode_warns_but_leaves_the_trigger_to_the_engine() {
+        let mut g = CompactionGauge::default();
+        assert_eq!(g.policy().mode, CompactMode::Native);
+        assert_eq!(g.after_turn(70_000, W), None);
+        assert_eq!(
+            g.after_turn(76_000, W).as_deref(),
+            Some("context 76% full (76k/100k tokens); run /compact now to free space")
+        );
+        let text = g.after_turn(86_000, W).expect("a warning");
+        assert!(text.contains("engine compacts at its own threshold"), "{text}");
+        assert!(!text.contains("auto-compaction is off"), "{text}");
     }
 
     #[test]
@@ -436,7 +478,7 @@ mod tests {
 
     #[test]
     fn unknown_window_uses_token_thresholds() {
-        let mut g = CompactionGauge::default();
+        let mut g = CompactionGauge::new(warn());
         assert_eq!(g.after_turn(119_999, None), None);
         assert_eq!(
             g.after_turn(120_000, Some(0)).as_deref(),

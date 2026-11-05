@@ -1895,7 +1895,7 @@ mod tests {
     #[test]
     fn compaction_settings_default_layer_and_clamp() {
         let defaults = AutoSettings::default();
-        assert_eq!(defaults.compact, CompactMode::Warn);
+        assert_eq!(defaults.compact, CompactMode::Native);
         assert_eq!(
             (defaults.compact_warn_percent, defaults.compact_auto_percent),
             (75, 85)

@@ -3795,7 +3795,7 @@ mod tests {
                 .with_compaction_policy(settings.compaction_policy(None))
                 .compaction_policy()
                 .mode,
-            CompactMode::Warn
+            CompactMode::Native
         );
     }
 

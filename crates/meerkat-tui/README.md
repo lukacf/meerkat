@@ -269,7 +269,7 @@ trust` shows a summary of the file as it is now and records its digest.
 enabled = true
 classifier_model = "claude-sonnet-4-6"   # optional, per-dialect default otherwise
 trust_project_builds = true              # cargo build/test/check are tier 1
-compact = "warn"                         # or "auto"; see "Context and compaction"
+compact = "native"                       # or "warn" / "auto"; see "Context and compaction"
 compact_warn_percent = 75
 compact_auto_percent = 85
 classifier_tools = true                  # stage 2 may read project files
@@ -435,10 +435,13 @@ semantic memory. rkat-tui only chooses the threshold, from the context
 window of the model's profile (the catalog, or the realm's `[models.<id>]`
 entry the endpoint listing keeps current):
 
-- `compact = "warn"` (the default): the size trigger is off (Meerkat still
-  compacts to recover a request the provider refused as too large). The gauge
-  warns once when the context crosses `compact_warn_percent` (75%) and after
-  every turn from `compact_auto_percent` (85%) on.
+- `compact = "native"` (the default): Meerkat's own threshold policy decides
+  when to compact; rkat-tui sets no override. The gauge is advisory: it warns
+  once when the context crosses `compact_warn_percent` (75%) and after every
+  turn from `compact_auto_percent` (85%) on.
+- `compact = "warn"`: the size trigger is off (Meerkat still compacts to
+  recover a request the provider refused as too large) and the gauge warns as
+  above; compaction happens only on `/compact now`.
 - `compact = "auto"` (or `--auto-compact`; `--no-auto-compact` forces
   `warn`): the threshold is `compact_auto_percent` of the model's context
   window, and the runtime compacts before the first model call that would

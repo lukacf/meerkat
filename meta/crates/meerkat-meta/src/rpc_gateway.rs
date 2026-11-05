@@ -15515,20 +15515,27 @@ pub use crate::gateway_mcp_composition::{
 pub const HOST_APP_ROUTES_PREFIX: &str = "/host";
 
 /// Nest the host's read-only routes, if any, under [`HOST_APP_ROUTES_PREFIX`],
-/// under the app's `request_bound`.
+/// under the app's `request_bound`. On an open Console (`posture`) they
+/// answer, like the Console's own routes, only requests addressed to a host
+/// the listener serves.
 fn mount_host_app_routes(
     app: axum::Router,
     host: Option<&Arc<dyn GatewayHostComposition>>,
     viewer: crate::http_console::ConsoleViewerResolver,
     send_precheck: crate::http_console::ConsoleSendPrecheck,
     request_bound: &crate::unified_runtime::http::ReferenceAppRequestBound,
+    posture: crate::gateway_composition::ConsoleAuthPosture,
 ) -> Result<axum::Router, GatewayHostError> {
     let Some(host) = host else {
         return Ok(app);
     };
+    let open = posture == crate::gateway_composition::ConsoleAuthPosture::Open;
     Ok(
         match host.host_app_routes_with_send_precheck(viewer, send_precheck)? {
-            Some(routes) => app.nest(HOST_APP_ROUTES_PREFIX, request_bound.apply(routes)),
+            Some(routes) => app.nest(
+                HOST_APP_ROUTES_PREFIX,
+                crate::http_console::served_hosts_only(request_bound.apply(routes), open),
+            ),
             None => app,
         },
     )
@@ -15545,12 +15552,14 @@ fn gateway_console_app(
     send_precheck: crate::http_console::ConsoleSendPrecheck,
     request_bound: &crate::unified_runtime::http::ReferenceAppRequestBound,
 ) -> Result<axum::Router, GatewayHostError> {
+    let posture = crate::gateway_composition::ConsoleAuthPosture::of(&decisions);
     mount_host_app_routes(
         runtime.reference_app_router_under(decisions, request_bound),
         host,
         viewer,
         send_precheck,
         request_bound,
+        posture,
     )
 }
 
@@ -23015,6 +23024,7 @@ mod prepared_application_tests {
 #[cfg(test)]
 mod host_app_routes_tests {
     use super::*;
+    use crate::gateway_composition::ConsoleAuthPosture;
     use axum::body::Body;
     use axum::http::{HeaderMap, Request, StatusCode, Uri};
     use tower::ServiceExt as _;
@@ -23203,6 +23213,7 @@ mod host_app_routes_tests {
             resolver(),
             precheck(),
             &request_bound(),
+            ConsoleAuthPosture::Open,
         )
         .expect("the host's routes mount");
         assert_eq!(
@@ -23218,6 +23229,7 @@ mod host_app_routes_tests {
             resolver(),
             crate::http_console::ConsoleSendPrecheck::new(read_only, None, None),
             &request_bound(),
+            ConsoleAuthPosture::Open,
         )
         .expect("the host's routes mount");
         assert_eq!(
@@ -23236,6 +23248,7 @@ mod host_app_routes_tests {
             resolver(),
             precheck(),
             &request_bound(),
+            ConsoleAuthPosture::Open,
         )
         .expect("the host's routes mount");
 
@@ -23260,12 +23273,14 @@ mod host_app_routes_tests {
         // refusal of an unauthenticated request.
         let mut decisions = minimal_decision_state();
         decisions.console.require_app_auth = true;
+        let posture = ConsoleAuthPosture::of(&decisions);
         let app = mount_host_app_routes(
             console_app(),
             Some(&host),
             crate::http_console::ConsoleViewerResolver::new(decisions, None),
             precheck(),
             &request_bound(),
+            posture,
         )
         .expect("the host's routes mount");
         assert_eq!(get(&app, "/host/status").await.0, StatusCode::UNAUTHORIZED);
@@ -23279,6 +23294,7 @@ mod host_app_routes_tests {
             resolver(),
             precheck(),
             &request_bound(),
+            ConsoleAuthPosture::Open,
         )
         .unwrap();
         assert_eq!(get(&app, "/host/status").await.0, StatusCode::NOT_FOUND);
@@ -23290,6 +23306,7 @@ mod host_app_routes_tests {
             resolver(),
             precheck(),
             &request_bound(),
+            ConsoleAuthPosture::Open,
         )
         .unwrap();
         assert_eq!(get(&app, "/host/status").await.0, StatusCode::NOT_FOUND);
@@ -23303,7 +23320,8 @@ mod host_app_routes_tests {
                 Some(&host),
                 resolver(),
                 precheck(),
-                &request_bound()
+                &request_bound(),
+                ConsoleAuthPosture::Open,
             )
             .err(),
             Some(GatewayHostError::Denied)

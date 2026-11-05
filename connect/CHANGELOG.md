@@ -63,6 +63,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   answers `tool_unavailable`, and nothing the Find already did is made
   again.
 
+- A Find is no longer refused as not allowed by policy (`access_denied`)
+  when another original's setup helper changes the shared authorization
+  while the Find retains or recovers its own helper's source. That change
+  is waited out within the owner-change bound and the helper's grant
+  resolved again; a change that outlasts the bound answers
+  `tool_unavailable`, and only a real refusal is a denial.
+
+- A Find no longer fails as temporarily unavailable (`tool_unavailable`)
+  when its setup helper's source binding is checked and published, or its
+  bound source recovered, or its helper observed, during another owner's
+  brief hold on the shared source state. The check or the publication
+  waits that out within the owner-change bound; the binding is never
+  written twice, and a hold that outlasts the bound still answers
+  `tool_unavailable`.
+
 - A Find no longer fails as temporarily unavailable (`tool_unavailable`)
   while another original's Find is writing the shared source state. Its
   setup helper admission waits for that write within the owner-change bound;

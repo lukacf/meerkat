@@ -6,7 +6,11 @@
 //! keeps no durable decisions (an ephemeral one) answers capability
 //! unavailable. `decision/decide` has no route in plain dispatch: a host
 //! adapter decides through its authenticated event
-//! ([`crate::router::MethodRouter::dispatch_with_decision_event`]).
+//! ([`crate::router::MethodRouter::dispatch_with_decision_event`]). A stdio
+//! connection whose operator decides durable decisions (a Unix build with
+//! local authorization) routes it to that operator, and presents the
+//! decisions of each `decision/list` page the operator acts for before it
+//! answers (the `operator` module).
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -24,7 +28,9 @@ use meerkat_runtime::decision::wire::{
     decision_phase_from_wire, presentation_from_wire, wire_canonical_part, wire_decision,
     wire_decision_listing, wire_decision_refusal,
 };
-use meerkat_runtime::decision::{DecisionError, DecisionWithdrawer, DurableDecisionService};
+use meerkat_runtime::decision::{
+    DecisionError, DecisionListing, DecisionWithdrawer, DurableDecisionService,
+};
 
 use crate::error;
 use crate::handlers::{RpcResponseExt, parse_params};
@@ -173,27 +179,23 @@ fn list_filter(
     Ok(filter)
 }
 
-/// Handle `decision/list`.
-pub async fn handle_list(
+/// The page a `decision/list` request names, and the owner it was read
+/// through.
+#[allow(clippy::result_large_err)]
+fn read_list_page(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
-    runtime: Arc<SessionRuntime>,
-) -> RpcResponse {
+    runtime: &SessionRuntime,
+) -> Result<(DurableDecisionService, DecisionListing), RpcResponse> {
     let params: DecisionListParams = match params {
         Some(_) => match parse_params(params) {
             Ok(params) => params,
-            Err(response) => return response.with_id(id),
+            Err(response) => return Err(response.with_id(id)),
         },
         None => DecisionListParams::default(),
     };
-    let filter = match list_filter(id.clone(), &params) {
-        Ok(filter) => filter,
-        Err(response) => return response,
-    };
-    let owner = match decision_owner(id.clone(), &runtime) {
-        Ok(owner) => owner,
-        Err(response) => return response,
-    };
+    let filter = list_filter(id.clone(), &params)?;
+    let owner = decision_owner(id.clone(), runtime)?;
     let limit = params
         .limit
         .map_or(DEFAULT_LIST_PAGE, |limit| {
@@ -201,8 +203,20 @@ pub async fn handle_list(
         })
         .clamp(1, DECISION_PAGE_MAX);
     match owner.list(&filter, params.after.as_deref(), limit) {
-        Ok(listing) => RpcResponse::success(id, wire_decision_listing(&listing)),
-        Err(error_value) => decision_error_to_response(id, error_value),
+        Ok(listing) => Ok((owner, listing)),
+        Err(error_value) => Err(decision_error_to_response(id, error_value)),
+    }
+}
+
+/// Handle `decision/list`.
+pub async fn handle_list(
+    id: Option<RpcId>,
+    params: Option<&serde_json::value::RawValue>,
+    runtime: Arc<SessionRuntime>,
+) -> RpcResponse {
+    match read_list_page(id.clone(), params, &runtime) {
+        Ok((_, listing)) => RpcResponse::success(id, wire_decision_listing(&listing)),
+        Err(response) => response,
     }
 }
 
@@ -395,6 +409,9 @@ pub fn handle_decide_event(
         Err(error_value) => decision_error_to_response(id, error_value),
     }
 }
+
+#[cfg(all(unix, feature = "local-authorization"))]
+pub(crate) mod operator;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

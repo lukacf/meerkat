@@ -915,3 +915,180 @@ mod authenticated_event {
         assert_eq!(row.state.phase, DecisionPhase::Open);
     }
 }
+
+// --- Two stdio connections' operators on one realm: these rows build the
+// --- connections' operators, so they compile only where a stdio connection
+// --- has one.
+#[cfg(all(unix, feature = "local-authorization"))]
+mod operator_connections {
+    use std::sync::{Arc, Mutex};
+
+    use meerkat_core::approval::consent::{AuthenticatedApprover, HostAuthenticationScope};
+    use meerkat_core::approval::decision::{DecisionId, DecisionPhase, StoredDecision};
+    use meerkat_core::{ApprovalAssurance, PrincipalKind};
+    use serde_json::json;
+    use serde_json::value::RawValue;
+    use tokio::sync::mpsc;
+
+    use super::{
+        INVALID_PARAMS, error_code, error_data, hold_request, persistent_router, principal, result,
+        subject_digest,
+    };
+    use crate::handlers::decision::operator::DecisionOperator;
+    use crate::protocol::{RpcId, RpcResponse};
+    use crate::server::AcknowledgedNotification;
+    use crate::session_runtime::SessionRuntime;
+
+    /// One stdio connection's operator, device trusted in the connection's
+    /// own scope, and the params of every notice the connection wrote. A
+    /// task stands in for the server loop: it takes each notice, keeps it
+    /// and acknowledges it as written.
+    struct Connection {
+        operator: DecisionOperator,
+        written: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    impl Connection {
+        fn open(scope: &str) -> Self {
+            let approver = AuthenticatedApprover::new(
+                principal(PrincipalKind::Human, "operator"),
+                ApprovalAssurance::DeviceTrusted,
+            )
+            .expect("approver")
+            .with_authentication_scope(HostAuthenticationScope::new(scope));
+            let (notices, mut queue) = mpsc::channel::<AcknowledgedNotification>(8);
+            let written = Arc::new(Mutex::new(Vec::new()));
+            let kept = Arc::clone(&written);
+            tokio::spawn(async move {
+                while let Some(AcknowledgedNotification {
+                    notification,
+                    written: acknowledged,
+                }) = queue.recv().await
+                {
+                    let params: serde_json::Value =
+                        serde_json::from_str(notification.params.get()).expect("notice params");
+                    kept.lock().expect("notices").push(params);
+                    let _ = acknowledged.send(());
+                }
+            });
+            Self {
+                operator: DecisionOperator::new(approver, notices)
+                    .expect("an operator in a scope of its own"),
+                written,
+            }
+        }
+
+        fn notices(&self) -> Vec<serde_json::Value> {
+            self.written.lock().expect("notices").clone()
+        }
+
+        /// The connection's client lists every decision.
+        async fn list(&self, runtime: &SessionRuntime) -> serde_json::Value {
+            result(
+                &self
+                    .operator
+                    .handle_list(Some(RpcId::Num(1)), None, runtime)
+                    .await,
+            )
+        }
+
+        /// The connection's operator approves `decision_id` as presented.
+        async fn decide(
+            &self,
+            runtime: &Arc<SessionRuntime>,
+            decision_id: &DecisionId,
+        ) -> RpcResponse {
+            let params = RawValue::from_string(
+                json!({
+                    "decision_id": decision_id.to_string(),
+                    "approve": true,
+                    "presented_digest": subject_digest(),
+                })
+                .to_string(),
+            )
+            .expect("raw params");
+            self.operator
+                .handle_decide(Some(RpcId::Num(2)), Some(&params), Arc::clone(runtime))
+                .await
+        }
+    }
+
+    /// The decision's own refusal of a decide the connection may not make,
+    /// in the form the wire path answers it.
+    fn assert_not_eligible(response: &RpcResponse) {
+        assert_eq!(error_code(response), INVALID_PARAMS, "{response:?}");
+        assert_eq!(
+            error_data(response),
+            json!({"kind": "decision_refused", "decision_refusal": {"kind": "not_eligible"}}),
+            "{response:?}"
+        );
+    }
+
+    /// The row as it was before the refused decide: the same revision,
+    /// still open, no outcome, nothing else changed.
+    fn assert_unchanged(after: &StoredDecision, before: &StoredDecision) {
+        assert_eq!(after.revision, before.revision, "a refused decide writes");
+        assert_eq!(after.state.phase, DecisionPhase::Open);
+        assert!(after.outcome.is_none(), "{after:?}");
+        assert_eq!(after, before);
+    }
+
+    /// Only the connection that presented a decision decides it. The same
+    /// operator on another connection (another scope) is refused, and so is
+    /// the presenting connection's own operator for a decision it never
+    /// presented; each refusal writes nothing.
+    #[tokio::test]
+    async fn only_the_connection_that_presented_a_decision_decides_it() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_router, runtime) = persistent_router(root.path()).await;
+        let decisions = runtime.decision_service();
+        let shown = decisions
+            .hold(hold_request("release", "build-1", "operator"), false)
+            .expect("hold");
+        let presenting = Connection::open("stdio:operator:presenting");
+        let other = Connection::open("stdio:operator:other");
+
+        // The presenting connection's client lists: the connection presents
+        // the decision to its operator and records that it did.
+        let page = presenting.list(&runtime).await;
+        assert_eq!(
+            page["decisions"][0]["decision_id"],
+            shown.decision_id.to_string(),
+            "{page}"
+        );
+        let notices = presenting.notices();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0]["decision_id"], shown.decision_id.to_string());
+        let presented = decisions.get(&shown.decision_id).expect("read");
+        assert!(
+            presented.state.first_presented_to_approver_at_ms.is_some(),
+            "{presented:?}"
+        );
+
+        // The other connection never presented it.
+        assert_not_eligible(&other.decide(&runtime, &shown.decision_id).await);
+        assert_unchanged(
+            &decisions.get(&shown.decision_id).expect("read"),
+            &presented,
+        );
+        assert!(other.notices().is_empty(), "{:?}", other.notices());
+
+        // Held after the list, this one was never presented on the
+        // presenting connection either.
+        let unshown = decisions
+            .hold(hold_request("release", "build-2", "operator"), false)
+            .expect("hold");
+        let held = decisions.get(&unshown.decision_id).expect("read");
+        assert_eq!(held.state.first_presented_to_approver_at_ms, None);
+        assert_not_eligible(&presenting.decide(&runtime, &unshown.decision_id).await);
+        assert_unchanged(&decisions.get(&unshown.decision_id).expect("read"), &held);
+
+        // The connection that presented the decision decides it.
+        let decided = presenting.decide(&runtime, &shown.decision_id).await;
+        assert_eq!(
+            result(&decided)["decision"]["phase"],
+            "approved",
+            "{decided:?}"
+        );
+    }
+}

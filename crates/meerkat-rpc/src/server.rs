@@ -928,12 +928,27 @@ pub enum ServerError {
     Io(#[from] std::io::Error),
 }
 
+/// A notification whose sender waits until the connection wrote it:
+/// `written` is answered once the line is written and flushed to the client,
+/// and dropped unanswered when it is not (the write failed, or the connection
+/// ended before it). Only a connection's decision operator sends one, so a
+/// build without one never constructs it.
+#[cfg_attr(not(all(unix, feature = "local-authorization")), allow(dead_code))]
+pub(crate) struct AcknowledgedNotification {
+    pub(crate) notification: RpcNotification,
+    pub(crate) written: oneshot::Sender<()>,
+}
+
 /// JSON-RPC server over async reader/writer streams.
 pub struct RpcServer<R, W> {
     transport: JsonlTransport<R, W>,
     router: MethodRouter,
     notification_rx: mpsc::Receiver<RpcNotification>,
     experimental_live_notification_rx: mpsc::Receiver<ExperimentalLiveRpcNotification>,
+    /// Notifications whose senders wait until they are written (the
+    /// connection's decision notices), and the sender half handed to them.
+    acknowledged_notification_rx: mpsc::Receiver<AcknowledgedNotification>,
+    acknowledged_notification_tx: mpsc::Sender<AcknowledgedNotification>,
     /// Channel for responses from concurrently dispatched requests.
     response_rx: mpsc::Receiver<AdmittedRpcResponse>,
     response_tx: mpsc::Sender<AdmittedRpcResponse>,
@@ -1040,6 +1055,8 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         #[cfg(not(feature = "openai-live"))]
         drop(experimental_live_notification_tx);
+        let (acknowledged_notification_tx, acknowledged_notification_rx) =
+            mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let transport = JsonlTransport::new(reader, writer);
         let (response_tx, response_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let (callback_request_tx, callback_request_rx) =
@@ -1068,6 +1085,8 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             router,
             notification_rx,
             experimental_live_notification_rx,
+            acknowledged_notification_rx,
+            acknowledged_notification_tx,
             response_rx,
             response_tx,
             callback_request_rx,
@@ -1103,6 +1122,35 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     ) -> Result<Self, meerkat_runtime::RuntimeDriverError> {
         self.router = self.router.with_governed_connection(connection, tools)?;
         Ok(self)
+    }
+
+    /// The sender of notifications this connection acknowledges once it
+    /// wrote them to its client.
+    #[cfg_attr(not(all(unix, feature = "local-authorization")), allow(dead_code))]
+    pub(crate) fn acknowledged_notification_sender(
+        &self,
+    ) -> mpsc::Sender<AcknowledgedNotification> {
+        self.acknowledged_notification_tx.clone()
+    }
+
+    /// Give this stdio connection its operator for durable decisions: the
+    /// process's operating-system user on the runtime's realm. A runtime
+    /// without a realm, or a user that cannot be named as an approver,
+    /// leaves the connection without one.
+    #[cfg(all(unix, feature = "local-authorization"))]
+    fn with_local_decision_operator(mut self) -> Self {
+        let Some(realm) = self.router.runtime().realm_id() else {
+            return self;
+        };
+        if let Some(operator) =
+            crate::handlers::decision::operator::DecisionOperator::for_local_operator(
+                &realm,
+                self.acknowledged_notification_sender(),
+            )
+        {
+            self.router = self.router.with_decision_operator(Arc::new(operator));
+        }
+        self
     }
 
     pub fn with_live_session_factory_opt(
@@ -1196,6 +1244,8 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         #[cfg(not(feature = "openai-live"))]
         drop(experimental_live_notification_tx);
+        let (acknowledged_notification_tx, acknowledged_notification_rx) =
+            mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let transport = JsonlTransport::new(reader, writer);
         let (response_tx, response_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let (long_running_tx, long_running_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
@@ -1231,6 +1281,8 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             router,
             notification_rx,
             experimental_live_notification_rx,
+            acknowledged_notification_rx,
+            acknowledged_notification_tx,
             response_rx,
             response_tx,
             callback_request_rx,
@@ -1528,6 +1580,16 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
                     self.transport.write_notification(&notification).await?;
                 }
 
+                // A notification whose sender waits for it: answered once
+                // the line is written and flushed. A failed write ends the
+                // connection and drops the answer, so the sender never
+                // takes the notification as shown.
+                Some(acknowledged) = self.acknowledged_notification_rx.recv() => {
+                    let AcknowledgedNotification { notification, written } = acknowledged;
+                    self.transport.write_notification(&notification).await?;
+                    let _ = written.send(());
+                }
+
                 Some(notification) = self.experimental_live_notification_rx.recv() => {
                     self.write_experimental_live_notification(notification).await?;
                 }
@@ -1562,6 +1624,10 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         // while the handlers and sessions below drain.
         #[cfg(feature = "local-authorization")]
         self.router.close_governed_connection();
+        // So does the connection's operator for durable decisions: a decide
+        // on it that commits from here is not eligible.
+        #[cfg(all(unix, feature = "local-authorization"))]
+        self.router.close_decision_operator();
 
         // EOF or any read/write failure closes the response queue before we
         // return. Dispatch tasks that finish later receive a send error and
@@ -1570,6 +1636,10 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         // connection that failed to deliver its answer.
         self.reject_queued_responses().await;
         self.reject_queued_experimental_live_notifications();
+        // A notification still queued is never written: its sender is told
+        // so (its answer is dropped) before the handlers waiting on it are
+        // drained below.
+        self.reject_queued_acknowledged_notifications();
         // The connection that owns this callback route is gone. Close the
         // route and fail every callback it still owes BEFORE the graceful
         // request shutdown: dispatchers observe a closed route or a dropped
@@ -1786,6 +1856,16 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         }
     }
 
+    /// Close the acknowledged notification queue and drop what it still
+    /// holds unwritten: each sender's answer is dropped, and a later send
+    /// fails.
+    fn reject_queued_acknowledged_notifications(&mut self) {
+        self.acknowledged_notification_rx.close();
+        while let Ok(unwritten) = self.acknowledged_notification_rx.try_recv() {
+            drop(unwritten);
+        }
+    }
+
     async fn write_long_running_response(&mut self, response: LongRunningResponse) -> bool {
         let cancel_id = response.response.id.clone();
         let to_write = match self
@@ -1914,6 +1994,12 @@ pub async fn serve_stdio_with_options(
     let reader = BufReader::new(stdin);
     let mut server =
         RpcServer::new_with_skill_runtime(reader, stdout, runtime, config_store, skill_runtime)?;
+    // A stdio connection's operator decides durable decisions; a TCP
+    // connection has none.
+    #[cfg(all(unix, feature = "local-authorization"))]
+    {
+        server = server.with_local_decision_operator();
+    }
     if let Some(live) = live {
         if let Some(ws) = live.ws {
             server = server.with_live_ws(ws.state, ws.base_url);
@@ -2028,6 +2114,12 @@ pub async fn serve_stdio_with_options_until(
     let reader = BufReader::new(stdin);
     let mut server =
         RpcServer::new_with_skill_runtime(reader, stdout, runtime, config_store, skill_runtime)?;
+    // A stdio connection's operator decides durable decisions; a TCP
+    // connection has none.
+    #[cfg(all(unix, feature = "local-authorization"))]
+    {
+        server = server.with_local_decision_operator();
+    }
     if let Some(live) = live {
         if let Some(ws) = live.ws {
             server = server.with_live_ws(ws.state, ws.base_url);

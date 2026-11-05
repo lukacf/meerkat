@@ -1663,6 +1663,10 @@ pub const DECISION_DECIDE_METHOD: &str = "decision/decide";
 pub struct MethodRouter {
     #[cfg(feature = "local-authorization")]
     governed_connection: Option<Arc<crate::governed_jsonl::GovernedConnection>>,
+    /// The operator of this router's stdio connection, who decides durable
+    /// decisions on it. `None` everywhere else (TCP, plain dispatch).
+    #[cfg(all(unix, feature = "local-authorization"))]
+    decision_operator: Option<Arc<handlers::decision::operator::DecisionOperator>>,
     runtime: Arc<SessionRuntime>,
     /// The callback route owned by this router's connection. `None` falls
     /// back to the runtime's process-default route.
@@ -1758,6 +1762,8 @@ impl MethodRouter {
         Ok(Self {
             #[cfg(feature = "local-authorization")]
             governed_connection: None,
+            #[cfg(all(unix, feature = "local-authorization"))]
+            decision_operator: None,
             runtime,
             config_store,
             notification_sink,
@@ -1827,6 +1833,27 @@ impl MethodRouter {
     pub(crate) fn close_governed_connection(&self) {
         if let Some(connection) = &self.governed_connection {
             connection.close();
+        }
+    }
+
+    /// Give this router's stdio connection its operator for durable
+    /// decisions: `decision/list` presents the decisions of each page the
+    /// operator acts for, and `decision/decide` decides as the operator.
+    #[cfg(all(unix, feature = "local-authorization"))]
+    pub(crate) fn with_decision_operator(
+        mut self,
+        operator: Arc<handlers::decision::operator::DecisionOperator>,
+    ) -> Self {
+        self.decision_operator = Some(operator);
+        self
+    }
+
+    /// The connection this router serves closed: no decide on it is
+    /// eligible any more.
+    #[cfg(all(unix, feature = "local-authorization"))]
+    pub(crate) fn close_decision_operator(&self) {
+        if let Some(operator) = &self.decision_operator {
+            operator.close();
         }
     }
 
@@ -2315,6 +2342,8 @@ impl MethodRouter {
         Self {
             #[cfg(feature = "local-authorization")]
             governed_connection: None,
+            #[cfg(all(unix, feature = "local-authorization"))]
+            decision_operator: None,
             runtime,
             config_store,
             notification_sink,
@@ -3453,10 +3482,7 @@ impl MethodRouter {
                 routed_arm(|| handlers::tool_grants::handle_audit(id, params, self.runtime.clone()))
                     .await
             }
-            "decision/list" => {
-                routed_arm(|| handlers::decision::handle_list(id, params, self.runtime.clone()))
-                    .await
-            }
+            "decision/list" => routed_arm(|| self.handle_decision_list(id, params)).await,
             "decision/get" => {
                 routed_arm(|| handlers::decision::handle_get(id, params, self.runtime.clone()))
                     .await
@@ -3474,6 +3500,13 @@ impl MethodRouter {
             "decision/withdraw" => {
                 routed_arm(|| handlers::decision::handle_withdraw(id, params, self.runtime.clone()))
                     .await
+            }
+            // Only a stdio connection with an operator routes a decide; it
+            // builds the authenticated event itself. Everywhere else the
+            // method is not found, as in plain dispatch.
+            #[cfg(all(unix, feature = "local-authorization"))]
+            DECISION_DECIDE_METHOD if self.decision_operator.is_some() => {
+                routed_arm(|| self.handle_operator_decision_decide(id, params)).await
             }
             // Compose the realm chain so an inherited (ancestor-realm) self-hosted
             // alias / per-provider default is listed identically to the other
@@ -3828,6 +3861,42 @@ impl MethodRouter {
     /// Access the underlying session runtime.
     pub fn runtime(&self) -> &SessionRuntime {
         &self.runtime
+    }
+
+    /// `decision/list`: on a stdio connection with an operator, the page is
+    /// presented to the operator before it is answered; elsewhere it is the
+    /// plain read.
+    async fn handle_decision_list(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        #[cfg(all(unix, feature = "local-authorization"))]
+        if let Some(operator) = &self.decision_operator {
+            return operator.handle_list(id, params, &self.runtime).await;
+        }
+        handlers::decision::handle_list(id, params, self.runtime.clone()).await
+    }
+
+    /// `decision/decide` by the operator of this router's stdio connection.
+    #[cfg(all(unix, feature = "local-authorization"))]
+    async fn handle_operator_decision_decide(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        match &self.decision_operator {
+            Some(operator) => {
+                operator
+                    .handle_decide(id, params, self.runtime.clone())
+                    .await
+            }
+            None => RpcResponse::error(
+                id,
+                error::METHOD_NOT_FOUND,
+                format!("Method not found: {DECISION_DECIDE_METHOD}"),
+            ),
+        }
     }
 
     async fn handle_tools_register(

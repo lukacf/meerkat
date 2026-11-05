@@ -807,16 +807,18 @@ impl ToolkitOriginalOwner {
         usage: HelperAdmissionUse,
         review: crate::review_custody::ReviewCustody,
     ) -> Result<Option<AdmittedHelperWork>, OriginalWriterError> {
+        // The owner's source writer first, before any other guard and with
+        // nothing held: another original's admission or binding holds it
+        // across its durable write, so this waits for that writer within
+        // Core's owner-change bound. Every check below then runs afresh under
+        // it, and the native fence decides as before.
+        #[cfg(test)]
+        self.hold_source_writer_for_test();
+        let _mutation = self.bounded_source_writer().await?;
         self.check_canonical_source(store, source_scope)?;
         store
             .capabilities()
             .require_durable_contract()
-            .map_err(|_| OriginalWriterError::Unavailable)?;
-        #[cfg(test)]
-        self.hold_source_writer_for_test();
-        let _mutation = self
-            .mutation
-            .try_lock()
             .map_err(|_| OriginalWriterError::Unavailable)?;
         self.check_helper_sources(contributor, contributors, own_originals)?;
         let parent = contributor.association.candidate();

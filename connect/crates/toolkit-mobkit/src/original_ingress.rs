@@ -2120,7 +2120,7 @@ impl ToolkitOriginalOwner {
                 Output = Result<Arc<toolkit_store::StoredRecord>, OriginalWriterError>,
             >,
     {
-        let _mutation = self.cancellation_writer().await?;
+        let _mutation = self.bounded_source_writer().await?;
         // Compare the selected event with this canonical original before any
         // publication changes. The writer mutex keeps these immutable facts
         // coupled to the later Pending and durable cancellation writes.
@@ -2386,7 +2386,7 @@ impl ToolkitOriginalOwner {
                 Output = Result<Arc<toolkit_store::StoredRecord>, OriginalWriterError>,
             >,
     {
-        let _mutation = self.cancellation_writer().await?;
+        let _mutation = self.bounded_source_writer().await?;
         let sources = validate_sources().await?;
         if sources.is_empty() {
             return Err(OriginalWriterError::WrongOwner);
@@ -3175,12 +3175,13 @@ impl ToolkitOriginalOwner {
         }
     }
 
-    /// The source writer for a cancellation, taken before any other guard.
-    /// Another writer holds it across its own durable write, so a
-    /// cancellation waits for that writer, within Core's owner-change bound,
-    /// and then reads every fact afresh under it. A holder that outlasts the
-    /// bound is unavailable, as before, and nothing was changed.
-    async fn cancellation_writer(
+    /// The source writer for an async writer that takes it before any other
+    /// guard: a cancellation, or a Find's helper admission. Another writer
+    /// holds it across its own durable write, so the caller waits for that
+    /// writer, within Core's owner-change bound, and then reads every fact
+    /// afresh under it. A holder that outlasts the bound is unavailable, as
+    /// before, and nothing was changed.
+    async fn bounded_source_writer(
         &self,
     ) -> Result<tokio::sync::MutexGuard<'_, ()>, OriginalWriterError> {
         tokio::time::timeout(

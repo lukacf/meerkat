@@ -116,6 +116,40 @@ declares that identity alone first. What changes for a host:
 **Do:** coming from Meta 0.9.3 or earlier, run Meta 0.9.10 over the state
 directory once before 0.9.11.
 
+### A host's adoption of a declared identity
+
+A host's adoption of an identity a declared roster lists
+(`MobHandle::adopt_member_identity_declaration` over a declared identity
+entry, Rust only) takes the entry over: Core retires the member with the
+cause `MemberRetirementCause::HostAdopted` and materializes it again under
+the host's intent, on its own session, as no entry, and the end of that
+retirement ends the entry. In 0.9.10 the entry outlived the retirement,
+unseated and owed its seat, and Core refused the host's spawn of the
+identity (`IdentityMember`), so the identity was not served again. From the
+host's intent row on, a declared apply answers the identity host-adopted
+(`DeclaredEntryRefusal::HostAdopted`), and a complete roster's seal leaves
+its entry as it is, whether the roster lists the identity or not.
+
+**Do:** nothing on the upgrade; see the rollback below.
+
+### Rolling back Core to 0.9.10
+
+0.9.10 does not know the cause `HostAdopted`: it replays that retirement as
+one the seal did not start, so it reads the identity a host took over as
+the declared entry again, seated by the member the host's intent
+materialized. The member keeps serving, and a declaration naming the
+identity is refused `HostAdopted`. But a complete roster that does not list
+the identity unlists the entry and retires the member once, and once the
+member retires for any other reason, Core refuses the host's spawn of the
+identity (`IdentityMember`) while the entry stands.
+
+**Do:** after rolling Core back to 0.9.10, unlist each identity that 0.9.10
+reads as a declared entry while a host's identity intent row names it
+(`MemberBindingHistory::identity_management` answers `IntentManaged`), with
+`MobHandle::unlist_declared_identity`: its member retires once (cause
+`Unlisted`), the entry ends, and the host's intent materializes the member
+again, as no entry.
+
 ### Rolling back Meta to 0.9.10
 
 Meta 0.9.10 reads what Meta 0.9.11 writes, with one boundary: an identity

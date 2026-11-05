@@ -103,10 +103,16 @@ each package is accepted only on evidence for that exact package, and the
 - Registering an identity (`IdentityRuntime::register`) or updating its spec
   (`update_spec`) declares it in Core's mob as a one-identity roster: Core's
   MobMachine decides what becomes of the identity's member and Core realizes
-  it. Meta records the spec only when Core decided the declaration
-  (`DeclaredIdentityAnswer::registers_spec`); a refusal, a deferral or a
-  failure leaves the previous registration as it was. An identity Core holds
-  no member for is seated Dormant when it is registered, on its archived
+  it. Meta records the spec as the identity's registration whatever Core
+  answers: the registration is the host's declaration, and the identity's
+  doors declare it again and answer Core's typed refusal. An identity whose
+  declaration Core refused for good (a raw member holds its name, its name
+  is a removed entry's or unreadable, its first-boot `Resume` row names a
+  session Core holds no copy of, its host rejects its build every time)
+  reads `broken` in its status, the status list and its health, names no
+  member and is not active, until Core answers a later declaration
+  otherwise. An identity Core holds no member for is seated Dormant when it
+  is registered, on its archived
   session or a fresh one, instead of at the next roster pass or its first
   delivery. The host's customizer composes the member build only when Core
   answers that the identity's verdict builds a member: an identity Core keeps
@@ -125,12 +131,25 @@ each package is accepted only on evidence for that exact package, and the
   Meta's registry. A send, a dispatch or a materialization of an identity
   Core holds no member for, or one whose first-boot row, held role move or
   host preparation is still owed, declares that identity alone before it
-  acts. One identity's refusal, held role move or failed retirement is that
+  acts. A respawn of a built member is such a declaration: Core seats the
+  member again, Dormant, on the session it kept archived, building nothing,
+  and the wake that follows builds it once, so the host's `customize_build`
+  runs twice (the seat's composed build, then the build's own), as for a
+  lazily seated identity, where the seat step revived the member live with
+  one call. One identity's refusal, held role move or failed retirement is that
   identity's own typed outcome, and the pass goes on; a retirement that
   failed is retried by the next complete roster. An identity refused before
   Core is asked (its first-boot row contradicts Core's history) turns a
   complete roster into a partial one for that pass, so nothing is unlisted
-  until every listed identity is declared.
+  until every listed identity is declared. A placed or externally bound
+  identity Core holds no member of is created through its host (at the
+  default pass, or at its first use after a lazy one), and that creation
+  carries out its pending first-boot `Resume` row: the member is created on
+  the row's session, with its history, and the row is settled; a session
+  Core holds no durable copy of is the row's typed refusal, and nothing is
+  created in its place. An identity awaiting a held creation that no held
+  pass in progress covers is refused typed (`held_completion_owed`): it owes
+  its host a held completion.
 - A member whose spawn carries the `agent_identity` label but not the
   durable-identity marker (the shape Meta 0.9.3 spawned) is no longer
   respawned onto its session to gain the marker, and the roster pass no
@@ -157,6 +176,12 @@ each package is accepted only on evidence for that exact package, and the
 
 ### Fixed
 
+- The exit interview a retirement no Meta verb asked for owes (Core's seal
+  unlisted the identity) is queued once when the process stops inside the
+  retirement's side effects and the next start delivers them again. Its
+  pending harvest was keyed by the time the side effect ran, so the replay
+  after the restart queued a second one; it is now keyed by Core's journal
+  position of the retirement, which the replay reads again.
 - The roster pass no longer retires a member a host spawned under an
   identity's member id and labelled with the identity when the roster never
   declared that identity.

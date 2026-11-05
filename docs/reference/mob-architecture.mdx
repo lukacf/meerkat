@@ -190,8 +190,21 @@ name.
   apply seats it again there (see [The declared apply](#the-declared-apply));
   an archive's retirement leaves it archived (`Archived`) instead, until its
   unarchive. Only the end of a retirement the apply's seal or a one-entry
-  unlist started (the host's roster unlisted the identity), a removal, the
-  destroy and the mob's reset end an entry.
+  unlist started (the host's roster unlisted the identity), a removal, a
+  host's adoption, the destroy and the mob's reset end an entry.
+- A host's adoption of a declared entry
+  (`adopt_member_identity_declaration`) takes the entry over: the identity
+  reconciler marks the entry, retires its member with the cause
+  `HostAdopted` (`MemberRetirementCause`) and materializes the member again
+  under the host's intent on its own session, as no entry; the end of that
+  retirement ends the entry. A declared apply answers the identity
+  host-adopted (`DeclaredEntryRefusal::HostAdopted`) from the mark on, and
+  its seal neither marks nor unmarks it.
+- A rotation (`rotate_member`) of an entry no member holds is its fresh
+  life, a seat of its name: without the entry's custody it is refused
+  `MobError::IdentityMember` before anything is created, and with it the
+  entry's archived session record is let go and the member is seated on a
+  fresh session.
 - A placed member is an entry only when the declared apply hosts the entry on
   its first use: a placed spawn with entry custody of any other name is
   refused `MobError::WiringError` before anything is created.

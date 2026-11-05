@@ -1268,10 +1268,21 @@ mod operator_connections {
     use crate::server::AcknowledgedNotification;
     use crate::session_runtime::SessionRuntime;
 
+    /// What the server loop's write of a notice does.
+    #[derive(Clone, Copy)]
+    enum Pipe {
+        /// The line is written: the notice is kept and acknowledged.
+        Writes,
+        /// The write fails: the line never reaches the client, and the
+        /// acknowledgement is dropped unanswered, as the server loop drops
+        /// it when its transport refuses the line.
+        Fails,
+    }
+
     /// One stdio connection's operator, device trusted in the connection's
     /// own scope, and the params of every notice the connection wrote. A
-    /// task stands in for the server loop: it takes each notice, keeps it
-    /// and acknowledges it as written.
+    /// task stands in for the server loop: it takes each notice and, as its
+    /// pipe does, keeps and acknowledges it or drops it unanswered.
     struct Connection {
         operator: DecisionOperator,
         written: Arc<Mutex<Vec<serde_json::Value>>>,
@@ -1279,6 +1290,10 @@ mod operator_connections {
 
     impl Connection {
         fn open(scope: &str) -> Self {
+            Self::open_on(scope, Pipe::Writes)
+        }
+
+        fn open_on(scope: &str, pipe: Pipe) -> Self {
             let approver = AuthenticatedApprover::new(
                 principal(PrincipalKind::Human, "operator"),
                 ApprovalAssurance::DeviceTrusted,
@@ -1294,10 +1309,16 @@ mod operator_connections {
                     written: acknowledged,
                 }) = queue.recv().await
                 {
-                    let params: serde_json::Value =
-                        serde_json::from_str(notification.params.get()).expect("notice params");
-                    kept.lock().expect("notices").push(params);
-                    let _ = acknowledged.send(());
+                    match pipe {
+                        Pipe::Writes => {
+                            let params: serde_json::Value =
+                                serde_json::from_str(notification.params.get())
+                                    .expect("notice params");
+                            kept.lock().expect("notices").push(params);
+                            let _ = acknowledged.send(());
+                        }
+                        Pipe::Fails => drop(acknowledged),
+                    }
                 }
             });
             Self {
@@ -1419,5 +1440,42 @@ mod operator_connections {
             "approved",
             "{decided:?}"
         );
+    }
+
+    /// A notice the pipe does not take records nothing. The server loop
+    /// answers a notice only once its line is written, and a failed write
+    /// drops the answer: the listing still answers, the decision stays
+    /// unpresented, and the connection's operator cannot decide it.
+    #[tokio::test]
+    async fn a_notice_the_pipe_does_not_take_records_no_presentation() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_router, runtime) = persistent_router(root.path()).await;
+        let decisions = runtime.decision_service();
+        let held = decisions
+            .hold(hold_request("release", "build-1", "operator"), false)
+            .expect("hold");
+        let before = decisions.get(&held.decision_id).expect("read");
+        let failing = Connection::open_on("stdio:operator:failing", Pipe::Fails);
+
+        let page = failing.list(&runtime).await;
+        let listed = &page["decisions"][0];
+        assert_eq!(
+            listed["decision_id"],
+            held.decision_id.to_string(),
+            "{page}"
+        );
+        assert!(
+            listed["first_presented_to_approver_at_ms"].is_null(),
+            "{page}"
+        );
+        assert!(failing.notices().is_empty(), "{:?}", failing.notices());
+        assert_eq!(
+            decisions.get(&held.decision_id).expect("read"),
+            before,
+            "a notice the pipe did not take recorded a presentation"
+        );
+
+        assert_not_eligible(&failing.decide(&runtime, &held.decision_id).await);
+        assert_unchanged(&decisions.get(&held.decision_id).expect("read"), &before);
     }
 }

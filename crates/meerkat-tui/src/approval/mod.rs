@@ -13,21 +13,25 @@
 //! Tier-3 actions are escalated to the human through the
 //! [`escalation::EscalationBroker`].
 //!
-//! This module currently holds the engine-independent parts: the tier policy
+//! The gate is [`admission::ApprovalGate`], Meerkat's `ToolDispatchAdmission`
+//! seam: the agent's dispatcher consults it immediately before every tool
+//! call, and a denial comes back to the model as an ordinary tool error
+//! (`policy_denied`) carrying [`deny_message`], so the run continues. The
+//! gate is installed per session build (see [`admission::install`]).
+//! [`engine::ApprovalEngine`] joins the parts below: tier policy
 //! ([`policy`]), rules and settings ([`rules`]), shell analysis ([`shell`]),
-//! the classifier contract and prompts ([`classifier`], [`prompts`]), denial
+//! the classifier and its prompts ([`classifier`], [`prompts`]), denial
 //! counters ([`counters`]), the escalation broker ([`escalation`]), the
-//! classifier transcript ([`transcript`]) and the verdict types below.
-//!
-//! The `ApprovalEngine` that joins them (decide → verdict, classifier allow
-//! cache, pause/resume, escalation, transcript recording) is ported in P2 of
-//! the upstream port, where the gate moves from a `PreToolExecution` hook to
-//! upstream's `ToolDispatchAdmission` and escalations persist through
-//! `ApprovalService`.
+//! durable escalation ledger ([`ledger`]) and the reasoning-blind classifier
+//! transcript ([`transcript`]).
 
+pub mod admission;
 pub mod classifier;
 pub mod counters;
+pub mod engine;
 pub mod escalation;
+pub mod git_index;
+pub mod ledger;
 pub mod patch_targets;
 pub mod policy;
 pub mod prompts;
@@ -36,22 +40,18 @@ pub mod shell;
 pub mod transcript;
 
 use counters::PauseCause;
-use meerkat_core::{HookReasonCode, SessionId};
+use meerkat_core::{SessionId, Usage};
 use policy::{Decider, Tier, VerdictSummary};
 use rules::{Rule, RuleId, RulesError};
 use serde::Serialize;
 use std::fmt;
 
-/// Hook id and in-process handler name of the transcript hook.
-pub const TRANSCRIPT_HOOK_ID: &str = "tui-transcript";
-/// In-process handler name of the run-ended hooks (also the `RunCompleted` hook id).
-pub const RUN_ENDED_HOOK_ID: &str = "tui-run-ended";
-/// Hook id of the `RunFailed` registration of the run-ended handler.
-pub const RUN_FAILED_HOOK_ID: &str = "tui-run-failed";
-/// Hook id and in-process handler name of the guardrail hook.
-pub const AUTO_MODE_HOOK_ID: &str = "tui-auto-mode";
-/// Guardrail timeout: long enough for a human to answer an escalation.
-pub const AUTO_MODE_HOOK_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
+pub use admission::ApprovalGate;
+pub use engine::{ApprovalConfig, ApprovalEngine};
+
+/// Typed code of the tool error a denial returns to the model
+/// (`ToolError::PolicyDenied`, rendered as `Tool call denied (auto_mode): …`).
+pub const DENIAL_CODE: &str = "auto_mode";
 
 /// Final decision for one tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,6 +122,8 @@ pub enum DenyReason {
     AutoDisabled,
     /// The classifier failed and no human could be asked.
     ClassifierUnavailable(String),
+    /// Nobody answered the escalation in time.
+    EscalationTimedOut,
 }
 
 impl DenyReason {
@@ -133,17 +135,7 @@ impl DenyReason {
                 Decider::Policy
             }
             Self::Classifier { .. } => Decider::Classifier,
-            Self::Human | Self::Stopped => Decider::Human,
-        }
-    }
-
-    /// Hook reason code for this denial: classifier blocks are safety
-    /// violations, everything else is a policy violation.
-    #[must_use]
-    pub fn reason_code(&self) -> HookReasonCode {
-        match self {
-            Self::Classifier { .. } => HookReasonCode::SafetyViolation,
-            _ => HookReasonCode::PolicyViolation,
+            Self::Human | Self::Stopped | Self::EscalationTimedOut => Decider::Human,
         }
     }
 
@@ -178,6 +170,9 @@ impl fmt::Display for DenyReason {
             Self::ClassifierUnavailable(err) => {
                 write!(f, "the safety classifier is unavailable ({err})")
             }
+            Self::EscalationTimedOut => {
+                f.write_str("the user did not answer the approval request in time")
+            }
         }
     }
 }
@@ -197,7 +192,7 @@ impl Serialize for AutoModePolicy {
     }
 }
 
-/// Typed payload attached to hook denials.
+/// Typed summary of a denial, for logs and diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DenyPayload {
     /// Always serialized as `"auto-mode"`.
@@ -242,6 +237,8 @@ pub enum ApprovalEvent {
         tier: Tier,
         /// Outcome.
         verdict: VerdictSummary,
+        /// Why it was denied (the reason the model receives), if it was.
+        reason: Option<String>,
     },
     /// Auto mode paused.
     Paused(PauseCause),
@@ -249,14 +246,29 @@ pub enum ApprovalEvent {
     Resumed,
     /// Broad allow rules were dropped on entering auto mode.
     RulesDropped(Vec<Rule>),
+    /// The classifier started (`true`) or finished (`false`) reviewing a call.
+    Classifying(bool),
+    /// One classifier model call's token usage.
+    ClassifierUsage {
+        /// Classifier model.
+        model: String,
+        /// Its usage.
+        usage: Usage,
+    },
+    /// An escalation ended without the human's answer (it timed out or its
+    /// tool call was abandoned): the dialog for it should close.
+    EscalationWithdrawn(u64),
 }
 
-/// Errors from engine configuration.
+/// Errors from approval setup.
 #[derive(Debug, thiserror::Error)]
 pub enum ApprovalError {
-    /// Rules could not be persisted.
+    /// Rules could not be loaded or persisted.
     #[error(transparent)]
     Rules(#[from] RulesError),
+    /// The escalation ledger could not be opened.
+    #[error(transparent)]
+    Ledger(#[from] ledger::LedgerError),
 }
 
 #[cfg(test)]
@@ -302,19 +314,16 @@ mod tests {
     }
 
     #[test]
-    fn deny_reasons_map_to_deciders_and_codes() {
+    fn deny_reasons_map_to_deciders() {
         let classifier = DenyReason::Classifier {
             rule: Some("D1".into()),
             explanation: "x".into(),
         };
         assert_eq!(classifier.decider(), Decider::Classifier);
-        assert_eq!(classifier.reason_code(), HookReasonCode::SafetyViolation);
         assert_eq!(classifier.rule_label().as_deref(), Some("D1"));
         assert_eq!(DenyReason::Human.decider(), Decider::Human);
-        assert_eq!(
-            DenyReason::AutoDisabled.reason_code(),
-            HookReasonCode::PolicyViolation
-        );
+        assert_eq!(DenyReason::EscalationTimedOut.decider(), Decider::Human);
+        assert_eq!(DenyReason::AutoDisabled.decider(), Decider::Policy);
         assert_eq!(DenyReason::Stopped.rule_label(), None);
     }
 }

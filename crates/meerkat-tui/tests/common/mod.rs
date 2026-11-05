@@ -1,6 +1,7 @@
-//! Shared harness for the headless runner tests: a temporary workspace, a
-//! scripted LLM client that records every request, and a runner over the
-//! real runtime-backed service (`PersistentSessionService` + `MeerkatMachine`).
+//! Shared harness for the headless runner and classifier tests: a temporary
+//! workspace, a scripted LLM client that records every request, and a runner
+//! over the real runtime-backed service (`PersistentSessionService` +
+//! `MeerkatMachine`) with the approval gate installed.
 
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -15,10 +16,11 @@ use clap::Parser;
 use futures::StreamExt;
 use meerkat::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
 use meerkat_core::{
-    AgentEvent, Message, Provider, Session, SessionId, StopReason, TurnUsage, Usage,
+    AgentEvent, Message, Provider, ProviderTag, Session, SessionId, StopReason, TurnUsage, Usage,
 };
 use meerkat_tui::Args;
-use meerkat_tui::bootstrap::{self, BootstrapOptions, TuiService};
+use meerkat_tui::approval::ApprovalEngine;
+use meerkat_tui::bootstrap::{self, ApprovalOverrides, BootstrapOptions, TuiService};
 use meerkat_tui::runner::Start;
 use meerkat_tui::runner::testing::{RunnerHarness, SavedUnsent, spawn_runner};
 use meerkat_tui::ui::{Effect, Msg, TurnOutcome};
@@ -50,6 +52,14 @@ pub enum Step {
         name: &'static str,
         args: Value,
     },
+    /// Several tool calls `(id, name, args)`, then `Done(ToolUse)`.
+    Tools(Vec<(&'static str, &'static str, Value)>),
+    /// A 400 rejecting the tool definitions.
+    RejectTools,
+    /// A transport failure.
+    StreamError,
+    /// A response that never arrives.
+    Hang,
     /// The inner step, once the gate is notified.
     Gated(Arc<Notify>, Box<Step>),
 }
@@ -88,18 +98,59 @@ impl Step {
                 usage,
                 done(StopReason::EndTurn),
             ],
-            Self::Tool { id, name, args } => vec![
-                Ok(LlmEvent::ToolCallComplete {
-                    id: id.to_string(),
-                    name: name.to_string(),
-                    args,
-                    meta: None,
-                }),
-                usage,
-                done(StopReason::ToolUse),
-            ],
+            Self::Tool { id, name, args } => Self::Tools(vec![(id, name, args)]).events(model),
+            Self::Tools(calls) => {
+                let mut events: Vec<_> = calls
+                    .into_iter()
+                    .map(|(id, name, args)| {
+                        Ok(LlmEvent::ToolCallComplete {
+                            id: id.to_string(),
+                            name: name.to_string(),
+                            args,
+                            meta: None,
+                        })
+                    })
+                    .collect();
+                events.push(usage);
+                events.push(done(StopReason::ToolUse));
+                events
+            }
+            Self::RejectTools => vec![Err(LlmError::InvalidRequest {
+                message: "tools are not supported by this model".to_string(),
+            })],
+            Self::StreamError => vec![Err(LlmError::ServerOverloaded)],
+            Self::Hang => Vec::new(),
             Self::Gated(_, inner) => inner.events(model),
         }
+    }
+}
+
+/// One recorded request.
+#[derive(Debug, Clone)]
+pub struct Recorded {
+    pub model: String,
+    pub max_tokens: u32,
+    pub temperature: Option<f32>,
+    pub provider_params: Option<ProviderTag>,
+    pub tools: Vec<String>,
+    pub messages: Vec<Message>,
+}
+
+impl Recorded {
+    /// Concatenated system text.
+    pub fn system(&self) -> String {
+        self.messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::System(s) => Some(s.content.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Concatenated user text.
+    pub fn user(&self) -> String {
+        user_texts(&self.messages).concat()
     }
 }
 
@@ -107,7 +158,7 @@ impl Step {
 pub struct ScriptedLlmClient {
     script: Vec<Step>,
     next: AtomicUsize,
-    requests: Mutex<Vec<Vec<Message>>>,
+    requests: Mutex<Vec<Recorded>>,
     calls: mpsc::UnboundedSender<usize>,
     calls_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<usize>>,
 }
@@ -127,6 +178,15 @@ impl ScriptedLlmClient {
 
     /// The messages of every request so far.
     pub fn requests(&self) -> Vec<Vec<Message>> {
+        self.requests
+            .lock()
+            .iter()
+            .map(|r| r.messages.clone())
+            .collect()
+    }
+
+    /// Every request so far, in full.
+    pub fn recorded(&self) -> Vec<Recorded> {
         self.requests.lock().clone()
     }
 
@@ -157,7 +217,14 @@ impl LlmClient for ScriptedLlmClient {
     ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>>
     {
         let index = self.next.fetch_add(1, Ordering::SeqCst);
-        self.requests.lock().push(request.messages.clone());
+        self.requests.lock().push(Recorded {
+            model: request.model.clone(),
+            max_tokens: request.max_tokens,
+            temperature: request.temperature,
+            provider_params: request.provider_params.clone(),
+            tools: request.tools.iter().map(|t| t.name.to_string()).collect(),
+            messages: request.messages.clone(),
+        });
         let _ = self.calls.send(index);
         let step = self
             .script
@@ -165,11 +232,15 @@ impl LlmClient for ScriptedLlmClient {
             .cloned()
             .unwrap_or(Step::Text("script exhausted"));
         let (gate, step) = step.into_parts();
+        let hang = matches!(step, Step::Hang);
         let events = step.events(&request.model);
         Box::pin(
             futures::stream::once(async move {
                 if let Some(gate) = gate {
                     gate.notified().await;
+                }
+                if hang {
+                    std::future::pending::<()>().await;
                 }
                 futures::stream::iter(events)
             })
@@ -228,6 +299,7 @@ pub fn args_for(root: &Path) -> Args {
 /// A runner over a real runtime-backed service, with its channels.
 pub struct Rig {
     pub service: Arc<TuiService>,
+    pub approval: Arc<ApprovalEngine>,
     pub store: Arc<dyn meerkat::SessionStore>,
     pub effects: mpsc::UnboundedSender<Effect>,
     pub ui_rx: mpsc::UnboundedReceiver<Msg>,
@@ -242,15 +314,27 @@ pub struct Rig {
 impl Rig {
     /// Bootstrap the realm at `root` with `llm` and start a runner on `start`.
     pub async fn start(root: &Path, llm: &Arc<ScriptedLlmClient>, start: Start) -> Self {
+        Self::start_with(root, llm, start, ApprovalOverrides::default()).await
+    }
+
+    /// [`Rig::start`] with approval-engine overrides.
+    pub async fn start_with(
+        root: &Path,
+        llm: &Arc<ScriptedLlmClient>,
+        start: Start,
+        approval: ApprovalOverrides,
+    ) -> Self {
         let runtime = bootstrap::bootstrap(
             &args_for(root),
             BootstrapOptions {
                 llm_override: Some(Arc::clone(llm) as Arc<dyn LlmClient>),
+                approval,
             },
         )
         .await
         .expect("bootstrap");
         let service = Arc::clone(&runtime.service);
+        let approval = Arc::clone(&runtime.approval.engine);
         let store = Arc::clone(&runtime.store);
         let RunnerHarness {
             effects,
@@ -270,6 +354,7 @@ impl Rig {
         });
         Self {
             service,
+            approval,
             store,
             effects,
             ui_rx,

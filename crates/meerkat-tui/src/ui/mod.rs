@@ -239,6 +239,14 @@ pub enum Msg {
     EscalationResolved(EscalationId),
     /// An approval decision to log in the transcript.
     Approval(ApprovalNotice),
+    /// One safety-classifier model call's usage: counted in the session's
+    /// cost under the classifier model.
+    ClassifierUsage {
+        /// Classifier model id.
+        model: String,
+        /// Its usage.
+        usage: meerkat_core::Usage,
+    },
     /// A notice to show in the transcript.
     Notice {
         /// Severity.
@@ -1068,6 +1076,10 @@ impl App {
                     allowed: n.allowed,
                     reason: n.reason,
                 });
+            }
+            Msg::ClassifierUsage { model, usage } => {
+                self.status.cost.record(&model, &usage);
+                fx.push(Effect::CostSnapshot(self.status.cost.clone()));
             }
             Msg::Notice { level, text } => {
                 self.transcript.push_notice(level, text);

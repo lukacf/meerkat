@@ -4,8 +4,9 @@
 //! (a `PersistentSessionService` driven by a `MeerkatMachine`): prompts are
 //! runtime inputs, messages typed mid-turn are durable steers the runtime
 //! writes into the conversation at the next step, and sessions persist in
-//! the workspace (`.rkat/tui/`) for `-c` / `--resume`. Every tool call will
-//! be gated through an auto-mode approval model (a later phase).
+//! the workspace (`.rkat/tui/`) for `-c` / `--resume`. Every tool call is
+//! gated by an auto-mode approval model installed as each session's
+//! `ToolDispatchAdmission` ([`approval`]).
 //!
 //! Module map:
 //! - [`cli`] — command-line arguments

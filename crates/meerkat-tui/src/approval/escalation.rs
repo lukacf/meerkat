@@ -1,6 +1,6 @@
 //! Human escalation broker.
 //!
-//! Pre-tool hooks for parallel tool calls run concurrently, but the human can
+//! The admission gate decides parallel tool calls concurrently, but the human can
 //! only answer one dialog at a time, so the broker serializes requests with an
 //! async mutex held across the whole wait. Any failure to get an answer (UI
 //! gone, responder dropped) resolves as [`HumanDecision::Deny`]: fail closed.
@@ -25,6 +25,9 @@ pub enum HumanDecision {
 /// What the UI shows in the escalation dialog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EscalationPrompt {
+    /// Engine-assigned id; a withdrawn escalation
+    /// ([`super::ApprovalEvent::EscalationWithdrawn`]) names it.
+    pub id: u64,
     /// Session the call belongs to.
     pub session_id: SessionId,
     /// Tool name.
@@ -42,6 +45,8 @@ pub struct EscalationPrompt {
 /// An escalation delivered to the UI, carrying the responder.
 #[derive(Debug)]
 pub struct EscalationRequest {
+    /// Engine-assigned id (see [`EscalationPrompt::id`]).
+    pub id: u64,
     /// Session the call belongs to.
     pub session_id: SessionId,
     /// Tool name.
@@ -90,6 +95,7 @@ impl EscalationBroker {
     ) -> HumanDecision {
         let (respond, answer) = oneshot::channel();
         let request = EscalationRequest {
+            id: prompt.id,
             session_id: prompt.session_id,
             tool: prompt.tool,
             args_preview: prompt.args_preview,
@@ -119,6 +125,7 @@ mod tests {
 
     fn prompt(tool: &str) -> EscalationPrompt {
         EscalationPrompt {
+            id: 0,
             session_id: SessionId::new(),
             tool: tool.into(),
             args_preview: "{}".into(),

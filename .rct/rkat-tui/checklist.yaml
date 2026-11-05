@@ -92,20 +92,22 @@ phases:
         done_when: "The headless test resumes the session it created."
   - id: 2
     title: "Approval Gate"
-    status: pending
+    status: done
     reviewers: [rct-guardian, integration-sheriff, spec-auditor]
     verification_commands:
+      - "./scripts/repo-cargo clippy -p meerkat-tui --all-targets --all-features -- -D warnings"
       - "./scripts/repo-cargo nextest run -p meerkat-tui"
     tasks:
       - id: P2-T001
         spec_id: CONTRACT-003
-        text: "Install the approval gate as a ToolDispatchAdmission through the SessionAgentBuilder wrapper."
-        done: false
+        text: "Install the approval gate as a ToolDispatchAdmission on every session build; persist escalations through ApprovalService + FileApprovalStore."
+        done: true
         done_when: "An end-to-end test blocks a tier-3 call through the real service."
+        note: "Installed per build through SessionBuildOptions.tool_dispatch_admission (create and resume), not through a SessionAgentBuilder wrapper: upstream's runtime-backed composition is specialised to FactoryAgentBuilder and its custody/job-delivery/reconfigure wiring is pub(crate). Mob members (P5) must receive the gate through their spawn specs."
       - id: P2-T002
         spec_id: CONTRACT-004
         text: "Run the classifier on meerkat-llm-core clients."
-        done: false
+        done: true
         done_when: "A scripted-client test returns a classifier verdict that the gate applies."
   - id: 3
     title: "Confinement And Custody"

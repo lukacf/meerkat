@@ -13,11 +13,15 @@
 //! has published its terminal event; [`Msg::TurnFinished`] then carries the
 //! result and the steered messages the runtime never delivered.
 //!
+//! The approval gate's side lives in [`approval`]: escalation dialogs,
+//! `/rules`, `/auto`, decision notices and classifier usage.
+//!
 //! Effects of later phases are answered honestly instead of being stubbed:
-//! approval rules and escalations (P2), model switching and the cost sidecar
-//! (P4), `/remember` (P6) and manual `/compact` (the runtime compacts on its
-//! own; a manual trigger needs an upstream primitive).
+//! model switching and the cost sidecar (P4), `/remember` (P6) and manual
+//! `/compact` (the runtime compacts on its own; a manual trigger needs an
+//! upstream primitive).
 
+mod approval;
 mod lifecycle;
 mod quit;
 #[doc(hidden)]
@@ -36,6 +40,7 @@ use meerkat_runtime::completion::{CompletionOutcome, CompletionWaitError};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 
+use crate::approval::ApprovalEngine;
 use crate::bootstrap::{self, BootstrapOptions, Runtime};
 use crate::cli::Args;
 use crate::delivery::{PendingId, SteerFailure};
@@ -191,6 +196,7 @@ fn workspace_notes_dir(workspace: &Path) -> PathBuf {
 pub(crate) struct Template {
     external_tools: Arc<dyn AgentToolDispatcher>,
     notes: Arc<MemoryToolDispatcher>,
+    approval: Arc<ApprovalEngine>,
 }
 
 impl Template {
@@ -224,6 +230,7 @@ impl Template {
             Self {
                 external_tools: Arc::new(gateway),
                 notes,
+                approval: Arc::clone(&runtime.approval.engine),
             },
             diff_rx,
         ))
@@ -239,6 +246,7 @@ impl Template {
                 .collect(),
             model: None,
             provider: None,
+            approval: Some(Arc::clone(&self.approval)),
         }
     }
 }
@@ -388,12 +396,14 @@ pub(crate) struct Runner {
     delivered: Vec<PendingId>,
     /// Messages the UI still held when the user quit ([`Effect::SaveUnsent`]).
     held_unsent: Vec<(Option<PendingId>, String)>,
+    /// The approval engine's channels and open escalations.
+    approval: approval::ApprovalDesk,
 }
 
 impl Runner {
     pub(crate) async fn new(parts: RunnerParts) -> Self {
         let RunnerParts {
-            runtime,
+            mut runtime,
             template,
             session,
             agent_tx,
@@ -402,6 +412,12 @@ impl Runner {
             diff_rx,
         } = parts;
         let (completion_tx, completion_rx) = mpsc::unbounded_channel();
+        let desk = approval::ApprovalDesk::new(
+            Arc::clone(&runtime.approval.engine),
+            runtime.approval.escalations.take(),
+            runtime.approval.events.take(),
+        );
+        let notices = std::mem::take(&mut runtime.approval.notices);
         let mut runner = Self {
             runtime,
             template,
@@ -416,7 +432,12 @@ impl Runner {
             turn: Turn::default(),
             delivered: Vec::new(),
             held_unsent: Vec::new(),
+            approval: desk,
         };
+        runner.push_auto_status();
+        for notice in notices {
+            runner.notice(NoticeLevel::Warn, notice);
+        }
         runner.follow_events().await;
         runner
     }
@@ -438,6 +459,8 @@ impl Runner {
                     }
                 },
                 Some(done) = self.completion_rx.recv() => self.on_completed(done).await,
+                Some(request) = recv(&mut self.approval.escalations) => self.on_escalation(request),
+                Some(event) = recv_unbounded(&mut self.approval.events) => self.on_approval_event(event),
                 Some(diff) = self.diff_rx.recv() => self.send(Msg::Diff {
                     tool_use_id: diff.tool_use_id,
                     path: diff.path.display().to_string(),
@@ -489,15 +512,12 @@ impl Runner {
             Effect::NewSession => self.new_session().await,
             Effect::ResumeSession(reference) => self.resume_session(&reference).await,
             Effect::RequestResumePicker => self.show_resume_picker().await,
-            Effect::RespondEscalation(..)
+            effect @ (Effect::RespondEscalation(..)
             | Effect::AddRule { .. }
             | Effect::RemoveRule(_)
             | Effect::ListRules
             | Effect::SetAutoMode(_)
-            | Effect::ResumeAutoMode => self.notice(
-                NoticeLevel::Warn,
-                "approval rules and auto mode are not wired in this build yet: tool calls are not reviewed",
-            ),
+            | Effect::ResumeAutoMode) => self.handle_approval_effect(effect),
             Effect::SetModel(_) | Effect::RequestModelPicker { .. } => self.notice(
                 NoticeLevel::Warn,
                 "switching models is not available in this build yet; restart with --model",
@@ -598,6 +618,8 @@ impl Runner {
     /// Interrupt the turn without blocking the loop: the completions of the
     /// stopped and cancelled inputs end it.
     fn interrupt(&mut self) {
+        let session_id = self.session.id().clone();
+        self.stop_approvals(&session_id);
         if !self.turn.is_active() {
             return;
         }
@@ -637,6 +659,7 @@ impl Runner {
         match event {
             AgentEvent::RunStarted { input, .. } => {
                 self.turn.open_runs += 1;
+                self.approval.engine.on_run_started(self.session.id());
                 // A follow-up run the runtime started for a steer that found
                 // no boundary: its prompt is the steered text.
                 if let Some(prompt) = input.prompt_text() {
@@ -800,6 +823,15 @@ impl Runner {
         } else {
             turn.result.unwrap_or_else(|| Ok(TurnSummary::default()))
         };
+        // Steered messages the model never received are not the user's
+        // words to it: they leave the classifier transcript again.
+        for input in &turn.inputs {
+            if let InputKind::Steer { id, text, .. } = &input.kind
+                && turn.undelivered.contains(id)
+            {
+                self.approval.engine.forget_prompt(self.session.id(), text);
+            }
+        }
         let mut undelivered = turn.undelivered;
         undelivered.sort();
         self.send(Msg::TurnFinished(TurnOutcome {
@@ -813,6 +845,22 @@ impl Runner {
 async fn next_event(events: &mut Option<EventStream>) -> Option<EventEnvelope<AgentEvent>> {
     match events {
         Some(stream) => stream.next().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The next item of an optional channel, or never.
+async fn recv<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The next item of an optional unbounded channel, or never.
+async fn recv_unbounded<T>(rx: &mut Option<mpsc::UnboundedReceiver<T>>) -> Option<T> {
+    match rx {
+        Some(rx) => rx.recv().await,
         None => std::future::pending().await,
     }
 }

@@ -975,6 +975,8 @@ test_suite(
         "//crates/meerkat-tools:rct_manual_schema_literals_test",
         "//crates/meerkat-tools:read_only_execution_gate_test",
         "//crates/meerkat-tui:approval_policy_test",
+        "//crates/meerkat-tui:approval_service_test",
+        "//crates/meerkat-tui:classifier_llm_test",
         "//crates/meerkat-tui:file_tools_test",
         "//crates/meerkat-tui:integrator_test",
         "//crates/meerkat-tui:meerkat_tui_unit_test",

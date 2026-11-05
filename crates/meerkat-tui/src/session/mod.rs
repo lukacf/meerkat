@@ -21,6 +21,11 @@
 //!   [`MeerkatMachine::cancel_input_if_present`].
 //! - [`SessionHandle::events`] follows every event of the session
 //!   (`SessionService::subscribe_session_events`), across runs.
+//! - With [`SessionOptions::approval`], every build of the session (fresh
+//!   or resumed) carries the approval gate as its `ToolDispatchAdmission`
+//!   ([`crate::approval::admission::install`]); a resumed session's
+//!   classifier transcript is seeded from its authoritative history, and
+//!   every prompt or steer the user submits is recorded in it.
 
 pub mod resolve;
 
@@ -41,6 +46,7 @@ use meerkat_core::{
 use meerkat_runtime::completion::CompletionHandle;
 use meerkat_runtime::{AcceptOutcome, IdempotencyKey, Input, MeerkatMachine, PromptInput};
 
+use crate::approval::{ApprovalEngine, admission};
 use crate::bootstrap::{CODING_PERSONA, Runtime, TuiService};
 use crate::error::TuiError;
 
@@ -61,6 +67,9 @@ pub struct SessionOptions {
     pub model: Option<String>,
     /// Provider of [`SessionOptions::model`], else the runtime's.
     pub provider: Option<Provider>,
+    /// The approval engine whose gate every tool call of the session passes.
+    /// `None` runs tools ungated (embedders and tests only).
+    pub approval: Option<Arc<ApprovalEngine>>,
 }
 
 /// An input the runtime accepted.
@@ -81,6 +90,7 @@ pub struct SessionHandle {
     id: SessionId,
     model: String,
     provider: Provider,
+    approval: Option<Arc<ApprovalEngine>>,
 }
 
 impl std::fmt::Debug for SessionHandle {
@@ -107,9 +117,13 @@ impl SessionHandle {
             .clone()
             .unwrap_or_else(|| runtime.model.clone());
         let provider = options.provider.unwrap_or(runtime.provider);
+        let approval = options.approval.clone();
         let mut build = build_options(options, provider);
         build.mint_session_with_id(session.id().clone());
-        Self::open(runtime, session, model, provider, build).await
+        if let Some(engine) = &approval {
+            admission::install(&mut build, engine, session.id().clone());
+        }
+        Self::open(runtime, session, model, provider, build, approval).await
     }
 
     /// Resume a persisted session of the realm and make it live.
@@ -135,9 +149,14 @@ impl SessionHandle {
             || (runtime.model.clone(), runtime.provider),
             |meta| (meta.model, meta.provider),
         );
+        let approval = options.approval.clone();
         let mut build = build_options(options, provider);
         build.resume_existing_session(session.clone());
-        Self::open(runtime, session, model, provider, build).await
+        if let Some(engine) = &approval {
+            admission::install(&mut build, engine, session.id().clone());
+            engine.seed_transcript(&session);
+        }
+        Self::open(runtime, session, model, provider, build, approval).await
     }
 
     async fn open(
@@ -146,6 +165,7 @@ impl SessionHandle {
         model: String,
         provider: Provider,
         build: SessionBuildOptions,
+        approval: Option<Arc<ApprovalEngine>>,
     ) -> Result<Self, TuiError> {
         let id = session.id().clone();
         let request = CreateSessionRequest {
@@ -183,6 +203,7 @@ impl SessionHandle {
             id,
             model,
             provider,
+            approval,
         })
     }
 
@@ -190,6 +211,12 @@ impl SessionHandle {
     #[must_use]
     pub fn id(&self) -> &SessionId {
         &self.id
+    }
+
+    /// The approval engine gating this session's tool calls, if any.
+    #[must_use]
+    pub fn approval(&self) -> Option<&Arc<ApprovalEngine>> {
+        self.approval.as_ref()
     }
 
     /// Model the session runs on.
@@ -237,7 +264,10 @@ impl SessionHandle {
     ///
     /// The prompt carries only its handling mode as turn metadata, which
     /// keeps a steer in the runtime's durable delivery class, and a caller
-    /// idempotency key derived from its fresh input id.
+    /// idempotency key derived from its fresh input id. The text is recorded
+    /// as the user's words in the classifier transcript first (the run can
+    /// reach a tool call before admission returns) and forgotten again when
+    /// the runtime refuses it.
     ///
     /// # Errors
     ///
@@ -248,6 +278,19 @@ impl SessionHandle {
         text: &str,
         handling_mode: HandlingMode,
     ) -> Result<Admission, TuiError> {
+        if let Some(engine) = &self.approval {
+            engine.record_prompt(&self.id, text);
+        }
+        let admitted = self.admit(text, handling_mode).await;
+        if admitted.is_err()
+            && let Some(engine) = &self.approval
+        {
+            engine.forget_prompt(&self.id, text);
+        }
+        admitted
+    }
+
+    async fn admit(&self, text: &str, handling_mode: HandlingMode) -> Result<Admission, TuiError> {
         let mut prompt = PromptInput::new(
             text,
             Some(RuntimeTurnMetadata {

@@ -14,17 +14,20 @@
 //!
 //! [`bootstrap`] runs both back to back.
 //!
+//! [`bootstrap_with`] also builds the approval engine ([`approval::build`]):
+//! every session the TUI opens installs its gate as the build's
+//! `ToolDispatchAdmission` (see [`crate::session`]).
+//!
 //! Seams for later phases (deliberately absent here, not stubbed):
-//! - P2 approval gate: a `SessionAgentBuilder` wrapper around
-//!   [`FactoryAgentBuilder`] installing a `ToolDispatchAdmission`.
 //! - P3 confinement: `AgentFactory::with_shell_confinement`; until then the
-//!   shell tool stays off ([`build_factory`]).
+//!   shell runs unconfined behind the approval gate ([`build_factory`]).
 //! - P4 endpoints and models: model selection here is `--model` /
 //!   `--provider` / the realm config only ([`resolve_model`]).
 //! - P5 mobs: `AgentFactory::mob(true)`.
 //! - P6 instruction files beyond the native `AGENTS.md` discovery, MCP from
 //!   `.rkat/mcp.toml`, native semantic memory.
 
+pub mod approval;
 pub mod credentials;
 pub mod dirs;
 pub mod persona;
@@ -44,6 +47,7 @@ use meerkat_store::{RealmBackend, realm_paths_in};
 use crate::cli::Args;
 use crate::error::TuiError;
 
+pub use approval::{ApprovalOverrides, ApprovalParts};
 pub use dirs::GlobalDirs;
 pub use persona::CODING_PERSONA;
 pub use scope::{RuntimeScope, load_config, resolve_scope};
@@ -77,6 +81,8 @@ pub struct Runtime {
     pub store: Arc<dyn SessionStore>,
     /// Backend pinned in the realm manifest.
     pub backend: RealmBackend,
+    /// The approval engine and the channels the runner serves.
+    pub approval: ApprovalParts,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -95,8 +101,11 @@ impl std::fmt::Debug for Runtime {
 pub struct BootstrapOptions {
     /// Serve every session with this client instead of resolving provider
     /// credentials (tests, or a host that already built a client). With an
-    /// override the user's provider token store is not opened.
+    /// override the user's provider token store is not opened, and the
+    /// classifier runs on the same client.
     pub llm_override: Option<Arc<dyn LlmClient>>,
+    /// Approval-engine overrides (classifier, escalation timeout).
+    pub approval: ApprovalOverrides,
 }
 
 /// Resolve the runtime scope and load the realm config.
@@ -125,8 +134,10 @@ pub async fn bootstrap(args: &Args, options: BootstrapOptions) -> Result<Runtime
 /// # Errors
 ///
 /// [`TuiError::Provider`] when no provider can be determined for the model,
-/// [`TuiError::Persistence`] when the realm cannot be opened, and
-/// [`TuiError::Composition`] when the runtime refuses the composition.
+/// [`TuiError::Persistence`] when the realm cannot be opened,
+/// [`TuiError::Overlay`] / [`TuiError::Approval`] when the approval rules or
+/// ledger cannot be loaded, and [`TuiError::Composition`] when the runtime
+/// refuses the composition.
 pub async fn bootstrap_with(
     scope: RuntimeScope,
     config: Config,
@@ -148,6 +159,18 @@ pub async fn bootstrap_with(
         .map_or_else(|| realm_root.clone(), PathBuf::from);
 
     let factory = build_factory(&scope, store_path, options.llm_override.is_none());
+    let approval = approval::build(
+        &scope,
+        args,
+        approval::ClassifierSource {
+            factory: &factory,
+            config: &config,
+            provider,
+            llm_override: options.llm_override.clone(),
+        },
+        &options.approval,
+    )
+    .await?;
     let mut builder = FactoryAgentBuilder::new(factory, config.clone());
     builder.default_llm_client = options.llm_override;
     let (service, machine) = build_runtime_backed_service_with_default_reconfigure_host(
@@ -166,6 +189,7 @@ pub async fn bootstrap_with(
         machine,
         store,
         backend: manifest.backend,
+        approval,
     })
 }
 
@@ -173,8 +197,9 @@ pub async fn bootstrap_with(
 ///
 /// `project_root` and `context_root` are the workspace, so the factory's
 /// native `AGENTS.md`, skills and hooks discovery see the project. Builtin
-/// tools are on; the shell stays off until the approval gate (P2) and
-/// confinement (P3) are wired, and mob tools until P5. The file and note
+/// tools and the shell are on: every call passes the approval gate each
+/// session installs (OS confinement of the shell arrives in P3). Mob tools
+/// stay off until P5. The file and note
 /// tools come in per session as external tools (see [`crate::session`]).
 /// `with_token_store` attaches the user's provider token store, so OAuth and
 /// stored keys resolve like they do for `rkat`.
@@ -188,7 +213,7 @@ fn build_factory(
         .project_root(scope.project_root.as_path())
         .context_root(scope.context_root.clone())
         .builtins(true)
-        .shell(false)
+        .shell(true)
         .mob(false);
     if let Some(user_root) = &scope.user_config_root {
         factory = factory.user_config_root(user_root.clone());

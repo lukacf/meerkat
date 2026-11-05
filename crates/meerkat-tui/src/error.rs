@@ -101,6 +101,12 @@ pub enum TuiError {
     /// The terminal UI failed.
     #[error(transparent)]
     Ui(#[from] crate::ui::UiError),
+    /// A command-line rule or setting flag is invalid.
+    #[error(transparent)]
+    Overlay(#[from] crate::overlay::OverlayError),
+    /// The approval rules or the escalation ledger could not be loaded.
+    #[error("approval setup failed: {0}")]
+    Approval(#[from] crate::approval::ApprovalError),
 }
 
 impl TuiError {
@@ -124,6 +130,8 @@ impl TuiError {
             | Self::SessionRef { .. }
             | Self::Endpoint(_)
             | Self::McpConfig(_)
+            | Self::Overlay(_)
+            | Self::Approval(_)
             | Self::NotATerminal => 2,
             Self::Io { .. }
             | Self::Persistence(_)

@@ -8450,6 +8450,62 @@ pub(crate) mod tests {
         router.shutdown().await;
     }
 
+    /// The governed controls a router retains for a re-add after a sign-in
+    /// (the name's own, and its retry record's) are released when the
+    /// router's close begins, without its shutdown: a router whose shutdown
+    /// never runs (its owner panicked or was aborted, or its release was
+    /// cancelled at the router lock) keeps no attachment control alive past
+    /// its close. A sign-in retry after the close is answered typed and
+    /// stages nothing.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn the_close_releases_the_retained_governed_controls() {
+        use crate::connection::tests::spawn_http_mcp_server;
+
+        let (url, _server) = spawn_http_mcp_server("interactive-token").await;
+        let config = selected_account_http_config(url);
+        let control = CountingControl::new(&config);
+        let (router, target, resolver) =
+            governed_router_awaiting_authorization(config, &control).await;
+        // The failed attempt dropped its own copy; only the router holds the
+        // control now.
+        let retained = Arc::downgrade(&control);
+        drop(control);
+        assert!(retained.upgrade().is_some(), "the router retains it");
+        *resolver.stored_token_for_testing() = Some("interactive-token".into());
+
+        let adapter = crate::McpRouterAdapter::new(router);
+        drop(adapter.begin_close());
+        assert!(
+            retained.upgrade().is_none(),
+            "the close released the retained control"
+        );
+
+        // The adapter answers that its router is closing, and the router
+        // itself refuses the record, whose control is gone.
+        assert_eq!(
+            adapter.retry_authorized(&target).await.unwrap(),
+            AuthorizedRetry::RouterClosed
+        );
+        {
+            let mut router = adapter.router_lock().write().await;
+            let router = router.as_mut().expect("the close shuts nothing down");
+            let refused = router.retry_authorized(&target);
+            assert!(
+                matches!(
+                    refused,
+                    Err(McpError::AttachmentRefused(McpAttachmentRefusal::Mismatch))
+                ),
+                "{refused:?}"
+            );
+            assert!(!router.has_staged_intent("guarded"), "nothing is staged");
+            assert!(!router.staged_payloads.contains_key("guarded"));
+            assert!(!router.staged_controls.contains_key("guarded"));
+            assert_eq!(router.servers_awaiting_authorization(), vec![target]);
+        }
+        adapter.shutdown().await;
+    }
+
     #[cfg(feature = "workspace-tests")]
     #[tokio::test]
     async fn retry_touches_only_the_exact_retained_target() {

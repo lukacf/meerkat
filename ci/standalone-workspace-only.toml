@@ -1014,6 +1014,7 @@ tests = [
     "router::tests::sign_out_unpublishes_the_connected_server_and_sign_in_adds_it_back",
     "router::tests::staged_add_remove_reload_transitions",
     "router::tests::stale_results_cannot_clear_or_replace_a_newer_retry_record",
+    "router::tests::the_close_releases_the_retained_governed_controls",
 ]
 
 [crates.meerkat-mcp-server]

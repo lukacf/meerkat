@@ -190,16 +190,25 @@ pub async fn handle_list(
         Ok(filter) => filter,
         Err(response) => return response,
     };
+    // A page of no decisions is refused; a larger page than the store's
+    // reads as the store's.
+    let limit = match params.limit {
+        None => DEFAULT_LIST_PAGE,
+        Some(0) => {
+            return RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "a decision page limit must be at least 1",
+            );
+        }
+        Some(limit) => usize::try_from(limit)
+            .unwrap_or(DECISION_PAGE_MAX)
+            .min(DECISION_PAGE_MAX),
+    };
     let owner = match decision_owner(id.clone(), &runtime) {
         Ok(owner) => owner,
         Err(response) => return response,
     };
-    let limit = params
-        .limit
-        .map_or(DEFAULT_LIST_PAGE, |limit| {
-            usize::try_from(limit).unwrap_or(DECISION_PAGE_MAX)
-        })
-        .clamp(1, DECISION_PAGE_MAX);
     match owner.list(&filter, params.after.as_deref(), limit) {
         Ok(listing) => RpcResponse::success(id, wire_decision_listing(&listing)),
         Err(error_value) => decision_error_to_response(id, error_value),

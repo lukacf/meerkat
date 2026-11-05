@@ -29,9 +29,14 @@ pub(super) struct Script {
     first_response_entered: tokio::sync::Notify,
     first_response_release: tokio::sync::Semaphore,
     // Fresh Finds the original's model makes after its first, one per later
-    // response of the same turn, in order, each once released.
+    // model call of the same turn, in order, each once released.
     fresh_finds: Mutex<std::collections::VecDeque<String>>,
     fresh_release: tokio::sync::Semaphore,
+    // The fresh Find each model operation was served, and whether its
+    // release was taken. Core may prepare a request again for the same model
+    // operation after its first attempt was refused before any response;
+    // that attempt is the same model call.
+    fresh_served: Mutex<std::collections::HashMap<String, (String, Arc<AtomicBool>)>>,
 }
 impl Script {
     pub(super) fn for_approved() -> Arc<Self> {
@@ -111,17 +116,40 @@ impl Script {
             first_response_release: tokio::sync::Semaphore::new(0),
             fresh_finds: Mutex::new(std::collections::VecDeque::new()),
             fresh_release: tokio::sync::Semaphore::new(0),
+            fresh_served: Mutex::new(std::collections::HashMap::new()),
         })
     }
     /// Have the original's model make `count` fresh Finds, in order, one in
-    /// each next response of the same turn, each once released
+    /// each next model call of the same turn, each once released
     /// ([`Self::release_fresh_find`]). Their call IDs extend the first
-    /// Find's: `{CALL}-fresh-{n}`.
+    /// Find's: `{CALL}-fresh-{n}`. A request Core prepares again for the
+    /// same model operation is the same model call: it is served the same
+    /// fresh Find, with no second release.
     pub(super) fn arm_fresh_finds(&self, count: usize) {
         self.fresh_finds
             .lock()
             .unwrap()
             .extend((1..=count).map(|n| format!("{CALL}-fresh-{n}")));
+    }
+    /// The fresh Find a model call is served, with its release state: the
+    /// next armed one the first time, then the same one for each attempt
+    /// Core prepares again for that model operation.
+    fn fresh_for(&self, operation: Option<String>) -> Option<(String, Arc<AtomicBool>)> {
+        let mut served = self.fresh_served.lock().unwrap();
+        if let Some(fresh) = operation
+            .as_ref()
+            .and_then(|operation| served.get(operation))
+        {
+            return Some(fresh.clone());
+        }
+        let fresh = (
+            self.fresh_finds.lock().unwrap().pop_front()?,
+            Arc::new(AtomicBool::new(false)),
+        );
+        if let Some(operation) = operation {
+            served.insert(operation, fresh.clone());
+        }
+        Some(fresh)
     }
     /// Let the next armed fresh Find be made.
     pub(super) fn release_fresh_find(&self) {
@@ -391,8 +419,9 @@ impl LlmClient for AcquisitionResponse {
     }
     fn stream_prepared<'a>(&'a self, request: &'a PreparedLlmRequest) -> LlmStream<'a> {
         let first = self.first.swap(false, Ordering::SeqCst);
-        // A fresh Find armed for a later response of the original's turn; a
-        // helper's request (it offers the setup report) never makes one.
+        // A fresh Find armed for a later model call of the original's turn,
+        // served by model operation; a helper's request (it offers the setup
+        // report) never makes one.
         let original = !request
             .request()
             .tools
@@ -401,7 +430,11 @@ impl LlmClient for AcquisitionResponse {
         let fresh = if first || !original {
             None
         } else {
-            self.script.fresh_finds.lock().unwrap().pop_front()
+            self.script.fresh_for(
+                request
+                    .authorization()
+                    .map(|authorization| authorization.operation_id().to_string()),
+            )
         };
         if !first {
             // Each of the turn's Find results, its first and its fresh ones,
@@ -424,9 +457,9 @@ impl LlmClient for AcquisitionResponse {
         // The underlying provider still consumes native authorization, checks
         // currentness, and records physical model entry/outcome for every call.
         let stream = self.inner.stream_prepared(request);
-        let call = match (first, fresh) {
-            (true, _) => CALL.to_owned(),
-            (false, Some(fresh)) => fresh,
+        let (call, released) = match (first, fresh) {
+            (true, _) => (CALL.to_owned(), None),
+            (false, Some((fresh, released))) => (fresh, Some(released)),
             (false, None) => return stream,
         };
         let script = self.script.clone();
@@ -443,8 +476,11 @@ impl LlmClient for AcquisitionResponse {
                         .unwrap()
                         .forget();
                 }
-                if !first {
+                if let Some(released) = released
+                    && !released.load(Ordering::SeqCst)
+                {
                     script.fresh_release.acquire().await.unwrap().forget();
+                    released.store(true, Ordering::SeqCst);
                 }
                 stream.map(move |event| {
                     event.map(|event| match event {

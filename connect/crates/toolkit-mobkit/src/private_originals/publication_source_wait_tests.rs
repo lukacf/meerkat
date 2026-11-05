@@ -8,13 +8,14 @@
 //! owner change Core names with the work step's one churn; only the read is
 //! made again, and nothing is issued or bound again. Held past the bound,
 //! the read is refused typed and is not made again. A refusal that the
-//! bounds outlast leaves the work to a fresh Find, which recovers the bound
-//! source and issues nothing again.
+//! bounds outlast keeps the refused work as it was: a later Find is another
+//! model call, so it is its own invocation (Toolkit's retry correlation is
+//! the original, its input and the call ID) and makes its own work once. No
+//! effect runs twice, and the refused work is never issued again.
 use super::*;
 use crate::publication_source_probe::{self, Hold};
 use meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
 use std::collections::BTreeSet;
-use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
 
 /// What the original's Finds settled, with `hold` made once, at the first
@@ -26,53 +27,67 @@ struct Found {
     helpers: usize,
     /// The publication-source reads made, from the first on.
     reads: usize,
-    /// Controller grants the helper's issuance appended.
-    issued: usize,
+    /// The controller grants appended, one entry (its lineage) per append.
+    issued: Vec<String>,
     /// From the first read to the first Find's result reaching the model.
     answered_after: Duration,
-    /// The helper's source row and its work effect after the first Find
-    /// settled (taken before any fresh Find), and at the end.
+    /// The first Find's helper source row and its work effect, read after
+    /// the hold ended and before any fresh Find.
     first_row: Option<toolkit_store::StoredRecord>,
     first_effect: Option<toolkit_store::StoredEffect>,
-    last_row: toolkit_store::StoredRecord,
-    last_effect: toolkit_store::StoredEffect,
+    /// Every helper source row the Finds wrote, with its work effect, at
+    /// the end.
+    rows: Vec<(toolkit_store::StoredRecord, toolkit_store::StoredEffect)>,
+}
+
+fn helper_scope(fixture: &Fixture) -> toolkit_store::StoreScope {
+    toolkit_store::StoreScope {
+        realm: fixture.scope.realm.clone(),
+        owner: format!("toolkit/helper-originals/{}", fixture.scope.owner),
+    }
 }
 
 /// The ids of the helper source rows in the owner's helper scope.
 async fn helper_rows(fixture: &Fixture) -> BTreeSet<String> {
-    let scope = toolkit_store::StoreScope {
-        realm: fixture.scope.realm.clone(),
-        owner: format!("toolkit/helper-originals/{}", fixture.scope.owner),
-    };
-    let rows = fixture.store.list_records(&scope, None, 10).await.unwrap();
+    let rows = fixture
+        .store
+        .list_records(&helper_scope(fixture), None, 10)
+        .await
+        .unwrap();
     assert!(rows.len() < 10);
     rows.into_iter().map(|row| row.key.id).collect()
 }
 
-/// The one helper source row this Find's helper wrote: the fixture's
-/// configured producer has its own, written before (`before`).
-async fn helper_row(fixture: &Fixture, before: &BTreeSet<String>) -> toolkit_store::StoredRecord {
-    let ours = helper_rows(fixture)
+/// The helper source rows written after `before`.
+async fn new_rows(
+    fixture: &Fixture,
+    before: &BTreeSet<String>,
+) -> Vec<toolkit_store::StoredRecord> {
+    let rows = fixture
+        .store
+        .list_records(&helper_scope(fixture), None, 10)
         .await
-        .into_iter()
-        .filter(|id| !before.contains(id))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        ours.len(),
-        1,
-        "one canonical source row of this helper: {ours:?}"
-    );
-    let scope = toolkit_store::StoreScope {
-        realm: fixture.scope.realm.clone(),
-        owner: format!("toolkit/helper-originals/{}", fixture.scope.owner),
-    };
-    let rows = fixture.store.list_records(&scope, None, 10).await.unwrap();
-    let key = rows
-        .into_iter()
-        .map(|row| row.key)
-        .find(|key| key.id == ours[0])
         .unwrap();
-    fixture.store.get(&key).await.unwrap().unwrap()
+    assert!(rows.len() < 10);
+    let mut found = vec![];
+    for row in rows {
+        if !before.contains(&row.key.id) {
+            found.push(fixture.store.get(&row.key).await.unwrap().unwrap());
+        }
+    }
+    found
+}
+
+/// The one helper source row the first Find's helper wrote.
+async fn helper_row(fixture: &Fixture, before: &BTreeSet<String>) -> toolkit_store::StoredRecord {
+    let mut rows = new_rows(fixture, before).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "one canonical source row of this helper: {:?}",
+        rows.iter().map(|row| &row.key.id).collect::<Vec<_>>()
+    );
+    rows.remove(0)
 }
 
 /// The helper's work effect, named by its source row.
@@ -95,14 +110,17 @@ async fn finds_with_hold_at_publication_source(hold: Hold, fresh_finds: usize) -
     let report = Report::new(script.tools().result_tool());
     let (fixture, _runtime_store) =
         Fixture::for_configured_helper_report(script.clone(), report.clone()).await;
-    let issued = Arc::new(AtomicUsize::new(0));
+    let issued: Arc<Mutex<Vec<String>>> = Arc::default();
     let appended = issued.clone();
     assert!(
         fixture
             .source
             .helper_controller_appended
-            .set(Arc::new(move |_lineage| {
-                appended.fetch_add(1, Ordering::SeqCst);
+            .set(Arc::new(move |lineage| {
+                appended
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::to_string(lineage).unwrap());
             }))
             .is_ok()
     );
@@ -170,18 +188,23 @@ async fn finds_with_hold_at_publication_source(hold: Hold, fresh_finds: usize) -
                 .iter()
                 .filter(|event| **event == "publication_source_read")
                 .count();
-            let last_row = helper_row(&fixture, &before).await;
-            let last_effect = work_effect(&fixture, &last_row).await;
+            let mut rows = vec![];
+            for row in new_rows(&fixture, &before).await {
+                let effect = work_effect(&fixture, &row).await;
+                rows.push((row, effect));
+            }
+            if fresh_finds == 0 {
+                assert_eq!(rows.len(), 1, "one canonical source row of this helper");
+            }
             Found {
                 feedback,
                 helpers: fixture.source.helper_sources.lock().unwrap().len(),
                 reads,
-                issued: issued.load(Ordering::SeqCst),
+                issued: issued.lock().unwrap().clone(),
                 answered_after: answered.duration_since(start),
                 first_row,
                 first_effect,
-                last_row,
-                last_effect,
+                rows,
             }
         }),
     ))
@@ -221,7 +244,11 @@ fn assert_waited_out(found: &Found, hold: Duration) {
     );
     assert_eq!(found.helpers, 1, "the helper was retained once");
     assert!(found.reads >= 1, "the read was made");
-    assert_eq!(found.issued, 1, "the controller grant was issued once");
+    assert_eq!(
+        found.issued.len(),
+        1,
+        "the controller grant was issued once"
+    );
     assert!(
         found.answered_after >= hold - Duration::from_millis(50),
         "the read waited for the hold: {:?}",
@@ -282,7 +309,11 @@ async fn publication_source_read_held_past_the_bound_is_refused_typed_and_not_re
         reply(first)
     );
     assert_eq!(found.reads, 1, "the refused read was not made again");
-    assert_eq!(found.issued, 1, "the controller grant was issued once");
+    assert_eq!(
+        found.issued.len(),
+        1,
+        "the controller grant was issued once"
+    );
     assert!(
         found.answered_after >= OWNER_CHANGE_WAIT_BOUND - Duration::from_millis(100)
             && found.answered_after < hold,
@@ -291,23 +322,31 @@ async fn publication_source_read_held_past_the_bound_is_refused_typed_and_not_re
     );
 }
 
-// A refusal that the bounds outlast (the collection held inside an owner
-// change past both the contention bound and the churn's): the work step
-// marks its claim uncertain and keeps the issued grant and the bound source.
-// A fresh Find is answered retry_safe for the uncertain work, and the next
-// fresh Find recovers the bound source: the helper is admitted with no grant
-// issued and no source bound again.
+// An invariant row, the same before and after the fix: a refusal that the
+// bounds outlast (the collection held inside an owner change past both the
+// contention bound and the churn's) never makes the refused work's effects
+// again. The work step marks its claim uncertain and keeps the issued grant
+// and the bound source. A fresh Find, released after the hold ended, is
+// another model call: its own invocation, with its own operation, work item
+// and grant, each made once. The refused work's row, claim and grant stay as
+// the first Find left them.
+//
+// The scripted model serves each armed fresh Find by model operation: when
+// Core prepares the request carrying the first Find's result again (its
+// first attempt, prepared during the owner change, was refused before any
+// response), that attempt is the same model call and gets the same fresh
+// call ID, with no second release.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn publication_source_refused_past_the_bounds_issues_no_second_grant() {
+async fn publication_source_refused_work_is_never_reissued_and_no_effect_runs_twice() {
     let found = finds_with_hold_at_publication_source(
         Hold {
             owner_change: true,
             duration: OWNER_CHANGE_WAIT_BOUND * 2 + Duration::from_secs(1),
         },
-        2,
+        1,
     )
     .await;
-    assert_eq!(found.feedback.len(), 3, "{:?}", found.feedback);
+    assert_eq!(found.feedback.len(), 2, "{:?}", found.feedback);
     let first = &found.feedback[0];
     assert!(first.is_error, "{}", reply(first));
     assert_eq!(
@@ -316,20 +355,16 @@ async fn publication_source_refused_past_the_bounds_issues_no_second_grant() {
         "a refusal past the bounds stays typed: {}",
         reply(first)
     );
+    let fresh = &found.feedback[1];
+    assert!(!fresh.is_error, "{}", reply(fresh));
     assert_eq!(
-        reply(&found.feedback[1])["worker"]["state"],
-        "retry_safe",
-        "{}",
-        reply(&found.feedback[1])
-    );
-    assert_eq!(
-        reply(&found.feedback[2])["worker"]["state"],
+        reply(fresh)["worker"]["state"],
         "input_admitted",
-        "{}",
-        reply(&found.feedback[2])
+        "the fresh Find admits its own helper: {}",
+        reply(fresh)
     );
-    assert_eq!(found.helpers, 1, "the helper was retained once");
-    assert_eq!(found.issued, 1, "no second grant was issued");
+    // The refused work as the first Find left it: bound, its claim
+    // uncertain at its first attempt.
     let first_row = found
         .first_row
         .expect("the first Find's settled source row");
@@ -337,12 +372,6 @@ async fn publication_source_refused_past_the_bounds_issues_no_second_grant() {
         first_row.data.body["state"]["phase"], "bound",
         "{first_row:?}"
     );
-    for part in ["facts", "controller", "state"] {
-        assert_eq!(
-            found.last_row.data.body[part], first_row.data.body[part],
-            "the bound source's {part} is unchanged"
-        );
-    }
     let first_effect = found
         .first_effect
         .expect("the first Find's settled work effect");
@@ -352,9 +381,54 @@ async fn publication_source_refused_past_the_bounds_issues_no_second_grant() {
         panic!("the refused completion keeps its claim uncertain: {first_effect:?}")
     };
     assert_eq!(evidence.body["kind"], "completion_uncertain");
-    assert_eq!(found.last_effect.key, first_effect.key);
+    // At the end: the refused work unchanged, and the fresh Find's own work.
     assert_eq!(
-        found.last_effect.attempt, 2,
-        "the one fresh attempt completed the same work"
+        found.rows.len(),
+        2,
+        "the refused work's row and the fresh Find's own"
     );
+    let (refused_row, refused_effect) = found
+        .rows
+        .iter()
+        .find(|(row, _)| row.key == first_row.key)
+        .expect("the refused work's row");
+    for part in ["facts", "controller", "state"] {
+        assert_eq!(
+            refused_row.data.body[part], first_row.data.body[part],
+            "the refused work's {part} is unchanged"
+        );
+    }
+    assert_eq!(refused_effect.key, first_effect.key);
+    assert_eq!(
+        refused_effect.attempt, 1,
+        "the refused work was not attempted again"
+    );
+    assert_eq!(
+        refused_effect.status,
+        toolkit_store::EffectStatus::Uncertain
+    );
+    let (own_row, own_effect) = found
+        .rows
+        .iter()
+        .find(|(row, _)| row.key != first_row.key)
+        .expect("the fresh Find's own row");
+    assert_ne!(
+        own_row.data.body["facts"]["operation"], first_row.data.body["facts"]["operation"],
+        "the fresh Find's own operation"
+    );
+    assert_ne!(
+        own_row.data.body["facts"]["admission"]["key"],
+        first_row.data.body["facts"]["admission"]["key"],
+        "the fresh Find's own work item"
+    );
+    assert_eq!(own_row.data.body["state"]["phase"], "bound", "{own_row:?}");
+    assert_eq!(own_effect.attempt, 1);
+    assert_eq!(own_effect.status, toolkit_store::EffectStatus::Succeeded);
+    // One grant per work, each appended once: the refused work's never again.
+    assert_eq!(found.issued.len(), 2, "one grant per work");
+    assert_ne!(
+        found.issued[0], found.issued[1],
+        "no grant was appended twice"
+    );
+    assert_eq!(found.helpers, 2, "each work's helper source retained once");
 }

@@ -3202,6 +3202,163 @@ async fn a_host_adoption_of_a_declared_entry_ends_the_entry_and_its_member_stand
     );
 }
 
+/// A host's adoption of a declared identity entry no member holds takes the
+/// entry over too. The host adopts the identity while its own retirement of
+/// the entry's member is in flight, so the reconciler waits for that
+/// retirement instead of taking the entry over: its end leaves the entry
+/// unseated, owed its seat, with the host's intent row naming the identity
+/// (the state an earlier build, whose adoption took no entry over, left
+/// behind). The next start's reconcile (the stopped incarnation's lease let
+/// go, as its expiry would) then finds no member: before it materializes the
+/// host's member it asks MobMachine for the takeover
+/// (`TakeOverIdentityEntry`), whose verdict ends the unseated entry, and the
+/// member it spawns on the adopted session holds the name as no entry. No
+/// retirement carries the adoption's cause: no member held the identity.
+///
+/// RED: let the reconciler materialize the member without the takeover:
+/// MobMachine refuses the spawn of the entry's name (`IdentityMember`), the
+/// reconcile backs off, and the adoption never converges.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_adoption_of_an_unseated_declared_entry_ends_the_entry_and_materializes_its_member()
+{
+    let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let service = Arc::new(meerkat_session::PersistentSessionService::new(
+        PersistentMockBuilder,
+        16,
+        session_store,
+        runtime_store,
+        blob_store,
+    ));
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "apply-host-adopts-unseated-entry"),
+        storage.clone(),
+    )
+    .with_session_service(service.clone())
+    .create()
+    .await
+    .expect("create the mob");
+    handle
+        .spawn_spec(worker_spec("unseated").with_entry_custody(true))
+        .await
+        .expect("the host declares its entry");
+    let session = handle
+        .resolve_bridge_session_id(&id("unseated"))
+        .await
+        .expect("a session-backed member");
+
+    // The host retires the entry's member, and adopts the identity while
+    // that retirement is in flight.
+    let hold = crate::runtime::actor::retirement_stage_hold::install(
+        &id("unseated"),
+        "retire-runtime-quiesce",
+    );
+    let retiring = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.retire(id("unseated")).await })
+    };
+    tokio::time::timeout(STEP, hold.entered())
+        .await
+        .expect("the host's retirement is in flight");
+    super::member_history::adopt_existing_member(&handle, &id("unseated"), &session, "worker")
+        .await;
+    hold.release();
+    tokio::time::timeout(STEP, retiring)
+        .await
+        .expect("the retire answers")
+        .expect("the retire task")
+        .expect("the host's retirement ends");
+    assert!(
+        matches!(
+            handle.identity_entry(&id("unseated")),
+            Ok(IdentityEntryRead::Entry(view))
+                if view.origin == crate::runtime::IdentityEntryOrigin::Declared
+                    && view.standing == EntryStanding::Unseated(UnseatedEntryCause::SeatOwed)
+        ),
+        "the host's retirement leaves a declared entry no member holds: {:?}",
+        handle.identity_entry(&id("unseated"))
+    );
+
+    // The next start's reconcile takes the intent row up.
+    let mob_id = handle.mob_id().clone();
+    tokio::time::timeout(STEP, handle.shutdown())
+        .await
+        .expect("the shutdown answers")
+        .expect("shut the mob down");
+    // The stopped incarnation's reconcile claimed the identity's lease, and
+    // its Shutdown kept it (no member held the identity): the next start
+    // would wait out its TTL (`AwaitLease`). Let it go, as its expiry would.
+    if let crate::identity::IdentityStoredObservation::Valid(record) = storage
+        .identity
+        .observe_identity_lease(&mob_id, &id("unseated"))
+        .await
+        .expect("read the identity lease")
+        && let Some(held) = record.active
+    {
+        assert!(
+            storage
+                .identity
+                .release_identity_lease(&mob_id, &id("unseated"), &held)
+                .await
+                .expect("release the lease"),
+            "the stopped incarnation's lease is released"
+        );
+    }
+    let handle = tokio::time::timeout(
+        STEP,
+        MobBuilder::for_resume(storage.clone())
+            .with_session_service(service.clone())
+            .notify_orchestrator_on_resume(false)
+            .resume(),
+    )
+    .await
+    .expect("the resume answers")
+    .expect("resume the mob");
+    super::member_history::await_adoption_convergence(&handle, &id("unseated")).await;
+
+    assert!(
+        matches!(
+            handle.identity_entry(&id("unseated")),
+            Ok(IdentityEntryRead::NotAnEntry { .. })
+        ),
+        "the takeover ended the entry: {:?}",
+        handle.identity_entry(&id("unseated"))
+    );
+    assert!(
+        handle
+            .list_members()
+            .await
+            .iter()
+            .any(|member| member.agent_identity == id("unseated")),
+        "the host's member materialized"
+    );
+    assert_eq!(
+        handle.resolve_bridge_session_id(&id("unseated")).await,
+        Some(session),
+        "the host's member serves on the adopted session"
+    );
+    let journal = storage
+        .events
+        .poll(0, usize::MAX)
+        .await
+        .expect("read the journal");
+    let causes = retirement_causes(&journal);
+    assert!(
+        causes
+            .iter()
+            .all(|(_, cause)| *cause != Some(MemberRetirementCause::HostAdopted)),
+        "no retirement carries the adoption's cause: {causes:?}"
+    );
+    tokio::time::timeout(STEP, handle.shutdown())
+        .await
+        .expect("the shutdown answers")
+        .expect("shut the resumed mob down");
+}
+
 /// The shape a host that names its identities in a form no member id can
 /// spell leaves behind: the member id encodes the identity (`team:carol` as
 /// `mk--team_ccarol`), the label spells the identity, and the spawn row

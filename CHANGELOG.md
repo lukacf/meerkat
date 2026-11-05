@@ -118,6 +118,15 @@ them.
   running loop. Upgrade every process that executes decisions on one store
   together. See Changed.
 
+- `meerkat-core`, `meerkat-contracts`: the operator of an `rkat-rpc` stdio
+  connection decides durable decisions (see Added). `GovernanceConfig`
+  gains the public field `decisions: DecisionGovernanceConfig`, so code
+  that builds it literally must set it (`decisions: Default::default()` or
+  `..Default::default()` states the default list, `["operator"]`).
+  `RpcMethodCatalogOptions` gains `decision_notices_enabled` (struct
+  literals need it): only a catalog for a connection that delivers decision
+  notices lists `decision/notice`.
+
 ### Added
 
 - `meerkat-runtime`: `decision::DecisionExecutorLoop`, the one executor of a
@@ -216,6 +225,31 @@ them.
   `PresentationRecord::new`. `meerkat-runtime`:
   `DurableDecisionService::is_available` and the `decision::wire`
   projection.
+- The operator of an `rkat-rpc` stdio connection decides durable decisions
+  (Unix builds with local authorization): the operating-system user who
+  started it, device trusted, in an authentication scope of the
+  connection's own. When its client lists (`decision/list`), the connection
+  presents each decision of the returned page that is open, waits for a
+  human and is addressed to an approver id the operator acts for, once per
+  connection, in page order: it writes a `decision/notice` notification
+  with the whole rendering, records the presentation once the notice is on
+  the pipe, and answers the page as recorded. Starting a connection
+  presents nothing. `decision/decide` on the connection decides as the
+  operator (ingress `rkat-rpc-stdio`): the request names only the decision,
+  the answer, the presented digest and a reason, and only a decision the
+  connection presented, whose approver id the configuration still lists,
+  is eligible; any other decide is refused `not_eligible`. A TCP
+  connection, plain dispatch and other builds keep answering
+  `decision/decide` method not found. The stock governed stdio pipe serves
+  both methods for its operator, in its consent surface's scope, with its
+  host's configuration as the pipe started. `meerkat-core`:
+  `[governance.decisions] operator_approver_ids`
+  (`DecisionGovernanceConfig`) names the approver ids the operator acts for,
+  `["operator"]` when absent; it is administered by the host like the rest
+  of `[governance]`. `meerkat-contracts`: `DECISION_NOTICE_NOTIFICATION`,
+  `WireDecisionNotice`, `WireDecisionNoticeEvent` (an event this version
+  does not know reads as `unknown`) and `WireDecisionNoticePresentation`,
+  and the `decision/notice` entry of the RPC notification catalog.
 
 - GitHub Copilot configured once: `[realm.<realm>.copilot]` states a Copilot
   account's credential source once (`source`, an `env` or

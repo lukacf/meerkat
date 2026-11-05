@@ -404,13 +404,6 @@ pub enum DeclaredEntryOutcome {
     /// that is busy, or whose spawn, wake or retirement is in flight, or a
     /// store that cannot serve now): nothing of it was done.
     Deferred { reason: MobError },
-    /// The identity's verdict seats, rotates or migrates its member, and its
-    /// declaration carried the identity's lifecycle facts only
-    /// ([`DeclaredBuild::FactsOnly`]): no member step was taken, so a
-    /// first-boot request that the seat or the fresh life would carry out is
-    /// not carried out. Its declaration was decided as any other's. The host
-    /// declares the identity again with its composed build.
-    BuildRequired,
     /// Refused, typed: nothing of it was written.
     Refused { refusal: DeclaredEntryRefusal },
     /// Left as it is, for a typed note: a quiet steady state, not a refusal,
@@ -419,6 +412,13 @@ pub enum DeclaredEntryOutcome {
     /// Realizing the identity's verdict failed, typed: an apply runs it
     /// again only once the cause is fixed.
     Failed { error: MobError },
+    /// The identity's verdict seats, rotates or migrates its member, and its
+    /// declaration carried the identity's lifecycle facts only
+    /// ([`DeclaredBuild::FactsOnly`]): no member step was taken, so a
+    /// first-boot request that the seat or the fresh life would carry out is
+    /// not carried out. Its declaration was decided as any other's. The host
+    /// declares the identity again with its composed build.
+    BuildRequired,
 }
 
 /// Why the declared apply left a listed identity as it is

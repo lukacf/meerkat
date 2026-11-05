@@ -1615,6 +1615,7 @@ impl PrivateOriginals {
             &key,
             Arc::new(stored.clone()),
             association,
+            None,
         )?;
         record.final_association = Some(association.clone());
         let data = encode(record).map_err(|_| OriginalWriterError::Conflict)?;

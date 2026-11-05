@@ -1826,6 +1826,14 @@ impl ToolkitOriginalOwner {
     /// Called under the existing source mutation writer immediately before the
     /// first canonical association CAS. The caller validated this exact unbound
     /// row; native's tracked foreground owns the entered asynchronous write.
+    ///
+    /// Inside its owner change the collection is only tried. With
+    /// `contended_until`, a collection held by another owner's short section
+    /// ends the change with nothing changed, is waited for outside any change
+    /// until that deadline, and the change begins again
+    /// ([`Self::change_with_collection_within`]); the in-memory record is
+    /// applied at most once, and the CAS after it is the caller's. Without it
+    /// a held collection is unavailable at once, as before.
     pub(crate) fn retain_first_binding_write(
         &self,
         store: &dyn toolkit_store::ToolkitStore,
@@ -1833,6 +1841,7 @@ impl ToolkitOriginalOwner {
         expected_key: &toolkit_store::StoreKey,
         source_record: Arc<toolkit_store::StoredRecord>,
         association: &InputAuthorityAssociation,
+        contended_until: Option<std::time::Instant>,
     ) -> Result<(), OriginalWriterError> {
         self.check_canonical_source(store, scope)?;
         // Each trusted caller derives its exact canonical key. Helper rows use
@@ -1841,47 +1850,59 @@ impl ToolkitOriginalOwner {
             return Err(OriginalWriterError::WrongOwner);
         }
         let claims = association.candidate();
-        let _publication = self
-            .publication
-            .begin_owner_change()
-            .map_err(|_| OriginalWriterError::Unavailable)?;
-        let mut originals = self
-            .originals
-            .try_lock()
-            .map_err(|_| OriginalWriterError::Unavailable)?;
-        if let Some(existing) = originals
-            .iter()
-            .find(|entry| entry.names(&claims.ingress_namespace.realm, &claims.original_work))
-        {
-            return match existing {
-                OriginalRecord::UnboundCancellation {
-                    source_record: prior,
-                    operation: OriginalOperationDisposition::Open,
-                    first_binding: Some(first),
-                    ..
-                } if first == association
-                    && prior.key == source_record.key
-                    && (crate::private_originals::same_source_origin(prior, &source_record)
-                        || helper_originals::same_unbound_source(prior, &source_record)) =>
-                {
-                    Ok(())
-                }
-                OriginalRecord::UnboundCancellation {
-                    operation: OriginalOperationDisposition::Cancelled { .. },
-                    ..
-                } => Err(OriginalWriterError::OperationCancelled),
-                _ => Err(OriginalWriterError::Unavailable),
-            };
+        let retain = |originals: &mut Vec<OriginalRecord>| -> Result<(), OriginalWriterError> {
+            if let Some(existing) = originals
+                .iter()
+                .find(|entry| entry.names(&claims.ingress_namespace.realm, &claims.original_work))
+            {
+                return match existing {
+                    OriginalRecord::UnboundCancellation {
+                        source_record: prior,
+                        operation: OriginalOperationDisposition::Open,
+                        first_binding: Some(first),
+                        ..
+                    } if first == association
+                        && prior.key == source_record.key
+                        && (crate::private_originals::same_source_origin(
+                            prior,
+                            &source_record,
+                        ) || helper_originals::same_unbound_source(prior, &source_record)) =>
+                    {
+                        Ok(())
+                    }
+                    OriginalRecord::UnboundCancellation {
+                        operation: OriginalOperationDisposition::Cancelled { .. },
+                        ..
+                    } => Err(OriginalWriterError::OperationCancelled),
+                    _ => Err(OriginalWriterError::Unavailable),
+                };
+            }
+            originals.push(OriginalRecord::UnboundCancellation {
+                realm: claims.ingress_namespace.realm.clone(),
+                original: claims.original_work.clone(),
+                source_record: source_record.clone(),
+                operation: OriginalOperationDisposition::Open,
+                first_binding: Some(association.clone()),
+                withdrawn_association: None,
+            });
+            Ok(())
+        };
+        match contended_until {
+            Some(deadline) => {
+                self.change_with_collection_within(deadline, std::thread::sleep, || {}, retain)
+            }
+            None => {
+                let _publication = self
+                    .publication
+                    .begin_owner_change()
+                    .map_err(|_| OriginalWriterError::Unavailable)?;
+                let mut originals = self
+                    .originals
+                    .try_lock()
+                    .map_err(|_| OriginalWriterError::Unavailable)?;
+                retain(&mut originals)
+            }
         }
-        originals.push(OriginalRecord::UnboundCancellation {
-            realm: claims.ingress_namespace.realm.clone(),
-            original: claims.original_work.clone(),
-            source_record,
-            operation: OriginalOperationDisposition::Open,
-            first_binding: Some(association.clone()),
-            withdrawn_association: None,
-        });
-        Ok(())
     }
 
     /// Publish a validated, durable withdrawal in the existing source owner.

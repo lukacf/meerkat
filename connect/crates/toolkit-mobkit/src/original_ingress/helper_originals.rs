@@ -1198,6 +1198,7 @@ impl ToolkitOriginalOwner {
                     &key,
                     Arc::new(prior.clone()),
                     &association,
+                    contended_until.map(tokio::time::Instant::into_std),
                 )?;
                 record.state = state;
                 store
@@ -3174,7 +3175,8 @@ mod tests {
                 &admitted.source_scope,
                 &key,
                 Arc::new(wrong_key),
-                source.original.association()
+                source.original.association(),
+                None,
             ),
             Err(OriginalWriterError::WrongOwner)
         ));

@@ -248,7 +248,14 @@ async fn real_first_binding_conflict_stays_conflict_without_callback() {
     {
         let _writer = f.owner.source_writer().await;
         f.owner
-            .retain_first_binding_write(f.store.as_ref(), &f.scope, &row.key, row.clone(), &first)
+            .retain_first_binding_write(
+                f.store.as_ref(),
+                &f.scope,
+                &row.key,
+                row.clone(),
+                &first,
+                None,
+            )
             .unwrap();
     }
     let mut candidate = first.candidate().clone();

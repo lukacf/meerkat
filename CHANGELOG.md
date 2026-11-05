@@ -178,6 +178,43 @@ them.
   `DecisionPassOutcome::KindNotClaimed`, the outcome of a decision of such a
   kind, which another executor executes.
 
+- Durable decisions on the RPC wire: `decision/list` (one page in decision
+  id order, filtered by kind, phase, approver id or requester, at most 500
+  decisions), `decision/get` (one decision, the held request when asked
+  for), `decision/rendering` (the rendering and its canonical parts for a
+  part size), `decision/present` (a host presenter's presentation, counted
+  only when it shows every canonical part to the party that decides now)
+  and `decision/withdraw` (as the host). A runtime whose persistence keeps
+  no durable decisions answers them capability unavailable
+  (`data.kind = "no_decision_store"`); a refusal is invalid params with
+  `data.kind = "decision_refused"` and its typed kind; store faults use the
+  approval store codes. `meerkat-contracts`: `WireDecision` and its
+  vocabularies (`WireDecisionPhase`, `WireDecisionStage`,
+  `WireDecisionNoticeState`, `WireDecisionTier`, `WireDecisionAssurance`,
+  `WireDecisionReviewVerdict`, `WirePresentationAudience`,
+  `WirePresentationRecord`, `WireCanonicalPart`, `WireDecisionEvidence`,
+  `WireDecisionOutcome`, `WireUnreadableDecision`), the closed
+  `WireDecisionRefusal` and `WireDecisionErrorData`, and the params and
+  results of the methods (`DecisionListParams`, `DecisionListResult`,
+  `DecisionGetParams`, `DecisionResult`, `DecisionRenderingParams`,
+  `DecisionRenderingResult`, `DecisionPresentParams`,
+  `DecisionPresentationRequest`, `DecisionAudienceRequest`,
+  `DecisionWithdrawParams`, `DecisionDecideParams`). The Python SDK wraps
+  the methods as `list_decisions`, `get_decision`, `decision_rendering`,
+  `present_decision` and `withdraw_decision`, the TypeScript SDK as
+  `listDecisions`, `getDecision`, `decisionRendering`, `presentDecision` and
+  `withdrawDecision`; neither decides a decision.
+- Host-adapter decide: `meerkat-rpc`:
+  `MethodRouter::dispatch_with_decision_event` decides `decision/decide`
+  (`DECISION_DECIDE_METHOD`) with an `AuthenticatedDecisionEvent` the host
+  built from the human's authenticated event; the request names only the
+  decision, the answer, the presented digest and a reason, and must equal
+  what the event binds. Plain dispatch has no route to `decision/decide`.
+  `meerkat-core`: `AuthenticatedDecisionEvent`, `CanonicalPart::new` and
+  `PresentationRecord::new`. `meerkat-runtime`:
+  `DurableDecisionService::is_available` and the `decision::wire`
+  projection.
+
 - GitHub Copilot configured once: `[realm.<realm>.copilot]` states a Copilot
   account's credential source once (`source`, an `env` or
   `external_resolver` source; optional `options`, the client identity

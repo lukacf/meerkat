@@ -100,6 +100,7 @@ service APIs. For agents that run in the browser itself, use the
 | `monitorsStart/metaJobHeartbeat/metaJobProgress/metaJobCheckpoint/metaJobComplete/metaJobFail/metaJobCancelAck` | Monitor creation and authority-checked Meta worker updates |
 | `requestApproval/listApprovals/getApproval/decideApproval` | Approval record lifecycle; persists when the RPC bundle exposes a store path |
 | `grantTool/revokeToolGrant/listToolGrants/toolGrantAudit` | Scoped tool grants of a session created with `grantGatedTools` |
+| `listDecisions/getDecision/decisionRendering/presentDecision/withdrawDecision` | Durable decisions of a server whose persistence keeps them; no SDK method decides one |
 | `listArtifacts/getArtifact/downloadArtifact` | Artifact metadata and payload access |
 | `latestEventCursor/listEventsSince/eventSnapshot` | Cursor replay and snapshots when host event projection is enabled |
 | `createMob(options?)` | Create a mob, return a `Mob` |

@@ -286,8 +286,14 @@ Decisions live in their own file beside the approval records,
 nothing is read at start, and a read touches one decision or one index page. A
 candidate launch reads decisions and writes none. Durable decisions share no
 record, file or machine with the in-run consent above, and `approval/list` never
-shows them. Core adds no wire method for them: a host builds its decision
-surfaces on the Rust owner, `meerkat_runtime::decision::DurableDecisionService`,
+shows them. The RPC server reads, presents and withdraws them with the
+[`decision/*` methods](/api/rpc#durable-decisions); a runtime whose persistence
+keeps none answers them capability unavailable (`-32020`). No request body
+decides one: a host's trusted adapter decides through
+`MethodRouter::dispatch_with_decision_event`, with the
+`AuthenticatedDecisionEvent` it built from the event it authenticated. A host
+builds its other decision surfaces on the Rust owner,
+`meerkat_runtime::decision::DurableDecisionService`,
 and executes them with `meerkat_runtime::decision::DecisionExecutorLoop`.
 
 Read the [integration and migration guide](/guides/authorization-integration)

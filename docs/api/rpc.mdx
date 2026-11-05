@@ -159,6 +159,11 @@ of this full catalog.
 | `tool_grants/revoke` | Tool grants | `RevokeToolGrantParams` | `RevokeToolGrantResult` | Revoke a scoped tool grant; idempotent, the result says whether this revoke ended it |
 | `tool_grants/list` | Tool grants | `ListToolGrantsParams` | `ListToolGrantsResult` | List a session's scoped tool grants, each due grant settled as expired first |
 | `tool_grants/audit` | Tool grants | `ToolGrantAuditParams` | `ToolGrantAuditResult` | Read a page of the audit log of a session's scoped tool grants |
+| `decision/list` | Decisions | `DecisionListParams` | `DecisionListResult` | List a page of durable decisions, filtered by kind, phase, approver id or requester |
+| `decision/get` | Decisions | `DecisionGetParams` | `DecisionResult` | Get one durable decision, its expiry recorded when its deadline passed |
+| `decision/rendering` | Decisions | `DecisionRenderingParams` | `DecisionRenderingResult` | Get a durable decision's rendering and its canonical parts for a part size |
+| `decision/present` | Decisions | `DecisionPresentParams` | `DecisionResult` | Record a host presenter's presentation of a durable decision's rendering |
+| `decision/withdraw` | Decisions | `DecisionWithdrawParams` | `DecisionResult` | Withdraw an open durable decision as the host |
 | `events/latest_cursor` | Events | `EventsLatestCursorParams` | `EventsLatestCursorResult` | Read the latest replay cursor for a typed event scope |
 | `events/list_since` | Events | `EventsListSinceParams` | `EventsListSinceResult` | List replayable events after a typed cursor |
 | `events/snapshot` | Events | `EventsSnapshotParams` | `EventsSnapshotResult` | Read a point-in-time snapshot with its replay cursor |
@@ -2151,6 +2156,100 @@ as an unsupported parameter.
 is recorded as an operator without a caller. Authorize grant administration in
 the trusted host or an authenticated proxy before forwarding the call.
 </Warning>
+
+## Durable decisions
+
+A durable decision holds one operation until an attested party decides it, its
+requester or the host withdraws it, or its deadline passes (see
+[durable decisions](/concepts/authorization)). The `decision/*` methods read
+and act on the decisions of the runtime's persistence, one row or one index
+page per call: `decision/list`, `decision/get`, `decision/rendering`,
+`decision/present` and `decision/withdraw`. A runtime whose persistence keeps
+no durable decisions answers them capability unavailable, with
+`data.kind = "no_decision_store"`.
+
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 41,
+  "method": "decision/list",
+  "params": {"phase": "open", "approver_id": "team:owners", "limit": 50}
+}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 41,
+  "result": {
+    "decisions": [
+      {
+        "decision_id": "decision:fe421f09ffb8179a56bfdb0a37f36ac99a6d307226aa144440e95686bafeaa23",
+        "kind": "release",
+        "subject_key": "build-7",
+        "operation_id": "release:build-7",
+        "request_digest": "sha256:7c02a5bac80b53d7403310592c0a3b8e5dd9eff29bcee8ee844eb3bd9b40e6a5",
+        "requester": "principal:[\"personal_agent\",\"example.org\",\"builder\"]",
+        "approver_id": "team:owners",
+        "phase": "open",
+        "stage": "human",
+        "notice": "not_due",
+        "deadline_at_ms": 1761739200000,
+        "created_at_ms": 1761735600000,
+        "subject_digest": "sha256:55c206817f2780cd717c90168bca1e020ca01528c7d38e27baefd111aafda6a3",
+        "renderer": "render.v1",
+        "permit_issued": false,
+        "revision": 1
+      }
+    ],
+    "unreadable": []
+  }
+}
+```
+
+- **`decision/list`** reads one page, in decision id order, of the decisions
+  every set filter matches: `kind`, `phase`, `approver_id` and `requester` (a
+  principal key). `limit` is 100 when absent and at most 500; `next_after`
+  names the decision id to read the next page `after`. A decision past its
+  deadline reads as expired. A row this server cannot read is listed under
+  `unreadable` and nothing executes it. A phase this version does not know is
+  refused, never read as no filter.
+- **`decision/get`** reads one decision, and records its expiry when its
+  deadline passed. `include_request: true` adds the held request.
+- **`decision/rendering`** returns the one canonical rendering of the held
+  request, its renderer and subject digest, and its canonical parts for
+  `max_part_bytes` (one part when absent): consecutive byte ranges on character
+  boundaries, each with its own digest.
+- **`decision/present`** records what a host presenter showed: the
+  `audience` (`{"kind": "approver", "approver_id": ...}` or `{"kind":
+  "reviewer", "reviewer": ...}`), the digest of the rendering shown, the part
+  size and the parts shown, the channel and message references, and the host
+  clock reading `at_ms`. It counts only when it shows every canonical part of
+  the held rendering to the party that decides now; a presentation at 0 is no
+  reading of when it was shown and is refused.
+- **`decision/withdraw`** withdraws an open decision as the host.
+
+A refusal is invalid params with `data.kind = "decision_refused"` and the
+decision's typed refusal in `data.decision_refusal.kind` (for example
+`subject_changed`, `presentation_incomplete`, `decided_before_presentation`,
+`not_eligible`, `self_approval` or `not_open`); a decision id with no decision
+is invalid params with `data.kind = "decision_not_found"`. Store faults use
+the approval store codes: store unavailable (nothing was written), conflict
+(another owner changed the decision), commit unknown (the write may have
+committed). A runtime serving a candidate launch reads decisions and refuses
+every write as capability unavailable with `data.kind = "candidate_launch"`.
+
+No request body decides a decision. A host's trusted transport adapter
+decides one by dispatching `decision/decide` through
+`MethodRouter::dispatch_with_decision_event` with the
+`AuthenticatedDecisionEvent` it built from the human's authenticated event: the
+attested decision (who decided, how they were authenticated, the ingress and
+event reference, the time the ingress observed the event and the digest of the
+rendering they saw) and the evidence that they may act for the decision's
+approver id. The request names only `decision_id`, `approve`,
+`presented_digest` and an optional `reason`, and must equal what the event
+binds; a request that names an approver, actor, assurance or scope is invalid
+params. Plain dispatch answers `decision/decide` method not found.
 
 ## Schedules, WorkGraph, and multi-host mobs
 

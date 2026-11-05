@@ -177,6 +177,9 @@ struct Script {
     runs: Mutex<BTreeMap<(String, String), Vec<String>>>,
     // Each member's call ID prefixes, one per run attempt, in order.
     prefixes: Mutex<BTreeMap<String, Vec<String>>>,
+    // A's helper's calls still pending when the case cancelled A: emitted in
+    // its current run, with no result recorded then.
+    pending_at_cancel: Mutex<std::collections::BTreeSet<String>>,
 }
 /// The input and the run a model request was made in, as Core's binding
 /// names them.
@@ -253,6 +256,24 @@ impl Script {
         self.run_prefixes(member)
             .pop()
             .unwrap_or_else(|| member.to_owned())
+    }
+    /// Record `member`'s calls still pending as the case cancels its
+    /// original: emitted in its latest run, with no result recorded yet.
+    fn record_pending_at_cancel(&self, member: &str) {
+        let prefix = self.current_prefix(member);
+        let emitted = self
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _, _)| in_run(id, &prefix))
+            .map(|(id, _, _)| id.clone())
+            .collect::<Vec<_>>();
+        let seen = self.seen_results.lock().unwrap();
+        *self.pending_at_cancel.lock().unwrap() = emitted
+            .into_iter()
+            .filter(|id| !seen.contains_key(id))
+            .collect();
     }
     fn require_loaded_catalog(prefix: &str, value: Value, names: &[&str]) {
         #[derive(serde::Deserialize)]
@@ -1779,15 +1800,6 @@ impl Case {
         })
     }
 
-    /// Whether helper `tag`'s current install call's result reached its
-    /// model: a refused first install's fresh install becomes its current
-    /// install once that refusal was recorded.
-    fn install_result_recorded(&self, tag: &str) -> bool {
-        let prefix = self.script.current_prefix(&format!("{tag}-helper"));
-        let call = format!("{prefix}-{}", self.script.retry_suffix(&prefix, "install"));
-        self.script.seen_results.lock().unwrap().contains_key(&call)
-    }
-
     async fn preparation(&self) -> Option<Value> {
         use std::os::unix::fs::MetadataExt;
         // Backend evidence only. The installed host remains the sole Toolkit
@@ -1927,22 +1939,6 @@ impl Case {
         })
         .await
         .expect("two ordinary helpers must join while one physical worker is held");
-        // A helper's model records its install's result with its next model
-        // request, which can come after its install joined the held worker and
-        // was approved, and after a refused first install's fresh install went
-        // through. Wait within the bound until each helper's current install
-        // result is recorded before the approvals are read and A is cancelled;
-        // the check proof still decides, so a result that never arrives still
-        // fails it.
-        let _ = tokio::time::timeout(BOUND, async {
-            while !["a", "b"]
-                .into_iter()
-                .all(|tag| self.install_result_recorded(tag))
-            {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await;
         assert_eq!(entered["closed"], false);
         assert!(entered["completion"].is_null());
         let observations = launch.observations();
@@ -2073,6 +2069,11 @@ impl Case {
             reviewed.windows(2).all(|pair| pair[0].1 == pair[1].1),
             "each exact native call independently reviews the same checked software proposal"
         );
+        // The worker is released only after A's cancellation is acknowledged,
+        // so an install of A that joined it is still pending here, and a
+        // cancelled member need not see its result. The check proof holds
+        // such a call to its safety proofs instead.
+        self.script.record_pending_at_cancel("a-helper");
         self.script.cancel_requested.store(true, Ordering::SeqCst);
         let cancelled = self
             .client

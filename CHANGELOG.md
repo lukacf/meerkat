@@ -123,6 +123,9 @@ them.
   gains the public field `decisions: DecisionGovernanceConfig`, so code
   that builds it literally must set it (`decisions: Default::default()` or
   `..Default::default()` states the default list, `["operator"]`).
+  `GovernanceConfig::is_empty` is true only while the list is that default
+  too: a section that lists other operator approver ids is no longer empty
+  (see Upgrade notes).
   `RpcMethodCatalogOptions` gains `decision_notices_enabled` (struct
   literals need it): only a catalog for a connection that delivers decision
   notices lists `decision/notice`.
@@ -238,7 +241,8 @@ them.
   operator (ingress `rkat-rpc-stdio`): the request names only the decision,
   the answer, the presented digest and a reason, and only a decision the
   connection presented, whose approver id the configuration still lists,
-  is eligible; any other decide is refused `not_eligible`. A TCP
+  is eligible, and only while the connection is open; any other decide is
+  refused `not_eligible`. A TCP
   connection, plain dispatch and other builds keep answering
   `decision/decide` method not found. The stock governed stdio pipe serves
   both methods for its operator, in its consent surface's scope, with its
@@ -561,6 +565,13 @@ them.
   batches now make 13. The budget, the errors that are retried, and the
   poisoning of the scopes of a batch that does not settle are unchanged.
   Affects 0.9.5 through 0.9.9.
+
+### Upgrade notes
+
+- Upgrade every process that shares a realm before its configuration
+  states `[governance.decisions]`: 0.9.10 refuses a `[governance]` section
+  with a `decisions` key, so a 0.9.10 process on the realm fails to load
+  the realm's configuration document as a whole.
 
 ### Known limitations
 

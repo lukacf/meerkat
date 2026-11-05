@@ -153,6 +153,23 @@ describe("durable decision wrappers", () => {
     assert.deepEqual(result, { decision: withdrawn });
   });
 
+  it("keeps an unknown phase as the server wrote it", async () => {
+    // The phase vocabulary is tolerant: a phase a later server sends reaches
+    // the caller as the server wrote it, neither refused nor rewritten.
+    const archived = { ...DECISION, phase: "archived" };
+    const { client } = fakeClient({
+      "decision/list": { decisions: [archived], unreadable: [] },
+      "decision/get": { decision: archived },
+    });
+
+    const listing = await client.listDecisions();
+    const read = await client.getDecision(DECISION_ID);
+
+    assert.deepEqual(listing, { decisions: [archived], unreadable: [] });
+    assert.deepEqual(read, { decision: archived });
+    assert.equal(read.decision.phase, "archived");
+  });
+
   const DECISION_CALLS = [
     ["decision/list", (client) => client.listDecisions()],
     ["decision/get", (client) => client.getDecision(DECISION_ID)],

@@ -195,13 +195,22 @@ fn read_list_page(
         None => DecisionListParams::default(),
     };
     let filter = list_filter(id.clone(), &params)?;
+    // A page of no decisions is refused; a larger page than the store's
+    // reads as the store's.
+    let limit = match params.limit {
+        None => DEFAULT_LIST_PAGE,
+        Some(0) => {
+            return Err(RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "a decision page limit must be at least 1",
+            ));
+        }
+        Some(limit) => usize::try_from(limit)
+            .unwrap_or(DECISION_PAGE_MAX)
+            .min(DECISION_PAGE_MAX),
+    };
     let owner = decision_owner(id.clone(), runtime)?;
-    let limit = params
-        .limit
-        .map_or(DEFAULT_LIST_PAGE, |limit| {
-            usize::try_from(limit).unwrap_or(DECISION_PAGE_MAX)
-        })
-        .clamp(1, DECISION_PAGE_MAX);
     match owner.list(&filter, params.after.as_deref(), limit) {
         Ok(listing) => Ok((owner, listing)),
         Err(error_value) => Err(decision_error_to_response(id, error_value)),

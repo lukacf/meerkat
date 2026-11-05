@@ -129,6 +129,12 @@ pub enum WireDecisionReviewVerdict {
 /// digest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+// Closed for the request that carries it (`DecisionPresentationRequest`).
+// Results carry it too (`WirePresentationRecord`, `DecisionRenderingResult`),
+// and no client parses a result with this type: the server only serializes
+// results, and the Python and TypeScript SDKs return a result as the server
+// wrote it. A client that deserializes results with it needs a result form
+// that tolerates added fields first.
 #[serde(deny_unknown_fields)]
 pub struct WireCanonicalPart {
     /// The part's position, from 0.

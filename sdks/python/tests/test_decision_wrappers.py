@@ -152,6 +152,26 @@ async def test_withdraw_decision_names_only_the_decision() -> None:
     assert result == {"decision": withdrawn}
 
 
+@pytest.mark.asyncio
+async def test_an_unknown_phase_is_kept_raw() -> None:
+    # The phase vocabulary is tolerant: a phase a later server sends reaches
+    # the caller as the server wrote it, neither refused nor rewritten.
+    archived = dict(DECISION, phase="archived")
+    client, _ = fake_client(
+        {
+            "decision/list": {"decisions": [archived], "unreadable": []},
+            "decision/get": {"decision": archived},
+        }
+    )
+
+    listing = await client.list_decisions()
+    read = await client.get_decision(DECISION_ID)
+
+    assert listing == {"decisions": [dict(DECISION, phase="archived")], "unreadable": []}
+    assert read == {"decision": dict(DECISION, phase="archived")}
+    assert read["decision"]["phase"] == "archived"
+
+
 DECISION_CALLS: list[tuple[str, Callable[[MeerkatClient], Awaitable[Any]]]] = [
     ("decision/list", lambda client: client.list_decisions()),
     ("decision/get", lambda client: client.get_decision(DECISION_ID)),

@@ -981,6 +981,185 @@ export interface WireToolGrantAuditEventUnknown {
 
 export type WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventUnknown;
 
+export interface DecisionAudienceApprover {
+  approver_id: string;
+  kind: "approver";
+}
+
+export interface DecisionAudienceReviewer {
+  kind: "reviewer";
+  reviewer: string;
+}
+
+export type DecisionAudienceRequest = DecisionAudienceApprover | DecisionAudienceReviewer;
+
+export type WireDecisionPhase = "open" | "approved" | "rejected" | "expired" | "withdrawn" | "executed" | "execution_refused" | "unknown";
+
+export type WireDecisionStage = "human" | "review" | "unknown";
+
+export type WireDecisionNoticeState = "not_required" | "not_due" | "owed" | "delivered" | "failed" | "unknown";
+
+export type WireDecisionTier = "human" | "review" | "unknown";
+
+export type WireDecisionAssurance = "person_authenticated" | "service_credential" | "device_trusted" | "unknown";
+
+export type WireDecisionReviewVerdict = "allow" | "deny" | "escalate" | "unknown";
+
+export interface WirePresentationAudienceApprover {
+  approver_id: string;
+  kind: "approver";
+}
+
+export interface WirePresentationAudienceReviewer {
+  kind: "reviewer";
+  reviewer: string;
+}
+
+export interface WirePresentationAudienceUnknown {
+  kind: "unknown";
+}
+
+export type WirePresentationAudience = WirePresentationAudienceApprover | WirePresentationAudienceReviewer | WirePresentationAudienceUnknown;
+
+export interface WireDecisionEvidenceHuman {
+  approve: boolean;
+  approver_id: string;
+  assurance: WireDecisionAssurance;
+  decider: string;
+  event_ref: string;
+  ingress: string;
+  kind: "human";
+  observed_at_ms?: number | null;
+  presentation?: Record<string, unknown> | null;
+  presented_digest: string;
+  reason?: string | null;
+}
+
+export interface WireDecisionEvidenceReview {
+  feedback?: string | null;
+  kind: "review";
+  origin_session: string;
+  presented_digest: string;
+  reviewer: string;
+  verdict: WireDecisionReviewVerdict;
+  verdict_call_ref: string;
+}
+
+export interface WireDecisionEvidenceUnknown {
+  kind: "unknown";
+}
+
+export type WireDecisionEvidence = WireDecisionEvidenceHuman | WireDecisionEvidenceReview | WireDecisionEvidenceUnknown;
+
+export interface WireDecisionRefusalInvalidWindow {
+  kind: "invalid_window";
+}
+
+export interface WireDecisionRefusalSelfReview {
+  kind: "self_review";
+}
+
+export interface WireDecisionRefusalHoldConflict {
+  kind: "hold_conflict";
+}
+
+export interface WireDecisionRefusalNotOpen {
+  kind: "not_open";
+}
+
+export interface WireDecisionRefusalExpired {
+  kind: "expired";
+}
+
+export interface WireDecisionRefusalSubjectChanged {
+  kind: "subject_changed";
+}
+
+export interface WireDecisionRefusalPresentationIncomplete {
+  kind: "presentation_incomplete";
+}
+
+export interface WireDecisionRefusalWrongAudience {
+  kind: "wrong_audience";
+}
+
+export interface WireDecisionRefusalReviewStage {
+  kind: "review_stage";
+}
+
+export interface WireDecisionRefusalHumanStage {
+  kind: "human_stage";
+}
+
+export interface WireDecisionRefusalEvidenceRequired {
+  kind: "evidence_required";
+}
+
+export interface WireDecisionRefusalNotEligible {
+  kind: "not_eligible";
+}
+
+export interface WireDecisionRefusalSelfApproval {
+  kind: "self_approval";
+}
+
+export interface WireDecisionRefusalWrongReviewer {
+  kind: "wrong_reviewer";
+}
+
+export interface WireDecisionRefusalNotRequester {
+  kind: "not_requester";
+}
+
+export interface WireDecisionRefusalNotApproved {
+  kind: "not_approved";
+}
+
+export interface WireDecisionRefusalBindingMismatch {
+  kind: "binding_mismatch";
+}
+
+export interface WireDecisionRefusalNotAuthorized {
+  kind: "not_authorized";
+}
+
+export interface WireDecisionRefusalSettlementOwed {
+  kind: "settlement_owed";
+}
+
+export interface WireDecisionRefusalNotOwed {
+  kind: "not_owed";
+}
+
+export interface WireDecisionRefusalDecidedBeforePresentation {
+  kind: "decided_before_presentation";
+}
+
+export type WireDecisionRefusal = WireDecisionRefusalInvalidWindow | WireDecisionRefusalSelfReview | WireDecisionRefusalHoldConflict | WireDecisionRefusalNotOpen | WireDecisionRefusalExpired | WireDecisionRefusalSubjectChanged | WireDecisionRefusalPresentationIncomplete | WireDecisionRefusalWrongAudience | WireDecisionRefusalReviewStage | WireDecisionRefusalHumanStage | WireDecisionRefusalEvidenceRequired | WireDecisionRefusalNotEligible | WireDecisionRefusalSelfApproval | WireDecisionRefusalWrongReviewer | WireDecisionRefusalNotRequester | WireDecisionRefusalNotApproved | WireDecisionRefusalBindingMismatch | WireDecisionRefusalNotAuthorized | WireDecisionRefusalSettlementOwed | WireDecisionRefusalNotOwed | WireDecisionRefusalDecidedBeforePresentation;
+
+export interface WireDecisionErrorDataDecisionRefused {
+  decision_refusal: WireDecisionRefusal;
+  kind: "decision_refused";
+}
+
+export interface WireDecisionErrorDataDecisionNotFound {
+  kind: "decision_not_found";
+}
+
+export interface WireDecisionErrorDataDecisionUnreadable {
+  kind: "decision_unreadable";
+}
+
+export interface WireDecisionErrorDataCandidateLaunch {
+  kind: "candidate_launch";
+}
+
+export interface WireDecisionErrorDataNoDecisionStore {
+  kind: "no_decision_store";
+}
+
+export type WireDecisionErrorData = WireDecisionErrorDataDecisionRefused | WireDecisionErrorDataDecisionNotFound | WireDecisionErrorDataDecisionUnreadable | WireDecisionErrorDataCandidateLaunch | WireDecisionErrorDataNoDecisionStore;
+
 export interface ActivateInstructionParams {
   activation: Record<string, unknown>;
   session_id: string;
@@ -1615,6 +1794,116 @@ export interface ToolGrantAuditResult {
   next_sequence?: number | null;
   rows: WireToolGrantAuditRow[];
   unreadable?: WireUnreadableToolGrantAuditRow[];
+}
+
+export interface WireCanonicalPart {
+  count: number;
+  index: number;
+  part_digest: string;
+}
+
+export interface WirePresentationRecord {
+  at_ms: number;
+  audience: WirePresentationAudience;
+  channel_ref: string;
+  max_part_bytes?: number | null;
+  message_ref: string;
+  parts_shown: WireCanonicalPart[];
+  subject_digest: string;
+}
+
+export interface WireDecisionOutcome {
+  evidence: WireDecisionEvidence;
+  tier: WireDecisionTier;
+}
+
+export interface WireDecision {
+  approver_id: string;
+  created_at_ms: number;
+  deadline_at_ms: number;
+  decided_at_ms?: number | null;
+  decision_id: string;
+  ended_at_ms?: number | null;
+  execution_refusal?: string | null;
+  first_presented_to_approver_at_ms?: number | null;
+  kind: string;
+  notice: WireDecisionNoticeState;
+  operation_id: string;
+  outcome?: WireDecisionOutcome | null;
+  permit_issued: boolean;
+  phase: WireDecisionPhase;
+  presentations?: WirePresentationRecord[];
+  renderer: string;
+  request?: unknown;
+  request_digest: string;
+  requester: string;
+  reviewer?: string | null;
+  revision: number;
+  stage: WireDecisionStage;
+  subject_digest: string;
+  subject_key: string;
+}
+
+export interface WireUnreadableDecision {
+  decision_id: string;
+  detail: string;
+}
+
+export interface DecisionPresentationRequest {
+  at_ms: number;
+  audience: DecisionAudienceRequest;
+  channel_ref: string;
+  max_part_bytes?: number | null;
+  message_ref: string;
+  parts_shown: WireCanonicalPart[];
+  subject_digest: string;
+}
+
+export interface DecisionListParams {
+  after?: string | null;
+  approver_id?: string | null;
+  kind?: string | null;
+  limit?: number | null;
+  phase?: WireDecisionPhase | null;
+  requester?: string | null;
+}
+
+export interface DecisionListResult {
+  decisions: WireDecision[];
+  next_after?: string | null;
+  unreadable?: WireUnreadableDecision[];
+}
+
+export interface DecisionGetParams {
+  decision_id: string;
+  include_request?: boolean;
+}
+
+export interface DecisionResult {
+  decision: WireDecision;
+}
+
+export interface DecisionRenderingParams {
+  decision_id: string;
+  max_part_bytes?: number | null;
+}
+
+export interface DecisionRenderingResult {
+  decision_id: string;
+  max_part_bytes?: number | null;
+  parts: WireCanonicalPart[];
+  renderer: string;
+  rendering: string;
+  subject_digest: string;
+}
+
+export interface DecisionPresentParams {
+  decision_id: string;
+  presentation: DecisionPresentationRequest;
+}
+
+export interface DecisionWithdrawParams {
+  decision_id: string;
 }
 
 export interface CallbackToolExecutionFast {

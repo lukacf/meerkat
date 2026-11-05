@@ -55,6 +55,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   change in progress the refusal still answers at once.
 
 - A Find no longer fails as temporarily unavailable (`tool_unavailable`)
+  when its setup helper's admission, grants or source binding meet another
+  owner's brief hold on the shared source state, or a change of the shared
+  authorization in progress. The checks made before each of those steps,
+  and the reads made after them, wait that out within the owner-change
+  bound; no step is made twice. A hold that outlasts the bound still
+  answers `tool_unavailable`, and nothing the Find already did is made
+  again.
+
+- A Find no longer fails as temporarily unavailable (`tool_unavailable`)
   while another original's Find is writing the shared source state. Its
   setup helper admission waits for that write within the owner-change bound;
   a write that outlasts the bound is still refused as temporarily

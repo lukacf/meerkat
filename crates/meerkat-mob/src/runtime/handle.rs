@@ -8469,6 +8469,33 @@ impl MobHandle {
         }
     }
 
+    /// [`Self::retire_exact_incarnation`] of the incarnation at `generation`
+    /// only (see [`Self::join_or_start_retirement_step`]'s pin).
+    async fn retire_exact_incarnation_at(
+        &self,
+        agent_identity: AgentIdentity,
+        generation: Generation,
+    ) -> Result<(), MobError> {
+        let operation_deadline = Instant::now() + super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT;
+        let Some((key, pending)) = self
+            .join_or_start_retirement_step(
+                agent_identity,
+                None,
+                operation_deadline,
+                true,
+                super::state::RetirementRedrive::Plain,
+                Some(generation),
+            )
+            .await?
+        else {
+            return Ok(());
+        };
+        // An unscoped slot re-checks no scope, so its step only ever runs.
+        self.wait_for_retirement_operation(&key, pending)
+            .await
+            .map(|_ran| ())
+    }
+
     async fn retire_exact_incarnation(
         &self,
         agent_identity: AgentIdentity,
@@ -8551,6 +8578,7 @@ impl MobHandle {
             operation_deadline,
             bound_admission,
             redrive,
+            None,
         )
         .await
     }
@@ -8560,6 +8588,14 @@ impl MobHandle {
     /// [`Self::retire_at_scope`] under its root scope. A scoped root step
     /// reads no roster entry: the actor resolves the incarnation only after
     /// MobMachine classified the scope in the step's own command.
+    ///
+    /// An unscoped step with a `pinned_generation` retires the identity's
+    /// incarnation only when the roster holds it at that generation: one
+    /// at another generation is refused before the step elects a slot
+    /// ([`MobError::LifecycleOperationPending`], retryable). The step then
+    /// retires the exact incarnation it read, which the actor checks again
+    /// in its own command, so an incarnation seated after the read is never
+    /// retired by it.
     async fn join_or_start_retirement_step(
         &self,
         agent_identity: AgentIdentity,
@@ -8567,6 +8603,7 @@ impl MobHandle {
         operation_deadline: Instant,
         bound_admission: bool,
         redrive: super::state::RetirementRedrive,
+        pinned_generation: Option<Generation>,
     ) -> Result<Option<(RetirementOperationKey, Arc<PendingRetirementOperation>)>, MobError> {
         // Retire's absent-member convergence is still an operator action.
         // Enter the serialized scope gate before any roster observation so a
@@ -8632,6 +8669,17 @@ impl MobHandle {
                 }
                 return Ok(None);
             };
+            if let Some(pinned) = pinned_generation
+                && entry.generation != pinned
+            {
+                return Err(MobError::LifecycleOperationPending {
+                    intent: format!(
+                        "retire '{agent_identity}' at generation {pinned}: its current \
+                         incarnation is at generation {}",
+                        entry.generation
+                    ),
+                });
+            }
             let expected = super::state::RetireMemberIncarnation {
                 agent_identity: entry.agent_identity.clone(),
                 agent_runtime_id: entry.agent_runtime_id.clone(),
@@ -21073,6 +21121,59 @@ impl MobHandle {
         }
     }
 
+    /// [`Self::retire_member_tree`] of `identity`'s incarnation at
+    /// `generation` only. Nothing is retired when the roster holds the
+    /// identity at another generation: the call answers
+    /// [`MobError::LifecycleOperationPending`], retryable. The member's own
+    /// step retires the exact incarnation it read, which the actor checks
+    /// again in its own command, so an incarnation a respawn seated after
+    /// that read is never retired here. An identity with no incarnation
+    /// retires nothing and answers `Ok(())`, as [`Self::retire`] does.
+    pub(super) async fn retire_at_generation(
+        &self,
+        identity: AgentIdentity,
+        generation: Generation,
+    ) -> Result<(), MobError> {
+        let current = self
+            .roster
+            .read()
+            .await
+            .get(&identity)
+            .map(|entry| entry.generation);
+        if let Some(current) = current
+            && current != generation
+        {
+            return Err(MobError::LifecycleOperationPending {
+                intent: format!(
+                    "retire '{identity}' at generation {generation}: its current incarnation \
+                     is at generation {current}"
+                ),
+            });
+        }
+        let handle = self.clone();
+        // Like `retire`, run the cascade off the caller's stack.
+        meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+            let mut first_error = None;
+            let mut attempted = std::collections::BTreeSet::new();
+            handle
+                .retire_descendants_until_stable(&identity, &mut attempted, &mut first_error)
+                .await;
+            let own = handle
+                .retire_exact_incarnation_at(identity.clone(), generation)
+                .await;
+            if own.is_ok() {
+                handle
+                    .retire_descendants_until_stable(&identity, &mut attempted, &mut first_error)
+                    .await;
+            }
+            match (own, first_error) {
+                (Err(error), _) | (Ok(()), Some(error)) => Err(error),
+                (Ok(()), None) => Ok(()),
+            }
+        })
+        .await
+    }
+
     async fn retire_descendants_until_stable(
         &self,
         ancestor: &AgentIdentity,
@@ -21228,6 +21329,7 @@ impl MobHandle {
                 operation_deadline,
                 true,
                 super::state::RetirementRedrive::Plain,
+                None,
             )
             .await?
         else {

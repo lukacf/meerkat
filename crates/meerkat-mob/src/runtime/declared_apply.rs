@@ -1555,45 +1555,36 @@ impl super::MobHandle {
     /// session (placed on a member host) is retired at its delivery scope,
     /// captured now: the scope must still name that incarnation, and the
     /// scoped retirement checks it again in the step that retires the
-    /// member. A member bound to no session has no delivery scope: its
-    /// current incarnation must still be that one when this reads it, and
-    /// the retirement retires the incarnation current in its own step, so a
-    /// respawn between the two is retired in its place (a later roster that
-    /// lists the identity seats it again). A moved incarnation is refused
-    /// retryable, and the next complete apply decides its member again.
+    /// member. A member bound to no session has no delivery scope: it is
+    /// retired at that generation ([`Self::retire_at_generation`]), whose
+    /// own step retires the exact incarnation it read, so a respawn seated
+    /// after MobMachine's verdict is never retired here. A moved incarnation
+    /// is refused retryable, and the next complete apply decides its member
+    /// again.
     async fn retire_unadopted_legacy_member(
         &self,
         identity: &AgentIdentity,
         generation: Generation,
     ) -> Result<(), MobError> {
-        let moved = || MobError::LifecycleOperationPending {
-            intent: format!(
-                "retire unlisted legacy member '{identity}': its incarnation changed after \
-                 MobMachine decided its retirement"
-            ),
-        };
-        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
-        let (bound, current) = {
-            let state = self.machine_state_watch_rx.borrow();
-            (
-                state.member_session_bindings.contains_key(&dsl_identity),
-                state
-                    .identity_runtime_generations
-                    .get(&dsl_identity)
-                    .copied(),
-            )
-        };
+        let bound = self
+            .machine_state_watch_rx
+            .borrow()
+            .member_session_bindings
+            .contains_key(&mob_dsl::AgentIdentity::from_domain(identity));
         if bound {
             let scope = self.capture_member_delivery_scope(identity).await?;
             if scope.generation() != generation {
-                return Err(moved());
+                return Err(MobError::LifecycleOperationPending {
+                    intent: format!(
+                        "retire unlisted legacy member '{identity}': its incarnation changed \
+                         after MobMachine decided its retirement"
+                    ),
+                });
             }
             return self.retire_at_scope(&scope).await;
         }
-        if current != Some(mob_dsl::Generation::from_domain(generation)) {
-            return Err(moved());
-        }
-        self.retire(identity.clone()).await
+        self.retire_at_generation(identity.clone(), generation)
+            .await
     }
 
     /// MobMachine's verdicts for `declarations`, one chunk per actor step,

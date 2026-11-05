@@ -3232,6 +3232,51 @@ async fn a_complete_roster_retires_an_unlisted_legacy_member_bound_to_no_session
     );
 }
 
+/// The retirement of an unlisted legacy member bound to no session is
+/// pinned to the generation MobMachine decided on
+/// (`MobHandle::retire_at_generation`): its own step retires the exact
+/// incarnation it read, so an incarnation a respawn seated after the
+/// verdict is never retired by it. The pin to the replaced generation is
+/// refused, retryable, and retires nothing; the pin to the current one
+/// retires the member.
+///
+/// RED (`RED-S2-pinned-retire.patch`): retire whatever incarnation the
+/// identity holds (the plain retirement the session-less branch used
+/// before): the respawned incarnation is retired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retirement_pinned_to_a_generation_never_retires_a_respawned_incarnation() {
+    let mob = ApplyMob::new("apply-pinned-retire").await;
+    mob.handle
+        .spawn_spec(worker_spec("pinned"))
+        .await
+        .expect("a member");
+    let decided = mob.generation("pinned").await.expect("its generation");
+    mob.handle
+        .respawn(id("pinned"), None)
+        .await
+        .expect("a respawn seats its next incarnation");
+    let respawned = mob.generation("pinned").await.expect("the next generation");
+    assert_ne!(decided, respawned, "the respawn moved the incarnation");
+
+    let refused = mob.handle.retire_at_generation(id("pinned"), decided).await;
+    assert!(
+        matches!(refused, Err(MobError::LifecycleOperationPending { .. })),
+        "a pin to the replaced generation is refused, retryable: {refused:?}"
+    );
+    assert_eq!(
+        mob.generation("pinned").await,
+        Some(respawned),
+        "the respawned incarnation is not retired"
+    );
+
+    mob.handle
+        .retire_at_generation(id("pinned"), respawned)
+        .await
+        .expect("the pin to the current generation retires the member");
+    mob.retirement_ended("pinned").await;
+    assert!(!mob.is_member("pinned").await, "the member is retired");
+}
+
 /// An unlisted legacy member placed on a member host is never adopted: an
 /// identity entry's member is local. MobMachine answers it
 /// `RetireUnadopted`, and the complete roster retires it at its delivery

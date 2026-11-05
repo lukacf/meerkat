@@ -1674,6 +1674,9 @@ impl ToolkitOriginalOwner {
         self.observe_helper_sources(&admitted.contributor, &admitted.contributors, &[])
     }
 
+    // The bind makes this check itself, with its wait for a held collection;
+    // the cold-helper fixture and the contributor rows still use this form.
+    #[cfg(test)]
     fn check_helper_contributors(
         &self,
         contributor: &Arc<RetainedToolkitOriginal>,

@@ -114,6 +114,14 @@ async fn finds_with_hold_at_publication_source(hold: Hold, fresh_finds: usize) -
     finds_with_hold_at(Site::PublicationSource, 1, hold, fresh_finds, false).await
 }
 
+/// A control's hits of its site so far, and, once the chosen hit came, the
+/// hold's start with the owner's helper admission events then.
+#[derive(Default)]
+struct Reached {
+    hits: usize,
+    start: Option<(Instant, usize)>,
+}
+
 /// The original's Finds, with `hold` made once, at the `nth` hit (from 1)
 /// of `site`, and `fresh_finds` fresh Finds released once the hold ended.
 /// With `concurrent_change`, another actor begins and ends an owner change
@@ -145,9 +153,8 @@ pub(super) async fn finds_with_hold_at(
             }))
             .is_ok()
     );
-    // The site's hits so far, and the hold's start with the owner's helper
-    // admission events then.
-    let reached: Arc<Mutex<(usize, Option<(Instant, usize)>)>> = Arc::default();
+    // The site's hits so far, and the hold's start.
+    let reached: Arc<Mutex<Reached>> = Arc::default();
     let seen = reached.clone();
     let owner = fixture.source.owner.clone();
     let concurrent: Arc<Mutex<Option<Duration>>> = Arc::default();
@@ -157,11 +164,11 @@ pub(super) async fn finds_with_hold_at(
             return None;
         }
         let mut seen = seen.lock().unwrap();
-        seen.0 += 1;
-        if seen.0 != nth {
+        seen.hits += 1;
+        if seen.hits != nth {
             return None;
         }
-        seen.1 = Some((
+        seen.start = Some((
             Instant::now(),
             owner.helper_admission_events_for_test().len(),
         ));
@@ -200,7 +207,7 @@ pub(super) async fn finds_with_hold_at(
                     return (None, None);
                 }
                 let start = loop {
-                    if let Some((start, _)) = reached.lock().unwrap().1 {
+                    if let Some((start, _)) = reached.lock().unwrap().start {
                         break start;
                     }
                     tokio::time::sleep(Duration::from_millis(5)).await;
@@ -224,7 +231,7 @@ pub(super) async fn finds_with_hold_at(
             let (start, from) = reached
                 .lock()
                 .unwrap()
-                .1
+                .start
                 .expect("the Find reached the hold's site");
             let reads = fixture.source.owner.helper_admission_events_for_test()[from..]
                 .iter()

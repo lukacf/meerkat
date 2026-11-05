@@ -204,12 +204,41 @@ struct AwaitingAuthorization {
     target: McpServerIdentity,
     config: McpServerConfig,
     operation: AwaitingOperation,
+    /// Whether the attachment was governed when the record was made, and
+    /// under which control: its re-add after a sign-in is staged with that
+    /// control, or refused.
+    governance: AwaitingGovernance,
     /// For a [`AwaitingOperation::Released`] record: a sign-in for exactly
     /// this target completed while the release's own removal was still
     /// staged or settling. The server is staged again at the first boundary
     /// after that removal settles, with no further sign-in; the flag stays
     /// set until the owner accepts that add.
     signed_in_during_release: bool,
+}
+
+/// The governance a retry record carries to its re-add. A governed
+/// attachment reconnects only under a control, so a governed record is
+/// staged again with the control it was attached under, which the new
+/// connection asks at its physical entry; without one it is refused, never
+/// re-added plainly.
+#[derive(Clone)]
+enum AwaitingGovernance {
+    /// The attachment was not governed: its re-add is a plain one.
+    Plain,
+    /// The attachment was governed under this control.
+    Governed(Arc<dyn McpAttachmentAuthority>),
+    /// The attachment was governed, and the router held no control for it.
+    GovernedWithoutControl,
+}
+
+impl std::fmt::Debug for AwaitingGovernance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Plain => "Plain",
+            Self::Governed(_) => "Governed",
+            Self::GovernedWithoutControl => "GovernedWithoutControl",
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1509,6 +1538,12 @@ pub struct McpRouter {
     /// disposition at a boundary: the surface is not attached, or its
     /// removal finalized.
     governed_servers: std::collections::HashSet<String>,
+    /// The control each governed name was last attached under, kept with its
+    /// mark in `governed_servers` and released with it. A sign-in retry or
+    /// restage of that attachment is staged again with it, so the new
+    /// connection asks it at its physical entry (a fresh decision for that
+    /// effect) and the attachment stays governed.
+    governed_controls: HashMap<String, Arc<dyn McpAttachmentAuthority>>,
 
     // --- Async pending infrastructure ---
     pending_tx: mpsc::Sender<PendingResult>,
@@ -1966,6 +2001,7 @@ impl McpRouter {
             pending_attempts: HashMap::new(),
             refused_payloads: HashMap::new(),
             governed_servers: std::collections::HashSet::new(),
+            governed_controls: HashMap::new(),
             pending_tx: tx,
             pending_rx: Mutex::new(rx),
             pending_obligations: HashMap::new(),
@@ -2592,11 +2628,14 @@ impl McpRouter {
                         ),
                         _ => (None, None),
                     };
-                    if control.is_some() {
+                    if let Some(control) = &control {
                         self.governed_servers.insert(server_name.clone());
+                        self.governed_controls
+                            .insert(server_name.clone(), Arc::clone(control));
                     }
                     if no_connection_removal {
                         self.governed_servers.remove(&server_name);
+                        self.governed_controls.remove(&server_name);
                     }
                     self.execute_effects(
                         &transition.effects,
@@ -3352,15 +3391,53 @@ impl McpRouter {
         if self.has_staged_intent(server_name) {
             return;
         }
+        let governance = self.awaiting_governance(server_name);
         self.awaiting_authorization.insert(
             server_name.to_owned(),
             AwaitingAuthorization {
                 target: (**target).clone(),
                 config,
                 operation,
+                governance,
                 signed_in_during_release: false,
             },
         );
+    }
+
+    /// The governance a retry record of `server_name` carries: the control
+    /// the governed name was attached under, if it is governed.
+    fn awaiting_governance(&self, server_name: &str) -> AwaitingGovernance {
+        if !self.governed_servers.contains(server_name) {
+            return AwaitingGovernance::Plain;
+        }
+        match self.governed_controls.get(server_name) {
+            Some(control) => AwaitingGovernance::Governed(Arc::clone(control)),
+            None => AwaitingGovernance::GovernedWithoutControl,
+        }
+    }
+
+    /// The control a record's re-add after a sign-in is staged with: a
+    /// governed record's own control, which must cover the record's exact
+    /// descriptor, and none for a plain record. A governed record without
+    /// such a control is refused, and so is a plain record of a name
+    /// governed since: a governed name is re-added only under a control.
+    fn re_add_control(
+        &self,
+        server_name: &str,
+        awaiting: &AwaitingAuthorization,
+    ) -> Result<Option<Arc<dyn McpAttachmentAuthority>>, McpError> {
+        match &awaiting.governance {
+            AwaitingGovernance::Plain => {
+                self.refuse_ungoverned_change(server_name)?;
+                Ok(None)
+            }
+            AwaitingGovernance::Governed(control) if control.server() == &awaiting.config => {
+                Ok(Some(Arc::clone(control)))
+            }
+            AwaitingGovernance::Governed(_) | AwaitingGovernance::GovernedWithoutControl => {
+                Err(McpError::AttachmentRefused(McpAttachmentRefusal::Mismatch))
+            }
+        }
     }
 
     fn has_staged_intent(&self, server_name: &str) -> bool {
@@ -3397,12 +3474,14 @@ impl McpRouter {
     /// current credential when it connects.
     ///
     /// A newer staged intent or an operation in flight for the server wins
-    /// and the sign-in stays kept. A staging refusal is reported as a failed
-    /// add lifecycle action in this boundary's result and the sign-in stays
-    /// kept, so a later boundary tries again. Once the owner accepts the
-    /// add, its payload is installed before the lifecycle mirror, and a
-    /// mirror refusal is reported the same way without undoing the accepted
-    /// intent.
+    /// and the sign-in stays kept. A governed server is staged again only
+    /// with the control it was attached under ([`Self::retry_authorized`]).
+    /// A staging refusal, a governed record without its control included,
+    /// is reported as a failed add lifecycle action in this boundary's
+    /// result and the sign-in stays kept, so a later boundary tries again.
+    /// Once the owner accepts the add, its payload (and a governed record's
+    /// control) is installed before the lifecycle mirror, and a mirror
+    /// refusal is reported the same way without undoing the accepted intent.
     fn restage_retained_sign_ins(&mut self, delta: &mut McpApplyDelta) {
         let due: Vec<String> = self
             .awaiting_authorization
@@ -3425,40 +3504,49 @@ impl McpRouter {
             {
                 continue;
             }
-            let Some(config) = self
-                .awaiting_authorization
-                .get(&server_name)
-                .map(|awaiting| awaiting.config.clone())
-            else {
+            let Some(awaiting) = self.awaiting_authorization.get(&server_name).cloned() else {
                 continue;
             };
-            if let Err(error) = Self::validate_tool_names(&config).and_then(|()| {
-                self.surface_owner
-                    .apply(ExternalToolSurfaceInput::StageAdd { surface_id })
-                    .map(drop)
-                    .map_err(McpError::from)
-            }) {
-                tracing::warn!(
-                    server = %server_name,
-                    %error,
-                    "could not stage the released server again after its sign-in; kept for the next boundary"
-                );
-                delta.lifecycle_actions.push(
-                    McpLifecycleAction::new(
-                        server_name.clone(),
-                        ToolConfigChangeOperation::Add,
-                        McpLifecyclePhase::Failed,
-                    )
-                    .with_detail(Some(error.to_string())),
-                );
-                continue;
-            }
+            let staged = self
+                .re_add_control(&server_name, &awaiting)
+                .and_then(|control| {
+                    Self::validate_tool_names(&awaiting.config)?;
+                    self.surface_owner
+                        .apply(ExternalToolSurfaceInput::StageAdd { surface_id })
+                        .map(drop)
+                        .map_err(McpError::from)?;
+                    Ok(control)
+                });
+            let control = match staged {
+                Ok(control) => control,
+                Err(error) => {
+                    tracing::warn!(
+                        server = %server_name,
+                        %error,
+                        "could not stage the released server again after its sign-in; kept for the next boundary"
+                    );
+                    delta.lifecycle_actions.push(
+                        McpLifecycleAction::new(
+                            server_name.clone(),
+                            ToolConfigChangeOperation::Add,
+                            McpLifecyclePhase::Failed,
+                        )
+                        .with_detail(Some(error.to_string())),
+                    );
+                    continue;
+                }
+            };
             // The owner accepted the add: the kept sign-in is answered and
-            // the payload is installed before the lifecycle mirror.
+            // the payload, with a governed server's control, is installed
+            // before the lifecycle mirror.
             if let Some(record) = self.awaiting_authorization.get_mut(&server_name) {
                 record.signed_in_during_release = false;
             }
-            self.staged_payloads.insert(server_name.clone(), config);
+            self.staged_payloads
+                .insert(server_name.clone(), awaiting.config);
+            if let Some(control) = control {
+                self.staged_controls.insert(server_name.clone(), control);
+            }
             if let Err(error) = self.notify_lifecycle_connect_pending(&server_name) {
                 delta.lifecycle_actions.push(
                     McpLifecycleAction::new(
@@ -3482,6 +3570,15 @@ impl McpRouter {
     /// first, so an accepted result supersedes or refreshes the record.
     /// A staging fault is returned typed; the accepted intent keeps its
     /// payload, so the next boundary does not fail for a missing payload.
+    ///
+    /// A governed attachment is staged again only with the control it was
+    /// attached under, as an add: the boundary moves the control into the
+    /// new connection, which asks it at its physical entry, and marks the
+    /// name governed again. A governed record without a control that covers
+    /// its exact descriptor, and a plain record of a name governed since, are
+    /// refused with [`McpError::AttachmentRefused`]
+    /// ([`McpAttachmentRefusal::Mismatch`]): nothing is staged and the record
+    /// is kept.
     pub fn retry_authorized(
         &mut self,
         target: &McpServerIdentity,
@@ -3518,12 +3615,15 @@ impl McpRouter {
         {
             return Ok(AuthorizedRetry::AlreadyPending);
         }
-        let input = match awaiting.operation {
-            AwaitingOperation::Add | AwaitingOperation::Released => {
-                Self::validate_tool_names(&awaiting.config)?;
-                ExternalToolSurfaceInput::StageAdd { surface_id }
-            }
-            AwaitingOperation::Reload => ExternalToolSurfaceInput::StageReload { surface_id },
+        // A governed record's control goes with its payload, and its re-add
+        // is an add: the boundary moves controls only with an add.
+        let control = self.re_add_control(&server_name, &awaiting)?;
+        let reload = control.is_none() && awaiting.operation == AwaitingOperation::Reload;
+        let input = if reload {
+            ExternalToolSurfaceInput::StageReload { surface_id }
+        } else {
+            Self::validate_tool_names(&awaiting.config)?;
+            ExternalToolSurfaceInput::StageAdd { surface_id }
         };
         if let Err(error) = self.surface_owner.apply(input) {
             tracing::warn!(
@@ -3533,16 +3633,18 @@ impl McpRouter {
             );
             return Err(error.into());
         }
-        // The owner accepted the intent: its payload is installed before the
-        // lifecycle mirror, so a mirror fault cannot leave the boundary
-        // without it.
+        // The owner accepted the intent: its payload, with a governed
+        // record's control, is installed before the lifecycle mirror, so a
+        // mirror fault cannot leave the boundary without it.
         self.staged_payloads
             .insert(server_name.clone(), awaiting.config);
-        match awaiting.operation {
-            AwaitingOperation::Add | AwaitingOperation::Released => {
-                self.notify_lifecycle_connect_pending(&server_name)?;
-            }
-            AwaitingOperation::Reload => self.notify_lifecycle_reload(&server_name)?,
+        if let Some(control) = control {
+            self.staged_controls.insert(server_name.clone(), control);
+        }
+        if reload {
+            self.notify_lifecycle_reload(&server_name)?;
+        } else {
+            self.notify_lifecycle_connect_pending(&server_name)?;
         }
         Ok(AuthorizedRetry::Staged)
     }
@@ -3615,7 +3717,9 @@ impl McpRouter {
     }
 
     /// Stage the removal of one connected server whose credential for
-    /// `target` is gone, keeping its config as a sign-in record.
+    /// `target` is gone, keeping its config as a sign-in record, with the
+    /// control a governed server is attached under (its removal's
+    /// disposition releases the router's own copy).
     fn release_server(
         &mut self,
         server_name: &str,
@@ -3635,6 +3739,7 @@ impl McpRouter {
         {
             return Ok(ReleasedCredential::AlreadyPending);
         }
+        let governance = self.awaiting_governance(server_name);
         self.stage_remove(server_name)?;
         self.awaiting_authorization.insert(
             server_name.to_owned(),
@@ -3642,6 +3747,7 @@ impl McpRouter {
                 target: target.clone(),
                 config,
                 operation: AwaitingOperation::Released,
+                governance,
                 signed_in_during_release: false,
             },
         );
@@ -3951,6 +4057,7 @@ impl McpRouter {
             );
             // The removal's disposition: the name is no longer governed.
             self.governed_servers.remove(&server_name);
+            self.governed_controls.remove(&server_name);
             if degraded {
                 delta.degraded_removals.push(server_name);
             }
@@ -4919,6 +5026,7 @@ impl McpRouter {
         self.failed_stdio_attempts.clear();
         self.pending_stdio_diagnostics.clear();
         self.staged_controls.clear();
+        self.governed_controls.clear();
         self.staged_attempts.clear();
         self.pending_attempts.clear();
         self.refused_payloads.clear();

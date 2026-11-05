@@ -2196,7 +2196,7 @@ macro_rules! mob_catalog_machine_dsl {
             // awaits it, unseated PreparationPending. A store-owned
             // identity's preparation is its row's: a declaration under
             // created custody requires none.
-            DeclareIdentityEntry { agent_identity: AgentIdentity, profile_name: String, runtime_mode: Enum<SpawnPolicyRuntimeMode>, placement: Enum<EntryPlacementKind>, held_creation: bool, declared_migration_from: Option<String>, intent_managed: bool, session_memory_only: bool, resume_session_role: Option<String>, first_boot: Enum<FirstBootRequestKind>, created_custody: bool, preparation_required: bool },
+            DeclareIdentityEntry { agent_identity: AgentIdentity, profile_name: String, runtime_mode: Enum<SpawnPolicyRuntimeMode>, placement: Enum<EntryPlacementKind>, held_creation: bool, declared_migration_from: Option<String>, intent_managed: bool, session_memory_only: bool, resume_session_role: Option<String>, first_boot: Enum<FirstBootRequestKind>, created_custody: bool, preparation_required: bool, legacy_marker: bool, legacy_label: bool, legacy_generation: Generation },
             // The seal of a complete declared roster: `desired` is every
             // identity the roster lists.
             SealDeclaredRoster { desired: Set<AgentIdentity> },
@@ -3473,6 +3473,68 @@ macro_rules! mob_catalog_machine_dsl {
                     }
                 }
             }}}}}}
+        }
+
+        // The legacy adoption's verdict for one observed member
+        // (AdoptLegacyIdentityEntry), over the name's and the member's facts
+        // only: one arm per verdict guards on it, and a candidate's declared
+        // apply decides on the basis it gives (DeclareIdentityEntry's
+        // would_be). An entry's name was adopted already when it is a declared
+        // entry's, and is no host's to adopt otherwise, as a reserved name is
+        // not; an unseated name has no member; a stale observation is read
+        // again. A listed member is adopted when it carries either legacy mark
+        // and is a local member bound to a session and not retiring, a worker's
+        // without a mark, and not adoptable otherwise. An unlisted member is
+        // adopted only with both marks and no host's intent row, retired without
+        // its adoption when it is placed or bound to no session, not adoptable
+        // while it retires, and a worker's otherwise.
+        helper legacy_adoption_verdict(
+            is_entry: bool,
+            declared_entry: bool,
+            name_reserved: bool,
+            seated: bool,
+            observation_current: bool,
+            durable_identity_marker: bool,
+            own_identity_label: bool,
+            listed: bool,
+            intent_row: bool,
+            hosted: bool,
+            session_bound: bool,
+            retiring: bool
+        ) -> Enum<LegacyIdentityEntryAdoptionKind> {
+            if is_entry == true && declared_entry == true && name_reserved == false {
+                LegacyIdentityEntryAdoptionKind::AlreadyAnEntry
+            } else {
+            if is_entry == true || name_reserved == true {
+                LegacyIdentityEntryAdoptionKind::NotAdoptable
+            } else {
+            if seated == false {
+                LegacyIdentityEntryAdoptionKind::NotSeated
+            } else {
+            if observation_current == false {
+                LegacyIdentityEntryAdoptionKind::StaleObservation
+            } else {
+            if listed == true {
+                if hosted == true || session_bound == false || retiring == true {
+                    LegacyIdentityEntryAdoptionKind::NotAdoptable
+                } else {
+                if durable_identity_marker == true || own_identity_label == true {
+                    LegacyIdentityEntryAdoptionKind::Adopted
+                } else {
+                    LegacyIdentityEntryAdoptionKind::NameHeldByWorker
+                }}
+            } else {
+            if durable_identity_marker == false || own_identity_label == false || intent_row == true {
+                LegacyIdentityEntryAdoptionKind::NameHeldByWorker
+            } else {
+            if retiring == true {
+                LegacyIdentityEntryAdoptionKind::NotAdoptable
+            } else {
+            if hosted == true || session_bound == false {
+                LegacyIdentityEntryAdoptionKind::RetireUnadopted
+            } else {
+                LegacyIdentityEntryAdoptionKind::Adopted
+            }}}}}}}}
         }
 
         // The declared apply's verdict for one identity (DeclareIdentityEntry),
@@ -30874,22 +30936,25 @@ macro_rules! mob_catalog_machine_dsl {
             on input AdoptLegacyIdentityEntry { agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row }
             guard { self.lifecycle_phase == Phase::Running }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
-            guard "not_an_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
-            guard "name_not_reserved" {
-                self.identity_entry_tombstones.contains(agent_identity) == false
-                && self.identity_entry_unreadable.contains(agent_identity) == false
+            guard "legacy_adoption_verdict" {
+                legacy_adoption_verdict(
+                    self.identity_entry_origins.contains_key(agent_identity),
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared),
+                    self.identity_entry_tombstones.contains(agent_identity) == true
+                        || self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.identity_runtime_generations.get_copied(agent_identity) == Some(generation),
+                    durable_identity_marker,
+                    own_identity_label,
+                    listed,
+                    intent_row,
+                    self.member_placement.contains_key(agent_identity),
+                    self.member_session_bindings.contains_key(agent_identity),
+                    self.identity_to_runtime.contains_key(agent_identity) == true
+                        && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)
+                ) == LegacyIdentityEntryAdoptionKind::Adopted
             }
-            guard "member_seated" { self.identity_to_runtime.contains_key(agent_identity) == true }
-            guard "observed_incarnation_current" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
-            guard "member_adoptable" {
-                self.member_placement.contains_key(agent_identity) == false
-                && self.member_session_bindings.contains_key(agent_identity) == true
-                && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) != Some(MobMemberState::Retiring)
-            }
-            guard "listed_legacy_member" {
-                listed == true
-                && (durable_identity_marker == true || own_identity_label == true)
-            }
+            guard "listed" { listed == true }
             update {
                 self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
                 self.members_to_spawn.remove(agent_identity);
@@ -30904,24 +30969,25 @@ macro_rules! mob_catalog_machine_dsl {
             on input AdoptLegacyIdentityEntry { agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row }
             guard { self.lifecycle_phase == Phase::Running }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
-            guard "not_an_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
-            guard "name_not_reserved" {
-                self.identity_entry_tombstones.contains(agent_identity) == false
-                && self.identity_entry_unreadable.contains(agent_identity) == false
+            guard "legacy_adoption_verdict" {
+                legacy_adoption_verdict(
+                    self.identity_entry_origins.contains_key(agent_identity),
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared),
+                    self.identity_entry_tombstones.contains(agent_identity) == true
+                        || self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.identity_runtime_generations.get_copied(agent_identity) == Some(generation),
+                    durable_identity_marker,
+                    own_identity_label,
+                    listed,
+                    intent_row,
+                    self.member_placement.contains_key(agent_identity),
+                    self.member_session_bindings.contains_key(agent_identity),
+                    self.identity_to_runtime.contains_key(agent_identity) == true
+                        && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)
+                ) == LegacyIdentityEntryAdoptionKind::Adopted
             }
-            guard "member_seated" { self.identity_to_runtime.contains_key(agent_identity) == true }
-            guard "observed_incarnation_current" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
-            guard "member_adoptable" {
-                self.member_placement.contains_key(agent_identity) == false
-                && self.member_session_bindings.contains_key(agent_identity) == true
-                && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) != Some(MobMemberState::Retiring)
-            }
-            guard "unlisted_legacy_member" {
-                listed == false
-                && durable_identity_marker == true
-                && own_identity_label == true
-                && intent_row == false
-            }
+            guard "unlisted" { listed == false }
             update {
                 self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
                 self.members_to_spawn.remove(agent_identity);
@@ -30939,24 +31005,23 @@ macro_rules! mob_catalog_machine_dsl {
             on input AdoptLegacyIdentityEntry { agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row }
             guard { self.lifecycle_phase == Phase::Running }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
-            guard "not_an_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
-            guard "name_not_reserved" {
-                self.identity_entry_tombstones.contains(agent_identity) == false
-                && self.identity_entry_unreadable.contains(agent_identity) == false
-            }
-            guard "member_seated" { self.identity_to_runtime.contains_key(agent_identity) == true }
-            guard "observed_incarnation_current" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
-            guard "legacy_marks_not_observed" {
-                (listed == true
-                    && durable_identity_marker == false
-                    && own_identity_label == false
-                    && self.member_placement.contains_key(agent_identity) == false
-                    && self.member_session_bindings.contains_key(agent_identity) == true
-                    && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) != Some(MobMemberState::Retiring))
-                || (listed == false
-                    && (durable_identity_marker == false
-                        || own_identity_label == false
-                        || intent_row == true))
+            guard "legacy_adoption_verdict" {
+                legacy_adoption_verdict(
+                    self.identity_entry_origins.contains_key(agent_identity),
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared),
+                    self.identity_entry_tombstones.contains(agent_identity) == true
+                        || self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.identity_runtime_generations.get_copied(agent_identity) == Some(generation),
+                    durable_identity_marker,
+                    own_identity_label,
+                    listed,
+                    intent_row,
+                    self.member_placement.contains_key(agent_identity),
+                    self.member_session_bindings.contains_key(agent_identity),
+                    self.identity_to_runtime.contains_key(agent_identity) == true
+                        && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)
+                ) == LegacyIdentityEntryAdoptionKind::NameHeldByWorker
             }
             update {}
             to Running
@@ -30971,23 +31036,23 @@ macro_rules! mob_catalog_machine_dsl {
             on input AdoptLegacyIdentityEntry { agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row }
             guard { self.lifecycle_phase == Phase::Running }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
-            guard "not_an_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
-            guard "name_not_reserved" {
-                self.identity_entry_tombstones.contains(agent_identity) == false
-                && self.identity_entry_unreadable.contains(agent_identity) == false
-            }
-            guard "member_seated" { self.identity_to_runtime.contains_key(agent_identity) == true }
-            guard "observed_incarnation_current" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
-            guard "unlisted_legacy_member" {
-                listed == false
-                && durable_identity_marker == true
-                && own_identity_label == true
-                && intent_row == false
-            }
-            guard "member_hosted_or_bound_to_no_session" {
-                (self.member_placement.contains_key(agent_identity) == true
-                    || self.member_session_bindings.contains_key(agent_identity) == false)
-                && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) != Some(MobMemberState::Retiring)
+            guard "legacy_adoption_verdict" {
+                legacy_adoption_verdict(
+                    self.identity_entry_origins.contains_key(agent_identity),
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared),
+                    self.identity_entry_tombstones.contains(agent_identity) == true
+                        || self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.identity_runtime_generations.get_copied(agent_identity) == Some(generation),
+                    durable_identity_marker,
+                    own_identity_label,
+                    listed,
+                    intent_row,
+                    self.member_placement.contains_key(agent_identity),
+                    self.member_session_bindings.contains_key(agent_identity),
+                    self.identity_to_runtime.contains_key(agent_identity) == true
+                        && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)
+                ) == LegacyIdentityEntryAdoptionKind::RetireUnadopted
             }
             update {}
             to Running
@@ -31001,23 +31066,28 @@ macro_rules! mob_catalog_machine_dsl {
             on input AdoptLegacyIdentityEntry { agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row }
             guard { self.lifecycle_phase == Phase::Running }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
-            guard "not_an_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
-            guard "name_not_reserved" {
-                self.identity_entry_tombstones.contains(agent_identity) == false
-                && self.identity_entry_unreadable.contains(agent_identity) == false
+            guard "legacy_adoption_verdict" {
+                legacy_adoption_verdict(
+                    self.identity_entry_origins.contains_key(agent_identity),
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared),
+                    self.identity_entry_tombstones.contains(agent_identity) == true
+                        || self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.identity_runtime_generations.get_copied(agent_identity) == Some(generation),
+                    durable_identity_marker,
+                    own_identity_label,
+                    listed,
+                    intent_row,
+                    self.member_placement.contains_key(agent_identity),
+                    self.member_session_bindings.contains_key(agent_identity),
+                    self.identity_to_runtime.contains_key(agent_identity) == true
+                        && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)
+                ) == LegacyIdentityEntryAdoptionKind::NotAdoptable
             }
-            guard "member_seated" { self.identity_to_runtime.contains_key(agent_identity) == true }
-            guard "observed_incarnation_current" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
-            guard "member_not_adoptable" {
-                (listed == true
-                    && (self.member_placement.contains_key(agent_identity) == true
-                        || self.member_session_bindings.contains_key(agent_identity) == false
-                        || self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)))
-                || (listed == false
-                    && durable_identity_marker == true
-                    && own_identity_label == true
-                    && intent_row == false
-                    && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+            guard "entry_free_name" {
+                self.identity_entry_origins.contains_key(agent_identity) == false
+                && self.identity_entry_tombstones.contains(agent_identity) == false
+                && self.identity_entry_unreadable.contains(agent_identity) == false
             }
             update {}
             to Running
@@ -31030,13 +31100,24 @@ macro_rules! mob_catalog_machine_dsl {
             on input AdoptLegacyIdentityEntry { agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row }
             guard { self.lifecycle_phase == Phase::Running }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
-            guard "not_an_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
-            guard "name_not_reserved" {
-                self.identity_entry_tombstones.contains(agent_identity) == false
-                && self.identity_entry_unreadable.contains(agent_identity) == false
+            guard "legacy_adoption_verdict" {
+                legacy_adoption_verdict(
+                    self.identity_entry_origins.contains_key(agent_identity),
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared),
+                    self.identity_entry_tombstones.contains(agent_identity) == true
+                        || self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.identity_runtime_generations.get_copied(agent_identity) == Some(generation),
+                    durable_identity_marker,
+                    own_identity_label,
+                    listed,
+                    intent_row,
+                    self.member_placement.contains_key(agent_identity),
+                    self.member_session_bindings.contains_key(agent_identity),
+                    self.identity_to_runtime.contains_key(agent_identity) == true
+                        && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)
+                ) == LegacyIdentityEntryAdoptionKind::StaleObservation
             }
-            guard "member_seated" { self.identity_to_runtime.contains_key(agent_identity) == true }
-            guard "observed_incarnation_stale" { self.identity_runtime_generations.get_copied(agent_identity) != Some(generation) }
             update {}
             to Running
             emit LegacyIdentityEntryAdoptionResolved { agent_identity: agent_identity, verdict: LegacyIdentityEntryAdoptionKind::StaleObservation }
@@ -31046,12 +31127,24 @@ macro_rules! mob_catalog_machine_dsl {
             on input AdoptLegacyIdentityEntry { agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row }
             guard { self.lifecycle_phase == Phase::Running }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
-            guard "not_an_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
-            guard "name_not_reserved" {
-                self.identity_entry_tombstones.contains(agent_identity) == false
-                && self.identity_entry_unreadable.contains(agent_identity) == false
+            guard "legacy_adoption_verdict" {
+                legacy_adoption_verdict(
+                    self.identity_entry_origins.contains_key(agent_identity),
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared),
+                    self.identity_entry_tombstones.contains(agent_identity) == true
+                        || self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.identity_runtime_generations.get_copied(agent_identity) == Some(generation),
+                    durable_identity_marker,
+                    own_identity_label,
+                    listed,
+                    intent_row,
+                    self.member_placement.contains_key(agent_identity),
+                    self.member_session_bindings.contains_key(agent_identity),
+                    self.identity_to_runtime.contains_key(agent_identity) == true
+                        && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)
+                ) == LegacyIdentityEntryAdoptionKind::NotSeated
             }
-            guard "member_not_seated" { self.identity_to_runtime.contains_key(agent_identity) == false }
             update {}
             to Running
             emit LegacyIdentityEntryAdoptionResolved { agent_identity: agent_identity, verdict: LegacyIdentityEntryAdoptionKind::NotSeated }
@@ -31063,11 +31156,23 @@ macro_rules! mob_catalog_machine_dsl {
             on input AdoptLegacyIdentityEntry { agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row }
             guard { self.lifecycle_phase == Phase::Running }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
-            guard "identity_entry" { self.identity_entry_origins.contains_key(agent_identity) == true }
-            guard "declared_entry" { self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared) }
-            guard "name_not_reserved" {
-                self.identity_entry_tombstones.contains(agent_identity) == false
-                && self.identity_entry_unreadable.contains(agent_identity) == false
+            guard "legacy_adoption_verdict" {
+                legacy_adoption_verdict(
+                    self.identity_entry_origins.contains_key(agent_identity),
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared),
+                    self.identity_entry_tombstones.contains(agent_identity) == true
+                        || self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.identity_runtime_generations.get_copied(agent_identity) == Some(generation),
+                    durable_identity_marker,
+                    own_identity_label,
+                    listed,
+                    intent_row,
+                    self.member_placement.contains_key(agent_identity),
+                    self.member_session_bindings.contains_key(agent_identity),
+                    self.identity_to_runtime.contains_key(agent_identity) == true
+                        && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)
+                ) == LegacyIdentityEntryAdoptionKind::AlreadyAnEntry
             }
             update {}
             to Running
@@ -31081,9 +31186,26 @@ macro_rules! mob_catalog_machine_dsl {
             on input AdoptLegacyIdentityEntry { agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row }
             guard { self.lifecycle_phase == Phase::Running }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
-            guard "created_or_reserved_name" {
-                (self.identity_entry_origins.contains_key(agent_identity) == true
-                    && self.identity_entry_origins.get_cloned(agent_identity) != Some(IdentityEntryOrigin::Declared))
+            guard "legacy_adoption_verdict" {
+                legacy_adoption_verdict(
+                    self.identity_entry_origins.contains_key(agent_identity),
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared),
+                    self.identity_entry_tombstones.contains(agent_identity) == true
+                        || self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.identity_runtime_generations.get_copied(agent_identity) == Some(generation),
+                    durable_identity_marker,
+                    own_identity_label,
+                    listed,
+                    intent_row,
+                    self.member_placement.contains_key(agent_identity),
+                    self.member_session_bindings.contains_key(agent_identity),
+                    self.identity_to_runtime.contains_key(agent_identity) == true
+                        && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)
+                ) == LegacyIdentityEntryAdoptionKind::NotAdoptable
+            }
+            guard "other_custody_or_reserved_name" {
+                self.identity_entry_origins.contains_key(agent_identity) == true
                 || self.identity_entry_tombstones.contains(agent_identity) == true
                 || self.identity_entry_unreadable.contains(agent_identity) == true
             }
@@ -31158,7 +31280,7 @@ macro_rules! mob_catalog_machine_dsl {
         // instructions) is no lifecycle fact, so nothing is written but the
         // end of a role hold the host ended by restoring the role.
         transition DeclareIdentityEntryKept {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on the entries of the custody it
             // declares, by this explicit check: a roster's declaration on a
@@ -31231,7 +31353,7 @@ macro_rules! mob_catalog_machine_dsl {
         // session when the identity has one (the entry comes back with its
         // history), on a fresh one otherwise.
         transition DeclareIdentityEntrySeatOwed {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on the entries of the custody it
             // declares, by this explicit check: a roster's declaration on a
@@ -31313,7 +31435,7 @@ macro_rules! mob_catalog_machine_dsl {
         // member (a spawn holding the entry's custody), never the dormant
         // seat.
         transition DeclareIdentityEntryHostedOnFirstUse {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on the entries of the custody it
             // declares, by this explicit check: a roster's declaration on a
@@ -31384,7 +31506,7 @@ macro_rules! mob_catalog_machine_dsl {
         // its held creation: the entry is recorded, and only a spawn holding
         // its custody (the host's held protocol) creates it.
         transition DeclareIdentityEntryAwaitHeldCreation {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on the entries of the custody it
             // declares, by this explicit check: a roster's declaration on a
@@ -31459,7 +31581,7 @@ macro_rules! mob_catalog_machine_dsl {
         // declaration takes this arm: a store-owned identity's preparation
         // is its row's.
         transition DeclareIdentityEntryPreparationPending {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation }
             guard { self.lifecycle_phase == Phase::Running }
             // A roster's declaration, on a Declared entry or a name no entry
             // holds.
@@ -31519,7 +31641,7 @@ macro_rules! mob_catalog_machine_dsl {
         // whole change. Its unarchive, or its preparation's settle, seats it
         // from the row's spec.
         transition DeclareIdentityEntryRecordOnly {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation }
             guard { self.lifecycle_phase == Phase::Running }
             // A store-owned update's declaration, on its Created entry.
             guard "entry_of_the_declared_custody" {
@@ -31570,7 +31692,7 @@ macro_rules! mob_catalog_machine_dsl {
         // its own session (a same-session rotation, when the member is
         // idle); a role hold ends.
         transition DeclareIdentityEntryRuntimeModeRestamp {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on the entries of the custody it
             // declares, by this explicit check: a roster's declaration on a
@@ -31645,7 +31767,7 @@ macro_rules! mob_catalog_machine_dsl {
         // terminal commits the new role: a deferred or refused restamp keeps
         // the member held.
         transition DeclareIdentityEntryRoleMigrate {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on the entries of the custody it
             // declares, by this explicit check: a roster's declaration on a
@@ -31717,7 +31839,7 @@ macro_rules! mob_catalog_machine_dsl {
         // runtime mode moves); a role move keeps it until the rotation's
         // terminal commits the new role.
         transition DeclareIdentityEntryRoleRotate {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on the entries of the custody it
             // declares, by this explicit check: a roster's declaration on a
@@ -31796,7 +31918,7 @@ macro_rules! mob_catalog_machine_dsl {
         // way: it is recorded an entry owed its seat, and no apply seats it
         // until one declares the migration or restores the role.
         transition DeclareIdentityEntryRoleMigrationHeld {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on the entries of the custody it
             // declares, by this explicit check: a roster's declaration on a
@@ -31876,7 +31998,7 @@ macro_rules! mob_catalog_machine_dsl {
         // identity whose held construction, is in flight is left to the next
         // apply: nothing is written.
         transition DeclareIdentityEntryLifecycleInFlight {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on the entries of the custody it
             // declares, by this explicit check: a roster's declaration on a
@@ -31934,7 +32056,7 @@ macro_rules! mob_catalog_machine_dsl {
         // A worker member holds the name: refused for this identity alone,
         // and nothing is written.
         transition DeclareIdentityEntryRefusedNameHeldByWorker {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on the entries of the custody it
             // declares, by this explicit check: a roster's declaration on a
@@ -31992,7 +32114,7 @@ macro_rules! mob_catalog_machine_dsl {
         // The identity store manages the identity (an intent row): refused,
         // and nothing is written.
         transition DeclareIdentityEntryRefusedHostAdopted {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on the entries of the custody it
             // declares, by this explicit check: a roster's declaration on a
@@ -32053,7 +32175,7 @@ macro_rules! mob_catalog_machine_dsl {
         // (would_be), by the one verdict helper; it is advisory and never
         // applied.
         transition DeclareIdentityEntryRefusedNonAuthoritative {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on the entries of the custody it
             // declares, by this explicit check: a roster's declaration on a
@@ -32115,7 +32237,23 @@ macro_rules! mob_catalog_machine_dsl {
                     identity_entry_verdict(
                         true,
                         intent_managed,
-                        self.identity_to_runtime.contains_key(agent_identity) == true && self.identity_entry_origins.contains_key(agent_identity) == false,
+                        self.identity_to_runtime.contains_key(agent_identity) == true && self.identity_entry_origins.contains_key(agent_identity) == false
+                            && legacy_adoption_verdict(
+                                self.identity_entry_origins.contains_key(agent_identity),
+                                self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared),
+                                self.identity_entry_tombstones.contains(agent_identity) == true
+                                    || self.identity_entry_unreadable.contains(agent_identity) == true,
+                                self.identity_to_runtime.contains_key(agent_identity),
+                                self.identity_runtime_generations.get_copied(agent_identity) == Some(legacy_generation),
+                                legacy_marker,
+                                legacy_label,
+                                true,
+                                intent_managed,
+                                self.member_placement.contains_key(agent_identity),
+                                self.member_session_bindings.contains_key(agent_identity),
+                                self.identity_to_runtime.contains_key(agent_identity) == true
+                                    && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)
+                            ) != LegacyIdentityEntryAdoptionKind::Adopted,
                         self.spawn_exec_phase.contains_key(agent_identity) == true
                             || self.member_wake_attempts.contains_key(agent_identity) == true
                             || (self.identity_to_runtime.contains_key(agent_identity) == true
@@ -32151,7 +32289,7 @@ macro_rules! mob_catalog_machine_dsl {
         // candidate composition answers the same refusals: nothing is
         // written either way.
         transition DeclareIdentityEntryRefusedNameOwnedByCreated {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation }
             guard { self.lifecycle_phase == Phase::Running }
             guard "roster_custody" { created_custody == false }
             guard "created_entry" {
@@ -32168,7 +32306,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition DeclareIdentityEntryRefusedNameTombstoned {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation }
             guard { self.lifecycle_phase == Phase::Running }
             guard "name_tombstoned" { self.identity_entry_tombstones.contains(agent_identity) == true }
             guard "name_readable" { self.identity_entry_unreadable.contains(agent_identity) == false }
@@ -32178,7 +32316,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition DeclareIdentityEntryRefusedNameUnreadable {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation }
             guard { self.lifecycle_phase == Phase::Running }
             guard "name_unreadable" { self.identity_entry_unreadable.contains(agent_identity) == true }
             update {}
@@ -32189,7 +32327,7 @@ macro_rules! mob_catalog_machine_dsl {
         // A mob that is not running declares nothing.
         transition DeclareIdentityEntryMobNotRunning {
             per_phase [Stopped, Completed, Destroyed]
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required, legacy_marker, legacy_label, legacy_generation }
             update {}
             to Running
             emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::MobNotRunning, archived_session: None, would_be: None }

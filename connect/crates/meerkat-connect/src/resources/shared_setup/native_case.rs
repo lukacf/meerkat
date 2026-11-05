@@ -2022,10 +2022,32 @@ impl Case {
             "continuation has its own native input"
         );
         assert_eq!(completed["completion"]["job"]["status"], "succeeded");
+        // The script records a helper's tool result when that helper's next
+        // model request carries it, which can come after the continuation
+        // the result produced reached B's original. Wait for B's job and
+        // report results within the bound; the assertions below still
+        // decide, so a result that never arrives still fails here.
+        let job = format!("b-helper-{}", self.script.retry_suffix("b-helper", "job"));
+        let report = format!(
+            "b-helper-{}",
+            self.script.retry_suffix("b-helper", "report")
+        );
+        let _ = tokio::time::timeout(BOUND, async {
+            loop {
+                {
+                    let results = self.script.results.lock().unwrap();
+                    if results.contains_key(&job) && results.contains_key(&report) {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
         {
             let results = self.script.results.lock().unwrap();
-            assert!(results.contains_key("b-helper-job"));
-            assert!(results.contains_key("b-helper-report"));
+            assert!(results.contains_key(&job), "{job}");
+            assert!(results.contains_key(&report), "{report}");
         }
         self.assert_find_feedback(&["a", "b"], true).await;
         assert_eq!(

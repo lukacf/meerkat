@@ -240,19 +240,19 @@ DeclareOneArm(id, s) == Cardinality({i \in 1..15 : DeclareEnabled(id, s)[i]}) = 
 
 \* Every arm of the seal of one desired set, in every lifecycle phase.
 SealArm(d) ==
-    \/ SealDeclaredRosterSealed(d)
-    \/ SealDeclaredRosterNonAuthoritative(d)
-    \/ SealDeclaredRosterMobNotRunningStopped(d)
-    \/ SealDeclaredRosterMobNotRunningCompleted(d)
-    \/ SealDeclaredRosterMobNotRunningDestroyed(d)
+    \/ SealDeclaredRosterSealed(d, {})
+    \/ SealDeclaredRosterNonAuthoritative(d, {})
+    \/ SealDeclaredRosterMobNotRunningStopped(d, {})
+    \/ SealDeclaredRosterMobNotRunningCompleted(d, {})
+    \/ SealDeclaredRosterMobNotRunningDestroyed(d, {})
 
 SealOneArm(d) ==
     Cardinality({i \in 1..5 :
-        << ENABLED SealDeclaredRosterSealed(d),
-           ENABLED SealDeclaredRosterNonAuthoritative(d),
-           ENABLED SealDeclaredRosterMobNotRunningStopped(d),
-           ENABLED SealDeclaredRosterMobNotRunningCompleted(d),
-           ENABLED SealDeclaredRosterMobNotRunningDestroyed(d) >>[i]}) = 1
+        << ENABLED SealDeclaredRosterSealed(d, {}),
+           ENABLED SealDeclaredRosterNonAuthoritative(d, {}),
+           ENABLED SealDeclaredRosterMobNotRunningStopped(d, {}),
+           ENABLED SealDeclaredRosterMobNotRunningCompleted(d, {}),
+           ENABLED SealDeclaredRosterMobNotRunningDestroyed(d, {}) >>[i]}) = 1
 
 \* Every arm of the legacy adoption, in the run's phases, over the shell's
 \* raw observations: the spawn row's durable-identity marker (m) and
@@ -419,9 +419,31 @@ ApplyIdentitySteps ==
     \/ AForget
     \/ A2Adopt
 
+\* A host's adoption over member 1's entry, in every arm, the archive
+\* terminal that ends the entry it marked, and the replay of the mark.
+ATakeOver ==
+    \/ TakeOverIdentityEntryAdopting(Id1)
+    \/ TakeOverIdentityEntryEnded(Id1)
+    \/ TakeOverIdentityEntryDeferred(Id1)
+    \/ TakeOverIdentityEntryNotADeclaredEntry(Id1)
+    \/ TakeOverIdentityEntryNonAuthoritative(Id1)
+    \/ TakeOverIdentityEntryMobNotRunningStopped(Id1)
+    \/ TakeOverIdentityEntryMobNotRunningCompleted(Id1)
+    \/ TakeOverIdentityEntryMobNotRunningDestroyed(Id1)
+AHostAdoptedArchive(inc) ==
+    ObserveMemberRetirementArchivedLiveHostAdopted(Id1, inc[1], inc[2], inc[3], Some(inc[4]), AuditDisposal, TRUE)
+AAdoptMark ==
+    \E rid \in {Rid1, Rid3} :
+        \/ RecoverIdentityEntryAdoptingMarkedRunning(Id1, rid)
+        \/ RecoverIdentityEntryAdoptingStaleRunning(Id1, rid)
+
 \* The run holds no reset: an entry is seated on a fresh session here only
 \* once its record is let go (the legacy run drives the reset).
 ApplyNext ==
+    \/ \E d \in SUBSET {Id1} : SealDeclaredRosterSealed(d, {Id1})
+    \/ ATakeOver
+    \/ \E inc \in AIncarnations : AHostAdoptedArchive(inc)
+    \/ AAdoptMark
     \/ ASeed
     \/ \E s \in ApplyShapes : DeclareArm(Id1, s)
     \/ \E d \in SUBSET {Id1} : SealArm(d)
@@ -490,10 +512,50 @@ AuditMarkReplayExactlyOne ==
 AuditEntryLeavesBySealDestroyOrReset ==
     [][\A id \in LeftEntries :
          \/ id \in identity_entry_retiring
-         \/ \E d \in SUBSET {Id1, Id2} : SealDeclaredRosterSealed(d)
+         \/ id \in identity_entry_adopting
+         \/ TakeOverIdentityEntryEnded(id)
+         \/ \E d \in SUBSET {Id1, Id2} : SealDeclaredRosterSealed(d, {})
          \/ destroy_admitted
          \/ phase' = "Destroyed"
          \/ ResetToRunning
+      ]_vars
+
+\* While a host's adoption takes member 1's entry over, the declared apply
+\* changes nothing of it: a declaration answers it as a host-adopted
+\* identity and the seal neither marks nor unmarks it, so the adoption and
+\* the apply never both act on the entry.
+AuditApplyLeavesAdoptingEntryAlone ==
+    [][(((\E s \in ApplyShapes : DeclareArm(Id1, s)) \/ (\E d \in SUBSET {Id1} : SealArm(d)))
+          /\ Id1 \in identity_entry_adopting)
+         => /\ Id1 \in identity_entry_adopting'
+            /\ Id1 \notin identity_entry_retiring'
+            /\ identity_entry_origins' = identity_entry_origins
+            /\ identity_to_runtime' = identity_to_runtime
+            /\ member_state_markers' = member_state_markers
+            /\ member_rotation_targets' = member_rotation_targets
+            /\ member_host_preparation_causes' = member_host_preparation_causes
+      ]_vars
+
+\* Exactly one arm of the takeover answers member 1.
+AuditTakeOverExactlyOneApply ==
+    Cardinality({i \in 1..8 :
+        << ENABLED TakeOverIdentityEntryAdopting(Id1),
+           ENABLED TakeOverIdentityEntryEnded(Id1),
+           ENABLED TakeOverIdentityEntryDeferred(Id1),
+           ENABLED TakeOverIdentityEntryNotADeclaredEntry(Id1),
+           ENABLED TakeOverIdentityEntryNonAuthoritative(Id1),
+           ENABLED TakeOverIdentityEntryMobNotRunningStopped(Id1),
+           ENABLED TakeOverIdentityEntryMobNotRunningCompleted(Id1),
+           ENABLED TakeOverIdentityEntryMobNotRunningDestroyed(Id1) >>[i]}) = 1
+
+\* The seal spares every identity a host's intent row names: it neither
+\* marks nor ends its entry, listed or not.
+AuditSealSparesIntentNamed ==
+    [][\A d \in SUBSET {Id1}, n \in SUBSET {Id1} :
+         SealDeclaredRosterSealed(d, n)
+           => \A id \in n :
+                /\ (id \in Entries <=> id \in DOMAIN identity_entry_origins')
+                /\ (id \in identity_entry_retiring <=> id \in identity_entry_retiring')
       ]_vars
 
 \* Under a candidate composition no declaration, seal, record release or
@@ -661,7 +723,7 @@ AuditWitnessFreshAfterForget ==
 AuditWitnessSealRemovesUnseated ==
     /\ Id1 \in Entries
     /\ Id1 \in DOMAIN identity_entry_unseated
-    /\ SealDeclaredRosterSealed({})
+    /\ SealDeclaredRosterSealed({}, {})
     /\ Id1 \notin DOMAIN identity_entry_origins'
 \* The replay of an unlisted retirement marks the entry.
 AuditWitnessReplayMarked ==
@@ -694,6 +756,27 @@ AuditWitnessSeatKeepsRoleHold ==
 AuditWitnessCandidateRefused == DeclareIdentityEntryRefusedNonAuthoritative(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE, FALSE, FALSE, 0)
 AuditWitnessNameHeldByWorker == DeclareIdentityEntryRefusedNameHeldByWorker(Id2, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE, FALSE, FALSE, 0)
 AuditWitnessHostAdopted == DeclareIdentityEntryRefusedHostAdopted(Id1, AuditProfile, AuditMode, "Local", FALSE, None, TRUE, FALSE, None, "None", FALSE, FALSE, FALSE, FALSE, 0)
+\* A declaration of an entry a host's adoption takes over, with no intent
+\* row in its declaration, is answered as a host-adopted identity.
+AuditWitnessDeclareOverAdopting ==
+    /\ Id1 \in identity_entry_adopting
+    /\ DeclareIdentityEntryRefusedHostAdopted(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE, FALSE, FALSE, 0)
+\* The seal of a roster that no longer lists an entry a host's adoption
+\* takes over leaves it unmarked.
+AuditWitnessSealSparesAdopting ==
+    /\ Id1 \in identity_entry_adopting
+    /\ SealDeclaredRosterSealed({}, {})
+\* A host's adoption waits while the seal's mark stands: the seal's
+\* retirement wins, and ends the entry.
+AuditWitnessTakeOverDeferredBySeal ==
+    /\ Id1 \in identity_entry_retiring
+    /\ TakeOverIdentityEntryDeferred(Id1)
+\* The host-adopted archive ends the entry the adoption marked.
+AuditWitnessAdoptedEntryEnds ==
+    /\ Id1 \in identity_entry_adopting
+    /\ \E inc \in AIncarnations : AHostAdoptedArchive(inc)
+\* The replay marks the entry a host's adoption took over again.
+AuditWitnessAdoptionMarkReplayed == \E rid \in {Rid1, Rid3} : RecoverIdentityEntryAdoptingMarkedRunning(Id1, rid)
 AuditWitnessInFlight == DeclareIdentityEntryLifecycleInFlight(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE, FALSE, FALSE, 0)
 \* A mob reset and a destroy with entries present.
 AuditWitnessResetEndsEntries == Entries # {} /\ ResetToRunning
@@ -710,7 +793,7 @@ AuditWitnessResetEndsRetiredEntry == Id2 \in Entries /\ Record(Id2) # None /\ Re
 AuditWitnessSealEndsRoleHold ==
     /\ Id1 \in DOMAIN identity_entry_unseated
     /\ Cause(Id1) = Some("RoleMigrationUndeclared")
-    /\ SealDeclaredRosterSealed({})
+    /\ SealDeclaredRosterSealed({}, {})
     /\ Id1 \notin DOMAIN identity_entry_origins'
     /\ CauseNext(Id1) = None
 AuditWitnessResetEndsRoleHold ==
@@ -746,7 +829,19 @@ NotAuditWitnessResumeRoleMigrationOwed == [][~AuditWitnessResumeRoleMigrationOwe
 NotAuditWitnessSeatKeepsRoleHold == [][~AuditWitnessSeatKeepsRoleHold]_vars
 NotAuditWitnessCandidateRefused == [][~AuditWitnessCandidateRefused]_vars
 NotAuditWitnessNameHeldByWorker == [][~AuditWitnessNameHeldByWorker]_vars
+\* The seal of a roster that no longer lists an entry a host's intent row
+\* names leaves it unmarked and seated.
+AuditWitnessSealSparesIntentNamed ==
+    /\ Id1 \in Entries
+    /\ Id1 \in DOMAIN identity_to_runtime
+    /\ SealDeclaredRosterSealed({}, {Id1})
+NotAuditWitnessSealSparesIntentNamed == [][~AuditWitnessSealSparesIntentNamed]_vars
 NotAuditWitnessHostAdopted == [][~AuditWitnessHostAdopted]_vars
+NotAuditWitnessDeclareOverAdopting == [][~AuditWitnessDeclareOverAdopting]_vars
+NotAuditWitnessSealSparesAdopting == [][~AuditWitnessSealSparesAdopting]_vars
+NotAuditWitnessTakeOverDeferredBySeal == [][~AuditWitnessTakeOverDeferredBySeal]_vars
+NotAuditWitnessAdoptedEntryEnds == [][~AuditWitnessAdoptedEntryEnds]_vars
+NotAuditWitnessAdoptionMarkReplayed == [][~AuditWitnessAdoptionMarkReplayed]_vars
 NotAuditWitnessInFlight == [][~AuditWitnessInFlight]_vars
 NotAuditWitnessResetEndsEntries == [][~AuditWitnessResetEndsEntries]_vars
 NotAuditWitnessDestroyEndsEntries == [][~AuditWitnessDestroyEndsEntries]_vars
@@ -1034,7 +1129,7 @@ AuditWitnessSealDefersInFlightSpawn ==
     /\ Id2 \in DOMAIN spawn_exec_phase
     /\ Id2 \in Entries
     /\ identity_entry_origins[Id2] = "Declared"
-    /\ \E d \in SUBSET {Id1} : SealDeclaredRosterSealed(d)
+    /\ \E d \in SUBSET {Id1} : SealDeclaredRosterSealed(d, {})
     /\ Id2 \notin identity_entry_retiring'
 
 NotAuditWitnessHeldWaiting == ~AuditWitnessHeldWaiting

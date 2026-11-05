@@ -508,7 +508,7 @@ AuditNamesProbeExactlyOne == ProbeExactlyOne
 \* unreadable name's entry.
 AuditSealNeverTouchesCreated ==
     [][\A d \in SUBSET CreatedIds :
-         SealDeclaredRosterSealed(d)
+         SealDeclaredRosterSealed(d, {})
            => \A id \in CreatedIds :
                 (Created(id) \/ id \in identity_entry_unreadable)
                   => /\ OriginNext(id) = Origin(id)
@@ -524,7 +524,7 @@ AuditSealNeverTouchesCreated ==
 \* A complete seal that does not list a Created entry keeps it.
 AuditWitnessSealKeepsCreated ==
     /\ Created(Id2)
-    /\ SealDeclaredRosterSealed({})
+    /\ SealDeclaredRosterSealed({}, {})
     /\ OriginNext(Id2) = Some("Created")
 \* A complete seal that does not list an unreadable name's Declared entry
 \* keeps it unmarked.
@@ -532,7 +532,7 @@ AuditWitnessSealSkipsUnreadable ==
     /\ Origin(Id1) = Some("Declared")
     /\ Id1 \in identity_entry_unreadable
     /\ Id1 \in DOMAIN identity_to_runtime
-    /\ SealDeclaredRosterSealed({})
+    /\ SealDeclaredRosterSealed({}, {})
     /\ Id1 \notin identity_entry_retiring'
 \* The probe refuses entry custody over a Created entry's name.
 AuditWitnessProbeOtherOrigin ==

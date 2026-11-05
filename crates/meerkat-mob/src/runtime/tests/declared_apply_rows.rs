@@ -3097,6 +3097,111 @@ async fn a_complete_roster_leaves_an_unlisted_host_adopted_member_with_both_mark
     );
 }
 
+/// A host's adoption of a declared identity entry takes the entry over. The
+/// identity reconciler marks the entry (`TakeOverIdentityEntry`) before it
+/// retires the member to materialize it again under the host's intent; that
+/// retirement's start row records the cause `HostAdopted`, and its end ends
+/// the entry and keeps the machine topology for the host's member, which
+/// the reconciler materializes again on its own session, as no entry. A
+/// complete roster that still lists the identity is then answered for it as
+/// a host-adopted identity and changes nothing.
+///
+/// RED: let the reconciler retire the member without the takeover (the
+/// entry unmarked): MobMachine refuses the entry at the end of that
+/// retirement, whose archive keeps the topology as a legacy fresh-life
+/// respawn's does, and the adoption never converges.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_adoption_of_a_declared_entry_ends_the_entry_and_its_member_stands() {
+    let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let service = Arc::new(meerkat_session::PersistentSessionService::new(
+        PersistentMockBuilder,
+        16,
+        session_store,
+        runtime_store,
+        blob_store,
+    ));
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "apply-host-adopts-entry"),
+        storage.clone(),
+    )
+    .with_session_service(service)
+    .create()
+    .await
+    .expect("create the mob");
+    handle
+        .spawn_spec(worker_spec("taken").with_entry_custody(true))
+        .await
+        .expect("the host declares its entry");
+    assert!(
+        matches!(
+            handle.identity_entry(&id("taken")),
+            Ok(IdentityEntryRead::Entry(view)) if view.origin == crate::runtime::IdentityEntryOrigin::Declared
+        ),
+        "a declared entry before the adoption"
+    );
+    let session = handle
+        .resolve_bridge_session_id(&id("taken"))
+        .await
+        .expect("a session-backed member");
+    super::member_history::adopt_existing_member(&handle, &id("taken"), &session, "worker").await;
+    super::member_history::await_adoption_convergence(&handle, &id("taken")).await;
+
+    assert!(
+        matches!(
+            handle.identity_entry(&id("taken")),
+            Ok(IdentityEntryRead::NotAnEntry { .. })
+        ),
+        "the adoption ended the entry: {:?}",
+        handle.identity_entry(&id("taken"))
+    );
+    assert_eq!(
+        handle.resolve_bridge_session_id(&id("taken")).await,
+        Some(session),
+        "the host's member serves on the member's own session"
+    );
+    let journal = storage
+        .events
+        .poll(0, usize::MAX)
+        .await
+        .expect("read the journal");
+    assert_eq!(
+        retirement_causes(&journal),
+        vec![(id("taken"), Some(MemberRetirementCause::HostAdopted))],
+        "the reconciler's retirement records the adoption's cause"
+    );
+
+    let outcome = tokio::time::timeout(
+        STEP,
+        handle.apply_declared_roster(DeclaredRoster::complete([declared("taken")])),
+    )
+    .await
+    .expect("the apply answers")
+    .expect("the apply runs");
+    assert!(
+        matches!(
+            answer(&outcome, "taken"),
+            DeclaredEntryOutcome::Refused {
+                refusal: DeclaredEntryRefusal::HostAdopted
+            }
+        ),
+        "{outcome:?}"
+    );
+    assert!(outcome.unlisted.is_empty(), "{outcome:?}");
+    assert!(
+        handle
+            .list_members()
+            .await
+            .iter()
+            .any(|member| member.agent_identity == id("taken")),
+        "the host's member keeps serving"
+    );
+}
+
 /// The shape a host that names its identities in a form no member id can
 /// spell leaves behind: the member id encodes the identity (`team:carol` as
 /// `mk--team_ccarol`), the label spells the identity, and the spawn row

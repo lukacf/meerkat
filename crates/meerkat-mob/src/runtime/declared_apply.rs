@@ -1543,7 +1543,9 @@ impl super::MobHandle {
         }
 
         if complete {
-            self.seal_declared_roster(listed, &mut outcome).await?;
+            let intent_named = self.declared_apply_intent_named_entries(history.as_ref());
+            self.seal_declared_roster(listed, intent_named, &mut outcome)
+                .await?;
         }
         Ok((outcome, change))
     }
@@ -1644,6 +1646,37 @@ impl super::MobHandle {
             .and_then(|metadata| {
                 crate::build::stored_member_role_name(&metadata).map(ProfileName::from)
             }))
+    }
+
+    /// The Declared entries a host's identity intent row names, readable or
+    /// not, in the apply's one read (`history`): the seal leaves them as they
+    /// are, since the roster does not own them (an adoption takes the entry
+    /// over, and a row this build cannot read is never driven). A mob
+    /// without an identity store names none.
+    fn declared_apply_intent_named_entries(
+        &self,
+        history: Option<&super::MemberBindingHistory>,
+    ) -> BTreeSet<AgentIdentity> {
+        let Some(history) = history else {
+            return BTreeSet::new();
+        };
+        let entries: Vec<AgentIdentity> = self
+            .machine_state_watch_rx
+            .borrow()
+            .identity_entry_origins
+            .keys()
+            .map(|identity| AgentIdentity::from(identity.0.as_str()))
+            .collect();
+        entries
+            .into_iter()
+            .filter(|identity| {
+                matches!(
+                    history.identity_management(identity),
+                    super::MemberIdentityManagement::IntentManaged
+                        | super::MemberIdentityManagement::IntentUnreadable
+                )
+            })
+            .collect()
     }
 
     /// The member binding history the apply reads its raw observations
@@ -2215,11 +2248,13 @@ impl super::MobHandle {
     async fn seal_declared_roster(
         &self,
         listed: BTreeSet<AgentIdentity>,
+        intent_named: BTreeSet<AgentIdentity>,
         outcome: &mut DeclaredRosterOutcome,
     ) -> Result<(), MobError> {
         let answer = self
             .send_actor_command(|reply_tx| MobCommand::SealDeclaredRoster {
                 desired: listed,
+                intent_named,
                 reply_tx,
             })
             .await??;

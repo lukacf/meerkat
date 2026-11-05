@@ -252,6 +252,12 @@ pub enum MemberRetirementCause {
     /// ([`super::MobHandle::archive_identity`]): the end of the retirement
     /// leaves the entry unseated, archived, on its archived session.
     Archived,
+    /// A host's identity intent adopted the identity
+    /// ([`super::MobHandle::adopt_member_identity_declaration`]) and took its
+    /// declared entry over: the end of the retirement ends the entry, and
+    /// the identity reconciler materializes the member again under the
+    /// host's intent, as no entry.
+    HostAdopted,
 }
 
 impl MemberRetirementCause {
@@ -261,6 +267,7 @@ impl MemberRetirementCause {
             Self::Unlisted => "unlisted",
             Self::Removed => "removed",
             Self::Archived => "archived",
+            Self::HostAdopted => "host_adopted",
         }
     }
 
@@ -273,6 +280,7 @@ impl MemberRetirementCause {
             "unlisted" => Some(Self::Unlisted),
             "removed" => Some(Self::Removed),
             "archived" => Some(Self::Archived),
+            "host_adopted" => Some(Self::HostAdopted),
             _ => None,
         }
     }
@@ -1595,11 +1603,12 @@ pub(crate) fn machine_entry_origin(
 /// it, read from `state`, MobMachine's state before the step that writes the
 /// row: [`MemberRetirementCause::Unlisted`] while the declared apply's seal,
 /// or the one-entry unlist, marks the identity's entry
-/// (`identity_entry_retiring`). Either marks only a member whose retirement
-/// has not started and whose spawn is not in flight, and the seal never
-/// drops the mark of one whose retirement has, so the
-/// start row and the end's row read the same mark, and the end of a marked
-/// retirement ends the entry. The one reader of the mark for the journal:
+/// (`identity_entry_retiring`), and [`MemberRetirementCause::HostAdopted`]
+/// while a host's adoption takes it over (`identity_entry_adopting`). Each
+/// marks only a member whose retirement has not started and whose spawn is
+/// not in flight, and nothing drops the mark of one whose retirement has, so
+/// the start row and the end's row read the same mark, and the end of a
+/// marked retirement ends the entry. The one reader of the marks for the journal:
 /// the start row and the plain terminal row read it here. A rotation's
 /// terminal keeps the identity's standing and records no cause.
 pub(crate) fn stored_retirement_cause(
@@ -1609,6 +1618,8 @@ pub(crate) fn stored_retirement_cause(
     let identity = mob_dsl::AgentIdentity::from_domain(identity);
     if state.identity_entry_retiring.contains(&identity) {
         Some(MemberRetirementCause::Unlisted)
+    } else if state.identity_entry_adopting.contains(&identity) {
+        Some(MemberRetirementCause::HostAdopted)
     } else if state.identity_entry_removing.contains(&identity) {
         Some(MemberRetirementCause::Removed)
     } else if state.identity_entry_archiving.contains(&identity) {
@@ -2291,15 +2302,22 @@ mod tests {
         assert!(!census.is_complete());
     }
 
-    /// A retirement cause round-trips through its stored token, and a token
-    /// this build does not know reads as no cause.
+    /// Every retirement cause round-trips through its stored token, and a
+    /// token this build does not know reads as no cause: the reading a
+    /// release that predates a cause gives its rows (0.9.10 reads
+    /// `host_adopted` so, and replays the retirement as one the seal did not
+    /// start; see the upgrading guide's rollback to 0.9.10).
     #[test]
     fn a_retirement_cause_round_trips_through_its_stored_token() {
-        assert_eq!(MemberRetirementCause::Unlisted.as_stored(), "unlisted");
-        assert_eq!(
-            MemberRetirementCause::from_stored("unlisted"),
-            Some(MemberRetirementCause::Unlisted)
-        );
+        for (cause, token) in [
+            (MemberRetirementCause::Unlisted, "unlisted"),
+            (MemberRetirementCause::Removed, "removed"),
+            (MemberRetirementCause::Archived, "archived"),
+            (MemberRetirementCause::HostAdopted, "host_adopted"),
+        ] {
+            assert_eq!(cause.as_stored(), token);
+            assert_eq!(MemberRetirementCause::from_stored(token), Some(cause));
+        }
         assert_eq!(MemberRetirementCause::from_stored("a_later_cause"), None);
     }
 

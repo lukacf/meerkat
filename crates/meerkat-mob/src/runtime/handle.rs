@@ -9932,6 +9932,7 @@ impl MobHandle {
         ) {
             spec.mark_agent_creation();
         }
+        let identity = spec.identity.clone();
         let plan = self
             .send_actor_command(|reply_tx| MobCommand::PlanMemberRotation {
                 spec: Box::new(spec),
@@ -9944,6 +9945,10 @@ impl MobHandle {
                 seated,
                 endpoint_source,
             } => {
+                if !seated {
+                    self.forget_archived_session_for_fresh_life(&identity)
+                        .await?;
+                }
                 let entry = super::dormant_seat::prepare_dormant_seat(
                     self.session_service.as_ref(),
                     endpoint_source.as_ref(),
@@ -9976,6 +9981,8 @@ impl MobHandle {
             // seat of it, which is a spawn; the commit step clears its host
             // preparation as it does for a seat chunk's spawn.
             super::dormant_seat::MemberRotationPlan::Embody(spec) => {
+                self.forget_archived_session_for_fresh_life(&identity)
+                    .await?;
                 let agent_identity = spec.identity.clone();
                 let member_ref = Box::pin(self.spawn_spec_internal(*spec)).await?;
                 let session_id = member_ref.bridge_session_id().cloned().ok_or_else(|| {
@@ -10002,6 +10009,40 @@ impl MobHandle {
             | super::DormantSeatOutcome::Embodied { session_id, .. } => Ok(session_id),
             other => Err(other.into_unseated_error()),
         }
+    }
+
+    /// The fresh life a rotation starts for an identity entry no member
+    /// holds takes a fresh session: the entry's archived session record, if
+    /// it has one, is let go first (`ForgetArchivedSession`,
+    /// `FreshLifeRequested`), as a declared apply's first-boot `Fresh`
+    /// request lets it go. A name that is no entry, or an entry with no
+    /// record, needs nothing.
+    async fn forget_archived_session_for_fresh_life(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<(), MobError> {
+        let archived = {
+            let state = self.machine_state_watch_rx.borrow();
+            state
+                .identity_entry_archived_sessions
+                .get(&mob_dsl::AgentIdentity::from_domain(identity))
+                .map(|session| SessionId::parse(&session.0))
+                .transpose()
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "'{identity}' holds an invalid archived session record: {error}"
+                    ))
+                })?
+        };
+        if let Some(session_id) = archived {
+            self.forget_archived_session(
+                identity,
+                &session_id,
+                mob_dsl::ArchivedSessionForgetReason::FreshLifeRequested,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// One chunk of [`Self::seat_dormant_members`]: plan on the actor,

@@ -28618,6 +28618,35 @@ impl MobActor {
         }
     }
 
+    /// Whether the host's adoption has taken `identity`'s declared entry
+    /// over, so the identity reconciler may act on its member
+    /// (`TakeOverIdentityEntry`): a seated entry is marked adopting, an
+    /// unseated one ended, and a name that is no Declared entry needs
+    /// nothing. An entry with a member step in flight, or one a candidate
+    /// composition holds, is left as it is: the reconcile waits and asks
+    /// again.
+    fn identity_entry_taken_over(
+        &mut self,
+        identity: &AgentIdentity,
+        intent_record: &crate::identity::IdentityIntentRecord,
+    ) -> Result<bool, MobError> {
+        match self.take_over_identity_entry(identity)? {
+            mob_dsl::HostAdoptionEntryVerdict::Adopting
+            | mob_dsl::HostAdoptionEntryVerdict::Ended
+            | mob_dsl::HostAdoptionEntryVerdict::NotADeclaredEntry => Ok(true),
+            mob_dsl::HostAdoptionEntryVerdict::Deferred
+            | mob_dsl::HostAdoptionEntryVerdict::NonAuthoritative
+            | mob_dsl::HostAdoptionEntryVerdict::MobNotRunning => {
+                self.schedule_identity_reconcile_wait(
+                    identity,
+                    IdentityReconcileAuthorityKey::from_intent(intent_record),
+                    Duration::from_millis(100),
+                );
+                Ok(false)
+            }
+        }
+    }
+
     async fn reconcile_identity_pass(
         &mut self,
         identity: &AgentIdentity,
@@ -29221,6 +29250,14 @@ impl MobActor {
                 }
                 IdentityReconcileDecision::RetireMemberMaterialization => {
                     if !self.retirements.contains_key(identity) {
+                        // The host's adoption takes the identity's declared
+                        // entry over first: the end of this retirement ends
+                        // the entry, so the member the reconcile materializes
+                        // is the host's. An entry with a member step in flight
+                        // waits for it.
+                        if !self.identity_entry_taken_over(identity, &intent_record)? {
+                            return Ok(false);
+                        }
                         self.start_retirement(
                             identity.clone(), Instant::now() + super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT,
                             None, retirement_io::RetirementReply::IdentityReconcile(completion_authority.clone()),
@@ -29445,6 +29482,12 @@ impl MobActor {
                         .map_err(MobError::from)?;
                     let completion_authority =
                         IdentityReconcileCompletionAuthority::from_permit(&permit);
+                    // An identity no member holds whose declared entry the
+                    // host's adoption has not taken over yet: the entry ends
+                    // now, so the host's member takes the name as no entry.
+                    if !self.identity_entry_taken_over(identity, &intent_record)? {
+                        return Ok(false);
+                    }
                     let mut spec = super::spec_compiler::spawn_spec_from_desired_member(
                         identity,
                         session,
@@ -32046,8 +32089,12 @@ impl MobActor {
                         Box::pin(self.declare_identity_entries(declarations, change)).await;
                     let _ = reply_tx.send(result);
                 }
-                MobCommand::SealDeclaredRoster { desired, reply_tx } => {
-                    let result = self.seal_declared_roster(desired);
+                MobCommand::SealDeclaredRoster {
+                    desired,
+                    intent_named,
+                    reply_tx,
+                } => {
+                    let result = self.seal_declared_roster(desired, intent_named);
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::OpenDeclaredApply { reply_tx } => {

@@ -1499,6 +1499,13 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         input: MobMachineCatalogInput::UnlistIdentityEntry,
         reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
     },
+    // A host's takeover of a declared entry (0.9.11), decided in the identity
+    // reconciler's step before it retires or materializes the member. Not a
+    // surface command.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::TakeOverIdentityEntry,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
 ];
 
 #[doc(hidden)]

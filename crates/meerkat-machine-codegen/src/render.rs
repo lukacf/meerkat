@@ -1002,6 +1002,21 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             // (0.9.11).
             "AdoptLegacyIdentityEntryAdoptedUnlisted",
             "AdoptLegacyIdentityEntryRetireUnadopted",
+            // A host's adoption over a declared identity entry (0.9.11): its
+            // archive terminals, the takeover's verdicts and the replay of
+            // its mark.
+            "ObserveMemberRetirementArchivedLiveHostAdopted",
+            "ObserveMemberRetirementArchivedRetiredHostAdopted",
+            "TakeOverIdentityEntryAdopting",
+            "TakeOverIdentityEntryEnded",
+            "TakeOverIdentityEntryDeferred",
+            "TakeOverIdentityEntryNotADeclaredEntry",
+            "TakeOverIdentityEntryNonAuthoritative",
+            "TakeOverIdentityEntryMobNotRunningStopped",
+            "TakeOverIdentityEntryMobNotRunningCompleted",
+            "TakeOverIdentityEntryMobNotRunningDestroyed",
+            "RecoverIdentityEntryAdoptingMarkedRunning",
+            "RecoverIdentityEntryAdoptingStaleRunning",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

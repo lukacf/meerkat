@@ -860,6 +860,48 @@ fn meerkat_transcript_unsupported_arms_follow_every_published_variant() {
     }
 }
 
+/// MobMachine's arms of a host's adoption over a declared identity entry
+/// (0.9.11: the archive terminals that end the entry, the takeover's
+/// verdicts and the replay of its mark) are emitted last, on the machine's
+/// late tail after the legacy adoption's arms, so no `TransitionId`
+/// discriminant 0.9.10 renders moves: `UnlistIdentityEntryMobNotRunningDestroyed`,
+/// its last variant, keeps index 1902.
+#[test]
+fn mob_host_adoption_arms_follow_every_earlier_variant() {
+    let rendered = render_machine_kernel_module(&mob_machine());
+    let variants = transition_id_variants(&rendered);
+    let index = |name: &str| {
+        variants
+            .iter()
+            .position(|variant| variant == name)
+            .expect("the named variant is a rendered TransitionId variant")
+    };
+    assert_eq!(index("UnlistIdentityEntryMobNotRunningDestroyed"), 1902);
+    let host_adoption_arms = [
+        "ObserveMemberRetirementArchivedLiveHostAdopted",
+        "ObserveMemberRetirementArchivedRetiredHostAdopted",
+        "TakeOverIdentityEntryAdopting",
+        "TakeOverIdentityEntryEnded",
+        "TakeOverIdentityEntryDeferred",
+        "TakeOverIdentityEntryNotADeclaredEntry",
+        "TakeOverIdentityEntryNonAuthoritative",
+        "TakeOverIdentityEntryMobNotRunningStopped",
+        "TakeOverIdentityEntryMobNotRunningCompleted",
+        "TakeOverIdentityEntryMobNotRunningDestroyed",
+        "RecoverIdentityEntryAdoptingMarkedRunning",
+        "RecoverIdentityEntryAdoptingStaleRunning",
+    ];
+    assert_eq!(
+        variants[variants.len() - host_adoption_arms.len()..].to_vec(),
+        host_adoption_arms.to_vec(),
+        "the host adoption's arms are the last TransitionId variants"
+    );
+    assert!(
+        index("AdoptLegacyIdentityEntryRetireUnadopted") > 1902,
+        "the legacy adoption's arms follow every variant 0.9.10 renders"
+    );
+}
+
 #[test]
 fn generated_meerkat_operation_status_is_closed_enum() {
     let rendered = render_machine_kernel_module(&meerkat_machine());

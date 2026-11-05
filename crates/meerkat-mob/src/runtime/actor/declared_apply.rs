@@ -471,6 +471,37 @@ impl MobActor {
         Ok(verdict)
     }
 
+    /// Take `identity`'s declared entry over for a host's adoption
+    /// (`TakeOverIdentityEntry`) in one MobMachine step, decided on that
+    /// identity alone: a seated Declared entry is marked adopting (the end of
+    /// its member's retirement ends it), an unseated one ends at once, one
+    /// with a member step in flight is deferred, and any other name is left
+    /// as it is. A mob that is not running answers an invalid transition.
+    pub(super) fn take_over_identity_entry(
+        &mut self,
+        identity: &AgentIdentity,
+    ) -> Result<mob_dsl::HostAdoptionEntryVerdict, MobError> {
+        let effects = self.apply_dsl_input_collect_effects(
+            mob_dsl::MobMachineInput::TakeOverIdentityEntry {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(identity),
+            },
+            "take_over_identity_entry",
+        )?;
+        let verdict = effects
+            .iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::IdentityEntryTakenOver { verdict, .. } => Some(*verdict),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal("MobMachine answered no takeover verdict".to_string())
+            })?;
+        if verdict == mob_dsl::HostAdoptionEntryVerdict::MobNotRunning {
+            return Err(self.invalid_transition_to(MobState::Running));
+        }
+        Ok(verdict)
+    }
+
     /// Seal a complete declared roster (`SealDeclaredRoster`) in one
     /// MobMachine step, and answer the Declared entries it marked (whose
     /// members the handle retires) and the ones it removed at once. A mob
@@ -478,11 +509,16 @@ impl MobActor {
     pub(super) fn seal_declared_roster(
         &mut self,
         desired: BTreeSet<AgentIdentity>,
+        intent_named: BTreeSet<AgentIdentity>,
     ) -> Result<SealAnswer, MobError> {
         let before = self.dsl_authority.state().identity_entry_origins.clone();
         let prepared = self.prepare_dsl_input_transition(
             mob_dsl::MobMachineInput::SealDeclaredRoster {
                 desired: desired
+                    .iter()
+                    .map(mob_dsl::AgentIdentity::from_domain)
+                    .collect(),
+                intent_named: intent_named
                     .iter()
                     .map(mob_dsl::AgentIdentity::from_domain)
                     .collect(),

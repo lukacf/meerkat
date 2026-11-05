@@ -68,12 +68,13 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{RespawnRefusalReason
 // The declared apply: unseated causes, host preparation causes, declared
 // placements, verdicts, the seal's verdict, why an archived session record
 // is let go, the kind of a host's first-boot request, the verdict of an
-// apply's opening and of a one-entry unlist. The schema's own types, one
-// definition for both instantiations of the machine.
+// apply's opening, of a one-entry unlist and of a host's adoption over an
+// entry. The schema's own types, one definition for both instantiations of
+// the machine.
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     ArchivedSessionForgetReason, DeclaredApplyOpenVerdict, DeclaredRosterSealVerdict,
-    EntryPlacementKind, FirstBootRequestKind, HostPreparationCause, IdentityEntryVerdict,
-    UnlistEntryVerdict, UnseatedEntryCause,
+    EntryPlacementKind, FirstBootRequestKind, HostAdoptionEntryVerdict, HostPreparationCause,
+    IdentityEntryVerdict, UnlistEntryVerdict, UnseatedEntryCause,
 };
 // Operator instructions: a record's slot effect and target kind, why a
 // member's delivery is blocked or deferred, why a write is refused, and the
@@ -14619,14 +14620,20 @@ mod tests {
         );
     }
 
-    /// The seal of a complete roster listing `desired`.
+    /// The seal of a complete roster listing `desired`, no host's intent row
+    /// naming any entry.
     fn seal(
         authority: &mut MobMachineAuthority,
         desired: std::collections::BTreeSet<AgentIdentity>,
     ) -> DeclaredRosterSealVerdict {
-        let transition =
-            MobMachineMutator::apply(authority, MobMachineInput::SealDeclaredRoster { desired })
-                .expect("the seal answers");
+        let transition = MobMachineMutator::apply(
+            authority,
+            MobMachineInput::SealDeclaredRoster {
+                desired,
+                intent_named: std::collections::BTreeSet::new(),
+            },
+        )
+        .expect("the seal answers");
         transition
             .effects()
             .iter()

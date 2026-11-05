@@ -133,6 +133,24 @@ async fn check_current_after_owner_change(
     )
 }
 
+/// A selected task preparation's answer once its one deadline ran out: this
+/// exact call's check before its effect, made once and never waited on. An
+/// owner change of the work's own publication still in progress answers
+/// Core's typed refusal to rebuild, certified not dispatched while nothing
+/// of the call ran; every other answer is unavailable, never a denial.
+fn refused_at_deadline(
+    context: &ToolDispatchContext,
+    call: ToolCallView<'_>,
+    plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
+) -> ServiceTaskError {
+    match crate::current_check::check_before_effect(context, call, plan) {
+        Err(error) if crate::current_check::refuses_to_rebuild(&error) => {
+            service_task_refusal("prepare.deadline", service_task_error(error))
+        }
+        _ => shared_task_refusal("prepare.deadline", PrivateOriginalError::Unavailable).into(),
+    }
+}
+
 impl InstalledServiceTaskSource {
     /// This exact call's current authorization check after its effect ran:
     /// a shared selected check that joined, then released, its physical
@@ -507,7 +525,43 @@ impl InstalledServiceTaskSource {
         self.prepare_selected_with_setup(call, context, plan, proposed_agent, false, churn)
             .await
     }
+    /// One preparation of a selected service task, under one deadline from
+    /// its start: now plus Core's owner-change bound, within the call's
+    /// remaining tool time. Every wait of the preparation shares it: its
+    /// reads of the owner's store (each waits for the store's one connection,
+    /// which a record change holds while it waits for an owner change of the
+    /// shared publication) and its checks' waits after a refusal to rebuild.
+    /// It holds no source writer, publication guard or recovery lock while
+    /// it waits, and it writes nothing, so ending it at the deadline drops
+    /// reads only. At the deadline the call's check before its effect is
+    /// made once: an owner change still in progress answers Core's typed
+    /// refusal to rebuild, certified not dispatched (nothing of the call
+    /// ran); anything else answers unavailable, never a denial.
     async fn prepare_selected_with_setup(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
+        proposed_agent: Option<&str>,
+        select_setup: bool,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
+    ) -> Result<Option<InstalledServiceTask>, ServiceTaskError> {
+        let bound = context.remaining_tool_time().map_or(
+            meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+            |remaining| remaining.min(meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND),
+        );
+        let deadline = tokio::time::Instant::now() + bound;
+        match tokio::time::timeout_at(
+            deadline,
+            self.prepare_selected_within(call, context, plan, proposed_agent, select_setup, churn),
+        )
+        .await
+        {
+            Ok(prepared) => prepared,
+            Err(_) => Err(refused_at_deadline(context, call, plan)),
+        }
+    }
+    async fn prepare_selected_within(
         &self,
         call: ToolCallView<'_>,
         context: &ToolDispatchContext,

@@ -28,6 +28,7 @@ const HOLD: Duration = Duration::from_millis(150);
 /// The Find admitted its helper once the hold was waited out: one source row,
 /// its controller grant issued once and its source retained once.
 fn assert_admitted_after(found: &Found, hold: Duration) {
+    assert!(found.turn_completed, "the original's turn completed");
     assert_eq!(found.feedback.len(), 1, "{:?}", found.feedback);
     let first = &found.feedback[0];
     assert!(
@@ -134,6 +135,7 @@ async fn retain_held_past_the_bound_is_refused_typed() {
         false,
     )
     .await;
+    assert!(found.turn_completed, "the original's turn completed");
     assert_eq!(found.feedback.len(), 1, "{:?}", found.feedback);
     let first = &found.feedback[0];
     assert!(first.is_error, "{}", reply(first));
@@ -152,13 +154,16 @@ async fn retain_held_past_the_bound_is_refused_typed() {
     );
 }
 
-// An owner change held at the lineage resolution past both the stale-read
-// churn's bound and the contention bound: the retention stays typed,
-// tool_unavailable, and never answers access_denied for a change it could
-// not see the end of.
+// An owner change held at the lineage resolution past the stale-read churn's
+// bound: the retention stays typed, tool_unavailable, and never answers
+// access_denied for a change it could not see the end of. The hold ends one
+// second after that bound, within the original's next model request's own
+// wait for the change, so the turn completes; a refusal at once (the old
+// denial) leaves the change to outlast that wait, so the turn's completion
+// is not part of this row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retain_lineage_resolution_past_the_bounds_is_unavailable_never_denied() {
-    let hold = OWNER_CHANGE_WAIT_BOUND * 2 + Duration::from_secs(1);
+    let hold = OWNER_CHANGE_WAIT_BOUND + Duration::from_secs(1);
     let found = finds_with_hold_at(
         Site::Resolve,
         1,

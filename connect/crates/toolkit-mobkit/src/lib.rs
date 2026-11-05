@@ -856,8 +856,8 @@ pub mod observe_helper_probe {
 /// owner's originals collection held on a thread of its own, inside an owner
 /// change on the owner's publication or without one, as another helper's
 /// first binding write holds them. Each site is named by its [`Site`] and a
-/// key: the Find's call ID where the step has it, else the helper's work
-/// item.
+/// key: the Find's call ID where the step has it, else the helper's work item
+/// or its work admission key.
 #[cfg(any(test, feature = "test-support"))]
 pub mod source_hold_probe {
     use std::sync::{Arc, Mutex, PoisonError};
@@ -889,7 +889,9 @@ pub mod source_hold_probe {
         /// `advance.recover_helper`); keyed by work item.
         Recover,
         /// The Find's live-replay helper observation
-        /// (`advance.observe_helper`); keyed by call ID.
+        /// (`advance.observe_helper`), once the call's acquisition original
+        /// is read, just before the observation's first fenced access; keyed
+        /// by the helper's work admission key.
         Observe,
     }
     /// A control's answer at a site, given its key.

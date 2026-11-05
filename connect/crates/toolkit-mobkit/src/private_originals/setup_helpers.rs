@@ -412,6 +412,12 @@ impl PrivateOriginals {
         let mut churn = context.owner_change_churn();
         let contended_until =
             tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) =
+            crate::source_hold_probe::observe(crate::source_hold_probe::Site::Observe, key.as_str())
+        {
+            crate::source_hold_probe::retain(self.hold_sources_for_test(hold));
+        }
         loop {
             let observed = self
                 .owner

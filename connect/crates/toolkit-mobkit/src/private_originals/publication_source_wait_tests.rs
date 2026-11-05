@@ -44,6 +44,8 @@ pub(super) struct Found {
     /// How long another actor's owner change, begun on the owner's
     /// publication while the hold lasted, waited to begin.
     pub(super) concurrent_change: Option<Duration>,
+    /// Whether the original's turn completed (its native ticket answered).
+    pub(super) turn_completed: bool,
 }
 
 fn helper_scope(fixture: &Fixture) -> toolkit_store::StoreScope {
@@ -226,7 +228,7 @@ pub(super) async fn finds_with_hold_at(
             };
             let (finished, answered, (first_row, first_effect)) =
                 tokio::join!(fixture.finish(&first), answered, fresh);
-            finished.unwrap();
+            let turn_completed = finished.is_ok();
             let (feedback, _, _) = script.observations();
             let (start, from) = reached
                 .lock()
@@ -255,6 +257,7 @@ pub(super) async fn finds_with_hold_at(
                 first_effect,
                 rows,
                 concurrent_change: None,
+                turn_completed,
             }
         }),
     ))
@@ -282,6 +285,7 @@ pub(super) fn reply(result: &ToolResult) -> serde_json::Value {
 /// The Find admitted its helper once the hold was waited out, with the
 /// controller grant issued once.
 pub(super) fn assert_waited_out(found: &Found, hold: Duration) {
+    assert!(found.turn_completed, "the original's turn completed");
     assert_eq!(found.feedback.len(), 1, "{:?}", found.feedback);
     let first = &found.feedback[0];
     assert!(
@@ -352,6 +356,7 @@ async fn publication_source_read_held_past_the_bound_is_refused_typed_and_not_re
         0,
     )
     .await;
+    assert!(found.turn_completed, "the original's turn completed");
     assert_eq!(found.feedback.len(), 1, "{:?}", found.feedback);
     let first = &found.feedback[0];
     assert!(first.is_error, "{}", reply(first));
@@ -399,6 +404,7 @@ async fn publication_source_refused_work_is_never_reissued_and_no_effect_runs_tw
         1,
     )
     .await;
+    assert!(found.turn_completed, "the original's turn completed");
     assert_eq!(found.feedback.len(), 2, "{:?}", found.feedback);
     let first = &found.feedback[0];
     assert!(first.is_error, "{}", reply(first));

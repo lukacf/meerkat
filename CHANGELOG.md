@@ -346,6 +346,14 @@ them.
   until its realm is reopened. Its serialized and wire value is the existing
   `read_failed`, and nothing deserializes into it.
 
+- `meerkat-core`:
+  `ToolDispatchContext::enter_reviewed_effect_held_after_owner_change` is now
+  public. A tool leaf's reviewed effect entry can wait out an owner change in
+  progress, within the dispatch attempt's owner-change bounds, instead of
+  refusing with `reprepare_required`. The review is spent once, after its
+  staging, and a refusal met before any effect stays certified as not
+  dispatched.
+
 ### Changed
 
 - Host store refusals are typed and scoped to the families a read needs
@@ -633,6 +641,15 @@ them.
   before otherwise, so the other sessions keep working and the read still
   never sees a batch whose outcome is unknown. Affects 0.9.5 through 0.9.9.
 
+### Security
+
+- `meerkat-mcp`: a governed MCP server that is re-added after a sign-in (the
+  retry of a connection that needed authorization, or the restage of a server
+  released at sign-out) now connects only under the attachment control it was
+  attached under, and the new connection asks that control again. A governed
+  server without such a control is refused (`AttachmentRefused`) and is never
+  re-added without one.
+
 ### Upgrade notes
 
 - Approval store files are owner-only on Unix (see Fixed). A process that
@@ -683,6 +700,15 @@ them.
   a scope-only poison: a probe that must keep the earlier rule checks
   `readiness.is_ready() && !readiness.scope_poisoned`, and
   `HostStoreReadiness::poisoned_scopes` is new (see Meta's changelog).
+
+- `meerkat-mcp` hosts with governed MCP servers: a native live-attachment
+  control admits one live attachment. After a sign-in that follows a 401 from
+  the server, or after the restage of a released server that had connected,
+  the re-add is refused and reported as a failed add. Attach the server again
+  with a fresh control. Configured servers come back by themselves.
+  `McpRouter::retry_authorized` can now return `McpError::AttachmentRefused`
+  (`McpAttachmentRefusal::Mismatch`) for a governed server without a matching
+  control; nothing is staged then.
 
 ### Known limitations
 

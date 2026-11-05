@@ -333,6 +333,8 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # runner's coverage parsing stays pinned to that form.
 # empty_resume_residency_audit.sh requires its four witnesses violated, and
 # with --mutants each seeded defect's invariant or property violated.
+# switch_turn_withdrawal_audit.sh requires its five witnesses violated, and
+# with --mutants each seeded defect's property or invariant violated.
 # durable_tail_classification_audit.sh requires its Ready witness violated,
 # and with --mutants each seeded defect's target invariant violated.
 # durable_tail_recovery_ownership_audit.sh requires its four witnesses
@@ -682,6 +684,16 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessCompositionClaimed is violated."' \
   'echo "Error: Invariant AuditVerdictExactlyOne is violated."' \
   'echo "Error: Action property AuditPlacementOwnership is violated."' \
+  'echo "Error: Action property NotAuditWitnessQueuedInputKept is violated."' \
+  'echo "Error: Action property NotAuditWitnessStoppedWithdrawn is violated."' \
+  'echo "Error: Action property AuditAbortWithdrawsOnlyTheRequest is violated."' \
+  'echo "Error: Action property AuditAbortOnlyForThePendingRequest is violated."' \
+  'echo "Error: Action property NotAuditWitnessConflictRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessStoppedCompleted is violated."' \
+  'echo "Error: Action property AuditPendingSwitchEndsOnlyWithItsRequest is violated."' \
+  'echo "Error: Action property AuditCompleteSettlesTheRequest is violated."' \
+  'echo "Error: Action property NotAuditWitnessFiniteConflictRefused is violated."' \
+  'echo "Error: Invariant AuditNoDenialUnderThePendingSwitch is violated."' \
   'echo "Error: Assumption line 1, col 1 to line 1, col 2 of module member_residency_audit is false."' \
   'echo "Error: The first argument of <= should be an integer, but instead it is:"' \
   'echo "200000 states generated, 200000 distinct states found, 0 states left on queue."' \

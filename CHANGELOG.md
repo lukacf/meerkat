@@ -35,6 +35,87 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-runtime`: the
+  MeerkatMachine gains the failure arm of an until-changed switch-turn
+  reconfigure, the refusal of an until-changed switch-turn while another
+  switch is pending, and the completion of a reconfigured switch-turn in a
+  retired or stopped session (see Fixed). `MeerkatMachineInput`
+  (meerkat-machine-schema and meerkat-runtime) and the kernel
+  `generated::meerkat` `Input` gain
+  `AbortUntilChangedSwitchTurnReconfigure { request_id }`, and
+  `MeerkatMachineInputVariant` (meerkat-machine-schema and meerkat-runtime),
+  `MeerkatMachineRuntimeInternalInput` (meerkat-runtime) and the kernel
+  `InputKind` gain `AbortUntilChangedSwitchTurnReconfigure`. The kernel
+  `generated::meerkat::TransitionId` gains
+  `AbortUntilChangedSwitchTurnReconfigureIdle`,
+  `AbortUntilChangedSwitchTurnReconfigureAttached`,
+  `AbortUntilChangedSwitchTurnReconfigureRunning`,
+  `AbortUntilChangedSwitchTurnReconfigureRetired`,
+  `AbortUntilChangedSwitchTurnReconfigureStopped`,
+  `RequestUntilChangedSwitchTurnPendingConflictIdle`,
+  `RequestUntilChangedSwitchTurnPendingConflictAttached`,
+  `RequestUntilChangedSwitchTurnPendingConflictRunning`,
+  `CompleteUntilChangedSwitchTurnReconfigureRetired` and
+  `CompleteUntilChangedSwitchTurnReconfigureStopped`. Every new variant is
+  appended last, so no existing variant's implicit discriminant moves. Every
+  enum named here is exhaustive, so a downstream exhaustive match needs the
+  new arms, or a wildcard arm.
+
+### Fixed
+
+- `meerkat-runtime`: a failed model switch during a session no longer
+  discards an input admitted while the switch was in progress. A switch
+  that lasts until changed (`SwitchTurnDuration::UntilChanged`) records its
+  request and runs the LLM reconfigure without holding the session's
+  mutation gate, so other callers can admit input meanwhile. When the
+  reconfigure failed, the switch wrote back the whole generated state it
+  had read before its request, erasing every fact other callers committed
+  in that gap: an input admitted then lost its generated phase while its
+  ledger row stayed, so the machine no longer tracked an input the runtime
+  had accepted, and a stop in that gap was undone in the machine. A failed
+  switch now withdraws only its own request, through the MeerkatMachine
+  input `AbortUntilChangedSwitchTurnReconfigure` (see Breaking), and leaves
+  every other fact as it stands, a stop included; a failed preparation,
+  which fails before the gate is released, withdraws through the same
+  input. The caller still gets the reconfigure's error. Affects 0.6.0
+  through 0.9.10.
+
+- `meerkat-runtime`: a model switch that lasts until changed, requested
+  while another switch was pending, replaced the pending switch. A pending
+  until-changed switch could then neither complete nor be withdrawn, so its
+  caller got an error although its reconfigure had applied, and a finite
+  switch waiting for its next turn was dropped although its caller had been
+  told it applied. Such a request is now denied with
+  `SwitchTurnDenialReason::ScopedOverrideConflict`, as a finite switch
+  requested while another switch is pending already is, and so is a model
+  change a run requested when it is realized while a switch is pending. A
+  retry of a pending until-changed request itself (the same `request_id`)
+  is accepted, so a caller that dropped its request while the reconfigure
+  ran can finish it; an until-changed request that reuses the id of a
+  finite switch waiting for its turn is refused with an error and leaves
+  that switch in place. A request that reuses a pending switch's id and
+  cannot be accepted (a finite request, or an until-changed one that is not
+  approved or whose target cannot carry the session's transcript) is
+  likewise refused with an error and records nothing: before, it was
+  recorded as denied under that id, so the pending switch's own approved
+  retry was answered as denied too and the switch stayed pending, and a
+  retried finite switch was answered as denied although it still applied
+  at its turn. A denied `request_id` now stays denied: its retry is answered
+  with the recorded denial and stages nothing. Before, a retry sent after
+  the conflict that refused it had cleared was staged but answered as
+  denied: an until-changed switch then stayed pending without its
+  reconfigure, and a finite one still applied at its turn. Affects 0.6.0
+  through 0.9.10.
+
+- `meerkat-runtime`: a stop or a retirement that landed after an
+  until-changed model switch had reconfigured the session, but before the
+  switch finished, failed the switch: the caller got an error although the
+  reconfigure had applied, and the switch stayed pending. The switch now
+  finishes in a stopped or retired session as well. Affects 0.6.0 through
+  0.9.10.
+
 ## [0.9.10] - 2026-11-04
 
 ### Highlights

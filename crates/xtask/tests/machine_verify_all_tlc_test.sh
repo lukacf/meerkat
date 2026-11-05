@@ -562,6 +562,45 @@ if run_part audits-e; then
   TLC_WORKERS="${tlc_workers}" "${empty_resume_residency_audit}" "${EMPTY_RESUME_RESIDENCY_AUDIT_MAX_STEPS:-6}" --mutants
 fi
 
+# The settlement of an until-changed switch-turn (the shell releases the
+# session mutation gate while the LLM reconfigure runs; on a failure
+# AbortUntilChangedSwitchTurnReconfigure withdraws the request, and on a
+# success CompleteUntilChangedSwitchTurnReconfigure completes it) is reached by
+# no ci-sweep step that also admits an input or stops the runtime in that gap.
+# A hand-written audit over the same generated model drives one session, one
+# input and two requests through the accepted until-changed request, its
+# refusal while another one is pending, the refusal of a finite request while
+# a switch is pending, the input's admission, the stop and the input's
+# abandonment, and the completion and the abort in every phase each declares
+# (only their Idle and Stopped arms fire, since nothing attaches, runs or
+# retires the session; all phases of an arm share one generated body), under
+# every generated invariant plus one invariant and four action properties:
+# the pending switch's id holds no denial; an abort withdraws exactly the
+# pending switch and its request's approval entries (no terminal; the phase
+# and every input's facts unchanged), and fires only for the request still
+# pending; a pending switch ends only through its own request; a completion
+# clears it, records it as applied and makes its target the baseline. It
+# requires five witnesses reached (an approved request withdrawn while
+# another input is queued, one withdrawn in Stopped after a stop abandoned
+# that input, a request refused while another one is pending, a finite
+# request refused while the other one is pending, one completed in Stopped)
+# and refuses eight seeded defects (--mutants): an abort that records a
+# terminal, one that erases the inputs' phases, one without its
+# pending-request guard, one that keeps its request's approval entry, an
+# accept without its pending-switch guard, a completion that keeps the old
+# baseline, an accept without its denied-request guard, a finite refusal
+# without its pending-request guard.
+# 9 steps reach every witness.
+switch_turn_withdrawal_audit="${workspace_root}/specs/machines/meerkat_machine/switch_turn_withdrawal_audit.sh"
+if [[ ! -x "${switch_turn_withdrawal_audit}" ]]; then
+  echo "error: switch-turn withdrawal audit runner is missing from workspace runfiles: ${switch_turn_withdrawal_audit}" >&2
+  exit 1
+fi
+if run_part audits-t; then
+  echo "running bounded switch-turn withdrawal TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${switch_turn_withdrawal_audit}" "${SWITCH_TURN_WITHDRAWAL_AUDIT_MAX_STEPS:-10}" --mutants
+fi
+
 # The member generation high-water (resume recovers each identity's highest
 # generation from the whole log, every reset epoch included, then seals the
 # window; minting reads it) is empty in the MobMachine ci sweep, whose
@@ -1305,7 +1344,9 @@ run_machine_verify() {
 # hosted (168 s locally): 712-719 s with the created identity removal run
 # (158-233), which moved to audits-u, so about 479-489 s;
 # audits-t = its archive, unlist, placement and recovered runs: 228-335,
-# the shard 320-364 s;
+# the shard 320-364 s, and the switch-turn withdrawal audit with --mutants
+# (eleven runs, not yet measured hosted; the empty-resume residency audit's
+# seven runs take 52-64 s): about 400-460 s;
 # audits-u = its preparation and prepverdicts runs 161-237 and the tool
 # grant expiry audit with --mutants 13-16 (the shard 228-264 s), and the
 # removal run, from audits-s: about 454-497 s;

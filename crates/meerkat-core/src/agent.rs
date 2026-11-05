@@ -2173,13 +2173,65 @@ impl ToolDispatchContext {
         .map_err(|error| self.effect_entry_refusal(error))
     }
 
-    /// [`Self::enter_reviewed_effect_held`] whose staging waits after a
-    /// refusal to rebuild (an owner change in progress on the work's own
-    /// publication, or one that completed while it read) within the dispatch
-    /// attempt's own bounds, as the root staging does
-    /// ([`Self::stage_tool_entry_after_owner_change`]). Nothing is spent
-    /// before or during a wait: the review is spent once, after the staging.
-    async fn enter_reviewed_effect_held_after_owner_change(
+    /// [`Self::enter_reviewed_effect_held`] whose staging waits out an owner
+    /// change instead of refusing it: the effect entry for a leaf whose
+    /// dispatch may race another actor's change of the work's owners.
+    ///
+    /// Use it for a tool's single consuming effect entry when an owner
+    /// change may land after the fenced dispatch staged the call (during an
+    /// adapter's or the leaf's own awaits, for example). While a change is
+    /// in progress every staging of the decision refuses to rebuild
+    /// (`ReprepareRequired`), and the synchronous form answers that refusal
+    /// at once. This form waits for the change to complete (or, when none is
+    /// in progress at its read because the change completed while the
+    /// staging read, pauses one backoff step) and stages again from the
+    /// current owners, as the dispatch's root staging does. Call it as the
+    /// synchronous form is called: once, immediately before the body or
+    /// handoff it guards, with the context the leaf was handed, and holding
+    /// nothing the change may need (no owner or host lock, no store
+    /// transaction). Use the returned context when present, and hold the
+    /// returned custody as the synchronous form's.
+    ///
+    /// The wait stays within the dispatch attempt's own owner-change bounds,
+    /// which the attempt's other entry stagings (its root staging, the
+    /// call-level execution policy gate's) and its review's post-verdict
+    /// check share: one deadline,
+    /// [`crate::authorization::OWNER_CHANGE_WAIT_BOUND`] from the attempt's
+    /// first wait or the call's remaining tool time when less, and
+    /// [`crate::authorization::OWNER_CHANGE_FREE_REBUILDS`] free rebuilds
+    /// for all of them. Each wait is traced at site `tool_entry`
+    /// ([`crate::authorization::OwnerChangeWait::trace`]) and reported to the
+    /// host's operation refusal observer as the call's. The entry only
+    /// stages again: it never repeats the dispatch, and a refused staging
+    /// ran nothing. A context outside a fenced dispatch has no such bounds
+    /// and answers exactly as the synchronous form.
+    ///
+    /// Nothing is spent before or during a wait: the review is spent once,
+    /// after the staging that passed, for the decision that staging
+    /// returned. The staging never reviews again, so the tier decides what
+    /// an owner change met here leaves:
+    /// - R1 enters once the change settles, under the decision prepared
+    ///   again after it.
+    /// - At R2 the change supersedes the reviewed decision, so once it
+    ///   completes the entry settles as [`crate::ToolError::ReviewUnsatisfied`]
+    ///   ([`crate::approval::review::ReviewUnsatisfiedKind::ContextChanged`]),
+    ///   by design and as a later synchronous entry would: no effect runs
+    ///   under a decision that was not reviewed.
+    /// - A human consent (R3) goes on to its spend, which re-adjudicates it.
+    ///
+    /// Prefer this form for an effect entry that can await, so that a
+    /// concurrent owner change delays the effect instead of refusing it. The
+    /// synchronous [`Self::enter_reviewed_effect_held`] (or
+    /// [`Self::enter_reviewed_effect`]) fits an entry that cannot await, or
+    /// one that must answer at once.
+    ///
+    /// # Errors
+    /// As [`Self::enter_reviewed_effect_held`], with the refusal to rebuild
+    /// (`ReprepareRequired`) once the bounds are spent. An operation refusal
+    /// met while no effect of the dispatch entered is certified
+    /// [`crate::authorization::RefusalDispatch::NotDispatched`], as the
+    /// synchronous form certifies it (see [`Self::enter_reviewed_effect`]).
+    pub async fn enter_reviewed_effect_held_after_owner_change(
         &self,
         call: ToolCallView<'_>,
         plan: Option<&crate::ResolvedToolExecutionPlan>,

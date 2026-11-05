@@ -87,10 +87,23 @@ impl ToolkitOriginalOwner {
                 let writer = owner.mutation.blocking_lock();
                 held.send(()).unwrap();
                 std::thread::sleep(hold);
+                owner.record_helper_admission_event_for_test("holder_released");
                 drop(writer);
             });
             holding.recv().unwrap();
         }
+    }
+
+    /// Record one step of a helper admission, for a fixture's order check.
+    #[cfg(test)]
+    pub(crate) fn record_helper_admission_event_for_test(&self, event: &'static str) {
+        self.helper_admission_events.lock().unwrap().push(event);
+    }
+
+    /// The helper admission steps recorded so far, in order.
+    #[cfg(test)]
+    pub(crate) fn helper_admission_events_for_test(&self) -> Vec<&'static str> {
+        self.helper_admission_events.lock().unwrap().clone()
     }
 
     /// Warm custody remains the existing native resume path, including source

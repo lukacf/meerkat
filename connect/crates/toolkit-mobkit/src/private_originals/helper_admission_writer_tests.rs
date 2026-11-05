@@ -2,7 +2,9 @@
 //! original's admission or binding holds across its durable write. A short
 //! hold is waited for, within Core's owner-change bound, and the admission
 //! then admits once; a hold that outlasts the bound stays the existing
-//! retryable unavailability, with nothing admitted.
+//! retryable unavailability, with nothing admitted. The admission takes the
+//! writer before any check and checks its sources afresh under it, once its
+//! holder released it.
 use super::*;
 use meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
 use std::time::{Duration, Instant};
@@ -14,6 +16,8 @@ struct Found {
     is_error: bool,
     helpers: usize,
     elapsed: Duration,
+    /// The helper admission's steps and the holder's release, in order.
+    events: Vec<&'static str>,
 }
 
 async fn find_with_writer_held(hold: Duration) -> Found {
@@ -42,6 +46,7 @@ async fn find_with_writer_held(hold: Duration) -> Found {
                 is_error: feedback[0].is_error,
                 helpers,
                 elapsed,
+                events: fixture.source.owner.helper_admission_events_for_test(),
             }
         }),
     ))
@@ -94,5 +99,28 @@ async fn helper_admission_past_its_bound_stays_unavailable_with_nothing_admitted
         found.elapsed >= OWNER_CHANGE_WAIT_BOUND - Duration::from_millis(100),
         "the admission waited out its bound before refusing: {:?}",
         found.elapsed
+    );
+}
+
+// The holder records its release just before it drops the writer, and the
+// admission records taking the writer and then its completed source checks.
+// The admission's first steps are therefore exactly: the holder released,
+// the writer taken, the sources checked under it. A source check made before
+// the writer was taken would come first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn helper_admission_checks_its_sources_under_the_writer_it_waited_for() {
+    let found = find_with_writer_held(Duration::from_millis(300)).await;
+    assert_eq!(
+        found.reply["worker"]["state"], "input_admitted",
+        "{}",
+        found.reply
+    );
+    assert_eq!(found.helpers, 1, "the helper was admitted once");
+    assert!(
+        found
+            .events
+            .starts_with(&["holder_released", "writer_acquired", "sources_checked"]),
+        "the admission took the writer once its holder released it and checked its sources under it: {:?}",
+        found.events
     );
 }

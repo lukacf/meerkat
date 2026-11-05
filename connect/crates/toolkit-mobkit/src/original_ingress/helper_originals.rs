@@ -815,12 +815,16 @@ impl ToolkitOriginalOwner {
         #[cfg(test)]
         self.hold_source_writer_for_test();
         let _mutation = self.bounded_source_writer().await?;
+        #[cfg(test)]
+        self.record_helper_admission_event_for_test("writer_acquired");
         self.check_canonical_source(store, source_scope)?;
         store
             .capabilities()
             .require_durable_contract()
             .map_err(|_| OriginalWriterError::Unavailable)?;
         self.check_helper_sources(contributor, contributors, own_originals)?;
+        #[cfg(test)]
+        self.record_helper_admission_event_for_test("sources_checked");
         let parent = contributor.association.candidate();
         if !origin.matches(contributor.association())
             || parent.ingress_namespace.ingress != self.ingress_domain

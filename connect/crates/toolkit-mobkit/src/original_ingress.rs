@@ -531,6 +531,10 @@ pub struct ToolkitOriginalOwner {
     // helper admission takes the writer.
     #[cfg(test)]
     helper_admission_writer_hold: Mutex<Option<std::time::Duration>>,
+    // A helper admission's writer and source checks, in order, beside that
+    // fixture holder's release of the writer.
+    #[cfg(test)]
+    helper_admission_events: Mutex<Vec<&'static str>>,
     originals: Mutex<Vec<OriginalRecord>>,
     // Published by the same canonical collector writer, never agent custody.
     collectors: Mutex<Vec<collector_originals::PublishedCollector>>,
@@ -651,6 +655,8 @@ impl ToolkitOriginalOwner {
             record_change_probe: Mutex::new(None),
             #[cfg(test)]
             helper_admission_writer_hold: Mutex::new(None),
+            #[cfg(test)]
+            helper_admission_events: Mutex::new(Vec::new()),
             originals: Mutex::new(Vec::new()),
             collectors: Mutex::new(Vec::new()),
             canonical_source: Mutex::new(None),

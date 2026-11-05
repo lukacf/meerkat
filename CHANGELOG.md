@@ -37,6 +37,11 @@ them.
 
 ### Breaking
 
+- `meerkat-core`: `InMemoryDecisionStore` is no longer `UnwindSafe`: it now
+  holds its per-kind executor claims in an `Arc<parking_lot::Mutex<..>>`. A
+  host that moves it into `catch_unwind` wraps it in
+  `std::panic::AssertUnwindSafe`.
+
 - Behaviour-only (not measured by the gate): `meerkat-runtime`:
   `DecisionExecutorLoop::start` no longer refuses a second executor of a
   decision kind with `DecisionError::ExecutorHeld`. The loop starts without

@@ -36,8 +36,15 @@ impl PrivateOriginals {
         {
             return Err(PrivateOriginalError::Denied);
         }
+        // Before the intent write and before issuance, a source collection
+        // held by another owner's short section is waited out within Core's
+        // owner-change bound (from here), holding nothing; neither effect is
+        // ever made again.
+        let contended_until =
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
         self.owner
-            .check_admitted_helper(&prepared.admitted)
+            .check_admitted_helper_until(&prepared.admitted, contended_until)
+            .await
             .map_err(helper_error)?;
         self.require_helper_selection(prepared.admitted.selection())?;
         let selected = prepared.admitted.selection();
@@ -129,7 +136,7 @@ impl PrivateOriginals {
             let _controller = controller;
             source
                 .owner
-                .check_admitted_helper(&admitted)
+                .check_admitted_helper_blocking_until(&admitted, contended_until.into_std())
                 .map_err(helper_error)?;
             lifetime
                 .validate_current_selection()

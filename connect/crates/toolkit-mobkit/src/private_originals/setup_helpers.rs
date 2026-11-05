@@ -319,6 +319,15 @@ impl PrivateOriginals {
             })
     }
 
+    /// Create or replay the helper's work item for a Find's work step, through
+    /// a fresh fence on each attempt. Before the create, a source collection
+    /// held by another owner's short section is waited out within Core's
+    /// owner-change bound (from the first attempt), holding nothing. A fence
+    /// refused as unavailable while Core names an owner change in progress on
+    /// the work's own publication ran nothing: that change is waited out with
+    /// `churn`, the work step's one churn, and the same admission made again,
+    /// keyed exactly as before, so a create that did commit is only replayed.
+    /// Every other refusal, and one the bounds outlast, stands as it is.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn admit_setup_helper(
         self: &Arc<Self>,
@@ -330,28 +339,44 @@ impl PrivateOriginals {
         operation: HelperOperation,
         selection: HelperAdmissionSelection,
         review: crate::review_custody::ReviewCustody,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
     ) -> Result<Arc<AdmittedHelperWork>, PrivateOriginalError> {
         let original = self.acquisition_original(context).await?;
         self.require_helper_selection(&selection)?;
-        self.owner
-            .admit_fenced_helper(
-                entered,
-                self.store.as_ref(),
-                &self.scope,
-                service,
-                key,
-                request,
-                operation,
-                original.setup_origin(),
-                &original.original,
-                &original.contributors,
-                &original.own_originals,
-                selection,
-                review,
-            )
-            .await
-            .map(Arc::new)
-            .map_err(helper_error)
+        let contended_until =
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+        loop {
+            let admitted = self
+                .owner
+                .admit_fenced_helper(
+                    entered,
+                    self.store.as_ref(),
+                    &self.scope,
+                    service,
+                    key.clone(),
+                    request.clone(),
+                    operation.clone(),
+                    original.setup_origin(),
+                    &original.original,
+                    &original.contributors,
+                    &original.own_originals,
+                    selection.clone(),
+                    review.clone(),
+                    contended_until,
+                )
+                .await;
+            if matches!(admitted, Err(OriginalWriterError::Unavailable))
+                && crate::current_check::wait_for_owner_change(
+                    context,
+                    churn,
+                    "toolkit.find.admit_helper",
+                )
+                .await
+            {
+                continue;
+            }
+            return admitted.map(Arc::new).map_err(helper_error);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -548,6 +573,9 @@ impl PrivateOriginals {
     /// The actual native child issuer supplies this lineage. This method never
     /// issues a grant or treats its configured parent as a runnable child.
     /// Resolve the issued path with the real owner, then retain the exact source.
+    /// Before the binding write, a source collection held by another owner's
+    /// short section is waited out within Core's owner-change bound, holding
+    /// nothing; the write itself is never made again.
     pub(crate) async fn retain_setup_helper_source(
         self: &Arc<Self>,
         prepared: &PreparedHelperController,
@@ -561,8 +589,11 @@ impl PrivateOriginals {
         {
             return Err(PrivateOriginalError::Denied);
         }
+        let contended_until =
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
         self.owner
-            .check_admitted_helper(&prepared.admitted)
+            .check_admitted_helper_until(&prepared.admitted, contended_until)
+            .await
             .map_err(helper_error)?;
         self.require_helper_selection(prepared.admitted.selection())?;
         let selected = &prepared.admitted.selection().helper;
@@ -598,7 +629,12 @@ impl PrivateOriginals {
         };
         let source = self
             .owner
-            .bind_admitted_helper(self.store.as_ref(), &prepared.admitted, binding)
+            .bind_admitted_helper_until(
+                self.store.as_ref(),
+                &prepared.admitted,
+                binding,
+                Some(contended_until),
+            )
             .await
             .map_err(helper_error)?;
         let mut held = self
@@ -643,11 +679,48 @@ impl PrivateOriginals {
     /// Export only exact source history for the existing preparation owner.
     /// Publication still requires its acquisition/effect claim and native
     /// operation admission; this is not a new permission-bearing token.
+    ///
+    /// A read refused as unavailable while Core names an owner change in
+    /// progress on the work's own publication is waited out with `churn`, the
+    /// work step's one churn, and only the read made again, afresh; the
+    /// grants issued and the source bound before it are never made again.
     pub(crate) async fn setup_helper_publication_source(
         self: &Arc<Self>,
         prepared: &PreparedHelperController,
         held: &Arc<HeldSetupHelper>,
         service: &WorkGraphService,
+        context: &ToolDispatchContext,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
+    ) -> Result<meerkat_toolkit::setup::NativeHelperSource, PrivateOriginalError> {
+        let contended_until =
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+        loop {
+            let read = self
+                .read_setup_helper_publication_source(prepared, held, service, contended_until)
+                .await;
+            if matches!(read, Err(PrivateOriginalError::Unavailable))
+                && crate::current_check::wait_for_owner_change(
+                    context,
+                    churn,
+                    "toolkit.find.publication_source",
+                )
+                .await
+            {
+                continue;
+            }
+            return read;
+        }
+    }
+
+    /// One read of [`Self::setup_helper_publication_source`], afresh: its
+    /// source checks wait out a held source collection until
+    /// `contended_until`, holding nothing. It writes nothing.
+    async fn read_setup_helper_publication_source(
+        self: &Arc<Self>,
+        prepared: &PreparedHelperController,
+        held: &Arc<HeldSetupHelper>,
+        service: &WorkGraphService,
+        contended_until: tokio::time::Instant,
     ) -> Result<meerkat_toolkit::setup::NativeHelperSource, PrivateOriginalError> {
         #[cfg(test)]
         self.owner
@@ -668,11 +741,12 @@ impl PrivateOriginals {
         }
         self.require_helper_selection(prepared.admitted.selection())?;
         self.owner
-            .helper_publication_source(
+            .helper_publication_source_until(
                 self.store.as_ref(),
                 service,
                 &prepared.admitted,
                 &held.source,
+                Some(contended_until),
             )
             .await
             .map_err(helper_error)
@@ -681,12 +755,47 @@ impl PrivateOriginals {
     /// Re-open exactly the contributor rows selected by the native invocation.
     /// The preparation owner uses their versions in its same-store conditional
     /// write. No catalog scan, source copy or new authority is constructed.
+    ///
+    /// A read refused as unavailable while Core names an owner change in
+    /// progress on the work's own publication is waited out with `churn`, the
+    /// work step's one churn, and only the read made again, afresh.
     pub(crate) async fn setup_helper_contributor_conditions(
         self: &Arc<Self>,
         admitted: &AdmittedHelperWork,
+        context: &ToolDispatchContext,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
+    ) -> Result<Vec<toolkit_store::RecordCondition>, PrivateOriginalError> {
+        let contended_until =
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+        loop {
+            let read = self
+                .read_setup_helper_contributor_conditions(admitted, contended_until)
+                .await;
+            if matches!(read, Err(PrivateOriginalError::Unavailable))
+                && crate::current_check::wait_for_owner_change(
+                    context,
+                    churn,
+                    "toolkit.find.contributor_conditions",
+                )
+                .await
+            {
+                continue;
+            }
+            return read;
+        }
+    }
+
+    /// One read of [`Self::setup_helper_contributor_conditions`], afresh: its
+    /// source checks wait out a held source collection until
+    /// `contended_until`, holding nothing. It writes nothing.
+    async fn read_setup_helper_contributor_conditions(
+        self: &Arc<Self>,
+        admitted: &AdmittedHelperWork,
+        contended_until: tokio::time::Instant,
     ) -> Result<Vec<toolkit_store::RecordCondition>, PrivateOriginalError> {
         self.owner
-            .check_admitted_helper(admitted)
+            .check_admitted_helper_until(admitted, contended_until)
+            .await
             .map_err(helper_error)?;
         self.require_helper_selection(admitted.selection())?;
         let sources = {
@@ -731,7 +840,8 @@ impl PrivateOriginals {
             });
         }
         self.owner
-            .check_admitted_helper(admitted)
+            .check_admitted_helper_until(admitted, contended_until)
+            .await
             .map_err(helper_error)?;
         Ok(conditions)
     }

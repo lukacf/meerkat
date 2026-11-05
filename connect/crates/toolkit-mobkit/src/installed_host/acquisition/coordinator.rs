@@ -639,6 +639,10 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
         let acquisition = self.acquisition;
         let originals = &acquisition.host.originals;
         let operation = self.operation(preparation)?;
+        // One churn for this work step's owner-change waits: its helper
+        // admission and its two reads after the helper's grants were issued
+        // and its source bound.
+        let mut churn = self.context.owner_change_churn();
         // Observation is historical metadata only. Creation or replay must
         // enter the actual native current full-source fence on every attempt.
         let admitted = originals
@@ -651,6 +655,7 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
                 operation,
                 self.selection(),
                 self.review.clone(),
+                &mut churn,
             )
             .await
             .map_err(|error| {
@@ -768,6 +773,8 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
                         &prepared,
                         &held,
                         acquisition.work_backend.service(),
+                        self.context,
+                        &mut churn,
                     )
                     .await
                     .map_err(|error| {
@@ -820,7 +827,7 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
                     )
                     .await?;
                 let mut conditions = originals
-                    .setup_helper_contributor_conditions(&admitted)
+                    .setup_helper_contributor_conditions(&admitted, self.context, &mut churn)
                     .await
                     .map_err(|error| {
                         #[cfg(test)]

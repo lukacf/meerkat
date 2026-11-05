@@ -712,6 +712,12 @@ impl ToolkitOriginalOwner {
     /// retry the identical operation/key/request. WorkGraph recovers that item;
     /// this method never allocates another key or overwrites a source record.
     /// Native input submission and its source settlement remain separate.
+    ///
+    /// Before the create, a held source collection (another owner's short
+    /// section) is waited out until `contended_until` with short pauses,
+    /// the source writer released while waiting, and the checks made again
+    /// under the writer taken afresh. At that instant the contention answers
+    /// `Unavailable`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn admit_fenced_helper(
         self: &Arc<Self>,
@@ -728,6 +734,7 @@ impl ToolkitOriginalOwner {
         own_originals: &[Arc<RetainedToolkitOriginal>],
         selection: HelperAdmissionSelection,
         review: crate::review_custody::ReviewCustody,
+        contended_until: tokio::time::Instant,
     ) -> Result<AdmittedHelperWork, OriginalWriterError> {
         self.access_fenced_helper(
             entered,
@@ -744,6 +751,7 @@ impl ToolkitOriginalOwner {
             selection,
             HelperAdmissionUse::Create,
             review,
+            Some(contended_until),
         )
         .await?
         .ok_or(OriginalWriterError::Unavailable)
@@ -785,6 +793,7 @@ impl ToolkitOriginalOwner {
             selection,
             HelperAdmissionUse::Observe,
             review,
+            None,
         )
         .await
     }
@@ -806,6 +815,7 @@ impl ToolkitOriginalOwner {
         selection: HelperAdmissionSelection,
         usage: HelperAdmissionUse,
         review: crate::review_custody::ReviewCustody,
+        contended_until: Option<tokio::time::Instant>,
     ) -> Result<Option<AdmittedHelperWork>, OriginalWriterError> {
         // The owner's source writer first, before any other guard and with
         // nothing held: another original's admission or binding holds it
@@ -814,15 +824,32 @@ impl ToolkitOriginalOwner {
         // it, and the native fence decides as before.
         #[cfg(test)]
         self.hold_source_writer_for_test();
-        let _mutation = self.bounded_source_writer().await?;
-        #[cfg(test)]
-        self.record_helper_admission_event_for_test("writer_acquired");
-        self.check_canonical_source(store, source_scope)?;
-        store
-            .capabilities()
-            .require_durable_contract()
-            .map_err(|_| OriginalWriterError::Unavailable)?;
-        self.check_helper_sources(contributor, contributors, own_originals)?;
+        let _mutation = loop {
+            let mutation = self.bounded_source_writer().await?;
+            #[cfg(test)]
+            self.record_helper_admission_event_for_test("writer_acquired");
+            self.check_canonical_source(store, source_scope)?;
+            store
+                .capabilities()
+                .require_durable_contract()
+                .map_err(|_| OriginalWriterError::Unavailable)?;
+            // A source collection held by another owner's short section is
+            // contention, not an answer: with `contended_until`, it is waited
+            // out with the writer released, and the checks made again under
+            // the writer taken afresh. Nothing has been created yet.
+            let settlement =
+                self.observe_helper_sources(contributor, contributors, own_originals)?;
+            if settlement == HelperSourceSettlement::Contended
+                && let Some(deadline) = contended_until
+                && tokio::time::Instant::now() < deadline
+            {
+                drop(mutation);
+                contention_pause(deadline).await;
+                continue;
+            }
+            helper_settlement_result(settlement)?;
+            break mutation;
+        };
         #[cfg(test)]
         self.record_helper_admission_event_for_test("sources_checked");
         let parent = contributor.association.candidate();
@@ -1002,11 +1029,28 @@ impl ToolkitOriginalOwner {
     /// Bind only after the actual native identity owner selected the helper's
     /// session/controller. WorkGraph admission has already happened, so retries
     /// cannot create another helper work item after a lost source response.
+    #[cfg(test)]
     pub(crate) async fn bind_admitted_helper(
         self: &Arc<Self>,
         store: &dyn ToolkitStore,
         admitted: &AdmittedHelperWork,
         binding: HelperNativeBinding,
+    ) -> Result<RetainedHelperSource, OriginalWriterError> {
+        self.bind_admitted_helper_until(store, admitted, binding, None)
+            .await
+    }
+
+    /// [`Self::bind_admitted_helper`], with a source collection held by
+    /// another owner's short section before the binding write waited out
+    /// until `contended_until`: the source writer is released while waiting,
+    /// and the check made again under the writer taken afresh. Nothing is
+    /// written before that check.
+    pub(crate) async fn bind_admitted_helper_until(
+        self: &Arc<Self>,
+        store: &dyn ToolkitStore,
+        admitted: &AdmittedHelperWork,
+        binding: HelperNativeBinding,
+        contended_until: Option<tokio::time::Instant>,
     ) -> Result<RetainedHelperSource, OriginalWriterError> {
         if !Arc::ptr_eq(self, &admitted.owner)
             || !admitted
@@ -1021,10 +1065,22 @@ impl ToolkitOriginalOwner {
             .capabilities()
             .require_durable_contract()
             .map_err(|_| OriginalWriterError::Unavailable)?;
-        let _mutation = self.source_writer().await;
         let contributor = &admitted.contributor;
         let contributors = &admitted.contributors;
-        self.check_helper_contributors(contributor, contributors)?;
+        let _mutation = loop {
+            let mutation = self.source_writer().await;
+            let settlement = self.observe_helper_sources(contributor, contributors, &[])?;
+            if settlement == HelperSourceSettlement::Contended
+                && let Some(deadline) = contended_until
+                && tokio::time::Instant::now() < deadline
+            {
+                drop(mutation);
+                contention_pause(deadline).await;
+                continue;
+            }
+            helper_settlement_result(settlement)?;
+            break mutation;
+        };
         let facts = &admitted.facts;
         let selected = &facts.selection.helper;
         if binding.ingress_actor != selected.ingress_actor
@@ -1327,6 +1383,7 @@ impl ToolkitOriginalOwner {
     /// Historical source facts for the existing prepared-work owner. The
     /// exact immutable row participates in that owner's atomic publication;
     /// these facts do not attest native input custody or authorize an effect.
+    #[cfg(test)]
     pub(crate) async fn helper_publication_source(
         self: &Arc<Self>,
         store: &dyn ToolkitStore,
@@ -1334,8 +1391,25 @@ impl ToolkitOriginalOwner {
         admitted: &AdmittedHelperWork,
         source: &RetainedHelperSource,
     ) -> Result<meerkat_toolkit::setup::NativeHelperSource, OriginalWriterError> {
+        self.helper_publication_source_until(store, service, admitted, source, None)
+            .await
+    }
+
+    /// [`Self::helper_publication_source`], with a source collection held by
+    /// another owner's short section waited out until `contended_until` at
+    /// each of its source checks, with short pauses and nothing held. The
+    /// read writes nothing.
+    pub(crate) async fn helper_publication_source_until(
+        self: &Arc<Self>,
+        store: &dyn ToolkitStore,
+        service: &WorkGraphService,
+        admitted: &AdmittedHelperWork,
+        source: &RetainedHelperSource,
+        contended_until: Option<tokio::time::Instant>,
+    ) -> Result<meerkat_toolkit::setup::NativeHelperSource, OriginalWriterError> {
         self.check_canonical_source(store, &admitted.source_scope)?;
-        self.check_admitted_helper(admitted)?;
+        self.check_admitted_helper_within(admitted, contended_until)
+            .await?;
         if !source.matches_admission(admitted) {
             return Err(OriginalWriterError::Conflict);
         }
@@ -1378,27 +1452,40 @@ impl ToolkitOriginalOwner {
         {
             return Err(OriginalWriterError::Conflict);
         }
-        self.check_admitted_helper(admitted)?;
+        self.check_admitted_helper_within(admitted, contended_until)
+            .await?;
         // A retained row cannot conceal source cancellation. This remains an
         // observation; native effect/input owners perform their current check.
-        let originals = self
-            .originals
-            .try_lock()
-            .map_err(|_| OriginalWriterError::Unavailable)?;
-        let held = originals
-            .iter()
-            .filter_map(OriginalRecord::bound)
-            .find(|held| Arc::ptr_eq(&held.retained, &source.original))
-            .ok_or(OriginalWriterError::WrongOwner)?;
-        match &held.operation {
-            OriginalOperationDisposition::Open => {}
-            OriginalOperationDisposition::CancellationPending => {
-                return Err(OriginalWriterError::Unavailable);
+        let disposition = loop {
+            let read = self
+                .originals
+                .try_lock()
+                .map(|originals| {
+                    originals
+                        .iter()
+                        .filter_map(OriginalRecord::bound)
+                        .find(|held| Arc::ptr_eq(&held.retained, &source.original))
+                        .map(|held| match &held.operation {
+                            OriginalOperationDisposition::Open => Ok(()),
+                            OriginalOperationDisposition::CancellationPending => {
+                                Err(OriginalWriterError::Unavailable)
+                            }
+                            OriginalOperationDisposition::Cancelled { .. } => {
+                                Err(OriginalWriterError::OperationCancelled)
+                            }
+                        })
+                        .unwrap_or(Err(OriginalWriterError::WrongOwner))
+                })
+                .map_err(|error| matches!(error, std::sync::TryLockError::WouldBlock));
+            match (read, contended_until) {
+                (Ok(disposition), _) => break disposition,
+                (Err(true), Some(deadline)) if tokio::time::Instant::now() < deadline => {
+                    contention_pause(deadline).await;
+                }
+                (Err(_), _) => break Err(OriginalWriterError::Unavailable),
             }
-            OriginalOperationDisposition::Cancelled { .. } => {
-                return Err(OriginalWriterError::OperationCancelled);
-            }
-        }
+        };
+        disposition?;
         Ok(meerkat_toolkit::setup::NativeHelperSource {
             source: RecordCondition {
                 key: saved.key,
@@ -1441,8 +1528,21 @@ impl ToolkitOriginalOwner {
         self: &Arc<Self>,
         admitted: &AdmittedHelperWork,
     ) -> Result<(), OriginalWriterError> {
-        let deadline =
-            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+        self.check_admitted_helper_until(
+            admitted,
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+        )
+        .await
+    }
+
+    /// [`Self::check_admitted_helper_outside_change`] until `deadline`: a
+    /// held source collection is waited out with async pauses until then,
+    /// and answers `Unavailable` once it passed.
+    pub(crate) async fn check_admitted_helper_until(
+        self: &Arc<Self>,
+        admitted: &AdmittedHelperWork,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), OriginalWriterError> {
         loop {
             let settlement = self.admitted_helper_settlement(admitted)?;
             if settlement != HelperSourceSettlement::Contended
@@ -1450,13 +1550,46 @@ impl ToolkitOriginalOwner {
             {
                 return helper_settlement_result(settlement);
             }
-            tokio::time::sleep_until(std::cmp::min(
-                deadline,
-                tokio::time::Instant::now() + std::time::Duration::from_millis(1),
-            ))
-            .await;
+            contention_pause(deadline).await;
             // Expiry before the next read, as the bounded waits elsewhere.
             if tokio::time::Instant::now() >= deadline {
+                return Err(OriginalWriterError::Unavailable);
+            }
+        }
+    }
+
+    /// [`Self::check_admitted_helper_until`] when `contended_until` is set,
+    /// and [`Self::check_admitted_helper`] at once otherwise.
+    pub(crate) async fn check_admitted_helper_within(
+        self: &Arc<Self>,
+        admitted: &AdmittedHelperWork,
+        contended_until: Option<tokio::time::Instant>,
+    ) -> Result<(), OriginalWriterError> {
+        match contended_until {
+            Some(deadline) => self.check_admitted_helper_until(admitted, deadline).await,
+            None => self.check_admitted_helper(admitted),
+        }
+    }
+
+    /// [`Self::check_admitted_helper_until`] for a caller on a blocking
+    /// thread of its own, which holds no lock, guard or reservation a change
+    /// or cancellation may need: the pauses block that thread only.
+    pub(crate) fn check_admitted_helper_blocking_until(
+        self: &Arc<Self>,
+        admitted: &AdmittedHelperWork,
+        deadline: std::time::Instant,
+    ) -> Result<(), OriginalWriterError> {
+        loop {
+            let settlement = self.admitted_helper_settlement(admitted)?;
+            let now = std::time::Instant::now();
+            if settlement != HelperSourceSettlement::Contended || now >= deadline {
+                return helper_settlement_result(settlement);
+            }
+            std::thread::sleep(std::cmp::min(
+                deadline - now,
+                std::time::Duration::from_millis(1),
+            ));
+            if std::time::Instant::now() >= deadline {
                 return Err(OriginalWriterError::Unavailable);
             }
         }
@@ -1608,6 +1741,16 @@ enum HelperSourceSettlement {
     Candidate,
     Contended,
     CancellationPending,
+}
+
+/// One short pause of a bounded wait for a source collection held by another
+/// owner's short section, never past `deadline`.
+async fn contention_pause(deadline: tokio::time::Instant) {
+    tokio::time::sleep_until(std::cmp::min(
+        deadline,
+        tokio::time::Instant::now() + std::time::Duration::from_millis(1),
+    ))
+    .await;
 }
 
 /// A source check's answer: only Admitted contributor custody is usable.

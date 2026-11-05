@@ -20,7 +20,10 @@
 //! An attempt through a governed helper admission fence (a Find's helper
 //! observation, for example), which ran nothing when its fence refused while
 //! Core names an owner change in progress, waits for that change with
-//! [`wait_for_owner_change`] and is made again through a fresh fence.
+//! [`wait_for_owner_change`] and is made again through a fresh fence. A read
+//! of a Find's work step made after its effects (the helper's
+//! publication-source and contributor-condition reads) waits the same way
+//! and only the read is made again; the effects before it never are.
 
 use meerkat_core::authorization::OwnerChangeChurn;
 use meerkat_core::{ResolvedToolExecutionPlan, ToolCallView, ToolDispatchContext, ToolError};

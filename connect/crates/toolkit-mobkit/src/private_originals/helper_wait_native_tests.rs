@@ -1,4 +1,4 @@
-//! The Find dispatch's wait before its helper's one rebind, on the actual
+//! The Find dispatch's wait before each rebind of its helper, on the actual
 //! native owner. The helper's first native admission finds a real owner change
 //! of the same source publication in progress (begun after its genuine policy
 //! read and held for a while from another thread), and its return is the real
@@ -6,7 +6,8 @@
 //! it only inside its own fenced dispatch); the source deadline stays live
 //! throughout. A change that outlasts the tool time, or no tool time left at
 //! all, stops the dispatch at ReprepareRequired after one native call; one
-//! that settles within it lets the one rebind go with the same input. Each
+//! that settles within it lets a rebind go with the same input, after each
+//! settled wait of the dispatch's one churn. Each
 //! control names the exact stop. Without the source's custody recovery the
 //! helper's first candidate is unenrolled, and its guard, dropped at the
 //! refusal, takes the publication writer and so waits out a change still in

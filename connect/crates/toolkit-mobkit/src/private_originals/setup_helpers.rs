@@ -762,10 +762,14 @@ impl PrivateOriginals {
             review_custody: review.clone(),
         });
         // Keep one raw input identity and event content. A definite policy
-        // change may rebuild its current binding once, never its source/key.
+        // change rebuilds only the current binding, never the source/key: on
+        // the Find dispatch after each settled wait of its one churn, without
+        // a dispatch once.
         let input = Input::Prompt(PromptInput::new(content, None));
         let mut reprepared = false;
-        // One churn for this submission's wait, never re-armed.
+        // One churn for this submission's waits, never re-armed: one
+        // deadline within Core's owner-change bound and at most
+        // OWNER_CHANGE_FREE_REBUILDS settled waits.
         let mut churn = dispatch.map(ToolDispatchContext::owner_change_churn);
         let result = loop {
             // Meta may await the current member/controller before calling the
@@ -792,25 +796,30 @@ impl PrivateOriginals {
                 {
                     pending.handoff.record_definite_refusal();
                 }
-                if reprepared {
-                    return Ok(SetupHelperSubmission::ReprepareRequired);
-                }
-                reprepared = true;
                 // The publication changed under native admission's check. On
-                // the Find dispatch the one rebind goes only after that change
-                // is waited out and everything it relies on is current again
-                // (helper_rebind_after_wait); otherwise the dispatch stops at
-                // ReprepareRequired. An expired source deadline stays the
-                // denial checked above, and without a dispatch the one rebind
-                // is immediate, as before.
-                if let (Some(context), Some(churn)) = (dispatch, churn.as_mut())
-                    && tokio::time::Instant::now() < source_deadline
-                    && !self
-                        .helper_rebind_after_wait(prepared, context, churn, source_deadline)
-                        .await
-                    && tokio::time::Instant::now() < source_deadline
-                {
-                    return Ok(SetupHelperSubmission::ReprepareRequired);
+                // the Find dispatch each rebind goes only after that change is
+                // waited out and everything it relies on is current again
+                // (helper_rebind_after_wait); a wait that does not settle, or
+                // a spent budget, stops the dispatch at ReprepareRequired. An
+                // expired source deadline stays the denial checked above, and
+                // without a dispatch the one rebind is immediate, as before.
+                match (dispatch, churn.as_mut()) {
+                    (Some(context), Some(churn)) => {
+                        if tokio::time::Instant::now() < source_deadline
+                            && !self
+                                .helper_rebind_after_wait(prepared, context, churn, source_deadline)
+                                .await
+                            && tokio::time::Instant::now() < source_deadline
+                        {
+                            return Ok(SetupHelperSubmission::ReprepareRequired);
+                        }
+                    }
+                    _ => {
+                        if reprepared {
+                            return Ok(SetupHelperSubmission::ReprepareRequired);
+                        }
+                        reprepared = true;
+                    }
                 }
                 continue;
             }
@@ -845,8 +854,8 @@ impl PrivateOriginals {
         }))
     }
 
-    /// The Find dispatch's wait before its helper's one rebind. True when the
-    /// rebind may go; otherwise the reason it stops ([`HelperRebindStop`]) is
+    /// The Find dispatch's wait before each rebind of its helper. True when
+    /// the rebind may go; otherwise the reason it stops ([`HelperRebindStop`]) is
     /// written as a static diagnostic.
     async fn helper_rebind_after_wait(
         &self,
@@ -964,8 +973,8 @@ impl PrivateOriginals {
     }
 }
 
-/// Why a Find dispatch's helper stops at ReprepareRequired instead of taking
-/// its one rebind after a same-session PolicyChanged, in the order checked.
+/// Why a Find dispatch's helper stops at ReprepareRequired instead of
+/// rebinding after a same-session PolicyChanged, in the order checked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum HelperRebindStop {
     /// The dispatch has no work authorization to wait with.

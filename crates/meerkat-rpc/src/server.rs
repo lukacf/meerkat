@@ -4427,4 +4427,146 @@ mod tests {
             Ok(())
         }
     }
+
+    /// The decision notices of a stdio connection's operator, through the
+    /// server loop.
+    #[cfg(all(unix, feature = "local-authorization"))]
+    mod decision_notices {
+        use std::pin::Pin;
+        use std::sync::Arc;
+        use std::task::{Context, Poll};
+
+        use meerkat_core::approval::decision::{
+            ApproverId, DecisionHoldRequest, DecisionKind, DecisionOperationId,
+            DecisionPrincipalKey, DecisionRenderer, DecisionRendering, DecisionRequestBody,
+            DecisionRow, DecisionStore, DecisionSubjectKey, Sha256Digest,
+        };
+        use meerkat_core::connection::RealmId;
+        use meerkat_core::{
+            Config, ConfigStore, MemoryConfigStore, PrincipalKind, PrincipalRef, TrustDomainId,
+        };
+        use tokio::io::AsyncWriteExt as _;
+
+        use crate::router::NotificationSink;
+        use crate::server::RpcServer;
+        use crate::session_runtime::SessionRuntime;
+
+        /// A pipe that refuses every line written to it.
+        struct RefusingPipe;
+
+        impl tokio::io::AsyncWrite for RefusingPipe {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                _: &[u8],
+            ) -> Poll<std::io::Result<usize>> {
+                Poll::Ready(Err(std::io::Error::other("the pipe refuses the line")))
+            }
+
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn poll_shutdown(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        /// The server loop answers a decision notice only once its line is
+        /// written. A pipe that refuses the line ends the connection with the
+        /// write error, and the decision records no presentation: the
+        /// operator never takes the notice as shown.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_notice_line_the_pipe_refuses_records_no_presentation() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let (_, bundle) = meerkat::open_realm_persistence_in(
+                root.path(),
+                "decisions",
+                Some(meerkat_store::RealmBackend::Sqlite),
+                None,
+            )
+            .await
+            .expect("open the realm");
+            let store_path = bundle.store_path().expect("a store path").to_path_buf();
+            let runtime = Arc::new(
+                SessionRuntime::new(
+                    meerkat::AgentFactory::minimal(),
+                    Config::default(),
+                    4,
+                    bundle,
+                    NotificationSink::noop(),
+                )
+                .expect("compose the RPC session runtime"),
+            );
+            runtime.set_realm_context(
+                Some(RealmId::parse("decisions").expect("realm id")),
+                None,
+                None,
+            );
+            let requester = PrincipalRef::in_domain(
+                PrincipalKind::PersonalAgent,
+                "builder",
+                TrustDomainId::new("example.org").expect("trust domain"),
+            )
+            .expect("principal");
+            let held = runtime
+                .decision_service()
+                .hold(
+                    DecisionHoldRequest::new(
+                        DecisionKind::new("release").expect("kind"),
+                        DecisionSubjectKey::new("build-1").expect("subject key"),
+                        DecisionOperationId::new("operation:build-1").expect("operation id"),
+                        Sha256Digest::of(br#"{"build":7}"#),
+                        DecisionRequestBody::from_value(&serde_json::json!({"build": 7}))
+                            .expect("request body"),
+                        DecisionPrincipalKey::of(&requester).expect("principal key"),
+                        ApproverId::new("operator").expect("approver id"),
+                        u64::MAX / 2,
+                        DecisionRendering::new("Release build 7 to production.")
+                            .expect("rendering"),
+                        DecisionRenderer::new("render.v1").expect("renderer"),
+                    ),
+                    false,
+                )
+                .expect("hold");
+            let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
+                Config::default(),
+                meerkat_models::canonical(),
+            ));
+            let (mut client, server_side) = tokio::io::duplex(1 << 16);
+            let mut server = RpcServer::new(
+                tokio::io::BufReader::new(server_side),
+                RefusingPipe,
+                Arc::clone(&runtime),
+                config_store,
+            )
+            .expect("compose the server")
+            .with_local_decision_operator();
+            client
+                .write_all(
+                    b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"decision/list\",\"params\":{}}\n",
+                )
+                .await
+                .expect("write the request");
+
+            let served = tokio::time::timeout(std::time::Duration::from_secs(120), server.run())
+                .await
+                .expect("the connection ends");
+            assert!(served.is_err(), "the refused line ends the connection");
+            let row = match meerkat_store::SqliteDecisionStore::in_store_path(&store_path)
+                .get(&held.decision_id)
+                .expect("read the decision store")
+                .expect("a stored row")
+            {
+                DecisionRow::Readable(row) => *row,
+                DecisionRow::Unreadable(row) => panic!("the stored row is unreadable: {row:?}"),
+            };
+            assert_eq!(row.state.first_presented_to_approver_at_ms, None, "{row:?}");
+            assert!(row.presentations.is_empty(), "{row:?}");
+            drop(client);
+        }
+    }
 }

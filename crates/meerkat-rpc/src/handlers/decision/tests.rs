@@ -1253,15 +1253,18 @@ mod operator_connections {
     use std::sync::{Arc, Mutex};
 
     use meerkat_core::approval::consent::{AuthenticatedApprover, HostAuthenticationScope};
-    use meerkat_core::approval::decision::{DecisionId, DecisionPhase, StoredDecision};
+    use meerkat_core::approval::decision::{
+        DecisionId, DecisionPhase, DecisionPrincipalKey, DecisionStage, StoredDecision,
+    };
     use meerkat_core::{ApprovalAssurance, PrincipalKind};
     use serde_json::json;
     use serde_json::value::RawValue;
     use tokio::sync::mpsc;
 
     use super::{
-        INVALID_PARAMS, error_code, error_data, hold_request, persistent_router, principal, result,
-        subject_digest,
+        INVALID_PARAMS, error_code, error_data, hold_request, hold_request_until, now_ms,
+        persistent_router, principal, realm_bundle, result, router_over, stored_row,
+        subject_digest, wait_past,
     };
     use crate::handlers::decision::operator::DecisionOperator;
     use crate::protocol::{RpcId, RpcResponse};
@@ -1477,5 +1480,91 @@ mod operator_connections {
 
         assert_not_eligible(&failing.decide(&runtime, &held.decision_id).await);
         assert_unchanged(&decisions.get(&held.decision_id).expect("read"), &before);
+    }
+
+    /// A connection that ended decides nothing, not even a decision it
+    /// presented: the decide is refused and the decision stays as it was.
+    #[tokio::test]
+    async fn a_closed_connection_decides_nothing() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_router, runtime) = persistent_router(root.path()).await;
+        let decisions = runtime.decision_service();
+        let held = decisions
+            .hold(hold_request("release", "build-1", "operator"), false)
+            .expect("hold");
+        let connection = Connection::open("stdio:operator:closing");
+
+        connection.list(&runtime).await;
+        assert_eq!(connection.notices().len(), 1, "{:?}", connection.notices());
+        let presented = decisions.get(&held.decision_id).expect("read");
+        assert!(
+            presented.state.first_presented_to_approver_at_ms.is_some(),
+            "{presented:?}"
+        );
+
+        connection.operator.close();
+        assert_not_eligible(&connection.decide(&runtime, &held.decision_id).await);
+        assert_unchanged(&decisions.get(&held.decision_id).expect("read"), &presented);
+    }
+
+    /// A list presents only the decisions that wait for a human now. A
+    /// decision in its review stage, and one past its deadline (the page
+    /// reads it as expired), get no notice, and the list writes neither row:
+    /// no presentation and no expiry.
+    #[tokio::test]
+    async fn a_list_presents_no_decision_in_review_or_past_its_deadline() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let bundle = realm_bundle(root.path()).await;
+        let store_path = bundle
+            .store_path()
+            .expect("a realm's store path")
+            .to_path_buf();
+        let (_router, runtime) = router_over(bundle);
+        let decisions = runtime.decision_service();
+        let reviewer = DecisionPrincipalKey::of(&principal(PrincipalKind::SharedAgent, "reviewer"))
+            .expect("principal key");
+        let in_review = decisions
+            .hold(
+                hold_request("release", "build-1", "operator").with_reviewer(reviewer),
+                false,
+            )
+            .expect("hold");
+        assert_eq!(in_review.state.stage, DecisionStage::Review);
+        let deadline_at_ms = now_ms() + 1_000;
+        let lapsing = decisions
+            .hold(
+                hold_request_until("release", "build-2", "operator", deadline_at_ms),
+                false,
+            )
+            .expect("hold");
+        wait_past(deadline_at_ms).await;
+        let connection = Connection::open("stdio:operator:filtering");
+
+        let page = connection.list(&runtime).await;
+        let phase_of = |decision_id: &DecisionId| {
+            page["decisions"]
+                .as_array()
+                .expect("a page of decisions")
+                .iter()
+                .find(|row| row["decision_id"] == decision_id.to_string())
+                .map(|row| row["phase"].clone())
+        };
+        assert_eq!(
+            phase_of(&in_review.decision_id),
+            Some(json!("open")),
+            "{page}"
+        );
+        assert_eq!(
+            phase_of(&lapsing.decision_id),
+            Some(json!("expired")),
+            "{page}"
+        );
+        assert!(
+            connection.notices().is_empty(),
+            "{:?}",
+            connection.notices()
+        );
+        assert_eq!(stored_row(&store_path, &in_review.decision_id), in_review);
+        assert_eq!(stored_row(&store_path, &lapsing.decision_id), lapsing);
     }
 }

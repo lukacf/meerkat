@@ -37,19 +37,20 @@ them.
 
 ### Changed
 
-- `meerkat-mcp`: a governed MCP server released at sign-out, whose re-add
-  after the sign-in is refused because the router holds no control that
-  covers it (`AttachmentRefused`), is reported as a failed add once, at the
-  first boundary after its release settles, where every later boundary
-  reported it again. It stays listed as awaiting sign-in, and a later
-  sign-in gets the typed refusal from `McpRouter::retry_authorized`.
+- `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
+  sign-in is refused (`AttachmentRefused`), because it is governed and the
+  router holds no control that covers it, or because it was signed out
+  ungoverned and its name has been governed since, is reported as a failed
+  add once, at the first boundary after its release settles, where every
+  later boundary reported it again. It stays listed as awaiting sign-in, and
+  a later sign-in gets the typed refusal from `McpRouter::retry_authorized`.
 
 ### Fixed
 
 - `meerkat-mcp`: retained attachment controls are released when the
   router's close begins (`McpRouterAdapter::begin_close`), so a router whose
-  shutdown never runs no longer keeps a governed server's control, and what
-  it holds, alive after its close.
+  shutdown never runs no longer keeps the controls it retains for a re-add
+  after a sign-in, and what they hold, alive after its close.
 
 ## [0.9.10] - 2026-11-04
 

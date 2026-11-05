@@ -1012,6 +1012,10 @@ pub enum MemberLifecycleEvent {
 pub struct MemberLifecycleRecord {
     /// The event's journal cursor.
     pub cursor: MobJournalCursor,
+    /// When the event was appended to the journal ([`MobEvent::timestamp`]):
+    /// stored with the event, so a later read of the journal reads the same
+    /// time again.
+    pub timestamp: chrono::DateTime<chrono::Utc>,
     /// The lifecycle fact.
     pub event: MemberLifecycleEvent,
 }
@@ -1424,6 +1428,7 @@ pub(crate) fn member_lifecycle_page(
         if let Some(lifecycle) = member_lifecycle_event(&event.kind) {
             records.push(MemberLifecycleRecord {
                 cursor: MobJournalCursor::new(event.cursor),
+                timestamp: event.timestamp,
                 event: lifecycle,
             });
         }
@@ -2322,8 +2327,8 @@ mod tests {
     }
 
     /// The lifecycle page keeps the mob's member lifecycle facts in journal
-    /// order and answers the cursor of the last event it read, a lifecycle
-    /// fact or not.
+    /// order, each with the time its event was appended, and answers the
+    /// cursor of the last event it read, a lifecycle fact or not.
     #[test]
     fn the_lifecycle_page_keeps_the_mobs_lifecycle_facts() {
         let mob = MobId::from("lifecycle-mob");
@@ -2337,9 +2342,14 @@ mod tests {
             ProfileName::from("worker"),
         )
         .with_identity_entry(Some(IdentityEntryOrigin::Declared));
+        // Each event appended at its own time: the page carries it.
+        let appended_at = |cursor: u64| {
+            chrono::DateTime::from_timestamp_millis(1_790_000_000_000 + cursor as i64 * 1_000)
+                .expect("a representable time")
+        };
         let event = |cursor: u64, mob_id: &MobId, kind: MobEventKind| MobEvent {
             cursor,
-            timestamp: chrono::Utc::now(),
+            timestamp: appended_at(cursor),
             mob_id: mob_id.clone(),
             kind,
         };
@@ -2364,9 +2374,13 @@ mod tests {
         assert_eq!(
             page.records
                 .iter()
-                .map(|record| record.cursor)
+                .map(|record| (record.cursor, record.timestamp))
                 .collect::<Vec<_>>(),
-            vec![MobJournalCursor::new(3), MobJournalCursor::new(6)]
+            vec![
+                (MobJournalCursor::new(3), appended_at(3)),
+                (MobJournalCursor::new(6), appended_at(6))
+            ],
+            "each record carries its event's cursor and the time it was appended"
         );
         assert!(matches!(
             &page.records[0].event,

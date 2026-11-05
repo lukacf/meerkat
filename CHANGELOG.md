@@ -298,6 +298,13 @@ them.
   did not start and reads the identity as the declared entry again, so a
   rollback to 0.9.10 has one step to take (see the upgrading guide).
 
+- `meerkat-mob`: `MemberLifecycleRecord::timestamp`, the time the record's
+  journal event was appended (the `MobEvent` timestamp, stored with the
+  event): a later read of the journal, after a restart included, reads the
+  same time again, so a reader can key work it owes a retirement by when
+  Core journaled it. The struct is `#[non_exhaustive]`, so the field is
+  additive.
+
 ### Changed
 
 - `meerkat-mob`: `DeclaredEntryVerdict`, the verdict a candidate

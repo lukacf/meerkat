@@ -5,6 +5,8 @@
 //! (git root found through a `.git` file) and `AGENTS.local.md` (capped)
 //! follow in that order; `/remember` appends to the workspace `AGENTS.md`,
 //! reaches the live session at once and the next session through the file.
+//! A resumed session keeps the instructions it was created with: the
+//! persona once, edited files only from the next new session.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -116,5 +118,59 @@ async fn remember_reaches_this_session_and_the_next() {
     let system = llm.recorded()[1].system();
     assert!(system.contains("- prefer tabs over spaces"), "{system}");
     assert!(!system.contains("# Remembered instruction\n\n"), "{system}");
+    rig.quit().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resumed_session_keeps_its_instructions_and_the_persona_once() {
+    let ws = Workspace::new();
+    write(&ws.root.join("AGENTS.local.md"), "FIRST-RULES apply.\n");
+    let llm = ScriptedLlmClient::new(vec![Step::Text("one")]);
+    let mut rig = Rig::start(&ws.root, &llm, Start::New).await;
+    let id = rig.first_session.clone();
+    rig.send(Effect::StartTurn("hi".into()));
+    rig.turn_finished().await;
+    let created = rig
+        .session(&id)
+        .await
+        .build_state()
+        .and_then(|state| state.additional_instructions)
+        .expect("persisted instructions");
+    rig.quit().await;
+
+    // The file changes; the session is resumed.
+    write(&ws.root.join("AGENTS.local.md"), "SECOND-RULES apply.\n");
+    let llm = ScriptedLlmClient::new(vec![Step::Text("two"), Step::Text("three")]);
+    let mut rig = Rig::start(&ws.root, &llm, Start::Resume("last".into())).await;
+    rig.send(Effect::StartTurn("again".into()));
+    rig.turn_finished().await;
+    let resumed = rig
+        .session(&id)
+        .await
+        .build_state()
+        .and_then(|state| state.additional_instructions)
+        .expect("persisted instructions");
+    assert_eq!(
+        resumed, created,
+        "the resumed build re-pushed other instructions"
+    );
+    let system = llm.recorded()[0].system();
+    assert_eq!(
+        system.matches("interactive coding agent").count(),
+        1,
+        "{system}"
+    );
+    assert!(system.contains("FIRST-RULES"), "{system}");
+    assert!(!system.contains("SECOND-RULES"), "{system}");
+
+    // A new session reads the edited file.
+    rig.send(Effect::NewSession);
+    let first = id.to_string();
+    rig.wait_for(|msg| matches!(msg, Msg::Status(StatusUpdate::Session(s)) if *s != first))
+        .await;
+    rig.send(Effect::StartTurn("fresh".into()));
+    rig.turn_finished().await;
+    let system = llm.recorded()[1].system();
+    assert!(system.contains("SECOND-RULES"), "{system}");
     rig.quit().await;
 }

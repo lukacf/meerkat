@@ -658,3 +658,243 @@ async fn grep_head_limit_no_match_and_bad_regex() {
         Err(ToolError::InvalidArguments { .. })
     ));
 }
+
+// ------------------------------------------------------ non-regular files ----
+
+/// Create a FIFO at `path` with `mkfifo`; `false` (after a `SKIPPED:` line)
+/// when the tool is unavailable.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)] // test-only process launch
+fn make_fifo(path: &Path) -> bool {
+    match std::process::Command::new("mkfifo").arg(path).status() {
+        Ok(status) if status.success() => true,
+        other => {
+            println!("SKIPPED: mkfifo unavailable ({other:?})");
+            false
+        }
+    }
+}
+
+/// Run a tool call, failing the test if it does not return within 10 s.
+async fn promptly<F: std::future::Future>(what: &str, fut: F) -> F::Output {
+    tokio::time::timeout(Duration::from_secs(10), fut)
+        .await
+        .unwrap_or_else(|_| panic!("{what} hung on a non-regular file"))
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fifo_is_refused_promptly_by_read_grep_and_read_only_tools() {
+    use meerkat_tui::tools::ReadOnlyProjectTools;
+
+    let fx = Fixture::new();
+    fx.write("plain.txt", "needle\n");
+    if !make_fifo(&fx.path("pipe")) {
+        return;
+    }
+
+    let text = promptly("read_file", fx.err("read_file", json!({"path": "pipe"}))).await;
+    assert!(text.contains("not a regular file"), "{text}");
+    assert!(text.contains("named pipe"), "{text}");
+
+    let text = promptly(
+        "grep path",
+        fx.err("grep", json!({"pattern": "needle", "path": "pipe"})),
+    )
+    .await;
+    assert!(text.contains("not a regular file"), "{text}");
+
+    // A walk skips the FIFO and still finds the regular file.
+    let text = promptly("grep walk", fx.ok("grep", json!({"pattern": "needle"}))).await;
+    assert!(text.contains("plain.txt"), "{text}");
+    assert!(!text.contains("pipe"), "{text}");
+
+    // Writing over a FIFO is refused too (never opened for reading).
+    let text = promptly(
+        "write_file",
+        fx.err("write_file", json!({"path": "pipe", "content": "x"})),
+    )
+    .await;
+    assert!(text.contains("not a regular file"), "{text}");
+
+    let ro = ReadOnlyProjectTools::new(ProjectRoot::new(fx.dir.path()).unwrap());
+    for (name, args) in [
+        ("read_file", json!({"path": "pipe"})),
+        ("grep", json!({"pattern": "x", "path": "pipe"})),
+    ] {
+        let raw = serde_json::value::to_raw_value(&args).unwrap();
+        let result = promptly(
+            name,
+            ro.dispatch(ToolCallView {
+                id: "c1",
+                name,
+                args: &raw,
+            }),
+        )
+        .await
+        .unwrap()
+        .result;
+        assert!(result.is_error, "{name}: {}", result.text_content());
+        assert!(
+            result.text_content().contains("not a regular file"),
+            "{name}: {}",
+            result.text_content()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn socket_is_refused_by_read_and_grep() {
+    let fx = Fixture::new();
+    let _listener = std::os::unix::net::UnixListener::bind(fx.path("sock")).unwrap();
+    let text = promptly("read_file", fx.err("read_file", json!({"path": "sock"}))).await;
+    assert!(text.contains("socket"), "{text}");
+    let text = promptly(
+        "grep",
+        fx.err("grep", json!({"pattern": "x", "path": "sock"})),
+    )
+    .await;
+    assert!(text.contains("not a regular file"), "{text}");
+}
+
+#[tokio::test]
+async fn reads_are_capped_and_say_so() {
+    use meerkat_tui::tools::MAX_FILE_READ_BYTES;
+
+    let fx = Fixture::new();
+    let cap = usize::try_from(MAX_FILE_READ_BYTES).unwrap();
+    // One line of `a`s up to the cap, then a marker line past it.
+    let mut content = vec![b'a'; cap - 1];
+    content.push(b'\n');
+    content.extend_from_slice(b"BEYOND_THE_CAP\n");
+    fx.write("big.txt", &content);
+
+    let text = fx.ok("read_file", json!({"path": "big.txt"})).await;
+    assert!(
+        text.contains("file truncated"),
+        "{}",
+        &text[text.len() - 200..]
+    );
+    assert!(!text.contains("BEYOND_THE_CAP"));
+
+    // grep searches only the capped prefix.
+    let text = fx.ok("grep", json!({"pattern": "BEYOND_THE_CAP"})).await;
+    assert!(text.contains("No matches"), "{text}");
+
+    // A file over the cap is never rewritten from its truncated prefix.
+    let text = fx
+        .err(
+            "edit_file",
+            json!({"path": "big.txt", "old_string": "aaa", "new_string": "b"}),
+        )
+        .await;
+    assert!(text.contains("larger than"), "{text}");
+    assert_eq!(
+        std::fs::metadata(fx.path("big.txt")).unwrap().len(),
+        content.len() as u64
+    );
+}
+
+// ------------------------------------------------------ per-session reads ----
+
+async fn call_as(
+    tools: &FileToolDispatcher,
+    session: Option<&meerkat_core::SessionId>,
+    name: &str,
+    args: Value,
+) -> ToolResult {
+    let raw = serde_json::value::to_raw_value(&args).unwrap();
+    let view = ToolCallView {
+        id: "call-1",
+        name,
+        args: &raw,
+    };
+    let outcome = match session {
+        Some(session) => {
+            let context = meerkat_core::ToolDispatchContext::default()
+                .with_runtime_identity(session.clone(), None);
+            tools.dispatch_with_context(view, &context).await
+        }
+        None => tools.dispatch(view).await,
+    };
+    outcome.unwrap().result
+}
+
+#[tokio::test]
+async fn a_read_satisfies_only_the_reading_sessions_writes() {
+    let fx = Fixture::new();
+    fx.write("shared.txt", "one\n");
+    let a = meerkat_core::SessionId::new();
+    let b = meerkat_core::SessionId::new();
+
+    let read = call_as(
+        &fx.tools,
+        Some(&a),
+        "read_file",
+        json!({"path": "shared.txt"}),
+    )
+    .await;
+    assert!(!read.is_error, "{}", read.text_content());
+
+    for args in [
+        json!({"path": "shared.txt", "content": "two\n"}),
+        json!({"path": "shared.txt", "old_string": "one", "new_string": "two"}),
+    ] {
+        let name = if args.get("content").is_some() {
+            "write_file"
+        } else {
+            "edit_file"
+        };
+        // Neither another session nor a context-free call inherits A's read.
+        for other in [Some(&b), None] {
+            let result = call_as(&fx.tools, other, name, args.clone()).await;
+            assert!(
+                result.is_error,
+                "{name} as {other:?}: {}",
+                result.text_content()
+            );
+            assert!(result.text_content().contains("has not been read"));
+        }
+    }
+    assert_eq!(fx.read("shared.txt"), "one\n");
+
+    let ok = call_as(
+        &fx.tools,
+        Some(&a),
+        "edit_file",
+        json!({"path": "shared.txt", "old_string": "one", "new_string": "two"}),
+    )
+    .await;
+    assert!(!ok.is_error, "{}", ok.text_content());
+    assert_eq!(fx.read("shared.txt"), "two\n");
+}
+
+#[tokio::test]
+async fn an_owned_dispatcher_keys_context_free_calls_by_its_session() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f.txt"), "x\n").unwrap();
+    let owner = meerkat_core::SessionId::new();
+    let tools =
+        FileToolDispatcher::for_session(ProjectRoot::new(dir.path()).unwrap(), None, owner.clone());
+    // A context-free read is the owner's, so the owner's contextual write passes.
+    let read = call_as(&tools, None, "read_file", json!({"path": "f.txt"})).await;
+    assert!(!read.is_error);
+    let other = meerkat_core::SessionId::new();
+    let refused = call_as(
+        &tools,
+        Some(&other),
+        "write_file",
+        json!({"path": "f.txt", "content": "y\n"}),
+    )
+    .await;
+    assert!(refused.is_error);
+    let ok = call_as(
+        &tools,
+        Some(&owner),
+        "write_file",
+        json!({"path": "f.txt", "content": "y\n"}),
+    )
+    .await;
+    assert!(!ok.is_error, "{}", ok.text_content());
+}

@@ -2,8 +2,10 @@
 //! scripted LLM: the picker shows every endpoint's live list, a bare id
 //! resolves to the endpoint listing it, the switch goes through the
 //! runtime's session-LLM reconfigure host and the next turn's request
-//! carries the new model; the choice and the cost totals survive a resume
-//! in the session's sidecar.
+//! carries the new model; the endpoint's connection and the model's profile
+//! are in the realm's own config document (so `rkat` resolves the session
+//! too), the endpoint is derived from the session's binding on resume, and
+//! the cost totals survive a resume in the session's cost record.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -12,11 +14,13 @@ mod common;
 use std::sync::Arc;
 
 use common::{Rig, RigOptions, ScriptedLlmClient, Step, Workspace, args_with};
+use meerkat_core::ConfigStore;
 use meerkat_core::Usage;
 use meerkat_tui::bootstrap;
-use meerkat_tui::endpoints::{ENDPOINT_REALM, Endpoint, EndpointRef, load_choice, load_cost};
+use meerkat_tui::endpoints::{ENDPOINT_REALM, Endpoint};
 use meerkat_tui::models::{EndpointListing, ModelEntry, ModelLister, ModelSource};
 use meerkat_tui::runner::Start;
+use meerkat_tui::runner::cost_store::load_cost;
 use meerkat_tui::ui::{Effect, Msg, SessionCost, StatusUpdate};
 
 /// An Anthropic-dialect gateway, defined on the command line.
@@ -27,7 +31,9 @@ fn proxy_args() -> Vec<String> {
         "--set",
         "endpoints.proxy.base_url=http://127.0.0.1:9",
         "--set",
-        "endpoints.proxy.api_key=sk-proxy-test",
+        // Keys come from the environment only; `PATH` is set wherever
+        // tests run, and the scripted client never sends it.
+        "endpoints.proxy.api_key_env=PATH",
     ]
     .map(str::to_string)
     .to_vec()
@@ -120,10 +126,22 @@ async fn the_picker_switches_the_live_model_and_the_next_turn_uses_it() {
     let binding = meta.auth_binding.expect("the proxy's binding");
     assert_eq!(binding.realm.as_str(), ENDPOINT_REALM);
     assert_eq!(binding.binding.as_str(), "proxy");
+    // The binding and the alias's profile live in the realm's own config
+    // document: another surface loading it resolves the session.
+    let document =
+        meerkat_core::FileConfigStore::new(realm.join("config.toml"), meerkat_models::canonical())
+            .get()
+            .await
+            .unwrap();
+    let target =
+        meerkat_core::connection::resolve_explicit_auth_binding_target(&document, &binding)
+            .unwrap();
     assert_eq!(
-        load_choice(&realm, &id.to_string()),
-        Some(EndpointRef::new("proxy", "my-alias"))
+        target.backend.base_url.as_deref(),
+        Some("http://127.0.0.1:9")
     );
+    let profile = &document.models.custom["my-alias"];
+    assert_eq!(profile.context_window, Some(50_000));
 
     // The UI's cost totals land in the sidecar.
     let mut cost = SessionCost::default();
@@ -164,10 +182,6 @@ async fn the_picker_switches_the_live_model_and_the_next_turn_uses_it() {
     assert_eq!(llm.recorded()[1].model, "claude-opus-4-8");
     let meta = rig.session(&id).await.session_metadata().unwrap();
     assert!(meta.auth_binding.is_none(), "{meta:?}");
-    assert_eq!(
-        load_choice(&realm, &id.to_string()),
-        Some(EndpointRef::new("anthropic", "claude-opus-4-8"))
-    );
     rig.quit().await;
 }
 

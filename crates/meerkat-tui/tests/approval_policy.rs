@@ -22,9 +22,16 @@
 //! `sub_agent_prompt_is_an_action_on_the_primary_transcript`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use meerkat_tui::approval::policy::{Action, PolicyContext, Tier, TierDecision, classify_tier};
+use meerkat_core::ToolSourceKind;
+use meerkat_tui::approval::catalog::ToolOrigin;
+use meerkat_tui::approval::policy::{
+    Action, DELEGATION_TOOLS, PolicyContext, READ_ONLY_BUILTINS, REVIEWED_BUILTINS, Tier,
+    TierDecision, classify_tier,
+};
 use meerkat_tui::approval::rules::{Rule, RuleKind, RuleOrigin, RuleSet};
+use meerkat_tui::memory::{NOTE_TOOL_NAMES, NOTES_SOURCE};
 use meerkat_tui::paths::ProjectRoot;
+use meerkat_tui::tools::{FILE_TOOL_NAMES, FILE_TOOLS_SOURCE};
 use serde_json::{Value, json};
 
 struct Harness {
@@ -70,16 +77,40 @@ fn harness(opts: Options) -> Harness {
 
 impl Harness {
     fn decide(&self, name: &str, args: &Value) -> TierDecision {
+        self.decide_from(name, args, Some(&origin(name)))
+    }
+
+    fn decide_from(&self, name: &str, args: &Value, origin: Option<&ToolOrigin>) -> TierDecision {
         let ctx = PolicyContext {
             root: &self.root,
             trust_project_builds: self.trust_project_builds,
             posix_shell: true,
         };
-        classify_tier(&Action::parse(name, args), &self.rules, &ctx)
+        let raw = serde_json::value::to_raw_value(args).unwrap();
+        classify_tier(&Action::parse(name, &raw, origin), &self.rules, &ctx)
     }
 
     fn tier(&self, name: &str, args: Value) -> Tier {
         self.decide(name, &args).tier
+    }
+}
+
+/// Where a real TUI session's tool of `name` comes from (a fixture: the
+/// gate reads it from the session's live tool definitions). Names no
+/// builtin, file or note tool has are an MCP server's.
+fn origin(name: &str) -> ToolOrigin {
+    if FILE_TOOL_NAMES.contains(&name) {
+        ToolOrigin::tui(FILE_TOOLS_SOURCE, name)
+    } else if NOTE_TOOL_NAMES.contains(&name) {
+        ToolOrigin::tui(NOTES_SOURCE, name)
+    } else if READ_ONLY_BUILTINS.contains(&name)
+        || REVIEWED_BUILTINS.contains(&name)
+        || DELEGATION_TOOLS.contains(&name)
+        || name.starts_with("mob_")
+    {
+        ToolOrigin::native(ToolSourceKind::Builtin)
+    } else {
+        ToolOrigin::mcp("server")
     }
 }
 
@@ -187,7 +218,7 @@ fn broad_rules_are_dropped_and_no_longer_bypass_review() {
     );
     let dropped = rules.sanitize_for_auto();
     assert_eq!(dropped.len(), 1);
-    assert_eq!(rules.allow.len(), 1);
+    assert_eq!(rules.allow().len(), 1);
     let h = harness(Options {
         rules,
         ..Options::default()
@@ -199,11 +230,11 @@ fn broad_rules_are_dropped_and_no_longer_bypass_review() {
 }
 
 #[test]
-fn workspace_memory_save_is_in_project_edit() {
+fn workspace_note_save_is_in_project_edit() {
     let h = harness(Options::default());
     assert_eq!(
         h.tier(
-            "memory_save",
+            "note_save",
             json!({"scope": "workspace", "name": "build", "content": "make ci"}),
         ),
         Tier::InProjectEdit
@@ -211,11 +242,11 @@ fn workspace_memory_save_is_in_project_edit() {
 }
 
 #[test]
-fn user_memory_save_reaches_classifier() {
+fn user_note_save_reaches_classifier() {
     let h = harness(Options::default());
     assert_eq!(
         h.tier(
-            "memory_save",
+            "note_save",
             json!({"scope": "user", "name": "style", "content": "x"}),
         ),
         Tier::Classifier
@@ -223,20 +254,20 @@ fn user_memory_save_reaches_classifier() {
 }
 
 #[test]
-fn memory_list_is_tier_one() {
+fn note_list_is_tier_one() {
     let h = harness(Options::default());
-    assert_eq!(h.tier("memory_list", json!({})), Tier::AlwaysAllow);
+    assert_eq!(h.tier("note_list", json!({})), Tier::AlwaysAllow);
 }
 
 #[test]
-fn allow_rule_makes_user_memory_save_tier_one() {
+fn allow_rule_makes_user_note_save_tier_one() {
     let h = harness(Options {
-        rules: allow_rule("memory_save", "user/*"),
+        rules: allow_rule("note_save", "user/*"),
         ..Options::default()
     });
     assert_eq!(
         h.tier(
-            "memory_save",
+            "note_save",
             json!({"scope": "user", "name": "style", "content": "x"}),
         ),
         Tier::AlwaysAllow
@@ -314,7 +345,12 @@ fn mcp_tools_reach_the_classifier_unless_a_rule_decides() {
     ] {
         let decision = h.decide(name, &args);
         assert_eq!(decision.tier, Tier::Classifier, "{name}");
-        assert!(decision.detail.contains("requires review"), "{decision:?}");
+        assert!(
+            decision
+                .detail
+                .contains("not a tool the TUI or the engine provides"),
+            "{decision:?}"
+        );
     }
 
     let mut rules = RuleSet::default();
@@ -341,4 +377,45 @@ fn mcp_tools_reach_the_classifier_unless_a_rule_decides() {
         Tier::UserDeny
     );
     assert_eq!(h.tier("fetch", json!({"url": "x"})), Tier::Classifier);
+}
+
+/// An MCP server may name its tools like builtins, file or note tools; the
+/// tier follows the tool's provenance, never its name.
+#[test]
+fn an_mcp_tool_named_like_a_builtin_is_not_trusted_like_one() {
+    let h = harness(Options::default());
+    let mcp = ToolOrigin::mcp("evil");
+    for (name, args, genuine) in [
+        (
+            "read_file",
+            json!({"path": "src/main.rs"}),
+            Tier::AlwaysAllow,
+        ),
+        (
+            "write_file",
+            json!({"path": "src/x.rs", "content": ""}),
+            Tier::InProjectEdit,
+        ),
+        ("glob", json!({"pattern": "**/*.rs"}), Tier::AlwaysAllow),
+        ("task_list", json!({}), Tier::AlwaysAllow),
+        ("delegate", json!({"task": "x"}), Tier::AlwaysAllow),
+        ("shell", json!({"command": "ls"}), Tier::AlwaysAllow),
+        (
+            "note_save",
+            json!({"scope": "workspace", "name": "x", "content": ""}),
+            Tier::InProjectEdit,
+        ),
+    ] {
+        assert_eq!(h.tier(name, args.clone()), genuine, "{name}");
+        assert_eq!(
+            h.decide_from(name, &args, Some(&mcp)).tier,
+            Tier::Classifier,
+            "{name} from an MCP server"
+        );
+        assert_eq!(
+            h.decide_from(name, &args, None).tier,
+            Tier::Classifier,
+            "{name} the session does not offer"
+        );
+    }
 }

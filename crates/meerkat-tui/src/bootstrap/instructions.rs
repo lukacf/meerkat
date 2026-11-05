@@ -348,6 +348,7 @@ mod tests {
         write(&ws.join(LOCAL_FILE_NAME), "local rules\n");
         let global = GlobalDirs {
             config: base.join("config"),
+            cache: base.join("cache"),
         };
         write(&global.agents_md(), "global rules\n");
         Tree {

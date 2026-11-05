@@ -21,9 +21,9 @@ use meerkat_core::{
 use meerkat_tui::Args;
 use meerkat_tui::approval::ApprovalEngine;
 use meerkat_tui::bootstrap::{self, ApprovalOverrides, BootstrapOptions, HostPaths, TuiService};
+use meerkat_tui::harness::{RunnerHarness, SavedUnsent, spawn_runner};
 use meerkat_tui::models::{EndpointListing, ModelLister};
 use meerkat_tui::runner::Start;
-use meerkat_tui::runner::testing::{RunnerHarness, SavedUnsent, spawn_runner};
 use meerkat_tui::ui::{Effect, Msg, TurnOutcome};
 use parking_lot::Mutex;
 use serde_json::Value;

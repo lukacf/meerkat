@@ -1,7 +1,10 @@
 //! `grep`: gitignore-aware regex search over file contents.
 
 use super::glob::{search_root, walker};
-use super::{GREP, Shared, ToolFailure, ToolOutcome, looks_binary, truncate_line};
+use super::{
+    CallMeta, GREP, MAX_FILE_READ_BYTES, ReadRefusal, Shared, ToolFailure, ToolOutcome,
+    looks_binary, read_capped, truncate_line,
+};
 use globset::Glob;
 use meerkat_core::ToolDef;
 use regex::RegexBuilder;
@@ -63,9 +66,11 @@ pub(crate) fn definition() -> ToolDef {
         GREP,
         format!(
             "Search file contents with a regular expression. Respects .gitignore and skips \
-             binary files. output_mode selects file paths (default), matching lines, or \
+             binary and non-regular files; only the first {} MiB of a file are searched. \
+             output_mode selects file paths (default), matching lines, or \
              per-file counts. Output is capped at {DEFAULT_HEAD_LIMIT} lines by default \
              (head_limit) and {} KiB.",
+            MAX_FILE_READ_BYTES / (1024 * 1024),
             MAX_OUTPUT_BYTES / 1024
         ),
         meerkat_tools::schema_for::<GrepArgs>(),
@@ -103,7 +108,7 @@ impl Output {
     }
 }
 
-pub(crate) fn run(shared: &Shared, _id: String, args: GrepArgs) -> ToolOutcome {
+pub(crate) fn run(shared: &Shared, _call: CallMeta, args: GrepArgs) -> ToolOutcome {
     let regex = RegexBuilder::new(&args.pattern)
         .case_insensitive(args.case_insensitive)
         .build()
@@ -118,6 +123,14 @@ pub(crate) fn run(shared: &Shared, _id: String, args: GrepArgs) -> ToolOutcome {
         })
         .transpose()?;
     let root = search_root(shared, GREP, args.path.as_deref())?;
+    // An explicit target that is neither a directory nor a regular file (a
+    // FIFO, socket or device) is refused rather than silently skipped.
+    let root_meta = std::fs::metadata(&root)
+        .map_err(|err| ToolFailure::io("search", &shared.display_abs(&root), &err))?;
+    if !root_meta.is_dir() && !root_meta.is_file() {
+        return Err(ReadRefusal::NotRegular(root_meta.file_type())
+            .into_failure("search", &shared.display_abs(&root)));
+    }
     let context = args.context.unwrap_or(0) as usize;
     let mut out = Output::new(args.head_limit.unwrap_or(DEFAULT_HEAD_LIMIT).max(1));
     let mut any = false;
@@ -136,9 +149,12 @@ pub(crate) fn run(shared: &Shared, _id: String, args: GrepArgs) -> ToolOutcome {
                 continue;
             }
         }
-        let Ok(bytes) = std::fs::read(path) else {
+        // `read_capped` re-checks the path (an entry's type comes from the
+        // directory listing) and never reads more than the cap.
+        let Ok(read) = read_capped(path, MAX_FILE_READ_BYTES) else {
             continue;
         };
+        let bytes = read.bytes;
         if looks_binary(&bytes) {
             continue;
         }

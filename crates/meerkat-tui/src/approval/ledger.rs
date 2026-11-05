@@ -1,20 +1,28 @@
 //! Durable record of human escalations.
 //!
 //! Every escalation the engine puts to the human is first requested from
-//! Meerkat's [`ApprovalService`] over a [`FileApprovalStore`]
-//! (`<realm>/tool-approvals.json`): owner = the session, resource = the tool
-//! call, risk by action kind, expiry = the escalation timeout. The human's
-//! answer (or a timeout, or the call being abandoned) decides the record.
+//! the realm's one approval issuer: the [`ApprovalService`] the persistence
+//! bundle opened over the realm's canonical `approvals.json`
+//! (`PersistenceBundle::approval_issuer`, selected once per host by
+//! `meerkat::ApprovalIssuerSelection`; the TUI never opens a second owner
+//! of that file). Owner = the session, resource = the tool call, requester
+//! = the TUI's gate, risk by action kind, expiry = the escalation timeout.
+//! The human's answer (or a timeout, or the call being abandoned) decides
+//! the record.
 //!
 //! A record never authorizes anything by itself: only the exact waiting
 //! dispatch consumes the human's answer. A process that ends while a record
-//! is pending cannot resume that dispatch, so [`EscalationLedger::open`]
-//! denies every record still pending from an earlier process.
+//! is pending cannot resume that dispatch, so when this process opens a
+//! session, [`EscalationLedger::deny_leftovers`] denies that session's
+//! records the TUI's gate left pending, and nothing else in the realm.
+//!
+//! The engine fails closed on the ledger: an escalation whose request
+//! cannot be recorded, or whose answer cannot be recorded, is a denial.
 //!
 //! "Allow always" rules do not live here: they go to the realm rules file
 //! (`tui.toml`), as before.
 
-use std::path::Path;
+
 use std::time::{Duration, SystemTime};
 
 use meerkat_core::{
@@ -23,13 +31,9 @@ use meerkat_core::{
     ApprovalResourceId, ApprovalResourceKind, ApprovalResourceRef, ApprovalRisk, ApprovalService,
     ApprovalStatus, SessionId, SurfaceMetadata,
 };
-use meerkat_store::FileApprovalStore;
 use serde_json::Value;
 
 use super::policy::{Action, ActionKind};
-
-/// File in the realm directory holding the escalation records.
-pub const LEDGER_FILE: &str = "tool-approvals.json";
 
 /// Principal that requests escalations (the TUI's approval gate).
 const REQUESTER: &str = "rkat-tui-approval-gate";
@@ -42,9 +46,6 @@ const RUNTIME: &str = "rkat-tui-runtime";
 /// Failures of the escalation ledger.
 #[derive(Debug, thiserror::Error)]
 pub enum LedgerError {
-    /// The store file could not be opened.
-    #[error("cannot open the approval ledger: {0}")]
-    Store(#[from] meerkat_core::ApprovalStoreError),
     /// The approval service refused an operation.
     #[error("approval ledger: {0}")]
     Service(#[from] meerkat_core::ApprovalError),
@@ -99,29 +100,41 @@ impl std::fmt::Debug for EscalationLedger {
 }
 
 impl EscalationLedger {
-    /// Open the ledger in `realm_root`, denying every record an earlier
-    /// process left pending.
+    /// The ledger over the realm's approval issuer.
+    #[must_use]
+    pub fn new(service: ApprovalService) -> Self {
+        Self { service }
+    }
+
+    /// Deny every record the TUI's gate left pending for `session_id` (an
+    /// earlier process ended before its human answered; the dispatch it
+    /// waited for is gone). Records of other sessions, and records other
+    /// requesters made, are left alone. Returns how many were denied.
     ///
     /// # Errors
     ///
-    /// [`LedgerError`] when the store cannot be opened or read.
-    pub fn open(realm_root: &Path) -> Result<Self, LedgerError> {
-        let store = FileApprovalStore::open(realm_root.join(LEDGER_FILE))?;
-        let ledger = Self {
-            service: ApprovalService::with_store(std::sync::Arc::new(store))?,
-        };
-        let pending = ledger.service.list(ApprovalListFilter {
+    /// [`LedgerError`] when the records cannot be read or decided.
+    pub fn deny_leftovers(&self, session_id: &SessionId) -> Result<usize, LedgerError> {
+        let requester = ApprovalPrincipalId::new(REQUESTER)?;
+        let pending = self.service.list(ApprovalListFilter {
             status: Some(ApprovalStatus::Pending),
         })?;
+        let mut denied = 0;
         for record in pending {
-            ledger.decide(
+            let ours = record.requester == requester
+                && matches!(&record.owner, ApprovalOwnerRef::Session { session_id: owner } if owner == session_id);
+            if !ours {
+                continue;
+            }
+            self.decide(
                 &record.approval_id,
                 ApprovalDecision::Deny,
                 Decider::Runtime,
                 "rkat-tui ended before this request was answered; the tool call did not run",
             )?;
+            denied += 1;
         }
-        Ok(ledger)
+        Ok(denied)
     }
 
     /// A ledger kept in memory only (tests, or a realm without a directory).
@@ -138,6 +151,16 @@ impl EscalationLedger {
     ///
     /// [`LedgerError`] when the service refuses the request.
     pub fn request(&self, entry: EscalationEntry<'_>) -> Result<ApprovalId, LedgerError> {
+        self.submit(Self::prepare(entry)?)
+    }
+
+    /// The approval request for `entry` (no I/O: [`Self::submit`] it, off
+    /// the async executor when the store is a file).
+    ///
+    /// # Errors
+    ///
+    /// [`LedgerError`] when a principal id is invalid.
+    pub fn prepare(entry: EscalationEntry<'_>) -> Result<ApprovalRequest, LedgerError> {
         let (kind, risk) = classify(entry.action);
         let request = ApprovalRequest {
             requester: ApprovalPrincipalId::new(REQUESTER)?,
@@ -153,7 +176,8 @@ impl EscalationLedger {
                 summary: format!("Run {}", entry.action.name),
                 body: Some(serde_json::json!({
                     "tool": entry.action.name,
-                    "arguments": entry.action.args,
+                    "arguments": serde_json::from_str::<Value>(entry.action.args.get())
+                        .unwrap_or_else(|_| Value::String(entry.action.args.get().to_string())),
                 })),
             },
             risk,
@@ -165,6 +189,15 @@ impl EscalationLedger {
             metadata: SurfaceMetadata::default(),
             request_provenance: None,
         };
+        Ok(request)
+    }
+
+    /// Record a prepared request.
+    ///
+    /// # Errors
+    ///
+    /// [`LedgerError`] when the service refuses the request.
+    pub fn submit(&self, request: ApprovalRequest) -> Result<ApprovalId, LedgerError> {
         Ok(self.service.request(request)?.approval_id)
     }
 
@@ -216,25 +249,42 @@ fn classify(action: &Action<'_>) -> (ApprovalActionKind, ApprovalRisk) {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::approval::catalog::ToolOrigin;
+    use meerkat_core::ToolSourceKind;
     use serde_json::json;
+    use serde_json::value::RawValue;
+
+    fn raw(value: &Value) -> Box<RawValue> {
+        serde_json::value::to_raw_value(value).unwrap()
+    }
+
+    fn service(path: &std::path::Path) -> ApprovalService {
+        meerkat::ApprovalIssuerSelection::Persistent {
+            store_path: path.to_path_buf(),
+        }
+        .open()
+    }
 
     #[test]
-    fn records_requests_and_decisions_and_denies_leftovers_on_open() {
+    fn records_requests_and_decisions_and_denies_only_its_own_leftovers() {
         let dir = tempfile::tempdir().unwrap();
         let session = SessionId::new();
-        let args = json!({"command": "git push --force"});
-        let action = Action::parse("shell", &args);
-        let entry = |id| EscalationEntry {
-            session_id: &session,
+        let other_session = SessionId::new();
+        let args = raw(&json!({"command": "git push --force"}));
+        let origin = ToolOrigin::native(ToolSourceKind::Shell);
+        let action = Action::parse("shell", &args, Some(&origin));
+        let entry = |session_id, id| EscalationEntry {
+            session_id,
             tool_use_id: id,
             action: &action,
             timeout: Duration::from_mins(5),
             hint: Some("classifier: BLOCK [D2]"),
         };
 
-        let ledger = EscalationLedger::open(dir.path()).unwrap();
-        let answered = ledger.request(entry("call_1")).unwrap();
-        let left = ledger.request(entry("call_2")).unwrap();
+        let ledger = EscalationLedger::new(service(dir.path()));
+        let answered = ledger.request(entry(&session, "call_1")).unwrap();
+        let left = ledger.request(entry(&session, "call_2")).unwrap();
+        let elsewhere = ledger.request(entry(&other_session, "call_3")).unwrap();
         let record = ledger
             .decide(
                 &answered,
@@ -246,16 +296,42 @@ mod tests {
         assert_eq!(record.status, ApprovalStatus::Approved);
         assert_eq!(record.risk, ApprovalRisk::High);
         assert!(record.expires_at.is_some());
-        assert!(matches!(
-            &record.owner,
-            ApprovalOwnerRef::Session { session_id } if session_id == &session
-        ));
         drop(ledger);
 
-        // A new process: the record left pending is denied, the decided one kept.
-        let reopened = EscalationLedger::open(dir.path()).unwrap();
+        // A record another requester (another host) left pending in the realm.
+        let service = service(dir.path());
+        let foreign = service
+            .request(ApprovalRequest {
+                requester: ApprovalPrincipalId::new("some-other-host").unwrap(),
+                owner: ApprovalOwnerRef::Session {
+                    session_id: session.clone(),
+                },
+                resource: ApprovalResourceRef {
+                    kind: ApprovalResourceKind::ToolCall,
+                    id: ApprovalResourceId::new("call_9"),
+                },
+                proposed_action: ApprovalProposedAction {
+                    kind: ApprovalActionKind::ToolCall,
+                    summary: "x".into(),
+                    body: None,
+                },
+                risk: ApprovalRisk::Low,
+                request_body: None,
+                allowed_decisions: [ApprovalDecision::Approve, ApprovalDecision::Deny]
+                    .into_iter()
+                    .collect(),
+                expires_at: None,
+                metadata: SurfaceMetadata::default(),
+                request_provenance: None,
+            })
+            .unwrap()
+            .approval_id;
+
+        // A new process opens `session`: only its own gate's leftover is denied.
+        let reopened = EscalationLedger::new(service);
+        assert_eq!(reopened.deny_leftovers(&session).unwrap(), 1);
+        assert_eq!(reopened.deny_leftovers(&session).unwrap(), 0);
         let records = reopened.records().unwrap();
-        assert_eq!(records.len(), 2);
         let status = |id: &ApprovalId| {
             records
                 .iter()
@@ -264,12 +340,18 @@ mod tests {
         };
         assert_eq!(status(&answered), Some(ApprovalStatus::Approved));
         assert_eq!(status(&left), Some(ApprovalStatus::Denied));
+        assert_eq!(status(&elsewhere), Some(ApprovalStatus::Pending));
+        assert_eq!(status(&foreign), Some(ApprovalStatus::Pending));
+        // The records live in the realm's canonical approval store.
+        assert!(dir.path().join("approvals.json").exists());
+        assert!(!dir.path().join("tool-approvals.json").exists());
     }
 
     #[test]
     fn writes_are_medium_risk() {
-        let args = json!({"path": "/etc/hosts", "content": "x"});
-        let (kind, risk) = classify(&Action::parse("write_file", &args));
+        let args = raw(&json!({"path": "/etc/hosts", "content": "x"}));
+        let origin = ToolOrigin::tui(crate::tools::FILE_TOOLS_SOURCE, "write_file");
+        let (kind, risk) = classify(&Action::parse("write_file", &args, Some(&origin)));
         assert_eq!(
             (kind, risk),
             (ApprovalActionKind::FileWrite, ApprovalRisk::Medium)

@@ -1,10 +1,13 @@
 //! The approval engine every session's gate shares.
 //!
-//! [`build`] layers `tui.toml` (global → realm → command line → project,
-//! the realm layer trusted only when git does not track it), reads the
-//! environment facts, builds the classifier, opens the escalation ledger
-//! (`<realm>/tool-approvals.json`) and the escalation broker, and returns
-//! the engine with the channels the runner serves.
+//! [`load_layers`] layers `tui.toml` (global → realm → command line →
+//! project; the realm layer is fully applied only when the host trust
+//! record says rkat-tui wrote it or the user trusted it, see
+//! [`crate::approval::trust`]). [`build`] reads the environment facts,
+//! builds the classifier, records escalations through the realm's one
+//! approval issuer (the persistence bundle's `approvals.json` owner) and
+//! opens the escalation broker, and returns the engine with the channels
+//! the runner serves.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -21,7 +24,8 @@ use crate::approval::engine::DEFAULT_ESCALATION_TIMEOUT;
 use crate::approval::escalation::{EscalationBroker, EscalationRequest};
 use crate::approval::ledger::EscalationLedger;
 use crate::approval::rules::{self, AutoSettings, RULES_FILE_NAME, RealmTrust};
-use crate::approval::{ApprovalConfig, ApprovalEngine, ApprovalEvent, git_index};
+use crate::approval::trust::HostTrustRecord;
+use crate::approval::{ApprovalConfig, ApprovalEngine, ApprovalEvent};
 use crate::cli::Args;
 use crate::error::TuiError;
 use crate::overlay::ConfigOverlay;
@@ -53,6 +57,11 @@ pub struct ApprovalParts {
     pub events: Option<mpsc::UnboundedReceiver<ApprovalEvent>>,
     /// Observations from loading the rules, shown once.
     pub notices: Vec<String>,
+    /// The host trust record of this workspace and realm (`/rules trust`,
+    /// and the project MCP config's opt-in).
+    pub trust: Arc<parking_lot::Mutex<HostTrustRecord>>,
+    /// The realm rules file.
+    pub realm_rules: std::path::PathBuf,
 }
 
 impl std::fmt::Debug for ApprovalParts {
@@ -95,20 +104,7 @@ pub(crate) fn load_layers(
     let realm_dir = scope.realm_root();
     let realm_rules = realm_dir.join(RULES_FILE_NAME);
     let mut notices = Vec::new();
-    let realm_trust = match git_index::is_tracked(&scope.context_root, &realm_rules) {
-        Ok(false) => RealmTrust::Owned,
-        Ok(true) => RealmTrust::Tracked,
-        Err(reason) => {
-            notices.push(
-                rules::Notice::RealmTrackingUnknown {
-                    path: realm_rules.clone(),
-                    reason,
-                }
-                .to_string(),
-            );
-            RealmTrust::Tracked
-        }
-    };
+    let realm_trust = RealmTrust::from_status(trust_record(scope).check(&realm_rules));
     let global_rules = scope.global.as_ref().map(super::GlobalDirs::rules_file);
     let layered = rules::load_layered_with(
         &realm_dir,
@@ -128,17 +124,30 @@ pub(crate) fn load_layers(
     Ok((layered, notices))
 }
 
+/// The host trust record of `scope`'s workspace and realm (in memory when
+/// there is no user config directory: nothing is trusted across runs).
+#[must_use]
+pub fn trust_record(scope: &RuntimeScope) -> HostTrustRecord {
+    match &scope.global {
+        Some(global) => HostTrustRecord::open(&global.config, &scope.context_root, &scope.realm_id),
+        None => HostTrustRecord::in_memory(&scope.context_root),
+    }
+}
+
 /// Build the approval engine for `scope` from the loaded `layered` rules.
+/// Escalations are recorded through `issuer`, the realm's one approval
+/// issuer (`PersistenceBundle::approval_issuer`).
 ///
 /// # Errors
 ///
-/// [`TuiError::Approval`] when the escalation ledger cannot be opened.
+/// [`TuiError::Io`] when the current directory cannot be read.
 pub(crate) async fn build(
     scope: &RuntimeScope,
     layered: rules::Layered,
     mut notices: Vec<String>,
     source: ClassifierSource<'_>,
     overrides: &ApprovalOverrides,
+    issuer: meerkat_core::ApprovalService,
 ) -> Result<ApprovalParts, TuiError> {
     let realm_dir = scope.realm_root();
     let realm_rules = realm_dir.join(RULES_FILE_NAME);
@@ -160,8 +169,8 @@ pub(crate) async fn build(
             classifier
         }
     };
-    let ledger =
-        EscalationLedger::open(&realm_dir).map_err(crate::approval::ApprovalError::from)?;
+    let ledger = EscalationLedger::new(issuer);
+    let trust = Arc::new(parking_lot::Mutex::new(trust_record(scope)));
     let engine = ApprovalEngine::new(ApprovalConfig {
         root: scope.project_root.clone(),
         rules: layered.rules,
@@ -175,13 +184,16 @@ pub(crate) async fn build(
         environment,
         posix_shell: shell_is_posix(),
         events: events_tx,
-        rules_path: Some(realm_rules),
+        rules_path: Some(realm_rules.clone()),
+        rules_trust: Some(Arc::clone(&trust)),
     });
     Ok(ApprovalParts {
         engine,
         escalations: Some(escalations),
         events: Some(events_rx),
         notices,
+        trust,
+        realm_rules,
     })
 }
 

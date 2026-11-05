@@ -27,6 +27,9 @@ pub enum RulesCommand {
     },
     /// Remove rule number `n` (as shown by `/rules list`).
     Remove(usize),
+    /// Trust the realm `tui.toml` as it is now (its summary is shown and its
+    /// digest recorded in the host trust record).
+    Trust,
 }
 
 /// `/auto` subcommands.
@@ -81,6 +84,9 @@ pub enum Command {
     },
     /// `/cost`: the session's token cost by model.
     Cost,
+    /// `/mcp trust`: trust the project `.rkat/mcp.toml` as it is now; its
+    /// servers start from the next session.
+    McpTrust,
 }
 
 /// Slash-command parse failure.
@@ -101,7 +107,7 @@ impl fmt::Display for CommandError {
     }
 }
 
-const RULES_USAGE: &str = "/rules [list | add allow|deny <tool> [pattern] | rm <n>]";
+const RULES_USAGE: &str = "/rules [list | add allow|deny <tool> [pattern] | rm <n> | trust]";
 const AUTO_USAGE: &str = "/auto [on | off | resume]";
 
 /// Help text shown by `/help`: every slash command and key binding.
@@ -115,6 +121,9 @@ Commands:
   /rules add allow|deny <tool> [pattern]
                                  add an approval rule
   /rules rm <n>                  remove rule n
+  /rules trust                   show the realm tui.toml and trust it as it is now
+  /mcp trust                     trust the project .rkat/mcp.toml as it is now (its servers
+                                 start from the next session)
   /auto                          show auto-mode state and denial counters
   /auto on|off|resume            enable, disable, or resume auto mode after a pause
   /model                         pick a model from every endpoint's list (type to filter)
@@ -125,7 +134,7 @@ Commands:
   /compact                       show the compaction policy (tui.toml [auto] compact =
                                  \"warn\" (default) warns at 75% and 85%; \"auto\" or
                                  --auto-compact lets the runtime compact at 85%)
-  /compact now                   compact before the next turn's first model call (idle only)
+  /compact now                   rebuild the session so its next model call compacts (idle only)
   /cost                          token usage and cost per model (footer: $0.42, ~ estimate, $? unpriced)
 Keys:
   Enter                          send; while the agent is working, queues the message
@@ -227,6 +236,10 @@ fn parse_command(name: &str, args: &[&str]) -> Result<Command, CommandError> {
             _ => Err(CommandError::Usage(AUTO_USAGE)),
         },
         "rules" => parse_rules(args).map(Command::Rules),
+        "mcp" => match args {
+            ["trust"] => Ok(Command::McpTrust),
+            _ => Err(CommandError::Usage("/mcp trust")),
+        },
         other => Err(CommandError::Unknown(other.to_string())),
     }
 }
@@ -247,6 +260,7 @@ fn parse_rules(args: &[&str]) -> Result<RulesCommand, CommandError> {
                 pattern,
             })
         }
+        ["trust"] => Ok(RulesCommand::Trust),
         ["rm" | "remove", n] => n
             .parse::<usize>()
             .map(RulesCommand::Remove)
@@ -357,6 +371,9 @@ mod tests {
             })
         );
         assert_eq!(ok("/rules rm 3"), Command::Rules(RulesCommand::Remove(3)));
+        assert_eq!(ok("/rules trust"), Command::Rules(RulesCommand::Trust));
+        assert_eq!(ok("/mcp trust"), Command::McpTrust);
+        assert!(parse("/mcp").is_some_and(|r| r.is_err()));
         assert!(matches!(
             parse("/rules rm x"),
             Some(Err(CommandError::Usage(_)))

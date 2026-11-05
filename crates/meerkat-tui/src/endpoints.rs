@@ -2,21 +2,16 @@
 //! from `tui.toml` (e.g. a LiteLLM proxy), and `endpoint:model` references.
 //!
 //! An [`Endpoint`] is a named place to send requests in one of Meerkat's
-//! client [`Dialect`]s. The built-in `anthropic`, `openai` and `gemini`
+//! client [`WireDialect`]s. The built-in `anthropic`, `openai` and `gemini`
 //! endpoints exist when the realm config or the environment has a key for
 //! them; configured endpoints come from the layered `tui.toml`.
-//!
-//! The endpoint/model choice of every session is kept in a small sidecar file
-//! (see [`save_choice`]) together with its per-model token totals: Meerkat
-//! persists the session's model and auth binding, but not which TUI endpoint
-//! name it was picked from, nor the totals by model.
 //!
 //! # How an endpoint reaches the engine
 //!
 //! Sessions are built and hot-swapped by the factory, which resolves every
-//! LLM client from the effective realm config. The TUI therefore lowers its
-//! endpoints into an in-memory layer over the realm config ([`lower_into`];
-//! never written to a realm document):
+//! LLM client from the realm config. The TUI therefore projects its
+//! endpoints into the realm's own config document, through the config
+//! owner ([`meerkat_core::FileConfigStore`], see [`project_endpoints`]):
 //!
 //! - **Built-in endpoints** (`anthropic`, `openai`, `gemini`) add nothing:
 //!   sessions on them resolve their credentials exactly as `rkat` does (the
@@ -24,14 +19,19 @@
 //!   switch back to one clears any explicit auth binding.
 //! - **Configured endpoints of every dialect** (a LiteLLM or vLLM proxy in the
 //!   OpenAI dialect, an Anthropic- or Gemini-dialect gateway) become one
-//!   realm connection each in the synthetic realm [`ENDPOINT_REALM`]: a
-//!   backend profile of the dialect's provider with the endpoint's
-//!   `base_url`, an auth profile reading `api_key_env` (or the inline
-//!   `api_key`), and a binding. A session on such an endpoint carries the
-//!   explicit [`AuthBindingRef`] ([`Endpoint::binding`]), so the provider's
-//!   own client (Anthropic Messages, OpenAI Responses, Gemini
-//!   `generateContent`) talks to the endpoint's URL with its key. The realm is
-//!   not on any session's chain, so it never changes the default resolution
+//!   connection each in the realm section [`ENDPOINT_REALM`] of the realm's
+//!   `config.toml`: a backend profile of the dialect's provider with the
+//!   endpoint's `base_url`, an auth profile reading the environment
+//!   variable `api_key_env` names (the document records the variable's
+//!   name, never a key), and a binding. Keys come from the environment
+//!   only: an inline `api_key` is refused at start-up
+//!   ([`EndpointError::InlineApiKey`]). A session on such an endpoint carries
+//!   the explicit [`AuthBindingRef`] ([`Endpoint::binding`]), so the
+//!   provider's own client (Anthropic Messages, OpenAI Responses, Gemini
+//!   `generateContent`) talks to the endpoint's URL with its key. Because the
+//!   entries live in the realm document, `rkat`, REST and RPC resolve a TUI
+//!   session's binding too. No session's realm chain names
+//!   [`ENDPOINT_REALM`], so the section never changes the default resolution
 //!   of the built-in providers.
 //!
 //! Upstream's `self_hosted` servers were considered for the OpenAI dialect
@@ -44,45 +44,51 @@
 //! transport at all.
 //!
 //! Model ids no capability profile covers (a proxy alias, a model newer than
-//! the catalog) get a `[models.<id>]` entry in the same layer
+//! the catalog) get a `[models.<id>]` entry in the same document
 //! ([`ensure_model_profile`]), built from what the endpoint reported (context
 //! window, output limit); nothing is added to the `meerkat-models` catalog.
+//! One `[models.<id>]` entry names one provider, so the same unknown model
+//! id on endpoints of different dialects is refused
+//! ([`EndpointError::DialectConflict`]).
+//!
+//! Which endpoint a session runs on is derived from its persisted identity
+//! ([`endpoint_of`]): the binding names a configured endpoint, else the
+//! provider names its built-in endpoint.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use meerkat_core::auth::{AuthConstraints, AuthMetadataDefaults};
-use meerkat_core::config::CustomModelConfig;
+use meerkat_core::config::{ConfigError, CustomModelConfig};
 use meerkat_core::connection::{
-    CredentialSourceSpec, RealmConfigSection, RealmConnectionSet, RealmId,
+    CredentialSourceSpec, IdentityError, RealmConfigSection, RealmConnectionSet, RealmId,
 };
 use meerkat_core::{
     AuthBindingRef, AuthProfileConfig, BackendProfileConfig, BindingId, BindingOrigin,
-    BindingPolicy, Config, Provider, ProviderBindingConfig,
+    BindingPolicy, Config, ConfigDelta, ConfigStore, Provider, ProviderBindingConfig,
 };
-use serde::{Deserialize, Serialize};
 
 use crate::approval::rules::{EndpointSection, LayeredEndpoint, Notice, RuleOrigin};
+/// The per-session cost record moved to [`crate::runner::cost_store`];
+/// re-exported here for existing callers.
+pub use crate::runner::cost_store::load_cost;
 use crate::bootstrap::credentials::{ProviderCredentials, resolve_builtin};
-use crate::error::TuiError;
 use crate::models::ModelEntry;
-use crate::ui::cost::{SessionCost, UsageTotals};
-use indexmap::IndexMap;
 
 /// Names of the built-in endpoints, in display order.
 pub const BUILTIN_NAMES: [&str; 3] = ["anthropic", "openai", "gemini"];
 
-/// Directory (inside the realm root) of the per-session endpoint sidecars.
-const CHOICE_DIR: &str = "tui_endpoints";
-
-/// The synthetic realm holding one connection per configured endpoint (see
-/// the module docs). Lives only in the TUI's in-memory config layer.
+/// The realm section holding one connection per configured endpoint (see
+/// the module docs), written into the realm's own config document.
 pub const ENDPOINT_REALM: &str = "rkat-tui-endpoints";
 
-/// The wire protocol an endpoint speaks (one of Meerkat's LLM clients).
+/// The wire protocol an endpoint speaks: which of Meerkat's LLM clients
+/// talks to it. A proxy (LiteLLM, vLLM, a gateway) speaks one of these
+/// protocols whatever models it routes to, so a dialect names a protocol,
+/// not who serves the model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Dialect {
+pub enum WireDialect {
     /// Anthropic Messages API.
     Anthropic,
     /// OpenAI Responses API (`/v1/responses`); also LiteLLM and other proxies.
@@ -91,7 +97,7 @@ pub enum Dialect {
     Gemini,
 }
 
-impl Dialect {
+impl WireDialect {
     /// Every dialect, in display order.
     pub const ALL: [Self; 3] = [Self::Anthropic, Self::OpenAi, Self::Gemini];
 
@@ -111,7 +117,7 @@ impl Dialect {
         Self::ALL.into_iter().find(|d| d.as_str() == name)
     }
 
-    /// The dialect of a concrete provider.
+    /// The dialect of a concrete provider's client.
     #[must_use]
     pub fn from_provider(provider: Provider) -> Option<Self> {
         match provider {
@@ -122,37 +128,26 @@ impl Dialect {
         }
     }
 
-    /// Infer the dialect from a model id prefix: `claude-*` → Anthropic,
-    /// `gpt-*`, `chatgpt-*`, `o<digit>*` → OpenAI, `gemini-*` → Gemini.
+    /// The dialect of a catalogued model's provider
+    /// ([`meerkat_models::infer_provider`]: exact catalog ids only, never a
+    /// name prefix).
     #[must_use]
-    pub fn infer_from_model(model: &str) -> Option<Self> {
-        let lower = model.to_ascii_lowercase();
-        if lower.starts_with("claude-") {
-            Some(Self::Anthropic)
-        } else if lower.starts_with("gpt-")
-            || lower.starts_with("chatgpt-")
-            || (lower.starts_with('o') && lower[1..].starts_with(|c: char| c.is_ascii_digit()))
-        {
-            Some(Self::OpenAi)
-        } else if lower.starts_with("gemini-") {
-            Some(Self::Gemini)
-        } else {
-            None
-        }
+    pub fn of_catalog_model(model: &str) -> Option<Self> {
+        meerkat_models::infer_provider(model).and_then(Self::from_provider)
     }
 }
 
-impl From<Dialect> for Provider {
-    fn from(dialect: Dialect) -> Self {
+impl From<WireDialect> for Provider {
+    fn from(dialect: WireDialect) -> Self {
         match dialect {
-            Dialect::Anthropic => Self::Anthropic,
-            Dialect::OpenAi => Self::OpenAI,
-            Dialect::Gemini => Self::Gemini,
+            WireDialect::Anthropic => Self::Anthropic,
+            WireDialect::OpenAi => Self::OpenAI,
+            WireDialect::Gemini => Self::Gemini,
         }
     }
 }
 
-impl fmt::Display for Dialect {
+impl fmt::Display for WireDialect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
@@ -169,10 +164,17 @@ impl SecretString {
         Self(secret.into())
     }
 
-    /// The secret itself; only for request headers and client construction.
+    /// The secret itself; only for request headers, client construction and
+    /// the realm document's inline credential source.
     #[must_use]
     pub fn expose(&self) -> &str {
         &self.0
+    }
+
+    /// Whether the secret is empty or blank.
+    #[must_use]
+    pub fn is_blank(&self) -> bool {
+        self.0.trim().is_empty()
     }
 }
 
@@ -182,19 +184,43 @@ impl fmt::Debug for SecretString {
     }
 }
 
+/// The name of an endpoint (`anthropic`, `litellm`, …).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EndpointName(String);
+
+impl EndpointName {
+    /// Wrap a name.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    /// The name.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for EndpointName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// One place to send LLM requests.
 #[derive(Debug, Clone)]
 pub struct Endpoint {
     /// Unique name (`anthropic`, `litellm`, …); the `endpoint` of `endpoint:model`.
     pub name: String,
     /// Protocol the endpoint speaks.
-    pub dialect: Dialect,
+    pub dialect: WireDialect,
     /// Base URL override; `None` uses the dialect's public API.
     pub base_url: Option<String>,
     /// API key.
     pub api_key: SecretString,
-    /// The environment variable the key came from (`api_key_env`), so the
-    /// engine reads it there instead of from an inline copy.
+    /// The environment variable the key came from (`api_key_env`), which
+    /// the realm document's auth profile names; `None` only for a built-in
+    /// endpoint.
     pub key_env: Option<String>,
     /// Whether this is one of the built-in provider endpoints.
     pub builtin: bool,
@@ -209,7 +235,7 @@ impl Endpoint {
     pub fn credentials(&self) -> ProviderCredentials {
         ProviderCredentials {
             provider: self.dialect.into(),
-            api_key: self.api_key.expose().to_string(),
+            api_key: self.api_key.clone(),
             base_url: self.base_url.clone(),
         }
     }
@@ -239,7 +265,7 @@ impl Endpoint {
     /// Whether the TUI holds a key it can list models with.
     #[must_use]
     pub fn has_key(&self) -> bool {
-        !self.api_key.expose().trim().is_empty()
+        !self.api_key.is_blank()
     }
 
     /// `anthropic dialect` or `openai dialect, http://localhost:4000`.
@@ -251,7 +277,7 @@ impl Endpoint {
 
 /// `<dialect> dialect[, <base url>]`.
 #[must_use]
-pub fn describe_endpoint(dialect: Dialect, base_url: Option<&str>) -> String {
+pub fn describe_endpoint(dialect: WireDialect, base_url: Option<&str>) -> String {
     match base_url {
         Some(url) => format!("{dialect} dialect, {url}"),
         None => format!("{dialect} dialect"),
@@ -259,7 +285,7 @@ pub fn describe_endpoint(dialect: Dialect, base_url: Option<&str>) -> String {
 }
 
 /// A model on a named endpoint; displayed (and parsed) as `endpoint:model`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EndpointRef {
     /// Endpoint name.
     pub endpoint: String,
@@ -320,9 +346,10 @@ pub enum ModelRefError {
         /// Configured endpoint names.
         known: Vec<String>,
     },
-    /// A bare model id that could belong to several endpoints (or none).
+    /// A bare model id no fetched list and no catalog entry places on one
+    /// endpoint.
     #[error(
-        "cannot tell which endpoint serves `{model}`; use `<endpoint>:{model}` (configured: {})",
+        "cannot tell which endpoint serves `{model}` (no endpoint lists it and the catalog does not know it); use `<endpoint>:{model}` (configured: {})",
         NameList(.known)
     )]
     Ambiguous {
@@ -342,10 +369,77 @@ pub enum ModelRefError {
     },
 }
 
-impl From<ModelRefError> for TuiError {
-    fn from(err: ModelRefError) -> Self {
-        Self::Endpoint(err.to_string())
-    }
+/// Why an endpoint cannot be used, or its projection into the realm config
+/// failed.
+#[derive(Debug, thiserror::Error)]
+pub enum EndpointError {
+    /// A model reference did not resolve.
+    #[error(transparent)]
+    ModelRef(#[from] ModelRefError),
+    /// The endpoint name is not a valid binding id.
+    #[error("endpoint `{name}` cannot name a binding: {source}")]
+    BindingName {
+        /// The endpoint name.
+        name: String,
+        /// Why the binding id is invalid.
+        #[source]
+        source: IdentityError,
+    },
+    /// Upstream synthesizes no API-key backend for the dialect.
+    #[error("no API-key backend for the {0} dialect")]
+    NoApiKeyBackend(WireDialect),
+    /// A configured endpoint carries its key inline (`api_key` in
+    /// `tui.toml` or `--set`) instead of naming an environment variable.
+    #[error(
+        "endpoint `{name}` sets an inline `api_key`; keys are read from the environment only: remove `api_key` and set `api_key_env = \"<VAR>\"` in [endpoints.{name}] (or `--endpoint-def {name}=<dialect>=<url>,key_env=<VAR>`), naming the environment variable that holds the key"
+    )]
+    InlineApiKey {
+        /// The endpoint.
+        name: String,
+    },
+    /// One `[models.<id>]` profile names one provider: the same unknown
+    /// model id cannot be served in two dialects.
+    #[error(
+        "model `{model}` is already registered for the {} dialect ([models.\"{model}\"] in the realm config); one profile cannot also describe it for {}: use the endpoint's own alias for one of them",
+        .existing.as_str(),
+        .requested.as_str()
+    )]
+    DialectConflict {
+        /// The model id.
+        model: String,
+        /// The provider its profile names.
+        existing: Provider,
+        /// The provider the new endpoint needs.
+        requested: Provider,
+    },
+    /// The effective model registry could not be built.
+    #[error("model registry: {0}")]
+    Registry(#[source] ConfigError),
+    /// The realm's config document could not be read.
+    #[error("cannot read the realm config: {0}")]
+    ConfigRead(#[source] ConfigError),
+    /// The realm's config document refused the write.
+    #[error("cannot write the realm config {}: {source}", .path.display())]
+    ConfigWrite {
+        /// The document.
+        path: PathBuf,
+        /// The config owner's refusal.
+        #[source]
+        source: ConfigError,
+    },
+    /// The patch for the realm document could not be built.
+    #[error("cannot encode the realm config patch: {0}")]
+    Encode(#[source] serde_json::Error),
+    /// The endpoint to take the first model of lists none.
+    #[error(
+        "no model selected and endpoint `{endpoint}` offers none ({why}); pass --model {endpoint}:<id>"
+    )]
+    NothingListed {
+        /// The endpoint.
+        endpoint: String,
+        /// Why its list is empty or missing.
+        why: String,
+    },
 }
 
 fn names(endpoints: &[Endpoint]) -> Vec<String> {
@@ -361,10 +455,11 @@ fn split_explicit<'a>(s: &'a str, endpoints: &[Endpoint]) -> Option<(&'a str, &'
         .then_some((name, model))
 }
 
-/// The endpoint serving a bare id by dialect: the built-in endpoint of the
-/// inferred dialect when configured, else the only endpoint of that dialect.
-fn by_dialect<'a>(model: &str, endpoints: &'a [Endpoint]) -> Option<&'a Endpoint> {
-    let dialect = Dialect::infer_from_model(model)?;
+/// The endpoint serving a catalogued id: the built-in endpoint of its
+/// provider's dialect when configured, else the only endpoint of that
+/// dialect. Ids outside the catalog never resolve here.
+fn by_catalog<'a>(model: &str, endpoints: &'a [Endpoint]) -> Option<&'a Endpoint> {
+    let dialect = WireDialect::of_catalog_model(model)?;
     if let Some(builtin) = endpoints.iter().find(|e| e.builtin && e.dialect == dialect) {
         return Some(builtin);
     }
@@ -425,8 +520,8 @@ pub fn needs_lookup(s: &str, endpoints: &[Endpoint]) -> bool {
 }
 
 /// Pick among several endpoints listing the same id: the current endpoint,
-/// then the built-in endpoint of the id's dialect, then the highest
-/// `priority`, then the first configured.
+/// then the built-in endpoint of the catalogued id's dialect, then the
+/// highest `priority`, then the first configured.
 fn tie_break<'a>(
     model: &str,
     candidates: &[&'a Endpoint],
@@ -437,7 +532,7 @@ fn tie_break<'a>(
     {
         return Some(found);
     }
-    if let Some(dialect) = Dialect::infer_from_model(model)
+    if let Some(dialect) = WireDialect::of_catalog_model(model)
         && let Some(found) = candidates
             .iter()
             .find(|e| e.builtin && e.dialect == dialect)
@@ -453,11 +548,12 @@ fn tie_break<'a>(
 /// `name:id` is explicit when `name` is a configured endpoint (model ids may
 /// themselves contain `:`). A bare id is looked up in `index` (the fetched
 /// model lists): one endpoint listing it → that endpoint; several → the
-/// `current` endpoint, then the built-in endpoint of the id's dialect, then
-/// the highest `priority`, then the first configured. When no endpoint lists
-/// it, the prefix decides (`claude-*` → anthropic, `gpt-*`/`o<digit>*` →
-/// openai, `gemini-*` → gemini: the built-in endpoint of that dialect, else
-/// the only endpoint of that dialect), else the only configured endpoint.
+/// `current` endpoint, then the built-in endpoint of the id's catalog
+/// dialect, then the highest `priority`, then the first configured. When no
+/// endpoint lists it, a catalogued id goes to the built-in endpoint of its
+/// provider's dialect (else the only endpoint of that dialect), and any id
+/// to the only configured endpoint. Ids are never inferred from a name
+/// prefix: outside the catalog, only the live lists place a bare id.
 ///
 /// # Errors
 ///
@@ -489,7 +585,7 @@ pub fn parse_model_ref(
     if let Some(endpoint) = tie_break(s, &listing, current) {
         return Ok(EndpointRef::new(endpoint.name.clone(), s));
     }
-    if let Some(endpoint) = by_dialect(s, endpoints) {
+    if let Some(endpoint) = by_catalog(s, endpoints) {
         return Ok(EndpointRef::new(endpoint.name.clone(), s));
     }
     if let [only] = endpoints {
@@ -540,31 +636,45 @@ impl EndpointRegistry {
     ///
     /// Invalid configured endpoints (unknown or missing dialect, no key,
     /// invalid name, a name clashing with a built-in) are skipped with a
-    /// [`Notice`]; a plain-text `api_key` is used with a notice.
-    #[must_use]
+    /// [`Notice`].
+    ///
+    /// # Errors
+    ///
+    /// [`EndpointError::InlineApiKey`] when a configured endpoint sets an
+    /// inline `api_key`: keys come from the environment only.
     pub fn discover(
         config: &Config,
         realm: Option<&RealmId>,
         configured: &BTreeMap<String, LayeredEndpoint>,
-    ) -> (Self, Vec<Notice>) {
+    ) -> Result<(Self, Vec<Notice>), EndpointError> {
         Self::discover_with(config, realm, configured, |var| std::env::var(var).ok())
     }
 
     /// [`Self::discover`] with an explicit environment lookup.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::discover`].
     pub fn discover_with(
         config: &Config,
         realm: Option<&RealmId>,
         configured: &BTreeMap<String, LayeredEndpoint>,
         env: impl Fn(&str) -> Option<String>,
-    ) -> (Self, Vec<Notice>) {
+    ) -> Result<(Self, Vec<Notice>), EndpointError> {
+        if let Some(name) = configured
+            .iter()
+            .find_map(|(name, layered)| layered.section.api_key.is_some().then_some(name))
+        {
+            return Err(EndpointError::InlineApiKey { name: name.clone() });
+        }
         let mut endpoints = Vec::new();
-        for dialect in Dialect::ALL {
+        for dialect in WireDialect::ALL {
             if let Some(creds) = resolve_builtin(config, dialect.into(), realm, &env) {
                 endpoints.push(Endpoint {
                     name: dialect.as_str().to_string(),
                     dialect,
                     base_url: creds.base_url,
-                    api_key: SecretString::new(creds.api_key.unwrap_or_default()),
+                    api_key: creds.api_key.unwrap_or_default(),
                     key_env: None,
                     builtin: true,
                     priority: 0,
@@ -574,17 +684,14 @@ impl EndpointRegistry {
         let mut notices = Vec::new();
         for (name, layered) in configured {
             match configured_endpoint(name, layered, &env) {
-                Ok((endpoint, notice)) => {
-                    notices.extend(notice);
-                    endpoints.push(endpoint);
-                }
+                Ok(endpoint) => endpoints.push(endpoint),
                 Err(reason) => notices.push(Notice::EndpointSkipped {
                     name: name.clone(),
-                    reason,
+                    reason: reason.to_string(),
                 }),
             }
         }
-        (Self { endpoints }, notices)
+        Ok((Self { endpoints }, notices))
     }
 
     /// Add each built-in endpoint missing from the registry, keyless (a host
@@ -592,7 +699,7 @@ impl EndpointRegistry {
     /// sessions on them never resolve credentials, and their lists are not
     /// fetched).
     pub fn add_keyless_builtins(&mut self) {
-        for (index, dialect) in Dialect::ALL.into_iter().enumerate() {
+        for (index, dialect) in WireDialect::ALL.into_iter().enumerate() {
             if self.get(dialect.as_str()).is_none() {
                 let at = index.min(self.endpoints.len());
                 self.endpoints.insert(
@@ -648,81 +755,99 @@ impl EndpointRegistry {
     }
 }
 
-/// Validate one `[endpoints.<name>]` entry.
+/// Why one `[endpoints.<name>]` entry is skipped.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EndpointSkip {
+    /// The name is not a valid endpoint name.
+    #[error("names may only use letters, digits, `_` and `-`")]
+    InvalidName,
+    /// The name is a built-in endpoint's.
+    #[error(
+        "`{0}` is a built-in endpoint; configure its key and base URL in the realm config, or pick another name"
+    )]
+    BuiltinName(String),
+    /// No `dialect`.
+    #[error("`dialect` is missing (anthropic, openai or gemini)")]
+    NoDialect,
+    /// An unknown `dialect`.
+    #[error("unknown dialect `{0}` (expected anthropic, openai or gemini)")]
+    UnknownDialect(String),
+    /// A project file may not name environment variables.
+    #[error(
+        "a project tui.toml may not read keys from the environment (`api_key_env = \"{0}\"`); define the endpoint in your own tui.toml"
+    )]
+    ProjectEnvKey(String),
+    /// `api_key_env` names an unset variable.
+    #[error("environment variable `{0}` (api_key_env) is not set")]
+    UnsetEnv(String),
+    /// No key at all.
+    #[error("no key: set `api_key_env` to the environment variable that holds it")]
+    NoKey,
+}
+
+/// Validate one `[endpoints.<name>]` entry (an inline `api_key` is refused
+/// before, by [`EndpointRegistry::discover_with`]).
 fn configured_endpoint(
     name: &str,
     layered: &LayeredEndpoint,
     env: &impl Fn(&str) -> Option<String>,
-) -> Result<(Endpoint, Option<Notice>), String> {
+) -> Result<Endpoint, EndpointSkip> {
     let EndpointSection {
         dialect,
         base_url,
         api_key_env,
-        api_key,
+        api_key: _,
         priority,
     } = &layered.section;
     if !is_valid_endpoint_name(name) {
-        return Err("names may only use letters, digits, `_` and `-`".to_string());
+        return Err(EndpointSkip::InvalidName);
     }
     if BUILTIN_NAMES.contains(&name) {
-        return Err(format!(
-            "`{name}` is a built-in endpoint; configure its key and base URL in the realm config, or pick another name"
-        ));
+        return Err(EndpointSkip::BuiltinName(name.to_string()));
     }
     let dialect = match dialect.as_deref() {
-        None => return Err("`dialect` is missing (anthropic, openai or gemini)".to_string()),
-        Some(raw) => Dialect::parse(raw).ok_or_else(|| {
-            format!("unknown dialect `{raw}` (expected anthropic, openai or gemini)")
-        })?,
-    };
-    let mut notice = None;
-    let key_env = api_key_env.clone();
-    let key = match (api_key_env, api_key) {
-        (Some(var), _) if layered.origin == RuleOrigin::Project => {
-            return Err(format!(
-                "a project tui.toml may not read keys from the environment (`api_key_env = \"{var}\"`); define the endpoint in your own tui.toml"
-            ));
-        }
-        (Some(var), _) => env(var)
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| format!("environment variable `{var}` (api_key_env) is not set"))?,
-        (None, Some(key)) => {
-            notice = Some(Notice::EndpointPlainKey {
-                name: name.to_string(),
-            });
-            key.clone()
-        }
-        (None, None) => {
-            return Err("no key: set `api_key_env` (or `api_key`)".to_string());
+        None => return Err(EndpointSkip::NoDialect),
+        Some(raw) => {
+            WireDialect::parse(raw).ok_or_else(|| EndpointSkip::UnknownDialect(raw.to_string()))?
         }
     };
-    Ok((
-        Endpoint {
-            name: name.to_string(),
-            dialect,
-            base_url: base_url.clone(),
-            api_key: SecretString::new(key),
-            key_env,
-            builtin: false,
-            priority: priority.unwrap_or(0),
-        },
-        notice,
-    ))
+    let Some(var) = api_key_env else {
+        return Err(EndpointSkip::NoKey);
+    };
+    if layered.origin == RuleOrigin::Project {
+        return Err(EndpointSkip::ProjectEnvKey(var.clone()));
+    }
+    let key = env(var)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| EndpointSkip::UnsetEnv(var.clone()))?;
+    Ok(Endpoint {
+        name: name.to_string(),
+        dialect,
+        base_url: base_url.clone(),
+        api_key: SecretString::new(key),
+        key_env: Some(var.clone()),
+        builtin: false,
+        priority: priority.unwrap_or(0),
+    })
 }
 
-/// Lower the configured endpoints of `endpoints` into `config` as the
-/// connections of [`ENDPOINT_REALM`] (see the module docs). Built-in
-/// endpoints add nothing; a config without configured endpoints is left
-/// unchanged.
+/// The [`ENDPOINT_REALM`] section entries of the configured endpoints of
+/// `endpoints` (built-in endpoints add nothing).
 ///
 /// # Errors
 ///
-/// [`TuiError::Endpoint`] when an endpoint name is not a valid binding id.
-pub fn lower_into(config: &mut Config, endpoints: &[Endpoint]) -> Result<(), TuiError> {
+/// [`EndpointError::BindingName`] when an endpoint name is not a valid
+/// binding id, [`EndpointError::NoApiKeyBackend`] when upstream names no
+/// API-key backend for a dialect, [`EndpointError::InlineApiKey`] when a
+/// configured endpoint names no environment variable (the document never
+/// holds a key).
+pub fn endpoint_section(endpoints: &[Endpoint]) -> Result<RealmConfigSection, EndpointError> {
     let mut section = RealmConfigSection::default();
     for endpoint in endpoints.iter().filter(|e| !e.builtin) {
-        BindingId::parse(endpoint.name.clone())
-            .map_err(|err| TuiError::Endpoint(format!("endpoint `{}`: {err}", endpoint.name)))?;
+        BindingId::parse(endpoint.name.clone()).map_err(|source| EndpointError::BindingName {
+            name: endpoint.name.clone(),
+            source,
+        })?;
         let provider = endpoint.provider();
         // The provider's own API-key backend and auth method, as the
         // environment default would name them.
@@ -731,19 +856,16 @@ pub fn lower_into(config: &mut Config, endpoints: &[Endpoint]) -> Result<(), Tui
             synthetic.backends.values().next(),
             synthetic.auth_profiles.values().next(),
         ) else {
-            return Err(TuiError::Endpoint(format!(
-                "no API-key backend for the {} dialect",
-                endpoint.dialect
-            )));
+            return Err(EndpointError::NoApiKeyBackend(endpoint.dialect));
         };
-        let source = match &endpoint.key_env {
-            Some(env) => CredentialSourceSpec::Env {
-                env: env.clone(),
-                fallback: Vec::new(),
-            },
-            None => CredentialSourceSpec::InlineSecret {
-                secret: endpoint.api_key.expose().to_string(),
-            },
+        let Some(env) = &endpoint.key_env else {
+            return Err(EndpointError::InlineApiKey {
+                name: endpoint.name.clone(),
+            });
+        };
+        let source = CredentialSourceSpec::Env {
+            env: env.clone(),
+            fallback: Vec::new(),
         };
         section.backend.insert(
             endpoint.name.clone(),
@@ -777,52 +899,187 @@ pub fn lower_into(config: &mut Config, endpoints: &[Endpoint]) -> Result<(), Tui
             },
         );
     }
-    if !section.binding.is_empty() {
-        config.realm.insert(ENDPOINT_REALM.to_string(), section);
-    }
-    Ok(())
+    Ok(section)
 }
 
-/// Make sure the engine knows a capability profile for `model` on
-/// `provider`: when neither the catalog nor the realm config has one, add a
-/// `[models.<id>]` entry from what the endpoint reported (`listed`), with
-/// conservative capabilities. Returns whether `config` changed.
+/// The merge patch that makes the realm document's [`ENDPOINT_REALM`]
+/// section hold `section`'s entries, or `None` when `config` (the document
+/// as persisted) already holds every one of them unchanged. Entries of
+/// endpoints no longer configured stay, so sessions bound to them keep
+/// resolving for every surface.
 ///
 /// # Errors
 ///
-/// [`TuiError::Endpoint`] when the config's model registry is invalid.
-pub fn ensure_model_profile(
-    config: &mut Config,
+/// [`EndpointError::Encode`] when an entry cannot be encoded.
+pub fn endpoint_patch(
+    config: &Config,
+    section: &RealmConfigSection,
+) -> Result<Option<ConfigDelta>, EndpointError> {
+    let existing = config.realm.get(ENDPOINT_REALM);
+    let backend = changed(&section.backend, existing.map(|s| &s.backend))?;
+    let auth = changed(&section.auth, existing.map(|s| &s.auth))?;
+    let binding = changed(&section.binding, existing.map(|s| &s.binding))?;
+    let mut realm_section = serde_json::Map::new();
+    for (key, map) in [("backend", backend), ("auth", auth), ("binding", binding)] {
+        if !map.is_empty() {
+            realm_section.insert(key.to_string(), serde_json::Value::Object(map));
+        }
+    }
+    if realm_section.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(ConfigDelta(serde_json::json!({
+        "realm": { ENDPOINT_REALM: realm_section }
+    }))))
+}
+
+/// The entries of `want` that `have` lacks or holds differently, encoded.
+fn changed<T: serde::Serialize>(
+    want: &BTreeMap<String, T>,
+    have: Option<&BTreeMap<String, T>>,
+) -> Result<serde_json::Map<String, serde_json::Value>, EndpointError> {
+    let mut out = serde_json::Map::new();
+    for (name, entry) in want {
+        let encoded = serde_json::to_value(entry).map_err(EndpointError::Encode)?;
+        let current = have
+            .and_then(|have| have.get(name))
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(EndpointError::Encode)?;
+        if current.as_ref() != Some(&encoded) {
+            out.insert(name.clone(), encoded);
+        }
+    }
+    Ok(out)
+}
+
+/// Project the configured endpoints of `endpoints` into the realm document
+/// `store` (see the module docs). Returns whether the document changed. The
+/// document names each endpoint's environment variable, never a key.
+///
+/// # Errors
+///
+/// [`EndpointError`] when the section cannot be built, the document cannot
+/// be read, or the config owner refuses the write.
+pub async fn project_endpoints(
+    store: &meerkat_core::FileConfigStore,
+    endpoints: &[Endpoint],
+) -> Result<bool, EndpointError> {
+    let section = endpoint_section(endpoints)?;
+    if section.binding.is_empty() {
+        return Ok(false);
+    }
+    let persisted = store.get().await.map_err(EndpointError::ConfigRead)?;
+    let Some(patch) = endpoint_patch(&persisted, &section)? else {
+        return Ok(false);
+    };
+    store
+        .patch(patch)
+        .await
+        .map_err(|source| EndpointError::ConfigWrite {
+            path: store.path().to_path_buf(),
+            source,
+        })?;
+    Ok(true)
+}
+
+/// The `[models.<id>]` entry `model` on `provider` needs, or `None` when
+/// the catalog or the realm config already profiles it the same way. A
+/// custom entry is refreshed when the endpoint now reports a window or an
+/// output limit it lacked or that changed.
+///
+/// # Errors
+///
+/// [`EndpointError::Registry`] when the config's model registry is invalid,
+/// [`EndpointError::DialectConflict`] when the id is already registered for
+/// another provider.
+pub fn model_profile_entry(
+    config: &Config,
     provider: Provider,
     model: &str,
     listed: Option<&ModelEntry>,
-) -> Result<bool, TuiError> {
+) -> Result<Option<CustomModelConfig>, EndpointError> {
+    let clamp = |value: Option<u64>| value.and_then(|v| u32::try_from(v).ok());
+    if let Some(existing) = config.models.custom.get(model) {
+        if existing.provider != provider {
+            return Err(EndpointError::DialectConflict {
+                model: model.to_string(),
+                existing: existing.provider,
+                requested: provider,
+            });
+        }
+        let Some(listed) = listed else {
+            return Ok(None);
+        };
+        let mut refreshed = existing.clone();
+        if let Some(window) = clamp(listed.context_window) {
+            refreshed.context_window = Some(window);
+        }
+        if let Some(output) = clamp(listed.max_output_tokens) {
+            refreshed.max_output_tokens = Some(output);
+        }
+        return Ok((&refreshed != existing).then_some(refreshed));
+    }
     let registry = config
         .model_registry(meerkat_models::canonical())
-        .map_err(|err| TuiError::Endpoint(format!("model registry: {err}")))?;
+        .map_err(EndpointError::Registry)?;
     if registry.profile_for_provider(provider, model).is_some() {
-        return Ok(false);
+        return Ok(None);
     }
-    let clamp = |value: Option<u64>| value.and_then(|v| u32::try_from(v).ok());
-    config.models.custom.insert(
-        model.to_string(),
-        CustomModelConfig {
-            provider,
-            display_name: listed.and_then(|entry| entry.display_name.clone()),
-            context_window: clamp(listed.and_then(|entry| entry.context_window)),
-            max_input_tokens: None,
-            max_output_tokens: clamp(listed.and_then(|entry| entry.max_output_tokens)),
-            vision: None,
-            web_search: None,
-            call_timeout_secs: None,
-        },
-    );
+    if let Some(other) = meerkat_models::infer_provider(model)
+        && other != provider
+    {
+        return Err(EndpointError::DialectConflict {
+            model: model.to_string(),
+            existing: other,
+            requested: provider,
+        });
+    }
+    Ok(Some(CustomModelConfig {
+        provider,
+        display_name: listed.and_then(|entry| entry.display_name.clone()),
+        context_window: clamp(listed.and_then(|entry| entry.context_window)),
+        max_input_tokens: None,
+        max_output_tokens: clamp(listed.and_then(|entry| entry.max_output_tokens)),
+        vision: None,
+        web_search: None,
+        call_timeout_secs: None,
+    }))
+}
+
+/// Make sure the realm document `store` profiles `model` on `provider`
+/// ([`model_profile_entry`]), writing the `[models.<id>]` entry through the
+/// config owner. Returns whether the document changed.
+///
+/// # Errors
+///
+/// As [`model_profile_entry`]; [`EndpointError::ConfigRead`] /
+/// [`EndpointError::ConfigWrite`] when the document cannot be read or
+/// refuses the write.
+pub async fn ensure_model_profile(
+    store: &meerkat_core::FileConfigStore,
+    provider: Provider,
+    model: &str,
+    listed: Option<&ModelEntry>,
+) -> Result<bool, EndpointError> {
+    let persisted = store.get().await.map_err(EndpointError::ConfigRead)?;
+    let Some(entry) = model_profile_entry(&persisted, provider, model, listed)? else {
+        return Ok(false);
+    };
+    let value = serde_json::to_value(&entry).map_err(EndpointError::Encode)?;
+    store
+        .patch(ConfigDelta(serde_json::json!({ "models": { model: value } })))
+        .await
+        .map_err(|source| EndpointError::ConfigWrite {
+            path: store.path().to_path_buf(),
+            source,
+        })?;
     Ok(true)
 }
 
 /// The context window the engine's model registry knows for `model` on
-/// `provider` (the catalog or a `[models.<id>]` entry); the gauge's second
-/// source after the endpoint's own number.
+/// `provider` (the catalog or a `[models.<id>]` entry, which listings keep
+/// current): the window the gauge and the compaction policy use.
 #[must_use]
 pub fn registry_context_window(config: &Config, provider: Provider, model: &str) -> Option<u64> {
     let registry = config.model_registry(meerkat_models::canonical()).ok()?;
@@ -857,11 +1114,12 @@ pub enum StartupPlan {
 /// - `--model` wins: explicit `endpoint:id`, else a bare id on `--endpoint`
 ///   when given, else [`parse_model_ref`] over `index` (fetch the lists first
 ///   when [`needs_lookup`] says so).
-/// - `--endpoint` alone: a built-in endpoint uses the config model when its
-///   dialect matches, else the catalog default; a configured endpoint uses
-///   the first model it lists.
-/// - Neither: the config model when its prefix picks an endpoint, else (one
-///   endpoint) the catalog default of a built-in or the first listed model.
+/// - `--endpoint` alone: a built-in endpoint uses the config model when the
+///   catalog places it on that endpoint's provider, else the catalog
+///   default; a configured endpoint uses the first model it lists.
+/// - Neither: the config model when the catalog places it on an endpoint,
+///   else (one endpoint) the catalog default of a built-in or the first
+///   listed model.
 ///
 /// # Errors
 ///
@@ -915,7 +1173,7 @@ pub fn plan_startup(
         {
             return Ok(StartupPlan::Resolved(EndpointRef::new(name, id)));
         }
-        if let Some(endpoint) = by_dialect(config_model, endpoints) {
+        if let Some(endpoint) = by_catalog(config_model, endpoints) {
             return Ok(StartupPlan::Resolved(EndpointRef::new(
                 endpoint.name.clone(),
                 config_model,
@@ -931,11 +1189,11 @@ pub fn plan_startup(
     }
 }
 
-/// The config model when it belongs to `endpoint`'s dialect, else the
-/// catalog default for that dialect.
+/// The config model when the catalog places it on `endpoint`'s provider,
+/// else the catalog default for that provider.
 fn builtin_default(endpoint: &Endpoint, config_model: &str) -> EndpointRef {
     let model = if !config_model.is_empty()
-        && Dialect::infer_from_model(config_model) == Some(endpoint.dialect)
+        && WireDialect::of_catalog_model(config_model) == Some(endpoint.dialect)
     {
         config_model.to_string()
     } else {
@@ -946,185 +1204,23 @@ fn builtin_default(endpoint: &Endpoint, config_model: &str) -> EndpointRef {
     EndpointRef::new(endpoint.name.clone(), model)
 }
 
-/// Where a session's endpoint choice should come from on resume.
-///
-/// Inference here only follows the model id's prefix (no "only endpoint"
-/// fallback), so a session never silently moves to an unrelated endpoint.
-///
-/// `stored` is the session's sidecar, `meta` its persisted provider and
-/// model; `exists` says whether an endpoint name is usable. Returns the
-/// choice and a notice when it had to be inferred or fell back.
-pub fn restore_choice(
-    stored: Option<EndpointRef>,
-    meta: Option<(Provider, String)>,
-    endpoints: &[Endpoint],
-    exists: impl Fn(&str) -> bool,
-    fallback: &EndpointRef,
-) -> (EndpointRef, Option<String>) {
-    if let Some(stored) = stored {
-        if exists(&stored.endpoint) {
-            return (stored, None);
-        }
-        return match by_dialect(&stored.model, endpoints) {
-            Some(endpoint) => {
-                let inferred = EndpointRef::new(endpoint.name.clone(), stored.model);
-                let text = format!(
-                    "endpoint `{}` of this session no longer exists; continuing on {inferred}",
-                    stored.endpoint
-                );
-                (inferred, Some(text))
-            }
-            None => (
-                fallback.clone(),
-                Some(format!(
-                    "endpoint `{}` of this session no longer exists; continuing on {fallback}",
-                    stored.endpoint
-                )),
-            ),
-        };
-    }
-    let Some((provider, model)) = meta else {
-        return (fallback.clone(), None);
+/// The endpoint a session runs on, derived from its persisted provider and
+/// auth binding: a binding into [`ENDPOINT_REALM`] names a configured
+/// endpoint; no binding means default resolution, the provider's built-in
+/// endpoint. `None` when that endpoint is not configured in this process (a
+/// session created by another surface, or an endpoint since removed).
+#[must_use]
+pub fn endpoint_of(
+    provider: Provider,
+    auth_binding: Option<&AuthBindingRef>,
+    endpoints: &EndpointRegistry,
+) -> Option<EndpointName> {
+    let name = match auth_binding {
+        Some(binding) if binding.realm.as_str() == ENDPOINT_REALM => binding.binding.as_str(),
+        Some(_) => return None,
+        None => WireDialect::from_provider(provider)?.as_str(),
     };
-    if let Some(dialect) = Dialect::from_provider(provider)
-        && exists(dialect.as_str())
-    {
-        return (EndpointRef::new(dialect.as_str(), model), None);
-    }
-    match by_dialect(&model, endpoints) {
-        Some(endpoint) if exists(&endpoint.name) => {
-            (EndpointRef::new(endpoint.name.clone(), model), None)
-        }
-        _ => (
-            fallback.clone(),
-            Some(format!(
-                "this session ran on {} model `{model}`, which no configured endpoint serves; continuing on {fallback}",
-                provider.as_str()
-            )),
-        ),
-    }
-}
-
-/// On-disk form of a session's endpoint choice and cost totals.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ChoiceFile {
-    endpoint: String,
-    model: String,
-    /// The totals in `cost` were partly derived from the session's
-    /// cumulative usage (see [`SessionCost::known`]).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    cost_estimated: bool,
-    /// `[cost."<model>"]`: token totals per model.
-    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
-    cost: IndexMap<String, UsageTotals>,
-    /// `[helper_cost.<label>."<model>"]`: the helpers' share of `cost`.
-    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
-    helper_cost: IndexMap<String, IndexMap<String, UsageTotals>>,
-}
-
-impl ChoiceFile {
-    fn new(choice: &EndpointRef, cost: Option<&SessionCost>) -> Self {
-        Self {
-            endpoint: choice.endpoint.clone(),
-            model: choice.model.clone(),
-            cost_estimated: cost.is_some_and(|c| !c.known),
-            cost: cost.map(|c| c.per_model.clone()).unwrap_or_default(),
-            helper_cost: cost.map(|c| c.helpers.clone()).unwrap_or_default(),
-        }
-    }
-
-    fn session_cost(self) -> Option<SessionCost> {
-        (!self.cost.is_empty()).then_some(SessionCost {
-            per_model: self.cost,
-            known: !self.cost_estimated,
-            helpers: self.helper_cost,
-        })
-    }
-}
-
-fn read_choice_file(realm_root: &Path, session_id: &str) -> Option<ChoiceFile> {
-    let text = std::fs::read_to_string(choice_path(realm_root, session_id)).ok()?;
-    match toml::from_str::<ChoiceFile>(&text) {
-        Ok(file) => Some(file),
-        Err(err) => {
-            tracing::warn!(error = %err, session_id, "ignoring unreadable endpoint choice");
-            None
-        }
-    }
-}
-
-fn write_choice_file(
-    realm_root: &Path,
-    session_id: &str,
-    file: &ChoiceFile,
-) -> Result<(), TuiError> {
-    let path = choice_path(realm_root, session_id);
-    let text = toml::to_string(file)
-        .map_err(|e| TuiError::Endpoint(format!("serialize endpoint choice: {e}")))?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| TuiError::io("create endpoint choice directory", e))?;
-    }
-    std::fs::write(&path, text).map_err(|e| TuiError::io("write endpoint choice", e))
-}
-
-fn choice_path(realm_root: &Path, session_id: &str) -> PathBuf {
-    realm_root
-        .join(CHOICE_DIR)
-        .join(format!("{session_id}.toml"))
-}
-
-/// Record that session `session_id` runs on `choice`
-/// (`<realm>/tui_endpoints/<id>.toml`).
-///
-/// # Errors
-///
-/// I/O or serialization failures.
-/// The session's cost totals already in the sidecar are kept.
-///
-/// # Errors
-///
-/// I/O or serialization failures.
-pub fn save_choice(
-    realm_root: &Path,
-    session_id: &str,
-    choice: &EndpointRef,
-) -> Result<(), TuiError> {
-    let cost = read_choice_file(realm_root, session_id).and_then(ChoiceFile::session_cost);
-    write_choice_file(
-        realm_root,
-        session_id,
-        &ChoiceFile::new(choice, cost.as_ref()),
-    )
-}
-
-/// Record the choice of session `session_id` together with its cost totals
-/// (`[cost."<model>"]` tables in the same sidecar).
-///
-/// # Errors
-///
-/// I/O or serialization failures.
-pub fn save_cost(
-    realm_root: &Path,
-    session_id: &str,
-    choice: &EndpointRef,
-    cost: &SessionCost,
-) -> Result<(), TuiError> {
-    write_choice_file(realm_root, session_id, &ChoiceFile::new(choice, Some(cost)))
-}
-
-/// The recorded choice of session `session_id`, if any (unreadable files
-/// count as missing).
-#[must_use]
-pub fn load_choice(realm_root: &Path, session_id: &str) -> Option<EndpointRef> {
-    read_choice_file(realm_root, session_id).map(|file| EndpointRef::new(file.endpoint, file.model))
-}
-
-/// The recorded cost totals of session `session_id`, if any.
-#[must_use]
-pub fn load_cost(realm_root: &Path, session_id: &str) -> Option<SessionCost> {
-    read_choice_file(realm_root, session_id).and_then(ChoiceFile::session_cost)
+    endpoints.get(name).map(|e| EndpointName::new(e.name.clone()))
 }
 
 #[cfg(test)]
@@ -1132,7 +1228,12 @@ pub fn load_cost(realm_root: &Path, session_id: &str) -> Option<SessionCost> {
 mod tests {
     use super::*;
 
-    fn ep(name: &str, dialect: Dialect, builtin: bool) -> Endpoint {
+    /// Catalogued ids (the tests pin them: inference is catalog-exact).
+    const ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
+    const OPENAI_MODEL: &str = "gpt-5.5";
+    const GEMINI_MODEL: &str = "gemini-3.1-pro-preview";
+
+    fn ep(name: &str, dialect: WireDialect, builtin: bool) -> Endpoint {
         Endpoint {
             name: name.to_string(),
             dialect,
@@ -1149,40 +1250,42 @@ mod tests {
     }
 
     #[test]
-    fn dialect_inference() {
-        let cases = [
-            ("claude-opus-4-6", Some(Dialect::Anthropic)),
-            ("gpt-5.4", Some(Dialect::OpenAi)),
-            ("chatgpt-4o-latest", Some(Dialect::OpenAi)),
-            ("o3", Some(Dialect::OpenAi)),
-            ("o4-mini", Some(Dialect::OpenAi)),
-            ("gemini-3.1-pro-preview", Some(Dialect::Gemini)),
-            ("ollama", None),
-            ("o", None),
-            ("llama3:8b", None),
-        ];
-        for (model, expected) in cases {
-            assert_eq!(Dialect::infer_from_model(model), expected, "{model}");
+    fn dialects_come_from_the_catalog_never_from_a_prefix() {
+        assert_eq!(
+            WireDialect::of_catalog_model(ANTHROPIC_MODEL),
+            Some(WireDialect::Anthropic)
+        );
+        assert_eq!(
+            WireDialect::of_catalog_model(OPENAI_MODEL),
+            Some(WireDialect::OpenAi)
+        );
+        assert_eq!(
+            WireDialect::of_catalog_model(GEMINI_MODEL),
+            Some(WireDialect::Gemini)
+        );
+        // Prefixes that used to decide no longer do.
+        for unknown in ["claude-not-catalogued", "gpt-not-catalogued", "o9", "gemini-x"] {
+            assert_eq!(WireDialect::of_catalog_model(unknown), None, "{unknown}");
         }
     }
 
     #[test]
     fn parse_model_ref_table() {
         let builtins = vec![
-            ep("anthropic", Dialect::Anthropic, true),
-            ep("openai", Dialect::OpenAi, true),
-            ep("litellm", Dialect::OpenAi, false),
-            ep("vertex", Dialect::Gemini, false),
+            ep("anthropic", WireDialect::Anthropic, true),
+            ep("openai", WireDialect::OpenAi, true),
+            ep("litellm", WireDialect::OpenAi, false),
+            ep("vertex", WireDialect::Gemini, false),
         ];
         let two_openai = vec![
-            ep("litellm", Dialect::OpenAi, false),
-            ep("proxy", Dialect::OpenAi, false),
+            ep("litellm", WireDialect::OpenAi, false),
+            ep("proxy", WireDialect::OpenAi, false),
         ];
-        let single = vec![ep("litellm", Dialect::OpenAi, false)];
+        let single = vec![ep("litellm", WireDialect::OpenAi, false)];
         type Case<'a> = (&'a str, &'a [Endpoint], Result<EndpointRef, &'a str>);
         let cases: Vec<Case<'_>> = vec![
             // explicit
-            ("litellm:gpt-5.2", &builtins, Ok(r("litellm", "gpt-5.2"))),
+            ("litellm:gpt-x", &builtins, Ok(r("litellm", "gpt-x"))),
             ("anthropic:gpt-x", &builtins, Ok(r("anthropic", "gpt-x"))),
             // model ids containing ':' after an explicit endpoint
             (
@@ -1190,34 +1293,28 @@ mod tests {
                 &builtins,
                 Ok(r("litellm", "llama3:8b")),
             ),
-            // bare: builtin of the inferred dialect wins over configured ones
-            ("gpt-5.2", &builtins, Ok(r("openai", "gpt-5.2"))),
+            // bare catalogued: builtin of its dialect wins over configured ones
+            (OPENAI_MODEL, &builtins, Ok(r("openai", OPENAI_MODEL))),
             (
-                "claude-sonnet-4-6",
+                ANTHROPIC_MODEL,
                 &builtins,
-                Ok(r("anthropic", "claude-sonnet-4-6")),
+                Ok(r("anthropic", ANTHROPIC_MODEL)),
             ),
-            ("o3", &builtins, Ok(r("openai", "o3"))),
-            // bare: the only endpoint of the dialect
-            (
-                "gemini-3-flash-preview",
-                &builtins,
-                Ok(r("vertex", "gemini-3-flash-preview")),
-            ),
+            // bare catalogued: the only endpoint of the dialect
+            (GEMINI_MODEL, &builtins, Ok(r("vertex", GEMINI_MODEL))),
             // bare: the only configured endpoint
             ("llama3:8b", &single, Ok(r("litellm", "llama3:8b"))),
-            (
-                "claude-opus-4-6",
-                &single,
-                Ok(r("litellm", "claude-opus-4-6")),
-            ),
+            (ANTHROPIC_MODEL, &single, Ok(r("litellm", ANTHROPIC_MODEL))),
+            // bare, unlisted, outside the catalog: no prefix guess
+            ("gpt-not-catalogued", &builtins, Err("cannot tell which endpoint")),
+            ("claude-not-catalogued", &builtins, Err("cannot tell which endpoint")),
             // ambiguous
-            ("gpt-5.2", &two_openai, Err("cannot tell which endpoint")),
+            (OPENAI_MODEL, &two_openai, Err("cannot tell which endpoint")),
             ("mystery", &builtins, Err("cannot tell which endpoint")),
-            ("nope:gpt-5.2", &two_openai, Err("unknown endpoint `nope`")),
+            ("nope:gpt-x", &two_openai, Err("unknown endpoint `nope`")),
             ("", &builtins, Err("empty")),
             ("litellm:", &builtins, Err("empty")),
-            ("gpt-5.2", &[], Err("no LLM endpoint")),
+            (OPENAI_MODEL, &[], Err("no LLM endpoint")),
         ];
         for (input, endpoints, expected) in cases {
             let got = parse_model_ref(input, endpoints, &ModelIndex::default(), None);
@@ -1229,7 +1326,7 @@ mod tests {
                 }
             }
         }
-        let err = parse_model_ref("gpt-5.2", &two_openai, &ModelIndex::default(), None)
+        let err = parse_model_ref(OPENAI_MODEL, &two_openai, &ModelIndex::default(), None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("litellm, proxy"), "{err}");
@@ -1237,50 +1334,42 @@ mod tests {
 
     #[test]
     fn bare_ids_resolve_by_lookup_with_tie_breaks() {
-        let mut high = ep("proxy", Dialect::OpenAi, false);
+        let mut high = ep("proxy", WireDialect::OpenAi, false);
         high.priority = 5;
         let endpoints = vec![
-            ep("anthropic", Dialect::Anthropic, true),
-            ep("openai", Dialect::OpenAi, true),
-            ep("litellm", Dialect::OpenAi, false),
+            ep("anthropic", WireDialect::Anthropic, true),
+            ep("openai", WireDialect::OpenAi, true),
+            ep("litellm", WireDialect::OpenAi, false),
             high,
         ];
         let mut index = ModelIndex::default();
         index.insert(
             "litellm",
-            ["only-on-litellm", "gpt-5.2", "shared", "claude-opus-4-6"],
+            ["only-on-litellm", OPENAI_MODEL, "shared", ANTHROPIC_MODEL],
         );
-        index.insert("openai", ["gpt-5.2"]);
-        index.insert("proxy", ["shared", "gpt-5.2", "claude-opus-4-6"]);
-        index.insert("anthropic", ["claude-opus-4-6"]);
+        index.insert("openai", [OPENAI_MODEL]);
+        index.insert("proxy", ["shared", OPENAI_MODEL, ANTHROPIC_MODEL]);
+        index.insert("anthropic", [ANTHROPIC_MODEL]);
         type Case<'a> = (&'a str, Option<&'a str>, Result<EndpointRef, &'a str>);
         let cases: Vec<Case<'_>> = vec![
-            // unique: listed by one endpoint, whatever the prefix says
+            // unique: listed by one endpoint, whatever the catalog says
             ("only-on-litellm", None, Ok(r("litellm", "only-on-litellm"))),
             // several: the current endpoint first
-            ("gpt-5.2", Some("litellm"), Ok(r("litellm", "gpt-5.2"))),
+            (OPENAI_MODEL, Some("litellm"), Ok(r("litellm", OPENAI_MODEL))),
             (
-                "claude-opus-4-6",
+                ANTHROPIC_MODEL,
                 Some("proxy"),
-                Ok(r("proxy", "claude-opus-4-6")),
+                Ok(r("proxy", ANTHROPIC_MODEL)),
             ),
-            // then the builtin of the id's dialect
-            ("gpt-5.2", Some("anthropic"), Ok(r("openai", "gpt-5.2"))),
-            (
-                "claude-opus-4-6",
-                None,
-                Ok(r("anthropic", "claude-opus-4-6")),
-            ),
+            // then the builtin of the catalogued id's dialect
+            (OPENAI_MODEL, Some("anthropic"), Ok(r("openai", OPENAI_MODEL))),
+            (ANTHROPIC_MODEL, None, Ok(r("anthropic", ANTHROPIC_MODEL))),
             // then the highest priority
             ("shared", None, Ok(r("proxy", "shared"))),
-            // unlisted → prefix inference
-            ("gpt-6", None, Ok(r("openai", "gpt-6"))),
-            (
-                "claude-new",
-                Some("litellm"),
-                Ok(r("anthropic", "claude-new")),
-            ),
-            // unlisted, unknown prefix, several endpoints → error
+            // unlisted catalogued id → its provider's built-in endpoint
+            ("gpt-5.4", None, Ok(r("openai", "gpt-5.4"))),
+            // unlisted, outside the catalog, several endpoints → error
+            ("gpt-not-catalogued", None, Err("cannot tell which endpoint")),
             ("mystery", None, Err("cannot tell which endpoint")),
             // explicit override
             ("litellm:gpt-6", None, Ok(r("litellm", "gpt-6"))),
@@ -1297,35 +1386,35 @@ mod tests {
         }
         // Equal priorities: the first configured wins.
         let tied = vec![
-            ep("a", Dialect::OpenAi, false),
-            ep("b", Dialect::OpenAi, false),
+            ep("a", WireDialect::OpenAi, false),
+            ep("b", WireDialect::OpenAi, false),
         ];
         let mut index = ModelIndex::default();
         index.insert("b", ["m"]);
         index.insert("a", ["m"]);
         assert_eq!(parse_model_ref("m", &tied, &index, None), Ok(r("a", "m")));
-        // Unlisted, unknown prefix, single endpoint → that endpoint.
-        let single = vec![ep("litellm", Dialect::OpenAi, false)];
+        // Unlisted, unknown, single endpoint → that endpoint.
+        let single = vec![ep("litellm", WireDialect::OpenAi, false)];
         assert_eq!(
             parse_model_ref("mystery", &single, &ModelIndex::default(), None),
             Ok(r("litellm", "mystery"))
         );
-        assert!(needs_lookup("gpt-5.2", &endpoints));
-        assert!(!needs_lookup("litellm:gpt-5.2", &endpoints));
-        assert!(!needs_lookup("gpt-5.2", &single));
+        assert!(needs_lookup(OPENAI_MODEL, &endpoints));
+        assert!(!needs_lookup("litellm:gpt-x", &endpoints));
+        assert!(!needs_lookup(OPENAI_MODEL, &single));
     }
 
     #[test]
     fn endpoint_ref_display() {
-        assert_eq!(r("litellm", "gpt-5.2").to_string(), "litellm:gpt-5.2");
+        assert_eq!(r("litellm", "gpt-x").to_string(), "litellm:gpt-x");
     }
 
     #[test]
     fn secret_never_debugs() {
-        let e = ep("x", Dialect::OpenAi, false);
-        let mut e = e;
+        let mut e = ep("x", WireDialect::OpenAi, false);
         e.api_key = SecretString::new("sk-very-secret");
         assert!(!format!("{e:?}").contains("sk-very-secret"));
+        assert!(!format!("{:?}", e.credentials()).contains("sk-very-secret"));
     }
 
     fn layered(section: EndpointSection, origin: RuleOrigin) -> LayeredEndpoint {
@@ -1354,19 +1443,12 @@ mod tests {
                 ),
             ),
             (
-                "plain",
-                layered(
-                    section(Some("anthropic"), None, Some("k")),
-                    RuleOrigin::Global,
-                ),
-            ),
-            (
                 "baddialect",
-                layered(section(Some("cohere"), None, Some("k")), RuleOrigin::Realm),
+                layered(section(Some("cohere"), Some("LITELLM_KEY"), None), RuleOrigin::Realm),
             ),
             (
                 "nodialect",
-                layered(section(None, None, Some("k")), RuleOrigin::Realm),
+                layered(section(None, Some("LITELLM_KEY"), None), RuleOrigin::Realm),
             ),
             (
                 "nokey",
@@ -1381,7 +1463,7 @@ mod tests {
             ),
             (
                 "openai",
-                layered(section(Some("openai"), None, Some("k")), RuleOrigin::Realm),
+                layered(section(Some("openai"), Some("LITELLM_KEY"), None), RuleOrigin::Realm),
             ),
             (
                 "projenv",
@@ -1392,7 +1474,7 @@ mod tests {
             ),
             (
                 "bad.name",
-                layered(section(Some("openai"), None, Some("k")), RuleOrigin::Realm),
+                layered(section(Some("openai"), Some("LITELLM_KEY"), None), RuleOrigin::Realm),
             ),
         ]
         .into_iter()
@@ -1401,12 +1483,12 @@ mod tests {
         let (registry, notices) =
             EndpointRegistry::discover_with(&config, None, &configured, |var| {
                 (var == "LITELLM_KEY").then(|| "sk-litellm".to_string())
-            });
+            })
+            .unwrap();
         let litellm = registry.get("litellm").expect("litellm");
-        assert_eq!(litellm.dialect, Dialect::OpenAi);
+        assert_eq!(litellm.dialect, WireDialect::OpenAi);
         assert_eq!(litellm.api_key.expose(), "sk-litellm");
         assert!(!litellm.builtin);
-        assert!(registry.get("plain").is_some());
         for skipped in [
             "baddialect",
             "nodialect",
@@ -1430,13 +1512,44 @@ mod tests {
                 .iter()
                 .any(|n| matches!(n, Notice::EndpointSkipped { name, .. } if name == "openai"))
         );
-        assert!(
-            notices
-                .iter()
-                .any(|n| matches!(n, Notice::EndpointPlainKey { name } if name == "plain"))
-        );
         let text: Vec<String> = notices.iter().map(ToString::to_string).collect();
         assert!(text.iter().all(|t| !t.contains("sk-litellm")));
+    }
+
+    #[test]
+    fn an_inline_api_key_is_a_typed_startup_error_naming_api_key_env() {
+        let configured: BTreeMap<String, LayeredEndpoint> = [
+            (
+                "litellm".to_string(),
+                layered(
+                    section(Some("openai"), Some("LITELLM_KEY"), None),
+                    RuleOrigin::Global,
+                ),
+            ),
+            (
+                "plain".to_string(),
+                layered(
+                    section(Some("anthropic"), None, Some("sk-plain-secret")),
+                    RuleOrigin::Global,
+                ),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let err = EndpointRegistry::discover_with(&Config::default(), None, &configured, |_| {
+            Some("sk-litellm".to_string())
+        })
+        .unwrap_err();
+        assert!(
+            matches!(&err, EndpointError::InlineApiKey { name } if name == "plain"),
+            "{err}"
+        );
+        let text = err.to_string();
+        assert!(text.contains("api_key_env"), "{text}");
+        assert!(text.contains("[endpoints.plain]"), "{text}");
+        assert!(!text.contains("sk-plain-secret"), "{text}");
+        // A start-up error: exit 2.
+        assert_eq!(crate::TuiError::from(err).exit_code(), 2);
     }
 
     fn plan_startup_t(
@@ -1449,11 +1562,11 @@ mod tests {
     #[test]
     fn startup_plans() {
         let both = vec![
-            ep("anthropic", Dialect::Anthropic, true),
-            ep("litellm", Dialect::OpenAi, false),
+            ep("anthropic", WireDialect::Anthropic, true),
+            ep("litellm", WireDialect::OpenAi, false),
         ];
-        let only_litellm = vec![ep("litellm", Dialect::OpenAi, false)];
-        let only_openai = vec![ep("openai", Dialect::OpenAi, true)];
+        let only_litellm = vec![ep("litellm", WireDialect::OpenAi, false)];
+        let only_openai = vec![ep("openai", WireDialect::OpenAi, true)];
         let req = |model, endpoint, config_model| StartupRequest {
             model,
             endpoint,
@@ -1469,25 +1582,25 @@ mod tests {
             resolved("litellm", "gpt-x")
         );
         assert_eq!(
-            plan_startup_t(req(Some("claude-opus-4-6"), None, ""), &both),
-            resolved("anthropic", "claude-opus-4-6")
+            plan_startup_t(req(Some(ANTHROPIC_MODEL), None, ""), &both),
+            resolved("anthropic", ANTHROPIC_MODEL)
         );
         assert_eq!(
-            plan_startup_t(req(None, Some("litellm"), "claude-opus-4-6"), &both),
+            plan_startup_t(req(None, Some("litellm"), ANTHROPIC_MODEL), &both),
             Ok(StartupPlan::FirstListed("litellm".into()))
         );
         assert_eq!(
-            plan_startup_t(req(None, None, "claude-opus-4-6"), &both),
-            resolved("anthropic", "claude-opus-4-6")
+            plan_startup_t(req(None, None, ANTHROPIC_MODEL), &both),
+            resolved("anthropic", ANTHROPIC_MODEL)
         );
         // Config model of a dialect nobody serves, one endpoint: list it.
         assert_eq!(
-            plan_startup_t(req(None, None, "claude-opus-4-6"), &only_litellm),
+            plan_startup_t(req(None, None, ANTHROPIC_MODEL), &only_litellm),
             Ok(StartupPlan::FirstListed("litellm".into()))
         );
         // ... or use the catalog default of a built-in.
         let Ok(StartupPlan::Resolved(choice)) =
-            plan_startup_t(req(None, None, "claude-opus-4-6"), &only_openai)
+            plan_startup_t(req(None, None, ANTHROPIC_MODEL), &only_openai)
         else {
             panic!("expected a resolved model");
         };
@@ -1501,8 +1614,8 @@ mod tests {
         let err = plan_startup_t(
             req(None, None, "mystery"),
             &[
-                ep("litellm", Dialect::OpenAi, false),
-                ep("proxy", Dialect::OpenAi, false),
+                ep("litellm", WireDialect::OpenAi, false),
+                ep("proxy", WireDialect::OpenAi, false),
             ],
         )
         .unwrap_err();
@@ -1514,111 +1627,39 @@ mod tests {
     }
 
     #[test]
-    fn restore_prefers_sidecar_then_infers() {
-        let endpoints = vec![
-            ep("anthropic", Dialect::Anthropic, true),
-            ep("litellm", Dialect::OpenAi, false),
-        ];
-        let exists = |name: &str| endpoints.iter().any(|e| e.name == name);
-        let fallback = r("anthropic", "claude-sonnet-4-6");
-        let (choice, notice) = restore_choice(
-            Some(r("litellm", "gpt-x")),
-            None,
-            &endpoints,
-            exists,
-            &fallback,
-        );
-        assert_eq!(choice, r("litellm", "gpt-x"));
-        assert!(notice.is_none());
-        let (choice, notice) = restore_choice(
-            Some(r("gone", "gpt-x")),
-            None,
-            &endpoints,
-            exists,
-            &fallback,
-        );
-        assert_eq!(choice, r("litellm", "gpt-x"));
-        assert!(notice.unwrap().contains("`gone`"));
-        let (choice, notice) = restore_choice(
-            None,
-            Some((Provider::Anthropic, "claude-opus-4-6".into())),
-            &endpoints,
-            exists,
-            &fallback,
-        );
-        assert_eq!(choice, r("anthropic", "claude-opus-4-6"));
-        assert!(notice.is_none());
-        let (choice, notice) = restore_choice(
-            None,
-            Some((Provider::Gemini, "gemini-3-flash-preview".into())),
-            &[ep("anthropic", Dialect::Anthropic, true)],
-            |name| name == "anthropic",
-            &fallback,
-        );
-        assert_eq!(choice, fallback);
-        assert!(notice.is_some());
-    }
-
-    #[test]
-    fn choice_sidecar_round_trip() {
-        let tmp = tempfile::tempdir().unwrap();
-        assert!(load_choice(tmp.path(), "abc").is_none());
-        save_choice(tmp.path(), "abc", &r("litellm", "llama3:8b")).unwrap();
+    fn a_sessions_endpoint_is_derived_from_its_binding_and_provider() {
+        let registry = EndpointRegistry::from_endpoints(vec![
+            ep("anthropic", WireDialect::Anthropic, true),
+            ep("litellm", WireDialect::OpenAi, false),
+        ]);
+        let litellm = registry.get("litellm").unwrap().binding();
         assert_eq!(
-            load_choice(tmp.path(), "abc"),
-            Some(r("litellm", "llama3:8b"))
+            endpoint_of(Provider::OpenAI, litellm.as_ref(), &registry),
+            Some(EndpointName::new("litellm"))
         );
-        assert!(load_cost(tmp.path(), "abc").is_none());
-    }
-
-    #[test]
-    fn cost_sidecar_round_trip_survives_choice_updates() {
-        use crate::ui::cost::{SessionCost, UsageTotals};
-        let tmp = tempfile::tempdir().unwrap();
-        let mut cost = SessionCost::default();
-        cost.add(
-            "gpt-5.4",
-            &UsageTotals {
-                input: 10,
-                output: 20,
-                cache_read: 30,
-                cache_write: 0,
-            },
-        );
-        cost.add(
-            "claude-opus-4-6",
-            &UsageTotals {
-                input: 1,
-                ..UsageTotals::default()
-            },
-        );
-        save_cost(tmp.path(), "abc", &r("litellm", "gpt-5.4"), &cost).unwrap();
-        let text = std::fs::read_to_string(tmp.path().join(CHOICE_DIR).join("abc.toml")).unwrap();
-        assert!(text.contains("[cost.\"gpt-5.4\"]"), "{text}");
-        assert!(!text.contains("cost_estimated"), "{text}");
-        assert_eq!(load_cost(tmp.path(), "abc"), Some(cost.clone()));
-        // Switching the model keeps the totals.
-        save_choice(tmp.path(), "abc", &r("anthropic", "claude-opus-4-6")).unwrap();
-        assert_eq!(load_cost(tmp.path(), "abc"), Some(cost.clone()));
         assert_eq!(
-            load_choice(tmp.path(), "abc"),
-            Some(r("anthropic", "claude-opus-4-6"))
+            endpoint_of(Provider::Anthropic, None, &registry),
+            Some(EndpointName::new("anthropic"))
         );
-        // Estimated totals stay estimated.
-        cost.known = false;
-        save_cost(tmp.path(), "abc", &r("anthropic", "claude-opus-4-6"), &cost).unwrap();
-        assert_eq!(load_cost(tmp.path(), "abc").map(|c| c.known), Some(false));
-        // Old sidecars without cost still load.
-        std::fs::write(
-            tmp.path().join(CHOICE_DIR).join("old.toml"),
-            "endpoint = \"openai\"\nmodel = \"gpt-5.2\"\n",
-        )
-        .unwrap();
-        assert_eq!(load_choice(tmp.path(), "old"), Some(r("openai", "gpt-5.2")));
-        assert!(load_cost(tmp.path(), "old").is_none());
+        // No built-in openai endpoint in this process, and a binding of
+        // another realm names no TUI endpoint.
+        assert_eq!(endpoint_of(Provider::OpenAI, None, &registry), None);
+        let foreign = AuthBindingRef {
+            realm: RealmId::parse("elsewhere").unwrap(),
+            binding: BindingId::parse("litellm").unwrap(),
+            profile: None,
+            origin: BindingOrigin::Configured,
+        };
+        assert_eq!(
+            endpoint_of(Provider::OpenAI, Some(&foreign), &registry),
+            None
+        );
+        // A removed endpoint is no endpoint.
+        let gone = ep("gone", WireDialect::OpenAi, false).binding();
+        assert_eq!(endpoint_of(Provider::OpenAI, gone.as_ref(), &registry), None);
     }
 
-    fn configured(name: &str, dialect: Dialect, key_env: Option<&str>) -> Endpoint {
+    fn configured(name: &str, dialect: WireDialect, key_env: Option<&str>) -> Endpoint {
         Endpoint {
             name: name.to_string(),
             dialect,
@@ -1631,12 +1672,12 @@ mod tests {
     }
 
     #[test]
-    fn configured_endpoints_lower_to_bindings_off_every_chain() {
+    fn configured_endpoints_become_bindings_off_every_chain() {
         let endpoints = vec![
-            ep("openai", Dialect::OpenAi, true),
-            configured("litellm", Dialect::OpenAi, Some("LITELLM_KEY")),
-            configured("gateway", Dialect::Anthropic, None),
-            configured("vertex", Dialect::Gemini, None),
+            ep("openai", WireDialect::OpenAi, true),
+            configured("litellm", WireDialect::OpenAi, Some("LITELLM_KEY")),
+            configured("gateway", WireDialect::Anthropic, Some("GATEWAY_KEY")),
+            configured("vertex", WireDialect::Gemini, Some("VERTEX_KEY")),
         ];
         let mut config = Config::default();
         let before = meerkat_core::connection::resolve_auth_binding_or_default_for_provider(
@@ -1647,7 +1688,9 @@ mod tests {
             true,
         )
         .unwrap();
-        lower_into(&mut config, &endpoints).unwrap();
+        config
+            .realm
+            .insert(ENDPOINT_REALM.to_string(), endpoint_section(&endpoints).unwrap());
         assert!(
             endpoints[0].binding().is_none(),
             "built-ins resolve by default"
@@ -1668,14 +1711,9 @@ mod tests {
                 "{}",
                 endpoint.name
             );
-            let expected = match &endpoint.key_env {
-                Some(env) => CredentialSourceSpec::Env {
-                    env: env.clone(),
-                    fallback: Vec::new(),
-                },
-                None => CredentialSourceSpec::InlineSecret {
-                    secret: "sk-inline".to_string(),
-                },
+            let expected = CredentialSourceSpec::Env {
+                env: endpoint.key_env.clone().unwrap(),
+                fallback: Vec::new(),
             };
             assert!(target.auth_profile.source == expected, "{}", endpoint.name);
         }
@@ -1690,10 +1728,57 @@ mod tests {
         .unwrap();
         assert_eq!(before.auth_binding, after.auth_binding);
         assert_eq!(before.backend.base_url, after.backend.base_url);
-        // Only built-ins: nothing is added.
-        let mut plain = Config::default();
-        lower_into(&mut plain, &endpoints[..1]).unwrap();
-        assert!(plain.realm.is_empty());
+        // Only built-ins: nothing to project.
+        assert!(endpoint_section(&endpoints[..1]).unwrap().binding.is_empty());
+    }
+
+    #[tokio::test]
+    async fn endpoints_are_projected_into_the_realm_document_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let store = meerkat_core::FileConfigStore::new(path.clone(), meerkat_models::canonical());
+        let endpoints = vec![
+            ep("anthropic", WireDialect::Anthropic, true),
+            configured("litellm", WireDialect::OpenAi, Some("LITELLM_KEY")),
+        ];
+        assert!(project_endpoints(&store, &endpoints).await.unwrap());
+        // Unchanged: nothing is written again.
+        assert!(!project_endpoints(&store, &endpoints).await.unwrap());
+        // What another surface loading the realm document reads resolves
+        // the session's binding.
+        let reread = meerkat_core::FileConfigStore::new(path.clone(), meerkat_models::canonical())
+            .get()
+            .await
+            .unwrap();
+        let binding = endpoints[1].binding().unwrap();
+        let target =
+            meerkat_core::connection::resolve_explicit_auth_binding_target(&reread, &binding)
+                .unwrap();
+        assert_eq!(target.backend.base_url, endpoints[1].base_url);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("LITELLM_KEY"), "{text}");
+        assert!(!text.contains("sk-inline"), "{text}");
+        // The document records the variable's name only: no secret, and no
+        // inline-secret source.
+        assert!(!text.contains("secret"), "{text}");
+        // A configured endpoint without a variable is refused, and the
+        // document is left as it was.
+        let inline = vec![configured("gateway", WireDialect::Anthropic, None)];
+        assert!(matches!(
+            project_endpoints(&store, &inline).await,
+            Err(EndpointError::InlineApiKey { name }) if name == "gateway"
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        let gateway = vec![configured("gateway", WireDialect::Anthropic, Some("GATEWAY_KEY"))];
+        assert!(project_endpoints(&store, &gateway).await.unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("GATEWAY_KEY"), "{text}");
+        assert!(!text.contains("sk-inline"), "{text}");
+        // Earlier endpoints stay, so their sessions keep resolving.
+        let reread = store.get().await.unwrap();
+        let section = &reread.realm[ENDPOINT_REALM];
+        assert!(section.binding.contains_key("litellm"));
+        assert!(section.binding.contains_key("gateway"));
     }
 
     #[tokio::test]
@@ -1701,14 +1786,22 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let factory = meerkat::AgentFactory::new(tmp.path().to_path_buf());
         for endpoint in [
-            configured("litellm", Dialect::OpenAi, None),
-            configured("gateway", Dialect::Anthropic, None),
-            configured("vertex", Dialect::Gemini, None),
+            // `PATH` is set wherever tests run; its value only has to be
+            // a non-empty key for the client to build.
+            configured("litellm", WireDialect::OpenAi, Some("PATH")),
+            configured("gateway", WireDialect::Anthropic, Some("PATH")),
+            configured("vertex", WireDialect::Gemini, Some("PATH")),
         ] {
             let mut config = Config::default();
-            lower_into(&mut config, std::slice::from_ref(&endpoint)).unwrap();
+            config.realm.insert(
+                ENDPOINT_REALM.to_string(),
+                endpoint_section(std::slice::from_ref(&endpoint)).unwrap(),
+            );
             let model = "served-only-here";
-            assert!(ensure_model_profile(&mut config, endpoint.provider(), model, None).unwrap());
+            let entry = model_profile_entry(&config, endpoint.provider(), model, None)
+                .unwrap()
+                .unwrap();
+            config.models.custom.insert(model.to_string(), entry);
             let identity = meerkat_core::SessionLlmIdentity {
                 model: model.to_string(),
                 provider: endpoint.provider(),
@@ -1724,11 +1817,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn profiles_are_added_only_for_unknown_models() {
-        let mut config = Config::default();
+    #[tokio::test]
+    async fn profiles_are_written_for_unknown_models_and_refused_across_dialects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = meerkat_core::FileConfigStore::new(
+            tmp.path().join("config.toml"),
+            meerkat_models::canonical(),
+        );
         assert!(
-            !ensure_model_profile(&mut config, Provider::Anthropic, "claude-sonnet-4-6", None)
+            !ensure_model_profile(&store, Provider::Anthropic, ANTHROPIC_MODEL, None)
+                .await
                 .unwrap()
         );
         let listed = ModelEntry {
@@ -1739,18 +1837,57 @@ mod tests {
             max_output_tokens: Some(2_048),
         };
         assert!(
-            ensure_model_profile(&mut config, Provider::OpenAI, "llama3:8b", Some(&listed))
+            ensure_model_profile(&store, Provider::OpenAI, "llama3:8b", Some(&listed))
+                .await
                 .unwrap()
         );
-        assert!(!ensure_model_profile(&mut config, Provider::OpenAI, "llama3:8b", None).unwrap());
+        assert!(
+            !ensure_model_profile(&store, Provider::OpenAI, "llama3:8b", None)
+                .await
+                .unwrap()
+        );
+        // A later listing with a larger window refreshes the profile.
+        let bigger = ModelEntry {
+            context_window: Some(16_384),
+            ..listed.clone()
+        };
+        assert!(
+            ensure_model_profile(&store, Provider::OpenAI, "llama3:8b", Some(&bigger))
+                .await
+                .unwrap()
+        );
+        let config = store.get().await.unwrap();
         let custom = &config.models.custom["llama3:8b"];
         assert_eq!(custom.provider, Provider::OpenAI);
-        assert_eq!(custom.context_window, Some(8_192));
+        assert_eq!(custom.context_window, Some(16_384));
         assert_eq!(custom.max_output_tokens, Some(2_048));
         assert_eq!(
             registry_context_window(&config, Provider::OpenAI, "llama3:8b"),
-            Some(8_192)
+            Some(16_384)
         );
         assert!(registry_context_window(&config, Provider::OpenAI, "unknown").is_none());
+        // The same id on an endpoint of another dialect is refused, as is a
+        // catalogued id claimed for another provider.
+        let err = ensure_model_profile(&store, Provider::Anthropic, "llama3:8b", None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                EndpointError::DialectConflict {
+                    existing: Provider::OpenAI,
+                    requested: Provider::Anthropic,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        let err = ensure_model_profile(&store, Provider::Gemini, OPENAI_MODEL, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, EndpointError::DialectConflict { .. }),
+            "{err}"
+        );
     }
 }

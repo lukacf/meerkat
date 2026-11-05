@@ -343,3 +343,175 @@ timestamp, and output excerpts.
   Mintlify docs only; the README is not under `docs/`). `make check-published-crates-standalone-guard`: meerkat-tui OK
   (no `standalone-tests` metadata: plain `cargo test`; README prints the ignored live-lane commands).
 - README: `crates/meerkat-tui/README.md` rewritten for the port. CHANGELOG `[Unreleased]` `### Added` entry completed.
+
+## Review fixes — Agent A (approval, security, helpers)
+
+### Why not the native operation review (A22, A23)
+
+Checked concretely against `crates/meerkat-core/src/approval/{review,consent}.rs`,
+`crates/meerkat/src/operation_reviewer.rs` and `crates/meerkat/src/governed_realm/stock/`:
+
+- The pieces are public: `OperationReviewer` (review.rs:291), `BoundOperationReview::new`
+  + `.with_human_consent(route, validity)` (review.rs:552-659), `HumanConsentRoute`
+  (consent.rs:262-319), `AgentFactory::with_operation_review` (factory.rs:4718).
+- But review only runs for a call carrying a `WorkAuthorizationContext`: the fenced dispatch
+  in `agent.rs:3646-3716` builds a review binding only `if let Some(work) =
+  context.work_authorization()`, else "Ungoverned work retains no review" (3678-3683). That
+  context comes only from the native grant host (`NativeGrantWorkConfiguration`,
+  `meerkat-runtime/src/meerkat_machine/local_authorization.rs:141-195`), which
+  `open_realm_persistence_in` (what rkat-tui opens) never installs. In an ungoverned realm a
+  bound review is accepted and never invoked.
+- The tier (R1/R2/R3, authorization.rs:997-1004) is authorization truth from an
+  `OperationPolicyOwner`; there is no host-local "tool call → tier" policy. Stock governance
+  leaves builtins unmapped: `stock/policy.rs:52-60, 746-756` refuse shell / write_file /
+  apply_patch as Unavailable (no `ToolOperationTarget` for builtins), and
+  `StockReviewTarget` has no builtin selector (stock/review.rs:121-151).
+- The consent route needs an `AuthenticatedApprover` (Human principal in a trust domain,
+  consent.rs:126-145) and settles the call as `HumanConsentRequired` for a fresh attempt
+  (review.rs:1372-1437); rkat-tui's dialog answers inside the waiting call.
+- `ReviewCandidate` gives no transcript (review.rs:22-27) and `ModelOperationReviewer` is a
+  single tool-less request (operation_reviewer.rs:127-133), so the classifier's reasoned
+  stage with read-only project tools has no native host.
+
+So rkat-tui keeps its gate on `ToolDispatchAdmission` (the seam that runs for every call in an
+ungoverned realm) and records its escalations in the realm's canonical approval store.
+
+Upstream asks:
+- (Z-H1, D#1) Host-local review tier policy for non-governed realms: a `tool call →
+  OperationReviewTier` policy installable on the factory/session build without
+  `NativeGrantWorkConfiguration`, plus `ToolOperationTarget::BuiltinOperation` targets and a
+  stock mapping / `StockReviewTarget` selector for builtins (shell, write_file, apply_patch).
+- (D#19) A typed host reviewer so the classifier's own agent loop can go away: a core-hosted
+  bounded multi-turn reviewer with host-supplied read-only tools and a sanctioned
+  transcript/environment context source, and a synchronous in-call `HumanConsentRoute` mode
+  for single-user hosts without a trust domain.
+- (D#6) Typed authorship on host prompts: a prompt admitted through `PromptInput` should carry
+  `TranscriptTurnInput::TypedText` (or `RenderClass::UserPrompt`) so a resumed transcript can
+  tell the human's words from peer / runtime input without a host sidecar; rkat-tui demotes
+  user-role messages without typed authorship to `[context]` lines.
+- (D#5) The admission seam receives no tool provenance or mutation class; rkat-tui reads the
+  session's published visible tool definitions per call. Ask: pass the resolved
+  `ToolDef`/`ToolProvenance` and `tool_mutation_class` of the owning dispatcher into
+  `ToolDispatchAdmission::await_dispatch_admission`.
+
+## Review fixes — Agent B (runtime, endpoints, structure, docs)
+
+Paths under `crates/meerkat-tui/`.
+
+- B1 durable endpoints: `src/endpoints.rs` (`endpoint_section`, `endpoint_patch`, `project_endpoints`,
+  `model_profile_entry`, `ensure_model_profile`, `EndpointError::DialectConflict`) writes the `[realm.rkat-tui-endpoints]`
+  backend/auth/binding entries and `[models.<id>]` profiles into the realm's own `config.toml` through
+  `FileConfigStore::patch` (only changed entries; an inline key makes the document 0600). The factory reads that document
+  on every build through `src/bootstrap/realm_config.rs` (`RealmConfigStore`: document + env overrides + `SYSTEM.md`),
+  replacing the in-memory synthetic realm. The endpoint-choice sidecar is gone: `endpoints::endpoint_of` derives the
+  endpoint from the session's persisted binding/provider. Cost records moved to `src/runner/cost_store.rs`
+  (`<realm>/tui_cost/<id>.toml`, `paths::write_atomic` 0600, corrupt file renamed `.corrupt-<unix s>`, legacy
+  `tui_endpoints/` totals still read). `endpoints::load_cost` stays as a re-export for `tests/mobs.rs`.
+- B2: `SessionHandle` keeps no model/provider/binding; `SessionHandle::identity` reads the authoritative metadata,
+  the runner re-reads it after open/switch/rebuild. `ModelChoice.endpoint: EndpointName`,
+  `Runner.current_endpoint: Option<EndpointName>`. Every build carries
+  `tool_access_policy = DenyList{brain_swap, apply_patch}` (`session::TUI_OWNED_BUILTINS`).
+- B3: prefix inference removed; `WireDialect::of_catalog_model` = `meerkat_models::infer_provider` (catalog-exact);
+  bare ids outside the catalog resolve only via live lists (or the only endpoint). `Dialect` → `WireDialect`.
+- B4: `bootstrap/confinement.rs` — a realm `[confinement]` shell requirement is the floor (lowered with
+  `meerkat::HostConfinement::resolve`; `strict` narrows network), `--no-confinement` against it is
+  `ConfinementError::BelowRealmFloor`. `tests/confinement.rs` probes `meerkat_sandbox::prepare` + a confined `/bin/true`
+  and prints `SKIPPED:`; no output-text matching.
+- B5: `ui::compaction::CompactionTrigger::{Inherit, Disable, At}`; window from the model profile only
+  (`runner::models::window_of` over `Runtime.effective`), listings refresh the profile; `Msg::CompactRebuilt` /
+  `COMPACT_REBUILT` ("rebuilt the session so its next model call compacts"); every retire+resume is
+  `Runner::rebuild_session_workaround(RebuildReason)`; background fetches never rebuild.
+- B6: runner — delivery only by `BoundaryAppendApplied` or the input's completion; runs tracked in a
+  `HashSet<RunId>`; typed `ui::TurnFailure::{Failed, Interrupted, Unknown, Pending}` (interrupted only on `Cancelled`
+  or metadata outcome `Cancelled`); `Completion::{Pending, TerminalAtAdmission (→ Unknown), AlreadyTerminal}`; waiters
+  and interrupt tasks in a `JoinSet` aborted on switch/quit; the scoped channel is gone; transcript seeding and helper
+  registration happen after a successful open; `SessionHandle::close` (→ `ApprovalEngine::forget_session`) on `/new`,
+  `/resume`, quit; inputs recorded with `record_user_input`/`forget_user_input` by idempotency key after admission.
+  A prompt during `/compact now` goes out as an ordinary `StartTurn` (Queue) served after the rebuild.
+- B7: `ui::cost::CostConfidence::{Exact, Approximate, Unmeasured}`, `SessionCost::reconcile` against
+  `Session::total_usage` on resume, `record_compaction` (estimated input + summary), `Msg::HelperUnmeasured`.
+- B8: typed errors with sources: `EndpointError`, `EndpointSkip`, `AdmissionError`, `ConfinementError`,
+  `PricingError` (sources), `ListModelsError::{Read, Decode, Utf8, Task}`, `CostStoreError`, `TuiError::ToolGateway`,
+  `TuiError::McpConfig(EffectiveMcpServersError)`; `Provider`/`MissingApiKey`/`Mcp`/`InputRejected` string variants gone.
+- B9: modules are crate-private, public under the `test-support` feature (`internal_modules!` in `src/lib.rs`), plus
+  `meerkat_tui::harness`; public API `run`, `Args`, `TuiError` and its error types. Self dev-dependency with
+  `test-support`, `[package.metadata.meerkat.standalone-tests] features = ["test-support"]`, README prints
+  `cargo test --features test-support`.
+- B10: price cache in `GlobalDirs::cache` (`--config-dir/cache`, `<user-root>/.cache/rkat-tui`, `$XDG_CACHE_HOME`,
+  platform cache dir).
+- B11: persona trimmed (no tool contracts / interrupt semantics); notes index last, via A's labelled untrusted
+  `prompt_index`. README updated for the whole pass.
+- B12: bidi controls replaced in `ui::markdown::sanitize`; model-list bodies through `http::read_capped`
+  (`MAX_LIST_BYTES`); project `.rkat/mcp.toml` servers only when `ProjectMcpTrust` (A's `HostTrustRecord` digest via
+  `/mcp trust`, or `--allow-project-mcp`), else upstream's trusting loader refuses them and a notice lists them.
+- B13: keys are `SecretString` end to end (`ProviderCredentials`, `BuiltinCredentials`), headers marked sensitive.
+- B14: resumed builds pass the session's persisted `build_state.additional_instructions` (the factory never re-renders
+  a resumed prompt): persona once, edited files apply from the next new session (`tests/instructions.rs`).
+- B15: `/remember` key = SHA-256 of the line (pinned in a test).
+- B16: REQ-006 downgraded to PARTIAL (gap 3 below stays open).
+
+Upstream asks (one line each):
+- (D#13/D#12) A typed "no size-triggered compaction" for `auto_compact_threshold_override` (today `NonZeroU64::MAX`).
+- (Z-H5, D#14) An on-demand compaction call and a live compaction-trigger update on a session, so
+  `rebuild_session_workaround` can go away; `CompactionCompleted` delivered after a retire-and-resume (P6 gap 3).
+- (Z-M9) A runtime/provider-owned "list models for this binding" seam so the TUI's live list client can go away.
+- (D#15) A host-owned secret store write path for endpoint keys (`CredentialSourceSpec::ManagedStore` from a host) so an
+  inline `api_key` need not be written into the realm document.
+- (B7) `CompactionCompleted` reporting the summary call's usage (today the input is the history estimate).
+- (B7, A) `HelperUpdate` has no "follow failed" variant yet: `Msg::HelperUnmeasured` exists on the UI side, but nothing
+  emits it until `src/mobs/follow.rs` reports a follow failure (Agent A's file).
+
+Verification (Agent B, lane `tui-port`, 2026-11-05, concurrent with Agent A's edits):
+- `fmt -p meerkat-tui`: clean. `node scripts/generate-bazel-rust-builds.mjs`: regenerated (`test-support` feature on
+  the test targets, self dev-dependency); `--check` clean. `make check-published-crates-standalone-guard`: meerkat-tui OK.
+- `clippy -p meerkat-tui --all-targets --all-features -- -D warnings`: no finding in Agent B's files; the remaining
+  findings are in Agent A's in-progress files (`approval/engine.rs` double_must_use, `memory/store.rs` redundant_clone,
+  `tests/drift_pins.rs`, `tests/mobs.rs`).
+- `nextest run -p meerkat-tui --lib --test integrator --test models --test compact --test instructions --test
+  semantic_recall --test confinement --test render_snapshot`: 495 passed; failing: `approval::policy::tests::
+  user_rules_take_precedence` (A), and `integrator::a_steered_message_is_applied_at_the_next_tool_boundary` +
+  `semantic_recall::a_compacted_fact_is_found_with_memory_search`, both because `read_file` / `memory_search` now reach
+  the classifier (A4 provenance lookup; the test fails the same with B's tool policy removed). The confinement cases
+  printed `SKIPPED:` (no unprivileged user namespaces on this host); the realm-floor case ran and passed.
+- `rkat-tui --help`: exit 0 (`--allow-project-mcp` listed).
+
+Verification (Agent A, lane `tui-port`, 2026-11-05): `repo-cargo fmt -p meerkat-tui -- --check` clean;
+`repo-cargo clippy -p meerkat-tui --all-targets --all-features -- -D warnings` clean;
+`repo-cargo nextest run -p meerkat-tui`: 588 tests run, 588 passed, 6 skipped (no hangs);
+`repo-cargo run -p meerkat-tui --bin rkat-tui -- --help </dev/null` prints usage.
+The A4 regression (Tier-1 `read_file`/`memory_search` reaching the classifier) was the missing
+`engine.set_tool_origins(ServiceToolOrigins::new(&service))` call in `bootstrap/mod.rs`, now wired.
+
+## User follow-ups — confinement refusal, sandbox grants, config dir, env-only endpoint keys (2026-11-05)
+
+- Educational refusal: `ConfinementError::Unenforceable` now carries `status: HostUsernsStatus` and `help`
+  (`unenforceable_help`): what blocked it (read from `/proc/sys/user/max_user_namespaces`,
+  `/proc/sys/kernel/unprivileged_userns_clone`, `/proc/sys/kernel/apparmor_restrict_unprivileged_userns`, in that
+  order; else the backend's refusal; macOS Seatbelt / no backend elsewhere), how to fix it (sysctl + `/etc/sysctl.d/`
+  drop-in; for AppArmor also a per-binary profile with `userns,` and `apparmor_parser -r`, with the trade-off), and how
+  to run unconfined (`--no-confinement`/`--confinement=off`, or the realm config when a `[confinement]` floor applies).
+  Fail closed, exit 2. Unit tests: `userns_status_is_read_from_the_proc_switches` (fake proc root),
+  `the_refusal_explains_the_blocker_the_fix_and_the_way_out`.
+- Linux baseline (read from `meerkat-sandbox/src/linux.rs`): dirs `/bin /sbin /usr/bin /usr/sbin /lib /lib64 /usr/lib
+  /usr/lib64`, files `/etc/ld.so.cache /dev/null /dev/random /dev/urandom`; empty private mount view + chroot, no
+  `/etc`, `/run`, `/proc`, `/sys`; grants bound at their own path; single regular files (nlink 1) are grantable as
+  `Literal`; symlinked paths and overlaps refused; seccomp admits only `AF_INET`/`AF_INET6` sockets (no `AF_UNIX`).
+- DNS: `/etc/{host.conf,gai.conf,services,protocols}` added as file grants. A symlinked `/etc/resolv.conf`
+  (systemd-resolved) cannot be granted, and granting its target's parent (`/run/systemd/resolve`) would not help
+  (glibc reads only `/etc/resolv.conf`; nss-resolve needs `AF_UNIX`): not granted; a start-up notice names it
+  (`HostPaths::resolv_conf_link`). Upstream ask: the Linux backend binding a symlink's target at the link's path.
+- Extra grants: `--confinement-read`/`--confinement-write <dir>` (`ExtraGrants`, validated by `grants_with`: absolute,
+  existing, canonical, directory, off baseline/`/proc`/`/sys`/`/dev`, disjoint from the workspace and each other,
+  not redundant; typed `ConfinementError::ExtraGrant`); refused under a realm floor. `ConfinementSection`
+  (`extra_read`/`extra_write`) is defined but not yet a `tui.toml` key (needs a field in `approval/rules.rs`).
+- Config dir: `~/.rkat/tui` (`<--user-config-root>/.rkat/tui`), `--config-dir` overrides; an existing legacy
+  `~/.config/rkat-tui` / `$XDG_CONFIG_HOME/rkat-tui` is used while the new dir is missing, with a one-line notice
+  (`legacy_config_notice`). Trust-record key unchanged (`the_trust_records_move_with_the_config_dir`).
+- Endpoint keys: an inline `api_key` is `EndpointError::InlineApiKey` (exit 2, names `api_key_env`); the realm
+  projection writes `CredentialSourceSpec::Env` only (a configured endpoint without a variable is refused); the 0600
+  path and `Notice::EndpointPlainKey` are gone. Tests: `an_inline_api_key_is_a_typed_startup_error_naming_api_key_env`,
+  `endpoints_are_projected_into_the_realm_document_once` (document holds the variable name only).
+- Verification (lane `tui-port`): fmt clean; clippy `-p meerkat-tui --all-targets --all-features -D warnings` clean;
+  nextest lib (`bootstrap::`, `endpoints::`, `cli::`) + `--test confinement` + `--test models`: 70 passed; confinement
+  cases print `SKIPPED:` (AppArmor userns restriction on this host), DNS test included; `--help` exit 0; a real
+  `rkat-tui --confinement=workspace` printed the AppArmor explanation and exited 2.

@@ -8,12 +8,15 @@
 //! [`crate::bootstrap::GlobalDirs`]), `<realm>/tui.toml`
 //! (per-workspace, the default write target) and `<project>/.rkat/tui.toml`
 //! (committed with the repository, therefore untrusted: it may only add deny
-//! rules, `[auto]` settings and new endpoints, and may not loosen
-//! `trust_project_builds`). The command-line overlay ([`crate::overlay`]) is a
+//! rules and `[auto]` settings, may not loosen `trust_project_builds`, and
+//! its endpoints are ignored). The realm file is fully applied only when
+//! the host trust record says rkat-tui wrote it or the user trusted it
+//! ([`crate::approval::trust`]); otherwise only its deny rules apply. The command-line overlay ([`crate::overlay`]) is a
 //! fourth layer between the realm and project files. Besides rules and
 //! `[auto]`, the file holds `[endpoints.<name>]` (see [`crate::endpoints`])
 //! and `[pricing."<model id>"]` price overrides (see [`crate::pricing`]).
 
+use crate::approval::trust::{TrustStatus, Untrusted};
 use crate::ui::compaction::{CompactMode, CompactionPolicy};
 use globset::{Glob, GlobBuilder, GlobMatcher};
 use serde::{Deserialize, Serialize};
@@ -27,6 +30,15 @@ pub const RULES_FILE_NAME: &str = "tui.toml";
 /// Errors from rule parsing and persistence.
 #[derive(Debug, thiserror::Error)]
 pub enum RulesError {
+    /// A rules file could not be written.
+    #[error("cannot write {}: {source}", path.display())]
+    Write {
+        /// The rules file.
+        path: PathBuf,
+        /// Why.
+        #[source]
+        source: crate::paths::AtomicWriteError,
+    },
     /// A glob pattern failed to compile.
     #[error("invalid pattern `{pattern}`: {source}")]
     Pattern {
@@ -241,89 +253,6 @@ impl fmt::Display for ArgPattern {
     }
 }
 
-/// Shell commands as rule subjects.
-///
-/// Allow rules must cover *every* simple command of a `;`/`&&`/`||`/`|` chain,
-/// so `cargo nextest run*` does not allow `cargo nextest run; curl x | sh`.
-/// Deny rules match when *any* simple command (or the whole command) matches,
-/// after whitespace normalisation and with a leading `\` stripped from the
-/// command word, so `true && git push`, `git  push` and `\git push` are all
-/// caught by `git push*`.
-mod shell_subject {
-    use super::ArgPattern;
-    use crate::approval::shell::{Op, RedirectKind, Segment, lex, segments};
-
-    /// Command words of a segment joined by single spaces, without a leading `\`.
-    fn segment_text(seg: &Segment) -> String {
-        let mut out = String::new();
-        for (i, word) in seg.words.iter().enumerate() {
-            if i > 0 {
-                out.push(' ');
-            }
-            let text = if i == 0 {
-                word.text.trim_start_matches('\\')
-            } else {
-                word.text.as_str()
-            };
-            out.push_str(text);
-        }
-        out
-    }
-
-    /// Whitespace-normalised text with a leading `\` stripped.
-    fn normalise(raw: &str) -> String {
-        let joined = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-        joined.trim_start_matches('\\').to_string()
-    }
-
-    /// Allow semantics: every segment matches. Unsupported syntax, background
-    /// jobs and file redirections never match.
-    pub(super) fn allow_matches(arg: &ArgPattern, command: &str) -> bool {
-        if let ArgPattern::Literal(text) = arg {
-            return text == command;
-        }
-        let Ok(tokens) = lex(command) else {
-            return false;
-        };
-        let mut any = false;
-        for seg in segments(tokens) {
-            if seg.terminator == Some(Op::Amp) {
-                return false;
-            }
-            if seg.words.is_empty() && seg.redirects.is_empty() {
-                continue;
-            }
-            let fd_dup_only = seg
-                .redirects
-                .iter()
-                .all(|r| matches!(r.kind, RedirectKind::DupOut | RedirectKind::DupIn));
-            if !fd_dup_only || !arg.matches(&segment_text(&seg)) {
-                return false;
-            }
-            any = true;
-        }
-        any
-    }
-
-    /// Deny semantics: the whole command or any segment matches.
-    pub(super) fn deny_matches(arg: &ArgPattern, command: &str) -> bool {
-        if arg.matches(command) || arg.matches(&normalise(command)) {
-            return true;
-        }
-        match lex(command) {
-            Ok(tokens) => segments(tokens)
-                .iter()
-                .any(|seg| arg.matches(&segment_text(seg))),
-            // Best effort for syntax the lexer refuses: split on anything that
-            // can separate or nest commands.
-            Err(_) => command
-                .split([';', '&', '|', '\n', '(', ')', '`', '{', '}'])
-                .map(|piece| normalise(piece.trim_start_matches('$')))
-                .any(|piece| !piece.is_empty() && arg.matches(&piece)),
-        }
-    }
-}
-
 fn has_glob_meta(s: &str) -> bool {
     s.contains(['*', '?', '[', '{'])
 }
@@ -411,7 +340,7 @@ impl Rule {
     /// Deny rules match when **any** subject matches; allow rules require
     /// **every** subject to match (an `apply_patch` touching two files is
     /// allowed only when both are covered). For `shell`, the same applies per
-    /// simple command of the command line (see [`shell_subject`]).
+    /// simple command of the command line (see [`super::shell_subject`]).
     pub fn matches(&self, tool: &str, subjects: &[String]) -> bool {
         if !self.tool.matches(tool) {
             return false;
@@ -423,7 +352,7 @@ impl Rule {
         match self.kind {
             RuleKind::Deny => subjects.iter().any(|s| {
                 if shell {
-                    shell_subject::deny_matches(arg, s)
+                    super::shell_subject::deny_matches(arg, s)
                 } else {
                     arg.matches(s)
                 }
@@ -432,7 +361,7 @@ impl Rule {
                 !subjects.is_empty()
                     && subjects.iter().all(|s| {
                         if shell {
-                            shell_subject::allow_matches(arg, s)
+                            super::shell_subject::allow_matches(arg, s)
                         } else {
                             arg.matches(s)
                         }
@@ -532,13 +461,15 @@ fn broad_shell_arg(arg: &str, glob: bool) -> Option<&'static str> {
     None
 }
 
-/// Identifies a rule inside a [`RuleSet`].
+/// Identifies a rule inside a [`RuleSet`]: a serial number assigned when
+/// the rule is added, never reused and never shifted by removing other
+/// rules, so an id shown in a denial still names the same rule later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RuleId {
     /// Which list.
     pub kind: RuleKind,
-    /// Index into that list.
-    pub index: usize,
+    /// Serial number (from 1, shared by both lists).
+    pub serial: u64,
 }
 
 impl fmt::Display for RuleId {
@@ -547,89 +478,118 @@ impl fmt::Display for RuleId {
             RuleKind::Allow => "allow",
             RuleKind::Deny => "deny",
         };
-        write!(f, "{kind}#{}", self.index + 1)
+        write!(f, "{kind}#{}", self.serial)
     }
 }
 
 /// Merged rules from every layer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuleSet {
-    /// Allow rules.
-    pub allow: Vec<Rule>,
-    /// Deny rules.
-    pub deny: Vec<Rule>,
+    allow: Vec<(u64, Rule)>,
+    deny: Vec<(u64, Rule)>,
+    /// Last serial handed out.
+    last: u64,
 }
 
 impl RuleSet {
+    fn list(&self, kind: RuleKind) -> &[(u64, Rule)] {
+        match kind {
+            RuleKind::Allow => &self.allow,
+            RuleKind::Deny => &self.deny,
+        }
+    }
+
+    fn list_mut(&mut self, kind: RuleKind) -> &mut Vec<(u64, Rule)> {
+        match kind {
+            RuleKind::Allow => &mut self.allow,
+            RuleKind::Deny => &mut self.deny,
+        }
+    }
+
+    /// Allow rules with their ids, in order.
+    pub fn allow(&self) -> impl ExactSizeIterator<Item = (RuleId, &Rule)> {
+        self.with_ids(RuleKind::Allow)
+    }
+
+    /// Deny rules with their ids, in order.
+    pub fn deny(&self) -> impl ExactSizeIterator<Item = (RuleId, &Rule)> {
+        self.with_ids(RuleKind::Deny)
+    }
+
+    fn with_ids(&self, kind: RuleKind) -> impl ExactSizeIterator<Item = (RuleId, &Rule)> {
+        self.list(kind)
+            .iter()
+            .map(move |(serial, rule)| (RuleId { kind, serial: *serial }, rule))
+    }
+
+    fn first_match(&self, kind: RuleKind, tool: &str, subjects: &[String]) -> Option<RuleId> {
+        self.with_ids(kind)
+            .find(|(_, r)| r.matches(tool, subjects))
+            .map(|(id, _)| id)
+    }
+
     /// First deny rule matching the action.
     pub fn matches_deny(&self, tool: &str, subjects: &[String]) -> Option<RuleId> {
-        self.deny
-            .iter()
-            .position(|r| r.matches(tool, subjects))
-            .map(|index| RuleId {
-                kind: RuleKind::Deny,
-                index,
-            })
+        self.first_match(RuleKind::Deny, tool, subjects)
     }
 
     /// First allow rule matching the action.
     pub fn matches_allow(&self, tool: &str, subjects: &[String]) -> Option<RuleId> {
-        self.allow
-            .iter()
-            .position(|r| r.matches(tool, subjects))
-            .map(|index| RuleId {
-                kind: RuleKind::Allow,
-                index,
-            })
+        self.first_match(RuleKind::Allow, tool, subjects)
     }
 
     /// Look up a rule by id.
     pub fn get(&self, id: RuleId) -> Option<&Rule> {
-        match id.kind {
-            RuleKind::Allow => self.allow.get(id.index),
-            RuleKind::Deny => self.deny.get(id.index),
-        }
+        self.list(id.kind)
+            .iter()
+            .find(|(serial, _)| *serial == id.serial)
+            .map(|(_, rule)| rule)
     }
 
-    /// Add a rule to the matching list (ignores exact duplicates).
-    pub fn push(&mut self, rule: Rule) {
-        let list = match rule.kind {
-            RuleKind::Allow => &mut self.allow,
-            RuleKind::Deny => &mut self.deny,
-        };
-        let duplicate = list
+    /// Add a rule to the matching list (ignores exact duplicates). Returns
+    /// the id of the rule (the existing one for a duplicate).
+    pub fn push(&mut self, rule: Rule) -> RuleId {
+        let kind = rule.kind;
+        if let Some((serial, _)) = self
+            .list(kind)
             .iter()
-            .any(|r| r.tool == rule.tool && r.arg == rule.arg);
-        if !duplicate {
-            list.push(rule);
+            .find(|(_, r)| r.tool == rule.tool && r.arg == rule.arg)
+        {
+            return RuleId {
+                kind,
+                serial: *serial,
+            };
         }
+        self.last += 1;
+        let serial = self.last;
+        self.list_mut(kind).push((serial, rule));
+        RuleId { kind, serial }
     }
 
     /// Remove a rule by id.
     pub fn remove(&mut self, id: RuleId) -> Option<Rule> {
-        let list = match id.kind {
-            RuleKind::Allow => &mut self.allow,
-            RuleKind::Deny => &mut self.deny,
-        };
-        (id.index < list.len()).then(|| list.remove(id.index))
+        let list = self.list_mut(id.kind);
+        let index = list.iter().position(|(serial, _)| *serial == id.serial)?;
+        Some(list.remove(index).1)
     }
 
     /// Drop allow rules too broad for auto mode; returns the dropped rules.
     pub fn sanitize_for_auto(&mut self) -> Vec<Rule> {
-        let (keep, dropped): (Vec<Rule>, Vec<Rule>) = std::mem::take(&mut self.allow)
-            .into_iter()
-            .partition(|r| r.broad_reason().is_none());
+        let (keep, dropped): (Vec<(u64, Rule)>, Vec<(u64, Rule)>) =
+            std::mem::take(&mut self.allow)
+                .into_iter()
+                .partition(|(_, r)| r.broad_reason().is_none());
         self.allow = keep;
-        dropped
+        dropped.into_iter().map(|(_, r)| r).collect()
     }
 
     /// Rules from one layer, as a serializable file body (without `[auto]`).
     pub fn layer_entries(&self, origin: RuleOrigin) -> (Vec<RuleEntry>, Vec<RuleEntry>) {
-        let pick = |rules: &[Rule]| {
+        let pick = |rules: &[(u64, Rule)]| {
             rules
                 .iter()
-                .filter(|r| r.origin == origin)
-                .map(Rule::to_entry)
+                .filter(|(_, r)| r.origin == origin)
+                .map(|(_, r)| r.to_entry())
                 .collect()
         };
         (pick(&self.allow), pick(&self.deny))
@@ -743,10 +703,13 @@ pub struct EndpointSection {
     /// Base URL (e.g. `http://localhost:4000` for LiteLLM).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    /// Environment variable holding the API key (preferred over `api_key`).
+    /// Environment variable holding the API key: the only way to supply
+    /// one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
-    /// The API key in plain text (allowed, with a notice).
+    /// An inline API key. Parsed only so that start-up can refuse it with a
+    /// typed error naming `api_key_env`
+    /// ([`crate::endpoints::EndpointError::InlineApiKey`]); never used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     /// Tie-break when several endpoints list the same bare model id
@@ -929,26 +892,21 @@ pub enum Notice {
         /// Project rules file.
         path: PathBuf,
     },
-    /// The realm rules file is tracked by git (it came with the repository), so
-    /// its allow rules are ignored.
-    TrackedRealmAllowIgnored {
+    /// The realm rules file is not trusted (see [`crate::approval::trust`]):
+    /// only its deny rules apply.
+    UntrustedRealmDenyOnly {
         /// Realm rules file.
         path: PathBuf,
-        /// Number of ignored allow rules.
-        count: usize,
-    },
-    /// The realm rules file is tracked by git, so its `[auto]` settings are ignored.
-    TrackedRealmAutoIgnored {
-        /// Realm rules file.
-        path: PathBuf,
-    },
-    /// Whether the realm rules file is tracked by git could not be determined,
-    /// so it is treated as tracked.
-    RealmTrackingUnknown {
-        /// Realm rules file.
-        path: PathBuf,
-        /// Why the check failed.
-        reason: String,
+        /// Why it is not trusted.
+        reason: Untrusted,
+        /// Ignored allow rules.
+        allow: usize,
+        /// Whether a non-empty `[auto]` section was ignored.
+        auto: bool,
+        /// Ignored endpoints.
+        endpoints: usize,
+        /// Ignored price overrides.
+        pricing: usize,
     },
     /// A global rules file exists at the pre-`GlobalDirs` location and is no
     /// longer read.
@@ -965,27 +923,18 @@ pub enum Notice {
         /// Why.
         reason: String,
     },
-    /// A configured endpoint stores its API key in plain text.
-    EndpointPlainKey {
-        /// Endpoint name.
-        name: String,
-    },
-    /// The project file tried to change an endpoint a user layer defines.
+    /// The project file defines an endpoint. Project files never define
+    /// endpoints (a cloned repository could route prompts and keys to its
+    /// own server): it is ignored, never used as a default or for the
+    /// classifier.
     ProjectEndpointIgnored {
         /// Project rules file.
         path: PathBuf,
         /// Endpoint name.
         name: String,
     },
-    /// The realm rules file is tracked by git, so its endpoints are ignored.
-    TrackedRealmEndpointsIgnored {
-        /// Realm rules file.
-        path: PathBuf,
-        /// Number of ignored endpoints.
-        count: usize,
-    },
-    /// A file the user does not own (the project file, or a realm file
-    /// tracked by git) set `[pricing]`; only user layers may.
+    /// A file the user does not own (the project file, or an untrusted
+    /// realm file) set `[pricing]`; only user layers may.
     PricingIgnored {
         /// The rules file.
         path: PathBuf,
@@ -1022,21 +971,24 @@ impl fmt::Display for Notice {
                 "ignored trust_project_builds=true in {}: a project file can only lower trust",
                 path.display()
             ),
-            Self::TrackedRealmAutoIgnored { path } => write!(
-                f,
-                "{} is tracked by git; ignored its [auto] settings",
-                path.display()
-            ),
-            Self::RealmTrackingUnknown { path, reason } => write!(
-                f,
-                "could not tell whether {} is tracked by git ({reason}); treating it as tracked",
-                path.display()
-            ),
-            Self::TrackedRealmAllowIgnored { path, count } => write!(
-                f,
-                "{} is tracked by git; ignored {count} allow rule(s) from it",
-                path.display()
-            ),
+            Self::UntrustedRealmDenyOnly {
+                path,
+                reason,
+                allow,
+                auto,
+                endpoints,
+                pricing,
+            } => {
+                write!(
+                    f,
+                    "{} is not trusted ({reason}); only its deny rules apply (ignored {allow} allow rule(s), {endpoints} endpoint(s), {pricing} price override(s)",
+                    path.display()
+                )?;
+                if *auto {
+                    f.write_str(" and its [auto] settings")?;
+                }
+                f.write_str("); review it and run /rules trust to use all of it")
+            }
             Self::LegacyGlobalRulesIgnored { path, new_path } => write!(
                 f,
                 "{} is no longer read; move it to {}",
@@ -1046,18 +998,9 @@ impl fmt::Display for Notice {
             Self::EndpointSkipped { name, reason } => {
                 write!(f, "endpoint `{name}` skipped: {reason}")
             }
-            Self::EndpointPlainKey { name } => write!(
-                f,
-                "endpoint `{name}` stores its API key in plain text in tui.toml; prefer `api_key_env`"
-            ),
             Self::ProjectEndpointIgnored { path, name } => write!(
                 f,
-                "ignored [endpoints.{name}] in {}: a project file may add endpoints but not change yours",
-                path.display()
-            ),
-            Self::TrackedRealmEndpointsIgnored { path, count } => write!(
-                f,
-                "{} is tracked by git; ignored {count} endpoint(s) from it",
+                "ignored [endpoints.{name}] in {}: project files may not define endpoints; define it in your own tui.toml",
                 path.display()
             ),
             Self::PricingIgnored { path, count } => write!(
@@ -1099,14 +1042,25 @@ pub fn legacy_global_rules_notice(
     })
 }
 
-/// How far the realm rules file (`<realm>/tui.toml`) is trusted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How far the realm rules file (`<realm>/tui.toml`) is trusted (decided
+/// from the host trust record, see [`crate::approval::trust`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RealmTrust {
-    /// The file is the user's own: all of it applies.
+    /// The file is what rkat-tui wrote or the user trusted: all of it applies.
     Owned,
-    /// The file is (or may be) tracked by git, i.e. it may have arrived with
-    /// the repository: only its deny rules apply.
-    Tracked,
+    /// The file is not trusted: only its deny rules apply.
+    DenyOnly(Untrusted),
+}
+
+impl RealmTrust {
+    /// The trust a [`TrustStatus`] gives the realm rules file.
+    #[must_use]
+    pub fn from_status(status: TrustStatus) -> Self {
+        match status {
+            TrustStatus::Missing | TrustStatus::Trusted => Self::Owned,
+            TrustStatus::Untrusted(reason) => Self::DenyOnly(reason),
+        }
+    }
 }
 
 /// Everything `tui.toml` configures, after layering.
@@ -1157,10 +1111,10 @@ pub fn load_layered(
 ///
 /// User layers (global → realm → cli): rules accumulate, `[auto]` fields and
 /// endpoint fields replace those of earlier layers, endpoints merge by name.
-/// A [`RealmTrust::Tracked`] realm file contributes only deny rules (no allow
-/// rules, `[auto]` settings or endpoints). The project layer contributes deny
-/// rules, `[auto]` settings the command line did not set, and new endpoints
-/// (which may not read keys from the environment); it can never turn
+/// A [`RealmTrust::DenyOnly`] realm file contributes only deny rules (no allow
+/// rules, `[auto]` settings, endpoints or prices). The project layer
+/// contributes deny rules and `[auto]` settings the command line did not
+/// set; its endpoints are ignored with a notice; it can never turn
 /// `trust_project_builds` or `classifier_tools` on, but may turn them off.
 ///
 /// # Errors
@@ -1195,63 +1149,54 @@ pub fn load_layered_with(
     }
 
     for (path, origin, file) in user_layers {
-        let untrusted = origin == RuleOrigin::Realm && realm_trust == RealmTrust::Tracked;
+        let untrusted = match (&realm_trust, origin) {
+            (RealmTrust::DenyOnly(reason), RuleOrigin::Realm) => Some(reason.clone()),
+            _ => None,
+        };
+        let path = path.unwrap_or_default();
         let mut ignored_allow = 0;
         for rule in file.rules(origin)? {
-            if untrusted && rule.kind == RuleKind::Allow {
+            if untrusted.is_some() && rule.kind == RuleKind::Allow {
                 ignored_allow += 1;
             } else {
                 rules.push(rule);
             }
         }
-        let path = path.unwrap_or_default();
-        if ignored_allow > 0 {
-            notices.push(Notice::TrackedRealmAllowIgnored {
-                path: path.clone(),
-                count: ignored_allow,
-            });
-        }
-        if untrusted {
-            if !file.pricing.is_empty() {
-                notices.push(Notice::PricingIgnored {
-                    path: path.clone(),
-                    count: file.pricing.len(),
+        if let Some(reason) = untrusted {
+            let auto = file
+                .auto
+                .as_ref()
+                .is_some_and(|auto| *auto != AutoSection::default());
+            if ignored_allow > 0 || auto || !file.endpoints.is_empty() || !file.pricing.is_empty()
+            {
+                notices.push(Notice::UntrustedRealmDenyOnly {
+                    path,
+                    reason,
+                    allow: ignored_allow,
+                    auto,
+                    endpoints: file.endpoints.len(),
+                    pricing: file.pricing.len(),
                 });
             }
-        } else {
-            for (model, section) in &file.pricing {
-                pricing
-                    .entry(model.clone())
-                    .or_default()
-                    .merge_from(section);
-            }
+            continue;
         }
-        if untrusted {
-            if !file.endpoints.is_empty() {
-                notices.push(Notice::TrackedRealmEndpointsIgnored {
-                    path: path.clone(),
-                    count: file.endpoints.len(),
+        for (model, section) in &file.pricing {
+            pricing
+                .entry(model.clone())
+                .or_default()
+                .merge_from(section);
+        }
+        for (name, section) in &file.endpoints {
+            endpoints
+                .entry(name.clone())
+                .and_modify(|layered| layered.section.merge_from(section))
+                .or_insert_with(|| LayeredEndpoint {
+                    section: section.clone(),
+                    origin,
                 });
-            }
-        } else {
-            for (name, section) in &file.endpoints {
-                endpoints
-                    .entry(name.clone())
-                    .and_modify(|layered| layered.section.merge_from(section))
-                    .or_insert_with(|| LayeredEndpoint {
-                        section: section.clone(),
-                        origin,
-                    });
-            }
         }
-        match &file.auto {
-            Some(auto) if untrusted => {
-                if *auto != AutoSection::default() {
-                    notices.push(Notice::TrackedRealmAutoIgnored { path });
-                }
-            }
-            Some(auto) => apply_auto(&mut settings, auto),
-            None => {}
+        if let Some(auto) = &file.auto {
+            apply_auto(&mut settings, auto);
         }
     }
 
@@ -1286,21 +1231,13 @@ pub fn load_layered_with(
         }
         None => true,
     });
-    for (name, section) in &project.endpoints {
-        if endpoints.contains_key(name) {
-            notices.push(Notice::ProjectEndpointIgnored {
-                path: project_path.clone(),
-                name: name.clone(),
-            });
-        } else {
-            endpoints.insert(
-                name.clone(),
-                LayeredEndpoint {
-                    section: section.clone(),
-                    origin: RuleOrigin::Project,
-                },
-            );
-        }
+    // Project files never define endpoints, not even new ones: a cloned
+    // repository could route prompts and credentials to its own server.
+    for name in project.endpoints.keys() {
+        notices.push(Notice::ProjectEndpointIgnored {
+            path: project_path.clone(),
+            name: name.clone(),
+        });
     }
     if let Some(mut auto) = project.auto {
         if auto.trust_project_builds == Some(true) {
@@ -1408,24 +1345,47 @@ fn apply_auto(settings: &mut AutoSettings, auto: &AutoSection) {
 /// Returns [`RulesError`] on serialization or I/O failures.
 pub fn save_realm(path: &Path, file: &RulesFile) -> Result<(), RulesError> {
     let text = toml::to_string_pretty(file)?;
-    let io = |source| RulesError::Io {
+    // Realm files can hold endpoint keys: owner-only, never through a symlink.
+    let trusted = path.parent().and_then(Path::parent);
+    crate::paths::write_atomic(
+        path,
+        text.as_bytes(),
+        crate::paths::FileMode::Private,
+        trusted,
+    )
+    .map_err(|source| RulesError::Write {
         path: path.to_path_buf(),
         source,
-    };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(io)?;
-    }
-    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
-    tmp_name.push(format!(".{}.tmp", std::process::id()));
-    let tmp = path.with_file_name(tmp_name);
-    std::fs::write(&tmp, text).map_err(io)?;
-    std::fs::rename(&tmp, path).map_err(|source| {
-        let _ = std::fs::remove_file(&tmp);
-        RulesError::Io {
-            path: path.to_path_buf(),
-            source,
-        }
     })
+}
+
+/// A human-readable summary of a rules file (what `/rules trust` shows
+/// before trusting it).
+#[must_use]
+pub fn summarize(path: &Path, file: &RulesFile) -> String {
+    use std::fmt::Write as _;
+    let mut out = format!("{}:", path.display());
+    let describe = |entry: &RuleEntry| match (&entry.arg, &entry.literal) {
+        (Some(arg), _) => format!("{} {arg}", entry.tool),
+        (None, Some(literal)) => format!("{} ={literal:?}", entry.tool),
+        (None, None) => entry.tool.clone(),
+    };
+    for entry in &file.allow {
+        let _ = write!(out, "\n  allow {}", describe(entry));
+    }
+    for entry in &file.deny {
+        let _ = write!(out, "\n  deny {}", describe(entry));
+    }
+    if file.auto.as_ref().is_some_and(|a| *a != AutoSection::default()) {
+        out.push_str("\n  [auto] settings");
+    }
+    for name in file.endpoints.keys() {
+        let _ = write!(out, "\n  endpoint {name}");
+    }
+    if !file.pricing.is_empty() {
+        let _ = write!(out, "\n  {} price override(s)", file.pricing.len());
+    }
+    out
 }
 
 /// Rewrite the rule lists of the realm file from the realm/session rules in
@@ -1660,7 +1620,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rules.allow.len(), 1);
-        assert_eq!(rules.allow[0].origin, RuleOrigin::Realm);
+        assert_eq!(rules.allow[0].1.origin, RuleOrigin::Realm);
         assert_eq!(rules.deny.len(), 2);
         assert!(!settings.trust_project_builds);
         assert!(!settings.enabled);
@@ -1691,9 +1651,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rules.allow.len(), 1);
-        assert_eq!(rules.allow[0].origin, RuleOrigin::Global);
+        assert_eq!(rules.allow[0].1.origin, RuleOrigin::Global);
         assert_eq!(rules.deny.len(), 1);
-        assert_eq!(rules.deny[0].origin, RuleOrigin::Global);
+        assert_eq!(rules.deny[0].1.origin, RuleOrigin::Global);
         assert!(notices.is_empty());
         // A missing global file is not an error.
         let (rules, _, _) = load_layered(
@@ -2008,7 +1968,7 @@ mod tests {
     }
 
     #[test]
-    fn tracked_realm_contributes_only_deny_rules() {
+    fn untrusted_realm_contributes_only_deny_rules() {
         let tmp = tempfile::tempdir().unwrap();
         let realm = tmp.path().join("realm");
         std::fs::create_dir_all(&realm).unwrap();
@@ -2017,17 +1977,26 @@ mod tests {
             "[auto]\ntrust_project_builds = true\nenabled = true\n[[allow]]\ntool = \"shell\"\narg = \"make lint\"\n[[deny]]\ntool = \"shell\"\narg = \"rm *\"\n",
         )
         .unwrap();
-        let (rules, settings, notices) =
-            load_layered(&realm, None, &tmp.path().join("p"), RealmTrust::Tracked).unwrap();
+        let (rules, settings, notices) = load_layered(
+            &realm,
+            None,
+            &tmp.path().join("p"),
+            RealmTrust::DenyOnly(Untrusted::NotRecorded),
+        )
+        .unwrap();
         assert!(rules.allow.is_empty());
         assert_eq!(rules.deny.len(), 1);
         assert!(!settings.trust_project_builds);
-        assert_eq!(notices.len(), 2, "{notices:?}");
-        assert!(
-            notices
-                .iter()
-                .any(|n| matches!(n, Notice::TrackedRealmAutoIgnored { .. }))
-        );
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices.iter().any(|n| matches!(
+            n,
+            Notice::UntrustedRealmDenyOnly {
+                allow: 1,
+                auto: true,
+                ..
+            }
+        )));
+        assert!(notices[0].to_string().contains("/rules trust"));
     }
 
     fn write(dir: &Path, text: &str) {
@@ -2093,9 +2062,8 @@ mod tests {
         assert!(!s.trust_project_builds, "project may lower trust");
         let allow: Vec<(RuleOrigin, &str)> = layered
             .rules
-            .allow
-            .iter()
-            .map(|r| (r.origin, r.tool.as_str()))
+            .allow()
+            .map(|(_, r)| (r.origin, r.tool.as_str()))
             .collect();
         assert_eq!(
             allow,
@@ -2118,7 +2086,7 @@ mod tests {
             Some(&cli("[[allow]]\ntool = \"shell\"\narg = \"git push*\"\n")),
         )
         .unwrap();
-        assert_eq!(layered.rules.deny[0].origin, RuleOrigin::Project);
+        assert_eq!(layered.rules.deny[0].1.origin, RuleOrigin::Project);
         assert!(
             layered
                 .rules
@@ -2178,8 +2146,15 @@ mod tests {
             texts.iter().any(|t| t.contains("`input` must be")),
             "{texts:?}"
         );
-        // A tracked realm file's prices are ignored too.
-        let layered = load_layered_with(&realm, None, &project, RealmTrust::Tracked, None).unwrap();
+        // An untrusted realm file's prices are ignored too.
+        let layered = load_layered_with(
+            &realm,
+            None,
+            &project,
+            RealmTrust::DenyOnly(Untrusted::Changed),
+            None,
+        )
+        .unwrap();
         assert!(layered.pricing.is_empty());
     }
 
@@ -2230,21 +2205,31 @@ mod tests {
         assert_eq!(litellm.section.base_url.as_deref(), Some("http://cli"));
         assert_eq!(litellm.section.api_key_env.as_deref(), Some("LITELLM_KEY"));
         assert_eq!(litellm.section.priority, Some(2));
-        assert_eq!(layered.endpoints["team"].origin, RuleOrigin::Project);
-        assert!(layered.notices.iter().any(
-            |n| matches!(n, Notice::ProjectEndpointIgnored { name, .. } if name == "litellm")
-        ));
-        assert!(!format!("{:?}", layered.endpoints["team"]).contains("\"k\""));
+        // Project endpoints are never used, new or not.
+        assert!(!layered.endpoints.contains_key("team"));
+        for name in ["litellm", "team"] {
+            assert!(
+                layered.notices.iter().any(
+                    |n| matches!(n, Notice::ProjectEndpointIgnored { name: n, .. } if n == name)
+                ),
+                "{name}"
+            );
+        }
 
-        // A tracked realm contributes no endpoints.
-        let layered = load_layered_with(&realm, None, &project, RealmTrust::Tracked, None).unwrap();
-        // Only the project's (dialect-less, later skipped) entry remains.
-        assert_eq!(layered.endpoints["litellm"].origin, RuleOrigin::Project);
-        assert!(
-            layered
-                .notices
-                .iter()
-                .any(|n| matches!(n, Notice::TrackedRealmEndpointsIgnored { count: 1, .. }))
-        );
+        // An untrusted realm contributes no endpoints, and the project's
+        // do not fill in.
+        let layered = load_layered_with(
+            &realm,
+            None,
+            &project,
+            RealmTrust::DenyOnly(Untrusted::NotRecorded),
+            None,
+        )
+        .unwrap();
+        assert!(layered.endpoints.is_empty());
+        assert!(layered.notices.iter().any(|n| matches!(
+            n,
+            Notice::UntrustedRealmDenyOnly { endpoints: 1, .. }
+        )));
     }
 }

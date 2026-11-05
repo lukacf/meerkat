@@ -10,12 +10,13 @@ mod common;
 
 use common::{Rig, RigOptions, ScriptedLlmClient, Step, Workspace};
 use meerkat_core::{AgentEvent, Message};
+use meerkat_tui::approval::catalog::ToolOrigin;
 use meerkat_tui::approval::policy::{
     Action, DELEGATION_TOOLS, PolicyContext, READ_ONLY_BUILTINS, REVIEWED_BUILTINS, Tier,
     classify_tier,
 };
 use meerkat_tui::approval::rules::RuleSet;
-use meerkat_tui::memory::MEMORY_TOOL_NAMES;
+use meerkat_tui::memory::NOTE_TOOL_NAMES;
 use meerkat_tui::paths::ProjectRoot;
 use meerkat_tui::runner::Start;
 use meerkat_tui::ui::Effect;
@@ -86,15 +87,16 @@ async fn every_offered_builtin_is_classified_and_memory_search_is_tier_one() {
             || REVIEWED_BUILTINS.contains(&name.as_str())
             || DELEGATION_TOOLS.contains(&name.as_str())
             || FILE_TOOLS.contains(&name.as_str())
-            || MEMORY_TOOL_NAMES.contains(&name.as_str())
+            || NOTE_TOOL_NAMES.contains(&name.as_str())
             // Mutating mob tools (the read-only ones are listed).
             || name.starts_with("mob_");
         if !known {
             unclassified.push(name.clone());
         }
         if READ_ONLY_BUILTINS.contains(&name.as_str()) {
-            let args = json!({});
-            let tier = classify_tier(&Action::parse(name, &args), &rules, &ctx).tier;
+            let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+            let origin = ToolOrigin::native(meerkat_core::ToolSourceKind::Builtin);
+            let tier = classify_tier(&Action::parse(name, &args, Some(&origin)), &rules, &ctx).tier;
             assert_eq!(tier, Tier::AlwaysAllow, "{name}");
         }
     }

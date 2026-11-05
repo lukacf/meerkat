@@ -15,13 +15,15 @@ use meerkat_core::connection::{
 };
 use meerkat_core::{Config, Provider};
 
+use crate::endpoints::SecretString;
+
 /// Resolved credentials for one provider endpoint.
 #[derive(Clone)]
 pub struct ProviderCredentials {
     /// The provider (wire dialect) these credentials belong to.
     pub provider: Provider,
-    /// API key (never logged).
-    pub api_key: String,
+    /// API key (never logged; exposed only into request headers).
+    pub api_key: SecretString,
     /// Optional base URL override.
     pub base_url: Option<String>,
 }
@@ -43,7 +45,7 @@ pub struct BuiltinCredentials {
     /// environment variable or an inline secret). `None` for token-store,
     /// OAuth, command and external sources: sessions still resolve those
     /// through the factory, but the model list cannot be fetched.
-    pub api_key: Option<String>,
+    pub api_key: Option<SecretString>,
     /// The binding's base URL override.
     pub base_url: Option<String>,
 }
@@ -72,8 +74,8 @@ pub fn resolve_builtin(
     let api_key = match &target.auth_profile.source {
         CredentialSourceSpec::Env { env: var, fallback } => std::iter::once(var)
             .chain(fallback)
-            .find_map(|name| env_value(env, name)),
-        CredentialSourceSpec::InlineSecret { secret } => Some(secret.clone()),
+            .find_map(|name| env_value(env, name).map(SecretString::new)),
+        CredentialSourceSpec::InlineSecret { secret } => Some(SecretString::new(secret.clone())),
         _ => None,
     };
     // The environment default without its variable is no endpoint at all.
@@ -105,12 +107,12 @@ mod tests {
     fn api_key_never_debugs() {
         let creds = ProviderCredentials {
             provider: Provider::Anthropic,
-            api_key: "sk-very-secret".to_string(),
+            api_key: SecretString::new("sk-very-secret"),
             base_url: None,
         };
         assert!(!format!("{creds:?}").contains("sk-very-secret"));
         let builtin = BuiltinCredentials {
-            api_key: Some("sk-very-secret".to_string()),
+            api_key: Some(SecretString::new("sk-very-secret")),
             base_url: None,
         };
         assert!(!format!("{builtin:?}").contains("sk-very-secret"));
@@ -126,12 +128,12 @@ mod tests {
             _ => None,
         };
         let anthropic = resolve_builtin(&config, Provider::Anthropic, None, &env).unwrap();
-        assert_eq!(anthropic.api_key.as_deref(), Some("sk-ant"));
+        assert_eq!(anthropic.api_key.as_ref().map(SecretString::expose), Some("sk-ant"));
         assert!(anthropic.base_url.is_none());
         // A blank variable is no key; Gemini falls back to GOOGLE_API_KEY.
         assert!(resolve_builtin(&config, Provider::OpenAI, None, &env).is_none());
         let gemini = resolve_builtin(&config, Provider::Gemini, None, &env).unwrap();
-        assert_eq!(gemini.api_key.as_deref(), Some("g-key"));
+        assert_eq!(gemini.api_key.as_ref().map(SecretString::expose), Some("g-key"));
         assert!(resolve_builtin(&config, Provider::Anthropic, None, &|_| None).is_none());
     }
 }

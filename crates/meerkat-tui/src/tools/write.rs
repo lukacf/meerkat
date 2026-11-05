@@ -1,6 +1,6 @@
 //! `write_file`: create or overwrite a file (read-before-overwrite enforced).
 
-use super::{Shared, ToolOutcome, WRITE_FILE};
+use super::{CallMeta, Shared, ToolOutcome, WRITE_FILE};
 use meerkat_core::ToolDef;
 use serde::Deserialize;
 
@@ -26,13 +26,13 @@ pub(crate) fn definition() -> ToolDef {
     )
 }
 
-pub(crate) fn run(shared: &Shared, id: String, args: WriteFileArgs) -> ToolOutcome {
+pub(crate) fn run(shared: &Shared, call: CallMeta, args: WriteFileArgs) -> ToolOutcome {
     let resolved = shared.resolve(WRITE_FILE, &args.path)?;
-    let existing = shared.check_writable(&args.path, &resolved)?;
+    let existing = shared.check_writable(call.session.as_ref(), &args.path, &resolved)?;
     let display = shared.display(&resolved);
     let created = existing.is_none();
     let old = existing.unwrap_or_default();
-    let diff = shared.commit_write(id, &resolved, &old, &args.content)?;
+    let diff = shared.commit_write(call, &resolved, &old, &args.content)?;
     let lines = args.content.lines().count();
     Ok(if created {
         format!("created {display} ({lines} lines)")

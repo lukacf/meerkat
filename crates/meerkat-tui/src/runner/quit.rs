@@ -36,7 +36,8 @@ pub struct SavedUnsent {
 
 impl Runner {
     /// Quit: interrupt a running turn and wait (up to [`QUIT_TURN_TIMEOUT`])
-    /// for its inputs to end, take the session off the runtime and shut the
+    /// for its inputs to end, abort the runner's remaining tasks, leave the
+    /// session (off the runtime, its approval state dropped) and shut the
     /// service down, then append every message the model never got to
     /// [`UNSENT_FILE`].
     pub(super) async fn shutdown(mut self) -> Option<SavedUnsent> {
@@ -44,9 +45,10 @@ impl Runner {
             self.interrupt();
             let deadline = tokio::time::sleep(QUIT_TURN_TIMEOUT);
             tokio::pin!(deadline);
-            while self.turn.is_active() && !self.turn.all_done() {
+            while self.turn.is_active() && !self.turn.settled() {
                 tokio::select! {
                     Some(done) = self.completion_rx.recv() => self.on_completed(done).await,
+                    Some(stopped) = self.stopped_rx.recv() => self.on_stopped(stopped).await,
                     () = &mut deadline => {
                         tracing::warn!("the interrupted turn did not end in time on quit");
                         break;
@@ -54,10 +56,12 @@ impl Runner {
                 }
             }
             if self.turn.is_active() && self.turn.all_done() {
+                // The interrupt's report did not come in time: end anyway.
                 self.finish_turn().await;
             }
         }
-        if let Err(err) = self.session.retire().await {
+        self.tasks.abort_all();
+        if let Err(err) = self.session.close().await {
             tracing::warn!(error = %err, "could not take the session off the runtime on quit");
         }
         if let Err(err) = self.runtime.service.try_shutdown().await {

@@ -15,7 +15,7 @@ use toml::{Table, Value};
 
 use crate::approval::rules::{RuleOrigin, RulesFile};
 use crate::cli::Args;
-use crate::endpoints::{Dialect, is_valid_endpoint_name};
+use crate::endpoints::{WireDialect, is_valid_endpoint_name};
 
 /// A command-line setting that cannot be applied. Fatal at start-up.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -321,7 +321,7 @@ fn validate(piece: &Table) -> Result<(), String> {
             return Err(format!("invalid endpoint name `{name}`"));
         }
         if let Some(dialect) = &section.dialect
-            && Dialect::parse(dialect).is_none()
+            && WireDialect::parse(dialect).is_none()
         {
             return Err(format!(
                 "unknown dialect `{dialect}` (expected anthropic, openai or gemini)"

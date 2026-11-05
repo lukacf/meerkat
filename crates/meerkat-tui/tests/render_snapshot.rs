@@ -411,7 +411,7 @@ fn status_bar_shows_context_gauge_with_threshold_colours() {
 
 #[test]
 fn model_picker_snapshot() {
-    use meerkat_tui::endpoints::Dialect;
+    use meerkat_tui::endpoints::WireDialect;
     use meerkat_tui::models::{ModelEntry, ModelGroup, ModelSource};
     let entry = |id: &str, name: &str, window: Option<u64>, source| ModelEntry {
         id: id.into(),
@@ -426,7 +426,7 @@ fn model_picker_snapshot() {
     app.update(Msg::ShowModelPicker(vec![
         ModelGroup {
             endpoint: "anthropic".into(),
-            dialect: Dialect::Anthropic,
+            dialect: WireDialect::Anthropic,
             base_url: None,
             models: vec![
                 entry(
@@ -447,7 +447,7 @@ fn model_picker_snapshot() {
         },
         ModelGroup {
             endpoint: "litellm".into(),
-            dialect: Dialect::OpenAi,
+            dialect: WireDialect::OpenAi,
             base_url: Some("http://localhost:4000".into()),
             models: Vec::new(),
             warning: Some("HTTP 500".into()),

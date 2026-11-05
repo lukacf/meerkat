@@ -1,4 +1,4 @@
-//! Context upkeep: `/remember` and the compaction threshold.
+//! Context upkeep: `/remember` and the compaction trigger.
 //!
 //! `/remember <text>` (or a single-line `#text`) appends `- <text>` to the
 //! workspace `AGENTS.md` (created with a header when missing) and pushes
@@ -7,81 +7,128 @@
 //! reads it from its next request; new sessions load it with `AGENTS.md`.
 //!
 //! Compaction is native (see [`crate::ui::compaction`]): every session build
-//! carries the policy's threshold for the model's context window
-//! ([`Runner::session_threshold`]). A model switch that moves it rebuilds
-//! the idle session ([`Runner::ensure_threshold`]). `/compact now` rebuilds
-//! it with a one-turn threshold of one token; the first model call of the
-//! next turn compacts, and when that turn finishes the session is rebuilt
-//! on the policy's threshold again.
+//! carries the policy's trigger for the model's context window
+//! ([`Runner::session_trigger`]). Upstream reads the trigger when the agent
+//! is built and exposes no call to change it on a live session or to
+//! compact on demand, so every change goes through one workaround,
+//! [`Runner::rebuild_session_workaround`]: retire the idle session and
+//! resume it with the new trigger. It runs only on what the user does: a
+//! model switch or a resume that moves the trigger ([`Runner::ensure_trigger`]),
+//! `/compact now` (a one-turn trigger, then back to the policy's after that
+//! turn), and a model switch that needed a new profile. A background list
+//! fetch never rebuilds. The upstream asks (an on-demand compaction call, a
+//! live trigger update) are recorded in `.rct/rkat-tui/evidence.md`.
 
-use std::hash::{DefaultHasher, Hash, Hasher};
-use std::num::NonZeroU64;
+use sha2::{Digest, Sha256};
 
 use super::Runner;
 use crate::bootstrap::instructions::{
     append_remember_line, remember_line, remember_target, remembered_context,
 };
-use crate::ui::compaction::COMPACT_NOW_THRESHOLD;
-use crate::ui::{CompactFailure, Msg, NoticeLevel};
+use crate::error::TuiError;
+use crate::session::SessionHandle;
+use crate::ui::{COMPACT_NOW, CompactFailure, CompactionTrigger, Msg, NoticeLevel};
+
+/// Why the session is rebuilt (see [`Runner::rebuild_session_workaround`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RebuildReason {
+    /// The compaction trigger moved (model switch, resume onto another
+    /// model). Upstream ask: a live trigger update.
+    CompactionTrigger,
+    /// `/compact now`, or returning from it. Upstream ask: an on-demand
+    /// compaction call.
+    CompactNow,
+    /// The agent's model registry predates a profile the switch needs.
+    /// Upstream ask: profiles read at reconfigure time.
+    ModelProfile,
+}
 
 impl Runner {
-    /// The native auto-compaction threshold the policy gives the current
-    /// model.
-    pub(super) fn session_threshold(&self) -> NonZeroU64 {
-        self.template
-            .policy
-            .native_threshold(Some(self.context_window().0))
+    /// The native auto-compaction trigger the policy gives the current
+    /// model (its profile's window; an estimated window counts as unknown).
+    pub(super) fn session_trigger(&self) -> CompactionTrigger {
+        let (window, estimated) = self.context_window();
+        self.template.policy.trigger((!estimated).then_some(window))
     }
 
-    /// Rebuild the idle session when its agent runs on another threshold
-    /// than [`Runner::session_threshold`] (after a model switch or a resume
-    /// onto another model). A running turn or an armed `/compact now`
-    /// keeps the session as it is.
-    pub(super) async fn ensure_threshold(&mut self) {
-        let wanted = self.session_threshold();
-        if self.compact_armed
+    /// The one place the TUI retires and resumes its own idle session (see
+    /// the module docs): the agent is rebuilt from the current config with
+    /// `trigger`, the event stream followed again, and the identity re-read.
+    pub(super) async fn rebuild_session_workaround(
+        &mut self,
+        reason: RebuildReason,
+        trigger: CompactionTrigger,
+    ) -> Result<(), TuiError> {
+        tracing::debug!(?reason, ?trigger, "rebuilding the session (upstream workaround)");
+        let id = self.session.id().clone();
+        self.session.retire().await?;
+        self.session =
+            SessionHandle::resume(&self.runtime, &id, self.template.options(None, trigger)).await?;
+        self.follow_events().await;
+        self.refresh_identity().await;
+        Ok(())
+    }
+
+    /// Rebuild the idle session when its agent runs on another trigger than
+    /// [`Runner::session_trigger`] (after a model switch or a resume onto
+    /// another model). A running turn or a pending `/compact now` keeps the
+    /// session as it is.
+    pub(super) async fn ensure_trigger(&mut self) {
+        let wanted = self.session_trigger();
+        if self.compact_now_pending
             || self.turn.is_active()
-            || self.session.compaction_threshold() == Some(wanted)
+            || self.session.compaction() == wanted
         {
             return;
         }
-        if let Err(err) = self.rebuild_session(wanted).await {
+        if let Err(err) = self
+            .rebuild_session_workaround(RebuildReason::CompactionTrigger, wanted)
+            .await
+        {
             self.notice(
                 NoticeLevel::Warn,
-                format!("could not apply the compaction threshold to this session: {err}"),
+                format!("could not apply the compaction trigger to this session: {err}"),
             );
         }
     }
 
     /// [`crate::ui::Effect::CompactNow`]: rebuild the idle session with a
-    /// one-turn threshold; answered with [`Msg::CompactArmed`].
+    /// one-turn trigger so its next model call compacts; answered with
+    /// [`Msg::CompactRebuilt`].
     pub(super) async fn compact_now(&mut self) {
         let result = if self.turn.is_active() {
             Err(CompactFailure::Busy)
         } else {
-            match self.rebuild_session(COMPACT_NOW_THRESHOLD).await {
+            match self
+                .rebuild_session_workaround(RebuildReason::CompactNow, COMPACT_NOW)
+                .await
+            {
                 Ok(()) => {
-                    self.compact_armed = true;
+                    self.compact_now_pending = true;
                     Ok(())
                 }
                 Err(err) => Err(CompactFailure::Rebuild(err.to_string())),
             }
         };
-        self.send(Msg::CompactArmed(result));
+        self.send(Msg::CompactRebuilt(result));
     }
 
-    /// After a turn: return a session armed by `/compact now` to the
-    /// policy's threshold.
-    pub(super) async fn disarm_compaction(&mut self) {
-        if !self.compact_armed {
+    /// After a turn: return a session rebuilt for `/compact now` to the
+    /// policy's trigger.
+    pub(super) async fn end_compact_now(&mut self) {
+        if !self.compact_now_pending {
             return;
         }
-        self.compact_armed = false;
-        if let Err(err) = self.rebuild_session(self.session_threshold()).await {
+        self.compact_now_pending = false;
+        let trigger = self.session_trigger();
+        if let Err(err) = self
+            .rebuild_session_workaround(RebuildReason::CompactNow, trigger)
+            .await
+        {
             self.notice(
                 NoticeLevel::Warn,
                 format!(
-                    "could not restore the compaction threshold after /compact now: {err}; /resume the session to restore it"
+                    "could not restore the compaction trigger after /compact now: {err}; /resume the session to restore it"
                 ),
             );
         }
@@ -126,11 +173,17 @@ impl Runner {
 }
 
 /// The idempotency key of a remembered line (per session: the same line
-/// twice is one system message).
+/// twice is one system message). A SHA-256 digest of the line, so the key
+/// is the same across processes, builds and toolchains.
 fn remember_key(line: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    line.hash(&mut hasher);
-    format!("rkat-tui:remember:{:016x}", hasher.finish())
+    let digest = Sha256::digest(line.as_bytes());
+    let mut key = String::with_capacity(18 + 64);
+    key.push_str("rkat-tui:remember:");
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(key, "{byte:02x}");
+    }
+    key
 }
 
 #[cfg(test)]
@@ -138,9 +191,13 @@ mod tests {
     use super::remember_key;
 
     #[test]
-    fn remember_keys_are_stable_per_line() {
+    fn remember_keys_are_stable_digests_per_line() {
         assert_eq!(remember_key("a"), remember_key("a"));
         assert_ne!(remember_key("a"), remember_key("b"));
-        assert!(remember_key("a").starts_with("rkat-tui:remember:"));
+        // Pinned: SHA-256("a"), the same in every process and build.
+        assert_eq!(
+            remember_key("a"),
+            "rkat-tui:remember:ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
+        );
     }
 }

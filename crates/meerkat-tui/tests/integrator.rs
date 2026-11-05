@@ -15,7 +15,7 @@ use meerkat_core::{AgentEvent, Message};
 use meerkat_tui::delivery::PendingId;
 use meerkat_tui::runner::Start;
 use meerkat_tui::session::resolve_session_ref;
-use meerkat_tui::ui::{Block, Effect, Msg, StatusUpdate};
+use meerkat_tui::ui::{Block, Effect, Msg, StatusUpdate, TurnFailure};
 use serde_json::json;
 use tokio::sync::Notify;
 
@@ -177,7 +177,7 @@ async fn interrupt_cancels_the_running_turn_and_returns_steers() {
     rig.send(Effect::Interrupt);
 
     let outcome = rig.turn_finished().await;
-    assert_eq!(outcome.result, Err("interrupted".to_string()));
+    assert_eq!(outcome.result, Err(TurnFailure::Interrupted));
     assert_eq!(outcome.undelivered, vec![PendingId(1)]);
 
     // The session stays usable, and the cancelled steer never runs.
@@ -341,5 +341,51 @@ async fn a_steer_without_a_running_turn_is_refused() {
         ),
         "{msg:?}"
     );
+    rig.quit().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_builtins_the_tui_owns_are_denied_by_the_tool_policy() {
+    let ws = Workspace::new();
+    let llm = ScriptedLlmClient::new(vec![
+        Step::Tool {
+            id: "swap",
+            name: "brain_swap",
+            args: json!({ "model": "claude-opus-4-8" }),
+        },
+        Step::Tool {
+            id: "patch",
+            name: "apply_patch",
+            args: json!({ "input": "*** Begin Patch\n*** End Patch\n" }),
+        },
+        Step::Text("done"),
+    ]);
+    let mut rig = Rig::start(&ws.root, &llm, Start::New).await;
+    rig.send(Effect::StartTurn("try them".into()));
+    rig.turn_finished().await;
+    let requests = llm.requests();
+    let result_of = |id: &str| {
+        requests
+            .iter()
+            .flatten()
+            .find_map(|m| match m {
+                Message::ToolResults { results, .. } => {
+                    results.iter().find(|r| r.tool_use_id == id).cloned()
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no result for {id}"))
+    };
+    for id in ["swap", "patch"] {
+        let result = result_of(id);
+        assert!(result.is_error, "{id}: {result:?}");
+    }
+    // The model never changed.
+    let meta = rig
+        .session(&rig.first_session)
+        .await
+        .session_metadata()
+        .unwrap();
+    assert_eq!(meta.model, common::MODEL);
     rig.quit().await;
 }

@@ -1,14 +1,18 @@
 //! The cost readout on the runner: the price table (overrides, endpoint
 //! prices, the community list refreshed in the background) and the
-//! per-session token totals by model, persisted in the session's sidecar.
+//! per-session token totals by model, persisted in the session's cost
+//! record ([`super::cost_store`]).
 //!
 //! The UI counts every `TurnCompleted` usage under the model the provider
-//! accounted it to (the identity `TurnUsage` carries) and every classifier
-//! call under the classifier model, and sends the totals as
+//! accounted it to (the identity `TurnUsage` carries), every classifier
+//! call under the classifier model and every compaction (estimated input
+//! plus the summary), and sends the totals as
 //! [`crate::ui::Effect::CostSnapshot`]; the runner stores them next to the
-//! session, so a resumed session shows its exact totals. A session the TUI
-//! never recorded (created by another surface) falls back to its cumulative
-//! usage attributed to its model, marked approximate.
+//! session. A resumed session's record is reconciled with its authoritative
+//! cumulative usage: usage the record does not account for is attributed to
+//! the session's model and the readout becomes approximate (`~`). A session
+//! the TUI never recorded (created by another surface) starts from its
+//! cumulative usage, approximate.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,7 +21,7 @@ use meerkat_core::Session;
 use tokio::task::JoinHandle;
 
 use super::Runner;
-use crate::endpoints::{load_cost, save_cost};
+use super::cost_store::{load_cost, save_cost};
 use crate::pricing::{CommunityPrices, FETCH_TIMEOUT, ModelPrice, PricingError, refresh_community};
 use crate::ui::{Msg, SessionCost, SessionCostSnapshot, StatusUpdate};
 
@@ -29,15 +33,22 @@ pub(super) fn spawn_price_fetch(url: String, cache: Option<PathBuf>) -> PriceFet
     tokio::spawn(async move { refresh_community(&url, cache.as_deref(), FETCH_TIMEOUT).await })
 }
 
-/// The cost totals of `session`: the sidecar's, else derived from the
-/// session's cumulative usage and attributed to `model` (approximate).
+/// The cost totals of `session`: its record reconciled with its
+/// authoritative cumulative usage, else that usage attributed to `model`
+/// (approximate).
 pub(super) fn session_cost(
     realm_root: &std::path::Path,
     session: &Session,
     model: &str,
 ) -> SessionCost {
-    load_cost(realm_root, &session.id().to_string())
-        .unwrap_or_else(|| SessionCost::derived(model, &session.total_usage()))
+    let usage = session.total_usage();
+    match load_cost(realm_root, &session.id().to_string()) {
+        Some(mut recorded) => {
+            recorded.reconcile(model, &usage);
+            recorded
+        }
+        None => SessionCost::derived(model, &usage),
+    }
 }
 
 impl Runner {
@@ -81,7 +92,6 @@ impl Runner {
         if let Err(err) = save_cost(
             &self.runtime.scope.realm_root(),
             &self.session.id().to_string(),
-            &self.current_choice(),
             snapshot,
         ) {
             tracing::warn!(error = %err, "could not record the session's cost");

@@ -15,7 +15,9 @@ use std::sync::OnceLock;
 /// task configuration, and secrets.
 pub const PROTECTED_PATTERNS: &[&str] = &[
     ".rkat/**",
+    ".git",
     ".git/**",
+    "**/.git",
     "**/.git/**",
     ".gitattributes",
     ".gitmodules",
@@ -287,6 +289,150 @@ fn canonicalize_existing_prefix(path: &Path) -> Result<PathBuf, PathError> {
     }
 }
 
+/// How private a file written by [`write_atomic`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileMode {
+    /// The process's default permissions (umask applies).
+    Default,
+    /// Owner read/write only (`0600` on Unix): files that may hold secrets
+    /// (rules with endpoint keys, notes, the trust record, cost data).
+    Private,
+}
+
+/// Failures of [`write_atomic`] and [`check_no_symlinks`].
+#[derive(Debug, thiserror::Error)]
+pub enum AtomicWriteError {
+    /// The target has no parent directory.
+    #[error("{0} has no parent directory")]
+    NoParent(PathBuf),
+    /// The target or one of its ancestors is a symlink.
+    #[error("refusing to write {path}: {component} is a symbolic link")]
+    Symlink {
+        /// The file to be written.
+        path: PathBuf,
+        /// The symlinked component.
+        component: PathBuf,
+    },
+    /// The target exists and is not a regular file.
+    #[error("refusing to write {0}: it is not a regular file")]
+    NotRegular(PathBuf),
+    /// An I/O operation failed.
+    #[error("{op} {path}: {source}")]
+    Io {
+        /// What was being done.
+        op: &'static str,
+        /// On which path.
+        path: PathBuf,
+        /// The error.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl AtomicWriteError {
+    fn io(op: &'static str, path: &Path, source: std::io::Error) -> Self {
+        Self::Io {
+            op,
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+}
+
+/// Refuse `path` when it, or any existing ancestor of it, is a symbolic link
+/// (each component checked with `symlink_metadata`). Missing components are
+/// fine: they will be created as real directories.
+///
+/// # Errors
+///
+/// [`AtomicWriteError::Symlink`] naming the first symlinked component, or
+/// [`AtomicWriteError::Io`] when a component cannot be inspected.
+pub fn check_no_symlinks(path: &Path) -> Result<(), AtomicWriteError> {
+    check_no_symlinks_from(Path::new(""), path, path)
+}
+
+/// Write `bytes` to `path` atomically: a temporary file in the same
+/// directory, flushed and synced, then renamed over the target
+/// (`tempfile::NamedTempFile::new_in(parent)?.persist(path)`). Missing parent
+/// directories are created. A target that is, or is reached through, a
+/// symlink is refused (only `root_trusted` — the part of `path` the caller
+/// itself chose, such as the user's config directory — is not checked), as
+/// is an existing target that is not a regular file. `mode` sets the file's
+/// permissions before the rename.
+///
+/// # Errors
+///
+/// [`AtomicWriteError`] when the target is refused or an I/O step fails.
+pub fn write_atomic(
+    path: &Path,
+    bytes: &[u8],
+    mode: FileMode,
+    root_trusted: Option<&Path>,
+) -> Result<(), AtomicWriteError> {
+    use std::io::Write as _;
+
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| AtomicWriteError::NoParent(path.to_path_buf()))?;
+    match root_trusted.and_then(|root| Some((root, path.strip_prefix(root).ok()?))) {
+        Some((root, rel)) => check_no_symlinks_from(root, rel, path)?,
+        None => check_no_symlinks(path)?,
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if !meta.file_type().is_file() => {
+            return Err(AtomicWriteError::NotRegular(path.to_path_buf()));
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(AtomicWriteError::io("inspect", path, err)),
+    }
+    std::fs::create_dir_all(parent)
+        .map_err(|e| AtomicWriteError::io("create directory", parent, e))?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|e| AtomicWriteError::io("create a temporary file in", parent, e))?;
+    #[cfg(unix)]
+    if mode == FileMode::Private {
+        use std::os::unix::fs::PermissionsExt as _;
+        temp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| AtomicWriteError::io("set permissions of", temp.path(), e))?;
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    temp.write_all(bytes)
+        .map_err(|e| AtomicWriteError::io("write", temp.path(), e))?;
+    temp.as_file()
+        .sync_all()
+        .map_err(|e| AtomicWriteError::io("sync", temp.path(), e))?;
+    temp.persist(path)
+        .map_err(|e| AtomicWriteError::io("replace", path, e.error))?;
+    Ok(())
+}
+
+/// [`check_no_symlinks`] for the components of `rel` below `base`.
+fn check_no_symlinks_from(base: &Path, rel: &Path, path: &Path) -> Result<(), AtomicWriteError> {
+    let mut current = base.to_path_buf();
+    for component in rel.components() {
+        current.push(component.as_os_str());
+        if matches!(component, Component::RootDir | Component::Prefix(_)) {
+            continue;
+        }
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(AtomicWriteError::Symlink {
+                    path: path.to_path_buf(),
+                    component: current,
+                });
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(AtomicWriteError::io("inspect", &current, err)),
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -374,6 +520,9 @@ mod tests {
             "AGENTS.md",
             "AGENTS.local.md",
             "docs/AGENTS.md",
+            // The file form of `.git` (a worktree or submodule pointer).
+            ".git",
+            "vendor/dep/.git",
         ] {
             let r = root.resolve(p).unwrap();
             assert!(r.inside(), "{p} should be inside");
@@ -393,6 +542,65 @@ mod tests {
             let r = root.resolve(p).unwrap();
             assert!(!r.protected, "{p} should not be protected");
         }
+    }
+
+    #[test]
+    fn git_file_form_is_not_tier_two_writable() {
+        let (dir, root) = root();
+        // A worktree's `.git` is a file pointing at the git dir: rewriting it
+        // redirects every git command.
+        std::fs::write(dir.path().join(".git"), "gitdir: /elsewhere\n").unwrap();
+        let r = root.resolve(".git").unwrap();
+        assert!(r.protected && !r.freely_writable());
+        assert!(root.resolve("sub/.git").unwrap().protected);
+        assert!(!root.resolve("src/.github").unwrap().protected);
+    }
+
+    #[test]
+    fn atomic_write_replaces_and_sets_private_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a/b/secret.toml");
+        write_atomic(&path, b"one", FileMode::Private, Some(dir.path())).unwrap();
+        write_atomic(&path, b"two", FileMode::Private, Some(dir.path())).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"two");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        // No temporary files are left behind.
+        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["secret.toml"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_refuses_symlinked_targets_and_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        let link = dir.path().join("link.toml");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        let err = write_atomic(&link, b"x", FileMode::Default, Some(dir.path())).unwrap_err();
+        assert!(matches!(err, AtomicWriteError::Symlink { .. }), "{err}");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("sub")).unwrap();
+        let through = dir.path().join("sub/new.toml");
+        let err = write_atomic(&through, b"x", FileMode::Default, Some(dir.path())).unwrap_err();
+        assert!(matches!(err, AtomicWriteError::Symlink { .. }), "{err}");
+        assert!(!outside.path().join("new.toml").exists());
+
+        // A symlink above the trusted root is the caller's choice.
+        let via = dir.path().join("via");
+        std::os::unix::fs::symlink(outside.path(), &via).unwrap();
+        write_atomic(&via.join("ok.toml"), b"x", FileMode::Default, Some(&via)).unwrap();
+        assert!(check_no_symlinks(&via.join("ok.toml")).is_err());
     }
 
     #[test]

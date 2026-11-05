@@ -4,6 +4,11 @@
 //! nesting), and its events go to the UI scoped to it until it leaves its
 //! mob. A retired member's session stream does not end by itself, so the
 //! follower also checks the mob's roster ([`ROSTER_CHECK`]).
+//!
+//! A helper that left the roster of a running mob retired: it is dropped
+//! from the registry and its binding. One whose mob stopped (the TUI is
+//! quitting) only stops being listed as running; its binding stays, so the
+//! member is gated for its owner when the mob is restored.
 
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -11,7 +16,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use meerkat_core::EventSourceIdentity;
 use meerkat_core::comms::{EventStream, SessionEventCursor};
-use meerkat_mob::{AgentIdentity, MobError, MobHandle, MobId};
+use meerkat_mob::{AgentIdentity, MobError, MobHandle, MobId, MobState};
 use meerkat_mob_mcp::MobMcpState;
 use tokio::sync::mpsc;
 
@@ -41,12 +46,10 @@ pub async fn watch(
 /// Forward one helper's events until it leaves its mob.
 async fn follow(state: Weak<MobMcpState>, registry: Arc<HelperRegistry>, helper: Spawning) {
     let Spawning { key, tag } = helper;
-    let mob_id = MobId::from(key.0.clone());
-    let identity = AgentIdentity::from(key.1.clone());
-    match subscribe(&state, &mob_id, &identity).await {
+    let retired = match subscribe(&state, &key.mob, &key.member).await {
         Ok((handle, mut stream, session)) => {
             if let Some(session) = session {
-                registry.bind_session(session, &tag);
+                registry.bind_session(&key, &tag, &session);
             }
             let mut check = tokio::time::interval(ROSTER_CHECK);
             check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -55,12 +58,12 @@ async fn follow(state: Weak<MobMcpState>, registry: Arc<HelperRegistry>, helper:
                     envelope = stream.next() => {
                         let Some(envelope) = envelope else { break };
                         if let EventSourceIdentity::Session { session_id } = &envelope.source {
-                            registry.bind_session(session_id.clone(), &tag);
+                            registry.bind_session(&key, &tag, session_id);
                         }
                         registry.emit(&tag, envelope.payload);
                     }
                     _ = check.tick() => {
-                        if !is_member(&handle, &identity).await {
+                        if !is_member(&handle, &key.member).await {
                             // Deliver what it published before it left.
                             while let Some(Some(envelope)) = futures::FutureExt::now_or_never(stream.next()) {
                                 registry.emit(&tag, envelope.payload);
@@ -70,12 +73,35 @@ async fn follow(state: Weak<MobMcpState>, registry: Arc<HelperRegistry>, helper:
                     }
                 }
             }
+            has_retired(&handle, &key.member).await
         }
         Err(err) => {
-            tracing::warn!(helper = %identity, mob = %mob_id, error = %err, "cannot follow helper");
+            tracing::warn!(helper = %key, error = %err, "cannot follow helper");
+            registry.follow_failed(&tag);
+            // A spawn refused after the customizer bound it never joined.
+            match state.upgrade() {
+                Some(state) => match state.handle_for(&key.mob).await {
+                    Ok(handle) => has_retired(&handle, &key.member).await,
+                    Err(_) => false,
+                },
+                None => false,
+            }
         }
+    };
+    if retired {
+        registry.retired(&key);
+    } else {
+        registry.finished(&key);
     }
-    registry.finished(&key);
+}
+
+/// Whether `identity` left `handle`'s mob for good: the mob still runs and
+/// its roster no longer lists the member. A stopped mob (the host is
+/// quitting) proves nothing; a destroyed one is dropped by the host's
+/// destroy hook.
+async fn has_retired(handle: &MobHandle, identity: &AgentIdentity) -> bool {
+    handle.status_observation_snapshot() == MobState::Running
+        && !is_member(handle, identity).await
 }
 
 /// Whether `identity` is still a member of `handle`'s mob (retiring counts

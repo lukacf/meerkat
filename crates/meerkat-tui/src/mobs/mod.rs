@@ -26,11 +26,23 @@
 //!   events, scoped to it, as [`HelperUpdate`]s; the runner sends them to
 //!   the UI (nested blocks, the running-helpers count, per-helper usage for
 //!   `/cost`).
+//! - **Ownership.** A helper works for the session its spawner works for,
+//!   or else for the bridge session that created its mob (the mob host's
+//!   create hook records it); a spawn that resolves to no session open here
+//!   is refused. The bindings persist under the realm
+//!   ([`bindings::BINDINGS_FILE`]), so a member restored after a restart is
+//!   gated for its own owner
+//!   ([`customizer::HelperCustomizer`]'s `customize_resume`). A retired
+//!   member or a destroyed mob is dropped from them; a forgotten session
+//!   ([`crate::approval::ApprovalEngine::forget_session`]) is dropped from
+//!   memory.
 //! - **Interrupts.** [`Helpers::cancel_for`] force-cancels the running
 //!   helpers of a session when its turn is interrupted.
 
 pub mod registry;
 
+#[cfg(feature = "mob")]
+pub mod bindings;
 #[cfg(feature = "mob")]
 pub mod customizer;
 #[cfg(feature = "mob")]
@@ -42,7 +54,9 @@ use meerkat_core::{AuthBindingRef, SessionId};
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
-pub use registry::{HelperRegistry, HelperStatus, HelperTag, HelperUpdate};
+pub use registry::{HelperStatus, HelperTag, HelperUpdate};
+#[cfg(feature = "mob")]
+pub use registry::{HelperKey, HelperRegistry, Owner, OwnerError};
 
 #[cfg(feature = "mob")]
 use meerkat_mob_mcp::MobMcpState;
@@ -51,6 +65,7 @@ use meerkat_runtime::MeerkatMachine;
 
 /// The TUI's helper host.
 pub struct Helpers {
+    #[cfg(feature = "mob")]
     registry: Arc<HelperRegistry>,
     updates: Mutex<Option<mpsc::UnboundedReceiver<HelperUpdate>>>,
     #[cfg(feature = "mob")]
@@ -60,7 +75,7 @@ pub struct Helpers {
 impl std::fmt::Debug for Helpers {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Helpers")
-            .field("live", &self.registry.live())
+            .field("live", &self.live())
             .finish_non_exhaustive()
     }
 }
@@ -72,7 +87,8 @@ pub struct HelperHostParts {
     pub service: Arc<crate::bootstrap::TuiService>,
     /// The runtime members register with.
     pub machine: Arc<MeerkatMachine>,
-    /// Realm directory: the mob state lives under it.
+    /// Realm directory: the mob state and the helper bindings live under
+    /// it.
     pub realm_root: std::path::PathBuf,
     /// The approval engine whose gate helpers get.
     pub engine: Arc<crate::approval::ApprovalEngine>,
@@ -107,8 +123,15 @@ impl Helpers {
             llm_override,
             workgraph,
         } = parts;
-        let (registry, updates) = HelperRegistry::new();
+        let (registry, updates) = HelperRegistry::persistent(&realm_root);
         let registry = Arc::new(registry);
+        // A forgotten session's helper bookkeeping goes with it.
+        let forget = Arc::downgrade(&registry);
+        engine.add_forget_hook(Arc::new(move |session: &SessionId| {
+            if let Some(registry) = forget.upgrade() {
+                registry.forget_session(session);
+            }
+        }));
         let (spawning_tx, spawning_rx) = mpsc::unbounded_channel();
         let customizer =
             customizer::HelperCustomizer::new(Arc::clone(&registry), engine, tools, spawning_tx);
@@ -122,6 +145,7 @@ impl Helpers {
         .with_default_llm_client(llm_override)
         .with_child_spawn_member_customizer(Arc::new(customizer))
         .into_shared();
+        install_mob_hooks(&state, &registry);
         tokio::spawn(follow::watch(
             Arc::downgrade(&state),
             Arc::clone(&registry),
@@ -153,26 +177,63 @@ impl Helpers {
     /// the gate already denies the helpers' reviewed calls once the owner is
     /// stopped.
     pub async fn cancel_for(&self, owner: &SessionId) {
-        for (mob_id, identity) in self.registry.live_for(owner) {
-            let mob = meerkat_mob::MobId::from(mob_id);
-            let handle = match self.state.handle_for(&mob).await {
+        for key in self.registry.live_for(owner) {
+            let handle = match self.state.handle_for(&key.mob).await {
                 Ok(handle) => handle,
                 Err(err) => {
-                    tracing::warn!(helper = %identity, mob = %mob, error = %err, "cannot reach helper's mob");
+                    tracing::warn!(helper = %key, error = %err, "cannot reach helper's mob");
                     continue;
                 }
             };
-            let member = meerkat_mob::AgentIdentity::from(identity.clone());
-            if let Err(err) = handle.force_cancel_member(member.clone()).await {
-                tracing::debug!(helper = %identity, error = %err, "helper run not cancelled");
+            if let Err(err) = handle.force_cancel_member(key.member.clone()).await {
+                tracing::debug!(helper = %key, error = %err, "helper run not cancelled");
             }
-            if let Err(err) = handle.retire(member).await {
-                tracing::warn!(helper = %identity, mob = %mob, error = %err, "cannot retire helper");
+            if let Err(err) = handle.retire(key.member.clone()).await {
+                tracing::warn!(helper = %key, error = %err, "cannot retire helper");
             }
         }
     }
 }
 
+/// Record the creator of every mob the host creates (helpers spawned into
+/// it work for that session) and drop a destroyed mob's helpers.
+///
+/// The state is fresh, so the hooks bind; a failure is logged and fails
+/// closed (no mob's creator is recorded, so every helper spawn that no
+/// helper makes is refused).
+#[cfg(feature = "mob")]
+fn install_mob_hooks(state: &Arc<MobMcpState>, registry: &Arc<HelperRegistry>) {
+    let created = Arc::downgrade(registry);
+    let created_hook = state.set_before_create(Arc::new(
+        move |request: meerkat_mob_mcp::MobCreateRequest| -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), String>> + Send>,
+        > {
+            // A host-made mob has no creator session: nothing to record, and
+            // its spawns are refused unless a helper spawns them.
+            let recorded = match (created.upgrade(), request.owner_bridge_session_id.as_ref()) {
+                (Some(registry), Some(owner)) => registry
+                    .record_mob(&request.mob_id, owner)
+                    .map_err(|err| format!("rkat-tui cannot record the mob's owner: {err}")),
+                _ => Ok(()),
+            };
+            Box::pin(async move { recorded })
+        },
+    ));
+    if let Err(err) = created_hook {
+        tracing::error!(error = %err, "cannot record mob creators: helper spawns are refused");
+    }
+    let destroyed = Arc::downgrade(registry);
+    let destroyed_hook = state.set_after_destroy(Arc::new(move |mob: &meerkat_mob::MobId| {
+        if let Some(registry) = destroyed.upgrade() {
+            registry.mob_destroyed(mob);
+        }
+    }));
+    if let Err(err) = destroyed_hook {
+        tracing::warn!(error = %err, "destroyed mobs keep their helper bindings");
+    }
+}
+
+#[cfg(feature = "mob")]
 impl Helpers {
     /// The bookkeeping shared with the customizer and the followers.
     #[must_use]
@@ -191,9 +252,10 @@ impl Helpers {
         self.registry.register_session(session, model, auth_binding);
     }
 
-    /// The helper updates for the UI (taken once, by the runner).
-    pub fn take_updates(&self) -> Option<mpsc::UnboundedReceiver<HelperUpdate>> {
-        self.updates.lock().take()
+    /// Drop `session`'s helper bookkeeping (it closed). Idempotent; the
+    /// approval engine's forget hook calls it too.
+    pub fn forget_session(&self, session: &SessionId) {
+        self.registry.forget_session(session);
     }
 
     /// Running helpers.
@@ -203,8 +265,34 @@ impl Helpers {
     }
 }
 
+impl Helpers {
+
+    /// The helper updates for the UI (taken once, by the runner).
+    pub fn take_updates(&self) -> Option<mpsc::UnboundedReceiver<HelperUpdate>> {
+        self.updates.lock().take()
+    }
+}
+
 #[cfg(not(feature = "mob"))]
 impl Helpers {
+    /// Without the `mob` feature no helper inherits anything.
+    pub fn register_session(
+        &self,
+        _session: &SessionId,
+        _model: &str,
+        _auth_binding: Option<&AuthBindingRef>,
+    ) {
+    }
+
+    /// Without the `mob` feature there is nothing to forget.
+    pub fn forget_session(&self, _session: &SessionId) {}
+
+    /// Without the `mob` feature no helper runs.
+    #[must_use]
+    pub fn live(&self) -> Vec<HelperStatus> {
+        Vec::new()
+    }
+
     /// Without the `mob` feature there are no helpers to cancel.
     #[allow(clippy::unused_async)]
     pub async fn cancel_for(&self, _owner: &SessionId) {}

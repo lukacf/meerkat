@@ -12,22 +12,28 @@
 //! A switch goes through the runtime's session-LLM reconfigure host
 //! ([`crate::session::SessionHandle::switch_model`]) between turns, after
 //! making sure the engine has a capability profile for the target
-//! ([`crate::bootstrap::Runtime::ensure_profile`]); the choice is recorded in
-//! the session's sidecar (`<realm>/tui_endpoints/<id>.toml`).
+//! ([`crate::bootstrap::Runtime::ensure_profile`]); the session's metadata
+//! then records the model and binding the endpoint is derived from.
 //!
-//! The gauge's window is the endpoint's own number (Anthropic and Gemini
-//! list it, LiteLLM's `/model/info` reports it); else the engine registry's
-//! number for the model (the catalog or a `[models.<id>]` entry); else
-//! [`DEFAULT_CONTEXT_WINDOW`], shown as an estimate.
+//! The gauge's (and the compaction policy's) window is the engine's model
+//! profile's: the catalog, or the realm's `[models.<id>]` entry, which a
+//! fetched listing keeps current (Anthropic and Gemini list windows,
+//! LiteLLM's `/model/info` reports them); else [`DEFAULT_CONTEXT_WINDOW`],
+//! shown as an estimate. A fetch finishing in the background refreshes the
+//! current model's profile and the gauge, but never rebuilds the session:
+//! a changed compaction trigger applies at the next switch the user makes.
+
+use std::sync::Arc;
 
 use meerkat_core::Provider;
 use tokio::task::JoinHandle;
 
 use super::Runner;
+use super::context::RebuildReason;
 use crate::bootstrap::Runtime;
 use crate::endpoints::registry_context_window;
-use crate::endpoints::{EndpointRef, ModelRefError, needs_lookup, parse_model_ref, save_choice};
-use crate::models::{FetchResults, ModelCache, ModelGroup, with_current};
+use crate::endpoints::{EndpointRef, ModelRefError, needs_lookup, parse_model_ref};
+use crate::models::{FetchResults, ListModelsError, ModelCache, ModelGroup, fetch_warning, with_current};
 use crate::ui::{Msg, NoticeLevel, StatusUpdate};
 
 /// The context window assumed when neither the endpoint nor the engine's
@@ -38,21 +44,18 @@ pub const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
 pub(super) type ModelFetch = JoinHandle<FetchResults>;
 
 impl Runner {
-    /// The current endpoint and model.
-    pub(super) fn current_choice(&self) -> EndpointRef {
-        EndpointRef::new(self.current_endpoint.clone(), self.session.model())
+    /// The current endpoint and model, when an endpoint serves the session.
+    pub(super) fn current_choice(&self) -> Option<EndpointRef> {
+        self.current_endpoint
+            .as_ref()
+            .map(|endpoint| EndpointRef::new(endpoint.as_str(), self.identity.model.clone()))
     }
 
-    /// Record the current choice next to the session, for `-c`/`/resume`.
-    pub(super) fn save_current_choice(&self) {
-        let realm = self.runtime.scope.realm_root();
-        if let Err(err) = save_choice(
-            &realm,
-            &self.session.id().to_string(),
-            &self.current_choice(),
-        ) {
-            tracing::warn!(error = %err, "could not record the session's endpoint");
-        }
+    /// The current endpoint's name, or `""` when none serves the session.
+    fn current_endpoint_name(&self) -> &str {
+        self.current_endpoint
+            .as_ref()
+            .map_or("", crate::endpoints::EndpointName::as_str)
     }
 
     /// Start the background fetch unless one is running.
@@ -91,23 +94,24 @@ impl Runner {
     /// the current model first.
     pub(super) fn picker_groups(&self) -> Vec<ModelGroup> {
         let endpoints = &self.runtime.endpoints;
-        let current = endpoints.iter().filter(|e| e.name == self.current_endpoint);
-        let others = endpoints.iter().filter(|e| e.name != self.current_endpoint);
+        let current_name = self.current_endpoint_name();
+        let current = endpoints.iter().filter(|e| e.name == current_name);
+        let others = endpoints.iter().filter(|e| e.name != current_name);
         current
             .chain(others)
             .map(|endpoint| {
                 let listed = self.models.as_ref().and_then(|m| m.get(&endpoint.name));
                 let (models, warning) = match listed {
                     Some(Ok(list)) => (list.clone(), None),
-                    Some(Err(warning)) => (Vec::new(), Some(warning.clone())),
+                    Some(Err(err)) => (Vec::new(), Some(fetch_warning(err))),
                     None if !endpoint.has_key() => (
                         Vec::new(),
                         Some("model listing needs an API key the TUI can read".to_string()),
                     ),
                     None => (Vec::new(), None),
                 };
-                let current = if endpoint.name == self.current_endpoint {
-                    self.session.model()
+                let current = if endpoint.name == current_name {
+                    self.identity.model.as_str()
                 } else {
                     ""
                 };
@@ -123,8 +127,9 @@ impl Runner {
     }
 
     /// The background fetch finished: cache the lists and their prices,
-    /// update the gauge, open the picker and finish a `/model <id>` waiting
-    /// for them.
+    /// refresh the current model's profile from its listing and the gauge,
+    /// open the picker and finish a `/model <id>` waiting for them. The
+    /// session is not rebuilt here (see the module docs).
     pub(super) async fn model_fetch_finished(
         &mut self,
         joined: Result<FetchResults, tokio::task::JoinError>,
@@ -140,14 +145,23 @@ impl Runner {
                 tracing::warn!(error = %err, "list-models task failed");
                 ModelCache::failed(
                     self.runtime.endpoints.names(),
-                    &format!("list-models task failed: {err}"),
+                    &Arc::new(ListModelsError::Task(err)),
                 )
             }
         };
+        let listed = cache
+            .entry(self.current_endpoint_name(), &self.identity.model)
+            .cloned();
         self.models = Some(cache);
+        if let Some(listed) = listed
+            && let Err(err) = self
+                .runtime
+                .ensure_profile(self.identity.provider, &self.identity.model, Some(&listed))
+                .await
+        {
+            tracing::warn!(error = %err, "cannot refresh the model profile from its listing");
+        }
         self.push_context_window();
-        // The listed window may move an auto-mode threshold (idle only).
-        self.ensure_threshold().await;
         if std::mem::take(&mut self.picker_waiting) {
             self.send(Msg::ShowModelPicker(self.picker_groups()));
         }
@@ -174,7 +188,7 @@ impl Runner {
             reference,
             self.runtime.endpoints.as_slice(),
             &index,
-            Some(&self.current_endpoint),
+            self.current_endpoint.as_ref().map(crate::endpoints::EndpointName::as_str),
         )
     }
 
@@ -214,64 +228,44 @@ impl Runner {
         let listed = self
             .models
             .as_ref()
-            .and_then(|m| m.entry(&choice.endpoint, &choice.model));
-        if let Err(err) = self.runtime.ensure_profile(&choice, listed).await {
+            .and_then(|m| m.entry(choice.endpoint.as_str(), &choice.model));
+        if let Err(err) = self
+            .runtime
+            .ensure_profile(choice.provider, &choice.model, listed)
+            .await
+        {
             self.notice(NoticeLevel::Error, failed(err.to_string()));
             return;
         }
         // The live agent's model registry predates the profile: rebuild the
         // agent from the persisted session first.
         if self.session.profiles() < self.runtime.profiles()
-            && let Err(err) = self.rebuild_session(self.session_threshold()).await
+            && let Err(err) = self
+                .rebuild_session_workaround(RebuildReason::ModelProfile, self.session.compaction())
+                .await
         {
             self.notice(NoticeLevel::Error, failed(err.to_string()));
             return;
         }
         match self.session.switch_model(&choice).await {
             Ok(()) => {
-                self.current_endpoint.clone_from(&choice.endpoint);
+                self.refresh_identity().await;
                 self.send(Msg::Status(StatusUpdate::Model {
-                    provider: self.current_endpoint.clone(),
-                    model: choice.model.clone(),
+                    provider: self.current_endpoint_name().to_string(),
+                    model: self.identity.model.clone(),
                 }));
                 self.push_context_window();
-                self.save_current_choice();
-                // The new model's window moves an auto-mode threshold.
-                self.ensure_threshold().await;
+                // The new model's window moves an auto-mode trigger.
+                self.ensure_trigger().await;
             }
             Err(err) => self.notice(NoticeLevel::Error, failed(err.to_string())),
         }
     }
 
-    /// Take the session off the runtime and make it live again, so its agent
-    /// is rebuilt from the current config with native auto-compaction
-    /// `threshold` (between turns only).
-    pub(super) async fn rebuild_session(
-        &mut self,
-        threshold: std::num::NonZeroU64,
-    ) -> Result<(), crate::error::TuiError> {
-        let id = self.session.id().clone();
-        self.session.retire().await?;
-        self.session = crate::session::SessionHandle::resume(
-            &self.runtime,
-            &id,
-            self.template.options(None, threshold),
-        )
-        .await?;
-        self.follow_events().await;
-        Ok(())
-    }
-
     /// The current model's context window: known, or
     /// [`DEFAULT_CONTEXT_WINDOW`] as an estimate (`true`).
     pub(super) fn context_window(&self) -> (u64, bool) {
-        window_of(
-            &self.runtime,
-            self.models.as_ref(),
-            &self.current_endpoint,
-            self.session.provider(),
-            self.session.model(),
-        )
+        window_of(&self.runtime, self.identity.provider, &self.identity.model)
     }
 
     /// Push the current model's context window (see the module docs).
@@ -284,19 +278,10 @@ impl Runner {
     }
 }
 
-/// The context window of `model` on `endpoint`: the endpoint's listed
-/// number, else the engine registry's, else [`DEFAULT_CONTEXT_WINDOW`] as an
+/// The context window of `model` on `provider`: the engine's model
+/// profile's (see the module docs), else [`DEFAULT_CONTEXT_WINDOW`] as an
 /// estimate (`true`).
-pub(crate) fn window_of(
-    runtime: &Runtime,
-    models: Option<&ModelCache>,
-    endpoint: &str,
-    provider: Provider,
-    model: &str,
-) -> (u64, bool) {
-    models
-        .and_then(|cache| cache.entry(endpoint, model))
-        .and_then(|entry| entry.context_window)
-        .or_else(|| registry_context_window(&runtime.config, provider, model))
+pub(crate) fn window_of(runtime: &Runtime, provider: Provider, model: &str) -> (u64, bool) {
+    registry_context_window(&runtime.effective.read(), provider, model)
         .map_or((DEFAULT_CONTEXT_WINDOW, true), |window| (window, false))
 }

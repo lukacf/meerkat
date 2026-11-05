@@ -1,6 +1,9 @@
 //! `read_file`: numbered, windowed file reads that record the file's mtime.
 
-use super::{READ_FILE, Shared, ToolFailure, ToolOutcome, looks_binary, truncate_line};
+use super::{
+    CallMeta, MAX_FILE_READ_BYTES, READ_FILE, ReadRefusal, Shared, ToolFailure, ToolOutcome,
+    looks_binary, read_capped, truncate_line,
+};
 use meerkat_core::ToolDef;
 use serde::Deserialize;
 use std::fmt::Write as _;
@@ -32,7 +35,9 @@ pub(crate) fn definition() -> ToolDef {
             "Read a text file. Output is numbered like `cat -n` (line number, tab, content). \
              Returns at most {DEFAULT_LIMIT} lines by default; use `offset`/`limit` to page \
              through larger files. Lines longer than {MAX_LINE_CHARS} characters are truncated. \
-             A file must be read before it can be modified with write_file or edit_file."
+             Only the first {} MiB of a file are read, and only regular files. \
+             A file must be read before it can be modified with write_file or edit_file.",
+            MAX_FILE_READ_BYTES / (1024 * 1024)
         ),
         meerkat_tools::schema_for::<ReadFileArgs>(),
     )
@@ -42,7 +47,7 @@ fn to_usize(value: u64) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
 }
 
-pub(crate) fn run(shared: &Shared, _id: String, args: ReadFileArgs) -> ToolOutcome {
+pub(crate) fn run(shared: &Shared, call: CallMeta, args: ReadFileArgs) -> ToolOutcome {
     let resolved = shared.resolve(READ_FILE, &args.path)?;
     let display = shared.display(&resolved);
 
@@ -55,24 +60,37 @@ pub(crate) fn run(shared: &Shared, _id: String, args: ReadFileArgs) -> ToolOutco
             "{display} is a directory; use glob (e.g. pattern `*` with path `{display}`) to list its contents"
         )));
     }
+    // A FIFO would block the open forever and a device may never end.
+    if !meta.is_file() {
+        return Err(ReadRefusal::NotRegular(meta.file_type()).into_failure("read", &display));
+    }
     let mtime = meta
         .modified()
         .map_err(|err| ToolFailure::io("read the modification time of", &display, &err))?;
-    let bytes =
-        std::fs::read(&resolved.abs).map_err(|err| ToolFailure::io("read", &display, &err))?;
+    let read = read_capped(&resolved.abs, MAX_FILE_READ_BYTES)
+        .map_err(|refusal| refusal.into_failure("read", &display))?;
+    let bytes = read.bytes;
     if looks_binary(&bytes) {
         return Err(ToolFailure::recoverable(format!(
             "{display} is a binary file; read_file only reads text"
         )));
     }
-    shared.record_read(resolved.abs, mtime);
+    shared.record_read(call.session, resolved.abs, mtime);
 
     let text = String::from_utf8_lossy(&bytes);
-    Ok(render(
+    let mut out = render(
         &text,
         to_usize(args.offset.unwrap_or(1)).max(1),
         to_usize(args.limit.unwrap_or(DEFAULT_LIMIT as u64)).max(1),
-    ))
+    );
+    if read.truncated {
+        let _ = writeln!(
+            out,
+            "… [file truncated: only the first {} MiB of {display} were read]",
+            MAX_FILE_READ_BYTES / (1024 * 1024)
+        );
+    }
+    Ok(out)
 }
 
 /// Render `text` as numbered lines starting at 1-based `offset`.

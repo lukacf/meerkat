@@ -26,18 +26,20 @@
 //! transcript ([`transcript`]).
 
 pub mod admission;
+pub mod catalog;
 pub mod classifier;
 pub mod counters;
 pub mod engine;
 pub mod escalation;
-pub mod git_index;
 pub mod ledger;
 pub mod patch_targets;
 pub mod policy;
 pub mod prompts;
 pub mod rules;
 pub mod shell;
+pub(crate) mod shell_subject;
 pub mod transcript;
+pub mod trust;
 
 use counters::PauseCause;
 use meerkat_core::{SessionId, Usage};
@@ -47,7 +49,9 @@ use serde::Serialize;
 use std::fmt;
 
 pub use admission::ApprovalGate;
-pub use engine::{ApprovalConfig, ApprovalEngine, Caller};
+pub use catalog::{ServiceToolOrigins, ToolCatalog, ToolOrigin, ToolOrigins};
+pub use engine::{ApprovalConfig, ApprovalEngine, Caller, ToolCall};
+pub use transcript::InputKey;
 
 /// Typed code of the tool error a denial returns to the model
 /// (`ToolError::PolicyDenied`, rendered as `Tool call denied (auto_mode): …`).
@@ -124,6 +128,9 @@ pub enum DenyReason {
     ClassifierUnavailable(String),
     /// Nobody answered the escalation in time.
     EscalationTimedOut,
+    /// The escalation (or the human's answer) could not be recorded in the
+    /// realm's approval store: the call fails closed.
+    LedgerUnavailable(String),
 }
 
 impl DenyReason {
@@ -131,9 +138,10 @@ impl DenyReason {
     #[must_use]
     pub fn decider(&self) -> Decider {
         match self {
-            Self::UserRule { .. } | Self::AutoDisabled | Self::ClassifierUnavailable(_) => {
-                Decider::Policy
-            }
+            Self::UserRule { .. }
+            | Self::AutoDisabled
+            | Self::ClassifierUnavailable(_)
+            | Self::LedgerUnavailable(_) => Decider::Policy,
             Self::Classifier { .. } => Decider::Classifier,
             Self::Human | Self::Stopped | Self::EscalationTimedOut => Decider::Human,
         }
@@ -172,6 +180,9 @@ impl fmt::Display for DenyReason {
             }
             Self::EscalationTimedOut => {
                 f.write_str("the user did not answer the approval request in time")
+            }
+            Self::LedgerUnavailable(err) => {
+                write!(f, "the approval request could not be recorded ({err})")
             }
         }
     }
@@ -260,6 +271,9 @@ pub enum ApprovalEvent {
     /// An escalation ended without the human's answer (it timed out or its
     /// tool call was abandoned): the dialog for it should close.
     EscalationWithdrawn(u64),
+    /// Something the human should know about the approval machinery (a
+    /// ledger write failed, a rules file was not trusted).
+    Notice(String),
 }
 
 /// Errors from approval setup.

@@ -107,22 +107,31 @@ impl Runner {
 
     /// Show an escalation to the human.
     pub(super) fn on_escalation(&mut self, request: EscalationRequest) {
-        let prompt = EscalationPrompt {
-            agent: request.agent.clone(),
-            tool: request.tool.clone(),
-            args_preview: request.args_preview.clone(),
-            hint: request.classifier_hint,
+        let EscalationRequest { prompt, respond } = request;
+        let shown = EscalationPrompt {
+            agent: prompt.agent,
+            tool: prompt.tool.clone(),
+            args_preview: prompt.args_preview,
+            hint: prompt.classifier_hint,
         };
         self.approval.pending.insert(
-            request.id,
+            prompt.id,
             PendingEscalation {
-                session_id: request.session_id,
-                respond: request.respond,
-                tool: request.tool,
-                subject: request.subjects.into_iter().next(),
+                session_id: prompt.session_id,
+                respond,
+                tool: prompt.tool,
+                subject: prompt.subjects.into_iter().next(),
             },
         );
-        self.send(Msg::Escalation(prompt, EscalationId(request.id)));
+        self.send(Msg::Escalation(shown, EscalationId(prompt.id)));
+    }
+
+    /// `/rules trust`: show what the realm rules file holds and trust it.
+    pub(super) fn trust_realm_rules(&self) {
+        match self.approval.engine.trust_realm_rules() {
+            Ok(summary) => self.notice(NoticeLevel::Info, summary),
+            Err(err) => self.notice(NoticeLevel::Error, format!("not trusted: {err}")),
+        }
     }
 
     fn respond_escalation(&mut self, id: EscalationId, answer: EscalationAnswer) {
@@ -162,7 +171,9 @@ impl Runner {
     }
 
     /// The human interrupted `session`'s turn: further escalations of it are
-    /// denied until its next run, and its open dialogs are answered with Stop.
+    /// denied until a new run starts (the engine keys the Stop by the run
+    /// current now, so a late start of this run does not lift it), and its
+    /// open dialogs are answered with Stop.
     pub(super) fn stop_approvals(&mut self, session: &SessionId) {
         self.approval.engine.stop(session);
         let ids: Vec<u64> = self
@@ -242,6 +253,7 @@ impl Runner {
             ApprovalEvent::ClassifierUsage { model, usage } => {
                 self.send(Msg::ClassifierUsage { model, usage });
             }
+            ApprovalEvent::Notice(text) => self.notice(NoticeLevel::Warn, text),
             ApprovalEvent::EscalationWithdrawn(id) => {
                 if self.approval.pending.remove(&id).is_some() {
                     self.send(Msg::EscalationResolved(EscalationId(id)));
@@ -312,33 +324,27 @@ fn auto_status(engine: &ApprovalEngine) -> (String, (u32, u32, u32, u32)) {
     )
 }
 
-fn numbered_rules(rules: &RuleSet) -> impl Iterator<Item = (usize, &Rule)> {
+/// Every rule with the number `/rules list` shows and `/rules remove`
+/// takes: its stable serial ([`RuleId::serial`]), which never shifts when
+/// other rules are removed.
+fn numbered_rules(rules: &RuleSet) -> impl Iterator<Item = (u64, &Rule)> {
     rules
-        .allow
-        .iter()
-        .chain(rules.deny.iter())
-        .enumerate()
-        .map(|(i, r)| (i + 1, r))
+        .allow()
+        .chain(rules.deny())
+        .map(|(id, rule)| (id.serial, rule))
 }
 
 fn nth_rule_id(rules: &RuleSet, n: usize) -> Option<RuleId> {
-    let index = n.checked_sub(1)?;
-    if index < rules.allow.len() {
-        Some(RuleId {
-            kind: RuleKind::Allow,
-            index,
-        })
-    } else {
-        let index = index - rules.allow.len();
-        (index < rules.deny.len()).then_some(RuleId {
-            kind: RuleKind::Deny,
-            index,
-        })
-    }
+    let serial = u64::try_from(n).ok()?;
+    rules
+        .allow()
+        .chain(rules.deny())
+        .map(|(id, _)| id)
+        .find(|id| id.serial == serial)
 }
 
 /// One `/rules list` line: number, rule and the layer it came from.
-fn rule_list_line(n: usize, rule: &Rule) -> String {
+fn rule_list_line(n: u64, rule: &Rule) -> String {
     format!("{n}. {} ({})", describe_rule(rule), rule.origin.as_str())
 }
 
@@ -359,24 +365,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nth_rule_id_spans_allow_then_deny() {
+    fn rule_numbers_are_stable_across_removal() {
         let mut rules = RuleSet::default();
-        rules
-            .allow
-            .push(Rule::new(RuleKind::Allow, "shell", Some("ls*"), RuleOrigin::Realm).unwrap());
-        rules
-            .deny
-            .push(Rule::new(RuleKind::Deny, "shell", Some("rm*"), RuleOrigin::Realm).unwrap());
+        let ls = rules.push(Rule::new(RuleKind::Allow, "shell", Some("ls*"), RuleOrigin::Realm).unwrap());
+        let rm = rules.push(Rule::new(RuleKind::Deny, "shell", Some("rm*"), RuleOrigin::Realm).unwrap());
+        let cat = rules.push(Rule::new(RuleKind::Allow, "shell", Some("cat*"), RuleOrigin::Realm).unwrap());
         assert_eq!(nth_rule_id(&rules, 0), None);
-        assert_eq!(
-            nth_rule_id(&rules, 1).map(|r| r.kind),
-            Some(RuleKind::Allow)
-        );
-        assert_eq!(
-            nth_rule_id(&rules, 2).map(|r| (r.kind, r.index)),
-            Some((RuleKind::Deny, 0))
-        );
-        assert_eq!(nth_rule_id(&rules, 3), None);
+        assert_eq!(nth_rule_id(&rules, 1), Some(ls));
+        assert_eq!(nth_rule_id(&rules, 2), Some(rm));
+        assert_eq!(rm.to_string(), "deny#2");
+        // Removing rule 1 does not renumber the others.
+        assert!(rules.remove(ls).is_some());
+        assert_eq!(nth_rule_id(&rules, 1), None);
+        assert_eq!(nth_rule_id(&rules, 2), Some(rm));
+        assert_eq!(nth_rule_id(&rules, 3), Some(cat));
+        assert_eq!(rules.get(rm).map(|r| r.kind), Some(RuleKind::Deny));
+        // A new rule never reuses a removed number.
+        let new = rules.push(Rule::new(RuleKind::Allow, "shell", Some("wc*"), RuleOrigin::Realm).unwrap());
+        assert_eq!(new.serial, 4);
+        let listed: Vec<u64> = numbered_rules(&rules).map(|(n, _)| n).collect();
+        assert_eq!(listed, [3, 4, 2]);
     }
 
     #[test]

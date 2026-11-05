@@ -441,7 +441,7 @@ mod tests {
     fn group(endpoint: &str, models: Vec<ModelEntry>) -> ModelGroup {
         ModelGroup {
             endpoint: endpoint.into(),
-            dialect: crate::endpoints::Dialect::Anthropic,
+            dialect: crate::endpoints::WireDialect::Anthropic,
             base_url: None,
             models,
             warning: None,
@@ -546,7 +546,7 @@ mod tests {
     #[test]
     fn group_header_names_endpoint_dialect_and_url() {
         let mut g = group("litellm", Vec::new());
-        g.dialect = crate::endpoints::Dialect::OpenAi;
+        g.dialect = crate::endpoints::WireDialect::OpenAi;
         g.base_url = Some("http://localhost:4000".into());
         assert_eq!(
             group_header(&g),

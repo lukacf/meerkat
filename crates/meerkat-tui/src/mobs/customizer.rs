@@ -5,8 +5,11 @@
 
 use std::sync::Arc;
 
-use meerkat_core::AgentToolDispatcher;
-use meerkat_mob::{MobError, SpawnCustomizationContext, SpawnMemberCustomizer, SpawnMemberSpec};
+use meerkat_core::{AgentToolDispatcher, SessionId};
+use meerkat_mob::{
+    MobError, ResumedMemberView, SpawnCustomizationContext, SpawnMemberCustomizer,
+    SpawnMemberSpec, SpawnSource,
+};
 use tokio::sync::mpsc;
 
 use super::registry::{HelperKey, HelperRegistry, HelperTag, Owner};
@@ -95,32 +98,90 @@ fn shape(
         .push(HELPER_PERSONA.to_string());
 }
 
+/// A refused helper, as the mob reports it.
+fn refuse(err: impl std::fmt::Display) -> MobError {
+    MobError::Internal(format!("rkat-tui: helper refused: {err}"))
+}
+
+impl HelperCustomizer {
+    /// Shape `spec` for `owner`, bind it as `key` and have it followed.
+    fn admit(
+        &self,
+        key: HelperKey,
+        owner: &Owner,
+        spec: &mut SpawnMemberSpec,
+        session: Option<&SessionId>,
+    ) -> Result<(), MobError> {
+        let label = spec.identity.to_string();
+        let model = requested_model(spec).unwrap_or_else(|| owner.model.clone());
+        let mut path = owner.path.clone();
+        path.push(label.clone());
+        let tag = HelperTag {
+            owner: owner.session.clone(),
+            path,
+            model: model.clone(),
+        };
+        // Bound durably before the member exists: a member whose owner a
+        // restart would lose never runs.
+        self.registry
+            .spawning(key.clone(), tag.clone())
+            .map_err(refuse)?;
+        if let Some(session) = session {
+            self.registry.bind_session(&key, &tag, session);
+        }
+        shape(spec, owner, &label, &model, &self.engine, &self.tools);
+        let _ = self.spawning.send(Spawning { key, tag });
+        Ok(())
+    }
+
+    /// The owner a rebuilt member `key` was bound to.
+    fn persisted_owner(&self, key: &HelperKey) -> Result<Owner, MobError> {
+        let tag = self.registry.owner_for_resume(key).map_err(refuse)?;
+        Ok(Owner {
+            auth_binding: self.registry.auth_binding_of(&tag.owner),
+            path: tag.parent_path().to_vec(),
+            session: tag.owner,
+            model: tag.model,
+        })
+    }
+}
+
 impl SpawnMemberCustomizer for HelperCustomizer {
     fn customize_spawn(
         &self,
         ctx: &SpawnCustomizationContext,
         spec: &mut SpawnMemberSpec,
     ) -> Result<(), MobError> {
-        // Fail closed: a helper nobody's approval gate can judge never runs.
-        let owner = self.registry.owner_of(ctx.mob_id.as_str()).ok_or_else(|| {
-            MobError::Internal("rkat-tui: no session to run this helper for".to_string())
-        })?;
-        let label = spec.identity.to_string();
-        let model = requested_model(spec).unwrap_or_else(|| owner.model.clone());
-        shape(spec, &owner, &label, &model, &self.engine, &self.tools);
-        let mut path = owner.path;
-        path.push(label.clone());
-        let spawning = Spawning {
-            key: (ctx.mob_id.to_string(), label),
-            tag: HelperTag {
-                owner: owner.session,
-                path,
-                model,
-            },
+        let key = HelperKey::new(ctx.mob_id.clone(), spec.identity.clone());
+        // A fork-derived member's rebuild asks with `Resume`: it keeps the
+        // owner it was bound to, when it was.
+        let persisted = if matches!(ctx.spawn_source, SpawnSource::Resume) {
+            self.persisted_owner(&key).ok()
+        } else {
+            None
         };
-        self.registry
-            .spawning(spawning.key.clone(), spawning.tag.clone());
-        let _ = self.spawning.send(spawning);
-        Ok(())
+        // Fail closed: a helper whose owner does not resolve to a session
+        // open here is refused, never attributed to another session.
+        let owner = match persisted {
+            Some(owner) => owner,
+            None => self
+                .registry
+                .owner_for_spawn(&ctx.mob_id, ctx.spawner_identity.as_ref())
+                .map_err(refuse)?,
+        };
+        self.admit(key, &owner, spec, None)
+    }
+
+    fn customize_resume(
+        &self,
+        ctx: &SpawnCustomizationContext,
+        durable: &ResumedMemberView,
+        spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        // A restored member is gated for the owner it was bound to, whether
+        // or not that session is open; a member nobody bound is refused.
+        let key = HelperKey::new(ctx.mob_id.clone(), spec.identity.clone());
+        let owner = self.persisted_owner(&key)?;
+        self.admit(key, &owner, spec, Some(&durable.session_id))
     }
 }

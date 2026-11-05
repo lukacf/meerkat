@@ -39,10 +39,19 @@ interrupt, a failed turn) comes back to the editor.
 
 *Esc limitation:* a steered message belongs to the runtime as soon as it is
 admitted, so it cannot be pulled back. Esc recalls only messages the UI still
-holds (typed while `/compact now` is arming, or right as a turn ended);
-with nothing to recall, Esc interrupts the turn. Ctrl-C interrupts too:
-the current run is stopped (steers that joined it are abandoned, not re-run),
-outstanding inputs are cancelled and running helpers are cancelled.
+holds (typed right as a turn ended); with nothing to recall, Esc interrupts
+the turn. Ctrl-C interrupts too: the current run is stopped (steers that
+joined it are abandoned, not re-run), outstanding inputs are cancelled and
+running helpers are cancelled.
+
+**How a turn ends.** A turn ends when the runtime reports every input it
+admitted terminal, and the UI says how in typed terms: completed, failed
+(the first failure wins), interrupted (only when the runtime reports the
+inputs cancelled), *pending* (the turn waits for an external tool result
+rkat-tui does not provide) or *outcome unknown* (the runtime cannot say what
+happened to an input; never resubmit it blindly). A steered message counts
+as delivered only when the runtime reports it written at a boundary or its
+input consumed.
 
 Ctrl-D on an empty editor (or `/quit`) quits at once when idle. While a turn
 runs or messages are pending it warns first; pressing it again within 3 s
@@ -58,9 +67,24 @@ resumed sessions and helpers carry it too. First match wins:
 | Tier | What | Review |
 |---|---|---|
 | 0 | A user **deny** rule matches | denied |
-| 1 | Read-only tools (`read_file`, `glob`, `grep` inside the project, task tools, `memory_search`, `memory_list`/`memory_read`, `blob_inspect`, skill browsing, `shell_jobs`, read-only `mob_*` queries, `delegate`), read-only shell commands (`cat`, `ls`, `rg`, `git status/diff/log`, `cargo check/test` when builds are trusted, …), narrow user **allow** rules | allowed |
-| 2 | `write_file` / `edit_file` / `apply_patch` where every target is inside the project and not protected (`.rkat/`, `.git/`, `.env*`, …); workspace memory notes | allowed |
+| 1 | Read-only tools (`read_file`, `glob`, `grep` inside the project, task tools, `memory_search`, `note_list`/`note_read`, `blob_inspect`, skill browsing, `shell_jobs`, read-only `mob_*` queries, `delegate`), read-only shell commands (`cat`, `ls`, `rg`, `git status/diff/log`, `cargo check/test` when builds are trusted, …), narrow user **allow** rules | allowed |
+| 2 | `write_file` / `edit_file` where every target is inside the project and not protected (`.rkat/`, `.git/` and any `.git` file, `.env*`, …); workspace notes | allowed |
 | 3 | Everything else: other shell commands, MCP tools, web search, comms sends, mutating mob tools, out-of-project paths, protected paths, user-level notes | classifier |
+
+A tool counts as a builtin, file or note tool only when its definition's
+provenance says so: an MCP tool or one of unknown origin with the same name
+goes to the classifier. The engine's `apply_patch` and `brain_swap` builtins
+are denied to every TUI session by its tool access policy (the TUI owns
+file writes, with diffs, and model switching).
+
+**What deny rules cover.** A deny rule matches the tool name and, with an
+`arg` glob or a `literal`, the call's canonical subject: the shell command
+after the TUI normalized `command`, `env`, an absolute program path
+(`/usr/bin/git` → `git`) and `git -C <dir>` prefixes; for file tools the
+project-relative path. It does not see through anything else: a script the
+command runs, an interpreter's `-c` string, an alias or a function. Deny
+rules are a convenience; the classifier and the sandbox are what contain an
+action.
 
 A denial is an ordinary tool result (`policy_denied` with the reason); the
 model reads it and the run continues.
@@ -80,8 +104,9 @@ attached context alone.
 After **3 consecutive** or **20 total** classifier blocks, auto mode pauses
 and each tier-3 action opens a dialog: allow once, allow and add a narrow
 rule, deny, or stop the turn. `/auto resume` resumes; `/auto` shows the
-state and counters. Escalation decisions are kept in the realm's approval
-ledger.
+state and counters. Every escalation is recorded through the realm's own
+approval issuer (`approvals.json`); when that record cannot be written the
+action is denied.
 
 ## Confinement
 
@@ -90,21 +115,105 @@ background jobs, monitors) runs:
 
 | Mode | Read and write | Read only | Network |
 |---|---|---|---|
-| `workspace` (default) | the workspace, the temp dir, the Cargo home, the user cache dir | the rustup home, `/usr/{local,share,include}`, `/opt`, CA certificates, `/etc/{resolv.conf,hosts,nsswitch.conf,passwd,group,gitconfig}` | allowed |
+| `workspace` (default) | the workspace, the temp dir, the Cargo home, the user cache dir, each `--confinement-write` | the rustup home, `/usr/{local,share,include}`, `/opt`, `/etc/{ssl,pki,ca-certificates}`, each `--confinement-read`; the files `/etc/{resolv.conf,hosts,nsswitch.conf,host.conf,gai.conf,services,protocols,passwd,group,gitconfig}` | allowed |
 | `strict` | as `workspace` | as `workspace` | denied |
 | `off` (`--no-confinement`) | no sandbox | | the host's |
 
 Command hooks and local MCP stdio servers are not confined. The mode is
-announced at start-up; a realm `[confinement]` section is ignored (the
-command line wins). Every shell call runs in durable process custody, so an
-interrupted call leaves no process behind.
+announced at start-up. Every shell call runs in durable process custody, so
+an interrupted call leaves no process behind.
 
-A host that cannot enforce the mode refuses to start and says why.
-**Ubuntu 24.04 and later** restrict unprivileged user namespaces
-(`kernel.apparmor_restrict_unprivileged_userns=1`), which the Linux sandbox
-needs: start with `--no-confinement`, or allow user namespaces for
-`rkat-tui` with an AppArmor profile. Where `/etc/resolv.conf` is a symbolic
-link (systemd-resolved), name resolution fails inside the Linux sandbox.
+**What a confined command sees.** On Linux it runs in an empty private
+mount view (a user namespace plus a chroot) holding exactly its grants:
+the sandbox's own baseline, read only (`/bin`, `/sbin`, `/usr/bin`,
+`/usr/sbin`, `/lib`, `/lib64`, `/usr/lib`, `/usr/lib64`, `/etc/ld.so.cache`,
+`/dev/null`, `/dev/random`, `/dev/urandom`), plus the table's paths that
+exist on the host. Nothing else of `/etc`, `/run`, `/proc`, `/sys` or your
+home directory is there, and Unix sockets are refused. Why each grant:
+
+- the workspace, temp dir, Cargo home and cache dir: builds, `cargo fetch`,
+  scratch files;
+- the rustup home, `/usr/{local,share,include}`, `/opt`: toolchains,
+  headers, shared data;
+- `/etc/{ssl,pki,ca-certificates}`: TLS root certificates (`curl`, `git`,
+  `cargo` over HTTPS);
+- `/etc/{hosts,nsswitch.conf,host.conf,gai.conf,services,protocols,resolv.conf}`:
+  name and service lookup;
+- `/etc/{passwd,group}`: user and group names (`ls -l`, `id`, `git`);
+- `/etc/gitconfig`: git's system defaults.
+
+The sandbox grants only directories and single regular files, at their own
+path, never through a symbolic link and never overlapping each other or the
+baseline: that is why `/etc` is granted file by file, and a path that does
+not exist on the host (or is a link) is left out.
+
+**Name resolution.** `localhost` and other `/etc/hosts` names always
+resolve. DNS needs `/etc/resolv.conf` itself. Where it is a symbolic link,
+as with systemd-resolved (`/etc/resolv.conf` → `/run/systemd/resolve/stub-resolv.conf`),
+it cannot be granted, and granting the link's target directory would not
+help (the C library reads only `/etc/resolv.conf`, and the resolver's
+`nss-resolve` socket is a Unix socket the sandbox refuses). There, DNS
+lookups fail in confined commands, and the start-up notices say so. The
+ways out: `--no-confinement` for the session, or make `/etc/resolv.conf` a
+regular file holding the stub resolver's address (`sudo cp --remove-destination
+/run/systemd/resolve/stub-resolv.conf /etc/resolv.conf`; systemd-resolved
+supports this static mode, but search domains then no longer follow network
+changes).
+
+**More directories.** `--confinement-read <dir>` and `--confinement-write
+<dir>` (repeatable) add directories. Each must be absolute, exist, be a
+directory, contain no symbolic link on the way (the error names the real
+path to pass instead), stay off the baseline and `/proc`, `/sys`, `/dev`,
+and be disjoint from the workspace and the other added directories. A
+directory already granted with at least that access is refused as
+redundant; a detected grant that overlaps an added one otherwise yields to
+it (for example `--confinement-write /opt/foo` drops the read-only `/opt`).
+Any violation refuses the start.
+
+A realm `[confinement]` that confines the shell (`shell`, else `all`) is the
+**floor**: the command line may only narrow it. `--confinement workspace`
+(the default) installs the realm's requirement as it is, `--confinement
+strict` installs it with the network denied, and `--confinement off` /
+`--no-confinement` refuses to start, naming the realm's policy; so do
+`--confinement-read`/`--confinement-write` (they would widen it: add the
+directories to the realm's `[confinement.shell]` instead). A realm that
+states `trusted_host` (or nothing) for the shell leaves the command line in
+charge.
+
+**When the host cannot confine.** A host that cannot enforce the mode
+refuses to start (exit 2; there is no silent fallback) and explains: what
+blocked it, how to make it work, and how to run without confinement. The
+Linux sandbox needs unprivileged user namespaces; the message reads the
+switches under `/proc/sys`:
+
+- `kernel.apparmor_restrict_unprivileged_userns = 1` (Ubuntu 24.04 and
+  later): allow user namespaces for the `rkat-tui` binary with an AppArmor
+  profile (narrow; attached to the binary's path),
+
+  ```
+  sudo tee /etc/apparmor.d/rkat-tui <<'EOF'
+  abi <abi/4.0>,
+  include <tunables/global>
+
+  profile rkat-tui /path/to/rkat-tui flags=(unconfined) {
+    userns,
+  }
+  EOF
+  sudo apparmor_parser -r /etc/apparmor.d/rkat-tui
+  ```
+
+  or lift the restriction for every program (broad: a larger kernel attack
+  surface) with `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`,
+  kept across reboots by a file in `/etc/sysctl.d/`;
+- `kernel.unprivileged_userns_clone = 0`: `sudo sysctl -w kernel.unprivileged_userns_clone=1`;
+- `user.max_user_namespaces = 0`: `sudo sysctl -w user.max_user_namespaces=15000`;
+- none of these (typically a container whose seccomp profile denies
+  `unshare`): the backend's own refusal.
+
+macOS uses Seatbelt; other platforms have no sandbox. To run without
+confinement: `--no-confinement` (or `--confinement=off`), unless a realm
+`[confinement]` requires it, in which case the message points at the realm
+config instead.
 
 ## Helpers
 
@@ -123,9 +232,19 @@ requires the caller to be a durable mob member).
 Rules live in TOML, layered (later settings win): the user-global
 `<config-dir>/tui.toml`, then `<realm>/tui.toml` (written by `/rules add`),
 then the command line, then `<project>/.rkat/tui.toml`. The project file may
-only add deny rules and `[auto]` settings; broad allow rules (blanket shell,
-interpreters, package-manager run commands) are dropped when auto mode
-starts.
+only add deny rules and `[auto]` settings; its `[endpoints]` are ignored with
+a notice. Broad allow rules (blanket shell, interpreters, package-manager run
+commands) are dropped when auto mode starts.
+
+**Trusting the realm file.** The realm `tui.toml` lives in the workspace and
+could have arrived with a repository. rkat-tui keeps a **host trust record**
+outside the workspace (`<config-dir>/trust/<workspace key>.toml`) with the
+SHA-256 of each workspace file it wrote itself or you trusted. The realm
+`tui.toml` counts as yours only when it is a regular file reached through no
+symbolic link and its digest matches the record; otherwise it can only deny,
+its `[endpoints]`, `[pricing]` and `[auto]` are ignored, and a notice says
+why. `/rules add` and the escalation dialog update the record; `/rules
+trust` shows a summary of the file as it is now and records its digest.
 
 ```toml
 [auto]
@@ -168,40 +287,63 @@ are never written to a file.
 | `auto.compact_auto_percent` | `--set auto.compact_auto_percent=N` | `85` |
 | `auto.classifier_tools` | `--set auto.classifier_tools=false` | `true` |
 | `[[allow]]` / `[[deny]]` `tool`, `arg` (glob) or `literal` | `--allow` / `--deny <tool>[=<glob>]` (repeatable) | none |
-| `endpoints.<name>.dialect`, `.base_url`, `.api_key_env`, `.api_key`, `.priority` | `--endpoint-def <name>=<dialect>=<url>[,key_env=VAR]` | |
+| `endpoints.<name>.dialect`, `.base_url`, `.api_key_env`, `.priority` (an inline `.api_key` is refused at start-up) | `--endpoint-def <name>=<dialect>=<url>[,key_env=VAR]` | |
 | `pricing."<model id>".input`, `.output`, `.cached_input`, `.cache_write` (USD per 1M tokens) | `--set 'pricing."<id>".input=15'` | fetched prices |
 
 Other flags: `--model`/`-m <[endpoint:]id>`, `--endpoint <name>`
 (`--provider` for the built-ins), `--resume <ref>`, `-c`/`--continue`,
 `-w`/`--workspace`, `--config-dir`, `--user-config-root`, `--realm`,
 `--isolated`, `--realm-backend`, `--state-root`, `--confinement`,
-`--no-confinement`, `--no-mouse`, `--wait-for-mcp`, `--no-pricing-fetch`.
+`--confinement-read`, `--confinement-write`, `--no-confinement`, `--no-mouse`, `--wait-for-mcp`, `--allow-project-mcp`,
+`--no-pricing-fetch`.
 
 ## Models, endpoints and cost
 
-An **endpoint** is a named place to send requests in one of Meerkat's client
+An **endpoint** is a named place to send requests in one of Meerkat's wire
 dialects: `anthropic`, `openai` (also LiteLLM and other OpenAI-compatible
-proxies) or `gemini`. The built-in endpoints exist when their key resolves
-(realm config, provider environment variable, or the `rkat` token store).
-More come from `[endpoints.<name>]` in `tui.toml`; they are wired as auth
-bindings of an in-memory config layer and never written to a realm file.
-Model references are `endpoint:id` or a bare id, looked up in the endpoints'
-live model lists (fetched in parallel in the background, 10 s each).
+proxies) or `gemini`. A dialect names the protocol, not who serves the
+model. The built-in endpoints exist when their key resolves (realm config,
+provider environment variable, or the `rkat` token store). More come from
+`[endpoints.<name>]` in `tui.toml`.
+
+Configured endpoints are **written into the realm's own `config.toml`**
+(through Meerkat's config owner) as connections of the `rkat-tui-endpoints`
+realm section: a backend with the endpoint's URL, an auth profile reading
+the environment variable `api_key_env` names (the document records the
+variable's name, never a key) and a binding. Keys come from the environment
+only: an inline `api_key` in `[endpoints.<name>]` (or through `--set`)
+refuses the start (exit 2) with a message naming `api_key_env`. Models
+only an endpoint knows get a `[models.<id>]` profile there, kept current
+from the endpoint's listing. A session's binding therefore resolves for
+`rkat`, REST and RPC on the same realm too. One `[models.<id>]` profile
+names one provider, so the same unknown model id on endpoints of two
+dialects is refused.
+
+Model references are `endpoint:id` or a bare id. A bare id is looked up in
+the endpoints' live model lists (fetched in parallel in the background, 10 s
+each); an id the lists do not have goes to its provider's endpoint only when
+the Meerkat model catalog knows it. Names are never guessed from a prefix.
 
 `/model` opens a picker grouped by endpoint (type to filter), `/model <ref>`
 switches directly and `/model refresh` refetches the lists. A switch is a hot
 swap of the live session's model through the runtime (between turns), also
-across endpoints and dialects; the choice is kept next to the session and
-restored by `-c`/`/resume`. Helpers follow the session's model; the
-classifier stays on the start-up endpoint.
+across endpoints and dialects; the session's metadata records the model and
+binding, and `-c`/`/resume` derive the endpoint from them. Helpers follow
+the session's model; the classifier stays on the start-up endpoint.
 
 The status bar shows the context gauge, `ctx 42% (84k/200k)` (yellow from 70%,
 red from 90%, `~` for an estimate), and the session's cost, `$0.42`: each
 model call's tokens are priced per model from `[pricing]` overrides, a
 LiteLLM endpoint's `/model/info`, or LiteLLM's community price list (cached
-for 7 days in `<config-dir>`; `--no-pricing-fetch` skips the download).
-Helpers' usage counts too. `/cost` prints the breakdown. The readout is an
-estimate, not a bill.
+for 7 days in the user cache directory, `$XDG_CACHE_HOME/rkat-tui` or the
+platform's; `--no-pricing-fetch` skips the download). Helpers' usage and
+compactions (their estimated input plus the summary) count too. `/cost`
+prints the breakdown. The readout is an estimate, not a bill, and says how
+far it can be trusted: exact; `~` **approximate** when part of it is
+estimated (a compaction's input, or usage the session's own record has that
+the TUI did not see: the totals are reconciled with the session's
+authoritative usage on resume); `~` and a "lower bound" note in `/cost`
+when some helper usage could not be observed at all.
 
 ## Instructions and memory
 
@@ -212,7 +354,8 @@ The system prompt of a new session is built from, in order:
    `system_prompt_file` of its own;
 2. the workspace `AGENTS.md` (or `.rkat/AGENTS.md`), loaded by Meerkat, and
    the skill inventory;
-3. the coding persona, then the user-global `AGENTS.md`, every `AGENTS.md`
+3. the coding persona (working style only: tool behaviour is described by
+   the tools themselves), then the user-global `AGENTS.md`, every `AGENTS.md`
    (or `.rkat/AGENTS.md`) from the git root down to the workspace's parent
    directory, and the workspace `AGENTS.local.md` (or
    `.rkat/AGENTS.local.md`, meant to stay uncommitted), each under
@@ -220,11 +363,16 @@ The system prompt of a new session is built from, in order:
    `AGENTS.md` limit (32 KiB) and all of them together at 96 KiB. The git
    root is the nearest directory with a `.git` directory or file; your home
    directory is never one;
-4. the memory-notes index (below), when there are notes.
+4. the notes index (below), when there are notes, labelled as untrusted,
+   model-written context rather than instructions.
 
-Instruction files and notes are re-read whenever a session is built
-(`/clear`, `/resume`). A resumed session keeps the system prompt it was
-created with (Meerkat does not reassemble it on resume).
+Instruction files and notes are re-read for every new session (`/clear`,
+`/new`). A resumed session (`-c`, `/resume`, and the rebuilds `/compact now`
+and model switches make) keeps the instructions it was created with: Meerkat
+does not reassemble a resumed session's system prompt, so the TUI passes the
+session's persisted instructions back unchanged (the persona appears once).
+Edited instruction files apply from the next new session; `/remember`
+reaches the live one.
 
 **`/remember <text>`** (or a single-line `#text`; `##…`, multi-line input and
 `\#…` are sent as prompts) appends `- <text>` to the workspace `AGENTS.md`
@@ -233,13 +381,14 @@ session as durable system context under `# Remembered instruction`, so the
 model reads it from its next request; it is fully applied, as part of
 `AGENTS.md`, from the next session on.
 
-**Memory notes** are small Markdown files the agent keeps across sessions with
-`memory_save`, `memory_read`, `memory_list` and `memory_forget`. Workspace
-notes live in `<workspace>/.rkat/tui/notes/`, user notes (personal
-preferences that follow you into every project) in `<config-dir>/notes/`;
-each directory has a generated `MEMORY.md` index. The system prompt carries
-only a capped index; the agent reads full notes on demand. Reads are tier 1,
-workspace writes tier 2, user-note writes go to the classifier.
+**Notes** are small Markdown files the agent keeps across sessions with
+`note_save`, `note_read`, `note_list` and `note_forget`. Workspace notes live
+in `<workspace>/.rkat/tui/notes/`, user notes (personal preferences that
+follow you into every project) in `<config-dir>/notes/`; each directory has a
+generated `MEMORY.md` index. The system prompt carries only a capped index,
+labelled as untrusted context an earlier session wrote; the agent reads full
+notes on demand. Reads are tier 1, workspace writes tier 2, user-note writes
+go to the classifier.
 
 **Semantic memory** is Meerkat's own: when a compaction discards messages,
 they are indexed into the realm's semantic index (`<realm>/memory/`), and the
@@ -252,15 +401,21 @@ project's `.rkat/mcp.toml` and the user's `~/.rkat/mcp.toml` (`rkat mcp add`
 writes them), loaded once at start-up. They connect in the background (the
 model sees a pending notice until they are ready); `--wait-for-mcp` waits for
 them before the first turn. MCP tools are tier 3 unless a rule allows or
-denies them by name. Servers from the project file start with your privileges
-and are named in a start-up notice.
+denies them by name. The project's `.rkat/mcp.toml` may have come with the
+repository, so its servers (which run with your privileges) start only when
+you trust it: `/mcp trust` records its digest in the host trust record (its
+servers start from the next session, until the file changes), and
+`--allow-project-mcp` trusts it for one run. Otherwise a start-up notice
+lists the servers it did not start.
 
 ### Context and compaction
 
 Compaction is Meerkat's native auto-compaction: before a model call the
 runtime summarizes older history once the context crosses the session's
 threshold, keeps the recent turns, and indexes what it discarded into
-semantic memory. rkat-tui only chooses the threshold:
+semantic memory. rkat-tui only chooses the threshold, from the context
+window of the model's profile (the catalog, or the realm's `[models.<id>]`
+entry the endpoint listing keeps current):
 
 - `compact = "warn"` (the default): the size trigger is off (Meerkat still
   compacts to recover a request the provider refused as too large). The gauge
@@ -269,8 +424,9 @@ semantic memory. rkat-tui only chooses the threshold:
 - `compact = "auto"` (or `--auto-compact`; `--no-auto-compact` forces
   `warn`): the threshold is `compact_auto_percent` of the model's context
   window, and the runtime compacts before the first model call that would
-  cross it. A model switch that moves the threshold rebuilds the idle
-  session.
+  cross it. A model switch or resume that moves the threshold rebuilds the
+  idle session; a model list arriving in the background never does (the new
+  window applies at your next switch).
 
 For a model whose window is unknown the thresholds are 120k (warn) and 150k
 (auto) tokens. `compact_auto_percent` below `compact_warn_percent` is raised
@@ -278,20 +434,22 @@ to it, with a notice.
 
 `/compact` shows the policy and threshold. Meerkat has no on-demand
 compaction call, so **`/compact now`** (idle only, after at least one turn)
-rebuilds the session with a one-turn threshold of one token: the next turn's
-first model call compacts first, and when that turn ends the session is
-rebuilt on the policy's threshold again. A long tool loop in that turn may
-compact again after Meerkat's cadence (3 model calls by default). Messages
-typed while it arms wait for it. The `✓ compacted` notice appears when the
-session next runs (Meerkat publishes it once the semantic index took the
-discarded messages).
+*rebuilds the session so its next model call compacts*: the session is
+rebuilt with a one-turn threshold of one token, and when the next turn ends
+it is rebuilt on the policy's threshold again. The rebuild is all the TUI
+can report; the compaction notices confirm the compaction itself. A long
+tool loop in that turn may compact again after Meerkat's cadence (3 model
+calls by default). A prompt typed during the rebuild is admitted as an
+ordinary queued input once it is done. The `✓ compacted` notice appears
+when the session next runs (Meerkat publishes it once the semantic index
+took the discarded messages).
 
 ## Keys and commands
 
 `/help`, `/quit`, `/clear`, `/resume [ref]`,
-`/rules [list|add allow|deny <tool> [pattern]|rm <n>]`, `/auto [on|off|resume]`,
-`/model [[endpoint:]id|refresh]`, `/remember <text>`, `/compact [now]`,
-`/cost`. `/clear`, `/resume`, `/model` and `/compact now` work only while
+`/rules [list|add allow|deny <tool> [pattern]|rm <n>|trust]`,
+`/auto [on|off|resume]`, `/model [[endpoint:]id|refresh]`,
+`/remember <text>`, `/compact [now]`, `/cost`, `/mcp trust`. `/clear`, `/resume`, `/model` and `/compact now` work only while
 idle; the transcript is replaced only once the new session is live.
 
 Enter sends (steers while a turn runs); Alt+Enter, Shift+Enter or Ctrl-J
@@ -311,9 +469,11 @@ selection, or start with `--no-mouse`.
 ## Where things live
 
 All state for a workspace lives inside it, under `<workspace>/.rkat/tui/`:
-the realm (sessions, config, `tui.toml` written by the UI, approval ledger,
-process custody, semantic index), the endpoint/cost sidecars
-(`tui_endpoints/`), input history, unsent messages, notes and logs
+the realm (sessions, config with the endpoint connections and model
+profiles, `tui.toml` written by the UI, the approval issuer's
+`approvals.json`, process custody, semantic index), the per-session cost
+records (`tui_cost/`, owner-only), input history, unsent messages, notes and
+logs
 (`logs/rkat-tui.log`). Nothing is keyed by the absolute path, so a renamed
 or moved workspace still continues with `-c`. A `.gitignore` keeps the
 directory out of commits.
@@ -326,10 +486,20 @@ Running from your home directory requires an explicit `--workspace`.
 that `rkat` uses instead.
 
 User-global files live in one config directory: `--config-dir <dir>`, else
-`<--user-config-root>/.config/rkat-tui`, else `$XDG_CONFIG_HOME/rkat-tui`,
-else `~/.config/rkat-tui` (on Windows `%APPDATA%\rkat-tui`). It holds
-`tui.toml`, `AGENTS.md`, `SYSTEM.md`, `notes/`, `history` and the price-list
-cache.
+`~/.rkat/tui` (under Meerkat's own user config root `~/.rkat`;
+`<--user-config-root>/.rkat/tui` when that flag is given). It holds
+`tui.toml`, `AGENTS.md`, `SYSTEM.md`, `notes/`, `history` and the host trust
+records (`trust/`). `$XDG_CONFIG_HOME` no longer decides it. Earlier
+releases used `~/.config/rkat-tui` (`$XDG_CONFIG_HOME/rkat-tui`;
+`<--user-config-root>/.config/rkat-tui`; `%APPDATA%\rkat-tui` on Windows):
+while `~/.rkat/tui` does not exist and such a directory does, it is used as
+is, with a one-line start-up notice naming the new default and
+`--config-dir`. Nothing is moved; move the whole directory (the trust
+records included, whose names do not depend on where the directory is) to
+switch. With `--workspace ~` the workspace's own state directory is
+`~/.rkat/tui` too, so pass `--config-dir` there. The price-list cache lives
+in the user cache directory (`<config-dir>/cache` when `--config-dir` is
+given).
 
 ## Testing
 
@@ -341,8 +511,21 @@ LLM):
 cargo test -p meerkat-tui
 ```
 
-The confinement tests skip themselves, printing why, where the host's sandbox
-backend is unavailable (for example Ubuntu's user-namespace restriction).
+The integration tests drive internal modules through the crate's
+`test-support` feature, which the workspace turns on through the crate's
+dev-dependency on itself. From the unpacked published package, run them with:
+
+```bash
+cargo test --features test-support
+```
+
+The confinement tests probe the host's sandbox backend directly (a confined
+`/bin/true` launch) and skip themselves with a `SKIPPED:` line naming the
+reason where it is unavailable (for example Ubuntu's user-namespace
+restriction). The name-resolution test resolves `localhost` inside the
+sandbox and, where `/etc/resolv.conf` is a regular file and the host itself
+resolves `example.com`, that name too; otherwise its DNS half prints
+`SKIPPED:`.
 
 The live lanes are ignored by default and skip a provider whose key is not in
 the environment:

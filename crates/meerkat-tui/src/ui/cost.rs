@@ -85,17 +85,41 @@ impl UsageTotals {
 /// Token totals by model id, in first-use order.
 pub type ModelTotals = IndexMap<String, UsageTotals>;
 
+/// How much the totals of a [`SessionCost`] can be trusted.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CostConfidence {
+    /// Every model call was counted under the model that produced it.
+    #[default]
+    Exact,
+    /// Some totals are estimates: derived from the session's cumulative
+    /// usage (a session recorded before cost tracking, or whose authoritative
+    /// usage exceeds the recorded totals), or a compaction whose input was
+    /// only estimated. The footer shows `~`.
+    Approximate,
+    /// Some usage was not observed at all (a helper whose events could not
+    /// be followed): the totals are a lower bound. The footer shows `~`.
+    Unmeasured,
+}
+
+impl CostConfidence {
+    /// The weaker of `self` and `other`.
+    #[must_use]
+    pub fn and(self, other: Self) -> Self {
+        self.max(other)
+    }
+}
+
 /// Token totals of a session by model, in first-use order.
-///
-/// `known` is false when the totals were derived from the session's
-/// cumulative usage (resuming a session recorded before cost tracking): the
-/// models are then a guess and the readout is marked approximate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionCost {
     /// Totals by model id (the session's own calls and its helpers').
     pub per_model: ModelTotals,
-    /// Whether every total is attributed to the model that produced it.
-    pub known: bool,
+    /// How far the totals can be trusted.
+    #[serde(default)]
+    pub confidence: CostConfidence,
     /// The helpers' share of `per_model`, by helper label.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub helpers: IndexMap<String, ModelTotals>,
@@ -108,7 +132,7 @@ impl Default for SessionCost {
     fn default() -> Self {
         Self {
             per_model: IndexMap::new(),
-            known: true,
+            confidence: CostConfidence::Exact,
             helpers: IndexMap::new(),
         }
     }
@@ -133,8 +157,8 @@ pub enum CostReadout {
 
 impl SessionCost {
     /// Totals derived from a session's cumulative `usage`, attributed to
-    /// `model` and marked approximate (`known = false`). Zero usage gives an
-    /// empty, known cost.
+    /// `model` and marked [`CostConfidence::Approximate`]. Zero usage gives
+    /// an empty, exact cost.
     #[must_use]
     pub fn derived(model: &str, usage: &Usage) -> Self {
         let totals = UsageTotals::from_usage(usage);
@@ -143,7 +167,7 @@ impl SessionCost {
         }
         Self {
             per_model: IndexMap::from([(model.to_string(), totals)]),
-            known: false,
+            confidence: CostConfidence::Approximate,
             helpers: IndexMap::new(),
         }
     }
@@ -173,16 +197,63 @@ impl SessionCost {
         self.add(model, &UsageTotals::from_usage(usage));
     }
 
-    /// Count `tokens` as output of `model` (compaction summaries, where only
-    /// the summary size is reported).
-    pub fn record_output(&mut self, model: &str, tokens: u64) {
-        self.add(
-            model,
-            &UsageTotals {
-                output: tokens,
-                ..UsageTotals::default()
-            },
-        );
+    /// Count a compaction's summary call on `model`: `input` is the history
+    /// estimate the compaction reported, `output` the summary size. The
+    /// input is an estimate, so the totals become
+    /// [`CostConfidence::Approximate`].
+    pub fn record_compaction(&mut self, model: &str, input: u64, output: u64) {
+        let totals = UsageTotals {
+            input,
+            output,
+            ..UsageTotals::default()
+        };
+        if totals.is_zero() {
+            return;
+        }
+        self.add(model, &totals);
+        self.confidence = self.confidence.and(CostConfidence::Approximate);
+    }
+
+    /// Some of helper `label`'s usage could not be observed.
+    pub fn mark_unmeasured(&mut self, label: &str) {
+        self.helpers.entry(label.to_string()).or_default();
+        self.confidence = self.confidence.and(CostConfidence::Unmeasured);
+    }
+
+    /// All input and output tokens counted, cache tokens included (as the
+    /// session's `total_usage` counts them).
+    #[must_use]
+    pub fn token_sum(&self) -> u64 {
+        self.per_model.values().fold(0_u64, |sum, t| {
+            sum.saturating_add(t.input)
+                .saturating_add(t.output)
+                .saturating_add(t.cache_read)
+                .saturating_add(t.cache_write)
+        })
+    }
+
+    /// Reconcile the recorded totals with the session's authoritative
+    /// cumulative `usage`: usage the record does not account for (calls
+    /// another surface made, a compaction published after the TUI stopped
+    /// following) makes the readout [`CostConfidence::Approximate`]; the
+    /// missing tokens are attributed to `model`.
+    pub fn reconcile(&mut self, model: &str, usage: &Usage) {
+        let authoritative = UsageTotals::from_usage(usage);
+        let recorded = self.per_model.values().fold(UsageTotals::default(), |mut sum, t| {
+            sum.add(t);
+            sum
+        });
+        let missing = UsageTotals {
+            input: authoritative.input.saturating_sub(recorded.input),
+            output: authoritative.output.saturating_sub(recorded.output),
+            cache_read: authoritative.cache_read.saturating_sub(recorded.cache_read),
+            cache_write: authoritative.cache_write.saturating_sub(recorded.cache_write),
+        };
+        if missing.is_zero() {
+            return;
+        }
+        self.add(model, &missing);
+        self.confidence = self.confidence.and(CostConfidence::Approximate);
     }
 
     /// Whether no token was counted.
@@ -214,7 +285,7 @@ impl SessionCost {
         }
         let mut usd = 0.0;
         let mut priced = 0_usize;
-        let mut approx = !self.known;
+        let mut approx = self.confidence != CostConfidence::Exact;
         for (model, totals) in self.per_model.iter().filter(|(_, t)| !t.is_zero()) {
             match prices.lookup(model) {
                 Some((price, source)) => {
@@ -264,10 +335,14 @@ impl SessionCost {
             CostReadout::Unknown | CostReadout::Unused => "$?".to_string(),
         };
         let _ = write!(out, "\n  total: {total}");
-        if !self.known {
-            out.push_str(
-                "\n  (totals before this run are derived from the session's usage and attributed to one model)",
-            );
+        match self.confidence {
+            CostConfidence::Exact => {}
+            CostConfidence::Approximate => out.push_str(
+                "\n  (approximate: part of the totals is derived from the session's recorded usage or a compaction estimate)",
+            ),
+            CostConfidence::Unmeasured => out.push_str(
+                "\n  (a lower bound: some helper usage could not be observed)",
+            ),
         }
         out
     }
@@ -406,7 +481,7 @@ mod tests {
         cost.record("a", &usage(500_000, 0, None, None));
         cost.record("b", &usage(100_000, 50_000, None, None));
         cost.record("a", &usage(500_000, 1_000_000, None, None));
-        cost.record_output("b", 50_000);
+        cost.record("b", &usage(0, 50_000, None, None));
         cost.record("a", &usage(0, 0, None, None));
         let order: Vec<&str> = cost.per_model.keys().map(String::as_str).collect();
         assert_eq!(order, vec!["a", "b"]);
@@ -444,7 +519,7 @@ mod tests {
     fn derived_totals_are_approximate() {
         let prices = table(&[("a", price(1.0, 1.0, None, None))]);
         let derived = SessionCost::derived("a", &usage(1_000_000, 0, Some(0), None));
-        assert!(!derived.known);
+        assert_eq!(derived.confidence, CostConfidence::Approximate);
         assert_eq!(
             cost_segment_text(&derived, &prices).as_deref(),
             Some("~$1.00")
@@ -483,6 +558,35 @@ mod tests {
         let mut plain = SessionCost::default();
         plain.record("a", &usage(1, 1, None, None));
         assert!(!plain.breakdown(&prices).contains("helpers"));
+    }
+
+    #[test]
+    fn confidence_follows_reconciliation_compaction_and_helpers() {
+        let prices = table(&[("a", price(1.0, 1.0, None, None))]);
+        let mut cost = SessionCost::default();
+        cost.record("a", &usage(1_000_000, 0, None, None));
+        // The session's usage matches the record: still exact.
+        cost.reconcile("a", &usage(1_000_000, 0, None, None));
+        assert_eq!(cost.confidence, CostConfidence::Exact);
+        assert_eq!(cost_segment_text(&cost, &prices).as_deref(), Some("$1.00"));
+        // The session's usage exceeds the record: the gap is attributed
+        // and the readout is approximate.
+        cost.reconcile("a", &usage(2_000_000, 0, None, None));
+        assert_eq!(cost.confidence, CostConfidence::Approximate);
+        assert_eq!(cost.per_model["a"].input, 2_000_000);
+        assert_eq!(cost_segment_text(&cost, &prices).as_deref(), Some("~$2.00"));
+        // A compaction counts its estimated input and its summary.
+        let mut compacted = SessionCost::default();
+        compacted.record_compaction("a", 1_000_000, 10);
+        assert_eq!(compacted.per_model["a"].input, 1_000_000);
+        assert_eq!(compacted.per_model["a"].output, 10);
+        assert_eq!(compacted.confidence, CostConfidence::Approximate);
+        // A helper that could not be followed makes it a lower bound, which
+        // a later approximation never upgrades.
+        compacted.mark_unmeasured("scout");
+        compacted.reconcile("a", &usage(9_000_000, 0, None, None));
+        assert_eq!(compacted.confidence, CostConfidence::Unmeasured);
+        assert!(compacted.breakdown(&prices).contains("lower bound"));
     }
 
     #[test]

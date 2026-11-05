@@ -44,17 +44,6 @@ pub enum TuiError {
     /// Listing or reading the realm's sessions failed.
     #[error("session store error: {0}")]
     SessionStore(#[from] meerkat::SessionStoreError),
-    /// The provider could not be determined or is not supported.
-    #[error("{0}")]
-    Provider(String),
-    /// No API key was found for the selected provider.
-    #[error(
-        "no API key for provider `{provider}`: set it in the realm config or the provider's environment variable"
-    )]
-    MissingApiKey {
-        /// Canonical provider name.
-        provider: &'static str,
-    },
     /// The LLM client could not be constructed.
     #[error("failed to build LLM client: {0}")]
     LlmClient(#[from] meerkat_llm_core::FactoryError),
@@ -72,15 +61,19 @@ pub enum TuiError {
         /// Why it did not resolve.
         reason: String,
     },
-    /// An MCP config file (`.rkat/mcp.toml`) could not be read or parsed.
+    /// The effective MCP set (realm servers, project and user `mcp.toml`)
+    /// could not be composed: a file cannot be read or parsed, or a realm
+    /// server and a file server share a name with different definitions.
     #[error("MCP config error: {0}")]
-    McpConfig(#[from] meerkat_core::McpConfigError),
-    /// No endpoint/model could be selected, or an endpoint is unusable.
-    #[error("{0}")]
-    Endpoint(String),
-    /// MCP servers could not be started.
-    #[error("MCP: {0}")]
-    Mcp(String),
+    McpConfig(#[from] meerkat_core::mcp_config::EffectiveMcpServersError),
+    /// No endpoint/model could be selected, an endpoint is unusable, or the
+    /// endpoint projection into the realm config failed.
+    #[error(transparent)]
+    Endpoint(#[from] crate::endpoints::EndpointError),
+    /// The session's external tools (file and note tools) could not be
+    /// composed into one gateway.
+    #[error("cannot compose the file and note tools: {0}")]
+    ToolGateway(#[source] meerkat_core::error::ToolError),
     /// stdin or stdout is not a terminal; the TUI needs one.
     #[error(
         "stdin and stdout must be a terminal; rkat-tui is interactive (use `rkat run` for scripts)"
@@ -99,8 +92,8 @@ pub enum TuiError {
     #[error("cannot follow the session's events: {0}")]
     EventStream(#[from] meerkat_core::comms::StreamError),
     /// The runtime refused an input.
-    #[error("the runtime refused the input: {0}")]
-    InputRejected(String),
+    #[error(transparent)]
+    Admission(#[from] crate::session::AdmissionError),
     /// The terminal UI failed.
     #[error(transparent)]
     Ui(#[from] crate::ui::UiError),
@@ -110,9 +103,10 @@ pub enum TuiError {
     /// The approval rules or the escalation ledger could not be loaded.
     #[error("approval setup failed: {0}")]
     Approval(#[from] crate::approval::ApprovalError),
-    /// The selected process confinement cannot be installed on this host.
+    /// The selected process confinement cannot be installed on this host,
+    /// or the command line asks for less than the realm's `[confinement]`.
     #[error("process confinement: {0}")]
-    Confinement(String),
+    Confinement(#[from] crate::bootstrap::confinement::ConfinementError),
 }
 
 impl TuiError {
@@ -131,8 +125,6 @@ impl TuiError {
             Self::ProjectRoot { .. }
             | Self::Realm(_)
             | Self::Config { .. }
-            | Self::Provider(_)
-            | Self::MissingApiKey { .. }
             | Self::SessionRef { .. }
             | Self::Endpoint(_)
             | Self::McpConfig(_)
@@ -147,12 +139,12 @@ impl TuiError {
             | Self::LlmClient(_)
             | Self::Session(_)
             | Self::SessionControl(_)
-            | Self::Mcp(_)
+            | Self::ToolGateway(_)
             | Self::Composition(_)
             | Self::Materialize(_)
             | Self::Runtime(_)
             | Self::EventStream(_)
-            | Self::InputRejected(_)
+            | Self::Admission(_)
             | Self::Ui(_) => 1,
         }
     }

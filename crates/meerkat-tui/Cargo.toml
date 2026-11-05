@@ -51,6 +51,9 @@ dirs = { workspace = true }
 indexmap = { workspace = true }
 parking_lot = { workspace = true }
 reqwest = { workspace = true }
+# Durable digests (allow cache, trust record) and atomic file writes.
+sha2 = { workspace = true }
+tempfile = { workspace = true }
 
 # Terminal UI
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
@@ -69,10 +72,22 @@ default = ["mcp", "mob"]
 mcp = ["meerkat/mcp"]
 # Sub-agents run as mob members (`delegate` / `fork_off`).
 mob = ["dep:meerkat-mob", "dep:meerkat-mob-mcp"]
+# Makes the internal modules public and adds `harness` (the headless
+# runner) for this crate's own integration tests. Not a stable API.
+test-support = []
 
 [dev-dependencies]
+# The integration tests drive the internal modules through `test-support`.
+meerkat-tui = { path = ".", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = { workspace = true }
+
+# The feature set this crate's own tests need. The published package has
+# no self dev-dependency to turn them on, so its README.md prints the
+# command with these features, and the standalone test lane
+# (scripts/published_crates_standalone.py) reads them from here.
+[package.metadata.meerkat.standalone-tests]
+features = ["test-support"]
 
 [lints]
 workspace = true

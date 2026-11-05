@@ -17,16 +17,60 @@
 //! unless a user rule allows or denies it by name.
 //!
 //! Local stdio servers run as the trusted host (see
-//! [`super::confinement`]). The project `mcp.toml` lives in the workspace,
-//! which a confined shell can write on Linux; the approval policy's
-//! protected paths (`.rkat/`), not the sandbox, keep the model from editing
-//! it, and the start-up notice names every project-scoped server.
+//! [`super::confinement`]). The project `mcp.toml` lives in the workspace:
+//! it may have come with the repository, and a confined shell can write it
+//! on Linux. Its servers therefore start only when the project file is
+//! trusted ([`ProjectMcpTrust`]): `--allow-project-mcp` for this run, or the
+//! host trust record ([`crate::approval::trust::HostTrustRecord`]) holding
+//! the file's digest after `/mcp trust`. Otherwise upstream's trusting
+//! loader ([`McpConfig::effective_servers_from_roots_trusting`]) refuses
+//! each of its servers (unless a trusted source states the same definition)
+//! and a start-up notice lists them.
 
-use meerkat_core::mcp_config::{McpConfig, McpScope, McpServerSource};
+use std::path::{Path, PathBuf};
+
+use meerkat_core::mcp_config::{McpConfig, McpScope, McpServerSource, project_mcp_path_in};
 use meerkat_core::{Config, McpServerConfig};
 
 use super::scope::RuntimeScope;
+use crate::approval::trust::{HostTrustRecord, TrustStatus};
 use crate::error::TuiError;
+
+/// Whether the project `.rkat/mcp.toml` may start servers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectMcpTrust {
+    /// `--allow-project-mcp`: trusted for this run.
+    AllowedByFlag,
+    /// Its digest is in the host trust record (`/mcp trust`).
+    Recorded,
+    /// Not trusted: its servers are refused.
+    Untrusted,
+}
+
+impl ProjectMcpTrust {
+    /// The trust of `scope`'s project file under `record` (`flag`:
+    /// `--allow-project-mcp`).
+    #[must_use]
+    pub fn of(scope: &RuntimeScope, record: &HostTrustRecord, flag: bool) -> Self {
+        if flag {
+            return Self::AllowedByFlag;
+        }
+        match record.check(&project_file(scope)) {
+            TrustStatus::Trusted => Self::Recorded,
+            TrustStatus::Missing | TrustStatus::Untrusted(_) => Self::Untrusted,
+        }
+    }
+
+    fn trusted(self) -> bool {
+        self != Self::Untrusted
+    }
+}
+
+/// The project MCP config of `scope` (`<workspace>/.rkat/mcp.toml`).
+#[must_use]
+pub fn project_file(scope: &RuntimeScope) -> PathBuf {
+    project_mcp_path_in(&scope.context_root)
+}
 
 /// The loaded MCP set and what to tell the user about it.
 #[derive(Debug, Default)]
@@ -37,27 +81,46 @@ pub struct LoadedMcp {
     pub notices: Vec<String>,
 }
 
-/// Load the effective MCP set for `scope` (see the module docs). Without the
-/// `mcp` feature the set is empty and a configured server is reported.
+/// Load the effective MCP set for `scope` (see the module docs): the
+/// project file's servers only when `project` trusts it. Without the `mcp`
+/// feature the set is empty and a configured server is reported.
 ///
 /// # Errors
 ///
-/// [`TuiError::Mcp`] when an `mcp.toml` cannot be read or parsed, or the
+/// [`TuiError::McpConfig`] when an `mcp.toml` cannot be read or parsed, or the
 /// realm config and a file define one server name differently.
-pub async fn load(scope: &RuntimeScope, config: &Config) -> Result<LoadedMcp, TuiError> {
-    let servers = McpConfig::effective_servers_from_roots(
+pub async fn load(
+    scope: &RuntimeScope,
+    config: &Config,
+    project: ProjectMcpTrust,
+) -> Result<LoadedMcp, TuiError> {
+    let project_path = project_file(scope);
+    let untrusted = move |path: &Path| !project.trusted() && path == project_path;
+    let effective = McpConfig::effective_servers_from_roots_trusting(
         &config.tools.mcp_servers,
         Some(scope.context_root.as_path()),
         scope.user_config_root.as_deref(),
+        &untrusted,
     )
-    .await
-    .map_err(|err| TuiError::Mcp(err.to_string()))?;
+    .await?;
+    let servers = effective.admitted;
+    let refused: Vec<&str> = effective
+        .refused
+        .iter()
+        .map(|r| r.server.name.as_str())
+        .collect();
     let project: Vec<&str> = servers
         .iter()
         .filter(|s| s.source == McpServerSource::File(McpScope::Project))
         .map(|s| s.server.name.as_str())
         .collect();
     let mut notices = Vec::new();
+    if !refused.is_empty() {
+        notices.push(format!(
+            "MCP servers of the project's .rkat/mcp.toml not started (the file is not trusted; /mcp trust or --allow-project-mcp starts them): {}",
+            refused.join(", ")
+        ));
+    }
     if !cfg!(feature = "mcp") {
         if !servers.is_empty() {
             notices.push(format!(
@@ -117,7 +180,9 @@ mod tests {
         ])
         .unwrap();
         let scope = super::super::resolve_scope(&args).unwrap();
-        let loaded = load(&scope, &Config::default()).await.unwrap();
+        let loaded = load(&scope, &Config::default(), ProjectMcpTrust::AllowedByFlag)
+            .await
+            .unwrap();
         let mut names: Vec<_> = loaded.servers.iter().map(|s| s.name.clone()).collect();
         names.sort();
         if cfg!(feature = "mcp") {
@@ -132,10 +197,38 @@ mod tests {
             assert!(names.is_empty());
         }
 
+        // Untrusted: the project's servers are refused and listed; the
+        // user's still start.
+        let mut record = HostTrustRecord::in_memory(&scope.context_root);
+        let trust = ProjectMcpTrust::of(&scope, &record, false);
+        assert_eq!(trust, ProjectMcpTrust::Untrusted);
+        let loaded = load(&scope, &Config::default(), trust).await.unwrap();
+        let names: Vec<_> = loaded.servers.iter().map(|s| s.name.clone()).collect();
+        if cfg!(feature = "mcp") {
+            assert_eq!(names, ["usr"]);
+            assert!(
+                loaded
+                    .notices
+                    .iter()
+                    .any(|n| n.contains("not trusted") && n.ends_with(": proj")),
+                "{:?}",
+                loaded.notices
+            );
+        }
+        // `/mcp trust` records the digest: trusted until the file changes.
+        record.record_file(&project_file(&scope)).unwrap();
+        assert_eq!(
+            ProjectMcpTrust::of(&scope, &record, false),
+            ProjectMcpTrust::Recorded
+        );
         std::fs::write(ws.join(".rkat/mcp.toml"), "not toml [").unwrap();
+        assert_eq!(
+            ProjectMcpTrust::of(&scope, &record, false),
+            ProjectMcpTrust::Untrusted
+        );
         assert!(matches!(
-            load(&scope, &Config::default()).await,
-            Err(TuiError::Mcp(_))
+            load(&scope, &Config::default(), ProjectMcpTrust::AllowedByFlag).await,
+            Err(TuiError::McpConfig(_))
         ));
     }
 }

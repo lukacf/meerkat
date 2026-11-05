@@ -33,8 +33,10 @@ use ratatui::layout::Rect;
 use ratatui::text::Line;
 
 pub use commands::{AutoCommand, Command, CommandError, ModelCommand, RuleEffect, RulesCommand};
-pub use compaction::{CompactFailure, CompactMode, CompactionGauge, CompactionPolicy};
-pub use cost::{CostReadout, SessionCost, SessionCostSnapshot, UsageTotals};
+pub use compaction::{
+    COMPACT_NOW, CompactFailure, CompactMode, CompactionGauge, CompactionPolicy, CompactionTrigger,
+};
+pub use cost::{CostConfidence, CostReadout, SessionCost, SessionCostSnapshot, UsageTotals};
 pub use delivery::{Pending, PendingQueue, PendingState};
 pub use history::History;
 pub use input::InputEditor;
@@ -104,12 +106,36 @@ pub struct TurnSummary {
     pub output_tokens: u64,
 }
 
+/// How a turn ended without a result. With `Ok(TurnSummary)` (completed)
+/// these are the turn's typed ends.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TurnFailure {
+    /// An input of the turn failed (the first failure wins).
+    #[error("{0}")]
+    Failed(String),
+    /// The user interrupted the turn (the runtime reported the inputs
+    /// cancelled).
+    #[error("interrupted")]
+    Interrupted,
+    /// What the runtime did with an input is not known (a receipt without
+    /// an outcome, a completion channel that closed, an input reported
+    /// terminal at admission without an outcome). Never resubmit it.
+    #[error("outcome unknown: {0}")]
+    Unknown(String),
+    /// The turn waits for an external tool result rkat-tui does not provide.
+    #[error("pending: the turn waits for an external result for `{tool}`")]
+    Pending {
+        /// The tool whose result the turn waits for.
+        tool: String,
+    },
+}
+
 /// Result of a turn (the started prompt and every follow-up run the runtime
 /// added for steered messages) plus the steered messages it never delivered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnOutcome {
-    /// The turn's result.
-    pub result: Result<TurnSummary, String>,
+    /// The turn's result: completed, or how it ended without one.
+    pub result: Result<TurnSummary, TurnFailure>,
     /// Steered messages the runtime ended without writing them into the
     /// conversation (the turn was interrupted or failed), oldest first. A
     /// message already shown as delivered can be listed here when its run
@@ -120,7 +146,7 @@ pub struct TurnOutcome {
 impl TurnOutcome {
     /// An outcome with nothing undelivered.
     #[must_use]
-    pub fn plain(result: Result<TurnSummary, String>) -> Self {
+    pub fn plain(result: Result<TurnSummary, TurnFailure>) -> Self {
         Self {
             result,
             undelivered: Vec::new(),
@@ -266,16 +292,20 @@ pub enum Msg {
     ShowModelPicker(Vec<ModelGroup>),
     /// Replace the transcript (e.g. after resuming a session).
     ResetTranscript(Vec<Block>),
-    /// `/compact now` armed (the integrator rebuilt the session with a
-    /// one-turn compaction threshold), or why it could not.
-    CompactArmed(Result<(), CompactFailure>),
+    /// `/compact now`: the integrator rebuilt the session with a one-turn
+    /// compaction trigger, so its next model call compacts (or why it could
+    /// not). The `CompactionStarted`/`Completed` events confirm the
+    /// compaction itself.
+    CompactRebuilt(Result<(), CompactFailure>),
+    /// Some of helper `label`'s usage could not be observed (its events
+    /// could not be followed): the cost readout becomes a lower bound.
+    HelperUnmeasured(String),
     /// Animation tick.
     Tick,
 }
 
-/// Notice shown once `/compact now` armed the next turn.
-pub const COMPACT_ARMED: &str =
-    "compaction armed: the next turn compacts the context before its first model call";
+/// Notice shown once `/compact now` rebuilt the session.
+pub const COMPACT_REBUILT: &str = "rebuilt the session so its next model call compacts the context; the compaction notice confirms it";
 
 /// Side effect requested by [`App::update`], executed by the integrator.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,6 +353,12 @@ pub enum Effect {
     RemoveRule(usize),
     /// List rules; answer with [`Msg::Notice`].
     ListRules,
+    /// `/rules trust`: show the realm `tui.toml` and record its digest in
+    /// the host trust record; answered with [`Msg::Notice`].
+    TrustRealmRules,
+    /// `/mcp trust`: record the project `.rkat/mcp.toml`'s digest in the
+    /// host trust record; its servers start from the next session.
+    TrustProjectMcp,
     /// Enable/disable auto mode.
     SetAutoMode(bool),
     /// Resume auto mode after a denial-limit pause.
@@ -339,7 +375,7 @@ pub enum Effect {
     Remember(String),
     /// `/compact now` (idle only): rebuild the session so its next turn
     /// compacts before the first model call; answered with
-    /// [`Msg::CompactArmed`].
+    /// [`Msg::CompactRebuilt`].
     CompactNow,
     /// The session's cost totals after a model call; the integrator
     /// persists them next to the session.
@@ -573,14 +609,19 @@ pub struct App {
     pub mode: InputMode,
     /// When Ctrl-X was pressed, while a chord is pending.
     pub chord: Option<Instant>,
-    /// Whether `/compact now` is arming ([`Effect::CompactNow`] sent, no
-    /// [`Msg::CompactArmed`] yet). Prompts are deferred meanwhile.
+    /// Whether `/compact now` is rebuilding the session ([`Effect::CompactNow`]
+    /// sent, no [`Msg::CompactRebuilt`] yet). A prompt sent meanwhile is
+    /// admitted as an ordinary `Queue` input once the rebuild is done (the
+    /// runner serves effects in order); session switches wait.
     pub compacting: bool,
     /// When a Ctrl-D / `/quit` was refused because work is in flight; a
     /// second one within [`QUIT_CONFIRM_WINDOW`] quits anyway.
     pub quit_confirm: Option<Instant>,
     /// Context-gauge policy: warn about a filling context (warn mode).
     gauge: CompactionGauge,
+    /// The history estimate of a compaction that started and has not
+    /// completed: the input of its summary call, counted on completion.
+    compaction_input: Option<u64>,
     /// Whether assistant text streamed during the current turn (the turn
     /// summary is shown only when nothing did).
     streamed_text: bool,
@@ -626,6 +667,7 @@ impl App {
             compacting: false,
             quit_confirm: None,
             gauge: CompactionGauge::default(),
+            compaction_input: None,
             streamed_text: false,
             global_history: Vec::new(),
             search_corpus: Vec::new(),
@@ -1049,9 +1091,16 @@ impl App {
                         self.status.cost.record(&model, usage);
                         fx.push(Effect::CostSnapshot(self.status.cost.clone()));
                     }
+                    AgentEvent::CompactionStarted {
+                        estimated_history_tokens,
+                        ..
+                    } => {
+                        self.compaction_input = Some(*estimated_history_tokens);
+                    }
                     AgentEvent::CompactionCompleted {
                         summary_tokens,
                         estimated_history_tokens_after,
+                        summary_source,
                         ..
                     } => {
                         // The history estimate the rewrite left (the
@@ -1060,11 +1109,22 @@ impl App {
                             Some(estimated_history_tokens_after.unwrap_or(*summary_tokens));
                         self.status.context_approx = true;
                         self.gauge.compacted();
-                        // Only the summary size is reported: count it as output.
-                        self.status
-                            .cost
-                            .record_output(&self.status.model, *summary_tokens);
-                        fx.push(Effect::CostSnapshot(self.status.cost.clone()));
+                        let input = self.compaction_input.take().unwrap_or(0);
+                        // Only a provider call costs anything; its input is
+                        // the history estimate, its output the summary.
+                        if summary_source.as_ref().is_none_or(|source| {
+                            matches!(
+                                source,
+                                meerkat_core::CompactionSummarySource::ProviderCall { .. }
+                            )
+                        }) {
+                            self.status.cost.record_compaction(
+                                &self.status.model,
+                                input,
+                                *summary_tokens,
+                            );
+                            fx.push(Effect::CostSnapshot(self.status.cost.clone()));
+                        }
                     }
                     _ => {}
                 }
@@ -1161,7 +1221,11 @@ impl App {
                 self.run_first_block = self.transcript.len();
                 self.scroll.bottom();
             }
-            Msg::CompactArmed(result) => self.compact_armed(result, now, &mut fx),
+            Msg::CompactRebuilt(result) => self.compact_rebuilt(result),
+            Msg::HelperUnmeasured(label) => {
+                self.status.cost.mark_unmeasured(&label);
+                fx.push(Effect::CostSnapshot(self.status.cost.clone()));
+            }
             Msg::Tick => {
                 dirty = self.status.running_since.is_some()
                     || self.status.classifying
@@ -1383,7 +1447,7 @@ impl App {
         } else if self.compacting {
             self.transcript.push_notice(
                 NoticeLevel::Warn,
-                "compaction is being armed; wait for it to finish",
+                "the session is being rebuilt for /compact now; wait for it to finish",
             );
             false
         } else {
@@ -1419,9 +1483,7 @@ impl App {
                     Some(rest) => format!("/{rest}"),
                     None => commands::unescape_hash(&raw).unwrap_or(raw),
                 };
-                if self.compacting {
-                    self.defer(prompt);
-                } else if self.running {
+                if self.running {
                     self.enqueue(prompt, fx);
                 } else {
                     self.start_turn(prompt, now, fx);
@@ -1467,54 +1529,17 @@ impl App {
         fx.push(Effect::Steer { id, text });
     }
 
-    /// Enter while compacting: hold the message until compaction finishes.
-    fn defer(&mut self, text: String) {
-        let id = self.pending.alloc_id();
-        let block = self.transcript.push(Block::Queued {
-            id,
-            text: text.clone(),
-            label: QueuedLabel::Deferred,
-        });
-        self.pending.push(Pending {
-            id,
-            text,
-            state: PendingState::Deferred,
-            block,
-        });
-        self.scroll.bottom();
-    }
-
-    /// `/compact now` armed (or failed): send what was typed meanwhile, or
-    /// hand it back to the editor when arming failed.
-    fn compact_armed(
-        &mut self,
-        result: Result<(), CompactFailure>,
-        now: Instant,
-        fx: &mut Vec<Effect>,
-    ) {
+    /// `/compact now` answered: report the rebuild (or why it failed).
+    fn compact_rebuilt(&mut self, result: Result<(), CompactFailure>) {
         self.compacting = false;
-        let deferred = self
-            .pending
-            .take_where(|p| p.state == PendingState::Deferred);
         match result {
             Ok(()) => {
                 self.transcript
-                    .push_notice(NoticeLevel::Info, COMPACT_ARMED);
-                if self.running {
-                    // Cannot happen (arming is idle-only); keep them for
-                    // the post-turn logic rather than starting a second turn.
-                    for item in deferred {
-                        self.pending.push(item);
-                    }
-                } else if !deferred.is_empty() {
-                    self.send_unsent(deferred, now, fx);
-                }
+                    .push_notice(NoticeLevel::Info, COMPACT_REBUILT);
             }
             Err(err) => {
                 self.transcript
                     .push_notice(NoticeLevel::Error, format!("/compact now failed: {err}"));
-                self.drop_blocks(deferred.iter().map(|p| p.block));
-                self.prepend_to_editor(deferred.into_iter().map(|p| p.text).collect());
             }
         }
     }
@@ -1695,7 +1720,7 @@ impl App {
         self.running = false;
         self.status.running_since = None;
         self.status.classifying = false;
-        let interrupted = matches!(&result, Err(e) if e == "interrupted");
+        let interrupted = matches!(&result, Err(TurnFailure::Interrupted));
         let succeeded = result.is_ok();
         match result {
             Ok(summary) => {
@@ -1703,9 +1728,17 @@ impl App {
                     self.transcript.push(Block::Assistant { md: summary.text });
                 }
             }
-            Err(err) => {
+            Err(err @ TurnFailure::Failed(_)) => {
                 self.transcript
                     .push_notice(NoticeLevel::Error, format!("turn failed: {err}"));
+            }
+            Err(TurnFailure::Interrupted) => {
+                self.transcript
+                    .push_notice(NoticeLevel::Warn, "turn interrupted");
+            }
+            Err(err @ (TurnFailure::Unknown(_) | TurnFailure::Pending { .. })) => {
+                self.transcript
+                    .push_notice(NoticeLevel::Warn, format!("turn ended: {err}"));
             }
         }
         self.streamed_text = false;
@@ -1878,7 +1911,7 @@ impl App {
         let compacting = |app: &mut Self| {
             app.transcript.push_notice(
                 NoticeLevel::Warn,
-                "compaction is being armed; wait for it to finish",
+                "the session is being rebuilt for /compact now; wait for it to finish",
             );
         };
         match cmd {
@@ -1941,7 +1974,7 @@ impl App {
                 } else if self.status.context_used.is_some() {
                     self.compacting = true;
                     self.transcript
-                        .push_notice(NoticeLevel::Info, "arming compaction…");
+                        .push_notice(NoticeLevel::Info, "rebuilding the session so the next model call compacts…");
                     self.scroll.bottom();
                     fx.push(Effect::CompactNow);
                 } else {
@@ -1979,6 +2012,8 @@ impl App {
                 pattern,
             }),
             Command::Rules(RulesCommand::Remove(n)) => fx.push(Effect::RemoveRule(n)),
+            Command::Rules(RulesCommand::Trust) => fx.push(Effect::TrustRealmRules),
+            Command::McpTrust => fx.push(Effect::TrustProjectMcp),
         }
     }
 
@@ -2458,7 +2493,7 @@ mod tests {
         app.update(key(KeyCode::Enter))
     }
 
-    fn finished(result: Result<TurnSummary, String>, undelivered: &[u64]) -> Msg {
+    fn finished(result: Result<TurnSummary, TurnFailure>, undelivered: &[u64]) -> Msg {
         Msg::TurnFinished(TurnOutcome {
             result,
             undelivered: undelivered.iter().copied().map(PendingId).collect(),
@@ -2709,7 +2744,7 @@ mod tests {
         assert_eq!(app.update(ctrl('c')), vec![Effect::Interrupt]);
         assert_eq!(app.status.queued, 1);
         type_str(&mut app, "draft");
-        let fx = app.update(finished(Err("interrupted".into()), &[2]));
+        let fx = app.update(finished(Err(TurnFailure::Interrupted), &[2]));
         assert!(fx.is_empty());
         assert_eq!(app.input.text(), "three\ndraft");
         assert!(app.transcript.blocks().contains(&user("two")));
@@ -2729,7 +2764,7 @@ mod tests {
         submit(&mut app, "two");
         app.update(ack(1, Ok(())));
         app.update(Msg::SteerDelivered(PendingId(1)));
-        let fx = app.update(finished(Err("interrupted".into()), &[1]));
+        let fx = app.update(finished(Err(TurnFailure::Interrupted), &[1]));
         assert!(fx.is_empty());
         assert_eq!(app.input.text(), "two");
         assert!(
@@ -2745,7 +2780,7 @@ mod tests {
         let mut app = running_app();
         submit(&mut app, "two");
         app.update(ack(1, Ok(())));
-        assert!(app.update(finished(Err("boom".into()), &[1])).is_empty());
+        assert!(app.update(finished(Err(TurnFailure::Failed("boom".into())), &[1])).is_empty());
         assert_eq!(app.input.text(), "two");
         assert!(matches!(
             last_notice(&app),
@@ -2768,7 +2803,7 @@ mod tests {
         assert_eq!(app.send_next.as_deref(), Some("urgent"));
         // The queued message stays in place until the turn ends.
         assert_eq!(app.status.queued, 1);
-        let fx = app.update(finished(Err("interrupted".into()), &[1]));
+        let fx = app.update(finished(Err(TurnFailure::Interrupted), &[1]));
         assert_eq!(fx, vec![Effect::StartTurn("two\n\nurgent".into())]);
         assert!(app.send_next.is_none());
         assert!(app.is_running());
@@ -3177,7 +3212,7 @@ mod tests {
         };
         vec![ModelGroup {
             endpoint: "anthropic".into(),
-            dialect: crate::endpoints::Dialect::Anthropic,
+            dialect: crate::endpoints::WireDialect::Anthropic,
             base_url: None,
             models: vec![
                 entry("claude-sonnet-4-6", ModelSource::Current),
@@ -3635,23 +3670,27 @@ mod tests {
     }
 
     #[test]
-    fn prompts_are_deferred_while_arming_and_sent_after() {
+    fn prompts_during_the_rebuild_are_queued_inputs_not_held_text() {
         let mut app = App::new(StatusInfo::default());
         app.status.context_used = Some(40_000);
         assert_eq!(submit(&mut app, "/compact now"), vec![Effect::CompactNow]);
         assert!(app.compacting);
         assert_eq!(
             last_notice(&app),
-            Some((NoticeLevel::Info, "arming compaction…".into()))
+            Some((
+                NoticeLevel::Info,
+                "rebuilding the session so the next model call compacts…".into()
+            ))
         );
-        assert!(submit(&mut app, "one").is_empty());
-        assert!(submit(&mut app, "two").is_empty());
-        assert_eq!(app.status.queued, 2);
+        // The prompt goes to the runner at once: it admits it as a `Queue`
+        // input after the rebuild (effects are served in order).
         assert_eq!(
-            app.transcript.blocks().last(),
-            Some(&queued_block(2, "two", QueuedLabel::Deferred))
+            submit(&mut app, "one"),
+            vec![Effect::StartTurn("one".into())]
         );
-        // Lifecycle commands are refused; /remember is not.
+        assert!(app.is_running());
+        assert_eq!(app.status.queued, 0);
+        // Lifecycle commands wait for the rebuild; /remember does not.
         for cmd in ["/clear", "/resume last", "/compact now"] {
             assert!(submit(&mut app, cmd).is_empty(), "{cmd}");
             assert_eq!(
@@ -3661,48 +3700,26 @@ mod tests {
             );
         }
         assert_eq!(submit(&mut app, "#x"), vec![Effect::Remember("x".into())]);
-        let fx = app.update(Msg::CompactArmed(Ok(())));
-        assert_eq!(fx, vec![Effect::StartTurn("one\n\ntwo".into())]);
+        assert!(app.update(Msg::CompactRebuilt(Ok(()))).is_empty());
         assert!(!app.compacting);
-        assert!(app.is_running());
-        assert_eq!(app.status.queued, 0);
-        assert!(app.transcript.blocks().contains(&user("one")));
-        assert!(app.transcript.blocks().contains(&user("two")));
         assert!(app.transcript.blocks().iter().any(
-            |b| matches!(b, Block::Notice { level: NoticeLevel::Info, text } if text == COMPACT_ARMED)
+            |b| matches!(b, Block::Notice { level: NoticeLevel::Info, text } if text == COMPACT_REBUILT)
         ));
+        // The wording never claims the compaction itself happened.
+        assert!(!COMPACT_REBUILT.contains("armed"));
     }
 
     #[test]
-    fn armed_without_deferred_sends_nothing() {
+    fn a_failed_rebuild_is_reported() {
         let mut app = App::new(StatusInfo::default());
         app.status.context_used = Some(1);
         submit(&mut app, "/compact now");
-        assert!(app.update(Msg::CompactArmed(Ok(()))).is_empty());
-        assert!(!app.is_running());
-        assert_eq!(
-            last_notice(&app),
-            Some((NoticeLevel::Info, COMPACT_ARMED.into()))
-        );
-    }
-
-    #[test]
-    fn failed_arming_returns_deferred_to_the_editor() {
-        let mut app = App::new(StatusInfo::default());
-        app.status.context_used = Some(1);
-        submit(&mut app, "/compact now");
-        submit(&mut app, "one");
-        submit(&mut app, "two");
-        type_str(&mut app, "draft");
-        let fx = app.update(Msg::CompactArmed(Err(CompactFailure::Rebuild(
+        let fx = app.update(Msg::CompactRebuilt(Err(CompactFailure::Rebuild(
             "boom".into(),
         ))));
         assert!(fx.is_empty());
         assert!(!app.compacting);
         assert!(!app.is_running());
-        assert!(app.pending.is_empty());
-        assert_eq!(app.status.queued, 0);
-        assert_eq!(app.input.text(), "one\ntwo\ndraft");
         assert_eq!(
             last_notice(&app),
             Some((
@@ -3710,11 +3727,16 @@ mod tests {
                 "/compact now failed: could not rebuild the session: boom".into()
             ))
         );
-        assert!(
-            !app.transcript
-                .blocks()
-                .iter()
-                .any(|b| matches!(b, Block::Queued { .. }))
+    }
+
+    #[test]
+    fn an_unmeasured_helper_marks_the_cost_a_lower_bound() {
+        let mut app = App::new(StatusInfo::default());
+        let fx = app.update(Msg::HelperUnmeasured("scout".into()));
+        assert!(matches!(fx.as_slice(), [Effect::CostSnapshot(_)]), "{fx:?}");
+        assert_eq!(
+            app.status.cost.confidence,
+            cost::CostConfidence::Unmeasured
         );
     }
 
@@ -3858,6 +3880,8 @@ mod tests {
         }));
         assert_eq!(app.status.cost.per_model["b"].output, 1_000_500);
         assert!(matches!(fx.as_slice(), [Effect::CostSnapshot(_)]));
+        // A compaction's input is an estimate: the readout is approximate.
+        assert_eq!(app.status.cost.confidence, CostConfidence::Approximate);
         // Nothing priced yet.
         assert!(footer(&app).contains(" │ $? │ "), "{}", footer(&app));
         // Prices arrive: the footer recomputes.
@@ -3865,7 +3889,7 @@ mod tests {
             ("a", 1.0, 1.0),
             ("b", 2.0, 2.0),
         ]))));
-        assert!(footer(&app).contains(" │ $3.00 │ "), "{}", footer(&app));
+        assert!(footer(&app).contains(" │ ~$3.00 │ "), "{}", footer(&app));
         app.update(Msg::Status(StatusUpdate::Prices(priced(&[(
             "a", 0.42, 1.0,
         )]))));

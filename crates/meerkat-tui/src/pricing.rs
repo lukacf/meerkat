@@ -10,7 +10,8 @@
 //!    endpoint (fetched with the model lists);
 //! 3. the community price list LiteLLM maintains
 //!    ([`COMMUNITY_PRICES_URL`]), fetched in the background at start-up and
-//!    cached in `<config dir>/pricing-cache.json` for [`CACHE_TTL`].
+//!    cached in `<cache dir>/pricing-cache.json` for [`CACHE_TTL`] (the
+//!    user cache directory, see [`crate::bootstrap::dirs::GlobalDirs::pricing_cache`]).
 //!
 //! Lookups normalise ids: the exact id first, then without a provider prefix
 //! (`anthropic/`, `openai/`, `gemini/`, `vertex_ai/`), then without a trailing
@@ -37,7 +38,7 @@ pub const MAX_PRICE_LIST_BYTES: usize = 32 * 1024 * 1024;
 /// Age after which the cached community list is refreshed (and its prices
 /// count as estimates until the refresh succeeds).
 pub const CACHE_TTL: Duration = Duration::from_hours(7 * 24);
-/// File name of the community price cache inside the global config dir.
+/// File name of the community price cache inside the user cache dir.
 pub const CACHE_FILE: &str = "pricing-cache.json";
 /// Tokens per price unit.
 pub const TOKENS_PER_UNIT: f64 = 1_000_000.0;
@@ -252,7 +253,7 @@ impl CommunityPrices {
     /// [`PricingError::Decode`] when the body is not a JSON object.
     pub fn decode(body: &str) -> Result<IndexMap<String, ModelPrice>, PricingError> {
         let raw: IndexMap<String, CommunityEntry> =
-            serde_json::from_str(body).map_err(|err| PricingError::Decode(err.to_string()))?;
+            serde_json::from_str(body).map_err(PricingError::Decode)?;
         Ok(raw
             .into_iter()
             .filter(|(key, _)| key != SAMPLE_SPEC_KEY)
@@ -273,29 +274,25 @@ impl CommunityPrices {
         }
     }
 
-    /// Write the list to `path` (temp file + rename).
+    /// Write the list to `path` atomically ([`crate::paths::write_atomic`]).
     ///
     /// # Errors
     ///
-    /// [`PricingError::Io`] on serialization or I/O failures.
+    /// [`PricingError::Encode`] / [`PricingError::Write`] on serialization or
+    /// I/O failures.
     pub fn save_cache(&self, path: &Path) -> Result<(), PricingError> {
         let text = serde_json::to_string(&CacheFileRef {
             fetched_at: self.fetched_at,
             models: &self.models,
         })
-        .map_err(|err| PricingError::Io(err.to_string()))?;
-        let io = |err: std::io::Error| PricingError::Io(format!("{}: {err}", path.display()));
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(io)?;
-        }
-        let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
-        tmp_name.push(format!(".{}.tmp", std::process::id()));
-        let tmp = path.with_file_name(tmp_name);
-        std::fs::write(&tmp, text).map_err(io)?;
-        std::fs::rename(&tmp, path).map_err(|err| {
-            let _ = std::fs::remove_file(&tmp);
-            io(err)
-        })
+        .map_err(PricingError::Encode)?;
+        crate::paths::write_atomic(
+            path,
+            text.as_bytes(),
+            crate::paths::FileMode::Default,
+            path.parent(),
+        )?;
+        Ok(())
     }
 }
 
@@ -447,23 +444,26 @@ impl PriceTable {
 }
 
 /// Failure to fetch or store the community price list.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum PricingError {
-    /// Transport failure (the URL is stripped).
-    #[error("network error: {0}")]
-    Http(String),
+    /// Transport failure, or a body larger than [`MAX_PRICE_LIST_BYTES`].
+    #[error(transparent)]
+    Read(#[from] crate::http::CappedReadError),
     /// Non-success status.
     #[error("HTTP {0}")]
     Status(u16),
+    /// The body is not UTF-8.
+    #[error("unexpected price list: {0}")]
+    Utf8(#[source] std::string::FromUtf8Error),
     /// The body is not the expected JSON.
     #[error("unexpected price list: {0}")]
-    Decode(String),
-    /// The body exceeded [`MAX_PRICE_LIST_BYTES`].
-    #[error("price list larger than {} MiB", MAX_PRICE_LIST_BYTES / (1024 * 1024))]
-    TooLarge,
-    /// Reading or writing the cache failed.
+    Decode(#[source] serde_json::Error),
+    /// Encoding the cache failed.
     #[error("price cache: {0}")]
-    Io(String),
+    Encode(#[source] serde_json::Error),
+    /// Writing the cache failed.
+    #[error("price cache: {0}")]
+    Write(#[from] crate::paths::AtomicWriteError),
 }
 
 /// Seconds since the Unix epoch, now.
@@ -483,34 +483,21 @@ pub async fn fetch_community(
     url: &str,
     timeout: Duration,
 ) -> Result<IndexMap<String, ModelPrice>, PricingError> {
-    let http = |err: reqwest::Error| PricingError::Http(err.without_url().to_string());
     let mut builder = reqwest::Client::builder()
         .timeout(timeout)
         .connect_timeout(timeout);
     if crate::models::is_loopback_url(url) {
         builder = builder.no_proxy();
     }
-    let client = builder.build().map_err(http)?;
-    let mut response = client.get(url).send().await.map_err(http)?;
+    let read = |err: reqwest::Error| PricingError::Read(err.into());
+    let client = builder.build().map_err(read)?;
+    let response = client.get(url).send().await.map_err(read)?;
     let status = response.status();
     if !status.is_success() {
         return Err(PricingError::Status(status.as_u16()));
     }
-    if response
-        .content_length()
-        .is_some_and(|len| len > MAX_PRICE_LIST_BYTES as u64)
-    {
-        return Err(PricingError::TooLarge);
-    }
-    // Read in chunks so a missing or lying Content-Length cannot exhaust memory.
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(http)? {
-        if body.len() + chunk.len() > MAX_PRICE_LIST_BYTES {
-            return Err(PricingError::TooLarge);
-        }
-        body.extend_from_slice(&chunk);
-    }
-    let body = String::from_utf8(body).map_err(|err| PricingError::Decode(err.to_string()))?;
+    let body = crate::http::read_capped(response, MAX_PRICE_LIST_BYTES).await?;
+    let body = String::from_utf8(body).map_err(PricingError::Utf8)?;
     CommunityPrices::decode(&body)
 }
 
@@ -862,7 +849,13 @@ mod tests {
         let err = refresh_community(&url, Some(&path), FETCH_TIMEOUT)
             .await
             .unwrap_err();
-        assert_eq!(err, PricingError::TooLarge);
+        assert!(
+            matches!(
+                err,
+                PricingError::Read(crate::http::CappedReadError::TooLarge { .. })
+            ),
+            "{err}"
+        );
         assert!(!path.exists(), "nothing cached");
     }
 }

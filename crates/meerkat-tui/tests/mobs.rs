@@ -314,7 +314,9 @@ fn proxy_options() -> RigOptions {
             "--set",
             "endpoints.proxy.base_url=http://127.0.0.1:9",
             "--set",
-            "endpoints.proxy.api_key=sk-proxy-test",
+            // Keys come from the environment only; `PATH` is set wherever
+            // tests run, and the scripted client never sends it.
+            "endpoints.proxy.api_key_env=PATH",
             "--model",
             "proxy:claude-sonnet-4-6",
         ]
@@ -356,5 +358,136 @@ async fn a_configured_endpoints_helper_uses_the_same_binding() {
     let binding = meta.auth_binding.expect("the proxy's binding");
     assert_eq!(binding.realm.as_str(), ENDPOINT_REALM);
     assert_eq!(binding.binding.as_str(), "proxy");
+    rig.quit().await;
+}
+
+/// A definition with one durable inline `delegate` profile, under `id`.
+fn team(id: &str) -> meerkat_mob::MobDefinition {
+    let mut definition = meerkat_mob::MobDefinition::implicit("unused", common::MODEL);
+    definition.id = meerkat_mob::MobId::from(id);
+    // Durable members are rebuilt on their sessions when the mob is restored.
+    for profile in definition.profiles.values_mut() {
+        if let meerkat_mob::ProfileBinding::Inline(profile) = profile {
+            profile.durable = true;
+        }
+    }
+    definition
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_helper_no_open_session_owns_is_refused() {
+    let ws = Workspace::new();
+    let llm = ScriptedLlmClient::new(vec![Step::Text("never")]);
+    let rig = Rig::start(&ws.root, &llm, Start::New).await;
+    let helpers = rig.helpers.clone().expect("helpers are hosted");
+    let id = rig.first_session.clone();
+    // Named as the open session's implicit mob, but created by the host:
+    // its helpers work for nobody, and never for the open session.
+    let definition = meerkat_mob::MobDefinition::implicit(&id.to_string(), common::MODEL);
+    let mob = within(helpers.state().mob_create_definition(definition))
+        .await
+        .unwrap();
+    let handle = within(helpers.state().handle_for(&mob)).await.unwrap();
+    let refused =
+        within(handle.spawn_spec(meerkat_mob::SpawnMemberSpec::new("delegate", "stray"))).await;
+    let Err(err) = refused else {
+        panic!("the spawn is refused");
+    };
+    assert!(err.to_string().contains("helper refused"), "{err}");
+    assert!(helpers.live().is_empty());
+    assert!(helpers.registry().live_for(&id).is_empty());
+    let members = within(handle.list_members()).await;
+    assert!(members.is_empty(), "members: {members:?}");
+    rig.quit().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_helpers_owner_survives_a_restart_until_it_retires() {
+    use meerkat_tui::mobs::HelperKey;
+
+    let ws = Workspace::new();
+    let mob = meerkat_mob::MobId::from("team");
+    let key = HelperKey::new(mob.clone(), meerkat_mob::AgentIdentity::from("worker"));
+    let llm = ScriptedLlmClient::new(vec![Step::Text("idle"), Step::Text("idle")]);
+    let rig = Rig::start(&ws.root, &llm, Start::New).await;
+    let owner = rig.first_session.clone();
+    let helpers = rig.helpers.clone().expect("helpers are hosted");
+    within(
+        helpers
+            .state()
+            .mob_create_definition_with_owner_bridge_session(
+                team("team"),
+                owner.clone(),
+                false,
+                false,
+            ),
+    )
+    .await
+    .unwrap();
+    let handle = within(helpers.state().handle_for(&mob)).await.unwrap();
+    // It runs a turn, so its durable session exists.
+    let mut spec = meerkat_mob::SpawnMemberSpec::new("delegate", "worker");
+    spec.initial_message = Some("start".into());
+    within(handle.spawn_spec(spec)).await.unwrap();
+    assert_eq!(helpers.registry().live_for(&owner), vec![key.clone()]);
+    llm.wait_call(0).await;
+    // The process exits: its mob shuts down (not retiring anyone).
+    within(handle.shutdown()).await.unwrap();
+    assert_eq!(
+        helpers.registry().owner_for_resume(&key).unwrap().owner,
+        owner
+    );
+    drop(handle);
+    drop(helpers);
+    rig.quit().await;
+
+    // A new process over the same realm: the restored member is gated for
+    // the session that spawned it, open or not.
+    let llm = ScriptedLlmClient::new(vec![Step::Text("idle"), Step::Text("idle")]);
+    let rig = Rig::start(&ws.root, &llm, Start::New).await;
+    assert_ne!(rig.first_session, owner);
+    let helpers = rig.helpers.clone().expect("helpers are hosted");
+    let handle = within(helpers.state().handle_for(&mob)).await.unwrap();
+    // The restored member is dormant until work wakes it, which rebuilds it
+    // on its durable session through `customize_resume`.
+    let member = within(handle.member(&key.member)).await.unwrap();
+    within(member.internal_turn("wake up")).await.unwrap();
+    let registry = Arc::clone(helpers.registry());
+    within(async {
+        while registry.live_for(&owner).is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert_eq!(registry.live_for(&owner), vec![key.clone()]);
+    assert!(registry.live_for(&rig.first_session).is_empty());
+    assert_eq!(registry.owner_for_resume(&key).unwrap().owner, owner);
+
+    // Forgetting the owner prunes its helpers here (twice is a no-op); the
+    // binding stays on disk for a later resume.
+    rig.approval.forget_session(&owner);
+    rig.approval.forget_session(&owner);
+    assert!(registry.live_for(&owner).is_empty());
+    assert!(registry.live().is_empty());
+    assert_eq!(registry.owner_for_resume(&key).unwrap().owner, owner);
+
+    // Retiring drops the binding for good.
+    within(handle.retire(key.member.clone())).await.unwrap();
+    within(async {
+        while registry.owner_for_resume(&key).is_ok() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let file = std::fs::read_to_string(
+        bootstrap::resolve_scope(&args_with(&ws.root, &[]))
+            .unwrap()
+            .realm_root()
+            .join(meerkat_tui::mobs::bindings::BINDINGS_FILE),
+    )
+    .unwrap();
+    assert!(!file.contains("worker"), "{file}");
+    drop(handle);
+    drop(helpers);
     rig.quit().await;
 }

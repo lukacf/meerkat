@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::StreamExt;
-use meerkat_core::{AgentEvent, EventEnvelope, ScopedAgentEvent};
+use meerkat_core::{AgentEvent, EventEnvelope};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{
@@ -130,14 +130,13 @@ pub fn install_panic_hook() {
 pub struct UiChannels {
     /// Primary agent stream events.
     pub agent_rx: mpsc::Receiver<EventEnvelope<AgentEvent>>,
-    /// Scoped (sub-agent) stream events.
-    pub scoped_rx: mpsc::Receiver<ScopedAgentEvent>,
     /// Integrator messages: escalations, diffs, approvals, turn completion, status, notices.
     pub ui_rx: mpsc::UnboundedReceiver<Msg>,
 }
 
-/// `msg` (from the integrator) preceded by every agent and scoped event
-/// already buffered. The runner sends `TurnFinished`, `SteerAck`,
+/// `msg` (from the integrator) preceded by every agent event already
+/// buffered (helpers' scoped events arrive as integrator messages, in
+/// order). The runner sends `TurnFinished`, `SteerAck`,
 /// `SteerDelivered` and `SteerRequeued` after the events that led to them,
 /// but on a different channel;
 /// applying the buffered events first keeps a turn's text from landing after
@@ -146,9 +145,6 @@ pub fn after_buffered_events(msg: Msg, channels: &mut UiChannels) -> Vec<Msg> {
     let mut batch = Vec::new();
     while let Ok(env) = channels.agent_rx.try_recv() {
         batch.push(Msg::Agent(env));
-    }
-    while let Ok(ev) = channels.scoped_rx.try_recv() {
-        batch.push(Msg::Scoped(ev));
     }
     batch.push(msg);
     batch
@@ -199,7 +195,6 @@ pub async fn run_ui(
         let batch = tokio::select! {
             biased;
             Some(env) = channels.agent_rx.recv() => vec![Msg::Agent(env)],
-            Some(ev) = channels.scoped_rx.recv() => vec![Msg::Scoped(ev)],
             Some(msg) = channels.ui_rx.recv() => after_buffered_events(msg, &mut channels),
             maybe = events.next() => match maybe {
                 Some(Ok(event)) => match translate(event, mouse) {
@@ -278,11 +273,9 @@ mod tests {
     #[tokio::test]
     async fn turn_finished_waits_for_buffered_agent_events() {
         let (agent_tx, agent_rx) = mpsc::channel(16);
-        let (_scoped_tx, scoped_rx) = mpsc::channel(16);
         let (ui_tx, ui_rx) = mpsc::unbounded_channel();
         let mut channels = UiChannels {
             agent_rx,
-            scoped_rx,
             ui_rx,
         };
         let mut app = App::new(StatusInfo::default());

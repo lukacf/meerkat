@@ -44,23 +44,11 @@ pub struct EscalationPrompt {
     pub classifier_hint: Option<String>,
 }
 
-/// An escalation delivered to the UI, carrying the responder.
+/// An escalation delivered to the UI: the prompt and the responder.
 #[derive(Debug)]
 pub struct EscalationRequest {
-    /// Engine-assigned id (see [`EscalationPrompt::id`]).
-    pub id: u64,
-    /// Session the call belongs to.
-    pub session_id: SessionId,
-    /// The helper making the call (`None`: the session's own agent).
-    pub agent: Option<String>,
-    /// Tool name.
-    pub tool: String,
-    /// Short rendering of the arguments.
-    pub args_preview: String,
-    /// Canonical rule subjects of the action.
-    pub subjects: Vec<String>,
-    /// The classifier's opinion, if it produced one.
-    pub classifier_hint: Option<String>,
+    /// What to show.
+    pub prompt: EscalationPrompt,
     /// Where to send the answer.
     pub respond: oneshot::Sender<HumanDecision>,
 }
@@ -85,8 +73,9 @@ impl EscalationBroker {
         )
     }
 
-    /// Acquire the serial lock. Callers re-check their state after this
-    /// returns and then call [`Self::ask_locked`].
+    /// Acquire the serial lock. Callers bound the wait (the engine waits for
+    /// the lock and the answer inside one escalation timeout), re-check their
+    /// state after this returns and then call [`Self::ask_locked`].
     pub async fn serial(&self) -> MutexGuard<'_, ()> {
         self.serial.lock().await
     }
@@ -98,17 +87,12 @@ impl EscalationBroker {
         prompt: EscalationPrompt,
     ) -> HumanDecision {
         let (respond, answer) = oneshot::channel();
-        let request = EscalationRequest {
-            id: prompt.id,
-            session_id: prompt.session_id,
-            agent: prompt.agent,
-            tool: prompt.tool,
-            args_preview: prompt.args_preview,
-            subjects: prompt.subjects,
-            classifier_hint: prompt.classifier_hint,
-            respond,
-        };
-        if self.tx.send(request).await.is_err() {
+        if self
+            .tx
+            .send(EscalationRequest { prompt, respond })
+            .await
+            .is_err()
+        {
             return HumanDecision::Deny;
         }
         answer.await.unwrap_or(HumanDecision::Deny)
@@ -161,10 +145,10 @@ mod tests {
                 .is_err(),
             "second escalation delivered before the first was answered"
         );
-        let first_tool = first.tool.clone();
+        let first_tool = first.prompt.tool.clone();
         first.respond.send(HumanDecision::AllowOnce).unwrap();
         let second = rx.recv().await.unwrap();
-        assert_ne!(second.tool, first_tool);
+        assert_ne!(second.prompt.tool, first_tool);
         second.respond.send(HumanDecision::Deny).unwrap();
 
         let (ra, rb) = (a.await.unwrap(), b.await.unwrap());

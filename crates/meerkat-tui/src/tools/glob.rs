@@ -1,6 +1,6 @@
 //! `glob`: gitignore-aware file search by glob pattern, newest first.
 
-use super::{GLOB, Shared, ToolFailure, ToolOutcome};
+use super::{CallMeta, GLOB, Shared, ToolFailure, ToolOutcome};
 use globset::GlobBuilder;
 use ignore::WalkBuilder;
 use meerkat_core::ToolDef;
@@ -74,7 +74,7 @@ pub(crate) fn walker(root: &Path, hide_secrets: bool) -> WalkBuilder {
     builder
 }
 
-pub(crate) fn run(shared: &Shared, _id: String, args: GlobArgs) -> ToolOutcome {
+pub(crate) fn run(shared: &Shared, _call: CallMeta, args: GlobArgs) -> ToolOutcome {
     let matcher = GlobBuilder::new(&args.pattern)
         .literal_separator(true)
         .build()

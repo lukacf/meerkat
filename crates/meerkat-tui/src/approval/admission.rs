@@ -15,6 +15,11 @@
 //! - escalate ⇒ the engine waits for the human (or the escalation timeout,
 //!   which denies) inside this call, while the UI shows the dialog.
 //!
+//! Before deciding, the gate asks the engine where the session's tool of
+//! the call's name comes from (its live tool definitions, see
+//! [`super::catalog`]): a name is a builtin, file or note tool only when
+//! its provenance says so.
+//!
 //! [`install`] composes the gate into a build, after any admission the build
 //! already carries, so every agent the TUI builds (fresh or resumed) runs
 //! behind it. A helper the session delegates to (a mob member) gets a gate
@@ -31,9 +36,8 @@ use meerkat_core::{
     LiveBridgeEffectKind, LiveBridgeEffectOutcome, SessionId, ToolConsequenceDenial,
     ToolDispatchAdmission, ToolDispatchContext, ToolError,
 };
-use serde_json::Value;
 
-use super::engine::{ApprovalEngine, Caller};
+use super::engine::{ApprovalEngine, Caller, ToolCall};
 use super::{DENIAL_CODE, Verdict, deny_message};
 
 /// One agent's view of the approval engine.
@@ -129,13 +133,6 @@ pub fn denial_error(reason: &super::DenyReason) -> ToolError {
     }
 }
 
-/// The call's arguments as JSON; unparsable arguments are passed on as their
-/// raw text (they parse as no known action, so they reach the classifier).
-fn call_args(call: ToolCallView<'_>) -> Value {
-    call.parse_args::<Value>()
-        .unwrap_or_else(|_| Value::String(call.args.get().to_string()))
-}
-
 #[async_trait]
 impl ToolDispatchAdmission for ApprovalGate {
     async fn await_dispatch_admission(
@@ -149,20 +146,30 @@ impl ToolDispatchAdmission for ApprovalGate {
                 .await_dispatch_admission(call, context, effect_kind)
                 .await?;
         }
+        let origin_session = context.and_then(ToolDispatchContext::origin_session_id);
         let caller = match &self.helper {
             Some(helper) => Caller::helper(&self.session_id, helper),
-            None => Caller::session(
-                context
-                    .and_then(ToolDispatchContext::origin_session_id)
-                    .unwrap_or(&self.session_id),
-            ),
+            None => Caller::session(origin_session.unwrap_or(&self.session_id)),
         };
-        let args = call_args(call);
-        match self
-            .engine
-            .decide_as(caller, call.id, call.name, &args)
-            .await
-        {
+        // Where the calling agent's tool of this name comes from: the
+        // session that is dispatching (a helper's own member session; for
+        // a helper without a dispatch context nothing is known, so its
+        // calls are judged as foreign tools).
+        let tools_of = match &self.helper {
+            Some(_) => origin_session,
+            None => Some(origin_session.unwrap_or(&self.session_id)),
+        };
+        let origin = match tools_of {
+            Some(session) => self.engine.tool_origin(session, call.name).await,
+            None => None,
+        };
+        let tool_call = ToolCall {
+            id: call.id,
+            name: call.name,
+            args: call.args,
+            origin: origin.as_ref(),
+        };
+        match self.engine.decide_as(caller, tool_call).await {
             Verdict::Allow { .. } => Ok(()),
             Verdict::Deny { reason, .. } => Err(denial_error(&reason)),
         }

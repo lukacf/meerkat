@@ -40,9 +40,9 @@ pub struct RunnerHarness {
 /// When the tools cannot be composed or the start session cannot be opened.
 pub async fn spawn_runner(runtime: Runtime, start: &Start) -> Result<RunnerHarness, TuiError> {
     let (template, diff_rx) = Template::new(&runtime)?;
-    let threshold = template.startup_threshold(&runtime);
+    let trigger = template.startup_trigger(&runtime);
     let (session, transcript) =
-        open_start(&runtime, template.options(None, threshold), start).await?;
+        open_start(&runtime, template.options(None, trigger), start).await?;
     let first_session = session.id().clone();
     let unsent_path = runtime.scope.realm_root().join(UNSENT_FILE);
     let (agent_tx, agent_rx) = mpsc::channel(AGENT_EVENT_CAPACITY);

@@ -7,25 +7,32 @@
 //! memory and reports `CompactionStarted`/`Completed`/`Failed`. The TUI
 //! only chooses that threshold and watches the gauge:
 //!
-//! - **warn** (default): the native trigger is off (threshold
-//!   [`NonZeroU64::MAX`]; upstream still compacts to recover a request the
-//!   provider refused as too large). One warning when usage crosses
+//! - **warn** (default): the native trigger is off
+//!   ([`CompactionTrigger::Disable`]; upstream still compacts to recover a
+//!   request the provider refused as too large). One warning when usage crosses
 //!   `compact_warn_percent` (re-armed once usage drops below it or a
 //!   compaction succeeds), and a warning after every turn at or above
 //!   `compact_auto_percent`.
 //! - **auto**: the threshold is `compact_auto_percent` of the model's
-//!   context window ([`CompactionPolicy::native_threshold`]); the engine
-//!   compacts before the first model call that would cross it.
+//!   context window ([`CompactionPolicy::trigger`]); the engine compacts
+//!   before the first model call that would cross it.
 //!
-//! `/compact` reports the policy; `/compact now` rebuilds the idle session
-//! with a one-turn threshold of one token ([`COMPACT_NOW_THRESHOLD`]), so
-//! the next turn's first model call compacts first; after that turn the
-//! session is rebuilt on the policy's threshold again. Upstream exposes no
-//! on-demand compaction call, hence the rebuild. A rebuilt agent does not
-//! keep the provider's last input count, so the one-turn threshold cannot
-//! be a fraction of the current context: a long tool loop in that turn can
-//! compact again after upstream's cadence (`min_turns_between_compactions`
-//! model calls, 3 by default).
+//! The window is the engine's model profile's (the catalog, or the realm's
+//! `[models.<id>]` entry the endpoint listings keep current), never a
+//! number the TUI keeps on the side.
+//!
+//! `/compact` reports the policy; `/compact now` rebuilds the session so the
+//! next model call compacts: the idle session is rebuilt with a one-turn
+//! trigger of one token ([`COMPACT_NOW`]), and after that turn it is rebuilt
+//! on the policy's trigger again. Upstream exposes no on-demand compaction
+//! call, so a rebuild is the workaround (`rebuild_session_workaround` in the
+//! runner; the upstream ask is recorded in `.rct/rkat-tui/evidence.md`).
+//! Nothing here can confirm that the next call compacts: the
+//! `CompactionStarted`/`Completed` events are the confirmation. A rebuilt
+//! agent does not keep the provider's last input count, so the one-turn
+//! trigger cannot be a fraction of the current context: a long tool loop
+//! in that turn can compact again after upstream's cadence
+//! (`min_turns_between_compactions` model calls, 3 by default).
 //!
 //! Upstream publishes `CompactionCompleted` when the runtime finalizes the
 //! compaction's semantic-memory projection, which happens when the session
@@ -112,16 +119,16 @@ impl CompactionPolicy {
         }
     }
 
-    /// The native auto-compaction threshold for a session whose model has
-    /// `window` tokens of context: [`NonZeroU64::MAX`] (never by size) in
-    /// warn mode, [`Self::auto_tokens`] in auto mode.
+    /// The native auto-compaction trigger for a session whose model has
+    /// `window` tokens of context: [`CompactionTrigger::Disable`] in warn
+    /// mode, [`Self::auto_tokens`] in auto mode.
     #[must_use]
-    pub fn native_threshold(&self, window: Option<u64>) -> NonZeroU64 {
+    pub fn trigger(&self, window: Option<u64>) -> CompactionTrigger {
         match self.mode {
-            CompactMode::Warn => NonZeroU64::MAX,
-            CompactMode::Auto => {
-                NonZeroU64::new(self.auto_tokens(window)).unwrap_or(NonZeroU64::MIN)
-            }
+            CompactMode::Warn => CompactionTrigger::Disable,
+            CompactMode::Auto => CompactionTrigger::At(
+                NonZeroU64::new(self.auto_tokens(window)).unwrap_or(NonZeroU64::MIN),
+            ),
         }
     }
 
@@ -167,10 +174,49 @@ impl CompactionPolicy {
     }
 }
 
-/// The one-turn threshold `/compact now` arms: any history crosses it, so
-/// the next turn's first model call compacts (upstream never compacts on a
-/// session's very first model call).
-pub const COMPACT_NOW_THRESHOLD: NonZeroU64 = NonZeroU64::MIN;
+/// The native auto-compaction trigger a session is built with
+/// (`SessionBuildOptions::auto_compact_threshold_override`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompactionTrigger {
+    /// Upstream's model-aware default threshold.
+    #[default]
+    Inherit,
+    /// No compaction by size. Upstream has no typed "off", so this lowers to
+    /// the largest threshold ([`NonZeroU64::MAX`], never reached); upstream
+    /// still compacts to recover a request the provider refused as too
+    /// large. Recorded as an upstream ask in `.rct/rkat-tui/evidence.md`.
+    Disable,
+    /// Compact before the first model call whose context reaches this many
+    /// tokens.
+    At(NonZeroU64),
+}
+
+impl CompactionTrigger {
+    /// The build's `auto_compact_threshold_override`.
+    #[must_use]
+    pub fn threshold_override(self) -> Option<NonZeroU64> {
+        match self {
+            Self::Inherit => None,
+            Self::Disable => Some(NonZeroU64::MAX),
+            Self::At(tokens) => Some(tokens),
+        }
+    }
+
+    /// The trigger a build's override stands for.
+    #[must_use]
+    pub fn from_override(threshold: Option<NonZeroU64>) -> Self {
+        match threshold {
+            None => Self::Inherit,
+            Some(NonZeroU64::MAX) => Self::Disable,
+            Some(tokens) => Self::At(tokens),
+        }
+    }
+}
+
+/// The one-turn trigger `/compact now` rebuilds the session with: any
+/// history crosses it, so the next model call compacts (upstream never
+/// compacts on a session's very first model call).
+pub const COMPACT_NOW: CompactionTrigger = CompactionTrigger::At(NonZeroU64::MIN);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Zone {
@@ -179,8 +225,8 @@ enum Zone {
     Auto,
 }
 
-/// Why `/compact now` could not arm a compaction, as reported in
-/// [`super::Msg::CompactArmed`].
+/// Why `/compact now` could not rebuild the session, as reported in
+/// [`super::Msg::CompactRebuilt`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CompactFailure {
     /// No turn has reported its context yet: nothing to compact.
@@ -302,16 +348,40 @@ mod tests {
     }
 
     #[test]
-    fn native_threshold_follows_the_mode() {
+    fn the_trigger_follows_the_mode() {
+        let at = |trigger: CompactionTrigger| match trigger {
+            CompactionTrigger::At(tokens) => tokens.get(),
+            other => panic!("expected a threshold, got {other:?}"),
+        };
         assert_eq!(
-            CompactionPolicy::default().native_threshold(W),
-            NonZeroU64::MAX
+            CompactionPolicy::default().trigger(W),
+            CompactionTrigger::Disable
         );
-        assert_eq!(auto().native_threshold(W).get(), 85_000);
-        assert_eq!(auto().native_threshold(None).get(), FALLBACK_AUTO_TOKENS);
-        assert_eq!(auto().native_threshold(Some(0)).get(), FALLBACK_AUTO_TOKENS);
-        assert_eq!(auto().native_threshold(Some(1)).get(), 1);
-        assert_eq!(COMPACT_NOW_THRESHOLD.get(), 1);
+        assert_eq!(at(auto().trigger(W)), 85_000);
+        assert_eq!(at(auto().trigger(None)), FALLBACK_AUTO_TOKENS);
+        assert_eq!(at(auto().trigger(Some(0))), FALLBACK_AUTO_TOKENS);
+        assert_eq!(at(auto().trigger(Some(1))), 1);
+        assert_eq!(at(COMPACT_NOW), 1);
+    }
+
+    #[test]
+    fn triggers_lower_to_the_override_and_back() {
+        for trigger in [
+            CompactionTrigger::Inherit,
+            CompactionTrigger::Disable,
+            COMPACT_NOW,
+            CompactionTrigger::At(NonZeroU64::MIN.saturating_add(41)),
+        ] {
+            assert_eq!(
+                CompactionTrigger::from_override(trigger.threshold_override()),
+                trigger
+            );
+        }
+        assert_eq!(CompactionTrigger::Inherit.threshold_override(), None);
+        assert_eq!(
+            CompactionTrigger::Disable.threshold_override(),
+            Some(NonZeroU64::MAX)
+        );
     }
 
     #[test]

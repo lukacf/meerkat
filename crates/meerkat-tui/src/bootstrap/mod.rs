@@ -23,11 +23,13 @@
 //! discovers the LLM endpoints ([`crate::endpoints`]), picks the start-up
 //! model ([`plan_model`]) and loads the price table.
 //!
-//! The factory reads its config from a TUI-owned in-memory store
-//! ([`Runtime::config_store`]): the realm config plus the endpoint layer
-//! ([`crate::endpoints::lower_into`]) and the `[models.<id>]` profiles of
-//! models only an endpoint knows ([`Runtime::ensure_profile`]). Nothing of it
-//! is written to a realm document.
+//! The factory reads the realm's own `config.toml` through its owner
+//! ([`Runtime::realm_config`], see [`realm_config`]) on every build. The
+//! configured endpoints are projected into that document as realm
+//! connections ([`crate::endpoints::project_endpoints`]), and models only an
+//! endpoint knows get a `[models.<id>]` profile there
+//! ([`Runtime::ensure_profile`]), so a session's auth binding and model
+//! resolve for `rkat`, REST and RPC on the same realm too.
 //!
 //! With the `mob` feature it hosts helpers ([`crate::mobs`]): the factory's
 //! mob tools are on, the builder's default mob-tools slot carries the mob
@@ -48,6 +50,7 @@ pub mod dirs;
 pub mod instructions;
 pub mod mcp;
 pub mod persona;
+pub mod realm_config;
 pub mod scope;
 
 use std::path::PathBuf;
@@ -59,17 +62,15 @@ use meerkat::{
     AgentFactory, FactoryAgentBuilder, LlmClient, PersistentSessionService, SessionStore,
 };
 use meerkat_core::connection::RealmId;
-use meerkat_core::{
-    AuthBindingRef, Config, ConfigStore, McpServerConfig, MemoryConfigStore, Provider,
-};
+use meerkat_core::{AuthBindingRef, Config, ConfigStore, McpServerConfig, Provider};
 use meerkat_runtime::MeerkatMachine;
 use meerkat_store::{RealmBackend, realm_paths_in};
 use meerkat_tools::builtin::shell::ShellConfinement;
 
 use crate::cli::Args;
 use crate::endpoints::{
-    EndpointRef, EndpointRegistry, StartupPlan, StartupRequest, ensure_model_profile, lower_into,
-    needs_lookup, plan_startup,
+    EndpointError, EndpointName, EndpointRef, EndpointRegistry, ModelRefError, StartupPlan,
+    StartupRequest, ensure_model_profile, needs_lookup, plan_startup, project_endpoints,
 };
 use crate::error::TuiError;
 use crate::mobs::Helpers;
@@ -85,6 +86,7 @@ pub use confinement::{ConfinementPlan, HostPaths};
 pub use dirs::GlobalDirs;
 pub use instructions::InstructionSources;
 pub use persona::{CODING_PERSONA, HELPER_PERSONA};
+pub use realm_config::RealmConfigStore;
 pub use scope::{RuntimeScope, load_config, resolve_scope};
 
 /// Live sessions one TUI process may hold (the primary session plus a few
@@ -102,7 +104,7 @@ pub type TuiService = PersistentSessionService<FactoryAgentBuilder>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelChoice {
     /// Endpoint name (`anthropic`, `litellm`, …).
-    pub endpoint: String,
+    pub endpoint: EndpointName,
     /// Model id as the endpoint knows it.
     pub model: String,
     /// The provider whose client speaks the endpoint's dialect.
@@ -116,7 +118,7 @@ impl ModelChoice {
     /// The choice as an `endpoint:model` reference.
     #[must_use]
     pub fn reference(&self) -> EndpointRef {
-        EndpointRef::new(self.endpoint.clone(), self.model.clone())
+        EndpointRef::new(self.endpoint.as_str(), self.model.clone())
     }
 }
 
@@ -124,11 +126,15 @@ impl ModelChoice {
 pub struct Runtime {
     /// Project, conventions roots and realm.
     pub scope: RuntimeScope,
-    /// Realm config with env overrides applied (without the endpoint layer).
+    /// Realm config with env overrides applied, as loaded at start-up.
     pub config: Config,
-    /// The effective config the factory reads (realm config plus the
-    /// endpoint layer); `/model` adds profiles to it.
-    pub config_store: Arc<MemoryConfigStore>,
+    /// The realm document the factory reads on every build (see
+    /// [`realm_config`]); endpoints and profiles are written into it.
+    pub realm_config: Arc<RealmConfigStore>,
+    /// The effective config as of the last profile change: the model
+    /// registry the context gauge and the compaction policy read windows
+    /// from.
+    pub effective: parking_lot::RwLock<Config>,
     /// Bumped whenever [`Runtime::ensure_profile`] adds a profile. An agent
     /// captures its model registry when it is built, so a session built at
     /// an older generation is rebuilt before it can switch to a new model.
@@ -159,7 +165,8 @@ pub struct Runtime {
     pub helpers: Option<Arc<Helpers>>,
     /// Where the instruction files of every session build come from.
     pub instructions: InstructionSources,
-    /// The declarative MCP servers every session build carries.
+    /// The declarative MCP servers every session build carries (reloaded
+    /// by `/mcp trust`).
     pub mcp_servers: Vec<McpServerConfig>,
     /// Whether sessions get native semantic memory (`memory_search`).
     pub memory: bool,
@@ -189,27 +196,28 @@ impl Runtime {
         choice_for(&self.endpoints, reference)
     }
 
-    /// Make sure the factory knows a capability profile for `choice`'s model
-    /// (see [`ensure_model_profile`]), adding a `[models.<id>]` entry to the
-    /// in-memory config when only the endpoint knows it.
+    /// Make sure the factory knows a capability profile for `model` on
+    /// `provider`: a `[models.<id>]` entry in the realm document when only
+    /// the endpoint knows it, refreshed from `listed` (see
+    /// [`ensure_model_profile`]).
     ///
     /// # Errors
     ///
-    /// [`TuiError::Endpoint`] when the profile cannot be added.
+    /// [`TuiError::Endpoint`] when the profile cannot be written (or the
+    /// id is already profiled for another dialect).
     pub async fn ensure_profile(
         &self,
-        choice: &ModelChoice,
+        provider: Provider,
+        model: &str,
         listed: Option<&ModelEntry>,
     ) -> Result<(), TuiError> {
-        let mut config = self
-            .config_store
-            .get()
-            .await
-            .map_err(|err| TuiError::Endpoint(format!("read the session config: {err}")))?;
-        if ensure_model_profile(&mut config, choice.provider, &choice.model, listed)? {
-            self.config_store.set(config).await.map_err(|err| {
-                TuiError::Endpoint(format!("cannot register model `{}`: {err}", choice.model))
-            })?;
+        if ensure_model_profile(self.realm_config.document(), provider, model, listed).await? {
+            let effective = self
+                .realm_config
+                .get()
+                .await
+                .map_err(EndpointError::ConfigRead)?;
+            *self.effective.write() = effective;
             self.profile_generation.fetch_add(1, Ordering::SeqCst);
         }
         Ok(())
@@ -227,15 +235,17 @@ fn choice_for(
     endpoints: &EndpointRegistry,
     reference: &EndpointRef,
 ) -> Result<ModelChoice, TuiError> {
-    let endpoint = endpoints.get(&reference.endpoint).ok_or_else(|| {
-        TuiError::Endpoint(format!(
-            "unknown endpoint `{}` (configured: {})",
-            reference.endpoint,
-            endpoints.names().join(", ")
-        ))
-    })?;
+    let endpoint =
+        endpoints
+            .get(&reference.endpoint)
+            .ok_or_else(|| {
+                EndpointError::from(ModelRefError::UnknownEndpoint {
+                    name: reference.endpoint.clone(),
+                    known: endpoints.names(),
+                })
+            })?;
     Ok(ModelChoice {
-        endpoint: endpoint.name.clone(),
+        endpoint: EndpointName::new(endpoint.name.clone()),
         model: reference.model.clone(),
         provider: endpoint.provider(),
         auth_binding: endpoint.binding(),
@@ -300,20 +310,32 @@ pub async fn bootstrap_with(
     let (mut layered, mut approval_notices) = approval::load_layers(&scope, args)?;
     let realm = RealmId::parse(scope.realm_id.clone()).ok();
     let (mut endpoints, endpoint_notices) =
-        EndpointRegistry::discover(&config, realm.as_ref(), &layered.endpoints);
+        EndpointRegistry::discover(&config, realm.as_ref(), &layered.endpoints)?;
     if options.llm_override.is_some() {
         endpoints.add_keyless_builtins();
     }
     let lister = options.lister.clone().unwrap_or_else(live_lister);
     let (choice, models) = plan_model(args, &config, &endpoints, &lister).await?;
 
-    let mut effective = config.clone();
-    instructions::apply_system_md(&mut effective, scope.global.as_ref());
-    lower_into(&mut effective, endpoints.as_slice())?;
+    let realm_config = Arc::new(RealmConfigStore::new(
+        &scope.config_path(),
+        scope.global.clone(),
+    ));
+    project_endpoints(realm_config.document(), endpoints.as_slice()).await?;
     let listed = models
         .as_ref()
-        .and_then(|cache| cache.entry(&choice.endpoint, &choice.model));
-    ensure_model_profile(&mut effective, choice.provider, &choice.model, listed)?;
+        .and_then(|cache| cache.entry(choice.endpoint.as_str(), &choice.model));
+    ensure_model_profile(
+        realm_config.document(),
+        choice.provider,
+        &choice.model,
+        listed,
+    )
+    .await?;
+    let effective = realm_config
+        .get()
+        .await
+        .map_err(EndpointError::ConfigRead)?;
 
     let host_paths = options.host_paths.clone().unwrap_or_else(HostPaths::detect);
     let confinement = confinement::plan(
@@ -321,6 +343,7 @@ pub async fn bootstrap_with(
         scope.project_root.as_path(),
         &config,
         &host_paths,
+        &confinement::ExtraGrants::from_args(args),
     )?;
 
     let (manifest, persistence) = meerkat::open_realm_persistence_in(
@@ -336,10 +359,19 @@ pub async fn bootstrap_with(
         .store_path()
         .map_or_else(|| realm_root.clone(), PathBuf::from);
 
-    let mut notices = Vec::new();
+    let mut notices: Vec<String> = scope
+        .global
+        .as_ref()
+        .and_then(|global| {
+            dirs::legacy_config_notice(
+                global,
+                args.config_dir.as_deref(),
+                scope.user_config_root.as_deref(),
+            )
+        })
+        .into_iter()
+        .collect();
     let memory = memory_probe(&store_path, manifest.backend, &mut notices);
-    let mcp = mcp::load(&scope, &config).await?;
-    notices.extend(mcp.notices);
     let factory = build_factory(
         &scope,
         store_path,
@@ -367,16 +399,17 @@ pub async fn bootstrap_with(
             llm_override: options.llm_override.clone(),
         },
         &options.approval,
+        persistence.approval_issuer(),
     )
     .await?;
-    let config_store = Arc::new(MemoryConfigStore::new(
-        effective.clone(),
-        meerkat_models::canonical(),
-    ));
+    let project_mcp =
+        mcp::ProjectMcpTrust::of(&scope, &approval.trust.lock(), args.allow_project_mcp);
+    let mcp = mcp::load(&scope, &config, project_mcp).await?;
+    notices.extend(mcp.notices);
     let mut builder = FactoryAgentBuilder::new_with_config_store(
         factory,
-        effective,
-        Arc::clone(&config_store) as Arc<dyn ConfigStore>,
+        effective.clone(),
+        Arc::clone(&realm_config) as Arc<dyn ConfigStore>,
     );
     builder.default_llm_client.clone_from(&options.llm_override);
     builder.wait_for_mcp = args.wait_for_mcp;
@@ -392,6 +425,11 @@ pub async fn bootstrap_with(
         persistence,
         realm_root.join(CONFIG_STATE_FILE),
     )?;
+    // Every gate judges a call by where the session's tool of that name
+    // comes from (its live tool definitions), never by the name alone.
+    approval
+        .engine
+        .set_tool_origins(Arc::new(crate::approval::ServiceToolOrigins::new(&service)));
     let helpers = start_helpers(
         &service,
         &machine,
@@ -407,7 +445,8 @@ pub async fn bootstrap_with(
     Ok(Runtime {
         scope,
         config,
-        config_store,
+        realm_config,
+        effective: parking_lot::RwLock::new(effective),
         profile_generation: Arc::new(AtomicU64::new(0)),
         choice,
         endpoints,
@@ -608,7 +647,9 @@ pub async fn plan_model(
         cache = Some(fetch().await);
     }
     let index = cache.as_ref().map(ModelCache::index).unwrap_or_default();
-    let reference = match plan_startup(request, endpoints.as_slice(), &index)? {
+    let reference = match plan_startup(request, endpoints.as_slice(), &index)
+        .map_err(EndpointError::from)?
+    {
         StartupPlan::Resolved(reference) => reference,
         StartupPlan::FirstListed(name) => {
             if cache.is_none() {
@@ -621,11 +662,12 @@ pub async fn plan_model(
                     let why = cache
                         .as_ref()
                         .and_then(|cache| cache.get(&name))
-                        .and_then(|list| list.as_ref().err().cloned())
+                        .and_then(|list| list.as_ref().err().map(ToString::to_string))
                         .unwrap_or_else(|| "it lists no models".to_string());
-                    TuiError::Endpoint(format!(
-                        "no model selected and endpoint `{name}` offers none ({why}); pass --model {name}:<id>"
-                    ))
+                    TuiError::from(EndpointError::NothingListed {
+                        endpoint: name.clone(),
+                        why,
+                    })
                 })?;
             EndpointRef::new(name, first.id.clone())
         }
@@ -637,7 +679,7 @@ pub async fn plan_model(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::endpoints::{Dialect, Endpoint, SecretString};
+    use crate::endpoints::{WireDialect, Endpoint, SecretString};
     use crate::models::{EndpointListing, ModelSource};
     use clap::Parser;
 
@@ -647,7 +689,7 @@ mod tests {
         Args::try_parse_from(argv).unwrap()
     }
 
-    fn ep(name: &str, dialect: Dialect, builtin: bool) -> Endpoint {
+    fn ep(name: &str, dialect: WireDialect, builtin: bool) -> Endpoint {
         Endpoint {
             name: name.to_string(),
             dialect,
@@ -696,9 +738,9 @@ mod tests {
 
     fn registry() -> EndpointRegistry {
         EndpointRegistry::from_endpoints(vec![
-            ep("anthropic", Dialect::Anthropic, true),
-            ep("openai", Dialect::OpenAi, true),
-            ep("litellm", Dialect::OpenAi, false),
+            ep("anthropic", WireDialect::Anthropic, true),
+            ep("openai", WireDialect::OpenAi, true),
+            ep("litellm", WireDialect::OpenAi, false),
         ])
     }
 
@@ -713,7 +755,7 @@ mod tests {
     #[tokio::test]
     async fn startup_model_planning() {
         let choice = plan(&["--model", "claude-sonnet-4-6"], "").await.unwrap();
-        assert_eq!(choice.endpoint, "anthropic");
+        assert_eq!(choice.endpoint.as_str(), "anthropic");
         assert_eq!(choice.provider, Provider::Anthropic);
         assert!(choice.auth_binding.is_none());
         // A bare id only one endpoint lists resolves by lookup.
@@ -727,10 +769,10 @@ mod tests {
         assert_eq!(binding.binding.as_str(), "litellm");
         // Listed by both: the built-in of its dialect wins.
         let choice = plan(&["--model", "gpt-5.5"], "").await.unwrap();
-        assert_eq!(choice.endpoint, "openai");
+        assert_eq!(choice.endpoint.as_str(), "openai");
         // Explicit endpoint.
         let choice = plan(&["--model", "litellm:gpt-5.5"], "").await.unwrap();
-        assert_eq!(choice.endpoint, "litellm");
+        assert_eq!(choice.endpoint.as_str(), "litellm");
         assert_eq!(choice.provider, Provider::OpenAI);
         // `--provider` / `--endpoint` with a bare id.
         let choice = plan(&["--endpoint", "litellm", "--model", "x"], "")

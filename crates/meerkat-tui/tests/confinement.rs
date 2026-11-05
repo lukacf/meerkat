@@ -5,14 +5,18 @@
 //! in durable process custody and leaves no process behind.
 //!
 //! The confined cases need the platform backend (Linux: unprivileged user
-//! namespaces; macOS: Seatbelt). Where it is unavailable, as in containers
-//! without user namespaces, bootstrap refuses the mode and the case is
-//! skipped with the reason printed.
+//! namespaces; macOS: Seatbelt). Each case first probes the backend directly
+//! (`meerkat_sandbox` compiles the mode's requirement and launches a
+//! confined `/bin/true`); where that fails, as in containers or on Ubuntu
+//! without unprivileged user namespaces, the case prints a `SKIPPED:` line
+//! with the reason and returns. Apart from the markers the commands echo,
+//! nothing is decided from a tool's output text.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,6 +29,8 @@ use meerkat_tui::approval::classifier::{
     ActionClassifier, ClassifierError, ClassifierInput, ClassifierVerdict,
 };
 use meerkat_tui::bootstrap::ApprovalOverrides;
+use meerkat_tui::bootstrap::confinement::{HostPaths, lower};
+use meerkat_tui::cli::ConfinementArg;
 use meerkat_tui::runner::Start;
 use meerkat_tui::ui::Effect;
 use serde_json::json;
@@ -73,15 +79,62 @@ fn tool_text(messages: &[Message], id: &str) -> String {
         .unwrap_or_else(|| panic!("no result for {id}"))
 }
 
+/// Why this host cannot run a launch confined by `mode` over `workspace`,
+/// probed directly: the requirement is compiled by the sandbox backend and a
+/// confined `/bin/true` must exit successfully. `None` when it can.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn sandbox_unavailable(workspace: &Path, mode: ConfinementArg) -> Option<String> {
+    let requirement = match lower(mode, workspace, &HostPaths::detect()) {
+        Ok(Some(requirement)) => requirement,
+        Ok(None) => return None,
+        Err(err) => return Some(format!("the requirement is invalid: {err}")),
+    };
+    let launch = match meerkat_sandbox::ProcessLaunchSpec::new(
+        "/bin/true".into(),
+        Vec::new(),
+        workspace.to_path_buf(),
+        BTreeMap::new(),
+    ) {
+        Ok(launch) => launch,
+        Err(refusal) => return Some(format!("the probe launch is invalid: {refusal}")),
+    };
+    let prepared = match meerkat_sandbox::prepare(&requirement, launch) {
+        Ok(prepared) => prepared,
+        Err(refusal) => return Some(format!("the backend refuses the requirement: {refusal}")),
+    };
+    let mut child = match prepared.spawn() {
+        Ok(child) => child,
+        Err(err) => return Some(format!("a confined launch cannot start: {err}")),
+    };
+    match child.wait().await {
+        Ok(status) if status.success() => None,
+        Ok(status) => Some(format!("a confined /bin/true exited with {status}")),
+        Err(err) => Some(format!("a confined launch cannot be awaited: {err}")),
+    }
+}
+
+/// No sandbox backend on this platform.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+async fn sandbox_unavailable(_workspace: &Path, _mode: ConfinementArg) -> Option<String> {
+    Some("this platform has no sandbox backend".to_string())
+}
+
 /// Start a rig whose shell is allowed without review, under `mode`; `None`
-/// when this host cannot enforce the mode (the reason is printed).
+/// (after printing a `SKIPPED:` line) when this host cannot run the mode.
 async fn confined_rig(ws: &Workspace, llm: &Arc<ScriptedLlmClient>, mode: &str) -> Option<Rig> {
+    let arg = match mode {
+        "strict" => ConfinementArg::Strict,
+        _ => ConfinementArg::Workspace,
+    };
+    if let Some(reason) = sandbox_unavailable(&ws.root, arg).await {
+        println!("SKIPPED: --confinement={mode} is unavailable on this host: {reason}");
+        return None;
+    }
     let options = allow_shell(vec![format!("--confinement={mode}")]);
     match Rig::try_start_opts(&ws.root, llm, Start::New, options).await {
         Ok(rig) => Some(rig),
-        Err(TuiError::Confinement(reason)) => {
-            eprintln!("skipped: --confinement={mode} is unavailable on this host: {reason}");
-            None
+        Err(err @ TuiError::Confinement(_)) => {
+            panic!("the probe launched confined, but bootstrap refused the mode: {err}")
         }
         Err(other) => panic!("bootstrap: {other}"),
     }
@@ -103,10 +156,6 @@ async fn run_confined(ws: &Workspace, mode: &str, command: &'static str) -> Opti
     rig.turn_finished().await;
     let text = tool_text(&llm.requests()[1], "sh");
     rig.quit().await;
-    if text.contains("confinement_refused") || text.contains("confinement is unsupported") {
-        eprintln!("skipped: the backend refused the confined launch: {text}");
-        return None;
-    }
     Some(text)
 }
 
@@ -128,6 +177,70 @@ async fn workspace_mode_confines_writes_to_the_workspace() {
         !outside.join("outside.txt").exists(),
         "a confined command wrote outside the workspace: {output}"
     );
+}
+
+/// Name resolution inside workspace mode, with this host's real system
+/// paths (`HostPaths::detect`): `localhost` resolves from the granted
+/// `/etc/hosts`, and a DNS name resolves through the stub resolver named in
+/// a granted `/etc/resolv.conf`. A host whose `/etc/resolv.conf` is a
+/// symbolic link (systemd-resolved) cannot have it granted: the DNS half
+/// prints `SKIPPED:` there, as it does when the host itself cannot resolve
+/// the name (no network).
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workspace_mode_resolves_localhost_and_dns_names() {
+    use std::net::ToSocketAddrs as _;
+    let ws = Workspace::new();
+    if let Some(reason) = sandbox_unavailable(&ws.root, ConfinementArg::Workspace).await {
+        println!("SKIPPED: --confinement=workspace is unavailable on this host: {reason}");
+        return;
+    }
+    let host = HostPaths::detect();
+    let dns_skip = if let Some(target) = &host.resolv_conf_link {
+        Some(format!(
+            "/etc/resolv.conf is a symbolic link (to {}), which the sandbox cannot grant",
+            target.display()
+        ))
+    } else if !Path::new("/etc/resolv.conf").is_file() {
+        Some("this host has no /etc/resolv.conf".to_string())
+    } else if ("example.com", 80).to_socket_addrs().is_err() {
+        Some("the host itself cannot resolve example.com".to_string())
+    } else {
+        None
+    };
+    let llm = ScriptedLlmClient::new(vec![
+        Step::Tool {
+            id: "sh",
+            name: "shell",
+            args: json!({
+                "command": "getent hosts localhost && echo LOCAL-OK; getent hosts example.com && echo DNS-OK; echo END"
+            }),
+        },
+        Step::Text("done"),
+    ]);
+    let options = RigOptions {
+        host_paths: Some(host),
+        ..allow_shell(vec!["--confinement=workspace".to_string()])
+    };
+    let mut rig = Rig::try_start_opts(&ws.root, &llm, Start::New, options)
+        .await
+        .unwrap_or_else(|err| panic!("bootstrap: {err}"));
+    rig.send(Effect::StartTurn("resolve".into()));
+    rig.turn_finished().await;
+    let output = tool_text(&llm.requests()[1], "sh");
+    rig.quit().await;
+    assert!(output.contains("END"), "{output}");
+    assert!(
+        output.contains("LOCAL-OK"),
+        "localhost did not resolve: {output}"
+    );
+    match dns_skip {
+        Some(reason) => println!("SKIPPED: DNS inside the sandbox: {reason}"),
+        None => assert!(
+            output.contains("DNS-OK"),
+            "example.com did not resolve: {output}"
+        ),
+    }
 }
 
 /// Accept connections on a loopback port until the test ends.
@@ -240,4 +353,32 @@ fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
         }
     }
     out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_confinement_below_a_realm_policy_is_a_typed_startup_error() {
+    let ws = Workspace::new();
+    let realm = meerkat_tui::bootstrap::resolve_scope(&common::args_for(&ws.root))
+        .unwrap()
+        .realm_root();
+    std::fs::create_dir_all(&realm).unwrap();
+    std::fs::write(
+        realm.join("config.toml"),
+        "[confinement.shell]\nmode = \"workspace\"\nnetwork = \"unrestricted\"\n",
+    )
+    .unwrap();
+    let llm = ScriptedLlmClient::new(Vec::new());
+    // `--confinement=off`, the same as `--no-confinement`.
+    let options = allow_shell(vec!["--confinement=off".to_string()]);
+    let Err(err) = Rig::try_start_opts(&ws.root, &llm, Start::New, options).await else {
+        panic!("--no-confinement started below the realm's policy");
+    };
+    assert!(
+        matches!(
+            &err,
+            TuiError::Confinement(meerkat_tui::ConfinementError::BelowRealmFloor { policy, .. })
+                if policy.contains("workspace preset")
+        ),
+        "{err}"
+    );
 }

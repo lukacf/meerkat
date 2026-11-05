@@ -8,9 +8,11 @@ use super::Runner;
 use super::cost::session_cost;
 use crate::bootstrap::Runtime;
 use crate::cli::Args;
-use crate::endpoints::{ENDPOINT_REALM, EndpointRef, load_choice, restore_choice};
+use crate::endpoints::EndpointName;
 use crate::error::TuiError;
-use crate::session::{SessionHandle, SessionOptions, list_sessions, resolve_session_ref};
+use crate::session::{
+    SessionHandle, SessionIdentity, SessionOptions, list_sessions, resolve_session_ref,
+};
 use crate::ui::{Block, Msg, NoticeLevel, SessionCost, StatusUpdate, ToolState};
 
 /// The session the TUI starts with.
@@ -57,12 +59,15 @@ pub async fn open_start(
     }
 }
 
-/// UI messages that show `session` on `endpoint` (status bar, transcript,
-/// cost totals `cost`). A resumed session's transcript comes from
-/// `transcript`; a fresh one clears the transcript when `reset` is set.
+/// UI messages that show `session` (its `identity`, on `endpoint`, with
+/// cost totals `cost`) in the status bar and transcript. A resumed
+/// session's transcript comes from `transcript`; a fresh one clears the
+/// transcript when `reset` is set. Without an endpoint the status shows the
+/// provider.
 pub fn session_messages(
     session: &SessionHandle,
-    endpoint: &str,
+    identity: &SessionIdentity,
+    endpoint: Option<&EndpointName>,
     transcript: Option<&Session>,
     cost: SessionCost,
     reset: bool,
@@ -71,8 +76,11 @@ pub fn session_messages(
     let mut msgs = vec![
         Msg::Status(StatusUpdate::Session(session.id().to_string())),
         Msg::Status(StatusUpdate::Model {
-            provider: endpoint.to_string(),
-            model: session.model().to_string(),
+            provider: endpoint.map_or_else(
+                || identity.provider.as_str().to_string(),
+                ToString::to_string,
+            ),
+            model: identity.model.clone(),
         }),
         Msg::Status(StatusUpdate::Tokens {
             input: usage.input_tokens,
@@ -88,30 +96,6 @@ pub fn session_messages(
     msgs
 }
 
-/// The endpoint a session runs on: a configured endpoint's binding names
-/// it; else the session's sidecar, else its provider's built-in endpoint
-/// (see [`restore_choice`]). Returns a notice when it had to fall back.
-#[must_use]
-pub fn session_endpoint(runtime: &Runtime, session: &SessionHandle) -> (String, Option<String>) {
-    if let Some(binding) = session.auth_binding()
-        && binding.realm.as_str() == ENDPOINT_REALM
-        && runtime.endpoints.get(binding.binding.as_str()).is_some()
-    {
-        return (binding.binding.as_str().to_string(), None);
-    }
-    let realm = runtime.scope.realm_root();
-    let stored = load_choice(&realm, &session.id().to_string())
-        .filter(|stored| stored.model == session.model());
-    let (choice, notice) = restore_choice(
-        stored,
-        Some((session.provider(), session.model().to_string())),
-        runtime.endpoints.as_slice(),
-        |name| runtime.endpoints.get(name).is_some(),
-        &EndpointRef::new(runtime.choice.endpoint.clone(), session.model()),
-    );
-    (choice.endpoint, notice)
-}
-
 impl Runner {
     /// `/new` (`/clear`): open a fresh session and retire the current one.
     pub(super) async fn new_session(&mut self) {
@@ -119,15 +103,12 @@ impl Runner {
             return;
         }
         let choice = self
-            .runtime
-            .choice_for(&self.current_choice())
-            .unwrap_or_else(|_| self.runtime.choice.clone());
-        let threshold = self.session_threshold();
-        match SessionHandle::create(
-            &self.runtime,
-            self.template.options(Some(choice), threshold),
-        )
-        .await
+            .current_choice()
+            .and_then(|current| self.runtime.choice_for(&current).ok())
+            .unwrap_or_else(|| self.runtime.choice.clone());
+        let trigger = self.session_trigger();
+        match SessionHandle::create(&self.runtime, self.template.options(Some(choice), trigger))
+            .await
         {
             Ok(session) => self.switch_to(session, None).await,
             Err(err) => self.notice(
@@ -153,9 +134,9 @@ impl Runner {
             self.notice(NoticeLevel::Info, "already in this session");
             return;
         }
-        let threshold = self.session_threshold();
+        let trigger = self.session_trigger();
         let opened =
-            match SessionHandle::resume(&self.runtime, &id, self.template.options(None, threshold))
+            match SessionHandle::resume(&self.runtime, &id, self.template.options(None, trigger))
                 .await
             {
                 Ok(session) => session,
@@ -174,10 +155,45 @@ impl Runner {
                     NoticeLevel::Error,
                     format!("could not read the resumed session: {err}"),
                 );
-                if let Err(err) = opened.retire().await {
+                if let Err(err) = opened.close().await {
                     tracing::warn!(error = %err, "could not retire the unread session");
                 }
             }
+        }
+    }
+
+    /// [`crate::ui::Effect::TrustProjectMcp`]: record the project
+    /// `.rkat/mcp.toml`'s digest in the host trust record and reload the MCP
+    /// set, so its servers start from the next session.
+    pub(super) async fn trust_project_mcp(&mut self) {
+        let path = crate::bootstrap::mcp::project_file(&self.runtime.scope);
+        let recorded = self.runtime.approval.trust.lock().record_file(&path);
+        if let Err(err) = recorded {
+            self.notice(NoticeLevel::Error, format!("not trusted: {err}"));
+            return;
+        }
+        let config = self.runtime.config.clone();
+        match crate::bootstrap::mcp::load(
+            &self.runtime.scope,
+            &config,
+            crate::bootstrap::mcp::ProjectMcpTrust::Recorded,
+        )
+        .await
+        {
+            Ok(loaded) => {
+                self.runtime.mcp_servers = loaded.servers;
+                self.notice(
+                    NoticeLevel::Info,
+                    format!(
+                        "trusted {} as it is now; its servers start from the next session (/new or /resume)",
+                        path.display()
+                    ),
+                );
+            }
+            Err(err) => self.notice(
+                NoticeLevel::Error,
+                format!("trusted {}, but it cannot be loaded: {err}", path.display()),
+            ),
         }
     }
 
@@ -206,42 +222,48 @@ impl Runner {
         busy
     }
 
-    /// Make `session` current: follow its events, retire the previous one
-    /// and reseed the UI.
+    /// Make `session` current: follow its events, leave the previous one
+    /// (its waiters and interrupt tasks aborted, its approval state
+    /// dropped) and reseed the UI.
     async fn switch_to(&mut self, session: SessionHandle, transcript: Option<Session>) {
         let previous = std::mem::replace(&mut self.session, session);
-        self.compact_armed = false;
+        self.compact_now_pending = false;
+        self.tasks.abort_all();
         self.follow_events().await;
-        if let Err(err) = previous.retire().await {
+        if let Err(err) = previous.close().await {
             tracing::warn!(error = %err, session = %previous.id(), "could not retire the previous session");
         }
+        self.refresh_identity().await;
         self.show_session(transcript.as_ref(), true);
         // A resumed session on another model than the current one.
-        self.ensure_threshold().await;
+        self.ensure_trigger().await;
     }
 
-    /// Seed the UI with the current session: its endpoint, status, cost
-    /// totals (the sidecar's for a resumed session) and transcript; record
-    /// the choice in the sidecar.
+    /// Seed the UI with the current session: its endpoint (derived from its
+    /// identity), status, cost totals (a resumed session's record,
+    /// reconciled with its authoritative usage) and transcript.
     pub(super) fn show_session(&mut self, transcript: Option<&Session>, reset: bool) {
-        let (endpoint, notice) = match transcript {
-            Some(_) => session_endpoint(&self.runtime, &self.session),
-            None => (self.current_endpoint.clone(), None),
-        };
-        self.current_endpoint = endpoint;
-        if let Some(text) = notice {
-            self.notice(NoticeLevel::Warn, text);
+        if self.current_endpoint.is_none() {
+            self.notice(
+                NoticeLevel::Warn,
+                format!(
+                    "no endpoint of this run serves this session ({} model `{}`); /model switches it to one",
+                    self.identity.provider.as_str(),
+                    self.identity.model
+                ),
+            );
         }
         let cost = transcript.map_or_else(SessionCost::default, |transcript| {
             session_cost(
                 &self.runtime.scope.realm_root(),
                 transcript,
-                self.session.model(),
+                &self.identity.model,
             )
         });
         for msg in session_messages(
             &self.session,
-            &self.current_endpoint,
+            &self.identity,
+            self.current_endpoint.as_ref(),
             transcript,
             cost,
             reset,
@@ -249,7 +271,6 @@ impl Runner {
             self.send(msg);
         }
         self.push_context_window();
-        self.save_current_choice();
     }
 }
 

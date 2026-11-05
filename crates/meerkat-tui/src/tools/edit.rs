@@ -1,6 +1,6 @@
 //! `edit_file`: exact-substring replacement (read-before-edit enforced).
 
-use super::{EDIT_FILE, Shared, ToolFailure, ToolOutcome};
+use super::{CallMeta, EDIT_FILE, Shared, ToolFailure, ToolOutcome};
 use meerkat_core::{ToolDef, ToolError};
 use serde::Deserialize;
 
@@ -32,7 +32,7 @@ pub(crate) fn definition() -> ToolDef {
     )
 }
 
-pub(crate) fn run(shared: &Shared, id: String, args: EditFileArgs) -> ToolOutcome {
+pub(crate) fn run(shared: &Shared, call: CallMeta, args: EditFileArgs) -> ToolOutcome {
     if args.old_string.is_empty() {
         return Err(ToolFailure::Fatal(ToolError::InvalidArguments {
             name: EDIT_FILE.to_string(),
@@ -46,7 +46,7 @@ pub(crate) fn run(shared: &Shared, id: String, args: EditFileArgs) -> ToolOutcom
     }
     let resolved = shared.resolve(EDIT_FILE, &args.path)?;
     let display = shared.display(&resolved);
-    let Some(content) = shared.check_writable(&args.path, &resolved)? else {
+    let Some(content) = shared.check_writable(call.session.as_ref(), &args.path, &resolved)? else {
         return Err(ToolFailure::recoverable(format!(
             "file not found: {display}; use write_file to create it"
         )));
@@ -59,7 +59,7 @@ pub(crate) fn run(shared: &Shared, id: String, args: EditFileArgs) -> ToolOutcom
         args.replace_all,
     )
     .map_err(|err| ToolFailure::recoverable(format!("{err} in {display}")))?;
-    let diff = shared.commit_write(id, &resolved, &content, &updated)?;
+    let diff = shared.commit_write(call, &resolved, &content, &updated)?;
     Ok(format!("edited {display} {}", diff.stats()))
 }
 

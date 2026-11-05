@@ -17,7 +17,8 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use crate::bootstrap::credentials::ProviderCredentials;
-use crate::endpoints::{Dialect, Endpoint, ModelIndex};
+use crate::endpoints::{Endpoint, ModelIndex, SecretString, WireDialect};
+use crate::http::{CappedReadError, read_capped};
 use crate::pricing::ModelPrice;
 
 /// Default Anthropic API base (mirrors `meerkat-client`).
@@ -30,6 +31,8 @@ const OPENAI_DEFAULT_BASE: &str = "https://api.openai.com";
 const GEMINI_DEFAULT_BASE: &str = "https://generativelanguage.googleapis.com";
 /// Upper bound on followed pages, so a misbehaving endpoint cannot loop forever.
 const MAX_PAGES: usize = 20;
+/// Largest model-list page accepted (a few hundred models is ~100 KiB).
+pub const MAX_LIST_BYTES: usize = 8 * 1024 * 1024;
 /// Maximum number of characters of an error body kept in [`ListModelsError::Status`].
 const MAX_ERROR_BODY_CHARS: usize = 300;
 
@@ -60,9 +63,10 @@ pub enum ModelSource {
 /// Failure to list models from a provider.
 #[derive(Debug, thiserror::Error)]
 pub enum ListModelsError {
-    /// Transport failure (connect, timeout, TLS, …). The URL is stripped.
-    #[error("network error: {0}")]
-    Http(reqwest::Error),
+    /// Transport failure (connect, timeout, TLS, …; the URL is stripped), or
+    /// a body larger than [`MAX_LIST_BYTES`].
+    #[error(transparent)]
+    Read(#[from] CappedReadError),
     /// The endpoint answered with a non-success status.
     #[error("HTTP {status}: {body}")]
     Status {
@@ -73,7 +77,13 @@ pub enum ListModelsError {
     },
     /// The response body did not match the expected shape.
     #[error("unexpected response: {0}")]
-    Decode(String),
+    Decode(#[source] serde_json::Error),
+    /// The response body is not UTF-8.
+    #[error("unexpected response: {0}")]
+    Utf8(#[source] std::string::FromUtf8Error),
+    /// The background task fetching the lists failed.
+    #[error("list-models task failed: {0}")]
+    Task(#[source] tokio::task::JoinError),
     /// The provider has no supported list-models endpoint.
     #[error("listing models is not supported for provider `{}`", .0.as_str())]
     Unsupported(Provider),
@@ -86,8 +96,17 @@ pub enum ListModelsError {
 
 impl From<reqwest::Error> for ListModelsError {
     fn from(err: reqwest::Error) -> Self {
-        Self::Http(err.without_url())
+        Self::Read(err.into())
     }
+}
+
+/// A request header carrying `secret`, marked sensitive (redacted from
+/// `Debug`, never cached by HTTP/2 header compression).
+fn secret_header(secret: &SecretString) -> Result<reqwest::header::HeaderValue, ListModelsError> {
+    let mut value = reqwest::header::HeaderValue::from_str(secret.expose())
+        .map_err(|_| ListModelsError::NoKey)?;
+    value.set_sensitive(true);
+    Ok(value)
 }
 
 /// Fetch the models available to `creds` from the provider's list endpoint.
@@ -136,7 +155,7 @@ pub struct ModelGroup {
     /// Endpoint name.
     pub endpoint: String,
     /// Its dialect.
-    pub dialect: Dialect,
+    pub dialect: WireDialect,
     /// Its base URL override.
     pub base_url: Option<String>,
     /// Models, in display order (the current one first in its group).
@@ -186,7 +205,7 @@ pub async fn list_endpoint(
         models: list_models(&creds, timeout).await?,
         prices: Vec::new(),
     };
-    if endpoint.dialect == Dialect::OpenAi
+    if endpoint.dialect == WireDialect::OpenAi
         && let Some(base) = &endpoint.base_url
     {
         match litellm_model_info(base, &creds.api_key, timeout).await {
@@ -293,7 +312,7 @@ impl LiteLlmModelInfo {
 
 async fn litellm_model_info(
     base: &str,
-    api_key: &str,
+    api_key: &SecretString,
     timeout: Duration,
 ) -> Result<LiteLlmInfoPage, ListModelsError> {
     let mut builder = reqwest::Client::builder()
@@ -304,7 +323,7 @@ async fn litellm_model_info(
     }
     let client = builder.build()?;
     let url = format!("{}/model/info", base.trim_end_matches('/'));
-    fetch_json(client.get(url).bearer_auth(api_key)).await
+    fetch_json(client.get(url).bearer_auth(api_key.expose())).await
 }
 
 /// Fill missing windows from LiteLLM's model info (first deployment with a
@@ -347,7 +366,8 @@ async fn fetch_json<T: DeserializeOwned>(
 ) -> Result<T, ListModelsError> {
     let response = request.send().await?;
     let status = response.status();
-    let body = response.text().await?;
+    let body = read_capped(response, MAX_LIST_BYTES).await?;
+    let body = String::from_utf8(body).map_err(ListModelsError::Utf8)?;
     if !status.is_success() {
         return Err(ListModelsError::Status {
             status: status.as_u16(),
@@ -373,7 +393,7 @@ pub(crate) fn is_loopback_url(url: &str) -> bool {
 }
 
 fn decode<T: DeserializeOwned>(body: &str) -> Result<T, ListModelsError> {
-    serde_json::from_str(body).map_err(|err| ListModelsError::Decode(err.to_string()))
+    serde_json::from_str(body).map_err(ListModelsError::Decode)
 }
 
 /// Collapse whitespace and truncate an error body for display.
@@ -426,7 +446,7 @@ impl From<AnthropicModel> for ModelEntry {
 async fn list_anthropic(
     client: &reqwest::Client,
     base: &str,
-    api_key: &str,
+    api_key: &SecretString,
 ) -> Result<Vec<ModelEntry>, ListModelsError> {
     let url = format!("{base}/v1/models");
     let mut entries = Vec::new();
@@ -434,7 +454,7 @@ async fn list_anthropic(
     for _ in 0..MAX_PAGES {
         let mut request = client
             .get(&url)
-            .header("x-api-key", api_key)
+            .header("x-api-key", secret_header(api_key)?)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .query(&[("limit", "1000")]);
         if let Some(after_id) = &after {
@@ -498,9 +518,11 @@ fn openai_entries(page: OpenAiPage) -> Vec<ModelEntry> {
 async fn list_openai(
     client: &reqwest::Client,
     base: &str,
-    api_key: &str,
+    api_key: &SecretString,
 ) -> Result<Vec<ModelEntry>, ListModelsError> {
-    let request = client.get(format!("{base}/v1/models")).bearer_auth(api_key);
+    let request = client
+        .get(format!("{base}/v1/models"))
+        .bearer_auth(api_key.expose());
     let page: OpenAiPage = fetch_json(request).await?;
     Ok(openai_entries(page))
 }
@@ -558,7 +580,7 @@ fn gemini_entry(model: GeminiModel) -> Option<ModelEntry> {
 async fn list_gemini(
     client: &reqwest::Client,
     base: &str,
-    api_key: &str,
+    api_key: &SecretString,
 ) -> Result<Vec<ModelEntry>, ListModelsError> {
     let url = format!("{base}/v1beta/models");
     let mut entries = Vec::new();
@@ -566,7 +588,7 @@ async fn list_gemini(
     for _ in 0..MAX_PAGES {
         let mut request = client
             .get(&url)
-            .header("x-goog-api-key", api_key)
+            .header("x-goog-api-key", secret_header(api_key)?)
             .query(&[("pageSize", "200")]);
         if let Some(token) = &page_token {
             request = request.query(&[("pageToken", token.as_str())]);
@@ -605,11 +627,15 @@ pub fn live_lister() -> ModelLister {
     })
 }
 
-/// Model lists by endpoint name: the list, or a one-line warning. Fetched
+/// One endpoint's list in the [`ModelCache`]: the models, or why they could
+/// not be listed.
+pub type CachedList = Result<Vec<ModelEntry>, Arc<ListModelsError>>;
+
+/// Model lists by endpoint name: the list, or the listing error. Fetched
 /// once per process (and on `/model refresh`).
 #[derive(Debug, Clone, Default)]
 pub struct ModelCache {
-    lists: HashMap<String, Result<Vec<ModelEntry>, String>>,
+    lists: HashMap<String, CachedList>,
 }
 
 impl ModelCache {
@@ -627,7 +653,7 @@ impl ModelCache {
                     }
                     Err(err) => {
                         tracing::warn!(endpoint = %name, error = %err, "could not list models");
-                        Err(fetch_warning(&err))
+                        Err(Arc::new(err))
                     }
                 };
                 (name, result)
@@ -636,20 +662,21 @@ impl ModelCache {
         (Self { lists }, prices)
     }
 
-    /// A cache in which every endpoint of `names` failed with `warning`.
+    /// A cache in which every endpoint of `names` failed with `error`.
     #[must_use]
-    pub fn failed(names: impl IntoIterator<Item = String>, warning: &str) -> Self {
+    pub fn failed(names: impl IntoIterator<Item = String>, error: &Arc<ListModelsError>) -> Self {
         Self {
             lists: names
                 .into_iter()
-                .map(|name| (name, Err(warning.to_string())))
+                .map(|name| (name, Err(Arc::clone(error))))
                 .collect(),
         }
     }
 
-    /// The list (or warning) of `endpoint`, `None` when it was not fetched.
+    /// The list (or listing error) of `endpoint`, `None` when it was not
+    /// fetched.
     #[must_use]
-    pub fn get(&self, endpoint: &str) -> Option<&Result<Vec<ModelEntry>, String>> {
+    pub fn get(&self, endpoint: &str) -> Option<&CachedList> {
         self.lists.get(endpoint)
     }
 
@@ -938,7 +965,7 @@ mod tests {
     async fn other_provider_is_unsupported() {
         let creds = ProviderCredentials {
             provider: Provider::Other,
-            api_key: "k".to_string(),
+            api_key: SecretString::new("k"),
             base_url: None,
         };
         let err = list_models(&creds, Duration::from_secs(1))
@@ -981,6 +1008,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_oversized_list_is_refused_without_reading_it_whole() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf).await.unwrap();
+            // No Content-Length: only the chunked read can stop it.
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n";
+            let _ = socket.write_all(head.as_bytes()).await;
+            let filler = vec![b' '; 64 * 1024];
+            for _ in 0..(MAX_LIST_BYTES / filler.len() + 2) {
+                if socket.write_all(&filler).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let creds = ProviderCredentials {
+            provider: Provider::OpenAI,
+            api_key: SecretString::new("k"),
+            base_url: Some(format!("http://{addr}/")),
+        };
+        let err = list_models(&creds, Duration::from_secs(10))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ListModelsError::Read(CappedReadError::TooLarge { .. })),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
     async fn anthropic_follows_pagination_with_headers() {
         let (base, server) = stub_server(vec![
             (
@@ -995,7 +1054,7 @@ mod tests {
         .await;
         let creds = ProviderCredentials {
             provider: Provider::Anthropic,
-            api_key: "sk-test".to_string(),
+            api_key: SecretString::new("sk-test"),
             base_url: Some(base),
         };
         let entries = list_models(&creds, Duration::from_secs(5)).await.unwrap();
@@ -1024,7 +1083,7 @@ mod tests {
         .await;
         let creds = ProviderCredentials {
             provider: Provider::Gemini,
-            api_key: "g-key".to_string(),
+            api_key: SecretString::new("g-key"),
             base_url: Some(base),
         };
         let entries = list_models(&creds, Duration::from_secs(5)).await.unwrap();
@@ -1049,7 +1108,7 @@ mod tests {
         .await;
         let creds = ProviderCredentials {
             provider: Provider::OpenAI,
-            api_key: "sk-secret".to_string(),
+            api_key: SecretString::new("sk-secret"),
             base_url: Some(base),
         };
         let err = list_models(&creds, Duration::from_secs(5))
@@ -1073,7 +1132,7 @@ mod tests {
         };
         let creds = ProviderCredentials {
             provider,
-            api_key,
+            api_key: SecretString::new(api_key),
             base_url: None,
         };
         let entries = list_models(&creds, Duration::from_secs(10)).await.unwrap();

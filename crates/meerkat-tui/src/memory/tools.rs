@@ -1,4 +1,4 @@
-//! Memory tools: `memory_save`, `memory_read`, `memory_forget`, `memory_list`.
+//! Note tools: `note_save`, `note_read`, `note_forget`, `note_list`.
 //!
 //! Failure convention (as for the file tools): store errors the model can act
 //! on — bad name, too large, not found, user scope unavailable — become
@@ -17,21 +17,21 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 /// Tool name: save (create or replace) a note.
-pub const MEMORY_SAVE: &str = "memory_save";
+pub const NOTE_SAVE: &str = "note_save";
 /// Tool name: read a note.
-pub const MEMORY_READ: &str = "memory_read";
+pub const NOTE_READ: &str = "note_read";
 /// Tool name: delete a note.
-pub const MEMORY_FORGET: &str = "memory_forget";
+pub const NOTE_FORGET: &str = "note_forget";
 /// Tool name: list notes.
-pub const MEMORY_LIST: &str = "memory_list";
+pub const NOTE_LIST: &str = "note_list";
 
-/// Names of every tool exposed by [`MemoryToolDispatcher`].
-pub const MEMORY_TOOL_NAMES: &[&str] = &[MEMORY_SAVE, MEMORY_READ, MEMORY_FORGET, MEMORY_LIST];
+/// Names of every tool exposed by [`NoteToolDispatcher`].
+pub const NOTE_TOOL_NAMES: &[&str] = &[NOTE_SAVE, NOTE_READ, NOTE_FORGET, NOTE_LIST];
 
 /// Provenance source id of the note tools (see [`crate::tools::FILE_TOOLS_SOURCE`]).
 pub const NOTES_SOURCE: &str = "rkat-tui.notes";
 
-const USER_UNAVAILABLE: &str = "user-level memory is unavailable (no config directory)";
+const USER_UNAVAILABLE: &str = "user-level notes are unavailable (no config directory)";
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -45,7 +45,7 @@ struct SaveArgs {
     )]
     name: String,
     #[schemars(
-        description = "Note content (Markdown, at most 4 KiB). The first line is shown in the memory index, so make it a summary."
+        description = "Note content (Markdown, at most 4 KiB). The first line is shown in the notes index, so make it a summary."
     )]
     content: String,
 }
@@ -55,7 +55,7 @@ struct SaveArgs {
 struct NoteArgs {
     #[schemars(description = "Scope of the note: `user` or `workspace`.")]
     scope: Scope,
-    #[schemars(description = "Note name, as shown by memory_list.")]
+    #[schemars(description = "Note name, as shown by note_list.")]
     name: String,
 }
 
@@ -67,7 +67,7 @@ struct ListArgs {
     scope: Option<Scope>,
 }
 
-/// Why a memory tool invocation failed in a way the model can recover from.
+/// Why a note tool invocation failed in a way the model can recover from.
 type Outcome = Result<String, String>;
 
 struct Stores {
@@ -135,21 +135,21 @@ fn describe(err: NoteError) -> String {
     err.to_string()
 }
 
-/// Dispatcher for the memory note tools.
-pub struct MemoryToolDispatcher {
+/// Dispatcher for the note tools.
+pub struct NoteToolDispatcher {
     stores: Arc<Stores>,
     tools: Arc<[Arc<ToolDef>]>,
 }
 
-impl MemoryToolDispatcher {
+impl NoteToolDispatcher {
     /// Create a dispatcher over the user-level store (absent when there is no
     /// config directory) and the workspace store.
     #[must_use]
     pub fn new(user: Option<NoteStore>, workspace: NoteStore) -> Self {
         let tools: Arc<[Arc<ToolDef>]> = vec![
             Arc::new(ToolDef::new(
-                MEMORY_SAVE,
-                "Save a memory note for future sessions (creates or replaces). Use \
+                NOTE_SAVE,
+                "Save a note for future sessions (creates or replaces). Use \
                               scope `user` for durable personal preferences and `workspace` for \
                               facts about this project. Never store secrets or transient state; \
                               update an existing note rather than duplicating it."
@@ -157,18 +157,18 @@ impl MemoryToolDispatcher {
                 meerkat_tools::schema_for::<SaveArgs>(),
             )),
             Arc::new(ToolDef::new(
-                MEMORY_READ,
-                "Read the full content of a memory note.".to_string(),
+                NOTE_READ,
+                "Read the full content of a note.".to_string(),
                 meerkat_tools::schema_for::<NoteArgs>(),
             )),
             Arc::new(ToolDef::new(
-                MEMORY_FORGET,
-                "Delete a memory note that is wrong or no longer relevant.".to_string(),
+                NOTE_FORGET,
+                "Delete a note that is wrong or no longer relevant.".to_string(),
                 meerkat_tools::schema_for::<NoteArgs>(),
             )),
             Arc::new(ToolDef::new(
-                MEMORY_LIST,
-                "List memory notes as `scope/name: first line`.".to_string(),
+                NOTE_LIST,
+                "List notes as `scope/name: first line`.".to_string(),
                 meerkat_tools::schema_for::<ListArgs>(),
             )),
         ]
@@ -226,9 +226,9 @@ impl MemoryToolDispatcher {
     }
 }
 
-impl std::fmt::Debug for MemoryToolDispatcher {
+impl std::fmt::Debug for NoteToolDispatcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MemoryToolDispatcher")
+        f.debug_struct("NoteToolDispatcher")
             .field("user", &self.stores.user)
             .field("workspace", &self.stores.workspace)
             .finish_non_exhaustive()
@@ -237,25 +237,25 @@ impl std::fmt::Debug for MemoryToolDispatcher {
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl AgentToolDispatcher for MemoryToolDispatcher {
+impl AgentToolDispatcher for NoteToolDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::clone(&self.tools)
     }
 
     fn tool_mutation_class(&self, tool_name: &str) -> ToolMutationClass {
         match tool_name {
-            MEMORY_READ | MEMORY_LIST => ToolMutationClass::ReadOnly,
-            MEMORY_SAVE | MEMORY_FORGET => ToolMutationClass::Mutating,
+            NOTE_READ | NOTE_LIST => ToolMutationClass::ReadOnly,
+            NOTE_SAVE | NOTE_FORGET => ToolMutationClass::Mutating,
             _ => ToolMutationClass::Unknown,
         }
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         let result = match call.name {
-            MEMORY_SAVE => self.run_blocking(call, Stores::save).await,
-            MEMORY_READ => self.run_blocking(call, Stores::read).await,
-            MEMORY_FORGET => self.run_blocking(call, Stores::forget).await,
-            MEMORY_LIST => self.run_blocking(call, Stores::list).await,
+            NOTE_SAVE => self.run_blocking(call, Stores::save).await,
+            NOTE_READ => self.run_blocking(call, Stores::read).await,
+            NOTE_FORGET => self.run_blocking(call, Stores::forget).await,
+            NOTE_LIST => self.run_blocking(call, Stores::list).await,
             other => Err(ToolError::NotFound {
                 name: other.to_string(),
             }),
@@ -270,15 +270,15 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
 
-    fn dispatcher(with_user: bool) -> (tempfile::TempDir, MemoryToolDispatcher) {
+    fn dispatcher(with_user: bool) -> (tempfile::TempDir, NoteToolDispatcher) {
         let tmp = tempfile::tempdir().unwrap();
         let user = with_user.then(|| NoteStore::open(tmp.path().join("user"), Scope::User));
         let ws = NoteStore::open(tmp.path().join("ws"), Scope::Workspace);
-        (tmp, MemoryToolDispatcher::new(user, ws))
+        (tmp, NoteToolDispatcher::new(user, ws))
     }
 
     async fn call(
-        d: &MemoryToolDispatcher,
+        d: &NoteToolDispatcher,
         name: &str,
         args: Value,
     ) -> Result<ToolResult, ToolError> {
@@ -292,7 +292,7 @@ mod tests {
         .map(|outcome| outcome.result)
     }
 
-    async fn text(d: &MemoryToolDispatcher, name: &str, args: Value) -> (String, bool) {
+    async fn text(d: &NoteToolDispatcher, name: &str, args: Value) -> (String, bool) {
         let r = call(d, name, args).await.unwrap();
         assert_eq!(r.tool_use_id, "call-1");
         (r.text_content(), r.is_error)
@@ -302,7 +302,7 @@ mod tests {
     fn tool_names_match_definitions() {
         let (_tmp, d) = dispatcher(true);
         let names: Vec<_> = d.tools().iter().map(|t| t.name.clone()).collect();
-        assert_eq!(names, MEMORY_TOOL_NAMES);
+        assert_eq!(names, NOTE_TOOL_NAMES);
     }
 
     #[tokio::test]
@@ -310,50 +310,49 @@ mod tests {
         let (_tmp, d) = dispatcher(true);
         let save = json!({"scope": "workspace", "name": "Build Cmd", "content": "make ci"});
         assert_eq!(
-            text(&d, MEMORY_SAVE, save.clone()).await,
+            text(&d, NOTE_SAVE, save.clone()).await,
             ("saved workspace/build-cmd (new)".into(), false)
         );
         assert_eq!(
-            text(&d, MEMORY_SAVE, save).await,
+            text(&d, NOTE_SAVE, save).await,
             ("saved workspace/build-cmd (replaced)".into(), false)
         );
         text(
             &d,
-            MEMORY_SAVE,
+            NOTE_SAVE,
             json!({"scope": "user", "name": "style", "content": "terse\nmore"}),
         )
         .await;
         assert_eq!(
             text(
                 &d,
-                MEMORY_READ,
+                NOTE_READ,
                 json!({"scope": "workspace", "name": "build-cmd"})
             )
             .await,
             ("make ci\n".into(), false)
         );
         assert_eq!(
-            text(&d, MEMORY_LIST, json!({})).await,
+            text(&d, NOTE_LIST, json!({})).await,
             (
                 "user/style: terse\nworkspace/build-cmd: make ci\n".into(),
                 false
             )
         );
         assert_eq!(
-            text(&d, MEMORY_LIST, json!({"scope": "user"})).await,
+            text(&d, NOTE_LIST, json!({"scope": "user"})).await,
             ("user/style: terse\n".into(), false)
         );
         assert_eq!(
-            text(&d, MEMORY_FORGET, json!({"scope": "user", "name": "style"})).await,
+            text(&d, NOTE_FORGET, json!({"scope": "user", "name": "style"})).await,
             ("forgot user/style".into(), false)
         );
-        let (msg, is_error) =
-            text(&d, MEMORY_READ, json!({"scope": "user", "name": "style"})).await;
+        let (msg, is_error) = text(&d, NOTE_READ, json!({"scope": "user", "name": "style"})).await;
         assert!(is_error);
         assert!(msg.contains("no note named"), "{msg}");
         let (msg, is_error) = text(
             &d,
-            MEMORY_SAVE,
+            NOTE_SAVE,
             json!({"scope": "workspace", "name": "memory", "content": "x"}),
         )
         .await;
@@ -363,15 +362,13 @@ mod tests {
     #[tokio::test]
     async fn malformed_arguments() {
         let (_tmp, d) = dispatcher(true);
-        let err = call(&d, MEMORY_READ, json!({"scope": "global", "name": "x"}))
+        let err = call(&d, NOTE_READ, json!({"scope": "global", "name": "x"}))
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidArguments { .. }), "{err:?}");
-        let err = call(&d, MEMORY_LIST, json!({"extra": 1}))
-            .await
-            .unwrap_err();
+        let err = call(&d, NOTE_LIST, json!({"extra": 1})).await.unwrap_err();
         assert!(matches!(err, ToolError::InvalidArguments { .. }), "{err:?}");
-        let err = call(&d, "memory_nope", json!({})).await.unwrap_err();
+        let err = call(&d, "note_nope", json!({})).await.unwrap_err();
         assert!(matches!(err, ToolError::NotFound { .. }), "{err:?}");
     }
 
@@ -380,16 +377,16 @@ mod tests {
         let (_tmp, d) = dispatcher(false);
         let (msg, is_error) = text(
             &d,
-            MEMORY_SAVE,
+            NOTE_SAVE,
             json!({"scope": "user", "name": "a", "content": "b"}),
         )
         .await;
         assert!(is_error);
         assert_eq!(msg, USER_UNAVAILABLE);
-        let (msg, is_error) = text(&d, MEMORY_LIST, json!({"scope": "user"})).await;
+        let (msg, is_error) = text(&d, NOTE_LIST, json!({"scope": "user"})).await;
         assert!(is_error);
         assert_eq!(msg, USER_UNAVAILABLE);
-        let (msg, is_error) = text(&d, MEMORY_LIST, json!({})).await;
+        let (msg, is_error) = text(&d, NOTE_LIST, json!({})).await;
         assert!(!is_error);
         assert!(msg.starts_with("no notes saved"), "{msg}");
     }

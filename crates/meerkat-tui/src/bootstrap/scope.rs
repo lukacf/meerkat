@@ -38,7 +38,8 @@ pub struct RuntimeScope {
     /// directory). `None` when neither is available.
     pub user_config_root: Option<PathBuf>,
     /// User-global `rkat-tui` directories (`--config-dir`, else
-    /// `~/.config/rkat-tui`). `None` when nothing resolves.
+    /// `<user config root>/.rkat/tui`, or an existing legacy directory; see
+    /// [`GlobalDirs`]). `None` when nothing resolves.
     pub global: Option<GlobalDirs>,
     /// Realm the sessions and config are stored in.
     pub realm_id: String,
@@ -385,12 +386,18 @@ mod tests {
             ws,
         ]))
         .unwrap();
-        assert_eq!(scope.global, Some(GlobalDirs { config: cfg }));
+        assert_eq!(
+            scope.global,
+            Some(GlobalDirs {
+                cache: cfg.join("cache"),
+                config: cfg,
+            })
+        );
 
         let scope = resolve_scope(&args(&["-w", ws, "--user-config-root", ws])).unwrap();
         assert_eq!(
             scope.global.map(|g| g.config),
-            Some(dir.path().join(".config").join("rkat-tui"))
+            Some(dir.path().join(".rkat").join("tui"))
         );
     }
 }

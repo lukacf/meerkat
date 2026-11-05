@@ -1241,10 +1241,11 @@ fn parse_args<'a>(
                 })?;
                 out.path_values.push(value.into());
             }
-            Some(Arg::Plain) if iter.next().is_none() => {
-                return Err(NotAllowlisted::new(format!(
-                    "`{label} {text}` without a value"
-                )));
+            Some(Arg::Plain) => {
+                let value = iter.next().ok_or_else(|| {
+                    NotAllowlisted::new(format!("`{label} {text}` without a value"))
+                })?;
+                reject_option_glob(label, value)?;
             }
             _ => {}
         }
@@ -1271,7 +1272,10 @@ fn parse_long<'a>(
         )));
     };
     match (kind, value) {
-        (Arg::Plain | Arg::Optional, Some(_)) => Ok(None),
+        (Arg::Plain | Arg::Optional, Some(_)) => {
+            reject_option_glob(label, word)?;
+            Ok(None)
+        }
         (Arg::Path | Arg::Flag, Some(v)) => {
             out.path_values.push(PathValue {
                 text: v,
@@ -1308,6 +1312,8 @@ fn parse_short<'a>(
                     text: attached,
                     unquoted_glob: word.unquoted_glob,
                 });
+            } else {
+                reject_option_glob(label, word)?;
             }
             return Ok(None);
         }
@@ -1318,6 +1324,19 @@ fn parse_short<'a>(
         }
     }
     Ok(None)
+}
+
+/// Refuse an option value (`-k*`, `--exclude=*.x`, or the word after `-e`) that
+/// carries an unquoted glob: its expansion is chosen by file names in the
+/// working directory, so a file named `-oevil` could become an extra option.
+fn reject_option_glob(label: &str, word: &Word) -> Result<(), NotAllowlisted> {
+    if word.unquoted_glob {
+        return Err(NotAllowlisted::new(format!(
+            "`{label}` option value `{}` is an unquoted glob",
+            word.text
+        )));
+    }
+    Ok(())
 }
 
 fn check_entry(
@@ -1415,6 +1434,7 @@ fn check_find(
             continue;
         }
         in_expression = true;
+        reject_option_glob("find", word)?;
         let Some(&(_, kind)) = FIND_PRIMARIES.iter().find(|(p, _)| *p == text) else {
             return Err(NotAllowlisted::new(format!(
                 "`find` with `{text}` is not on the read-only allowlist"
@@ -1426,6 +1446,7 @@ fn check_find(
                 let value = iter
                     .next()
                     .ok_or_else(|| NotAllowlisted::new(format!("`find {text}` without a value")))?;
+                reject_option_glob("find", value)?;
                 if kind == Arg::Path {
                     check_path_value(value.into(), base, ctx)?;
                 }
@@ -1470,10 +1491,14 @@ fn is_short_cluster(arg: &str) -> bool {
     arg.len() > 1 && arg.starts_with('-') && !arg.starts_with("--")
 }
 
-/// Whether an unquoted glob word has the narrow `[dir/][**/]*.<ext>` shape that
+/// Whether an unquoted glob word has the narrow `dir/[**/]*.<ext>` shape that
 /// can only match ordinary files below a literal directory.
 ///
-/// Returns the literal directory prefix (possibly empty) on success.
+/// Returns the literal directory prefix on success. The prefix is never empty:
+/// a bare `*.md` or `**/*.md` expands to file names chosen by whoever created
+/// the files, and a file named `-oevil.md` would turn into an option. A leading
+/// `./` counts as a literal prefix (`./*.md` expands to `./-oevil.md`, which is
+/// never an option); `.` is accepted only as the first component.
 fn simple_glob_prefix(text: &str) -> Option<String> {
     let mut parts: Vec<&str> = text.split('/').collect();
     let last = parts.pop()?;
@@ -1483,20 +1508,27 @@ fn simple_glob_prefix(text: &str) -> Option<String> {
     }
     let mut prefix = Vec::new();
     let mut seen_globstar = false;
-    for part in parts {
+    for (idx, part) in parts.into_iter().enumerate() {
         if part == "**" {
+            if prefix.is_empty() {
+                return None;
+            }
             seen_globstar = true;
             continue;
         }
+        let leading_dot = idx == 0 && part == ".";
         if seen_globstar
             || part.is_empty()
-            || part == "."
+            || (part == "." && !leading_dot)
             || part == ".."
             || part.contains(['*', '?', '['])
         {
             return None;
         }
         prefix.push(part);
+    }
+    if prefix.is_empty() {
+        return None;
     }
     Some(prefix.join("/"))
 }
@@ -1517,11 +1549,10 @@ fn check_path_value(
     if value.unquoted_glob {
         let Some(prefix) = simple_glob_prefix(text) else {
             return Err(NotAllowlisted::new(format!(
-                "glob `{text}` is not of the form `*.ext` or `**/*.ext`"
+                "glob `{text}` is not of the form `dir/*.ext`, `dir/**/*.ext` or `./*.ext`"
             )));
         };
-        let dir = if prefix.is_empty() { "." } else { &prefix };
-        return check_inside(dir, base, ctx);
+        return check_inside(&prefix, base, ctx);
     }
     check_inside(text, base, ctx)
 }
@@ -1611,7 +1642,8 @@ impl fmt::Display for Redirect {
     }
 }
 
-fn is_assignment(word: &str) -> bool {
+/// Whether `word` is a `NAME=value` variable assignment.
+pub(crate) fn is_assignment(word: &str) -> bool {
     let Some((name, _)) = word.split_once('=') else {
         return false;
     };
@@ -1974,11 +2006,14 @@ mod tests {
             ("cat .*/.*/etc/passwd", false),
             ("cat *", false),
             ("cat ?", false),
-            ("ls *.rs", true),
+            ("ls *.rs", false),
             ("ls src/*.rs", true),
-            ("ls **/*.rs", true),
+            ("ls **/*.rs", false),
+            ("ls src/**/*.rs", true),
             ("ls ../*.rs", false),
-            ("ls ./*.rs", false),
+            ("ls ./*.rs", true),
+            ("ls ./**/*.rs", true),
+            ("ls src/./*.rs", false),
             ("ls /etc/*.conf", false),
             ("cat < *", false),
             ("cat '*'", true),
@@ -2090,6 +2125,55 @@ mod tests {
         let c = ctx(&root, true);
         assert!(allowlisted("cat lnk/../secret", &c).is_err());
         assert!(allowlisted("cat src/../input.txt", &c).is_ok());
+    }
+
+    #[test]
+    fn unprefixed_globs_are_refused() {
+        let (dir, root) = project();
+        // `sort *.md` with a file named `-oevil.md` expands to `sort -oevil.md`.
+        std::fs::write(dir.path().join("-oevil.md"), "x").unwrap();
+        std::fs::write(dir.path().join("a.md"), "x").unwrap();
+        let c = ctx(&root, true);
+        assert!(allowlisted("sort *.md", &c).is_err());
+        assert!(allowlisted("sort **/*.md", &c).is_err());
+        assert!(allowlisted("sort ./*.md", &c).is_ok());
+        assert!(allowlisted("ls src/*.rs", &c).is_ok());
+        assert!(allowlisted("ls src/**/*.rs", &c).is_ok());
+    }
+
+    #[test]
+    fn option_value_globs_are_refused() {
+        let (_dir, root) = project();
+        let c = ctx(&root, true);
+        // Plain values, attached (short and long) and in the next word.
+        assert!(allowlisted("sort -k* input.txt", &c).is_err());
+        assert!(allowlisted("sort -k *.txt input.txt", &c).is_err());
+        assert!(allowlisted("sort --key=* input.txt", &c).is_err());
+        assert!(allowlisted("grep -r --exclude=*.x foo src", &c).is_err());
+        assert!(allowlisted("grep -r --exclude='*.x' foo src", &c).is_ok());
+        assert!(allowlisted("sort -k2 input.txt", &c).is_ok());
+    }
+
+    #[test]
+    fn find_expression_globs_are_refused() {
+        let (_dir, root) = project();
+        let c = ctx(&root, true);
+        assert!(allowlisted("find . -name *.rs", &c).is_err());
+        assert!(allowlisted("find . -path ./src/*", &c).is_err());
+        assert!(allowlisted("find . -name '*.rs'", &c).is_ok());
+        assert!(allowlisted("find src/*.rs -name x", &c).is_ok());
+        assert!(allowlisted("find *.rs -name x", &c).is_err());
+    }
+
+    #[test]
+    fn fd_dup_to_a_file_is_refused() {
+        let (_dir, root) = project();
+        let c = ctx(&root, true);
+        assert!(allowlisted("echo hi >&out.txt", &c).is_err());
+        assert!(allowlisted("echo hi >& out.txt", &c).is_err());
+        assert!(allowlisted("echo hi 2>&out.txt", &c).is_err());
+        assert!(allowlisted("echo hi 1>&2", &c).is_err());
+        assert!(allowlisted("echo hi 2>&1", &c).is_ok());
     }
 
     #[test]

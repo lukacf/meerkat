@@ -48,9 +48,24 @@ them.
   from live endpoint lists with hot swap and a per-model cost readout;
   `delegate` runs helpers as mob members; instruction files (user-global
   `SYSTEM.md`/`AGENTS.md`, ancestor `AGENTS.md`, `AGENTS.local.md`),
-  `/remember`, memory notes, native semantic memory, MCP servers from
-  `mcp.toml`, and a warn/auto policy over native auto-compaction with
-  `/compact now`. See `crates/meerkat-tui/README.md`.
+  `/remember`, notes (`note_*` tools, indexed as untrusted context), native
+  semantic memory, MCP servers from `mcp.toml` (the project file's only once
+  trusted with `/mcp trust` or `--allow-project-mcp`), and a warn/auto
+  policy over native auto-compaction with `/compact now`. Configured
+  endpoints and the `[models.<id>]` profiles of models only an endpoint
+  knows are written into the realm's own `config.toml`, so `rkat`, REST and
+  RPC resolve a TUI session's binding too; a realm `[confinement]` is a
+  floor the command line may only narrow; turns end with typed outcomes
+  (completed, failed, interrupted, pending, unknown); the cost readout
+  states its confidence. Endpoint keys come from the environment only
+  (`api_key_env`; an inline `api_key` refuses the start, and the realm
+  document records only the variable's name). A host that cannot confine
+  refuses the start with an explanation of what blocked it (on Linux the
+  user-namespace switches, with the AppArmor profile or sysctl that fixes
+  it) and how to run unconfined; `--confinement-read`/`--confinement-write`
+  add directories to the sandbox. User-global files live in `~/.rkat/tui`
+  (`--config-dir` overrides; an existing `~/.config/rkat-tui` is used with a
+  notice until the new directory exists). See `crates/meerkat-tui/README.md`.
 
 ## [0.9.10] - 2026-11-04
 

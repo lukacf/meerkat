@@ -979,6 +979,7 @@ test_suite(
         "//crates/meerkat-tui:classifier_llm_test",
         "//crates/meerkat-tui:compact_test",
         "//crates/meerkat-tui:confinement_test",
+        "//crates/meerkat-tui:drift_pins_test",
         "//crates/meerkat-tui:file_tools_test",
         "//crates/meerkat-tui:instructions_test",
         "//crates/meerkat-tui:integrator_test",

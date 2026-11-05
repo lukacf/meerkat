@@ -32,10 +32,14 @@
 use super::patch_targets::{ParseError, affected_paths};
 use super::rules::{RuleId, RuleSet};
 use super::shell;
-use crate::memory::{MEMORY_FORGET, MEMORY_LIST, MEMORY_READ, MEMORY_SAVE, Scope, slug};
+use super::catalog::{ToolFamily, ToolOrigin};
+use crate::memory::{NOTE_FORGET, NOTE_LIST, NOTE_READ, NOTE_SAVE, Scope, slug};
 use crate::paths::ProjectRoot;
+use crate::tools::{EDIT_FILE, GLOB, GREP, READ_FILE, WRITE_FILE};
+use meerkat_core::ToolMutationClass;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_json::value::RawValue;
 use std::fmt;
 
 /// Policy tier, first match wins.
@@ -169,8 +173,14 @@ pub const REVIEWED_BUILTINS: &[&str] = &[
 pub const DELEGATION_TOOLS: &[&str] = &["delegate", "fork_off"];
 
 /// What a tool call does, as far as the policy is concerned.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ActionKind<'a> {
+///
+/// Built by [`Action::parse`] from the call's raw arguments, deserialized
+/// once into the tool's typed argument struct. A name counts as a builtin,
+/// file or note tool only when the call's [`ToolOrigin`] says the session's
+/// tool of that name comes from there ([`ToolFamily`]); anything else, and
+/// any argument that does not parse, is [`ActionKind::Other`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionKind {
     /// `shell`, parsed with [`ShellArgs`] (a copy of the tool's own argument type).
     Shell {
         /// Command string.
@@ -183,14 +193,14 @@ pub enum ActionKind<'a> {
     /// `read_file`.
     FileRead {
         /// Requested path.
-        path: &'a str,
+        path: String,
     },
     /// `glob` / `grep`.
     Search {
         /// Search root (defaults to the project root).
-        path: Option<&'a str>,
+        path: Option<String>,
         /// `glob`'s pattern, which can itself name a directory.
-        pattern: Option<&'a str>,
+        pattern: Option<String>,
     },
     /// `write_file` / `edit_file` / `apply_patch`.
     FileWrite {
@@ -201,78 +211,133 @@ pub enum ActionKind<'a> {
     ReadOnlyBuiltin,
     /// A tool from [`DELEGATION_TOOLS`].
     Delegation,
-    /// `memory_list` / `memory_read`.
-    MemoryRead,
-    /// `memory_save` / `memory_forget` with a valid scope.
-    MemoryWrite {
+    /// `note_list` / `note_read`.
+    NoteRead,
+    /// `note_save` / `note_forget` with a valid scope.
+    NoteWrite {
         /// Note scope.
         scope: Scope,
         /// Note name as supplied (rule subjects use its slug when valid).
-        name: &'a str,
+        name: String,
     },
-    /// Anything else, including calls with malformed arguments.
+    /// Anything else, including foreign tools and malformed arguments.
     Other,
 }
 
 /// A parsed tool call.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Action<'a> {
     /// Tool name.
     pub name: &'a str,
-    /// Raw arguments.
-    pub args: &'a Value,
+    /// Raw arguments, exactly as the model sent them.
+    pub args: &'a RawValue,
+    /// Implementation family of the session's tool of this name.
+    pub family: ToolFamily,
     /// Policy-relevant interpretation.
-    pub kind: ActionKind<'a>,
+    pub kind: ActionKind,
+}
+
+/// Typed arguments of `read_file`.
+#[derive(Deserialize)]
+struct PathArgs {
+    path: String,
+}
+
+/// Typed arguments of `glob` / `grep` (only the fields the policy reads).
+#[derive(Deserialize)]
+struct SearchArgs {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    pattern: Option<String>,
+}
+
+/// Typed arguments of `apply_patch`.
+#[derive(Deserialize)]
+struct PatchArgs {
+    patch: String,
+}
+
+/// Typed arguments of `note_save` / `note_forget`.
+#[derive(Deserialize)]
+struct NoteArgs {
+    scope: Scope,
+    name: String,
+}
+
+fn typed<T: serde::de::DeserializeOwned>(args: &RawValue) -> Option<T> {
+    serde_json::from_str(args.get()).ok()
 }
 
 impl<'a> Action<'a> {
-    /// Interpret a tool call. Malformed arguments yield [`ActionKind::Other`],
-    /// which always reaches the classifier.
-    pub fn parse(name: &'a str, args: &'a Value) -> Self {
-        let str_arg = |key: &str| args.get(key).and_then(Value::as_str);
-        let kind = match name {
-            "shell" => parse_shell(args).map_or(ActionKind::Other, |input| ActionKind::Shell {
-                command: input.command,
-                working_dir: input.working_dir,
-                background: input.background,
-            }),
-            "read_file" => {
-                str_arg("path").map_or(ActionKind::Other, |path| ActionKind::FileRead { path })
-            }
-            "glob" => ActionKind::Search {
-                path: str_arg("path"),
-                pattern: str_arg("pattern"),
-            },
-            "grep" => ActionKind::Search {
-                path: str_arg("path"),
-                pattern: None,
-            },
-            "write_file" | "edit_file" => {
-                str_arg("path").map_or(ActionKind::Other, |path| ActionKind::FileWrite {
-                    paths: vec![path.to_string()],
+    /// Interpret a call of `name` with raw `args`, whose session tool comes
+    /// from `origin` (`None`: the session does not offer it, or its
+    /// definitions could not be read). Malformed arguments, foreign tools
+    /// and a declared mutation class that contradicts a read-only family
+    /// yield [`ActionKind::Other`], which always reaches the classifier.
+    pub fn parse(name: &'a str, args: &'a RawValue, origin: Option<&ToolOrigin>) -> Self {
+        let family = origin.map_or(ToolFamily::Foreign, ToolOrigin::family);
+        let mutation = origin.map_or(ToolMutationClass::Unknown, |o| o.mutation);
+        let kind = Self::kind(name, args, family, mutation);
+        Self {
+            name,
+            args,
+            family,
+            kind,
+        }
+    }
+
+    fn kind(
+        name: &str,
+        args: &RawValue,
+        family: ToolFamily,
+        mutation: ToolMutationClass,
+    ) -> ActionKind {
+        let declared_mutating = mutation == ToolMutationClass::Mutating;
+        match (family, name) {
+            (ToolFamily::Native, "shell") => {
+                typed::<ShellArgs>(args).map_or(ActionKind::Other, |input| ActionKind::Shell {
+                    command: input.command,
+                    working_dir: input.working_dir,
+                    background: input.background,
                 })
             }
-            "apply_patch" => match str_arg("patch").map(patch_targets) {
-                Some(Ok(paths)) if !paths.is_empty() => ActionKind::FileWrite { paths },
-                _ => ActionKind::Other,
-            },
-            MEMORY_LIST | MEMORY_READ => ActionKind::MemoryRead,
-            MEMORY_SAVE | MEMORY_FORGET => {
-                let scope = args.get("scope").map(Scope::deserialize);
-                match (scope, str_arg("name")) {
-                    (Some(Ok(scope)), Some(name)) => ActionKind::MemoryWrite { scope, name },
+            (ToolFamily::Native, "apply_patch") => {
+                match typed::<PatchArgs>(args).map(|a| patch_targets(&a.patch)) {
+                    Some(Ok(paths)) if !paths.is_empty() => ActionKind::FileWrite { paths },
                     _ => ActionKind::Other,
                 }
             }
-            n if READ_ONLY_BUILTINS.contains(&n) => ActionKind::ReadOnlyBuiltin,
-            n if DELEGATION_TOOLS.contains(&n) => ActionKind::Delegation,
+            (ToolFamily::Native, n) if READ_ONLY_BUILTINS.contains(&n) && !declared_mutating => {
+                ActionKind::ReadOnlyBuiltin
+            }
+            (ToolFamily::Native, n) if DELEGATION_TOOLS.contains(&n) => ActionKind::Delegation,
+            (ToolFamily::Files, READ_FILE) if !declared_mutating => typed::<PathArgs>(args)
+                .map_or(ActionKind::Other, |a| ActionKind::FileRead { path: a.path }),
+            (ToolFamily::Files, GLOB | GREP) if !declared_mutating => typed::<SearchArgs>(args)
+                .map_or(ActionKind::Other, |a| ActionKind::Search {
+                    path: a.path,
+                    pattern: if name == GLOB { a.pattern } else { None },
+                }),
+            (ToolFamily::Files, WRITE_FILE | EDIT_FILE) => typed::<PathArgs>(args)
+                .map_or(ActionKind::Other, |a| ActionKind::FileWrite {
+                    paths: vec![a.path],
+                }),
+            (ToolFamily::Notes, NOTE_LIST | NOTE_READ) if !declared_mutating => {
+                ActionKind::NoteRead
+            }
+            (ToolFamily::Notes, NOTE_SAVE | NOTE_FORGET) => typed::<NoteArgs>(args)
+                .map_or(ActionKind::Other, |a| ActionKind::NoteWrite {
+                    scope: a.scope,
+                    name: a.name,
+                }),
             _ => ActionKind::Other,
-        };
-        Self { name, args, kind }
+        }
     }
 
     /// Canonical rule subjects: the command for `shell`, display paths for file
-    /// tools, `<scope>/<slug>` for memory writes, pretty JSON for everything else.
+    /// tools, `<scope>/<slug>` for note writes, pretty JSON for everything else.
+    /// Computed once per decision by the engine.
     pub fn subjects(&self, root: &ProjectRoot) -> Vec<String> {
         let display = |raw: &str| match root.resolve(raw) {
             Ok(resolved) => root.display_of(&resolved).to_string(),
@@ -281,20 +346,29 @@ impl<'a> Action<'a> {
         match &self.kind {
             ActionKind::Shell { command, .. } => vec![command.clone()],
             ActionKind::FileRead { path } => vec![display(path)],
-            ActionKind::Search { path, .. } => vec![path.map_or_else(|| ".".to_string(), display)],
+            ActionKind::Search { path, .. } => {
+                vec![path.as_deref().map_or_else(|| ".".to_string(), display)]
+            }
             ActionKind::FileWrite { paths } => paths.iter().map(|p| display(p)).collect(),
-            ActionKind::MemoryWrite { scope, name } => {
-                let name = slug(name).unwrap_or_else(|_| (*name).to_string());
+            ActionKind::NoteWrite { scope, name } => {
+                let name = slug(name).unwrap_or_else(|_| name.clone());
                 vec![format!("{scope}/{name}")]
             }
             ActionKind::ReadOnlyBuiltin
             | ActionKind::Delegation
-            | ActionKind::MemoryRead
-            | ActionKind::Other => {
-                vec![serde_json::to_string_pretty(self.args).unwrap_or_default()]
-            }
+            | ActionKind::NoteRead
+            | ActionKind::Other => vec![pretty_args(self.args)],
         }
     }
+}
+
+/// Pretty JSON of raw arguments (their raw text when they are not JSON).
+#[must_use]
+pub fn pretty_args(args: &RawValue) -> String {
+    serde_json::from_str::<Value>(args.get())
+        .ok()
+        .and_then(|v| serde_json::to_string_pretty(&v).ok())
+        .unwrap_or_else(|| args.get().to_string())
 }
 
 /// Target paths named by an `apply_patch` body, from the tool's own parser.
@@ -314,9 +388,10 @@ pub fn patch_targets(patch: &str) -> Result<Vec<String>, ParseError> {
 ///
 /// **Local copy, to be upstreamed.** Mirrors the private `ShellInput` of
 /// `crates/meerkat-tools/src/builtin/shell/tool.rs`; keep the field set in
-/// sync with it. Unknown argument names are rejected
-/// (`deny_unknown_fields`): the tool would ignore them, which makes their
-/// purpose unclear, so such calls go to the classifier.
+/// sync with it (pinned against the live tool schema by the `drift_pins`
+/// test). Unknown argument names are rejected (`deny_unknown_fields`): the
+/// tool would ignore them, which makes their purpose unclear, so such calls
+/// go to the classifier.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShellArgs {
@@ -329,12 +404,6 @@ pub struct ShellArgs {
     /// Run as a background job.
     #[serde(default)]
     pub background: bool,
-}
-
-/// Parse shell arguments; anything the tool itself would refuse, or any
-/// unknown argument name, yields `None`.
-fn parse_shell(args: &Value) -> Option<ShellArgs> {
-    ShellArgs::deserialize(args).ok()
 }
 
 /// Environment for tier classification.
@@ -375,8 +444,18 @@ pub fn classify_tier(
     rules: &RuleSet,
     ctx: &PolicyContext<'_>,
 ) -> TierDecision {
-    let subjects = action.subjects(ctx.root);
-    if let Some(id) = rules.matches_deny(action.name, &subjects) {
+    classify_tier_with(action, &action.subjects(ctx.root), rules, ctx)
+}
+
+/// [`classify_tier`] with the action's subjects already computed
+/// ([`Action::subjects`]), so a decision computes them once.
+pub fn classify_tier_with(
+    action: &Action<'_>,
+    subjects: &[String],
+    rules: &RuleSet,
+    ctx: &PolicyContext<'_>,
+) -> TierDecision {
+    if let Some(id) = rules.matches_deny(action.name, subjects) {
         return TierDecision {
             tier: Tier::UserDeny,
             detail: format!("matches user rule {id}"),
@@ -389,7 +468,7 @@ pub fn classify_tier(
         Err(reason) => reason,
     };
 
-    if let Some(id) = rules.matches_allow(action.name, &subjects) {
+    if let Some(id) = rules.matches_allow(action.name, subjects) {
         return TierDecision {
             tier: Tier::AlwaysAllow,
             detail: format!("matches user rule {id}"),
@@ -409,15 +488,12 @@ fn builtin_tier(action: &Action<'_>, ctx: &PolicyContext<'_>) -> Result<TierDeci
             Tier::AlwaysAllow,
             "delegation (the helper's own calls pass this gate)",
         )),
-        ActionKind::MemoryRead => Ok(TierDecision::new(Tier::AlwaysAllow, "memory read")),
-        ActionKind::MemoryWrite { scope, .. } => {
+        ActionKind::NoteRead => Ok(TierDecision::new(Tier::AlwaysAllow, "note read")),
+        ActionKind::NoteWrite { scope, .. } => {
             if *scope == Scope::Workspace {
-                Ok(TierDecision::new(
-                    Tier::InProjectEdit,
-                    "workspace memory note",
-                ))
+                Ok(TierDecision::new(Tier::InProjectEdit, "workspace note"))
             } else {
-                Err("user-level memory persists into every project's system prompt".to_string())
+                Err("user-level notes persist into every project's system prompt".to_string())
             }
         }
         ActionKind::FileRead { path } => {
@@ -428,10 +504,10 @@ fn builtin_tier(action: &Action<'_>, ctx: &PolicyContext<'_>) -> Result<TierDeci
             ))
         }
         ActionKind::Search { path, pattern } => {
-            if let Some(path) = path {
+            if let Some(path) = path.as_deref() {
                 require_inside(ctx.root, path)?;
             }
-            if let Some(pattern) = pattern
+            if let Some(pattern) = pattern.as_deref()
                 && escapes_root(pattern)
             {
                 return Err(format!(
@@ -475,6 +551,10 @@ fn builtin_tier(action: &Action<'_>, ctx: &PolicyContext<'_>) -> Result<TierDeci
                 "read-only shell command",
             ))
         }
+        ActionKind::Other if action.family == ToolFamily::Foreign => Err(format!(
+            "`{}` is not a tool the TUI or the engine provides",
+            action.name
+        )),
         ActionKind::Other => Err(format!("`{}` requires review", action.name)),
     }
 }
@@ -512,13 +592,41 @@ mod tests {
         (dir, root)
     }
 
+    /// The origin a real TUI session gives `name` (test fixture: the
+    /// production gate reads origins from the session's live tool
+    /// definitions).
+    fn origin(name: &str) -> Option<ToolOrigin> {
+        use crate::memory::{NOTES_SOURCE, NOTE_TOOL_NAMES};
+        use crate::tools::{FILE_TOOL_NAMES, FILE_TOOLS_SOURCE};
+        use meerkat_core::ToolSourceKind;
+        if FILE_TOOL_NAMES.contains(&name) {
+            Some(ToolOrigin::tui(FILE_TOOLS_SOURCE, name))
+        } else if NOTE_TOOL_NAMES.contains(&name) {
+            Some(ToolOrigin::tui(NOTES_SOURCE, name))
+        } else if let Some(rest) = name.strip_prefix("mcp__") {
+            Some(ToolOrigin::mcp(rest.split("__").next().unwrap_or_default()))
+        } else if matches!(name, "unknown_tool" | "agent_spawn") {
+            None
+        } else {
+            Some(ToolOrigin::native(ToolSourceKind::Builtin))
+        }
+    }
+
+    fn raw(args: &Value) -> Box<RawValue> {
+        serde_json::value::to_raw_value(args).unwrap()
+    }
+
+    fn parse<'a>(name: &'a str, args: &'a RawValue) -> Action<'a> {
+        Action::parse(name, args, origin(name).as_ref())
+    }
+
     fn tier(root: &ProjectRoot, rules: &RuleSet, trust: bool, name: &str, args: &Value) -> Tier {
         let ctx = PolicyContext {
             root,
             trust_project_builds: trust,
             posix_shell: true,
         };
-        classify_tier(&Action::parse(name, args), rules, &ctx).tier
+        classify_tier(&parse(name, &raw(args)), rules, &ctx).tier
     }
 
     #[test]
@@ -542,7 +650,8 @@ mod tests {
         let args = json!({
             "patch": "*** Begin Patch\n*** Add File: src/ok.rs\n+x\n  *** Add File: .git/config\n+[core]\n*** End Patch"
         });
-        let action = Action::parse("apply_patch", &args);
+        let raw_args = raw(&args);
+        let action = parse("apply_patch", &raw_args);
         assert_eq!(
             action.kind,
             ActionKind::FileWrite {
@@ -560,7 +669,7 @@ mod tests {
         let (_dir, root) = project();
         let task = json!({"member_id": "scout", "task": "rm -rf /", "result_label": "r", "max_text_bytes": 10});
         assert_eq!(
-            Action::parse("delegate", &task).kind,
+            parse("delegate", &raw(&task)).kind,
             ActionKind::Delegation
         );
         assert_eq!(
@@ -593,7 +702,7 @@ mod tests {
     fn shell_args_use_the_tool_type() {
         let args = json!({"command": "ls", "working_dir": "src", "timeout_secs": 5});
         assert_eq!(
-            Action::parse("shell", &args).kind,
+            parse("shell", &raw(&args)).kind,
             ActionKind::Shell {
                 command: "ls".into(),
                 working_dir: Some("src".into()),
@@ -607,7 +716,7 @@ mod tests {
             json!("ls"),
         ] {
             assert_eq!(
-                Action::parse("shell", &bad).kind,
+                parse("shell", &raw(&bad)).kind,
                 ActionKind::Other,
                 "{bad}"
             );
@@ -646,12 +755,12 @@ mod tests {
         let rules = RuleSet::default();
         for name in READ_ONLY_BUILTINS {
             let args = json!({});
-            let tier = classify_tier(&Action::parse(name, &args), &rules, &ctx).tier;
+            let tier = classify_tier(&parse(name, &raw(&args)), &rules, &ctx).tier;
             assert_eq!(tier, Tier::AlwaysAllow, "{name}");
         }
         for name in REVIEWED_BUILTINS {
             let args = json!({});
-            let tier = classify_tier(&Action::parse(name, &args), &rules, &ctx).tier;
+            let tier = classify_tier(&parse(name, &raw(&args)), &rules, &ctx).tier;
             assert_eq!(tier, Tier::Classifier, "{name}");
         }
     }
@@ -832,9 +941,9 @@ mod tests {
                 Tier::Classifier,
             ),
             ("unknown_tool", json!({}), true, Tier::Classifier),
-            ("memory_list", json!({}), true, Tier::AlwaysAllow),
+            ("note_list", json!({}), true, Tier::AlwaysAllow),
             (
-                "memory_read",
+                "note_read",
                 json!({"scope": "user", "name": "x"}),
                 true,
                 Tier::AlwaysAllow,
@@ -846,37 +955,37 @@ mod tests {
                 Tier::AlwaysAllow,
             ),
             (
-                "memory_save",
+                "note_save",
                 json!({"scope": "workspace", "name": "x", "content": "y"}),
                 true,
                 Tier::InProjectEdit,
             ),
             (
-                "memory_forget",
+                "note_forget",
                 json!({"scope": "workspace", "name": "x"}),
                 true,
                 Tier::InProjectEdit,
             ),
             (
-                "memory_save",
+                "note_save",
                 json!({"scope": "user", "name": "x", "content": "y"}),
                 true,
                 Tier::Classifier,
             ),
             (
-                "memory_forget",
+                "note_forget",
                 json!({"scope": "user", "name": "x"}),
                 true,
                 Tier::Classifier,
             ),
             (
-                "memory_save",
+                "note_save",
                 json!({"scope": "global", "name": "x", "content": "y"}),
                 true,
                 Tier::Classifier,
             ),
             (
-                "memory_save",
+                "note_save",
                 json!({"scope": "workspace"}),
                 true,
                 Tier::Classifier,
@@ -971,10 +1080,10 @@ mod tests {
             posix_shell: true,
         };
         let args = json!({"command": "make lint"});
-        let decision = classify_tier(&Action::parse("shell", &args), &rules, &ctx);
+        let decision = classify_tier(&parse("shell", &raw(&args)), &rules, &ctx);
         assert_eq!(
             decision.rule.map(|r| r.to_string()).as_deref(),
-            Some("allow#1")
+            Some("allow#3")
         );
     }
 
@@ -983,25 +1092,27 @@ mod tests {
         let (dir, root) = project();
         let abs = dir.path().join("src/main.rs");
         let args = json!({"path": abs.to_str().unwrap()});
-        let action = Action::parse("read_file", &args);
+        let raw_args = raw(&args);
+        let action = parse("read_file", &raw_args);
         assert_eq!(action.subjects(&root), ["src/main.rs"]);
         let args = json!({"x": 1});
         assert_eq!(
-            Action::parse("mcp__a__b", &args).subjects(&root),
+            parse("mcp__a__b", &raw(&args)).subjects(&root),
             ["{\n  \"x\": 1\n}"]
         );
     }
 
     #[test]
-    fn memory_writes_parse_and_match_rules() {
+    fn note_writes_parse_and_match_rules() {
         let (_dir, root) = project();
         let args = json!({"scope": "user", "name": "Prefers Rust!", "content": "x"});
-        let action = Action::parse("memory_save", &args);
+        let raw_args = raw(&args);
+        let action = parse("note_save", &raw_args);
         assert_eq!(
             action.kind,
-            ActionKind::MemoryWrite {
+            ActionKind::NoteWrite {
                 scope: Scope::User,
-                name: "Prefers Rust!"
+                name: "Prefers Rust!".into()
             }
         );
         assert_eq!(action.subjects(&root), ["user/prefers-rust"]);
@@ -1014,43 +1125,104 @@ mod tests {
         assert_eq!(decision.tier, Tier::Classifier);
         assert_eq!(
             decision.detail,
-            "user-level memory persists into every project's system prompt"
+            "user-level notes persist into every project's system prompt"
         );
         let ws = json!({"scope": "workspace", "name": "x", "content": "y"});
         let decision = classify_tier(
-            &Action::parse("memory_save", &ws),
+            &parse("note_save", &raw(&ws)),
             &RuleSet::default(),
             &ctx,
         );
-        assert_eq!(decision.detail, "workspace memory note");
+        assert_eq!(decision.detail, "workspace note");
 
         let mut rules = RuleSet::default();
         rules.push(
             Rule::new(
                 RuleKind::Allow,
-                "memory_save",
+                "note_save",
                 Some("user/*"),
                 RuleOrigin::Realm,
             )
             .unwrap(),
         );
         assert_eq!(
-            tier(&root, &rules, true, "memory_save", &args),
+            tier(&root, &rules, true, "note_save", &args),
             Tier::AlwaysAllow
         );
         let mut rules = RuleSet::default();
         rules.push(
             Rule::new(
                 RuleKind::Deny,
-                "memory_save",
+                "note_save",
                 Some("workspace/*"),
                 RuleOrigin::Realm,
             )
             .unwrap(),
         );
         assert_eq!(
-            tier(&root, &rules, true, "memory_save", &ws),
+            tier(&root, &rules, true, "note_save", &ws),
             Tier::UserDeny
+        );
+    }
+
+    #[test]
+    fn names_do_not_confer_tiers_without_provenance() {
+        let (_dir, root) = project();
+        let ctx = PolicyContext {
+            root: &root,
+            trust_project_builds: true,
+            posix_shell: true,
+        };
+        let rules = RuleSet::default();
+        let decide = |name: &str, args: &Value, origin: Option<ToolOrigin>| {
+            let args = raw(args);
+            let action = Action::parse(name, &args, origin.as_ref());
+            (action.kind.clone(), classify_tier(&action, &rules, &ctx).tier)
+        };
+        // An MCP server's tools named like a builtin, a file tool and a note tool.
+        for (name, args) in [
+            ("task_list", json!({})),
+            ("read_file", json!({"path": "src/main.rs"})),
+            ("write_file", json!({"path": "src/x.rs", "content": ""})),
+            ("note_save", json!({"scope": "workspace", "name": "x", "content": ""})),
+            ("shell", json!({"command": "ls"})),
+        ] {
+            assert_eq!(
+                decide(name, &args, Some(ToolOrigin::mcp("evil"))),
+                (ActionKind::Other, Tier::Classifier),
+                "{name}"
+            );
+            // A tool the session does not offer at all.
+            assert_eq!(
+                decide(name, &args, None),
+                (ActionKind::Other, Tier::Classifier),
+                "{name}"
+            );
+        }
+        // A foreign callback surface reusing the TUI's tool name.
+        let other = ToolOrigin {
+            provenance: Some(crate::tools::provenance("someone-else")),
+            mutation: ToolMutationClass::ReadOnly,
+        };
+        assert_eq!(
+            decide("read_file", &json!({"path": "src/main.rs"}), Some(other)).1,
+            Tier::Classifier
+        );
+        // A builtin read-only name whose declaration says it mutates.
+        let mutating = ToolOrigin {
+            mutation: ToolMutationClass::Mutating,
+            ..ToolOrigin::native(meerkat_core::ToolSourceKind::Builtin)
+        };
+        assert_eq!(
+            decide("task_list", &json!({}), Some(mutating)).1,
+            Tier::Classifier
+        );
+        // Unparsable arguments never become a string payload of a known kind.
+        let garbage = serde_json::value::RawValue::from_string("[1,2".into());
+        assert!(garbage.is_err(), "the transport only delivers JSON");
+        assert_eq!(
+            decide("read_file", &json!("src/main.rs"), origin("read_file")),
+            (ActionKind::Other, Tier::Classifier)
         );
     }
 }

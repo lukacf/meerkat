@@ -80,8 +80,9 @@ pub struct Args {
     pub user_config_root: Option<PathBuf>,
 
     /// Directory for user-global rkat-tui files: AGENTS.md, SYSTEM.md, tui.toml
-    /// rules, notes, history. Defaults to $XDG_CONFIG_HOME/rkat-tui
-    /// (~/.config/rkat-tui); on Windows the platform config dir.
+    /// rules, notes, history, trust records. Defaults to ~/.rkat/tui (under
+    /// --user-config-root when given); an existing legacy ~/.config/rkat-tui
+    /// ($XDG_CONFIG_HOME/rkat-tui) is used until ~/.rkat/tui exists.
     #[arg(long)]
     pub config_dir: Option<PathBuf>,
 
@@ -109,12 +110,25 @@ pub struct Args {
     /// Cargo home and the cache dir (network allowed), `strict` additionally
     /// denies IP network access, `off` runs them unconfined. A mode this host
     /// cannot enforce (e.g. no unprivileged user namespaces) refuses to start.
+    /// A realm `[confinement]` for the shell is a floor: `workspace` installs
+    /// it, `strict` narrows its network, `off` refuses to start.
     #[arg(long, value_enum, value_name = "MODE", default_value_t = ConfinementArg::Workspace)]
     pub confinement: ConfinementArg,
 
     /// Launch processes unconfined (same as `--confinement off`).
     #[arg(long)]
     pub no_confinement: bool,
+
+    /// Let confined commands read this directory (absolute, existing, no
+    /// symbolic link on the way, disjoint from the workspace and the other
+    /// grants). Repeatable.
+    #[arg(long, value_name = "DIR")]
+    pub confinement_read: Vec<PathBuf>,
+
+    /// Let confined commands read and write this directory (same rules as
+    /// `--confinement-read`). Repeatable.
+    #[arg(long, value_name = "DIR")]
+    pub confinement_write: Vec<PathBuf>,
 
     /// Disable auto mode: every tier-3 action is denied instead of classified.
     #[arg(long)]
@@ -134,6 +148,11 @@ pub struct Args {
     #[arg(long, hide = true)]
     pub mouse: bool,
 
+    /// Start the MCP servers of the project's `.rkat/mcp.toml` for this run
+    /// even though the file is not in the host trust record (`/mcp trust`
+    /// records it for later runs).
+    #[arg(long)]
+    pub allow_project_mcp: bool,
     /// Block until every configured MCP server has finished connecting before
     /// the first turn (default: connect in the background).
     #[arg(long)]
@@ -300,6 +319,21 @@ mod tests {
                 .unwrap();
         assert_eq!(args.effective_confinement(), ConfinementArg::Off);
         assert!(Args::try_parse_from(["rkat-tui", "--confinement", "bogus"]).is_err());
+        let args = Args::try_parse_from([
+            "rkat-tui",
+            "--confinement-read",
+            "/a",
+            "--confinement-read",
+            "/b",
+            "--confinement-write",
+            "/c",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.confinement_read,
+            vec![PathBuf::from("/a"), PathBuf::from("/b")]
+        );
+        assert_eq!(args.confinement_write, vec![PathBuf::from("/c")]);
     }
 
     #[test]

@@ -200,9 +200,9 @@ async fn warn_mode_warns_and_compacts_only_on_compact_now() {
 
     rig.send(Effect::CompactNow);
     let msg = rig
-        .wait_for(|msg| matches!(msg, Msg::CompactArmed(_)))
+        .wait_for(|msg| matches!(msg, Msg::CompactRebuilt(_)))
         .await;
-    assert!(matches!(msg, Msg::CompactArmed(Ok(()))), "{msg:?}");
+    assert!(matches!(msg, Msg::CompactRebuilt(Ok(()))), "{msg:?}");
     rig.send(Effect::StartTurn("compact first".into()));
     assert_eq!(
         rig.turn_finished()

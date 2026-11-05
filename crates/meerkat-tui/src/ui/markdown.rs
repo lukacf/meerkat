@@ -697,11 +697,18 @@ pub fn sanitize(text: &str) -> String {
             '\n' => out.push('\n'),
             '\t' => out.extend(std::iter::repeat_n(' ', TAB_WIDTH)),
             '\r' => {}
-            c if c.is_control() => out.push('\u{fffd}'),
+            c if c.is_control() || is_bidi_control(c) => out.push('\u{fffd}'),
             c => out.push(c),
         }
     }
     out
+}
+
+/// Bidirectional embedding, override and isolate controls (U+202A–U+202E,
+/// U+2066–U+2069): text the model or a tool wrote could reorder what the
+/// terminal shows (a "Trojan Source" display), so they are replaced too.
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 /// Sanitize `text` and greedily word-wrap every line to at most `width` columns.
@@ -816,6 +823,16 @@ mod tests {
     #[test]
     fn sanitizes_control_characters() {
         assert_eq!(sanitize("a\tb\r\n\x1b[31m"), "a    b\n\u{fffd}[31m");
+    }
+
+    #[test]
+    fn sanitizes_bidi_overrides_and_isolates() {
+        for c in ('\u{202A}'..='\u{202E}').chain('\u{2066}'..='\u{2069}') {
+            assert_eq!(sanitize(&format!("a{c}b")), "a\u{fffd}b", "{:04X}", u32::from(c));
+        }
+        // Other format characters (a zero-width joiner) are left alone.
+        assert_eq!(sanitize("a\u{200D}b"), "a\u{200D}b");
+        assert!(wrap_text("x\u{202E}gnp.exe", 40).concat().contains('\u{fffd}'));
     }
 
     #[test]

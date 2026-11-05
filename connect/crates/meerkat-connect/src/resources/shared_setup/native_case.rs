@@ -170,6 +170,11 @@ struct Script {
     results: Mutex<BTreeMap<String, Value>>,
     finished: AtomicUsize,
     cancel_requested: AtomicBool,
+    // Held by A's model across one whole response (its check of the cancel
+    // flag, its recording of results and its emission of a call), and by
+    // the case across setting the flag and recording A's pending calls: a
+    // response is wholly before the cancel or wholly after it.
+    cancel_section: Mutex<()>,
     // Find answers of retry_safe this case met, each replayed by a fresh Find.
     retry_safe_answers: AtomicUsize,
     // The runs each member's input was served in, in order: a later run of
@@ -374,6 +379,10 @@ impl Script {
         } else {
             panic!("controlled response has no exact child input")
         };
+        // A's whole response, from its check of the cancel flag to its
+        // emission, holds the cancel section: the case's cancel of A falls
+        // wholly before or wholly after it.
+        let _cancel_section = (tag == "a").then(|| self.cancel_section.lock().unwrap());
         let helper = request
             .tools
             .iter()
@@ -2094,11 +2103,16 @@ impl Case {
         // The worker is released only after A's cancellation is acknowledged,
         // so an install of A that joined it is still pending here, and a
         // cancelled member need not see its result. The check proof holds
-        // such a call to its safety proofs instead. The flag goes first: an
-        // error result of A that lands after it is answered as cancelled,
-        // so A's model emits nothing after the calls recorded here.
-        self.script.cancel_requested.store(true, Ordering::SeqCst);
-        self.script.record_pending_at_cancel("a-helper");
+        // such a call to its safety proofs instead. The flag and the record
+        // are taken together under the cancel section, which A's model holds
+        // across each whole response: a response before them has emitted
+        // its calls, and one after them answers an error result as cancelled
+        // and emits nothing.
+        {
+            let _cancel_section = self.script.cancel_section.lock().unwrap();
+            self.script.cancel_requested.store(true, Ordering::SeqCst);
+            self.script.record_pending_at_cancel("a-helper");
+        }
         let cancelled = self
             .client
             .lock()

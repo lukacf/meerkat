@@ -31,10 +31,31 @@ impl PrivateOriginals {
             .await
     }
 
+    /// [`Self::setup_result_source_from_until`] for a caller with no step
+    /// deadline of its own: its basis reads wait for a held source collection
+    /// within Core's owner-change bound from now.
     pub(crate) async fn setup_result_source_from(
         &self,
         context: &ToolDispatchContext,
         expected: &[InstalledSetupSelection],
+    ) -> Result<SetupResultSource, PrivateOriginalError> {
+        self.setup_result_source_from_until(
+            context,
+            expected,
+            std::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+        )
+        .await
+    }
+
+    /// The helper's result source and its contributors. Each contributor's
+    /// admitted basis read meets a source collection held by another owner's
+    /// short section as contention and waits for it until `deadline`, the
+    /// caller's step's one deadline, holding nothing.
+    pub(crate) async fn setup_result_source_from_until(
+        &self,
+        context: &ToolDispatchContext,
+        expected: &[InstalledSetupSelection],
+        deadline: std::time::Instant,
     ) -> Result<SetupResultSource, PrivateOriginalError> {
         let authorization = context
             .work_authorization()
@@ -172,7 +193,7 @@ impl PrivateOriginals {
             originals.push(original);
         }
         for original in &originals {
-            self.require_result_source(original.original.association(), false)?;
+            self.require_result_source_until(original.original.association(), false, deadline)?;
             self.installed_setup_facts(&original.reference)
                 .await
                 .map_err(|error| match error {
@@ -183,7 +204,7 @@ impl PrivateOriginals {
         // This helper association was matched to the exact selected native
         // input above. Its native acceptance may precede the source callback;
         // the originating contributors remain strict retained sources.
-        self.require_result_source(association, true)?;
+        self.require_result_source_until(association, true, deadline)?;
         let lifetime = self
             .host_lifetime
             .get()
@@ -248,10 +269,27 @@ impl PrivateOriginals {
         })
     }
 
+    #[cfg(test)]
     fn require_result_source(
         &self,
         association: &InputAuthorityAssociation,
         own: bool,
+    ) -> Result<(), PrivateOriginalError> {
+        self.require_result_source_until(
+            association,
+            own,
+            std::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+        )
+    }
+
+    /// A result source's current disposition and, for a named-only one, its
+    /// admitted basis, read with a wait for a held source collection until
+    /// `deadline`. Nothing is held while it waits.
+    fn require_result_source_until(
+        &self,
+        association: &InputAuthorityAssociation,
+        own: bool,
+        deadline: std::time::Instant,
     ) -> Result<(), PrivateOriginalError> {
         let claims = association.candidate();
         match self
@@ -276,7 +314,11 @@ impl PrivateOriginals {
         }
         let basis = self
             .owner
-            .admitted_original_basis(&claims.ingress_namespace, &claims.original_work)
+            .admitted_original_basis_until(
+                &claims.ingress_namespace,
+                &claims.original_work,
+                deadline,
+            )
             .map_err(|_| PrivateOriginalError::Unavailable)?
             .ok_or(PrivateOriginalError::Unavailable)?;
         if basis != claims.authority_basis {

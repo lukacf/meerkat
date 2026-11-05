@@ -130,9 +130,28 @@ impl PrivateOriginals {
         }
     }
 
+    /// [`Self::acquisition_original_until`] for a caller with no step
+    /// deadline of its own: its basis reads wait for a held source collection
+    /// within Core's owner-change bound from now.
     pub(crate) async fn acquisition_original(
         &self,
         context: &ToolDispatchContext,
+    ) -> Result<AcquisitionOriginal, PrivateOriginalError> {
+        self.acquisition_original_until(
+            context,
+            std::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+        )
+        .await
+    }
+
+    /// The call's acquisition original and its complete contributor set. A
+    /// named-only contributor's admitted basis read meets a source collection
+    /// held by another owner's short section as contention and waits for it
+    /// until `deadline`, the caller's step's one deadline, holding nothing.
+    pub(crate) async fn acquisition_original_until(
+        &self,
+        context: &ToolDispatchContext,
+        deadline: std::time::Instant,
     ) -> Result<AcquisitionOriginal, PrivateOriginalError> {
         let authorization = context
             .work_authorization()
@@ -279,11 +298,12 @@ impl PrivateOriginals {
             if record.operation_cancelled {
                 return Err(PrivateOriginalError::Denied);
             }
-            self.require_acquisition_source(
+            self.require_acquisition_source_until(
                 association,
                 own_originals
                     .iter()
                     .any(|own| Arc::ptr_eq(own, &current.original)),
+                deadline,
             )?;
             if Arc::ptr_eq(&current, &held) {
                 source_record = Some(Arc::new(stored));
@@ -326,11 +346,12 @@ impl PrivateOriginals {
         // an atomic permission snapshot: the actual effect/fence must recheck
         // every contributor under native publication when admitting the helper.
         for original in &pending {
-            self.require_acquisition_source(
+            self.require_acquisition_source_until(
                 original.original.association(),
                 own_originals
                     .iter()
                     .any(|own| Arc::ptr_eq(own, &original.original)),
+                deadline,
             )?;
         }
         Ok(AcquisitionOriginal {
@@ -345,10 +366,27 @@ impl PrivateOriginals {
         })
     }
 
+    #[cfg(test)]
     fn require_acquisition_source(
         &self,
         association: &meerkat_authorization_contracts::work_association::InputAuthorityAssociation,
         own: bool,
+    ) -> Result<(), PrivateOriginalError> {
+        self.require_acquisition_source_until(
+            association,
+            own,
+            std::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+        )
+    }
+
+    /// A contributor's current disposition and, for a named-only one, its
+    /// admitted basis, read with a wait for a held source collection until
+    /// `deadline`. Nothing is held while it waits.
+    fn require_acquisition_source_until(
+        &self,
+        association: &meerkat_authorization_contracts::work_association::InputAuthorityAssociation,
+        own: bool,
+        deadline: std::time::Instant,
     ) -> Result<(), PrivateOriginalError> {
         let claims = association.candidate();
         match self
@@ -377,7 +415,11 @@ impl PrivateOriginals {
         }
         let basis = self
             .owner
-            .admitted_original_basis(&claims.ingress_namespace, &claims.original_work)
+            .admitted_original_basis_until(
+                &claims.ingress_namespace,
+                &claims.original_work,
+                deadline,
+            )
             .map_err(|_| PrivateOriginalError::Unavailable)?
             .ok_or(PrivateOriginalError::Unavailable)?;
         if basis != claims.authority_basis {

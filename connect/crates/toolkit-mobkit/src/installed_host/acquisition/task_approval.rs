@@ -553,7 +553,15 @@ impl InstalledServiceTaskSource {
         let deadline = tokio::time::Instant::now() + bound;
         match tokio::time::timeout_at(
             deadline,
-            self.prepare_selected_within(call, context, plan, proposed_agent, select_setup, churn),
+            self.prepare_selected_within(
+                call,
+                context,
+                plan,
+                proposed_agent,
+                select_setup,
+                churn,
+                deadline.into_std(),
+            ),
         )
         .await
         {
@@ -561,6 +569,9 @@ impl InstalledServiceTaskSource {
             Err(_) => Err(refused_at_deadline(context, call, plan)),
         }
     }
+    /// [`Self::prepare_selected_with_setup`]'s body; its result source's
+    /// basis reads wait for a held source collection until `deadline`, the
+    /// same one deadline.
     async fn prepare_selected_within(
         &self,
         call: ToolCallView<'_>,
@@ -569,6 +580,7 @@ impl InstalledServiceTaskSource {
         proposed_agent: Option<&str>,
         select_setup: bool,
         churn: &mut meerkat_core::authorization::OwnerChangeChurn,
+        deadline: std::time::Instant,
     ) -> Result<Option<InstalledServiceTask>, ServiceTaskError> {
         let selected = self.selected.upgrade().ok_or_else(|| {
             shared_task_refusal(
@@ -620,7 +632,7 @@ impl InstalledServiceTaskSource {
             let source = owner
                 .host
                 .originals
-                .setup_result_source_from(context, &owner.helper_selections())
+                .setup_result_source_from_until(context, &owner.helper_selections(), deadline)
                 .await
                 .map_err(|error| shared_task_refusal("prepare.result_source", error))?;
             let operation = Id::new(source.operation.acquisition.id.clone())

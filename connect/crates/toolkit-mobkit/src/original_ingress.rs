@@ -3299,15 +3299,39 @@ impl ToolkitOriginalOwner {
             .originals
             .try_lock()
             .map_err(|_| ControllerReadinessFailure::PolicyUnavailable)?;
-        Ok(originals
-            .iter()
-            .filter_map(OriginalRecord::bound)
-            .find(|retained| {
-                retained.source_custody == Some(SourceCustody::Admitted)
-                    && retained.names(namespace, original)
-            })
-            .map(|retained| retained.custody.authority_basis.clone()))
+        Ok(admitted_basis_in(&originals, namespace, original))
     }
+
+    /// [`Self::admitted_original_basis`] for a reader that holds no owner
+    /// change, reservation or other guard: a source collection held by
+    /// another owner's short section is contention, waited for until
+    /// `deadline` (the reader's step's one deadline), as the native readers
+    /// wait. Past the deadline, or poisoned, it is unavailable.
+    pub(crate) fn admitted_original_basis_until(
+        &self,
+        namespace: &QualifiedIngressNamespace,
+        original: &OriginalWorkRef,
+        deadline: std::time::Instant,
+    ) -> Result<Option<WorkAuthorityBasis>, ControllerReadinessFailure> {
+        let originals = wait_for_lock(&self.originals, deadline, std::thread::sleep)?;
+        Ok(admitted_basis_in(&originals, namespace, original))
+    }
+}
+
+/// The admitted custody's retained basis of `original`, when it has one.
+fn admitted_basis_in(
+    originals: &[OriginalRecord],
+    namespace: &QualifiedIngressNamespace,
+    original: &OriginalWorkRef,
+) -> Option<WorkAuthorityBasis> {
+    originals
+        .iter()
+        .filter_map(OriginalRecord::bound)
+        .find(|retained| {
+            retained.source_custody == Some(SourceCustody::Admitted)
+                && retained.names(namespace, original)
+        })
+        .map(|retained| retained.custody.authority_basis.clone())
 }
 
 #[cfg(test)]

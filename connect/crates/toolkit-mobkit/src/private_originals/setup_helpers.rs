@@ -320,9 +320,11 @@ impl PrivateOriginals {
     }
 
     /// Create or replay the helper's work item for a Find's work step, through
-    /// a fresh fence on each attempt. Before the create, a source collection
-    /// held by another owner's short section is waited out within Core's
-    /// owner-change bound (from the first attempt), holding nothing. A fence
+    /// a fresh fence on each attempt. A source collection held by another
+    /// owner's short section is waited out, holding nothing, within the
+    /// step's one deadline, Core's owner-change bound from its start: at the
+    /// acquisition original's basis reads, before the create, and at the
+    /// check after it. A fence
     /// refused as unavailable while Core names an owner change in progress on
     /// the work's own publication ran nothing: that change is waited out with
     /// `churn`, the work step's one churn, and the same admission made again,
@@ -341,10 +343,12 @@ impl PrivateOriginals {
         review: crate::review_custody::ReviewCustody,
         churn: &mut meerkat_core::authorization::OwnerChangeChurn,
     ) -> Result<Arc<AdmittedHelperWork>, PrivateOriginalError> {
-        let original = self.acquisition_original(context).await?;
-        self.require_helper_selection(&selection)?;
         let contended_until =
             tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+        let original = self
+            .acquisition_original_until(context, contended_until.into_std())
+            .await?;
+        self.require_helper_selection(&selection)?;
         loop {
             let admitted = self
                 .owner
@@ -392,10 +396,12 @@ impl PrivateOriginals {
     /// progress, and one the churn's bounds outlast, stand as they are.
     ///
     /// A source collection held by another owner's short section at the
-    /// observation's source check is contention, not an answer: it is waited
-    /// out with bounded pauses until Core's owner-change bound from this
-    /// call's first observation, the writer released while waiting, and the
-    /// check made again. The observation creates nothing.
+    /// observation's source checks (its acquisition original's basis reads,
+    /// and before and after its fenced read) is contention, not an answer:
+    /// it is waited out with bounded pauses until the observation's one
+    /// deadline, Core's owner-change bound from its start, and the check made
+    /// again (the writer released while waiting before the read, kept after
+    /// it). The observation creates nothing.
     pub(crate) async fn observe_setup_helper_for_live_replay(
         self: &Arc<Self>,
         context: &ToolDispatchContext,
@@ -407,11 +413,13 @@ impl PrivateOriginals {
         selection: HelperAdmissionSelection,
         review: crate::review_custody::ReviewCustody,
     ) -> Result<Option<Arc<AdmittedHelperWork>>, PrivateOriginalError> {
-        let original = self.acquisition_original(context).await?;
-        self.require_helper_selection(&selection)?;
-        let mut churn = context.owner_change_churn();
         let contended_until =
             tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+        let original = self
+            .acquisition_original_until(context, contended_until.into_std())
+            .await?;
+        self.require_helper_selection(&selection)?;
+        let mut churn = context.owner_change_churn();
         #[cfg(any(test, feature = "test-support"))]
         if let Some(hold) =
             crate::source_hold_probe::observe(crate::source_hold_probe::Site::Observe, key.as_str())

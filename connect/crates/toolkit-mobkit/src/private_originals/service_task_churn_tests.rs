@@ -366,12 +366,12 @@ async fn real_denial_at_the_task_check_stays_denied_without_waiting() {
     assert_eq!(prepared.reached.count("prepare.service_task"), 0);
 }
 
-// A selected install's outlasting await, named by the round 20 prints: the
-// preparation's snapshot reads the owner's store, whose one connection a
-// record change holds while it waits for an owner change of the shared
-// publication held past Core's bound. The preparation's one deadline, from
-// its start, ends that wait: it answers ReprepareRequired at the bound,
-// typed, and nothing past the snapshot is made.
+// A selected install's outlasting await: the preparation's snapshot reads
+// the owner's store, whose one connection a record change holds while it
+// waits for an owner change of the shared publication held past Core's
+// bound. The preparation's one deadline, from its start, ends that wait: it
+// answers ReprepareRequired at the bound, typed, and nothing past the
+// snapshot is made.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owner_change_held_behind_a_record_change_at_the_snapshot_ends_typed_within_the_bound() {
     let prepared = prepare_with(

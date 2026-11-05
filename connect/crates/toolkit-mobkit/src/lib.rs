@@ -910,8 +910,10 @@ pub mod source_hold_probe {
         /// A helper's grant issuance, its intent write just done, before its
         /// source check; keyed by work item.
         IntentsWritten,
-        /// A first binding write inside its owner change, just before it
-        /// takes the collection; keyed by the source row's ID.
+        /// A helper source's first binding write, just before it begins its
+        /// owner change (`retain_first_binding_write`); the hold lasts into
+        /// that change, where the write tries the collection; keyed by the
+        /// source row's ID.
         FirstWrite,
         /// A helper preparation's capture binder, inside Core's governed
         /// bind, before its source check; keyed by work item.

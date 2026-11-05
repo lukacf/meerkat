@@ -10,13 +10,16 @@
 //!   step's and the recovery's own;
 //! - `Observe`: the Find's live-replay helper observation
 //!   (`advance.observe_helper`);
-//! - the census sites (round 21): `FencedAfter` (a fenced helper create or
-//!   read just done, before its source check under the writer),
-//!   `IntentsWriter`, `Intents` and `IntentsWritten` (a helper's grant
+//! - `FencedAfter`: a fenced helper create or read just done, before its
+//!   source check under the writer;
+//! - `IntentsWriter`, `Intents` and `IntentsWritten`: a helper's grant
 //!   issuance taking the source writer, then before and after its intent
-//!   write), `FirstWrite` (a first binding write trying the collection inside
-//!   its owner change), `PrepareBind` (a helper preparation's capture binder)
-//!   and `Submit` (a helper submission's source check).
+//!   write;
+//! - `FirstWrite`: a first binding write just before it begins its owner
+//!   change, the hold lasting into the change, where the write tries the
+//!   collection;
+//! - `PrepareBind`: a helper preparation's capture binder;
+//! - `Submit`: a helper submission's source check.
 //!
 //! A held collection is waited out within Core's owner-change bound, and an
 //! owner change met by the lineage resolution is a stale read, waited out

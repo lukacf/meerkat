@@ -48,8 +48,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   refusal without `tool_invoked: false` still leaves the install uncertain
   and refuses its retry.
 
-- A selected setup task's call (a reviewed install's shared setup step,
-  a shared setup's check, join or stop, or a setup helper's report) no
+- A selected setup task's call (for example a reviewed install's shared
+  setup step, a shared setup's check, join or stop, a setup helper's
+  report, an account or public-service request, or a software review) no
   longer waits for as long as another task holds an authorization change
   while its task is prepared. The preparation now ends at the owner-change
   bound, including its reads of the setup store that wait behind a write
@@ -90,14 +91,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - A Find no longer fails as temporarily unavailable (`tool_unavailable`)
   when another owner's brief hold on the shared source state meets its
-  setup helper's admission or observation right after their read, its
-  grant issuance before or after the grant intent is written, its first
-  source binding write, its helper's preparation or submission, or a
+  setup helper's admission right after its create (or the create's
+  replay), its helper's observation right after its read, its grant
+  issuance before or after the grant intent is written, its first source
+  binding write, its helper's preparation or submission, or a
   contributor's admitted-source read (also in a selected setup task's
   result source). Each step waits that hold out within the owner-change
   bound, and the grant issuance also waits for another writer of the
   source state; nothing the Find already did is made again. A hold that
-  outlasts the bound still answers `tool_unavailable`.
+  outlasts the bound still answers `tool_unavailable`, except at the
+  submission's check before it binds again after an authorization change:
+  there it ends the Find as `retry_safe` (nothing admitted), as a change
+  that outlasts the bound does.
 
 - A Find no longer fails as temporarily unavailable (`tool_unavailable`)
   while another original's Find is writing the shared source state. Its

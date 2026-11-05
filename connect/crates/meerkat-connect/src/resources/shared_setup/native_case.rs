@@ -1778,6 +1778,15 @@ impl Case {
         })
     }
 
+    /// Whether helper `tag`'s current install call's result reached its
+    /// model: a refused first install's fresh install becomes its current
+    /// install once that refusal was recorded.
+    fn install_result_recorded(&self, tag: &str) -> bool {
+        let prefix = self.script.current_prefix(&format!("{tag}-helper"));
+        let call = format!("{prefix}-{}", self.script.retry_suffix(&prefix, "install"));
+        self.script.seen_results.lock().unwrap().contains_key(&call)
+    }
+
     async fn preparation(&self) -> Option<Value> {
         use std::os::unix::fs::MetadataExt;
         // Backend evidence only. The installed host remains the sole Toolkit
@@ -1917,6 +1926,22 @@ impl Case {
         })
         .await
         .expect("two ordinary helpers must join while one physical worker is held");
+        // A helper's model records its install's result with its next model
+        // request, which can come after its install joined the held worker and
+        // was approved, and after a refused first install's fresh install went
+        // through. Wait within the bound until each helper's current install
+        // result is recorded before the approvals are read and A is cancelled;
+        // the check proof still decides, so a result that never arrives still
+        // fails it.
+        let _ = tokio::time::timeout(BOUND, async {
+            while !["a", "b"]
+                .into_iter()
+                .all(|tag| self.install_result_recorded(tag))
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
         assert_eq!(entered["closed"], false);
         assert!(entered["completion"].is_null());
         let observations = launch.observations();

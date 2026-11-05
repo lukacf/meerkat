@@ -23436,6 +23436,75 @@ mod host_app_routes_tests {
         server.abort();
         runtime.shutdown().await;
     }
+
+    /// On an open Console the host's routes answer, like the Console's own
+    /// routes, only a request addressed to a host the gateway's listener
+    /// serves: a page that rebinds its own name to the listener's address
+    /// reads none of them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::expect_used)]
+    async fn open_console_host_routes_refuse_a_foreign_host() {
+        let definition = MobDefinition::from_toml(
+            "[mob]\nid = \"gateway-host-routes\"\n[profiles.worker]\nmodel = \"gpt-5.5\"\n",
+        )
+        .expect("definition");
+        let runtime = crate::unified_runtime::UnifiedRuntimeBuilder::default()
+            .definition(definition)
+            .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+            .build()
+            .await
+            .expect("runtime");
+        let decisions = RuntimeDecisionState::local_console(
+            ConsolePolicy {
+                require_app_auth: false,
+                ..Default::default()
+            },
+            None,
+        );
+        let host: Arc<dyn GatewayHostComposition> = Arc::new(RouteHost { routes: Ok(true) });
+        let app = gateway_console_app(
+            &runtime,
+            decisions.clone(),
+            Some(&host),
+            runtime.console_viewer_resolver(&decisions),
+            runtime.console_send_precheck(&decisions),
+            &request_bound(),
+        )
+        .expect("console app");
+        let binding = crate::gateway_composition::GatewayHttpBinding::bind_loopback()
+            .await
+            .expect("loopback listener");
+        let base = binding.http_base_url();
+        let port = binding.port();
+        let server = binding.serve(app);
+        let client = reqwest::Client::new();
+        let mut answers = Vec::new();
+        for host in [
+            format!("rebound.example.net:{port}"),
+            format!("127.0.0.1:{port}"),
+            format!("localhost:{port}"),
+        ] {
+            let status = client
+                .get(format!("{base}/host/status"))
+                .header(reqwest::header::HOST, host.as_str())
+                .send()
+                .await
+                .expect("host route answer")
+                .status()
+                .as_u16();
+            answers.push((host, status));
+        }
+        let _ = server.shutdown().await;
+        runtime.shutdown().await;
+        assert_eq!(
+            answers,
+            vec![
+                (format!("rebound.example.net:{port}"), 403),
+                (format!("127.0.0.1:{port}"), 200),
+                (format!("localhost:{port}"), 200),
+            ]
+        );
+    }
 }
 
 /// The gateway's close order for a held identity bootstrap whose pass ends in

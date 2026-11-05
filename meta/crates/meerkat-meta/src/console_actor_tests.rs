@@ -258,6 +258,25 @@ async fn post_without_header(app: &Router, path: &str, body: Value) -> StatusCod
         .status()
 }
 
+/// `body` posted to `path` on `app` with `token` in the `Authorization`
+/// header: the status.
+async fn post_with_header(app: &Router, path: &str, token: &str, body: Value) -> StatusCode {
+    use tower::ServiceExt;
+    app.clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(path)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(axum::body::Body::from(body.to_string()))
+                .expect("console request"),
+        )
+        .await
+        .expect("console response")
+        .status()
+}
+
 /// `path` read on `app` with no `Authorization` header: the status.
 async fn get_without_header(app: &Router, path: &str) -> StatusCode {
     use tower::ServiceExt;
@@ -331,5 +350,48 @@ async fn post_with_query_token_only_is_refused() {
         get_without_header(&enforced, &format!("/console/experience?auth_token={bob}")).await,
         StatusCode::UNAUTHORIZED,
         "a GET with a good query token"
+    );
+}
+
+/// The Flow Editor RPC is a `POST` on the Console's listener under the
+/// Console's authentication, and it carries writes (draft saves, deploys):
+/// like a Console write it takes its token only from the `Authorization`
+/// header, and a request whose only token is in the query string is refused
+/// 401, on an open Console too.
+#[tokio::test]
+async fn flow_editor_rpc_with_query_token_only_is_refused() {
+    use crate::http_flow_editor::protected_flow_editor_router;
+    let bob = token(human_claims(), Some(now_seconds() + 3600));
+    let schema = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "meta/mobpacks/schema",
+        "params": {},
+    });
+    let query_only = format!("/flow-editor/rpc?auth_token={bob}");
+    let enforced = protected_flow_editor_router(state().decisions);
+    assert_eq!(
+        (
+            post_without_header(&enforced, "/flow-editor/rpc", schema.clone()).await,
+            post_with_header(&enforced, "/flow-editor/rpc", &bob, schema.clone()).await,
+            post_without_header(&enforced, &query_only, schema.clone()).await,
+        ),
+        (
+            StatusCode::UNAUTHORIZED,
+            StatusCode::OK,
+            StatusCode::UNAUTHORIZED
+        ),
+        "no token, a header token, a query-only token"
+    );
+    let mut open = state().decisions;
+    open.console.require_app_auth = false;
+    let open = protected_flow_editor_router(open);
+    assert_eq!(
+        (
+            post_without_header(&open, "/flow-editor/rpc", schema.clone()).await,
+            post_without_header(&open, &query_only, schema).await,
+        ),
+        (StatusCode::OK, StatusCode::UNAUTHORIZED),
+        "an open console: no token, a query-only token"
     );
 }

@@ -63,9 +63,12 @@ pub(crate) mod shared_check_probe {
     }
     type Probe = Arc<dyn Fn(Step, &str) -> Option<std::time::Duration> + Send + Sync>;
     static PROBE: Mutex<Option<Probe>> = Mutex::new(None);
+    // Only the shared SDK case's controls install a probe.
+    #[cfg(feature = "console")]
     pub(crate) fn install(probe: Probe) {
         *PROBE.lock().unwrap() = Some(probe);
     }
+    #[cfg(feature = "console")]
     pub(crate) fn clear() {
         PROBE.lock().unwrap().take();
     }

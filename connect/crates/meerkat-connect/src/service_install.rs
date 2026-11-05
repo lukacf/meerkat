@@ -1470,7 +1470,7 @@ impl CheckedInstalls {
         // work's own publication in progress is waited out within the call's
         // one waiting state, and the check made again.
         let mut churn = context.owner_change_churn();
-        let refreshed = toolkit_mobkit::current_check::check_after_owner_change(
+        let refreshed = toolkit_mobkit::current_check::check_before_effect_after_owner_change(
             context,
             call,
             plan,
@@ -1978,7 +1978,7 @@ impl CheckedInstalls {
             // The check holds nothing, so an owner change in progress is
             // waited out and the check made again.
             let mut churn = context.owner_change_churn();
-            toolkit_mobkit::current_check::check_after_owner_change(
+            toolkit_mobkit::current_check::check_before_effect_after_owner_change(
                 context,
                 call,
                 plan,
@@ -2003,21 +2003,23 @@ impl CheckedInstalls {
         // native prepared check. The outer native gate remains its own owner.
         // The guard above owns this physical dispatch and cannot be released
         // for a wait, so the check answers once: an owner change in progress
-        // is refused at once, as Core answers it, before anything was sent.
+        // is refused at once, typed and certified not dispatched (nothing was
+        // sent), so the caller may retry it safely.
         #[cfg(all(test, unix))]
         shared_check_probe::observe(shared_check_probe::Step::InstallGuarded, call.id);
-        let refreshed = match toolkit_mobkit::current_check::check(context, call, plan) {
-            Ok(current) => current,
-            Err(error) => {
-                return approvals.settle_service_result(
-                    self,
-                    call,
-                    context,
-                    meerkat_core::LiveBridgeEffectOutcome::Failed,
-                    Err(error),
-                );
-            }
-        };
+        let refreshed =
+            match toolkit_mobkit::current_check::check_before_effect(context, call, plan) {
+                Ok(current) => current,
+                Err(error) => {
+                    return approvals.settle_service_result(
+                        self,
+                        call,
+                        context,
+                        meerkat_core::LiveBridgeEffectOutcome::Failed,
+                        Err(error),
+                    );
+                }
+            };
         let current = refreshed.as_ref().unwrap_or(context);
         if approvals
             .check_session(

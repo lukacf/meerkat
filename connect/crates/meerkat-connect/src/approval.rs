@@ -974,8 +974,9 @@ impl LocalApprovals {
             }
             let policy_entry = match &self.shared.installation_policy {
                 Some(source) => {
-                    let refreshed = match toolkit_mobkit::current_check::check(context, call, plan)
-                    {
+                    let refreshed = match toolkit_mobkit::current_check::check_before_effect(
+                        context, call, plan,
+                    ) {
                         Ok(refreshed) => refreshed,
                         Err(error) => {
                             drop((held, task));

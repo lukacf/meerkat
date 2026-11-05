@@ -361,7 +361,7 @@ impl PrivateOriginals {
         let Some(waiter) = self.workflow_call_selection(call, context, plan)? else {
             return Ok(None);
         };
-        if let Err(error) = crate::current_check::check_after_owner_change(
+        if let Err(error) = crate::current_check::check_before_effect_after_owner_change(
             context,
             call,
             Some(plan),

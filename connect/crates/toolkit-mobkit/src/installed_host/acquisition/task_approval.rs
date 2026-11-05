@@ -114,7 +114,10 @@ fn service_task_error(error: meerkat_core::ToolError) -> ServiceTaskError {
 /// never the preparation around it. The caller holds no lock, store
 /// transaction or source reservation across this wait, and cancelling it
 /// releases nothing. Any other answer is final at once, and a refusal to
-/// rebuild that outlasts the bounds stays typed.
+/// rebuild that outlasts the bounds stays typed. The check is Core's check
+/// before a tool's effect: every task entry point's own steps follow either
+/// nothing or the transport's effect entry, so its refusal is certified not
+/// dispatched exactly while nothing of the call ran.
 async fn check_current_after_owner_change(
     context: &ToolDispatchContext,
     call: ToolCallView<'_>,
@@ -123,7 +126,10 @@ async fn check_current_after_owner_change(
     site: &'static str,
 ) -> Result<Option<ToolDispatchContext>, ServiceTaskError> {
     service_task_check(
-        crate::current_check::check_after_owner_change(context, call, plan, churn, site).await,
+        crate::current_check::check_before_effect_after_owner_change(
+            context, call, plan, churn, site,
+        )
+        .await,
     )
 }
 
@@ -368,7 +374,7 @@ impl InstalledServiceTaskSource {
             .await?;
             #[cfg(test)]
             task.observe_stage_for_test("reserve.authorization");
-            let Err(error) = crate::current_check::check(context, call, plan) else {
+            let Err(error) = crate::current_check::check_before_effect(context, call, plan) else {
                 return Ok(entry);
             };
             entry.settle_unentered()?;

@@ -67,9 +67,12 @@ impl InstalledAcquisition {
             .observe_service_task_stage_for_test("report.authorization");
         // Each of the report's checks holds nothing, so an owner change of
         // the work's own publication in progress is waited out within the
-        // report's one waiting state, and the check made again.
+        // report's one waiting state, and the check made again. Nothing of
+        // the report ran before this first check, so a refusal here is
+        // certified not dispatched; the later ones follow its store write and
+        // claim nothing.
         let mut churn = context.owner_change_churn();
-        let initial_current = crate::current_check::check_after_owner_change(
+        let initial_current = crate::current_check::check_before_effect_after_owner_change(
             context,
             call,
             None,

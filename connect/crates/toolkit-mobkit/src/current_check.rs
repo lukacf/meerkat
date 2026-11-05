@@ -11,21 +11,41 @@
 //! once ([`check`]); its caller releases that custody before it waits, or
 //! answers the refusal at once.
 //!
-//! A refusal is Core's typed answer as Core gives it, and claims nothing
-//! about whether the call's tool code ran.
+//! A refusal is Core's typed answer as Core gives it. A check made before
+//! anything of the call ran ([`check_before_effect`]) is certified not
+//! dispatched while no effect of the dispatch has entered, so its caller may
+//! retry it safely; every other check claims nothing about whether the
+//! call's tool code ran.
 
 use meerkat_core::authorization::OwnerChangeChurn;
 use meerkat_core::{ResolvedToolExecutionPlan, ToolCallView, ToolDispatchContext, ToolError};
 
 /// This exact call's current authorization, checked once, holding whatever
 /// the caller holds. The returned context, when present, is the call's
-/// refreshed decision; use it for the rest of the call.
+/// refreshed decision; use it for the rest of the call. Its refusal claims
+/// nothing about whether the call's tool code ran: make it once a step of
+/// the call may have had an effect.
 pub fn check(
     context: &ToolDispatchContext,
     call: ToolCallView<'_>,
     plan: Option<&ResolvedToolExecutionPlan>,
 ) -> Result<Option<ToolDispatchContext>, ToolError> {
     context.check_tool_authorization(call, plan)
+}
+
+/// [`check`] made before anything of the call ran, Connect's own steps
+/// included: Core's check before a tool's effect. An operation refusal met
+/// while no effect of the dispatch has entered is certified not dispatched;
+/// once an effect entered it claims nothing. Core sees only its own effect
+/// entries, so make it only where no step of the call with an effect of its
+/// own (a store write, for example) has run yet. It records no entry and
+/// spends nothing.
+pub fn check_before_effect(
+    context: &ToolDispatchContext,
+    call: ToolCallView<'_>,
+    plan: Option<&ResolvedToolExecutionPlan>,
+) -> Result<Option<ToolDispatchContext>, ToolError> {
+    context.check_tool_authorization_before_effect(call, plan)
 }
 
 /// Whether `error` is Core's refusal to rebuild (`ReprepareRequired`): a
@@ -73,6 +93,34 @@ pub async fn wait_after_refusal(
 /// at once, and a refusal to rebuild that outlasts the bounds is Core's
 /// typed answer.
 pub async fn check_after_owner_change(
+    context: &ToolDispatchContext,
+    call: ToolCallView<'_>,
+    plan: Option<&ResolvedToolExecutionPlan>,
+    churn: &mut OwnerChangeChurn,
+    site: &'static str,
+) -> Result<Option<ToolDispatchContext>, ToolError> {
+    waiting(check, context, call, plan, churn, site).await
+}
+
+/// [`check_after_owner_change`] made with [`check_before_effect`]: its
+/// refusal after the bounds is certified not dispatched while no effect of
+/// the dispatch has entered.
+pub async fn check_before_effect_after_owner_change(
+    context: &ToolDispatchContext,
+    call: ToolCallView<'_>,
+    plan: Option<&ResolvedToolExecutionPlan>,
+    churn: &mut OwnerChangeChurn,
+    site: &'static str,
+) -> Result<Option<ToolDispatchContext>, ToolError> {
+    waiting(check_before_effect, context, call, plan, churn, site).await
+}
+
+async fn waiting(
+    check: fn(
+        &ToolDispatchContext,
+        ToolCallView<'_>,
+        Option<&ResolvedToolExecutionPlan>,
+    ) -> Result<Option<ToolDispatchContext>, ToolError>,
     context: &ToolDispatchContext,
     call: ToolCallView<'_>,
     plan: Option<&ResolvedToolExecutionPlan>,

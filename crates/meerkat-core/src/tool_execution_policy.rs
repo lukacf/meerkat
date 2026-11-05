@@ -3057,6 +3057,9 @@ pub(crate) mod tests {
             /// The work's own publication sequence, odd while an owner
             /// change is in progress.
             sequence: AtomicU64,
+            /// How long the change in progress stays held once a
+            /// preparation first meets it (`None`: held for good).
+            hold: Mutex<Option<Duration>>,
             /// Preparations refused to rebuild while a change was in
             /// progress.
             refused_in_change: AtomicUsize,
@@ -3065,17 +3068,13 @@ pub(crate) mod tests {
             entries: Mutex<Vec<(u64, OperationEntryBoundary)>>,
         }
 
-        /// Begin one owner change on the publication of `facts`, completed
-        /// by another thread after `hold`, or never when `None`.
-        fn begin_owner_change(facts: &Arc<OwnerChangeFacts>, hold: Option<Duration>) {
-            let odd = facts.sequence.fetch_add(1, Ordering::SeqCst) + 1;
-            if let Some(hold) = hold {
-                let facts = Arc::clone(facts);
-                std::thread::spawn(move || {
-                    std::thread::sleep(hold);
-                    facts.sequence.store(odd + 1, Ordering::SeqCst);
-                });
-            }
+        /// Begin one owner change on the publication of `facts`. Another
+        /// thread completes it `hold` after a preparation first meets it in
+        /// progress, so a staging that reads the publication after the
+        /// change began always meets it; `None` holds it for good.
+        fn begin_owner_change(facts: &OwnerChangeFacts, hold: Option<Duration>) {
+            *facts.hold.lock().unwrap() = hold;
+            facts.sequence.fetch_add(1, Ordering::SeqCst);
         }
 
         /// A work owner whose decisions carry `tier`. While an owner change
@@ -3110,6 +3109,17 @@ pub(crate) mod tests {
                 let at = self.facts.sequence.load(Ordering::SeqCst);
                 if at % 2 == 1 {
                     self.facts.refused_in_change.fetch_add(1, Ordering::SeqCst);
+                    // The first preparation that meets the change starts its
+                    // hold: another thread completes the change that long
+                    // after.
+                    let hold = self.facts.hold.lock().unwrap().take();
+                    if let Some(hold) = hold {
+                        let facts = Arc::clone(&self.facts);
+                        std::thread::spawn(move || {
+                            std::thread::sleep(hold);
+                            facts.sequence.fetch_add(1, Ordering::SeqCst);
+                        });
+                    }
                     return Err(
                         OperationRefused::new(OperationRefusalKind::ReprepareRequired).into(),
                     );
@@ -3210,8 +3220,9 @@ pub(crate) mod tests {
         }
 
         /// An adapter below the execution policy gate: it begins an owner
-        /// change held for `hold` (never completed when `None`), then hands
-        /// the call to its leaf with the context the gate staged.
+        /// change held for `hold` once a preparation meets it (for good when
+        /// `None`), then hands the call to its leaf with the context the gate
+        /// staged.
         struct BeginsOwnerChange {
             leaf: Arc<WaitingEntryLeaf>,
             facts: Arc<OwnerChangeFacts>,
@@ -3438,12 +3449,12 @@ pub(crate) mod tests {
 
         /// R1 work behind the call-level execution policy gate. The adapter
         /// below the gate begins an owner change after the gate staged the
-        /// call, and another thread completes it 30 ms later. The leaf's
-        /// waiting effect entry waits it out within the dispatch attempt's
-        /// bounds (one settled wait, traced at site `tool_entry`), stages
-        /// again and enters once, under the decision prepared after the
-        /// change: the body runs exactly once, and the effect entry is
-        /// recorded once, for that decision.
+        /// call, and another thread completes it 30 ms after the leaf's
+        /// effect entry first meets it. The leaf's waiting effect entry waits
+        /// it out within the dispatch attempt's bounds (one settled wait,
+        /// traced at site `tool_entry`), stages again and enters once, under
+        /// the decision prepared after the change: the body runs exactly
+        /// once, and the effect entry is recorded once, for that decision.
         ///
         /// RED with the synchronous `enter_reviewed_effect_held` at the leaf:
         /// the entry meets the change in progress and refuses to rebuild,

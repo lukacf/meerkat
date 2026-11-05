@@ -3,6 +3,8 @@
 //! token is a service, a token that names no human is a token principal,
 //! and a request without a verified token on an open Console is anonymous.
 
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use super::console_human_admission_tests::{BOB, state};
 use super::console_token_lapse_tests::{console_rpc_as, human_claims, now_seconds, token};
 use super::*;

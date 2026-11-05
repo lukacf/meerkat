@@ -41,6 +41,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   before it is sent, which is still refused at once. A refusal after part
   of the call ran still says nothing about whether it ran.
 
+- A reviewed install refused that way at its shared setup step, after its
+  review but before anything was sent, can now be retried. The install is
+  recorded as failed rather than uncertain, and its checked installation
+  stays available, so a fresh install of it asks for its own review. A
+  refusal without `tool_invoked: false` still leaves the install uncertain
+  and refuses its retry.
+
+- A Find no longer fails as temporarily unavailable (`tool_unavailable`)
+  when it reads its setup helper's admission while another original's
+  first binding is changing the shared authorization. The read waits out
+  that change within the owner-change bound and is made again. With no
+  change in progress the refusal still answers at once.
+
 - A Find no longer fails as temporarily unavailable (`tool_unavailable`)
   while another original's Find is writing the shared source state. Its
   setup helper admission waits for that write within the owner-change bound;

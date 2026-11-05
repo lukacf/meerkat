@@ -283,12 +283,11 @@ impl Server {
             }) {
                 return notice.clone();
             }
-            if self.next_message(deadline).is_none() {
-                panic!(
-                    "the connection presented no {decision_id}; its notices: {:?}",
-                    self.notices
-                );
-            }
+            assert!(
+                self.next_message(deadline).is_some(),
+                "the connection presented no {decision_id}; its notices: {:?}",
+                self.notices
+            );
         }
     }
 
@@ -489,7 +488,7 @@ fn each_page_the_client_lists_presents_its_own_decisions() {
     // Each decision was presented once, on the page that listed it.
     let mut shown = presented_ids(&server.notices);
     shown.sort();
-    let mut every = held.clone();
+    let mut every = held;
     every.sort();
     assert_eq!(shown, every);
 }

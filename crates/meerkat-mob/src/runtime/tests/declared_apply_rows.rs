@@ -1096,6 +1096,72 @@ async fn candidate_apply_writes_nothing_and_answers_every_identity_typed() {
     ));
 }
 
+/// A candidate composition over a store a host filled before identity
+/// entries existed reports, for each listed member, the verdict the
+/// authoritative apply gives it once its adoption decided the member: the
+/// declaration carries the observation the adoption decided on, so MobMachine
+/// decides on the basis that adoption gives. A legacy member with both marks
+/// is kept (`would_be` `Kept`), one the roster moves to another role with no
+/// migration declared is held (`RoleMigrationHeld`), and a raw member with
+/// no mark keeps the name a worker's (`NameHeldByWorker`). The candidate
+/// adopts nothing and writes nothing.
+///
+/// RED (`RED-B-shell-drops-observation.patch`): the declaration carries no
+/// observation: both legacy members report `NameHeldByWorker`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_candidate_reports_a_listed_legacy_members_verdict_after_its_adoption() {
+    let mut mob = ApplyMob::new("apply-candidate-legacy").await;
+    for spec in [
+        durably_marked(identity_labelled("legacy", "legacy")),
+        durably_marked(identity_labelled("moved", "moved")),
+        worker_spec("raw"),
+    ] {
+        mob.handle
+            .spawn_spec(spec)
+            .await
+            .expect("a host's member, seated before identity entries existed");
+    }
+    mob.restart_as(MobCompositionAuthority::NonAuthoritative)
+        .await;
+    let journal = mob.journal().await.len();
+
+    let outcome = mob
+        .apply(DeclaredRoster::partial([
+            declared("legacy"),
+            declared_as("moved", "lead", crate::MobRuntimeMode::TurnDriven),
+            declared("raw"),
+        ]))
+        .await;
+    for (name, would_be) in [
+        ("legacy", DeclaredEntryVerdict::Kept),
+        ("moved", DeclaredEntryVerdict::RoleMigrationHeld),
+        ("raw", DeclaredEntryVerdict::NameHeldByWorker),
+    ] {
+        assert!(
+            matches!(
+                answer(&outcome, name),
+                DeclaredEntryOutcome::Refused {
+                    refusal: DeclaredEntryRefusal::NonAuthoritative { would_be: answered }
+                } if *answered == would_be
+            ),
+            "{name}: {outcome:?}"
+        );
+    }
+    assert_eq!(
+        mob.journal().await.len(),
+        journal,
+        "a candidate writes no row"
+    );
+    for name in ["legacy", "moved", "raw"] {
+        assert!(mob.is_member(name).await, "{name} keeps its member");
+        assert_eq!(
+            mob.standing(name),
+            None,
+            "{name}: a candidate adopts nothing"
+        );
+    }
+}
+
 /// Apply a complete roster of `members` declared identities, restart, and
 /// apply the same roster again: the second apply answers every identity
 /// `Kept`, in chunks of `chunk` identities (the mob's override of

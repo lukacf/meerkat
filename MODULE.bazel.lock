@@ -567,7 +567,7 @@
           "FILE:@@//meta/crates/meerkat-meta/Cargo.toml fba3bf677e3736ace600eaa3bdf454b7b1cfded7b2032dd3c2418f9a76ecace5",
           "FILE:@@//meta/crates/meta-extension-state/Cargo.toml fdf6fe0cc5bd181c60fd5577390aa1007de1a4d8501a84247f519519bc431898",
           "FILE:@@//meta/crates/meta-store-conformance/Cargo.toml fdc91862d557a2d6c07116db35fa92d357867b8a5bc6de136eaf4d7bc92866c0",
-          "FILE:@@//connect/crates/meerkat-connect/Cargo.toml 28a17231ff53a8270a79cf0d8e2f72849e819d8f1d2945b7dcddc98a1927948e",
+          "FILE:@@//connect/crates/meerkat-connect/Cargo.toml a1fd5659ce116fb2df6264619a9e3b9e2172a9c6f0df0cfcc307cf458930c6f6",
           "FILE:@@//connect/crates/meerkat-toolkit/Cargo.toml 194256cf2876ec9e4dc355e1434e2170d50707689559101c93c74c83e3179404",
           "FILE:@@//connect/crates/toolkit-catalog/Cargo.toml dd8488c333ade9acc85df1ce2d7980dfb170526fc4465c578b07f5a0c7aae3d3",
           "FILE:@@//connect/crates/toolkit-package/Cargo.toml 98d981f580542813fa06b61070a81c4db78df43fb89c16db11cb0b4b88409664",

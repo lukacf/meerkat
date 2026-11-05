@@ -17,6 +17,7 @@ release = false
 name = "toolkit_gateway"
 path = "src/bin/toolkit_gateway.rs"
 required-features = ["console"]
+doc = false
 
 [features]
 default = []

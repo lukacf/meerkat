@@ -3501,6 +3501,162 @@ async fn the_governed_pipe_presents_and_decides_as_its_operator() {
     finish_scenario(result, cleanup_failures);
 }
 
+/// The method names an `initialize` result lists.
+#[cfg(feature = "mcp")]
+fn listed_methods(initialized: &Value) -> Vec<String> {
+    initialized["methods"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a method list: {initialized}"))
+        .iter()
+        .map(|method| method.as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Both stdio catalogs pin the decision methods their connections serve.
+/// The governed pipe, whose operator decides durable decisions, lists
+/// `decision/list` and `decision/decide` in its `initialize` answer. A plain
+/// stdio connection answers `initialize` from its router, which lists
+/// `decision/list` and keeps `decision/decide` out of the catalog even with
+/// the connection's operator attached.
+#[cfg(feature = "mcp")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_governed_pipe_catalog_lists_decision_decide_and_plain_stdio_does_not() {
+    use meerkat::governed_realm::stock::{StockGovernance, StockPrincipals, govern_stock_realm};
+    use meerkat::governed_realm::{RealmGovernance, open_governed_realm_persistence_with_provider};
+    const REALM: &str = "stock-decision-catalog";
+    const PLAIN_REALM: &str = "plain-decision-catalog";
+    let mut http = Server::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let open = |governance: RealmGovernance| {
+        open_governed_realm_persistence_with_provider(
+            &meerkat::DiskStorageProvider,
+            root.path(),
+            REALM,
+            Some(meerkat_store::RealmBackend::Sqlite),
+            None,
+            None,
+            governance,
+        )
+    };
+    drop(open(RealmGovernance::Ungoverned).await.unwrap());
+    let realm = RealmId::parse(REALM).unwrap();
+    let principals = StockPrincipals::for_user(&realm, 4245).unwrap();
+    govern_stock_realm(root.path(), REALM, &principals)
+        .await
+        .expect("governed");
+    let governance = StockGovernance::new(realm.clone(), principals);
+    let (_, bundle) = open(RealmGovernance::Stock(Arc::clone(&governance)))
+        .await
+        .unwrap();
+    let client = http_client_in(&http, REALM);
+    let selected = client.controller_model_selection().unwrap();
+    let (config, _) = governed_client_config(&http, &selected, &bundle).await;
+    let setup = stock::stock_governed_jsonl_setup_reviewed(
+        &governance,
+        config,
+        bundle,
+        client,
+        Vec::new(),
+        None,
+        &AgentFactory::minimal(),
+    )
+    .await
+    .expect("the stock host's reviewed setup");
+    let (client_io, server_io) = tokio::io::duplex(1 << 20);
+    let (r, w) = tokio::io::split(server_io);
+    let retirement = consent_retirement(&setup);
+    let (serving, _runtime) =
+        governed_serving(BufReader::new(r), w, setup, None, retirement).expect("construct");
+    let server_task = tokio::spawn(serving);
+    let (r, mut w) = tokio::io::split(client_io);
+    let mut r = BufReader::new(r);
+    let scenario = async {
+        let mut notices = Vec::new();
+        send(
+            &mut w,
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        )
+        .await;
+        let initialized = response_with_decision_notices(&mut r, 1, &mut notices).await;
+        let governed = listed_methods(&initialized["result"]);
+        assert!(
+            governed.iter().any(|method| method == "decision/list"),
+            "{governed:?}"
+        );
+        assert!(
+            governed
+                .iter()
+                .any(|method| method == crate::router::DECISION_DECIDE_METHOD),
+            "{governed:?}"
+        );
+
+        // A plain stdio connection's router, with the connection's operator.
+        let plain_root = tempfile::tempdir().unwrap();
+        let (_, plain_bundle) = meerkat::open_realm_persistence_in(
+            plain_root.path(),
+            PLAIN_REALM,
+            Some(meerkat_store::RealmBackend::Sqlite),
+            None,
+        )
+        .await
+        .unwrap();
+        let plain_runtime = Arc::new(
+            crate::session_runtime::SessionRuntime::new(
+                AgentFactory::minimal(),
+                Config::default(),
+                4,
+                plain_bundle,
+                crate::router::NotificationSink::noop(),
+            )
+            .unwrap(),
+        );
+        let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
+            meerkat_core::MemoryConfigStore::new(Config::default(), meerkat_models::canonical()),
+        );
+        let (operator_notices, _unread) = tokio::sync::mpsc::channel(1);
+        let operator = crate::handlers::decision::operator::DecisionOperator::for_local_operator(
+            &RealmId::parse(PLAIN_REALM).unwrap(),
+            operator_notices,
+        )
+        .expect("this process's user operates the connection");
+        let router = crate::router::MethodRouter::new(
+            plain_runtime,
+            config_store,
+            crate::router::NotificationSink::noop(),
+        )
+        .unwrap()
+        .with_decision_operator(Arc::new(operator));
+        let answer = router
+            .dispatch(crate::protocol::RpcRequest {
+                jsonrpc: "2.0".into(),
+                id: Some(RpcId::Num(1)),
+                method: "initialize".into(),
+                params: None,
+            })
+            .await
+            .expect("an initialize answer");
+        let plain: Value =
+            serde_json::from_str(answer.result.as_ref().expect("a result").get()).unwrap();
+        let plain = listed_methods(&plain);
+        assert!(
+            plain.iter().any(|method| method == "decision/list"),
+            "{plain:?}"
+        );
+        assert!(
+            !plain
+                .iter()
+                .any(|method| method == crate::router::DECISION_DECIDE_METHOD),
+            "{plain:?}"
+        );
+    };
+    let result =
+        std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_mins(1), scenario))
+            .catch_unwind()
+            .await;
+    let cleanup_failures = cleanup_jsonl(r, &mut w, server_task, &mut http).await;
+    finish_scenario(result, cleanup_failures);
+}
+
 /// Process termination ends a governed connection that is still open, as it
 /// does the ordinary stdio server: it stops reading, drains and returns.
 #[cfg(feature = "mcp")]

@@ -67,14 +67,13 @@ pub enum ToolState {
 /// Delivery state shown on a [`Block::Queued`] placeholder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueuedLabel {
-    /// Waiting for the integrator to accept it.
+    /// Waiting for the runtime to admit it.
     Queued,
-    /// In the agent's inbox, waiting for the next turn boundary.
+    /// Admitted; written into the turn at its next model boundary (or run
+    /// as a follow-up turn).
     Delivering,
-    /// Could not be injected; sent when the turn ends.
+    /// Held by the UI; sent when the current work ends.
     Deferred,
-    /// Being pulled back into the editor.
-    Recalling,
 }
 
 impl QueuedLabel {
@@ -85,7 +84,6 @@ impl QueuedLabel {
             Self::Queued => "queued",
             Self::Delivering => "delivering…",
             Self::Deferred => "will send after this turn",
-            Self::Recalling => "recalling…",
         }
     }
 }
@@ -808,21 +806,19 @@ fn retry_notice(retry: &LlmRetrySchedule) -> String {
 
 /// Notices for the upstream events the transcript has no dedicated block for.
 ///
-/// Rendered as a notice until P1 maps it: steer/queue boundary appends,
-/// model fallback, background jobs, tool-config changes, peer content, run
-/// resumption and request-bounded tool results. Events with no user-facing
-/// meaning (run/hook/interaction lifecycle, accounting disputes, transcript
-/// rewrites, cache breakpoints, reasoning lowering) yield `None`.
+/// Model fallback, background jobs, tool-config changes, peer content, run
+/// resumption and request-bounded tool results become notices. A steered
+/// message's `boundary_append_applied` yields `None`: the runner maps it to
+/// [`super::Msg::SteerDelivered`] and its placeholder becomes the user block.
+/// Events with no user-facing meaning (run/hook/interaction lifecycle,
+/// accounting disputes, transcript rewrites, cache breakpoints, reasoning
+/// lowering) yield `None`.
 fn upstream_notice(event: &AgentEvent) -> Option<(NoticeLevel, String)> {
     let notice = match event {
-        AgentEvent::BoundaryAppendApplied { append_count, .. } => (
-            NoticeLevel::Info,
-            format!("↳ {append_count} message(s) appended to the running turn"),
-        ),
         AgentEvent::BoundaryAppendsDiscarded(discarded) => (
-            NoticeLevel::Warn,
+            NoticeLevel::Info,
             format!(
-                "⚠ {} appended message(s) discarded",
+                "↺ {} message(s) taken back out of the stopped step; the runtime delivers them again",
                 discarded.input_ids.len()
             ),
         ),

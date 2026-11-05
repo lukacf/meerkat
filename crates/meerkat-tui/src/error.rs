@@ -41,6 +41,9 @@ pub enum TuiError {
     /// A session store operation failed.
     #[error("session store error: {0}")]
     Store(#[from] meerkat_store::StoreError),
+    /// Listing or reading the realm's sessions failed.
+    #[error("session store error: {0}")]
+    SessionStore(#[from] meerkat::SessionStoreError),
     /// The provider could not be determined or is not supported.
     #[error("{0}")]
     Provider(String),
@@ -75,6 +78,29 @@ pub enum TuiError {
     /// MCP servers could not be started.
     #[error("MCP: {0}")]
     Mcp(String),
+    /// stdin or stdout is not a terminal; the TUI needs one.
+    #[error(
+        "stdin and stdout must be a terminal; rkat-tui is interactive (use `rkat run` for scripts)"
+    )]
+    NotATerminal,
+    /// The runtime-backed session service could not be composed.
+    #[error("failed to compose the session runtime: {0}")]
+    Composition(#[from] meerkat::surface::RuntimeBackedCompositionError),
+    /// A session could not be made live on the runtime.
+    #[error("failed to open the session on the runtime: {0}")]
+    Materialize(#[from] meerkat::surface::SurfaceRuntimeMaterializeError),
+    /// The session runtime refused or failed an operation.
+    #[error("session runtime error: {0}")]
+    Runtime(#[from] meerkat_runtime::RuntimeDriverError),
+    /// The session's event stream could not be opened.
+    #[error("cannot follow the session's events: {0}")]
+    EventStream(#[from] meerkat_core::comms::StreamError),
+    /// The runtime refused an input.
+    #[error("the runtime refused the input: {0}")]
+    InputRejected(String),
+    /// The terminal UI failed.
+    #[error(transparent)]
+    Ui(#[from] crate::ui::UiError),
 }
 
 impl TuiError {
@@ -97,13 +123,21 @@ impl TuiError {
             | Self::MissingApiKey { .. }
             | Self::SessionRef { .. }
             | Self::Endpoint(_)
-            | Self::McpConfig(_) => 2,
+            | Self::McpConfig(_)
+            | Self::NotATerminal => 2,
             Self::Io { .. }
             | Self::Persistence(_)
             | Self::Store(_)
+            | Self::SessionStore(_)
             | Self::LlmClient(_)
             | Self::Session(_)
-            | Self::Mcp(_) => 1,
+            | Self::Mcp(_)
+            | Self::Composition(_)
+            | Self::Materialize(_)
+            | Self::Runtime(_)
+            | Self::EventStream(_)
+            | Self::InputRejected(_)
+            | Self::Ui(_) => 1,
         }
     }
 }

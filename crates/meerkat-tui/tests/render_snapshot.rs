@@ -268,8 +268,8 @@ fn history_search_prompt_line() {
 }
 
 #[test]
-fn queued_block_status_count_and_recall_hint() {
-    use meerkat_tui::delivery::PendingId;
+fn queued_block_status_count_and_hints() {
+    use meerkat_tui::delivery::{PendingId, SteerFailure};
     use ratatui::crossterm::event::{KeyCode, KeyEvent};
     let mut app = sample_app();
     let now = Instant::now();
@@ -286,8 +286,9 @@ fn queued_block_status_count_and_recall_hint() {
         rows.iter().any(|r| r == "› also fix tests  · queued"),
         "rows: {rows:#?}"
     );
+    // Steered into the runtime: not recallable, Esc interrupts.
     assert!(
-        rows[9].contains("Esc recall all · ↑ edit last queued"),
+        rows[9].contains("Enter queues · Esc/Ctrl-C interrupts"),
         "input title: {:?}",
         rows[9]
     );
@@ -297,7 +298,7 @@ fn queued_block_status_count_and_recall_hint() {
         rows[11]
     );
 
-    app.update(Msg::InjectAck {
+    app.update(Msg::SteerAck {
         id: PendingId(1),
         result: Ok(()),
     });
@@ -312,6 +313,22 @@ fn queued_block_status_count_and_recall_hint() {
         .find(|&y| buffer[(0, y)].symbol() == "›" && buffer[(2, y)].symbol() == "a")
         .expect("queued row");
     assert!(buffer[(2, y)].modifier.contains(Modifier::DIM));
+
+    // A message the UI holds can be recalled.
+    for c in "and docs".chars() {
+        app.update(Msg::Key(KeyEvent::from(KeyCode::Char(c))));
+    }
+    app.update_at(Msg::Key(KeyEvent::from(KeyCode::Enter)), now);
+    app.update(Msg::SteerAck {
+        id: PendingId(2),
+        result: Err(SteerFailure::NotRunning),
+    });
+    let rows = render_sized(&mut app, now, 100);
+    assert!(
+        rows[9].contains("Esc recall all · ↑ edit last queued"),
+        "input title: {:?}",
+        rows[9]
+    );
 }
 
 #[test]

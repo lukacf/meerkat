@@ -1,1 +1,378 @@
-//! Session handle: create, resume, turns, interrupt.
+//! A handle on one live session of the runtime-backed service.
+//!
+//! The session lives in the [`TuiService`] (its actor, transcript, stores)
+//! and is driven through the [`MeerkatMachine`] (its runtime registration):
+//!
+//! - [`SessionHandle::create`] / [`SessionHandle::resume`] make a session
+//!   live with [`materialize_session_with_reserved_admission_and_actor_slot`],
+//!   which prepares the session's runtime bindings
+//!   (`RuntimeBuildMode::SessionOwned`), builds the agent through the
+//!   factory and attaches a [`PersistentRuntimeExecutor`] whose terminal
+//!   publication is bound to the service-minted actor slot.
+//! - Turns are runtime inputs: [`SessionHandle::submit`] admits an
+//!   `Input::Prompt` with `RuntimeTurnMetadata { handling_mode }` and a
+//!   caller idempotency key through
+//!   [`MeerkatMachine::accept_input_with_completion`]. `Queue` runs it as a
+//!   turn (behind any running one); `Steer` delivers it to the running turn
+//!   at its next model boundary, or as one follow-up turn.
+//! - [`SessionHandle::interrupt`] stops the current run with
+//!   [`MeerkatMachine::stop_run`] (so steers that joined it are abandoned
+//!   instead of re-running) and cancels the caller's outstanding inputs with
+//!   [`MeerkatMachine::cancel_input_if_present`].
+//! - [`SessionHandle::events`] follows every event of the session
+//!   (`SessionService::subscribe_session_events`), across runs.
+
+pub mod resolve;
+
+use std::sync::Arc;
+
+use meerkat::surface::{
+    PersistentRuntimeExecutor, materialize_session_with_reserved_admission_and_actor_slot,
+};
+use meerkat_core::comms::EventStream;
+use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
+use meerkat_core::service::{
+    CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions,
+};
+use meerkat_core::{
+    AgentToolDispatcher, ContentInput, HandlingMode, InputId, Provider, Session, SessionId,
+    SystemPromptOverride,
+};
+use meerkat_runtime::completion::CompletionHandle;
+use meerkat_runtime::{AcceptOutcome, IdempotencyKey, Input, MeerkatMachine, PromptInput};
+
+use crate::bootstrap::{CODING_PERSONA, Runtime, TuiService};
+use crate::error::TuiError;
+
+pub use resolve::{list_sessions, resolve_session_ref};
+
+/// Reason recorded with every interrupt and cancellation the TUI requests.
+const INTERRUPT_REASON: &str = "rkat-tui: interrupted by the user";
+
+/// Options for [`SessionHandle::create`] and [`SessionHandle::resume`].
+#[derive(Default, Clone)]
+pub struct SessionOptions {
+    /// Extra tools (file tools, notes) composed into the agent's dispatcher.
+    pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    /// Instruction sections appended after [`CODING_PERSONA`].
+    pub additional_instructions: Vec<String>,
+    /// Model of a fresh session, else the runtime's. A resumed session keeps
+    /// its stored model (switching models is a later phase).
+    pub model: Option<String>,
+    /// Provider of [`SessionOptions::model`], else the runtime's.
+    pub provider: Option<Provider>,
+}
+
+/// An input the runtime accepted.
+#[derive(Debug)]
+pub struct Admission {
+    /// The accepted input (the existing one when deduplicated).
+    pub input_id: InputId,
+    /// Resolves when the input reaches its terminal; `None` when it already
+    /// did during admission.
+    pub completion: Option<CompletionHandle>,
+}
+
+/// A live session plus the model it runs on.
+#[derive(Clone)]
+pub struct SessionHandle {
+    service: Arc<TuiService>,
+    machine: Arc<MeerkatMachine>,
+    id: SessionId,
+    model: String,
+    provider: Provider,
+}
+
+impl std::fmt::Debug for SessionHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionHandle")
+            .field("id", &self.id)
+            .field("model", &self.model)
+            .field("provider", &self.provider)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SessionHandle {
+    /// Create a fresh session and make it live (no turn runs).
+    ///
+    /// # Errors
+    ///
+    /// [`TuiError::Session`] / [`TuiError::Materialize`] when the agent cannot
+    /// be built or the runtime refuses the registration.
+    pub async fn create(runtime: &Runtime, options: SessionOptions) -> Result<Self, TuiError> {
+        let session = Session::new();
+        let model = options
+            .model
+            .clone()
+            .unwrap_or_else(|| runtime.model.clone());
+        let provider = options.provider.unwrap_or(runtime.provider);
+        let mut build = build_options(options, provider);
+        build.mint_session_with_id(session.id().clone());
+        Self::open(runtime, session, model, provider, build).await
+    }
+
+    /// Resume a persisted session of the realm and make it live.
+    ///
+    /// # Errors
+    ///
+    /// [`TuiError::SessionRef`] when the session does not exist, otherwise as
+    /// [`SessionHandle::create`].
+    pub async fn resume(
+        runtime: &Runtime,
+        id: &SessionId,
+        options: SessionOptions,
+    ) -> Result<Self, TuiError> {
+        let session = runtime
+            .service
+            .load_authoritative_session(id)
+            .await?
+            .ok_or_else(|| TuiError::SessionRef {
+                reference: id.to_string(),
+                reason: "session not found in this realm".to_string(),
+            })?;
+        let (model, provider) = session.session_metadata().map_or_else(
+            || (runtime.model.clone(), runtime.provider),
+            |meta| (meta.model, meta.provider),
+        );
+        let mut build = build_options(options, provider);
+        build.resume_existing_session(session.clone());
+        Self::open(runtime, session, model, provider, build).await
+    }
+
+    async fn open(
+        runtime: &Runtime,
+        session: Session,
+        model: String,
+        provider: Provider,
+        build: SessionBuildOptions,
+    ) -> Result<Self, TuiError> {
+        let id = session.id().clone();
+        let request = CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: model.clone(),
+            prompt: ContentInput::Text(String::new()),
+            system_prompt: SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(build),
+            labels: None,
+        };
+        let admission = runtime.service.reserve_create_session_admission().await?;
+        let service = Arc::clone(&runtime.service);
+        let machine = Arc::clone(&runtime.machine);
+        Box::pin(materialize_session_with_reserved_admission_and_actor_slot(
+            &runtime.service,
+            &runtime.machine,
+            session,
+            request,
+            admission,
+            move |session_id, _attachment, actor_slot| {
+                Box::new(
+                    PersistentRuntimeExecutor::new(service, machine, session_id)
+                        .with_publication_actor_slot(actor_slot),
+                )
+            },
+        ))
+        .await?;
+        Ok(Self {
+            service: Arc::clone(&runtime.service),
+            machine: Arc::clone(&runtime.machine),
+            id,
+            model,
+            provider,
+        })
+    }
+
+    /// Session id.
+    #[must_use]
+    pub fn id(&self) -> &SessionId {
+        &self.id
+    }
+
+    /// Model the session runs on.
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Provider of [`SessionHandle::model`].
+    #[must_use]
+    pub fn provider(&self) -> Provider {
+        self.provider
+    }
+
+    /// Follow every event of the session, across runs, from now on.
+    ///
+    /// # Errors
+    ///
+    /// [`TuiError::EventStream`] when the session is not live.
+    pub async fn events(&self) -> Result<EventStream, TuiError> {
+        Ok(self.service.subscribe_session_events(&self.id).await?)
+    }
+
+    /// Start a turn: a `Queue` input, run behind any running turn.
+    ///
+    /// # Errors
+    ///
+    /// See [`SessionHandle::submit`].
+    pub async fn start_turn(&self, text: &str) -> Result<Admission, TuiError> {
+        self.submit(text, HandlingMode::Queue).await
+    }
+
+    /// Steer a message into the running turn: a durable `Steer` input,
+    /// written at the turn's next model boundary as a user message (or run
+    /// as one follow-up turn when no boundary opens in time).
+    ///
+    /// # Errors
+    ///
+    /// See [`SessionHandle::submit`].
+    pub async fn steer(&self, text: &str) -> Result<Admission, TuiError> {
+        self.submit(text, HandlingMode::Steer).await
+    }
+
+    /// Admit `text` as a user prompt with `handling_mode`.
+    ///
+    /// The prompt carries only its handling mode as turn metadata, which
+    /// keeps a steer in the runtime's durable delivery class, and a caller
+    /// idempotency key derived from its fresh input id.
+    ///
+    /// # Errors
+    ///
+    /// [`TuiError::Runtime`] when the runtime fails the admission and
+    /// [`TuiError::InputRejected`] when it rejects the input.
+    pub async fn submit(
+        &self,
+        text: &str,
+        handling_mode: HandlingMode,
+    ) -> Result<Admission, TuiError> {
+        let mut prompt = PromptInput::new(
+            text,
+            Some(RuntimeTurnMetadata {
+                handling_mode: Some(handling_mode),
+                ..RuntimeTurnMetadata::default()
+            }),
+        );
+        let key = format!("rkat-tui:{}", prompt.header.id);
+        prompt.header.idempotency_key = Some(
+            IdempotencyKey::caller(&key).map_err(|err| TuiError::InputRejected(err.to_string()))?,
+        );
+        let (outcome, completion) = self
+            .machine
+            .accept_input_with_completion(&self.id, Input::Prompt(prompt))
+            .await?;
+        let input_id = match outcome {
+            AcceptOutcome::Accepted { input_id, .. } => input_id,
+            AcceptOutcome::Deduplicated { existing_id, .. } => existing_id,
+            AcceptOutcome::Rejected { reason } => {
+                return Err(TuiError::InputRejected(format!("{reason:?}")));
+            }
+            other => {
+                return Err(TuiError::InputRejected(format!(
+                    "unexpected admission outcome: {other:?}"
+                )));
+            }
+        };
+        Ok(Admission {
+            input_id,
+            completion,
+        })
+    }
+
+    /// Interrupt: stop the current run, then cancel each of `outstanding`
+    /// (oldest first) that has not reached its terminal.
+    ///
+    /// Stopping the run (rather than only interrupting it) abandons the
+    /// steers that joined it instead of returning them to their lane for a
+    /// follow-up turn. A steer still queued is abandoned by the cancel; one a
+    /// follow-up run already picked up has that run interrupted.
+    ///
+    /// # Errors
+    ///
+    /// [`TuiError::Runtime`] when the runtime fails the stop or a cancel.
+    pub async fn interrupt(&self, outstanding: &[InputId]) -> Result<(), TuiError> {
+        if let Some(run_id) = self.machine.current_run(&self.id).await {
+            let receipt = self
+                .machine
+                .stop_run(&self.id, &run_id, INTERRUPT_REASON)
+                .await?;
+            tracing::debug!(?receipt, "stopped the current run");
+        }
+        for input_id in outstanding {
+            self.machine
+                .cancel_input_if_present(&self.id, input_id, INTERRUPT_REASON)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Cancel one input (abandoned while queued; its run interrupted when it
+    /// already runs).
+    ///
+    /// # Errors
+    ///
+    /// [`TuiError::Runtime`] when the runtime fails the cancel.
+    pub async fn cancel_input(&self, input_id: &InputId) -> Result<bool, TuiError> {
+        Ok(self
+            .machine
+            .cancel_input_if_present(&self.id, input_id, INTERRUPT_REASON)
+            .await?)
+    }
+
+    /// The session's committed transcript and metadata.
+    ///
+    /// # Errors
+    ///
+    /// [`TuiError::Session`] when the stores cannot be read,
+    /// [`TuiError::SessionRef`] when the session is gone.
+    pub async fn read(&self) -> Result<Session, TuiError> {
+        self.service
+            .load_authoritative_session(&self.id)
+            .await?
+            .ok_or_else(|| TuiError::SessionRef {
+                reference: self.id.to_string(),
+                reason: "session not found in this realm".to_string(),
+            })
+    }
+
+    /// Take the session off the runtime: its registration is unregistered
+    /// until terminal (which joins its actor). The session stays persisted
+    /// and can be resumed.
+    ///
+    /// # Errors
+    ///
+    /// [`TuiError::Runtime`] when the teardown fails.
+    pub async fn retire(&self) -> Result<(), TuiError> {
+        if let Some(registration) = self
+            .machine
+            .current_session_registration_witness(&self.id)
+            .await
+        {
+            self.machine
+                .unregister_session_registration_until_terminal_if_current(&registration)
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+/// Build options shared by fresh and resumed sessions: the persona plus the
+/// caller's instruction sections, and the external tools.
+fn build_options(options: SessionOptions, provider: Provider) -> SessionBuildOptions {
+    let SessionOptions {
+        external_tools,
+        additional_instructions,
+        ..
+    } = options;
+    let mut instructions = Vec::with_capacity(1 + additional_instructions.len());
+    instructions.push(CODING_PERSONA.to_string());
+    instructions.extend(additional_instructions);
+    SessionBuildOptions {
+        provider: Some(provider),
+        external_tools,
+        additional_instructions: Some(instructions),
+        ..SessionBuildOptions::default()
+    }
+}

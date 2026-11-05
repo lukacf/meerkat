@@ -70,7 +70,7 @@ phases:
         done_when: "Their unit tests pass and the machete ignore list in Cargo.toml no longer names their dependencies."
   - id: 1
     title: "Session On The Runtime Path"
-    status: pending
+    status: done
     reviewers: [rct-guardian, integration-sheriff, spec-auditor]
     verification_commands:
       - "./scripts/repo-cargo nextest run -p meerkat-tui"
@@ -78,17 +78,17 @@ phases:
       - id: P1-T001
         spec_id: CONTRACT-002
         text: "Bootstrap the realm, config and PersistentSessionService with MeerkatMachine bindings."
-        done: false
+        done: true
         done_when: "A headless test creates a session through the real service."
       - id: P1-T002
         spec_id: REQ-002
         text: "Submit turns through runtime input admission with Queue and Steer handling."
-        done: false
+        done: true
         done_when: "The headless test observes a queued and a steered turn complete."
       - id: P1-T003
         spec_id: REQ-003
         text: "Resume and continue sessions."
-        done: false
+        done: true
         done_when: "The headless test resumes the session it created."
   - id: 2
     title: "Approval Gate"

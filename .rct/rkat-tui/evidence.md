@@ -25,3 +25,26 @@ timestamp, and output excerpts.
 - `make check-rust-release-config`: OK (6 crate-level tests)
 - Left for P2: `ApprovalEngine` wiring, `LlmClassifier` on `meerkat-llm-core`.
 - `make verify-bazel-locks`: all five gates pass after `make buildbuddy-lock-update` and BUILD regeneration.
+
+## Phase 1 (session on the runtime path) — 2026-11-05
+
+- Base commit: `8a99d61a38` (P0), uncommitted working tree
+- Lane: `RUST_LANE_ID=tui-p1`
+- `./scripts/repo-cargo fmt -p meerkat-tui`: clean
+- `./scripts/repo-cargo clippy -p meerkat-tui --all-targets --all-features -- -D warnings`: exit 0
+- `./scripts/repo-cargo nextest run -p meerkat-tui`: 429 run, 429 passed, 3 skipped (live-API);
+  lib 368, approval_policy 15, file_tools 22, memory_tools 2, render_snapshot 11, integrator 8
+- `nextest run -p meerkat-tui --test integrator` repeated 5x: 8/8 each time (~1.3 s)
+- integrator (real `PersistentSessionService` + `MeerkatMachine`, scripted client):
+  turn completes (P1-T001); `Queue` prompt behind a running turn and a `Steer`
+  applied at a `read_file` tool boundary (`boundary_append_applied`, one run,
+  steer after the tool result) (P1-T002); interrupt returns the steer as
+  undelivered and it never reaches the model; `/new` + `/resume <id>`
+  in-process, `last` resolution, `-c` and `--resume <prefix>` across
+  lifetimes, workspace copied to a new path still resumes (P1-T003)
+- `./scripts/repo-cargo run -p meerkat-tui --bin rkat-tui -- --help </dev/null`: exit 0
+- `./scripts/repo-cargo run -p meerkat-tui --bin rkat-tui -- --realm-backend memory -w <dir> </dev/null`:
+  exit 2 in 0.3 s, "stdin and stdout must be a terminal…" (no bootstrap)
+- `node scripts/generate-bazel-rust-builds.mjs`: `crates/meerkat-tui/BUILD.bazel` regenerated;
+  the root `BUILD.bazel` also needs `//crates/meerkat-tui:integrator_test` in its
+  test suite (left to the pre-commit hook; outside this phase's edit scope)

@@ -19,7 +19,7 @@ pub mod search;
 pub mod selection;
 pub mod transcript;
 
-use crate::delivery::{CONTINUATION_PROMPT, DeliveryReport, InjectFailure, PendingId};
+use crate::delivery::{PendingId, SteerFailure};
 use crate::models::ModelGroup;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -93,8 +93,8 @@ pub enum InputMode {
     Search(HistorySearch),
 }
 
-/// Result of a finished turn, reported by the integrator.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Result of a finished turn, reported by the runner.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnSummary {
     /// Final assistant text.
     pub text: String,
@@ -104,22 +104,26 @@ pub struct TurnSummary {
     pub output_tokens: u64,
 }
 
-/// Result of a turn plus what happened to messages injected during it.
+/// Result of a turn (the started prompt and every follow-up run the runtime
+/// added for steered messages) plus the steered messages it never delivered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnOutcome {
     /// The turn's result.
     pub result: Result<TurnSummary, String>,
-    /// Delivery status of every message injected during the turn.
-    pub delivery: DeliveryReport,
+    /// Steered messages the runtime ended without writing them into the
+    /// conversation (the turn was interrupted or failed), oldest first. A
+    /// message already shown as delivered can be listed here when its run
+    /// was discarded.
+    pub undelivered: Vec<PendingId>,
 }
 
 impl TurnOutcome {
-    /// An outcome with nothing pending.
+    /// An outcome with nothing undelivered.
     #[must_use]
     pub fn plain(result: Result<TurnSummary, String>) -> Self {
         Self {
             result,
-            delivery: DeliveryReport::default(),
+            undelivered: Vec::new(),
         }
     }
 }
@@ -203,16 +207,19 @@ pub enum Msg {
     Scoped(ScopedAgentEvent),
     /// The turn started by [`Effect::StartTurn`] finished.
     TurnFinished(TurnOutcome),
-    /// The integrator's answer to [`Effect::Inject`].
-    InjectAck {
+    /// The runner's answer to [`Effect::Steer`].
+    SteerAck {
         /// The queued message.
         id: PendingId,
-        /// `Ok` when the message is in the agent's inbox.
-        result: Result<(), InjectFailure>,
+        /// `Ok` when the runtime admitted the message.
+        result: Result<(), SteerFailure>,
     },
-    /// Queued messages pulled back out of the agent's inbox by
-    /// [`Effect::RecallPending`]; these never reached the model.
-    Recalled(Vec<PendingId>),
+    /// The runtime wrote a steered message into the conversation (at a model
+    /// boundary of the running turn, or as a follow-up turn).
+    SteerDelivered(PendingId),
+    /// The runtime discarded a delivered message's application (its step was
+    /// stopped) and holds it again for redelivery.
+    SteerRequeued(PendingId),
     /// A file tool produced a diff.
     Diff {
         /// Tool-use id of the producing call.
@@ -264,17 +271,15 @@ pub enum Effect {
     Interrupt,
     /// Interrupt the running turn and send this prompt next (Ctrl-X Ctrl-S).
     InterruptAndSend(String),
-    /// Deliver a message to the running turn at its next boundary; answered
-    /// with [`Msg::InjectAck`].
-    Inject {
+    /// Steer a message into the running turn (a durable `Steer` input);
+    /// answered with [`Msg::SteerAck`], then [`Msg::SteerDelivered`] or the
+    /// turn's [`TurnOutcome::undelivered`].
+    Steer {
         /// Queue id allocated by the UI.
         id: PendingId,
-        /// Raw user text (the integrator adds the frame).
+        /// Raw user text, sent as an ordinary user message.
         text: String,
     },
-    /// Pull every not-yet-consumed injected message back; answered with
-    /// [`Msg::Recalled`].
-    RecallPending,
     /// Leave the application. The integrator interrupts a running turn,
     /// persists the session and saves undelivered messages before exiting.
     Quit,
@@ -541,9 +546,6 @@ pub struct App {
     pub send_next: Option<String>,
     /// Sequence number of the last primary-stream event processed.
     pub last_seq: u64,
-    /// Continuation turns still allowed for unanswered mid-turn messages;
-    /// reset to 1 whenever a turn starts with user content.
-    pub continuations_left: u8,
     /// Normal editing or history search.
     pub mode: InputMode,
     /// When Ctrl-X was pressed, while a chord is pending.
@@ -559,22 +561,12 @@ pub struct App {
     /// Whether assistant text streamed during the current turn (the turn
     /// summary is shown only when nothing did).
     streamed_text: bool,
-    /// Highest pending id allocated when the last continuation turn started;
-    /// an unanswered message above it was typed during the continuation.
-    continuation_watermark: Option<PendingId>,
-    /// A mid-turn message was recorded but not answered and no continuation
-    /// is left: Enter on an empty editor asks the model to answer it.
-    answer_hint: bool,
-    /// Texts of the messages the last report listed as unanswered.
-    unanswered_texts: Vec<(PendingId, String)>,
     /// Global (cross-workspace) prompt history, oldest first; searched after the
     /// workspace history.
     global_history: Vec<String>,
     /// Search corpus (newest first, deduplicated), built when a search starts.
     search_corpus: Vec<String>,
     pending_escalations: VecDeque<(EscalationId, EscalationPrompt)>,
-    /// Injection failures already announced during the current turn.
-    deferred_notified: Vec<InjectFailure>,
     submitted: Vec<String>,
     running: bool,
     run_first_block: usize,
@@ -606,20 +598,15 @@ impl App {
             pending: PendingQueue::new(),
             send_next: None,
             last_seq: 0,
-            continuations_left: 1,
             mode: InputMode::Normal,
             chord: None,
             compacting: false,
             quit_confirm: None,
             gauge: CompactionGauge::default(),
             streamed_text: false,
-            continuation_watermark: None,
-            answer_hint: false,
-            unanswered_texts: Vec::new(),
             global_history: Vec::new(),
             search_corpus: Vec::new(),
             pending_escalations: VecDeque::new(),
-            deferred_notified: Vec::new(),
             submitted: Vec::new(),
             running: false,
             run_first_block: 0,
@@ -1016,7 +1003,6 @@ impl App {
             Msg::Agent(env) => {
                 self.last_seq = env.seq;
                 match &env.payload {
-                    AgentEvent::TurnStarted { .. } => self.mark_seen(env.seq),
                     AgentEvent::TextDelta { delta, .. } if !delta.is_empty() => {
                         self.streamed_text = true;
                     }
@@ -1050,8 +1036,9 @@ impl App {
             }
             Msg::Scoped(ev) => self.transcript.apply_scoped_event_at(&ev, now),
             Msg::TurnFinished(outcome) => self.turn_finished(outcome, now, &mut fx),
-            Msg::InjectAck { id, result } => self.inject_ack(id, result, now, &mut fx),
-            Msg::Recalled(ids) => self.recalled(&ids, &mut fx),
+            Msg::SteerAck { id, result } => self.steer_ack(id, result, now, &mut fx),
+            Msg::SteerDelivered(id) => self.settle(id),
+            Msg::SteerRequeued(id) => self.requeue(id),
             Msg::Diff {
                 tool_use_id,
                 path,
@@ -1191,13 +1178,13 @@ impl App {
             }
             Action::Escape => {
                 if self.has_recallable() {
-                    self.recall_all(fx);
+                    self.recall_all();
                 } else if self.running {
                     self.interrupt(fx);
                 }
             }
             Action::Edit(EditAction::Up) if self.input.is_empty() && self.has_recallable() => {
-                self.recall_newest(fx);
+                self.recall_newest();
             }
             Action::ToggleReasoning => {
                 self.transcript.toggle_last_reasoning();
@@ -1361,13 +1348,6 @@ impl App {
 
     fn submit(&mut self, now: Instant, fx: &mut Vec<Effect>) {
         if self.input.text().trim().is_empty() {
-            if self.answer_hint && !self.running && !self.compacting {
-                // Ask the model to answer the recorded-but-unanswered message.
-                self.input.clear();
-                self.continuations_left = 0;
-                self.continuation_watermark = Some(self.pending.last_id());
-                self.begin_turn(CONTINUATION_PROMPT.to_string(), false, now, fx);
-            }
             return;
         }
         let raw = self.input.take();
@@ -1398,18 +1378,14 @@ impl App {
         }
     }
 
-    /// Start a turn with user content: resets the continuation budget and
-    /// shows `prompt` as a user block.
+    /// Start a turn with user content, shown as a user block.
     fn start_turn(&mut self, prompt: String, now: Instant, fx: &mut Vec<Effect>) {
-        self.continuations_left = 1;
-        self.continuation_watermark = None;
         self.begin_turn(prompt, true, now, fx);
     }
 
     fn begin_turn(&mut self, prompt: String, user_block: bool, now: Instant, fx: &mut Vec<Effect>) {
         self.run_first_block = self.transcript.len();
         self.streamed_text = false;
-        self.answer_hint = false;
         if user_block {
             self.transcript.push(Block::User {
                 text: prompt.clone(),
@@ -1421,7 +1397,7 @@ impl App {
         fx.push(Effect::StartTurn(prompt));
     }
 
-    /// Enter while a turn runs: queue the message and inject it.
+    /// Enter while a turn runs: queue the message and steer it into the turn.
     fn enqueue(&mut self, text: String, fx: &mut Vec<Effect>) {
         let id = self.pending.alloc_id();
         let block = self.transcript.push(Block::Queued {
@@ -1436,7 +1412,7 @@ impl App {
             block,
         });
         self.scroll.bottom();
-        fx.push(Effect::Inject { id, text });
+        fx.push(Effect::Steer { id, text });
     }
 
     /// Enter while compacting: hold the message until compaction finishes.
@@ -1508,13 +1484,32 @@ impl App {
         }
     }
 
-    /// Show a pending message as delivered (its placeholder becomes a user
-    /// block in place) and keep its text until the post-turn report.
+    /// Show a pending message as delivered: its placeholder becomes a user
+    /// block in place. The text is kept until the turn ends, in case the
+    /// runtime discards the application again.
     fn settle(&mut self, id: PendingId) {
         if let Some(item) = self.pending.settle(id) {
             let (block, text) = (item.block, item.text.clone());
             self.transcript.replace_block(block, Block::User { text });
         }
+    }
+
+    /// The runtime discarded a delivered message's application: show it as
+    /// waiting again.
+    fn requeue(&mut self, id: PendingId) {
+        let Some(item) = self.pending.take_settled(id) else {
+            return;
+        };
+        let state = PendingState::Admitted;
+        self.transcript.replace_block(
+            item.block,
+            Block::Queued {
+                id,
+                text: item.text.clone(),
+                label: state.label(),
+            },
+        );
+        self.pending.push(Pending { state, ..item });
     }
 
     /// Remove transcript blocks (highest index first, so the remaining ids
@@ -1555,160 +1550,72 @@ impl App {
         self.input.set_text(&text);
     }
 
-    /// A `TurnStarted` with `seq`: messages acknowledged before it reached the model.
-    fn mark_seen(&mut self, seq: u64) {
-        let seen: Vec<PendingId> = self
-            .pending
-            .items()
-            .iter()
-            .filter(|p| matches!(p.state, PendingState::Delivering { ack_seq } if seq > ack_seq))
-            .map(|p| p.id)
-            .collect();
-        for id in seen {
-            self.settle(id);
-        }
-    }
-
-    fn inject_ack(
+    fn steer_ack(
         &mut self,
         id: PendingId,
-        result: Result<(), InjectFailure>,
+        result: Result<(), SteerFailure>,
         now: Instant,
         fx: &mut Vec<Effect>,
     ) {
-        let Some((state, text)) = self.pending.get(id).map(|p| (p.state, p.text.clone())) else {
+        let Some(text) = self.pending.get(id).map(|p| p.text.clone()) else {
             return;
         };
-        if state == PendingState::Recalling && result.is_err() {
-            // Never reached the inbox: hand it straight back.
-            let texts = self.withdraw(&[id]);
-            self.prepend_to_editor(texts);
-            return;
-        }
         match result {
-            Ok(()) => {
-                if state == PendingState::Queued {
-                    let ack_seq = self.last_seq;
-                    self.set_pending_state(id, PendingState::Delivering { ack_seq });
-                }
+            Ok(()) => self.set_pending_state(id, PendingState::Admitted),
+            // The turn ended before the message reached the runtime: hold it
+            // for the turn's end (the runner's `TurnFinished` follows).
+            Err(SteerFailure::NotRunning) if self.running => {
+                self.set_pending_state(id, PendingState::Deferred);
             }
-            Err(InjectFailure::NotRunning) if self.running => {
-                fx.push(Effect::Inject { id, text });
-            }
-            Err(InjectFailure::NotRunning) => {
+            Err(SteerFailure::NotRunning) => {
                 if let Some(item) = self.pending.remove(id) {
                     self.transcript
                         .replace_block(item.block, Block::User { text: item.text });
                 }
-                self.continuations_left = 1;
-                self.continuation_watermark = None;
                 self.begin_turn(text, false, now, fx);
             }
-            Err(cause) => {
-                self.set_pending_state(id, PendingState::Deferred);
-                if !self.deferred_notified.contains(&cause) {
-                    self.transcript.push_notice(
-                        NoticeLevel::Warn,
-                        format!("couldn't deliver mid-turn: {cause}; will send after this turn"),
-                    );
-                    self.deferred_notified.push(cause);
-                }
+            Err(cause @ SteerFailure::Rejected(_)) => {
+                let texts = self.withdraw(&[id]);
+                self.prepend_to_editor(texts);
+                self.transcript.push_notice(
+                    NoticeLevel::Warn,
+                    format!(
+                        "couldn't send {}: {cause}; it is back in the editor",
+                        quote_short(&text)
+                    ),
+                );
             }
         }
     }
 
-    /// Esc with messages pending: pull every one of them back into the editor.
-    fn recall_all(&mut self, fx: &mut Vec<Effect>) {
-        let deferred: Vec<PendingId> = self
+    /// Esc with held messages: pull every one the UI still holds back into
+    /// the editor. Messages the runtime admitted stay (see [`delivery`]).
+    fn recall_all(&mut self) {
+        let held: Vec<PendingId> = self
             .pending
             .items()
             .iter()
-            .filter(|p| p.state == PendingState::Deferred)
+            .filter(|p| p.state.recallable())
             .map(|p| p.id)
             .collect();
-        let in_inbox: Vec<PendingId> = self
-            .pending
-            .items()
-            .iter()
-            .filter(|p| p.state.in_inbox())
-            .map(|p| p.id)
-            .collect();
-        let texts = self.withdraw(&deferred);
+        let texts = self.withdraw(&held);
         self.prepend_to_editor(texts);
-        for id in &in_inbox {
-            self.set_pending_state(*id, PendingState::Recalling);
-        }
-        if !in_inbox.is_empty() {
-            fx.push(Effect::RecallPending);
-        }
     }
 
-    /// ↑ on an empty editor with messages pending: pull back the newest one.
-    fn recall_newest(&mut self, fx: &mut Vec<Effect>) {
-        let Some((id, state)) = self.pending.newest_recallable().map(|p| (p.id, p.state)) else {
+    /// ↑ on an empty editor with held messages: pull back the newest one.
+    fn recall_newest(&mut self) {
+        let Some(id) = self.pending.newest_recallable().map(|p| p.id) else {
             return;
         };
-        if state.in_inbox() {
-            self.set_pending_state(id, PendingState::Recalling);
-            fx.push(Effect::RecallPending);
-        } else {
-            let texts = self.withdraw(&[id]);
-            self.prepend_to_editor(texts);
-        }
-    }
-
-    /// The integrator drained `ids` from the inbox before the model saw them.
-    fn recalled(&mut self, ids: &[PendingId], fx: &mut Vec<Effect>) {
-        let wanted: Vec<PendingId> = self
-            .pending
-            .items()
-            .iter()
-            .filter(|p| p.state == PendingState::Recalling && ids.contains(&p.id))
-            .map(|p| p.id)
-            .collect();
-        // Recalling items that were not drained had already reached the model.
-        let delivered: Vec<PendingId> = self
-            .pending
-            .items()
-            .iter()
-            .filter(|p| p.state == PendingState::Recalling && !ids.contains(&p.id))
-            .map(|p| p.id)
-            .collect();
-        for id in delivered {
-            self.settle(id);
-        }
-        // Drained but not asked for (a single-message recall drains the whole
-        // inbox, or a message was wrongly shown as delivered): send it again.
-        for &id in ids {
-            if wanted.contains(&id) {
-                continue;
-            }
-            if let Some(item) = self.pending.take_settled(id) {
-                let (block, text) = (item.block, item.text.clone());
-                self.transcript.replace_block(
-                    block,
-                    Block::Queued {
-                        id,
-                        text: text.clone(),
-                        label: QueuedLabel::Queued,
-                    },
-                );
-                self.pending.push(Pending {
-                    state: PendingState::Queued,
-                    ..item
-                });
-                fx.push(Effect::Inject { id, text });
-            } else if let Some(text) = self.pending.get(id).map(|p| p.text.clone()) {
-                self.set_pending_state(id, PendingState::Queued);
-                fx.push(Effect::Inject { id, text });
-            }
-        }
-        let texts = self.withdraw(&wanted);
+        let texts = self.withdraw(&[id]);
         self.prepend_to_editor(texts);
     }
 
     fn turn_finished(&mut self, outcome: TurnOutcome, now: Instant, fx: &mut Vec<Effect>) {
-        let TurnOutcome { result, delivery } = outcome;
+        let TurnOutcome {
+            result,
+            undelivered,
+        } = outcome;
         self.running = false;
         self.status.running_since = None;
         self.status.classifying = false;
@@ -1726,38 +1633,8 @@ impl App {
             }
         }
         self.streamed_text = false;
-        self.deferred_notified.clear();
-        // Texts of unanswered messages, kept across continuation turns (the
-        // queue forgets settled items once the report is applied).
-        let unanswered: Vec<(PendingId, String)> = delivery
-            .unanswered
-            .iter()
-            .filter_map(|id| {
-                let text = self.pending.text_of(*id).map(str::to_string).or_else(|| {
-                    self.unanswered_texts
-                        .iter()
-                        .find(|(known, _)| known == id)
-                        .map(|(_, text)| text.clone())
-                })?;
-                Some((*id, text))
-            })
-            .collect();
-        let unsent = self.apply_report(&delivery);
-        self.next_after_turn(unsent, &delivery, interrupted, succeeded, now, fx);
-        if !self.running && succeeded && !delivery.unanswered.is_empty() {
-            self.answer_hint = true;
-            let quoted: Vec<String> = unanswered.iter().map(|(_, t)| quote_short(t)).collect();
-            let what = if quoted.is_empty() {
-                "your message".to_string()
-            } else {
-                format!("your message {}", quoted.join(", "))
-            };
-            self.transcript.push_notice(
-                NoticeLevel::Warn,
-                format!("{what} was recorded but not answered; send it again or press Enter"),
-            );
-        }
-        self.unanswered_texts = unanswered;
+        let unsent = self.collect_unsent(&undelivered);
+        self.next_after_turn(unsent, interrupted, succeeded, now, fx);
         self.check_context(fx);
     }
 
@@ -1790,43 +1667,31 @@ impl App {
         }
     }
 
-    /// Apply a delivery report: delivered messages become user blocks; returns
-    /// the messages that never reached the model (undelivered or deferred),
-    /// oldest first. Messages the user asked back go to the editor.
-    fn apply_report(&mut self, report: &DeliveryReport) -> Vec<Pending> {
-        for id in report.answered.iter().chain(&report.unanswered) {
-            self.settle(*id);
-        }
-        let mut unsent: Vec<Pending> = report
-            .undelivered
+    /// After a turn: every message the turn did not deliver, oldest first.
+    /// Undelivered steers (queued or already shown as delivered), messages
+    /// the UI held, and (defensively) admitted messages the runtime never
+    /// reported on. Messages still waiting for their admission ack stay: the
+    /// ack decides.
+    fn collect_unsent(&mut self, undelivered: &[PendingId]) -> Vec<Pending> {
+        let mut unsent: Vec<Pending> = undelivered
             .iter()
             .filter_map(|id| self.pending.take_settled(*id))
             .collect();
-        // Deferred messages were never injected; a message still shown as
-        // delivering that the report does not mention is treated as unsent.
         unsent.extend(self.pending.take_where(|p| {
-            report.undelivered.contains(&p.id)
-                || p.state == PendingState::Deferred
-                || matches!(p.state, PendingState::Delivering { .. })
+            undelivered.contains(&p.id)
+                || matches!(p.state, PendingState::Deferred | PendingState::Admitted)
         }));
         self.pending.clear_settled();
         unsent.sort_by_key(|p| p.id);
-        let (recalled, unsent): (Vec<Pending>, Vec<Pending>) = unsent
-            .into_iter()
-            .partition(|p| p.state == PendingState::Recalling);
-        self.drop_blocks(recalled.iter().map(|p| p.block));
-        self.prepend_to_editor(recalled.into_iter().map(|p| p.text).collect());
         unsent
     }
 
     /// Decide what to send after a turn, in priority order: the Ctrl-X Ctrl-S
     /// prompt (with anything unsent), unsent messages back to the editor after
-    /// an interrupt, unsent messages as a new turn, one continuation turn for
-    /// messages the model saw but did not answer.
+    /// an interrupt or a failure, unsent messages as a new turn.
     fn next_after_turn(
         &mut self,
         unsent: Vec<Pending>,
-        report: &DeliveryReport,
         interrupted: bool,
         succeeded: bool,
         now: Instant,
@@ -1835,29 +1700,22 @@ impl App {
         if let Some(next) = self.send_next.take() {
             let mut texts = self.unsent_as_user(unsent);
             texts.push(next.clone());
-            self.continuations_left = 1;
             self.transcript.push(Block::User { text: next });
             self.begin_turn(texts.join("\n\n"), false, now, fx);
-        } else if interrupted {
+        } else if interrupted || !succeeded {
+            if !unsent.is_empty() && !interrupted {
+                self.transcript.push_notice(
+                    NoticeLevel::Warn,
+                    format!(
+                        "{} undelivered message(s) returned to the editor",
+                        unsent.len()
+                    ),
+                );
+            }
             self.drop_blocks(unsent.iter().map(|p| p.block));
             self.prepend_to_editor(unsent.into_iter().map(|p| p.text).collect());
         } else if !unsent.is_empty() {
             self.send_unsent(unsent, now, fx);
-        } else if !report.unanswered.is_empty() && succeeded {
-            // A message typed during the continuation turn earns its own.
-            if self
-                .continuation_watermark
-                .is_some_and(|mark| report.unanswered.iter().any(|id| *id > mark))
-            {
-                self.continuations_left = 1;
-            }
-            if self.continuations_left > 0 {
-                self.continuations_left -= 1;
-                self.continuation_watermark = Some(self.pending.last_id());
-                self.transcript
-                    .push_notice(NoticeLevel::Info, "continuing: answering your message");
-                self.begin_turn(CONTINUATION_PROMPT.to_string(), false, now, fx);
-            }
         }
     }
 
@@ -1865,8 +1723,6 @@ impl App {
     /// them as user blocks in place.
     fn send_unsent(&mut self, unsent: Vec<Pending>, now: Instant, fx: &mut Vec<Effect>) {
         let texts = self.unsent_as_user(unsent);
-        self.continuations_left = 1;
-        self.continuation_watermark = None;
         self.begin_turn(texts.join("\n\n"), false, now, fx);
     }
 
@@ -1901,8 +1757,9 @@ impl App {
         }
     }
 
-    /// Interrupt the running turn. Pending messages are settled by the
-    /// post-turn delivery report.
+    /// Interrupt the running turn. The runner also cancels every steered
+    /// message not yet delivered; [`TurnOutcome::undelivered`] brings them
+    /// back to the editor.
     fn interrupt(&mut self, fx: &mut Vec<Effect>) {
         fx.push(Effect::Interrupt);
     }
@@ -1937,9 +1794,11 @@ impl App {
             return;
         }
         self.quit_confirm = None;
+        // Delivered (settled) messages are in the conversation already.
         let mut held: Vec<(Option<PendingId>, String)> = self
             .pending
-            .all()
+            .items()
+            .iter()
             .map(|p| (Some(p.id), p.text.clone()))
             .collect();
         if let Some(next) = &self.send_next {
@@ -2535,12 +2394,15 @@ mod tests {
         app.update(key(KeyCode::Enter))
     }
 
-    fn finished(result: Result<TurnSummary, String>, delivery: DeliveryReport) -> Msg {
-        Msg::TurnFinished(TurnOutcome { result, delivery })
+    fn finished(result: Result<TurnSummary, String>, undelivered: &[u64]) -> Msg {
+        Msg::TurnFinished(TurnOutcome {
+            result,
+            undelivered: undelivered.iter().copied().map(PendingId).collect(),
+        })
     }
 
-    fn ack(id: u64, result: Result<(), InjectFailure>) -> Msg {
-        Msg::InjectAck {
+    fn ack(id: u64, result: Result<(), SteerFailure>) -> Msg {
+        Msg::SteerAck {
             id: PendingId(id),
             result,
         }
@@ -2568,23 +2430,18 @@ mod tests {
         app
     }
 
+    fn steer(id: u64, text: &str) -> Effect {
+        Effect::Steer {
+            id: PendingId(id),
+            text: text.into(),
+        }
+    }
+
     #[test]
-    fn enter_while_running_queues_and_injects() {
+    fn enter_while_running_queues_and_steers() {
         let mut app = running_app();
-        assert_eq!(
-            submit(&mut app, "two"),
-            vec![Effect::Inject {
-                id: PendingId(1),
-                text: "two".into()
-            }]
-        );
-        assert_eq!(
-            submit(&mut app, "three"),
-            vec![Effect::Inject {
-                id: PendingId(2),
-                text: "three".into()
-            }]
-        );
+        assert_eq!(submit(&mut app, "two"), vec![steer(1, "two")]);
+        assert_eq!(submit(&mut app, "three"), vec![steer(2, "three")]);
         assert_eq!(app.status.queued, 2);
         assert_eq!(
             app.transcript.blocks(),
@@ -2594,19 +2451,13 @@ mod tests {
                 queued_block(2, "three", QueuedLabel::Queued),
             ]
         );
-        assert!(app.has_recallable());
+        // The runtime holds them: nothing to recall locally.
+        assert!(!app.has_recallable());
     }
 
     #[test]
-    fn ack_ok_then_turn_started_delivers_in_place() {
+    fn admitted_then_delivered_in_place() {
         let mut app = running_app();
-        app.update(agent_at(
-            AgentEvent::TurnStarted {
-                turn_number: 0,
-                assistant_message_id: None,
-            },
-            3,
-        ));
         app.update(agent_at(
             AgentEvent::TextDelta {
                 delta: "a".into(),
@@ -2618,21 +2469,13 @@ mod tests {
         app.update(ack(1, Ok(())));
         assert_eq!(
             app.pending.get(PendingId(1)).map(|p| p.state),
-            Some(PendingState::Delivering { ack_seq: 4 })
+            Some(PendingState::Admitted)
         );
         assert_eq!(
             app.transcript.block(BlockId(2)),
             Some(&queued_block(1, "two", QueuedLabel::Delivering))
         );
-        // An event at or below ack_seq does not count.
-        app.update(agent_at(
-            AgentEvent::TurnStarted {
-                turn_number: 1,
-                assistant_message_id: None,
-            },
-            4,
-        ));
-        assert_eq!(app.status.queued, 1);
+        // A turn boundary alone does not count: only the runtime's ack.
         app.update(agent_at(
             AgentEvent::TurnStarted {
                 turn_number: 1,
@@ -2640,6 +2483,8 @@ mod tests {
             },
             5,
         ));
+        assert_eq!(app.status.queued, 1);
+        assert!(app.update(Msg::SteerDelivered(PendingId(1))).is_empty());
         app.update(agent_at(
             AgentEvent::TextDelta {
                 delta: "b".into(),
@@ -2658,117 +2503,96 @@ mod tests {
                 Block::Assistant { md: "b".into() },
             ]
         );
-        // The report confirms it; nothing more is sent.
-        let fx = app.update(finished(
-            Ok(summary()),
-            DeliveryReport {
-                answered: vec![PendingId(1)],
-                ..DeliveryReport::default()
-            },
-        ));
+        let fx = app.update(finished(Ok(summary()), &[]));
         assert!(fx.is_empty());
         assert!(!app.is_running());
     }
 
     #[test]
-    fn ack_not_running_reinjects_or_starts_turn() {
+    fn requeued_delivery_returns_to_waiting() {
         let mut app = running_app();
         submit(&mut app, "two");
-        // Still running (e.g. a continuation started): inject again.
+        app.update(ack(1, Ok(())));
+        app.update(Msg::SteerDelivered(PendingId(1)));
+        assert_eq!(app.transcript.block(BlockId(1)), Some(&user("two")));
+        app.update(Msg::SteerRequeued(PendingId(1)));
         assert_eq!(
-            app.update(ack(1, Err(InjectFailure::NotRunning))),
-            vec![Effect::Inject {
-                id: PendingId(1),
-                text: "two".into()
-            }]
+            app.transcript.block(BlockId(1)),
+            Some(&queued_block(1, "two", QueuedLabel::Delivering))
         );
-        app.update(finished(Ok(summary()), DeliveryReport::default()));
+        assert_eq!(app.status.queued, 1);
+        app.update(Msg::SteerDelivered(PendingId(1)));
+        assert_eq!(app.status.queued, 0);
+        assert!(app.update(finished(Ok(summary()), &[])).is_empty());
+        assert_eq!(app.transcript.blocks(), &[user("one"), user("two")]);
+    }
+
+    #[test]
+    fn ack_not_running_defers_or_starts_turn() {
+        let mut app = running_app();
+        submit(&mut app, "two");
+        // The turn is ending: hold it for the turn's end.
+        assert!(app.update(ack(1, Err(SteerFailure::NotRunning))).is_empty());
+        assert_eq!(
+            app.transcript.block(BlockId(1)),
+            Some(&queued_block(1, "two", QueuedLabel::Deferred))
+        );
+        let fx = app.update(finished(Ok(summary()), &[]));
+        assert_eq!(fx, vec![Effect::StartTurn("two".into())]);
+        assert_eq!(app.transcript.blocks(), &[user("one"), user("two")]);
+        app.update(finished(Ok(summary()), &[]));
+
+        // Already idle when the refusal arrives: send it as a prompt,
+        // converting the placeholder in place.
+        let mut app = running_app();
+        submit(&mut app, "two");
+        app.update(finished(Ok(summary()), &[]));
         assert!(!app.is_running());
         assert_eq!(app.status.queued, 1);
-        // Idle: send it as a prompt, converting the placeholder in place.
-        app.continuations_left = 0;
         assert_eq!(
-            app.update(ack(1, Err(InjectFailure::NotRunning))),
+            app.update(ack(1, Err(SteerFailure::NotRunning))),
             vec![Effect::StartTurn("two".into())]
         );
         assert!(app.is_running());
-        assert_eq!(app.continuations_left, 1);
         assert_eq!(app.status.queued, 0);
         assert_eq!(app.transcript.blocks(), &[user("one"), user("two")]);
     }
 
     #[test]
-    fn ack_failure_defers_with_one_notice_per_cause_and_sends_after_turn() {
+    fn rejected_steer_returns_to_the_editor_with_a_notice() {
         let mut app = running_app();
         submit(&mut app, "two");
-        submit(&mut app, "three");
-        submit(&mut app, "four");
-        assert!(app.update(ack(1, Err(InjectFailure::Full))).is_empty());
-        app.update(ack(2, Err(InjectFailure::Full)));
-        app.update(ack(3, Err(InjectFailure::Unavailable)));
-        let notices = app
-            .transcript
-            .blocks()
-            .iter()
-            .filter(|b| {
-                matches!(
-                    b,
-                    Block::Notice {
-                        level: NoticeLevel::Warn,
-                        ..
-                    }
-                )
-            })
-            .count();
-        assert_eq!(notices, 2);
-        assert_eq!(
-            app.transcript.block(BlockId(1)),
-            Some(&queued_block(1, "two", QueuedLabel::Deferred))
+        type_str(&mut app, "draft");
+        assert!(
+            app.update(ack(1, Err(SteerFailure::Rejected("closed".into()))))
+                .is_empty()
         );
-        assert_eq!(app.status.queued, 3);
-        let fx = app.update(finished(Ok(summary()), DeliveryReport::default()));
-        assert_eq!(fx, vec![Effect::StartTurn("two\n\nthree\n\nfour".into())]);
-        assert_eq!(app.status.queued, 0);
-        assert_eq!(app.transcript.block(BlockId(1)), Some(&user("two")));
-        assert_eq!(app.transcript.block(BlockId(3)), Some(&user("four")));
+        assert_eq!(app.input.text(), "two\ndraft");
+        assert!(app.pending.is_empty());
+        assert!(matches!(
+            last_notice(&app),
+            Some((NoticeLevel::Warn, text)) if text.contains("closed") && text.contains("“two”")
+        ));
     }
 
     #[test]
-    fn esc_recalls_everything_pending_into_a_non_empty_editor() {
+    fn esc_recalls_only_held_messages_and_otherwise_interrupts() {
         let mut app = running_app();
         submit(&mut app, "two");
         submit(&mut app, "three");
-        submit(&mut app, "four");
         app.update(ack(1, Ok(())));
-        app.update(ack(2, Err(InjectFailure::Full)));
+        app.update(ack(2, Err(SteerFailure::NotRunning)));
         type_str(&mut app, "draft");
-        // Deferred "three" comes back at once; the rest is drained by the integrator.
-        assert_eq!(app.update(key(KeyCode::Esc)), vec![Effect::RecallPending]);
+        assert!(app.has_recallable());
+        // Deferred "three" comes back; admitted "two" stays with the runtime.
+        assert!(app.update(key(KeyCode::Esc)).is_empty());
         assert_eq!(app.input.text(), "three\ndraft");
-        let non_notice = |app: &App| -> Vec<Block> {
-            app.transcript
-                .blocks()
-                .iter()
-                .filter(|b| !matches!(b, Block::Notice { .. }))
-                .cloned()
-                .collect()
-        };
         assert_eq!(
-            non_notice(&app),
-            vec![
-                user("one"),
-                queued_block(1, "two", QueuedLabel::Recalling),
-                queued_block(3, "four", QueuedLabel::Recalling),
-            ]
+            app.transcript.blocks(),
+            &[user("one"), queued_block(1, "two", QueuedLabel::Delivering)]
         );
-        // Esc again with only recalling items: plain interrupt.
+        // Esc again: interrupt.
         assert_eq!(app.update(key(KeyCode::Esc)), vec![Effect::Interrupt]);
-        // "two" had already reached the model; "four" was drained.
-        assert!(app.update(Msg::Recalled(vec![PendingId(3)])).is_empty());
-        assert_eq!(app.input.text(), "four\nthree\ndraft");
-        assert_eq!(app.input.cursor(), (2, 5));
-        assert_eq!(non_notice(&app), vec![user("one"), user("two")]);
-        assert_eq!(app.status.queued, 0);
     }
 
     #[test]
@@ -2780,139 +2604,34 @@ mod tests {
     }
 
     #[test]
-    fn up_recalls_only_the_newest_and_reinjects_the_rest() {
+    fn up_recalls_the_newest_held_message() {
         let mut app = running_app().with_history(vec!["old".into()]);
         submit(&mut app, "two");
         submit(&mut app, "three");
-        app.update(ack(1, Ok(())));
+        app.update(ack(1, Err(SteerFailure::NotRunning)));
         app.update(ack(2, Ok(())));
-        assert_eq!(app.update(key(KeyCode::Up)), vec![Effect::RecallPending]);
-        assert_eq!(
-            app.pending.get(PendingId(1)).map(|p| p.state),
-            Some(PendingState::Delivering { ack_seq: 0 })
-        );
-        // The integrator drained both: only "three" returns, "two" is re-injected.
-        assert_eq!(
-            app.update(Msg::Recalled(vec![PendingId(1), PendingId(2)])),
-            vec![Effect::Inject {
-                id: PendingId(1),
-                text: "two".into()
-            }]
-        );
-        assert_eq!(app.input.text(), "three");
-        assert_eq!(
-            app.transcript.blocks(),
-            &[user("one"), queued_block(1, "two", QueuedLabel::Queued)]
-        );
-        // With a non-empty editor ↑ edits as usual.
-        app.update(key(KeyCode::Up));
-        assert_eq!(app.input.text(), "three");
-        assert_eq!(app.status.queued, 1);
-    }
-
-    #[test]
-    fn up_on_deferred_item_recalls_locally() {
-        let mut app = running_app();
-        submit(&mut app, "two");
-        app.update(ack(1, Err(InjectFailure::Closed)));
         assert!(app.update(key(KeyCode::Up)).is_empty());
         assert_eq!(app.input.text(), "two");
-        assert!(app.pending.is_empty());
-        // With nothing pending, ↑ is history recall again.
+        assert_eq!(app.status.queued, 1);
+        // With nothing held, ↑ is history recall again.
         app.update(ctrl('u'));
         app.update(key(KeyCode::Up));
-        assert_eq!(app.input.text(), "two");
+        assert_eq!(app.input.text(), "three");
     }
 
     #[test]
-    fn recall_reply_for_failed_injection_returns_text() {
-        let mut app = running_app();
-        submit(&mut app, "two");
-        assert_eq!(app.update(key(KeyCode::Esc)), vec![Effect::RecallPending]);
-        app.update(ack(1, Err(InjectFailure::NotRunning)));
-        assert_eq!(app.input.text(), "two");
-        assert!(app.pending.is_empty());
-        assert!(app.update(Msg::Recalled(vec![])).is_empty());
-        assert_eq!(app.transcript.blocks(), &[user("one")]);
-    }
-
-    #[test]
-    fn report_undelivered_starts_turn_and_unanswered_continues_once() {
+    fn successful_turn_sends_held_messages_as_the_next_turn() {
         let mut app = running_app();
         submit(&mut app, "two");
         submit(&mut app, "three");
-        app.update(ack(1, Ok(())));
-        app.update(ack(2, Ok(())));
-        let fx = app.update(finished(
-            Ok(summary()),
-            DeliveryReport {
-                unanswered: vec![PendingId(1)],
-                undelivered: vec![PendingId(2)],
-                ..DeliveryReport::default()
-            },
-        ));
-        // Undelivered wins over the continuation.
-        assert_eq!(fx, vec![Effect::StartTurn("three".into())]);
+        app.update(ack(1, Err(SteerFailure::NotRunning)));
+        app.update(ack(2, Err(SteerFailure::NotRunning)));
+        let fx = app.update(finished(Ok(summary()), &[]));
+        assert_eq!(fx, vec![Effect::StartTurn("two\n\nthree".into())]);
         assert_eq!(
             app.transcript.blocks(),
             &[user("one"), user("two"), user("three")]
         );
-        // Next turn: an unanswered message triggers one continuation…
-        submit(&mut app, "four");
-        app.update(ack(3, Ok(())));
-        let report = DeliveryReport {
-            unanswered: vec![PendingId(3)],
-            ..DeliveryReport::default()
-        };
-        let fx = app.update(finished(Ok(summary()), report));
-        assert_eq!(fx, vec![Effect::StartTurn(CONTINUATION_PROMPT.into())]);
-        assert_eq!(app.continuations_left, 0);
-        assert!(matches!(
-            app.transcript.blocks().last(),
-            Some(Block::Notice { level: NoticeLevel::Info, text }) if text.contains("continuing")
-        ));
-        assert!(
-            !app.transcript
-                .blocks()
-                .iter()
-                .any(|b| matches!(b, Block::User { text } if text == CONTINUATION_PROMPT))
-        );
-        // A message typed during the continuation earns another one…
-        submit(&mut app, "five");
-        app.update(ack(4, Ok(())));
-        let report = DeliveryReport {
-            unanswered: vec![PendingId(4)],
-            ..DeliveryReport::default()
-        };
-        let fx = app.update(finished(Ok(summary()), report));
-        assert_eq!(fx, vec![Effect::StartTurn(CONTINUATION_PROMPT.into())]);
-        // …but the same message left unanswered again does not: the user is
-        // told, and Enter on an empty editor asks for the answer.
-        let report = DeliveryReport {
-            unanswered: vec![PendingId(4)],
-            ..DeliveryReport::default()
-        };
-        assert!(app.update(finished(Ok(summary()), report)).is_empty());
-        assert!(!app.is_running());
-        assert!(matches!(
-            last_notice(&app),
-            Some((NoticeLevel::Warn, text))
-                if text.contains("recorded but not answered") && text.contains("“five”")
-        ));
-        assert_eq!(
-            app.update(key(KeyCode::Enter)),
-            vec![Effect::StartTurn(CONTINUATION_PROMPT.into())]
-        );
-        app.update(finished(Ok(summary()), DeliveryReport::default()));
-        // A failed run never continues.
-        submit(&mut app, "six");
-        submit(&mut app, "seven");
-        app.update(ack(5, Ok(())));
-        let report = DeliveryReport {
-            unanswered: vec![PendingId(5)],
-            ..DeliveryReport::default()
-        };
-        assert!(app.update(finished(Err("boom".into()), report)).is_empty());
     }
 
     #[test]
@@ -2922,17 +2641,11 @@ mod tests {
         submit(&mut app, "three");
         app.update(ack(1, Ok(())));
         app.update(ack(2, Ok(())));
+        app.update(Msg::SteerDelivered(PendingId(1)));
         assert_eq!(app.update(ctrl('c')), vec![Effect::Interrupt]);
-        assert_eq!(app.status.queued, 2);
+        assert_eq!(app.status.queued, 1);
         type_str(&mut app, "draft");
-        let fx = app.update(finished(
-            Err("interrupted".into()),
-            DeliveryReport {
-                answered: vec![PendingId(1)],
-                undelivered: vec![PendingId(2)],
-                ..DeliveryReport::default()
-            },
-        ));
+        let fx = app.update(finished(Err("interrupted".into()), &[2]));
         assert!(fx.is_empty());
         assert_eq!(app.input.text(), "three\ndraft");
         assert!(app.transcript.blocks().contains(&user("two")));
@@ -2944,6 +2657,36 @@ mod tests {
                     || matches!(b, Block::User { text } if text == "three"))
         );
         assert_eq!(app.status.queued, 0);
+    }
+
+    #[test]
+    fn discarded_delivery_of_a_stopped_turn_returns_too() {
+        let mut app = running_app();
+        submit(&mut app, "two");
+        app.update(ack(1, Ok(())));
+        app.update(Msg::SteerDelivered(PendingId(1)));
+        let fx = app.update(finished(Err("interrupted".into()), &[1]));
+        assert!(fx.is_empty());
+        assert_eq!(app.input.text(), "two");
+        assert!(
+            !app.transcript
+                .blocks()
+                .iter()
+                .any(|b| matches!(b, Block::User { text } if text == "two"))
+        );
+    }
+
+    #[test]
+    fn failed_turn_returns_undelivered_with_a_notice() {
+        let mut app = running_app();
+        submit(&mut app, "two");
+        app.update(ack(1, Ok(())));
+        assert!(app.update(finished(Err("boom".into()), &[1])).is_empty());
+        assert_eq!(app.input.text(), "two");
+        assert!(matches!(
+            last_notice(&app),
+            Some((NoticeLevel::Warn, text)) if text.contains("returned to the editor")
+        ));
     }
 
     #[test]
@@ -2959,20 +2702,12 @@ mod tests {
             vec![Effect::InterruptAndSend("urgent".into())]
         );
         assert_eq!(app.send_next.as_deref(), Some("urgent"));
-        // The queued message stays in place until the report.
+        // The queued message stays in place until the turn ends.
         assert_eq!(app.status.queued, 1);
-        app.continuations_left = 0;
-        let fx = app.update(finished(
-            Err("interrupted".into()),
-            DeliveryReport {
-                undelivered: vec![PendingId(1)],
-                ..DeliveryReport::default()
-            },
-        ));
+        let fx = app.update(finished(Err("interrupted".into()), &[1]));
         assert_eq!(fx, vec![Effect::StartTurn("two\n\nurgent".into())]);
         assert!(app.send_next.is_none());
         assert!(app.is_running());
-        assert_eq!(app.continuations_left, 1);
         assert!(app.input.is_empty());
         let users: Vec<&Block> = app
             .transcript
@@ -2987,7 +2722,7 @@ mod tests {
     fn clear_is_refused_while_messages_are_pending() {
         let mut app = running_app();
         submit(&mut app, "two");
-        app.update(finished(Ok(summary()), DeliveryReport::default()));
+        app.update(finished(Ok(summary()), &[]));
         assert_eq!(app.status.queued, 1);
         assert!(submit(&mut app, "/clear").is_empty());
         assert!(matches!(
@@ -3239,7 +2974,7 @@ mod tests {
     fn model_is_refused_while_messages_are_pending() {
         let mut app = running_app();
         submit(&mut app, "two");
-        app.update(finished(Ok(summary()), DeliveryReport::default()));
+        app.update(finished(Ok(summary()), &[]));
         assert!(!app.is_running());
         assert_eq!(app.status.queued, 1);
         assert!(submit(&mut app, "/model gpt-5.2").is_empty());
@@ -3255,7 +2990,7 @@ mod tests {
         let mut app = running_app();
         let t0 = Instant::now();
         submit(&mut app, "two");
-        app.update(ack(1, Err(InjectFailure::Full)));
+        app.update(ack(1, Err(SteerFailure::NotRunning)));
         // First Ctrl-D warns and arms.
         assert!(app.update_at(ctrl('d'), t0).is_empty());
         assert!(app.quit_confirm_armed(t0));
@@ -3645,12 +3380,12 @@ mod tests {
             submit(&mut app, "## heading"),
             vec![Effect::StartTurn("## heading".into())]
         );
-        app.update(finished(Ok(summary()), DeliveryReport::default()));
+        app.update(finished(Ok(summary()), &[]));
         assert_eq!(
             submit(&mut app, "\\#tag"),
             vec![Effect::StartTurn("#tag".into())]
         );
-        app.update(finished(Ok(summary()), DeliveryReport::default()));
+        app.update(finished(Ok(summary()), &[]));
         type_str(&mut app, "#a");
         app.update(Msg::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)));
         assert_eq!(
@@ -3682,7 +3417,7 @@ mod tests {
             ))
         );
         submit(&mut app, "two");
-        app.update(finished(Ok(summary()), DeliveryReport::default()));
+        app.update(finished(Ok(summary()), &[]));
         assert!(!app.is_running());
         assert_eq!(app.status.queued, 1);
         assert!(submit(&mut app, "/compact").is_empty());
@@ -3841,7 +3576,7 @@ mod tests {
             }),
             assistant_message_id: None,
         }));
-        app.update(finished(Ok(summary()), DeliveryReport::default()))
+        app.update(finished(Ok(summary()), &[]))
     }
 
     fn warn_count(app: &App) -> usize {
@@ -3923,13 +3658,8 @@ mod tests {
             }),
             assistant_message_id: None,
         }));
-        let fx = app.update(finished(
-            Ok(summary()),
-            DeliveryReport {
-                undelivered: vec![PendingId(1)],
-                ..DeliveryReport::default()
-            },
-        ));
+        app.update(ack(1, Err(SteerFailure::NotRunning)));
+        let fx = app.update(finished(Ok(summary()), &[]));
         assert!(!fx.contains(&Effect::Compact), "{fx:?}");
         assert!(app.is_running());
         assert!(!app.compacting);

@@ -137,8 +137,9 @@ pub struct UiChannels {
 }
 
 /// `msg` (from the integrator) preceded by every agent and scoped event
-/// already buffered. The integrator sends `TurnFinished`, `InjectAck` and
-/// `Recalled` after the events that led to them, but on a different channel;
+/// already buffered. The runner sends `TurnFinished`, `SteerAck`,
+/// `SteerDelivered` and `SteerRequeued` after the events that led to them,
+/// but on a different channel;
 /// applying the buffered events first keeps a turn's text from landing after
 /// its summary (or in the next turn).
 pub fn after_buffered_events(msg: Msg, channels: &mut UiChannels) -> Vec<Msg> {

@@ -11,7 +11,7 @@ use std::fmt;
 
 use meerkat_core::Provider;
 
-use crate::credentials::ProviderCredentials;
+use crate::bootstrap::credentials::ProviderCredentials;
 
 /// Names of the built-in endpoints, in display order.
 pub const BUILTIN_NAMES: [&str; 3] = ["anthropic", "openai", "gemini"];

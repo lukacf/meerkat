@@ -19,7 +19,7 @@ path = "src/main.rs"
 [dependencies]
 # Meerkat engine: the runtime-backed persistent session path (SQLite realm
 # store, auto-compaction), skills, MCP, comms and semantic memory.
-meerkat = { workspace = true, features = ["anthropic", "openai", "gemini", "session-store", "session-compaction", "memory-store-session", "skills", "comms"] }
+meerkat = { workspace = true, features = ["anthropic", "openai", "gemini", "session-store", "jsonl-store", "session-compaction", "memory-store-session", "skills", "comms"] }
 meerkat-core = { workspace = true }
 meerkat-runtime = { workspace = true, features = ["sqlite-store"] }
 meerkat-session = { workspace = true }
@@ -85,10 +85,8 @@ ignored = [
     "meerkat-memory",
     "meerkat-mob",
     "meerkat-mob-mcp",
-    "meerkat-models",
     "meerkat-sandbox",
     "meerkat-session",
-    "tracing-subscriber",
 ]
 
 [lints]

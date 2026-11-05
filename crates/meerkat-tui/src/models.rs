@@ -15,7 +15,7 @@ use meerkat_core::Provider;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use crate::credentials::ProviderCredentials;
+use crate::bootstrap::credentials::ProviderCredentials;
 use crate::endpoints::{Dialect, Endpoint};
 use crate::pricing::ModelPrice;
 

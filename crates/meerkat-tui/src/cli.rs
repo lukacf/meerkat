@@ -94,7 +94,9 @@ pub struct Args {
     #[arg(long)]
     pub isolated: bool,
 
-    /// Backend when creating a new realm or workspace state directory.
+    /// Backend when creating a new realm or workspace state directory
+    /// (default: sqlite). An existing realm keeps the backend it was created
+    /// with; naming a different one is an error.
     #[arg(long, value_enum)]
     pub realm_backend: Option<RealmBackendArg>,
 
@@ -187,8 +189,10 @@ pub enum ConfinementArg {
 pub enum RealmBackendArg {
     /// Append-only JSONL files.
     Jsonl,
-    /// SQLite database.
+    /// SQLite database (the default for the workspace-local realm).
     Sqlite,
+    /// In-process only: nothing survives the process (throwaway sessions).
+    Memory,
 }
 
 #[cfg(test)]

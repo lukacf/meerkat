@@ -2,10 +2,17 @@
 //!
 //! Each such message becomes a [`Pending`] item with a [`Block::Queued`]
 //! placeholder in the transcript. The item moves through [`PendingState`] as
-//! the integrator acknowledges the injection, the model picks it up, the user
-//! recalls it, or the post-turn [`DeliveryReport`](crate::delivery::DeliveryReport)
-//! settles it. The state machine itself lives in [`super::App`]; this module
-//! only owns the queue.
+//! the runner admits it to the session's runtime ([`super::Msg::SteerAck`])
+//! and the runtime writes it into the conversation
+//! ([`super::Msg::SteerDelivered`], where the placeholder becomes a user
+//! block in place). The state machine itself lives in [`super::App`]; this
+//! module only owns the queue.
+//!
+//! Only messages the UI still holds ([`PendingState::Deferred`]) can be
+//! recalled into the editor. Once the runtime has admitted a message it is
+//! durable: the runtime offers no cancellation that is guaranteed to leave the
+//! running turn alone, so the way to get admitted messages back is to
+//! interrupt the turn, which returns every undelivered one to the editor.
 //!
 //! [`Block::Queued`]: super::transcript::Block::Queued
 
@@ -16,19 +23,14 @@ use super::transcript::{BlockId, QueuedLabel};
 /// Where a pending message is in its delivery lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingState {
-    /// Handed to the integrator ([`super::Effect::Inject`]); no ack yet.
+    /// Handed to the runner ([`super::Effect::Steer`]); no ack yet.
     Queued,
-    /// In the agent's inbox. The next `TurnStarted` with a sequence number
-    /// above `ack_seq` is taken as the model having seen it.
-    Delivering {
-        /// `App::last_seq` when the injection was acknowledged.
-        ack_seq: u64,
-    },
-    /// Injection was refused; the message is sent after the turn ends.
+    /// Admitted to the runtime as a durable steer: written into the running
+    /// turn at its next model boundary, or run as a follow-up turn.
+    Admitted,
+    /// Held by the UI (compaction is running, or no turn was running to
+    /// steer into); sent as a new turn when the current work ends.
     Deferred,
-    /// The user asked for it back ([`super::Effect::RecallPending`]); waiting
-    /// for [`super::Msg::Recalled`] or the post-turn report.
-    Recalling,
 }
 
 impl PendingState {
@@ -37,22 +39,16 @@ impl PendingState {
     pub fn label(self) -> QueuedLabel {
         match self {
             Self::Queued => QueuedLabel::Queued,
-            Self::Delivering { .. } => QueuedLabel::Delivering,
+            Self::Admitted => QueuedLabel::Delivering,
             Self::Deferred => QueuedLabel::Deferred,
-            Self::Recalling => QueuedLabel::Recalling,
         }
     }
 
-    /// Whether the user can still recall the message (Esc / ↑).
+    /// Whether the user can pull the message back into the editor (Esc / ↑):
+    /// only messages the runtime does not hold yet.
     #[must_use]
     pub fn recallable(self) -> bool {
-        !matches!(self, Self::Recalling)
-    }
-
-    /// Whether recalling it needs the integrator to drain the inbox.
-    #[must_use]
-    pub fn in_inbox(self) -> bool {
-        matches!(self, Self::Queued | Self::Delivering { .. })
+        matches!(self, Self::Deferred)
     }
 }
 
@@ -73,8 +69,10 @@ pub struct Pending {
 #[derive(Debug, Clone, Default)]
 pub struct PendingQueue {
     items: Vec<Pending>,
-    /// Items already shown as delivered (a `TurnStarted` followed their ack)
-    /// whose text is kept until the post-turn report confirms delivery.
+    /// Items already shown as delivered ([`super::Msg::SteerDelivered`])
+    /// whose text is kept until the turn ends: a discarded application
+    /// ([`super::Msg::SteerRequeued`]) or an undelivered terminal brings
+    /// them back.
     settled: Vec<Pending>,
     next_id: u64,
 }
@@ -120,7 +118,7 @@ impl PendingQueue {
         &self.items
     }
 
-    /// Number of items (every item is not yet delivered).
+    /// Number of items not yet delivered.
     #[must_use]
     pub fn len(&self) -> usize {
         self.items.len()
@@ -176,8 +174,8 @@ impl PendingQueue {
         self.items.iter().rev().find(|p| p.state.recallable())
     }
 
-    /// Move an item to the settled list (shown as delivered, awaiting the
-    /// post-turn report). Returns the settled item.
+    /// Move an item to the settled list (shown as delivered until the turn
+    /// ends). Returns the settled item.
     pub fn settle(&mut self, id: PendingId) -> Option<&Pending> {
         let item = self.remove(id)?;
         self.settled.push(item);
@@ -190,7 +188,7 @@ impl PendingQueue {
         Some(self.settled.remove(idx))
     }
 
-    /// Forget every settled item (the report has been applied).
+    /// Forget every settled item (the turn ended).
     pub fn clear_settled(&mut self) {
         self.settled.clear();
     }
@@ -243,15 +241,17 @@ mod tests {
     }
 
     #[test]
-    fn newest_recallable_skips_recalling_items() {
+    fn only_deferred_items_are_recallable() {
         let mut q = PendingQueue::new();
         let a = item(&mut q, "a", 0);
         let b = item(&mut q, "b", 1);
-        assert_eq!(q.newest_recallable().map(|p| p.id), Some(b));
-        q.get_mut(b).unwrap().state = PendingState::Recalling;
-        assert_eq!(q.newest_recallable().map(|p| p.id), Some(a));
-        q.get_mut(a).unwrap().state = PendingState::Recalling;
         assert!(q.newest_recallable().is_none());
+        q.get_mut(a).unwrap().state = PendingState::Deferred;
+        assert_eq!(q.newest_recallable().map(|p| p.id), Some(a));
+        q.get_mut(b).unwrap().state = PendingState::Deferred;
+        assert_eq!(q.newest_recallable().map(|p| p.id), Some(b));
+        q.get_mut(b).unwrap().state = PendingState::Admitted;
+        assert_eq!(q.newest_recallable().map(|p| p.id), Some(a));
     }
 
     #[test]
@@ -279,13 +279,10 @@ mod tests {
     #[test]
     fn labels_follow_states() {
         assert_eq!(PendingState::Queued.label(), QueuedLabel::Queued);
-        assert_eq!(
-            PendingState::Delivering { ack_seq: 3 }.label(),
-            QueuedLabel::Delivering
-        );
+        assert_eq!(PendingState::Admitted.label(), QueuedLabel::Delivering);
         assert_eq!(PendingState::Deferred.label(), QueuedLabel::Deferred);
-        assert_eq!(PendingState::Recalling.label(), QueuedLabel::Recalling);
-        assert!(PendingState::Queued.in_inbox());
-        assert!(!PendingState::Deferred.in_inbox());
+        assert!(PendingState::Deferred.recallable());
+        assert!(!PendingState::Admitted.recallable());
+        assert!(!PendingState::Queued.recallable());
     }
 }

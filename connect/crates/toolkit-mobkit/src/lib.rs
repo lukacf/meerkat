@@ -825,3 +825,29 @@ pub(crate) mod find_entry_probe {
         }
     }
 }
+
+/// Test seam: observe a Find just before its live-replay helper observation
+/// (`advance.observe_helper`), by call ID. A control of a host's shared case
+/// can begin an owner change on the shared publication there, as another
+/// original's first binding does.
+#[cfg(any(test, feature = "test-support"))]
+pub mod observe_helper_probe {
+    use std::sync::{Arc, Mutex, PoisonError};
+    /// A control's action at the step, given the Find's call ID.
+    pub type Probe = Arc<dyn Fn(&str) + Send + Sync>;
+    static PROBE: Mutex<Option<Probe>> = Mutex::new(None);
+    /// Install the control's probe, replacing any earlier one.
+    pub fn install(probe: Probe) {
+        *PROBE.lock().unwrap_or_else(PoisonError::into_inner) = Some(probe);
+    }
+    /// Remove the control's probe.
+    pub fn clear() {
+        PROBE.lock().unwrap_or_else(PoisonError::into_inner).take();
+    }
+    pub(crate) fn observe(call: &str) {
+        let probe = PROBE.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if let Some(probe) = probe {
+            probe(call);
+        }
+    }
+}

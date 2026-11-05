@@ -422,6 +422,8 @@ impl InstalledAcquisition {
         // reacquires the exact complete contributor set before native runtime
         // preparation, without ever creating work on this completed path.
         progress.enter(AdmissionStage::ObserveHelper);
+        #[cfg(any(test, feature = "test-support"))]
+        crate::observe_helper_probe::observe(call.id);
         let admitted = originals
             .observe_setup_helper_for_live_replay(
                 context,

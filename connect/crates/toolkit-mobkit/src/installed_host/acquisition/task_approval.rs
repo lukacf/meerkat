@@ -1,6 +1,7 @@
 //! Fresh local service instructions selected through the real helper task.
 //! The source and acquisition owners remain the existing installed instances.
 use super::*;
+use crate::private_originals::setup_workflow::execution::WorkflowCustodyRefusal;
 use crate::private_originals::{InstalledServiceTask, authorization_error};
 use meerkat_core::ToolCallView;
 use std::sync::{Mutex, Weak};
@@ -16,26 +17,25 @@ pub struct InstalledServiceTaskSource {
 /// A refusal of a service task entry point. `Refused` is the source owner's
 /// own answer. `ReprepareRequired` is this exact call's current authorization
 /// check refusing to rebuild after its bounded waits for owner changes on the
-/// work's own publication: Core's typed answer, no verdict, and never a
-/// denial or unavailability.
+/// work's own publication: Core's typed answer as Core gave it, no verdict,
+/// and never a denial or unavailability.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ServiceTaskError {
     #[error(transparent)]
     Refused(#[from] PrivateOriginalError),
     #[error("service task authorization must be prepared again")]
-    ReprepareRequired,
+    ReprepareRequired(meerkat_core::authorization::OperationRefused),
 }
 
 impl ServiceTaskError {
     /// The tool projection of [`Self::ReprepareRequired`]: Core's typed
-    /// refusal to rebuild, which claims nothing about whether the call
-    /// dispatched. A `Refused` answer keeps its caller's own projection.
-    pub fn reprepare_required() -> meerkat_core::ToolError {
-        meerkat_core::ToolError::AuthorizationRefused {
-            refusal: meerkat_core::authorization::OperationRefused::new(
-                meerkat_core::authorization::OperationRefusalKind::ReprepareRequired,
-            ),
-        }
+    /// refusal to rebuild as Core gave it. It claims nothing about whether
+    /// the call dispatched unless Core certified that it did not. A
+    /// `Refused` answer keeps its caller's own projection.
+    pub fn reprepare_required(
+        refusal: meerkat_core::authorization::OperationRefused,
+    ) -> meerkat_core::ToolError {
+        meerkat_core::ToolError::AuthorizationRefused { refusal }
     }
 }
 
@@ -57,7 +57,7 @@ pub(super) fn shared_task_refusal(
 fn service_task_refusal(stage: &'static str, error: ServiceTaskError) -> ServiceTaskError {
     match error {
         ServiceTaskError::Refused(error) => shared_task_refusal(stage, error).into(),
-        ServiceTaskError::ReprepareRequired => {
+        ServiceTaskError::ReprepareRequired(_) => {
             emit_shared_task_refusal(stage, "reprepare_required");
             error
         }
@@ -70,29 +70,38 @@ fn emit_shared_task_refusal(stage: &'static str, kind: &'static str) {
     crate::original_ingress::shared_entry_diagnostics::emit(stage, None, Some(kind));
 }
 
-/// Whether `error` is Core's refusal to rebuild (`ReprepareRequired`): a
-/// stale read of the work's own publication that ran nothing.
-fn refuses_to_rebuild(error: &meerkat_core::ToolError) -> bool {
-    matches!(
-        error.primary_error(),
+/// Core's refusal to rebuild beneath `error`, when it is one: a stale read of
+/// the work's own publication that ran nothing.
+fn rebuild_refusal(
+    error: &meerkat_core::ToolError,
+) -> Option<meerkat_core::authorization::OperationRefused> {
+    match error.primary_error() {
         meerkat_core::ToolError::AuthorizationRefused { refusal }
-            if refusal.kind() == meerkat_core::authorization::OperationRefusalKind::ReprepareRequired
-    )
+            if refusal.kind()
+                == meerkat_core::authorization::OperationRefusalKind::ReprepareRequired =>
+        {
+            Some(*refusal)
+        }
+        _ => None,
+    }
 }
 
 /// This exact call's current authorization answer as a service task answer.
-/// A refusal to rebuild stays typed. Every other refusal keeps its source
-/// projection: a denial stays Denied and unavailability stays Unavailable.
+/// A refusal to rebuild stays typed, as Core gave it. Every other refusal
+/// keeps its source projection: a denial stays Denied and unavailability
+/// stays Unavailable.
 fn service_task_check(
     checked: Result<Option<ToolDispatchContext>, meerkat_core::ToolError>,
 ) -> Result<Option<ToolDispatchContext>, ServiceTaskError> {
-    checked.map_err(|error| {
-        if refuses_to_rebuild(&error) {
-            ServiceTaskError::ReprepareRequired
-        } else {
-            authorization_error(error).into()
-        }
-    })
+    checked.map_err(service_task_error)
+}
+
+/// [`service_task_check`]'s answer for a refused check.
+fn service_task_error(error: meerkat_core::ToolError) -> ServiceTaskError {
+    match rebuild_refusal(&error) {
+        Some(refusal) => ServiceTaskError::ReprepareRequired(refusal),
+        None => authorization_error(error).into(),
+    }
 }
 
 /// This exact call's pure current authorization check, checked again after a
@@ -113,39 +122,11 @@ async fn check_current_after_owner_change(
     churn: &mut meerkat_core::authorization::OwnerChangeChurn,
     site: &'static str,
 ) -> Result<Option<ToolDispatchContext>, ServiceTaskError> {
-    service_task_check(check_tool_after_owner_change(context, call, plan, churn, site).await)
+    service_task_check(
+        crate::current_check::check_after_owner_change(context, call, plan, churn, site).await,
+    )
 }
 
-/// [`check_current_after_owner_change`] with Core's own answer: the same
-/// bounded wait after a refusal to rebuild, and every other answer, and a
-/// refusal to rebuild that outlasts the bounds, returned as Core gave it.
-async fn check_tool_after_owner_change(
-    context: &ToolDispatchContext,
-    call: ToolCallView<'_>,
-    plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
-    churn: &mut meerkat_core::authorization::OwnerChangeChurn,
-    site: &'static str,
-) -> Result<Option<ToolDispatchContext>, meerkat_core::ToolError> {
-    loop {
-        let checked = context.check_tool_authorization(call, plan);
-        if let Err(error) = &checked
-            && refuses_to_rebuild(error)
-            && let Some(work) = context.work_authorization()
-            && churn
-                .wait_after_stale_read(
-                    work.authorization().as_ref(),
-                    context.remaining_tool_time(),
-                    site,
-                    None,
-                )
-                .await
-                .settled()
-        {
-            continue;
-        }
-        return checked;
-    }
-}
 impl InstalledServiceTaskSource {
     /// This exact call's current authorization check after its effect ran:
     /// a shared selected check that joined, then released, its physical
@@ -166,7 +147,7 @@ impl InstalledServiceTaskSource {
         churn: &mut meerkat_core::authorization::OwnerChangeChurn,
         site: &'static str,
     ) -> Result<Option<ToolDispatchContext>, meerkat_core::ToolError> {
-        check_tool_after_owner_change(context, call, plan, churn, site).await
+        crate::current_check::check_after_owner_change(context, call, plan, churn, site).await
     }
 }
 impl InstalledAcquisition {
@@ -366,26 +347,47 @@ impl InstalledServiceTaskSource {
             .ok_or_else(|| {
                 shared_task_refusal("reserve.task_missing", PrivateOriginalError::Unavailable)
             })?;
-        let entry = crate::original_ingress::shared_entry_diagnostics::scope(
-            task.shared_entry_diagnostic_context(call),
-            async {
-                task.reserve_shared_entry(member)
-                    .await
-                    .map_err(|error| shared_task_refusal("reserve.source_entry", error))
-            },
-        )
-        .await?;
         // The reservation is source custody that a cancellation drains, so
-        // this check never waits while holding it. A refusal to rebuild
-        // stays typed here and settles the unused reservation.
-        #[cfg(test)]
-        task.observe_stage_for_test("reserve.authorization");
-        if let Err(error) = service_task_check(context.check_tool_authorization(call, plan)) {
-            // No private transport command has been prepared on this path.
+        // its check never waits while holding it. A refusal to rebuild
+        // settles the unused reservation (no private transport command has
+        // been prepared on this path), waits out the change holding nothing,
+        // with this entry point's one churn, and reserves again: the task's
+        // currentness, the member and the source entry are each checked
+        // afresh, and the call checked again. A change that outlasts the
+        // bounds, and every other refusal, settles the reservation and stays
+        // typed.
+        loop {
+            let entry = crate::original_ingress::shared_entry_diagnostics::scope(
+                task.shared_entry_diagnostic_context(call),
+                async {
+                    task.reserve_shared_entry(member)
+                        .await
+                        .map_err(|error| shared_task_refusal("reserve.source_entry", error))
+                },
+            )
+            .await?;
+            #[cfg(test)]
+            task.observe_stage_for_test("reserve.authorization");
+            let Err(error) = crate::current_check::check(context, call, plan) else {
+                return Ok(entry);
+            };
             entry.settle_unentered()?;
-            return Err(service_task_refusal("reserve.authorization", error));
+            drop(entry);
+            if crate::current_check::refuses_to_rebuild(&error)
+                && crate::current_check::wait_after_refusal(
+                    context,
+                    &mut churn,
+                    "toolkit.service_task.reserve",
+                )
+                .await
+            {
+                continue;
+            }
+            return Err(service_task_refusal(
+                "reserve.authorization",
+                service_task_error(error),
+            ));
         }
-        Ok(entry)
     }
     /// Consume a shared-stop handoff only for this actual native helper's
     /// current captured acquisition. Historical job visibility is insufficient.
@@ -530,8 +532,16 @@ impl InstalledServiceTaskSource {
             Some(plan) => owner
                 .host
                 .originals
-                .workflow_task_custody(call, context, plan)
-                .map_err(|error| shared_task_refusal("prepare.workflow_custody", error))?,
+                .workflow_task_custody(call, context, plan, churn)
+                .await
+                .map_err(|refusal| match refusal {
+                    WorkflowCustodyRefusal::Refused(error) => {
+                        shared_task_refusal("prepare.workflow_custody", error).into()
+                    }
+                    WorkflowCustodyRefusal::Current(error) => {
+                        service_task_refusal("prepare.workflow_custody", service_task_error(error))
+                    }
+                })?,
             None => None,
         };
         let (snapshot, selected_helper) = if let Some(custody) = &workflow {

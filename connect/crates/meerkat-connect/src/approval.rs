@@ -364,7 +364,9 @@ fn service_task_failure(
         ServiceTaskError::Refused(
             PrivateOriginalError::Denied | PrivateOriginalError::Conflict,
         ) => ToolError::access_denied(name),
-        ServiceTaskError::ReprepareRequired => ServiceTaskError::reprepare_required(),
+        ServiceTaskError::ReprepareRequired(refusal) => {
+            ServiceTaskError::reprepare_required(refusal)
+        }
     }
 }
 
@@ -394,7 +396,9 @@ impl LocalApprovals {
                     ServiceTaskError::Refused(
                         PrivateOriginalError::Denied | PrivateOriginalError::Conflict,
                     ) => ToolError::access_denied(call.name),
-                    ServiceTaskError::ReprepareRequired => ServiceTaskError::reprepare_required(),
+                    ServiceTaskError::ReprepareRequired(refusal) => {
+                        ServiceTaskError::reprepare_required(refusal)
+                    }
                 }
             })
     }
@@ -438,7 +442,7 @@ impl LocalApprovals {
     }
     /// This call's current authorization check after its shared effect ran,
     /// through the service task source; Core's own answer is returned as it
-    /// gave it. Without a task source it is the plain check.
+    /// gave it. Without a task source the same bounded wait runs here.
     #[cfg(unix)]
     pub(crate) async fn check_after_shared_effect(
         &self,
@@ -454,7 +458,12 @@ impl LocalApprovals {
                     .check_after_shared_effect(call, context, plan, churn, site)
                     .await
             }
-            None => context.check_tool_authorization(call, plan),
+            None => {
+                toolkit_mobkit::current_check::check_after_owner_change(
+                    context, call, plan, churn, site,
+                )
+                .await
+            }
         }
     }
     // Exercise the existing per-request deadline after the exact prompt is
@@ -930,54 +939,83 @@ impl LocalApprovals {
                 .resolve()
                 .map_err(|error| installation_policy::tool_refusal(call.name, error))?;
         }
-        let held = owner.retain_action(call, session)?;
-        let mut reviewed = held.review();
-        reviewed["tool"] = call.name.into();
-        reviewed["call_id"] = call.id.into();
-        // The installed source selects the same canonical waiting task without
-        // requiring service access authority. Its currentness is re-opened after
-        // the decision, including on the application-policy branch.
-        let task = match &self.service_tasks {
-            Some(tasks) => tasks
-                .prepare_software(call, context, plan)
-                .await
-                .map_err(|error| service_task_failure(call.name, error))?,
-            None => None,
-        };
-        if self.shared.installation_policy.is_some()
-            && self.service_tasks.is_some()
-            && task.is_none()
-        {
-            return Err(ToolError::unavailable(
-                call.name,
-                meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
-            ));
-        }
-        let policy_entry = match &self.shared.installation_policy {
-            Some(source) => {
-                let refreshed = context.check_tool_authorization(call, plan)?;
-                let policy = source
-                    .resolve()
-                    .map_err(|error| installation_policy::tool_refusal(call.name, error))?;
-                let entry = match policy {
-                    Some(policy) => policy
-                        .reserve(
-                            held.realm(),
-                            call,
-                            refreshed.as_ref().unwrap_or(context),
-                            &reviewed,
-                        )
-                        .map_err(|error| installation_policy::tool_refusal(call.name, error))?,
-                    None => None,
-                };
-                // Only an actual human-required decision selects this same
-                // invocation's real presenter. Denial/staleness never retries it.
-                if entry.is_none() && self.shared.prompts.is_closed() {
-                    return Ok(SoftwareReviewOutcome::RequiresHuman);
-                }
-                entry
+        // The retained action and the prepared task are this attempt's
+        // decision. The installation-policy branch checks the call before it
+        // reserves the policy entry; a refusal to rebuild there releases both
+        // and waits out the change holding nothing, with this call's one
+        // churn, then retains the action and prepares the task again, every
+        // precondition checked afresh. A change that outlasts the bounds,
+        // and every other refusal, is answered as Core gave it.
+        let mut churn = context.owner_change_churn();
+        let (held, reviewed, task, policy_entry) = loop {
+            let held = owner.retain_action(call, session)?;
+            let mut reviewed = held.review();
+            reviewed["tool"] = call.name.into();
+            reviewed["call_id"] = call.id.into();
+            // The installed source selects the same canonical waiting task
+            // without requiring service access authority. Its currentness is
+            // re-opened after the decision, including on the
+            // application-policy branch.
+            let task = match &self.service_tasks {
+                Some(tasks) => tasks
+                    .prepare_software(call, context, plan)
+                    .await
+                    .map_err(|error| service_task_failure(call.name, error))?,
+                None => None,
+            };
+            if self.shared.installation_policy.is_some()
+                && self.service_tasks.is_some()
+                && task.is_none()
+            {
+                return Err(ToolError::unavailable(
+                    call.name,
+                    meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
+                ));
             }
-            None => None,
+            let policy_entry = match &self.shared.installation_policy {
+                Some(source) => {
+                    let refreshed = match toolkit_mobkit::current_check::check(context, call, plan)
+                    {
+                        Ok(refreshed) => refreshed,
+                        Err(error) => {
+                            drop((held, task));
+                            if toolkit_mobkit::current_check::refuses_to_rebuild(&error)
+                                && toolkit_mobkit::current_check::wait_after_refusal(
+                                    context,
+                                    &mut churn,
+                                    "connect.install.policy",
+                                )
+                                .await
+                            {
+                                continue;
+                            }
+                            return Err(error);
+                        }
+                    };
+                    let policy = source
+                        .resolve()
+                        .map_err(|error| installation_policy::tool_refusal(call.name, error))?;
+                    let entry = match policy {
+                        Some(policy) => policy
+                            .reserve(
+                                held.realm(),
+                                call,
+                                refreshed.as_ref().unwrap_or(context),
+                                &reviewed,
+                            )
+                            .map_err(|error| installation_policy::tool_refusal(call.name, error))?,
+                        None => None,
+                    };
+                    // Only an actual human-required decision selects this same
+                    // invocation's real presenter. Denial/staleness never retries it.
+                    if entry.is_none() && self.shared.prompts.is_closed() {
+                        return Ok(SoftwareReviewOutcome::RequiresHuman);
+                    }
+                    entry
+                }
+                None => None,
+            };
+            break (held, reviewed, task, policy_entry);
         };
         self.check_session(session).map_err(|_| refused())?;
         self.shared
@@ -1112,12 +1150,16 @@ impl LocalApprovals {
 
     /// Observe only this live owner's latest retained software attempt. This
     /// never searches approval history, renews permission or recommends retry.
+    /// Its checks hold nothing, so an owner change of the work's own
+    /// publication in progress is waited out with `churn`, the waiting state
+    /// of the setup_state call, and the check made again.
     pub(crate) async fn software_review_observation(
         &self,
         owner: &crate::service_install::CheckedInstalls,
         call: ToolCallView<'_>,
         context: &ToolDispatchContext,
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
     ) -> Result<serde_json::Value, ToolError> {
         let refused = || ToolError::access_denied(call.name);
         if call.name != "setup_state" {
@@ -1125,7 +1167,14 @@ impl LocalApprovals {
         }
         let session = context.origin_session_id().ok_or_else(refused)?;
         self.check_session(session).map_err(|_| refused())?;
-        let refreshed = context.check_tool_authorization(call, plan)?;
+        let refreshed = toolkit_mobkit::current_check::check_after_owner_change(
+            context,
+            call,
+            plan,
+            churn,
+            "connect.setup_state.observation",
+        )
+        .await?;
         let context = refreshed.as_ref().unwrap_or(context);
         let (id, task) = {
             let state = self.shared.live_state().map_err(|_| refused())?;
@@ -1177,7 +1226,14 @@ impl LocalApprovals {
                 .await
                 .map_err(|error| service_task_failure(call.name, error))?;
         }
-        context.check_tool_authorization(call, plan)?;
+        toolkit_mobkit::current_check::check_after_owner_change(
+            context,
+            call,
+            plan,
+            churn,
+            "connect.setup_state.observation_current",
+        )
+        .await?;
         let state = self.shared.live_state().map_err(|_| refused())?;
         if state.closed || state.session.as_ref() != Some(session) {
             return Err(refused());

@@ -1466,7 +1466,18 @@ impl CheckedInstalls {
         if physical_arguments(document(call.args.get())?)? != json!({}) {
             return Err(refused(call.name));
         }
-        let refreshed = context.check_tool_authorization(call, plan)?;
+        // Each check of this call holds nothing, so an owner change of the
+        // work's own publication in progress is waited out within the call's
+        // one waiting state, and the check made again.
+        let mut churn = context.owner_change_churn();
+        let refreshed = toolkit_mobkit::current_check::check_after_owner_change(
+            context,
+            call,
+            plan,
+            &mut churn,
+            "connect.setup_state.entry",
+        )
+        .await?;
         let current = refreshed.as_ref().unwrap_or(context);
         approvals
             .check_session(
@@ -1486,7 +1497,14 @@ impl CheckedInstalls {
             .inner_call(call, current, plan)
             .await
             .inspect_err(|error| setup_dispatch_refusal("state.inner", error))?;
-        let refreshed = current.check_tool_authorization(call, plan)?;
+        let refreshed = toolkit_mobkit::current_check::check_after_owner_change(
+            current,
+            call,
+            plan,
+            &mut churn,
+            "connect.setup_state.inner",
+        )
+        .await?;
         let current = refreshed.as_ref().unwrap_or(current);
         let mut value = response_document(call, &outcome)?;
         if outcome.result.is_error || value.get("error").is_some() {
@@ -1497,9 +1515,16 @@ impl CheckedInstalls {
             return Err(unconfirmed());
         }
         value["software_review_observation"] = approvals
-            .software_review_observation(self, call, current, plan)
+            .software_review_observation(self, call, current, plan, &mut churn)
             .await?;
-        current.check_tool_authorization(call, plan)?;
+        toolkit_mobkit::current_check::check_after_owner_change(
+            current,
+            call,
+            plan,
+            &mut churn,
+            "connect.setup_state.reply",
+        )
+        .await?;
         if self.state.lock().map_err(|_| unavailable())?.retired {
             return Err(refused(call.name));
         }
@@ -1950,7 +1975,17 @@ impl CheckedInstalls {
         ) {
             // This is the application's next action, not a native task state,
             // approval, installation receipt or authority to retry automatically.
-            context.check_tool_authorization(call, plan)?;
+            // The check holds nothing, so an owner change in progress is
+            // waited out and the check made again.
+            let mut churn = context.owner_change_churn();
+            toolkit_mobkit::current_check::check_after_owner_change(
+                context,
+                call,
+                plan,
+                &mut churn,
+                "connect.install.requires_human",
+            )
+            .await?;
             return Ok(ToolResult::new(
                 call.id.into(),
                 serde_json::json!({"state":"requires_action","action":"human_installation_review",
@@ -1966,9 +2001,12 @@ impl CheckedInstalls {
         // Human review can outlast the originating permission. Recheck this
         // exact borrowed call and actual plan without extracting/rebuilding the
         // native prepared check. The outer native gate remains its own owner.
+        // The guard above owns this physical dispatch and cannot be released
+        // for a wait, so the check answers once: an owner change in progress
+        // is refused at once, as Core answers it, before anything was sent.
         #[cfg(all(test, unix))]
         shared_check_probe::observe(shared_check_probe::Step::InstallGuarded, call.id);
-        let refreshed = match context.check_tool_authorization(call, plan) {
+        let refreshed = match toolkit_mobkit::current_check::check(context, call, plan) {
             Ok(current) => current,
             Err(error) => {
                 return approvals.settle_service_result(
@@ -2116,7 +2154,17 @@ impl CheckedInstalls {
             {
                 return Err(unconfirmed());
             }
-            context.check_tool_authorization(call, plan)?;
+            // The check holds nothing, so an owner change in progress is
+            // waited out and the check made again.
+            let mut churn = context.owner_change_churn();
+            toolkit_mobkit::current_check::check_after_owner_change(
+                context,
+                call,
+                plan,
+                &mut churn,
+                "connect.setup_stop.result",
+            )
+            .await?;
             let session = context
                 .origin_session_id()
                 .ok_or_else(|| refused(call.name))?;

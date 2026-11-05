@@ -1434,7 +1434,7 @@ async fn workflow_dispatch_preserves_native_unavailability_before_entry() {
                     arguments: serde_json::from_str(call.args.get()).unwrap() } }, fault.clone()).unwrap();
         let current = current.with_tool_application_control(control);
         current.check_tool_authorization(call, Some(plan)).unwrap();
-        let custody = source.workflow_task_custody(call, &current, plan).unwrap().unwrap();
+        let custody = source.workflow_task_custody(call, &current, plan, &mut current.owner_change_churn()).await.unwrap().unwrap();
         let entry = custody.entry.clone();
         let before = c.f.store.get(waiter.membership.acquisition()).await.unwrap();
         let before_workflow = c.f.store.get(snapshot.reference().key()).await.unwrap();
@@ -1448,7 +1448,8 @@ async fn workflow_dispatch_preserves_native_unavailability_before_entry() {
             *fault.0.lock().unwrap() = Some(error);
             assert!(matches!(current.check_tool_authorization(call, Some(plan)),
                 Err(ToolError::OperationAuthorizationUnavailable | ToolError::OperationObservationUnavailable)));
-            assert!(matches!(source.workflow_task_custody(call, &current, plan), Err(PrivateOriginalError::Unavailable)));
+            assert!(matches!(source.workflow_task_custody(call, &current, plan, &mut current.owner_change_churn()).await,
+                Err(crate::private_originals::setup_workflow::execution::WorkflowCustodyRefusal::Refused(PrivateOriginalError::Unavailable))));
             assert!(matches!(dispatcher.dispatch_resolved_with_context(call, &current, plan).await,
                 Err(ToolError::Unavailable { .. })));
             assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -1462,8 +1463,9 @@ async fn workflow_dispatch_preserves_native_unavailability_before_entry() {
         let changed = serde_json::value::RawValue::from_string(call.args.get().to_owned()).unwrap();
         assert!(matches!(current.check_tool_authorization(ToolCallView { args: &changed, ..call }, Some(plan)),
             Err(ToolError::AuthorizationRefused { .. })));
-        assert!(matches!(source.workflow_task_custody(ToolCallView { args: &changed, ..call }, &current, plan),
-            Err(PrivateOriginalError::Denied)));
+        assert!(matches!(source.workflow_task_custody(ToolCallView { args: &changed, ..call }, &current, plan,
+                &mut current.owner_change_churn()).await,
+            Err(crate::private_originals::setup_workflow::execution::WorkflowCustodyRefusal::Refused(PrivateOriginalError::Denied))));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(c.f.store.get(waiter.membership.acquisition()).await.unwrap(), before);
         assert_eq!(c.f.store.get(snapshot.reference().key()).await.unwrap(), before_workflow);
@@ -1494,7 +1496,8 @@ async fn workflow_dispatch_preserves_native_unavailability_before_entry() {
         let next_prepared = prepare_control("post-entry control",
             current.work_authorization().unwrap().clone(), next_binding.clone(), &diagnose);
         let next_context = captured.clone().__test_with_prepared_authorization(next_prepared);
-        let next_entry = source.workflow_task_custody(next_call, &next_context, next_plan).unwrap().unwrap().entry;
+        let next_entry = source.workflow_task_custody(next_call, &next_context, next_plan,
+            &mut next_context.owner_change_churn()).await.unwrap().unwrap().entry;
         after_entry_failure.store(true, Ordering::SeqCst);
         assert!(matches!(dispatcher.dispatch_resolved_with_context(next_call, &next_context, next_plan).await,
             Err(ToolError::Unavailable { .. })));

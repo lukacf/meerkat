@@ -149,7 +149,9 @@ pub(super) async fn dispatch(
             use toolkit_mobkit::installed_host::acquisition::ServiceTaskError;
             match error {
                 ServiceTaskError::Refused(_) => unavailable(),
-                ServiceTaskError::ReprepareRequired => ServiceTaskError::reprepare_required(),
+                ServiceTaskError::ReprepareRequired(refusal) => {
+                    ServiceTaskError::reprepare_required(refusal)
+                }
             }
         })?
         .ok_or_else(|| ToolError::access_denied(call.name))?;

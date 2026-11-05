@@ -282,7 +282,9 @@ pub(super) async fn dispatch(
                 ServiceTaskError::Refused(
                     PrivateOriginalError::Denied | PrivateOriginalError::Conflict,
                 ) => ToolError::access_denied(call.name),
-                ServiceTaskError::ReprepareRequired => ServiceTaskError::reprepare_required(),
+                ServiceTaskError::ReprepareRequired(refusal) => {
+                    ServiceTaskError::reprepare_required(refusal)
+                }
             }
         })?
         .ok_or_else(|| {

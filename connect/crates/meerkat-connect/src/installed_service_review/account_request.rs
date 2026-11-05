@@ -522,7 +522,9 @@ impl RequestTool {
                 ServiceTaskError::Refused(
                     PrivateOriginalError::Conflict | PrivateOriginalError::Denied,
                 ) => ToolError::access_denied(call.name),
-                ServiceTaskError::ReprepareRequired => ServiceTaskError::reprepare_required(),
+                ServiceTaskError::ReprepareRequired(refusal) => {
+                    ServiceTaskError::reprepare_required(refusal)
+                }
             }
         })?;
         if let Some(task) = &task {

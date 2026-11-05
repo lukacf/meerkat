@@ -194,7 +194,7 @@ async fn persistent_owner_change_at_the_task_check_ends_typed_within_the_bound()
     let prepared = prepare_with("prepare.authorization", AtCheck::OwnerChange(None)).await;
     assert_tool_time_covers_the_wait(prepared.remaining);
     assert!(
-        matches!(prepared.result, Err(ServiceTaskError::ReprepareRequired)),
+        matches!(prepared.result, Err(ServiceTaskError::ReprepareRequired(_))),
         "a change that outlasts the bound stays a typed refusal to rebuild, never a denial: {:?}",
         prepared.result.as_ref().err()
     );

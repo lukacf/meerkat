@@ -15,6 +15,21 @@ pub(crate) struct WorkflowTaskCustody {
     pub(crate) entry: Arc<WorkflowCallCustody>,
 }
 
+/// A refusal of a call's workflow custody.
+#[derive(Debug)]
+pub(crate) enum WorkflowCustodyRefusal {
+    /// The source owner's own answer.
+    Refused(PrivateOriginalError),
+    /// The call's current authorization refused to rebuild after its bounded
+    /// waits: Core's typed answer as Core gave it.
+    Current(meerkat_core::ToolError),
+}
+impl From<PrivateOriginalError> for WorkflowCustodyRefusal {
+    fn from(error: PrivateOriginalError) -> Self {
+        Self::Refused(error)
+    }
+}
+
 /// Validate the service-task helper correlation. A current workflow owns G's
 /// selection; the request's fixed helper is only eligible for optional warm
 /// setup metadata when it is that same member. This grants no operation access.
@@ -328,18 +343,39 @@ impl PrivateOriginals {
             .settle_unentered_call(call)
             .map_err(custody_error)
     }
-    pub(crate) fn workflow_task_custody(
+    /// The workflow custody of this exact call: its selected waiter, the
+    /// call's current authorization, then the selected call's entry. The
+    /// check holds only the shared waiter selection, so an owner change of
+    /// the work's own publication in progress is waited out with `churn`,
+    /// the waiting state of the call's entry point, and the check made
+    /// again. A refusal to rebuild that outlasts the bounds stays Core's
+    /// typed answer ([`WorkflowCustodyRefusal::Current`]), never a denial;
+    /// every other refusal keeps its source projection.
+    pub(crate) async fn workflow_task_custody(
         &self,
         call: ToolCallView<'_>,
         context: &ToolDispatchContext,
         plan: &ResolvedToolExecutionPlan,
-    ) -> Result<Option<WorkflowTaskCustody>, PrivateOriginalError> {
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
+    ) -> Result<Option<WorkflowTaskCustody>, WorkflowCustodyRefusal> {
         let Some(waiter) = self.workflow_call_selection(call, context, plan)? else {
             return Ok(None);
         };
-        context
-            .check_tool_authorization(call, Some(plan))
-            .map_err(authorization_error)?;
+        if let Err(error) = crate::current_check::check_after_owner_change(
+            context,
+            call,
+            Some(plan),
+            churn,
+            "toolkit.workflow.custody",
+        )
+        .await
+        {
+            return Err(if crate::current_check::refuses_to_rebuild(&error) {
+                WorkflowCustodyRefusal::Current(error)
+            } else {
+                authorization_error(error).into()
+            });
+        }
         let entry = waiter
             .authority
             .selected_call(call)

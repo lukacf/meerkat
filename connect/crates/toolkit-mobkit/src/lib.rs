@@ -11,6 +11,7 @@
 #![recursion_limit = "256"]
 
 mod admission_progress;
+pub mod current_check;
 pub mod discovery;
 #[cfg(all(feature = "native-host", unix))]
 pub mod host_gateway;

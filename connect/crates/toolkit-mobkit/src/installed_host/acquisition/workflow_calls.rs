@@ -1,5 +1,6 @@
 //! Stage exact workflow selection after the existing native registration resolves.
 use super::*;
+use crate::private_originals::setup_workflow::execution::WorkflowCustodyRefusal;
 use meerkat_core::{
     AgentToolDispatcher, ResolvedToolExecutionPlan, ToolCallView, ToolCatalogCapabilities,
     ToolCatalogEntry, ToolDef, ToolDispatchContext, ToolError, ToolExecutionResolutionContext,
@@ -51,14 +52,14 @@ impl InstalledServiceTaskSource {
             }
         }
     }
-    fn workflow_entry(
+    async fn workflow_entry(
         &self,
         call: ToolCallView<'_>,
         context: &ToolDispatchContext,
         plan: &ResolvedToolExecutionPlan,
     ) -> Result<
         Option<Arc<crate::original_ingress::workflow_custody::WorkflowCallCustody>>,
-        PrivateOriginalError,
+        WorkflowCustodyRefusal,
     > {
         let selected = self
             .selected
@@ -69,11 +70,15 @@ impl InstalledServiceTaskSource {
             .map_err(|_| PrivateOriginalError::Unavailable)?
             .configured();
         match owner {
-            Some(owner) => owner
-                .host
-                .originals
-                .workflow_task_custody(call, context, plan)
-                .map(|custody| custody.map(|custody| custody.entry)),
+            Some(owner) => {
+                let mut churn = context.owner_change_churn();
+                owner
+                    .host
+                    .originals
+                    .workflow_task_custody(call, context, plan, &mut churn)
+                    .await
+                    .map(|custody| custody.map(|custody| custody.entry))
+            }
             None => Ok(None),
         }
     }
@@ -237,9 +242,14 @@ impl AgentToolDispatcher for WorkflowCalls {
         let entry = self
             .source
             .workflow_entry(call, context, plan)
-            .map_err(|error| {
-                super::task_approval::shared_task_refusal("workflow.entry", error);
-                workflow_failure(call.name, error)
+            .await
+            .map_err(|refusal| match refusal {
+                WorkflowCustodyRefusal::Refused(error) => {
+                    super::task_approval::shared_task_refusal("workflow.entry", error);
+                    workflow_failure(call.name, error)
+                }
+                // A refusal to rebuild stays Core's typed answer.
+                WorkflowCustodyRefusal::Current(error) => error,
             })?;
         if call.name == meerkat_toolkit::setup::SETUP_PUBLIC_SERVICE_REQUEST
             && let Some(entry) = &entry

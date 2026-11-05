@@ -96,7 +96,8 @@ impl ObservedBridge {
             | DeliveryMode::HelperPolicyChangesThenUnresolved
             | DeliveryMode::HelperPolicyChangesThenRetirement
             | DeliveryMode::HelperPolicyChangesThenDeadline
-            | DeliveryMode::HelperPolicyChangeHeld(_) => {}
+            | DeliveryMode::HelperPolicyChangeHeld(_)
+            | DeliveryMode::HelperPolicyChangesHeld(..) => {}
             DeliveryMode::HoldAccepted | DeliveryMode::HoldHelperAcceptedReply => {
                 // Native admission is real and its reply is retained unchanged.
                 // IdentityRuntime owns the entry permit and finishes it only
@@ -155,37 +156,39 @@ impl ObservedBridge {
         if ordinal == 1 {
             *self.fault.helper_input.lock().unwrap() = Some(input.id().clone());
         }
-        let _change_arm =
-            if ordinal == 1 || matches!(self.fault.mode, DeliveryMode::HelperPolicyChangesAlways) {
-                let association = input
-                    .header()
-                    .authority_association
-                    .as_ref()
-                    .expect("actual bound helper association")
-                    .clone();
-                assert_eq!(
-                    association.candidate().target.context.as_str(),
-                    session_id.to_string()
-                );
-                // A change held in progress is met by native's one read; it
-                // makes no in-place re-read while a change is in progress.
-                let reads = if matches!(self.fault.mode, DeliveryMode::HelperPolicyChangeHeld(_)) {
-                    1
-                } else {
-                    NATIVE_CONTROLLER_ADMISSION_READS
-                };
-                assert!(
-                    self.fault
-                        .helper_admission_change
-                        .lock()
-                        .unwrap()
-                        .replace((association, reads))
-                        .is_none()
-                );
-                Some(AdmissionChangeArm(self.fault.clone()))
+        let _change_arm = if ordinal == 1
+            || matches!(self.fault.mode, DeliveryMode::HelperPolicyChangesAlways)
+            || matches!(self.fault.mode, DeliveryMode::HelperPolicyChangesHeld(count, _) if ordinal <= count)
+        {
+            let association = input
+                .header()
+                .authority_association
+                .as_ref()
+                .expect("actual bound helper association")
+                .clone();
+            assert_eq!(
+                association.candidate().target.context.as_str(),
+                session_id.to_string()
+            );
+            // A change held in progress is met by native's one read; it
+            // makes no in-place re-read while a change is in progress.
+            let reads = if self.fault.mode.held_change().is_some() {
+                1
             } else {
-                None
+                NATIVE_CONTROLLER_ADMISSION_READS
             };
+            assert!(
+                self.fault
+                    .helper_admission_change
+                    .lock()
+                    .unwrap()
+                    .replace((association, reads))
+                    .is_none()
+            );
+            Some(AdmissionChangeArm(self.fault.clone()))
+        } else {
+            None
+        };
         let real = self
             .delegate_governed_delivery(runtime_id, session_id, input, custody, internal)
             .await;
@@ -344,7 +347,7 @@ impl OperationPolicyOwner for AdmissionChangingOwner {
                 _ => false,
             }
         };
-        if selected && let DeliveryMode::HelperPolicyChangeHeld(hold) = self.fault.mode {
+        if selected && let Some(hold) = self.fault.mode.held_change() {
             // No semantic policy fact is changed either: a real owner change
             // begins after the genuine policy read and stays in progress, on
             // its own thread, through Core's enclosing currentness check, for

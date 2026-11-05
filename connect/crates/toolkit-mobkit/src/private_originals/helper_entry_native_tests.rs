@@ -925,7 +925,17 @@ async fn exercise_helper_reprepare(mode: DeliveryMode) {
             }
             // Expiry refuses before the second dispatch. Retired-login custody
             // instead refuses inside the second real bridge at its final entry.
-            let attempts = if deadline_expired { 1 } else { 2 };
+            // Changes at every native call are refused once per call: the
+            // submission rebinds after each settled wait of its one churn,
+            // within its free rebuilds, and then stops at retry_safe.
+            let always = matches!(mode, DeliveryMode::HelperPolicyChangesAlways);
+            let attempts = if deadline_expired {
+                1
+            } else if always {
+                1 + usize::from(meerkat_core::authorization::OWNER_CHANGE_FREE_REBUILDS)
+            } else {
+                2
+            };
             let inputs = fault.helper_inputs.lock().unwrap().clone();
             assert_eq!(inputs.len(), attempts);
             assert_eq!(fault.helper_returns.load(Ordering::SeqCst), attempts);
@@ -933,9 +943,8 @@ async fn exercise_helper_reprepare(mode: DeliveryMode) {
                 assert_eq!(input, &input_before[0],
                     "one actual Input ID, content, authority, timestamp and event key across re-entry");
             }
-            let always = matches!(mode, DeliveryMode::HelperPolicyChangesAlways);
-            assert_eq!(fault.helper_policy_changed.load(Ordering::SeqCst), if always { 2 } else { 1 });
-            assert_eq!(fault.publication_changes.load(Ordering::SeqCst), if always { 4 } else { 2 });
+            assert_eq!(fault.helper_policy_changed.load(Ordering::SeqCst), if always { attempts } else { 1 });
+            assert_eq!(fault.publication_changes.load(Ordering::SeqCst), if always { 2 * attempts } else { 2 });
             let accepted = matches!(mode,
                 DeliveryMode::HelperPolicyChangesOnce | DeliveryMode::HelperPolicyChangesThenUnresolved);
             assert_eq!(fault.accepted.load(Ordering::SeqCst), usize::from(accepted));

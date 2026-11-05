@@ -108,6 +108,9 @@ pub(crate) enum DeliveryMode {
     // The first helper admission instead finds a real owner change still in
     // progress, held this long from another thread.
     HelperPolicyChangeHeld(std::time::Duration),
+    // The first that many helper admissions each find a real owner change
+    // still in progress, each held this long from another thread.
+    HelperPolicyChangesHeld(usize, std::time::Duration),
 }
 
 impl DeliveryMode {
@@ -120,7 +123,17 @@ impl DeliveryMode {
                 | Self::HelperPolicyChangesThenRetirement
                 | Self::HelperPolicyChangesThenDeadline
                 | Self::HelperPolicyChangeHeld(_)
+                | Self::HelperPolicyChangesHeld(..)
         )
+    }
+    /// How long a held mode holds each owner change it begins.
+    fn held_change(self) -> Option<std::time::Duration> {
+        match self {
+            Self::HelperPolicyChangeHeld(hold) | Self::HelperPolicyChangesHeld(_, hold) => {
+                Some(hold)
+            }
+            _ => None,
+        }
     }
 }
 

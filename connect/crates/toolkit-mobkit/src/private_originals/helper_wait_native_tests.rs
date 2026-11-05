@@ -26,13 +26,17 @@ async fn exercise_helper_wait(
     tool_time: Duration,
     stop: Option<setup_helpers::HelperRebindStop>,
     selected: bool,
+    changes: usize,
 ) {
     let rebind = stop.is_none();
     let (_connection, _logins, login) = enrolled_login();
     let script = acquisition_denial::Script::paused_for_helper_entry();
-    let fault = Arc::new(DeliveryFault::new(DeliveryMode::HelperPolicyChangeHeld(
-        hold,
-    )));
+    let mode = if changes == 1 {
+        DeliveryMode::HelperPolicyChangeHeld(hold)
+    } else {
+        DeliveryMode::HelperPolicyChangesHeld(changes, hold)
+    };
+    let fault = Arc::new(DeliveryFault::new(mode));
     let (fixture, history) = Fixture::for_helper_entry(script.clone(), fault.clone()).await;
     let mut first_round = selected.then(|| fixture.source.hold_first_custody_round_for_test());
     let custody = std::sync::Mutex::new(None);
@@ -141,7 +145,9 @@ async fn exercise_helper_wait(
                 "retry_safe"
             };
             assert_eq!(reply["worker"]["state"], expected, "{reply}");
-            let attempts = if rebind { 2 } else { 1 };
+            // Each held change refuses one native call; a rebind follows
+            // each settled wait, and the call after the last change admits.
+            let attempts = if rebind { changes + 1 } else { 1 };
             let inputs = fault.helper_inputs.lock().unwrap().clone();
             assert_eq!(inputs.len(), attempts, "native calls");
             assert_eq!(fault.helper_returns.load(Ordering::SeqCst), attempts);
@@ -151,7 +157,10 @@ async fn exercise_helper_wait(
                     "one actual Input ID, content, authority, timestamp and event key"
                 );
             }
-            assert_eq!(fault.helper_policy_changed.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                fault.helper_policy_changed.load(Ordering::SeqCst),
+                if rebind { changes } else { 1 }
+            );
             assert_eq!(
                 *fixture.source.helper_rebind_stops_for_test.lock().unwrap(),
                 Vec::from_iter(stop),
@@ -243,6 +252,7 @@ async fn helper_change_outlasting_the_tool_time_stops_after_one_native_call() {
         Duration::from_millis(300),
         Some(setup_helpers::HelperRebindStop::WaitUnsettled),
         true,
+        1,
     ))
     .await;
 }
@@ -254,6 +264,7 @@ async fn helper_with_no_tool_time_left_stops_after_one_native_call() {
         Duration::ZERO,
         Some(setup_helpers::HelperRebindStop::NoBudget),
         false,
+        1,
     ))
     .await;
 }
@@ -265,6 +276,22 @@ async fn helper_change_settling_within_the_tool_time_rebinds_once() {
         Duration::from_secs(10),
         None,
         false,
+        1,
+    ))
+    .await;
+}
+
+// Two changes in a row, each held 300 ms and each settling within the
+// dispatch's bounds: the submission rebinds after each settled wait of its one
+// churn, with the same input, and the third native call admits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn helper_changes_settling_in_a_row_rebind_after_each_wait() {
+    Box::pin(exercise_helper_wait(
+        Duration::from_millis(300),
+        Duration::from_secs(10),
+        None,
+        false,
+        2,
     ))
     .await;
 }

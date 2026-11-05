@@ -31,6 +31,7 @@ import {
   shellQuote,
   tlcSelection,
 } from "./affected-tests.mjs";
+import { INTEGRATION_SUITES, LIVE_ONLY_FEATURES } from "./ci-cargo-lanes.mjs";
 import { parseNonRustReaders } from "./ci-non-rust-readers.mjs";
 import { loadProducts } from "./ci-products.mjs";
 import { packageDir, readMetadata, workspacePackages } from "./rust-test-selector.mjs";
@@ -279,6 +280,10 @@ const FIXTURE_PACKAGES = [
   fixturePackage("meerkat-integration-tests", { deps: ["meerkat-runtime"], fixture: true, tests: ["e2e_fast_lane"] }),
   fixturePackage("meerkat-meta", { product: "meta", deps: ["meerkat-runtime"], kinds: [["lib"], ["bin"]] }),
   fixturePackage("xtask", { kinds: [["lib"], ["bin"]] }),
+  // The packages of the feature-bearing integration suites, without reverse
+  // dependencies here.
+  fixturePackage("meerkat", { tests: ["cold_restart_resume", "persistence_contract", "governed_realm"] }),
+  fixturePackage("meerkat-machine-kernels", { tests: ["kernel_round_trip"] }),
 ];
 const FIXTURE_INVENTORY = parseNonRustReaders({
   schema_version: 1,
@@ -305,6 +310,7 @@ const FIXTURE_TARGETS = {
   wasm_only: { gate: { state: "never", features: [], expr: 'target_arch = "wasm32"' } },
   empty_target: { ignored: { tests: 0, ignored: 0, reasons: [] } },
   odd_gate: { gate: { state: "unreadable", features: [], expr: 'any(feature = "a", feature = "b")' } },
+  governed_realm: { gate: { state: "needs", features: ["local-authorization", "mcp", "session-store"], expr: 'all(feature = "session-store", feature = "local-authorization", feature = "mcp")' } },
 };
 function fixtureContext({ lane = parseTlcLane(FIXTURE_LANE) } = {}) {
   const packages = new Map(FIXTURE_PACKAGES.map((pkg) => [pkg.name, pkg]));
@@ -492,6 +498,44 @@ check("crate-level gates and ignored tests decide what a narrowed target runs", 
   assert.ok(odd.notes.some((note) => note.startsWith("meerkat-sqlite: --test odd_gate opens with cfg(any(") && note.endsWith("the package runs whole")), odd.notes.join("\n"));
 });
 
+check("a feature-bearing suite keeps its features for a narrowed target it holds", () => {
+  const suites = [
+    {
+      name: "meerkat-store-restart",
+      packages: ["meerkat"],
+      package_flags: "-p meerkat --features live,session-store",
+      test_flags: "--test cold_restart_resume --test persistence_contract",
+    },
+    { name: "meerkat-governed-realm", packages: ["meerkat"], package_flags: "-p meerkat --features session-store,local-authorization,mcp", test_flags: "--test governed_realm" },
+  ];
+  const push = pushPlan({ mode: "packages", rust_changed: true, packages: ["meerkat"], closure: ["meerkat"], integration_suites: suites });
+  const ofMeerkat = (selection) => lines(selection, "tests").filter((line) => line.includes(" -p meerkat "));
+  const restart = selectCommands({ paths: ["crates/meerkat/tests/cold_restart_resume.rs"], push, pr: NO_PR, ctx: fixtureContext() });
+  assert.deepEqual(ofMeerkat(restart), [
+    nextest(`-p meerkat --test cold_restart_resume --profile ${TEST_PROFILE} --no-tests=fail`),
+    nextest(`-p meerkat --features live,session-store --test cold_restart_resume --profile ${ROW_PROFILE} --no-tests=fail`),
+  ]);
+  assert.ok(restart.notes.includes("integration suite meerkat-store-restart: runs the changed cold_restart_resume with its features"), restart.notes.join("\n"));
+  assert.ok(restart.notes.includes("integration suite meerkat-governed-realm: only test targets of its trigger packages changed"));
+  // A crate-level gate that already names the suite's features runs the
+  // target once.
+  const realm = selectCommands({ paths: ["crates/meerkat/tests/governed_realm.rs"], push, pr: NO_PR, ctx: fixtureContext() });
+  assert.deepEqual(ofMeerkat(realm), [nextest(`-p meerkat --features local-authorization,mcp,session-store --test governed_realm --profile ${TEST_PROFILE} --no-tests=fail`)]);
+  // A suite over every test target of its package holds each narrowed one.
+  const kernels = pushPlan({
+    mode: "packages",
+    rust_changed: true,
+    packages: ["meerkat-machine-kernels"],
+    closure: ["meerkat-machine-kernels"],
+    integration_suites: [{ name: "machine-kernels", packages: ["meerkat-machine-kernels"], package_flags: "-p meerkat-machine-kernels --features test-oracle", test_flags: "" }],
+  });
+  const oracle = selectCommands({ paths: ["crates/meerkat-machine-kernels/tests/kernel_round_trip.rs"], push: kernels, pr: NO_PR, ctx: fixtureContext() });
+  assert.ok(
+    lines(oracle, "tests").includes(nextest(`-p meerkat-machine-kernels --features test-oracle --test kernel_round_trip --profile ${ROW_PROFILE} --no-tests=fail`)),
+    lines(oracle, "tests").join("\n"),
+  );
+});
+
 check("a change outside the tests directory is not narrowed", () => {
   const push = pushPlan({ mode: "packages", rust_changed: true, packages: ["meerkat-sqlite"], closure: ["meerkat-sqlite"], shards: [] });
   for (const paths of [["crates/meerkat-sqlite/tests/lock_sources.rs", "crates/meerkat-sqlite/src/lib.rs"], ["crates/meerkat-sqlite/tests/fixture.json"]]) {
@@ -643,6 +687,53 @@ check("end to end: a gated, a live-gated and a lane-only test target", () => {
   assert.ok(!out.stdout.some((line) => /system_cli_realm_mcp|live_smoke_rpc/.test(line)), "the live-gated and lane-only targets are named, not run");
   assert.ok(out.stderr.includes("rkat --test system_cli_realm_mcp needs integration-real-tests (live provider credentials): not run"), out.stderr);
   assert.match(out.stderr, /meerkat-rpc --test live_smoke_rpc: all \d+ tests are ignored \(lanes? [^)]*e2e-live[^)]*\)/);
+});
+
+// Does a command run `target` of `pkg` with every one of `features`?
+function runsWithFeatures(commands, pkg, target, features) {
+  return commands.some((line) => {
+    const words = line.split(" ");
+    if (!words.includes("nextest") || words[words.indexOf("-p") + 1] !== pkg) return false;
+    if (!words.some((word, index) => word === "--test" && words[index + 1] === target)) return false;
+    const at = words.indexOf("--features");
+    const enabled = at < 0 ? [] : words[at + 1].split(",");
+    return features.every((feature) => enabled.includes(feature));
+  });
+}
+const suiteNamed = (name) => INTEGRATION_SUITES.find((suite) => (suite.name ?? suite.package) === name);
+
+check("end to end: a test-only edit of governed_realm keeps the governed-realm suite's features", () => {
+  const out = cli("--", "crates/meerkat/tests/governed_realm.rs");
+  assert.equal(out.status, 0, out.stderr);
+  assert.ok(runsWithFeatures(out.stdout, "meerkat", "governed_realm", suiteNamed("meerkat-governed-realm").features), out.stdout.join("\n"));
+});
+
+check("end to end: a test-only edit of cold_restart_resume keeps the store-restart suite's features", () => {
+  const out = cli("--", "crates/meerkat/tests/cold_restart_resume.rs");
+  assert.equal(out.status, 0, out.stderr);
+  assert.ok(runsWithFeatures(out.stdout, "meerkat", "cold_restart_resume", suiteNamed("meerkat-store-restart").features), out.stdout.join("\n"));
+});
+
+check("end to end: every feature-bearing integration suite keeps its features for a narrowed target", () => {
+  const packages = new Map(workspacePackages(readMetadata()).map((pkg) => [pkg.name, pkg]));
+  for (const suite of INTEGRATION_SUITES.filter((entry) => entry.features?.length > 0)) {
+    const pkg = packages.get(suite.package);
+    const target = pkg.targets.find((candidate) => {
+      if (!candidate.kind.includes("test") || !candidate.src_path.endsWith(`${sep}tests${sep}${candidate.name}.rs`) || candidate.name.startsWith("e2e_")) return false;
+      if (suite.tests && !suite.tests.includes(candidate.name)) return false;
+      const text = readFileSync(candidate.src_path, "utf8");
+      const gate = crateGate(text);
+      const tests = ignoredTests([text]);
+      const needs = [...(candidate["required-features"] ?? []), ...gate.features];
+      return (gate.state === "always" || gate.state === "needs") && !needs.some((feature) => LIVE_ONLY_FEATURES.includes(feature)) && tests.tests > tests.ignored;
+    });
+    const name = suite.name ?? suite.package;
+    assert.ok(target, `${name}: a runnable test target to edit`);
+    const path = `${packageDir(pkg)}/tests/${target.name}.rs`;
+    const out = cli("--", path);
+    assert.equal(out.status, 0, out.stderr);
+    assert.ok(runsWithFeatures(out.stdout, suite.package, target.name, suite.features), `${name}: ${path}\n${out.stdout.join("\n")}`);
+  }
 });
 
 check("end to end: a machine DSL change regenerates and runs the machine's TLC", () => {

@@ -69,7 +69,10 @@
 // know, a feature the package does not declare) leaves the package un-narrowed.
 // A target whose every test is #[ignore]d runs nothing by default: it is
 // named with its lanes (`#[ignore = "lane:NAME"]`) and reasons, as is a
-// target that declares no test.
+// target that declares no test. CI still runs a feature-bearing integration
+// suite of a narrowed package (INTEGRATION_SUITES), so the narrowed targets
+// that suite holds run again with its features and CI's row profile, unless
+// the narrowed run already enables them all.
 //
 // Generated files and TLC. The generators run first, and TLC follows the
 // specs: the machines and compositions whose specs/ files changed, the
@@ -665,6 +668,17 @@ function targetFeatures(target) {
   return [...new Set([...target.requiredFeatures, ...(target.gate?.state === "needs" ? target.gate.features : [])])].sort();
 }
 
+// The narrowed targets of an integration suite row's package that the row
+// runs: the ones its `--test NAME` list names, or all of them when it runs
+// every test target.
+function suiteHeldTargets(row, narrowedRun) {
+  const kept = narrowedRun.get(row.packages[0]);
+  if (!kept) return [];
+  const words = (row.test_flags ?? "").split(" ").filter(Boolean);
+  const listed = words.flatMap((word, index) => (word === "--test" && !["*", "'*'"].includes(words[index + 1]) ? [words[index + 1]] : []));
+  return [...kept].filter((name) => listed.length === 0 || listed.includes(name)).sort();
+}
+
 // Why a target whose every test is ignored runs nothing here: its lanes
 // (`#[ignore = "lane:NAME"]`, with the Make target that runs each) and its
 // other reasons.
@@ -789,6 +803,7 @@ export function selectCommands({ paths, push, pr, ctx }) {
   const specialBinaries = new Set(specialRows.flatMap((row) => row.binaries));
   const makeTargets = new Set([...(ctx.readText("Makefile") ?? "").matchAll(/^([A-Za-z0-9_-]+):/gm)].map((match) => match[1]));
   const narrowedRun = new Map();
+  const narrowedFeatures = new Map();
   for (const [name, targets] of narrowed) {
     if (inClosure.has(name)) continue;
     const kept = targets.filter((target) => {
@@ -821,6 +836,7 @@ export function selectCommands({ paths, push, pr, ctx }) {
     if (kept.length === 0) continue;
     narrowedRun.set(name, new Set(kept.map((target) => target.name)));
     const features = [...new Set(kept.flatMap(targetFeatures))].sort();
+    narrowedFeatures.set(name, new Set(features));
     add(
       "tests",
       nextestCommand(ctx, {
@@ -868,11 +884,23 @@ export function selectCommands({ paths, push, pr, ctx }) {
       push.mode === "workspace" ||
       suite.triggers.some((name) => seedSet.has(name)) ||
       (suite.paths ?? []).some((prefix) => paths.some((path) => path.startsWith(prefix)));
+    const flags = row.package_flags.split(" ");
+    const hasFeatures = flags.includes("--features");
     if (!selected) {
-      notes.push(`integration suite ${row.name}: only test targets of its trigger packages changed`);
+      // CI runs a feature-bearing suite for its package even when only test
+      // targets changed: the narrowed targets it holds run again with its
+      // features, unless the narrowed run already enables them all.
+      const held = hasFeatures ? suiteHeldTargets(row, narrowedRun) : [];
+      const suiteFeatures = hasFeatures ? flags[flags.indexOf("--features") + 1].split(",") : [];
+      const enabled = narrowedFeatures.get(row.packages[0]) ?? new Set();
+      if (held.length === 0 || suiteFeatures.every((feature) => enabled.has(feature))) {
+        notes.push(`integration suite ${row.name}: only test targets of its trigger packages changed`);
+        continue;
+      }
+      notes.push(`integration suite ${row.name}: runs the changed ${held.join(", ")} with its features`);
+      add("tests", nextestCommand(ctx, { flags, targets: held.flatMap((target) => ["--test", target]), profile: ROW_PROFILE, noTests: "fail" }));
       continue;
     }
-    const hasFeatures = row.package_flags.split(" ").includes("--features");
     if (!hasFeatures && inClosure.has(row.packages[0])) continue;
     add(
       "tests",

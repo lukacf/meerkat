@@ -7,6 +7,7 @@ mod find_feedback;
 mod observe_controls;
 mod planning_admission;
 mod post_effect_controls;
+mod work_step_controls;
 use super::sdk_host::{SdkClient, SdkLaunchOwner, SdkParent};
 use super::*;
 use async_trait::async_trait;

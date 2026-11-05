@@ -851,3 +851,49 @@ pub mod observe_helper_probe {
         }
     }
 }
+
+/// Test seam: a Find's work step just before its helper publication-source
+/// read (`complete.publication_source`), by call ID. A control can have the
+/// owner's originals collection held there on a thread of its own, inside an
+/// owner change on the owner's publication or without one, as another
+/// helper's first binding write holds them.
+#[cfg(any(test, feature = "test-support"))]
+pub mod publication_source_probe {
+    use std::sync::{Arc, Mutex, PoisonError};
+    use std::thread::JoinHandle;
+    use std::time::Duration;
+    /// What a control holds from the step on, for `duration`: the owner's
+    /// originals collection, inside an owner change on the owner's
+    /// publication when `owner_change`.
+    #[derive(Clone, Copy, Debug)]
+    pub struct Hold {
+        pub owner_change: bool,
+        pub duration: Duration,
+    }
+    /// A control's answer at the step, given the Find's call ID.
+    pub type Probe = Arc<dyn Fn(&str) -> Option<Hold> + Send + Sync>;
+    static PROBE: Mutex<Option<Probe>> = Mutex::new(None);
+    static HOLDS: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new());
+    /// Install the control's probe, replacing any earlier one.
+    pub fn install(probe: Probe) {
+        *PROBE.lock().unwrap_or_else(PoisonError::into_inner) = Some(probe);
+    }
+    /// Remove the control's probe, once every hold it made ended.
+    pub fn clear() {
+        PROBE.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let holds = std::mem::take(&mut *HOLDS.lock().unwrap_or_else(PoisonError::into_inner));
+        for hold in holds {
+            let _ = hold.join();
+        }
+    }
+    pub(crate) fn observe(call: &str) -> Option<Hold> {
+        let probe = PROBE.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        probe.and_then(|probe| probe(call))
+    }
+    pub(crate) fn retain(hold: JoinHandle<()>) {
+        HOLDS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(hold);
+    }
+}

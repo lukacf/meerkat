@@ -28,6 +28,10 @@ pub(super) struct Script {
     hold_first_response: bool,
     first_response_entered: tokio::sync::Notify,
     first_response_release: tokio::sync::Semaphore,
+    // Fresh Finds the original's model makes after its first, one per later
+    // response of the same turn, in order, each once released.
+    fresh_finds: Mutex<std::collections::VecDeque<String>>,
+    fresh_release: tokio::sync::Semaphore,
 }
 impl Script {
     pub(super) fn for_approved() -> Arc<Self> {
@@ -105,7 +109,23 @@ impl Script {
             hold_first_response,
             first_response_entered: tokio::sync::Notify::new(),
             first_response_release: tokio::sync::Semaphore::new(0),
+            fresh_finds: Mutex::new(std::collections::VecDeque::new()),
+            fresh_release: tokio::sync::Semaphore::new(0),
         })
+    }
+    /// Have the original's model make `count` fresh Finds, in order, one in
+    /// each next response of the same turn, each once released
+    /// ([`Self::release_fresh_find`]). Their call IDs extend the first
+    /// Find's: `{CALL}-fresh-{n}`.
+    pub(super) fn arm_fresh_finds(&self, count: usize) {
+        self.fresh_finds
+            .lock()
+            .unwrap()
+            .extend((1..=count).map(|n| format!("{CALL}-fresh-{n}")));
+    }
+    /// Let the next armed fresh Find be made.
+    pub(super) fn release_fresh_find(&self) {
+        self.fresh_release.add_permits(1);
     }
     pub(super) fn tools(&self) -> InstalledAcquisitionTools {
         self.tools.clone()
@@ -371,29 +391,48 @@ impl LlmClient for AcquisitionResponse {
     }
     fn stream_prepared<'a>(&'a self, request: &'a PreparedLlmRequest) -> LlmStream<'a> {
         let first = self.first.swap(false, Ordering::SeqCst);
+        // A fresh Find armed for a later response of the original's turn; a
+        // helper's request (it offers the setup report) never makes one.
+        let original = !request
+            .request()
+            .tools
+            .iter()
+            .any(|tool| tool.name == meerkat_toolkit::setup::SETUP_REPORT);
+        let fresh = if first || !original {
+            None
+        } else {
+            self.script.fresh_finds.lock().unwrap().pop_front()
+        };
         if !first {
+            // Each of the turn's Find results, its first and its fresh ones,
+            // once, in the order the model first sees them.
             let mut captured = self.script.results.lock().unwrap();
             for message in request.request().messages.iter() {
                 if let Message::ToolResults { results, .. } = message {
-                    captured.extend(
-                        results
-                            .iter()
-                            .filter(|result| result.tool_use_id == CALL)
-                            .cloned(),
-                    );
+                    for result in results {
+                        if result.tool_use_id.starts_with(CALL)
+                            && !captured
+                                .iter()
+                                .any(|seen| seen.tool_use_id == result.tool_use_id)
+                        {
+                            captured.push(result.clone());
+                        }
+                    }
                 }
             }
         }
         // The underlying provider still consumes native authorization, checks
         // currentness, and records physical model entry/outcome for every call.
         let stream = self.inner.stream_prepared(request);
-        if !first {
-            return stream;
-        }
+        let call = match (first, fresh) {
+            (true, _) => CALL.to_owned(),
+            (false, Some(fresh)) => fresh,
+            (false, None) => return stream,
+        };
         let script = self.script.clone();
         Box::pin(
             futures::stream::once(async move {
-                if script.hold_first_response {
+                if first && script.hold_first_response {
                     // Hold only physical scripted output. Native authorization and
                     // input admission remain on their ordinary owner paths.
                     script.first_response_entered.notify_one();
@@ -404,10 +443,13 @@ impl LlmClient for AcquisitionResponse {
                         .unwrap()
                         .forget();
                 }
-                stream.map(|event| {
+                if !first {
+                    script.fresh_release.acquire().await.unwrap().forget();
+                }
+                stream.map(move |event| {
                     event.map(|event| match event {
                 LlmEvent::TextDelta { .. } => LlmEvent::ToolCallComplete {
-                    id: CALL.into(),
+                    id: call.clone(),
                     name: crate::FIND_AND_INSTALL.into(),
                     args: serde_json::json!({"request":"Find a tool for this original request"}),
                     meta: None,

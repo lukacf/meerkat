@@ -629,6 +629,17 @@ impl PrivateOriginals {
         Ok(source)
     }
 
+    /// Test seam: the owner's originals collection held per `hold`
+    /// ([`crate::publication_source_probe`]), on a thread of its own.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn hold_sources_for_test(
+        &self,
+        hold: crate::publication_source_probe::Hold,
+    ) -> std::thread::JoinHandle<()> {
+        self.owner
+            .hold_sources_for_test(hold.owner_change, hold.duration)
+    }
+
     /// Export only exact source history for the existing preparation owner.
     /// Publication still requires its acquisition/effect claim and native
     /// operation admission; this is not a new permission-bearing token.
@@ -638,6 +649,9 @@ impl PrivateOriginals {
         held: &Arc<HeldSetupHelper>,
         service: &WorkGraphService,
     ) -> Result<meerkat_toolkit::setup::NativeHelperSource, PrivateOriginalError> {
+        #[cfg(test)]
+        self.owner
+            .record_helper_admission_event_for_test("publication_source_read");
         if !prepared
             .source
             .upgrade()

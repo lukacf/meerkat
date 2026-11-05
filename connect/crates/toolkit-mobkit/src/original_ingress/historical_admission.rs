@@ -100,6 +100,40 @@ impl ToolkitOriginalOwner {
         self.helper_admission_events.lock().unwrap().push(event);
     }
 
+    /// Hold this owner's originals collection on a thread of its own for
+    /// `hold`, inside an owner change on its publication when `owner_change`,
+    /// as another helper's first binding write holds them (the publication
+    /// writer first, then the collection). Returns once both are held; the
+    /// returned thread releases them.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn hold_sources_for_test(
+        self: &Arc<Self>,
+        owner_change: bool,
+        hold: std::time::Duration,
+    ) -> std::thread::JoinHandle<()> {
+        let owner = self.clone();
+        let (held, holding) = std::sync::mpsc::sync_channel(0);
+        let thread = std::thread::spawn(move || {
+            let change = owner_change
+                .then(|| owner.publication.begin_owner_change())
+                .transpose();
+            let originals = owner
+                .originals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = held.send(change.is_ok());
+            std::thread::sleep(hold);
+            drop(originals);
+            drop(change);
+        });
+        assert_eq!(
+            holding.recv().ok(),
+            Some(true),
+            "the control's owner change began"
+        );
+        thread
+    }
+
     /// The helper admission steps recorded so far, in order.
     #[cfg(test)]
     pub(crate) fn helper_admission_events_for_test(&self) -> Vec<&'static str> {

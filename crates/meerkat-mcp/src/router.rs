@@ -226,8 +226,9 @@ struct AwaitingAuthorization {
 enum AwaitingGovernance {
     /// The attachment was not governed: its re-add is a plain one.
     Plain,
-    /// The attachment was governed under this control.
-    Governed(Arc<dyn McpAttachmentAuthority>),
+    /// The attachment was governed under this control, which the router's
+    /// close releases.
+    Governed(Arc<crate::connection::RetainedControl>),
     /// The attachment was governed, and the router held no control for it.
     GovernedWithoutControl,
 }
@@ -1542,11 +1543,12 @@ pub struct McpRouter {
     /// removal finalized.
     governed_servers: std::collections::HashSet<String>,
     /// The control each governed name was last attached under, kept with its
-    /// mark in `governed_servers` and released with it. A sign-in retry or
+    /// mark in `governed_servers` and released with it, or when the router's
+    /// close begins (its retry records share it). A sign-in retry or
     /// restage of that attachment is staged again with it, so the new
     /// connection asks it at its physical entry (a fresh decision for that
     /// effect) and the attachment stays governed.
-    governed_controls: HashMap<String, Arc<dyn McpAttachmentAuthority>>,
+    governed_controls: HashMap<String, Arc<crate::connection::RetainedControl>>,
 
     // --- Async pending infrastructure ---
     pending_tx: mpsc::Sender<PendingResult>,
@@ -2633,8 +2635,10 @@ impl McpRouter {
                     };
                     if let Some(control) = &control {
                         self.governed_servers.insert(server_name.clone());
-                        self.governed_controls
-                            .insert(server_name.clone(), Arc::clone(control));
+                        self.governed_controls.insert(
+                            server_name.clone(),
+                            self.close_index.retain_control(Arc::clone(control)),
+                        );
                     }
                     if no_connection_removal {
                         self.governed_servers.remove(&server_name);
@@ -3422,8 +3426,9 @@ impl McpRouter {
     /// The control a record's re-add after a sign-in is staged with: a
     /// governed record's own control, which must cover the record's exact
     /// descriptor, and none for a plain record. A governed record without
-    /// such a control is refused, and so is a plain record of a name
-    /// governed since: a governed name is re-added only under a control.
+    /// such a control (the router's close releases it) is refused, and so is
+    /// a plain record of a name governed since: a governed name is re-added
+    /// only under a control.
     fn re_add_control(
         &self,
         server_name: &str,
@@ -3434,10 +3439,11 @@ impl McpRouter {
                 self.refuse_ungoverned_change(server_name)?;
                 Ok(None)
             }
-            AwaitingGovernance::Governed(control) if control.server() == &awaiting.config => {
-                Ok(Some(Arc::clone(control)))
-            }
-            AwaitingGovernance::Governed(_) | AwaitingGovernance::GovernedWithoutControl => {
+            AwaitingGovernance::Governed(retained) => match retained.control() {
+                Some(control) if control.server() == &awaiting.config => Ok(Some(control)),
+                _ => Err(McpError::AttachmentRefused(McpAttachmentRefusal::Mismatch)),
+            },
+            AwaitingGovernance::GovernedWithoutControl => {
                 Err(McpError::AttachmentRefused(McpAttachmentRefusal::Mismatch))
             }
         }
@@ -8302,11 +8308,12 @@ pub(crate) mod tests {
         assert_eq!(settled.phase, McpLifecyclePhase::Failed, "{settled:?}");
         assert_eq!(router.active_server_names(), vec!["guarded".to_string()]);
         assert!(router.list_tools().iter().any(|tool| tool.name == "echo"));
+        let held = router
+            .governed_controls
+            .get("guarded")
+            .and_then(|held| held.control());
         assert!(
-            router
-                .governed_controls
-                .get("guarded")
-                .is_some_and(|held| held.server() == &replacement.server),
+            held.is_some_and(|control| control.server() == &replacement.server),
             "the router holds the replacement's control"
         );
         (router, target, resolver)

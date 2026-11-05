@@ -55,11 +55,25 @@ them.
 - `meerkat-mob`: `DeclaredEntryRefusal::NonAuthoritative` carries `would_be:
   DeclaredEntryVerdict`, the verdict an authoritative composition would give
   the same declaration over the same state. MobMachine's candidate arm
-  decides it with the same verdict rule its other arms apply; it is advisory
-  and never applied, and a candidate still writes nothing. A match on the
-  variant needs `NonAuthoritative { .. }`. `meerkat-machine-kernels`: the
-  MobMachine effect `IdentityEntryDeclared` gains `would_be`, set on a
-  candidate's refusal only.
+  decides it with the same verdict rule its other arms apply, and a listed
+  member a host seated before identity entries existed on the basis the
+  authoritative composition's adoption of it gives (see the
+  `DeclareIdentityEntry` entry); it is advisory and never applied, and a
+  candidate still writes nothing. A match on the variant needs
+  `NonAuthoritative { .. }`. `meerkat-machine-kernels`: the MobMachine
+  effect `IdentityEntryDeclared` gains `would_be`, set on a candidate's
+  refusal only.
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the
+  `MobMachineInput` variant `DeclareIdentityEntry` (meerkat-machine-schema
+  and meerkat-mob) and the kernel `generated::mob::inputs` struct
+  `DeclareIdentityEntry` gain `legacy_marker` and `legacy_label` (each a
+  `bool`) and `legacy_generation` (a `Generation`): the observation the
+  declared apply's legacy adoption decided a listed member on (the legacy
+  marks on its spawn row and the generation of its incarnation), over which
+  a candidate composition's `would_be` is decided. Code that builds them
+  literally must set them (`false`, `false` and `Generation(0)` declare no
+  observation), and a serialized kernel input without them no longer
+  deserializes.
 - Behaviour-only (not measured by the gate): `meerkat-mob`:
   `MobHandle::apply_declared_roster` with a complete roster also retires a
   member the roster does not list when the member's spawn row carries both
@@ -256,6 +270,12 @@ them.
   next complete apply decides it again if it is still there.
 
 ### Changed
+
+- `meerkat-mob`: `DeclaredEntryVerdict`, the verdict a candidate
+  composition reports in `DeclaredEntryRefusal::NonAuthoritative`, is a
+  closed vocabulary (no `#[non_exhaustive]`): a host's projection of it
+  matches every verdict with no wildcard arm, so adding a verdict is a
+  breaking change, named under Breaking in the release that adds it.
 
 - A session on a zero-config Copilot route, or on a route of a
   `[realm.<realm>.copilot]` account, carries the route's account as its

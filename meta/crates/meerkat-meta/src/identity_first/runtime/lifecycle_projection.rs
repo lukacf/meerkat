@@ -109,7 +109,7 @@
 //! refused, retryable, with nothing recorded, when the incarnation changed
 //! since the verb first read it (another lifecycle operation of the member
 //! ended in between): the incarnation its record names is the one Core held
-//! at its head. The seat step reads its head before the binding. The
+//! at its head. A declaration reads the head before Core is asked. The
 //! projection reads a rotation's record by the same fact ([`step_reached`]):
 //! the record answers a retirement of its incarnation, or the fresh life's
 //! seat after it, only when Core journaled that fact after the record's head
@@ -181,8 +181,8 @@
 //! nothing kicked (Core's own, a host's). The cursor is read, or started at
 //! the journal's head when there is none, before the first step Meta asks
 //! Core for in this process, so every step Meta asks for is projected; a
-//! seat step is refused, retryable, while no cursor is stored and none can
-//! be started. With one stored, a step goes ahead whatever else failed: what
+//! declaration is refused, retryable, while no cursor is stored and none
+//! can be started. With one stored, a step goes ahead whatever else failed: what
 //! it journals lies past that cursor, and the live task prepares the
 //! projection again at each sweep until a preparation gets through. A
 //! unified runtime's identity bootstrap waits for the projection to reach
@@ -1749,7 +1749,7 @@ impl IdentityRuntime {
         };
         // The stored cursor first: once one of the mob's current incarnation
         // is stored, a step Core journals lies past it whatever else fails
-        // here, so a seat step goes ahead.
+        // here, so a declaration goes ahead.
         let (store, mob_id) = self.identity_record_store();
         let stored = store
             .lifecycle_projection_cursor(&mob_id)

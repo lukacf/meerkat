@@ -4259,7 +4259,7 @@ impl DeclaredIdentityAnswer {
             Self::Refused { refusal } => matches!(
                 refusal,
                 meerkat_mob::DeclaredEntryRefusal::HostAdopted
-                    | meerkat_mob::DeclaredEntryRefusal::NonAuthoritative
+                    | meerkat_mob::DeclaredEntryRefusal::NonAuthoritative { .. }
             ),
             Self::BuildRequired | Self::Deferred { .. } | Self::Failed { .. } => false,
         }
@@ -5175,8 +5175,8 @@ pub trait SessionBridge: Send + Sync {
 
     /// The incarnation of this bridge's mob, as the head of its member
     /// lifecycle journal names it, known without a store read. When the head
-    /// does not read, the identity runtime lets a seat step go ahead past a
-    /// stored lifecycle projection cursor only if the cursor is of this
+    /// does not read, the identity runtime lets a declaration go ahead past
+    /// a stored lifecycle projection cursor only if the cursor is of this
     /// incarnation. `None`, the default, places no cursor: such a step is
     /// refused, retryable, until the head reads. A bridge that wraps another
     /// forwards it.
@@ -7147,7 +7147,7 @@ enum ResumeSourceProbe {
     /// before its retire: retiring the member would destroy nothing, but the
     /// resume after it would find no session and leave the identity without
     /// its seat. A role move of such a member is Core's rotation, which
-    /// needs no resume (the seat step plans it so).
+    /// needs no resume (Core's declared apply decides it so).
     NeverCreated,
     /// At least one authority answered and none knows the session: the
     /// member holds the only live copy, so the repair refuses before its
@@ -12797,8 +12797,8 @@ mod tests {
 
     /// A seat Core refused for the session it names (here: Core holds no
     /// durable copy of it) keeps Core's typed reason, as a resume's refusal
-    /// does, so the seat step can answer a first-boot `Resume` row's typed
-    /// refusal instead of a generic retry.
+    /// does, so a first-boot `Resume` row's refusal stays typed instead of
+    /// a generic retry.
     #[test]
     fn a_seat_refused_for_its_session_keeps_cores_typed_reason() {
         let identity = AgentIdentity::parse("agent:seat-absent").expect("identity");

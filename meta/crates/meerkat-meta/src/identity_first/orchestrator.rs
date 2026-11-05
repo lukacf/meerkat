@@ -4,16 +4,18 @@
 //! (topology reconciliation), REQ-20 (static wiring preserved), REQ-22 (topology
 //! not continuity truth), and REQ-33 (identity-keyed reconciliation).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use futures::{StreamExt, stream};
 
 use std::sync::Arc;
 
-use super::bridge::MemberRuntimeBinding;
+use super::bridge::{MemberRuntimeBinding, UnlistedIdentityAnswer};
 use super::contracts::{AgentCustomizer, TopologyProvider};
-use super::runtime::{EmbodimentOverrides, IdentityRuntime, IdentityRuntimeError, SeatOutcome};
+use super::runtime::{
+    EmbodimentOverrides, HostedIdentities, IdentityRuntime, IdentityRuntimeError,
+};
 use super::types::{
     AgentBuildDraft, AgentIdentity, DurableAgentSpec, IdentityRestoreProgress, ManagedPeerEdge,
     TopologyContext,
@@ -184,6 +186,10 @@ impl RestoreOutcome {
 pub struct RestoreFlowResult {
     pub outcomes: BTreeMap<AgentIdentity, RestoreOutcome>,
     pub managed_edges: Vec<ManagedPeerEdge>,
+    /// What the host's whole roster did with each identity Core held
+    /// declared that it does not list: retired, removed, or failed to retire
+    /// (the next pass retires it again). Empty for a partial restore.
+    pub unlisted: BTreeMap<AgentIdentity, UnlistedIdentityAnswer>,
 }
 
 // ---------------------------------------------------------------------------
@@ -256,68 +262,6 @@ pub fn compute_reconcile_actions(
     }
 
     actions
-}
-
-type RosterAuthorityGuards = (
-    tokio::sync::OwnedMutexGuard<()>,
-    tokio::sync::OwnedMutexGuard<()>,
-);
-
-/// Reserve every identity and its public alias in one stable order before a
-/// roster-wide registration. Keeping the guards owned lets the
-/// restore work remain concurrent after the all-or-nothing authority gate,
-/// while reset, delete, materialize, and raw-member creation cannot invalidate
-/// any member's freshly resolved generation.
-async fn acquire_roster_authority_guards(
-    runtime: &IdentityRuntime,
-    identities: &[AgentIdentity],
-) -> Result<BTreeMap<AgentIdentity, RosterAuthorityGuards>, IdentityRuntimeError> {
-    let ordered = identities.iter().cloned().collect::<BTreeSet<_>>();
-    let mut lifecycle_guards = BTreeMap::new();
-    for identity in &ordered {
-        lifecycle_guards.insert(
-            identity.clone(),
-            runtime
-                .lifecycle_lock_for(identity)
-                .await
-                .lock_owned()
-                .await,
-        );
-    }
-
-    let mut alias_guards = BTreeMap::new();
-    for identity in &ordered {
-        alias_guards.insert(
-            identity.clone(),
-            runtime
-                .raw_member_alias_lock(identity.as_str())
-                .await
-                .lock_owned()
-                .await,
-        );
-    }
-    // One read of Core's roster answers every identity (no Core round trip
-    // per identity at boot).
-    runtime
-        .ensure_raw_member_aliases_available(&ordered)
-        .await?;
-
-    ordered
-        .into_iter()
-        .map(|identity| {
-            let lifecycle = lifecycle_guards.remove(&identity).ok_or_else(|| {
-                IdentityRuntimeError::Internal(format!(
-                    "authority gate lost lifecycle reservation for {identity}"
-                ))
-            })?;
-            let alias = alias_guards.remove(&identity).ok_or_else(|| {
-                IdentityRuntimeError::Internal(format!(
-                    "authority gate lost alias reservation for {identity}"
-                ))
-            })?;
-            Ok((identity, (lifecycle, alias)))
-        })
-        .collect::<Result<_, IdentityRuntimeError>>()
 }
 
 // ---------------------------------------------------------------------------
@@ -442,29 +386,47 @@ async fn restore_registered_member(
     outcome
 }
 
+/// Execute the full restore flow per REQ-12 sequencing, for part of the
+/// host's roster: no identity it does not list is unlisted (see
+/// [`restore_roster`]).
+pub async fn restore_flow(
+    runtime: &IdentityRuntime,
+    roster: &[DurableAgentSpec],
+    topology_provider: Option<&dyn TopologyProvider>,
+    customizer: Option<&dyn AgentCustomizer>,
+) -> Result<RestoreFlowResult, IdentityRuntimeError> {
+    restore_roster(runtime, roster, topology_provider, customizer, false).await
+}
+
 /// Execute the full restore flow per REQ-12 sequencing.
 ///
 /// Steps:
-/// 1. Validate the roster, compute topology, and register every roster spec
-///    (a host-adopted identity is a typed refusal in the report).
-/// 2. Make every registered identity a member of Core's mob without
-///    materializing it (`IdentityRuntime::seat_identities`): an identity
-///    Core holds needs nothing, and one it does not hold is seated Dormant,
-///    its pending first-boot row carried out with it. Core materializes each
-///    member on its first delivery, or at boot when its own obligation facts
-///    say the member owes work. Meta wakes nothing.
+/// 1. Validate the roster and compute topology.
+/// 2. Declare the roster in Core's mob, through Core's declared apply
+///    (`IdentityRuntime::declare_roster_pass`): the host's whole roster when
+///    `complete`, so Core also unlists each identity it holds declared that
+///    the roster does not list and retires its member. Core's MobMachine
+///    decides each identity's verdict and Core realizes it: an identity Core
+///    keeps needs nothing, one it holds no member for is seated Dormant (on
+///    its archived session, or its pending first-boot row's), a declared
+///    role migration is carried out, an undeclared one held. Core
+///    materializes each member on its first delivery, or at boot when its
+///    own obligation facts say the member owes work. Meta wakes nothing,
+///    and creates only an identity hosted on its first use, through its
+///    host.
 /// 3. A held pass creates its fresh members itself, held, through the
 ///    identity's create (`IdentityRuntime::embody_identity`).
 /// 4. A refusal is a typed `Refused` outcome for that identity only; the
 ///    remaining identities go on.
 ///
 /// Without a session bridge the flow is validation-only: every outcome is
-/// `Dormant` and nothing is seated.
-pub async fn restore_flow(
+/// `Dormant` and nothing is declared.
+pub(crate) async fn restore_roster(
     runtime: &IdentityRuntime,
     roster: &[DurableAgentSpec],
     topology_provider: Option<&dyn TopologyProvider>,
     customizer: Option<&dyn AgentCustomizer>,
+    complete: bool,
 ) -> Result<RestoreFlowResult, IdentityRuntimeError> {
     // Fleet-level declaration and topology remain fail-closed: without a
     // valid unique roster there is no truthful set of identities to seat.
@@ -474,11 +436,11 @@ pub async fn restore_flow(
         topology_provider,
         RosterPass::Default,
         customizer,
+        complete,
     )
     .await?;
     let managed_edges = registered.managed_edges;
-    let mut outcomes =
-        seated_restore_outcomes(runtime, registered.outcomes, &registered.seats).await;
+    let mut outcomes = registered.outcomes;
     // Typed per-member progress on the bootstrap status: every member is
     // settled together once Core answers the pass's seat call, each with
     // its own typed outcome.
@@ -551,30 +513,52 @@ pub async fn restore_flow(
     Ok(RestoreFlowResult {
         outcomes,
         managed_edges,
+        unlisted: registered.unlisted,
     })
 }
 
-/// Register the roster and topology metadata, and seat every identity Core
-/// does not hold, without materializing any.
+/// Register the roster and topology metadata, and make every identity a
+/// member of Core's mob without materializing any, for part of the host's
+/// roster: no identity it does not list is unlisted (see
+/// [`lazy_register_roster`]).
+pub async fn lazy_register_flow(
+    runtime: &IdentityRuntime,
+    roster: &[DurableAgentSpec],
+    topology_provider: Option<&dyn TopologyProvider>,
+) -> Result<RestoreFlowResult, IdentityRuntimeError> {
+    lazy_register_roster(runtime, roster, topology_provider, false).await
+}
+
+/// Register the roster and topology metadata, and declare the roster in
+/// Core's mob, the host's whole roster when `complete`, without
+/// materializing any member.
 ///
-/// The explicit lazy bootstrap modes run this. Every listed identity Meta
+/// The explicit lazy bootstrap modes run this. Every listed identity Core
 /// can seat is a member of Core's mob afterwards, as under the default, so
 /// peers reach it; Core materializes it on demand. A placed or externally
 /// bound identity Core does not hold is left for its first use, as these
 /// modes always left it: its host creates it, so a create at the pass would
 /// read broken while that host is not bound yet. A lazy reconcile also
 /// reconciles the managed topology, since no restore pass follows it.
-pub async fn lazy_register_flow(
+pub(crate) async fn lazy_register_roster(
     runtime: &IdentityRuntime,
     roster: &[DurableAgentSpec],
     topology_provider: Option<&dyn TopologyProvider>,
+    complete: bool,
 ) -> Result<RestoreFlowResult, IdentityRuntimeError> {
-    let registered =
-        register_roster_metadata(runtime, roster, topology_provider, RosterPass::Lazy, None)
-            .await?;
+    let registered = register_roster_metadata(
+        runtime,
+        roster,
+        topology_provider,
+        RosterPass::Lazy,
+        None,
+        complete,
+    )
+    .await?;
     Ok(RestoreFlowResult {
         outcomes: registered.outcomes,
         managed_edges: registered.managed_edges,
+        unlisted: registered.unlisted,
     })
 }
 
@@ -593,48 +577,48 @@ enum RosterPass {
 
 /// What a roster registration made of its identities.
 struct RegisteredRoster {
-    /// Each identity's outcome: refused typed, or registered (`Dormant`
-    /// with the spec's base draft).
+    /// Each identity's outcome: refused typed, registered (`Dormant` with
+    /// the spec's build), or a member Core holds.
     outcomes: BTreeMap<AgentIdentity, RestoreOutcome>,
-    /// What the seat step left of each identity it seated or found seated.
-    seats: BTreeMap<AgentIdentity, SeatOutcome>,
+    /// What a complete roster did with each identity it does not list.
+    unlisted: BTreeMap<AgentIdentity, UnlistedIdentityAnswer>,
     managed_edges: Vec<ManagedPeerEdge>,
 }
 
-/// Validate the roster and topology, register every roster spec, and make
-/// every registered identity a member of Core's mob without materializing
-/// it. Meta keeps no Core fact: the registration is the roster's policy
-/// only, and every Core fact is read per call. A roster entry naming a
-/// host-adopted identity (Core holds its identity intent row) is registered
-/// for the views but reported as a typed refusal: no Meta verb acts on it. A
-/// lazy reconcile (`reconcile_edges`) also reconciles the managed topology,
-/// since no restore pass follows it.
+/// Validate the roster and topology, then declare the roster in Core's mob
+/// ([`IdentityRuntime::declare_roster_pass`]), the host's whole roster when
+/// `complete`, registering each identity whose answer stands as its
+/// registration: every listed identity Core can seat is a member of Core's
+/// mob afterwards, and none is materialized. Meta keeps no Core fact: the
+/// registration is the roster's policy only, and every Core fact is read
+/// per call. A roster entry naming a host-adopted identity is registered
+/// for the views and reported as a typed refusal: no Meta verb acts on it.
+/// A lazy reconcile (`RosterPass::Lazy`) leaves an identity hosted on its
+/// first use for it, and also reconciles the managed topology, since no
+/// restore pass follows it.
 ///
-/// The first-boot manifest is read first. A manifest the reader
-/// refuses refuses every identity of the compile, typed, and nothing is
-/// seated: which identities it covers is unknown. The compile itself goes
-/// on, so the gateway stays up and its status names the file and the
-/// refusal. The pending row of each identity the roster lists is carried out
-/// by the identity's seat; a row that fails or is refused makes that
-/// identity's outcome a typed refusal, and the rest of the roster goes on.
-/// A row whose identity the roster does not list stays pending, unless
-/// Core's member history shows it done (a row for a helper or a fork child
-/// the host made on the mob and retired, which `storage-migrate-native`
-/// before 0.9.5 wrote): such a row is settled
-/// ([`IdentityRuntime::settle_done_unlisted_first_boot_rows`]). Then each
-/// listed identity whose Core member lacks the durable-identity marker
-/// (Meta 0.9.3 spawned it) is respawned onto the same session
-/// ([`IdentityRuntime::respawn_unmarked_identities`]); a failed respawn is
-/// that identity's typed refusal.
+/// The first-boot manifest is read first. A manifest the reader refuses
+/// refuses every identity of the compile, typed, and nothing is declared:
+/// which identities it covers is unknown. The compile itself goes on, so
+/// the gateway stays up and its status names the file and the refusal. The
+/// pending row of each identity the roster lists is carried out by the
+/// identity's declaration; a row Core's history contradicts makes that
+/// identity's outcome a typed refusal, and the rest of the roster goes on
+/// (a complete roster then unlists nothing this time). A row whose
+/// identity the roster does not list stays pending, unless Core's member
+/// history shows it done (a row for a helper or a fork child the host made
+/// on the mob and retired, which `storage-migrate-native` before 0.9.5
+/// wrote): such a row is settled
+/// ([`IdentityRuntime::settle_done_unlisted_first_boot_rows`]).
 async fn register_roster_metadata(
     runtime: &IdentityRuntime,
     roster: &[DurableAgentSpec],
     topology_provider: Option<&dyn TopologyProvider>,
     pass: RosterPass,
     customizer: Option<&dyn AgentCustomizer>,
+    complete: bool,
 ) -> Result<RegisteredRoster, IdentityRuntimeError> {
     IdentityRuntime::validate_roster_uniqueness(roster)?;
-    let first_boot_unreadable = runtime.load_first_boot_manifest().await.err().map(Arc::new);
 
     let identities: Vec<AgentIdentity> = roster.iter().map(|s| s.identity.clone()).collect();
 
@@ -653,17 +637,16 @@ async fn register_roster_metadata(
     );
     runtime.set_desired_peer_edges(managed_edges.clone()).await;
 
-    let registered = register_identity_metadata(
-        runtime,
-        roster,
-        first_boot_unreadable.as_ref(),
-        customizer,
-        pass,
-    )
-    .await?;
+    let hosted = match pass {
+        RosterPass::Default => HostedIdentities::CreateNow,
+        RosterPass::Lazy => HostedIdentities::LeaveForFirstUse,
+    };
+    let declared = runtime
+        .declare_roster_pass(roster, complete, true, customizer, hosted)
+        .await;
     // The rows of identities this roster does not list wait for a roster
     // that lists them, unless Core's history already shows them done.
-    if first_boot_unreadable.is_none() {
+    if runtime.load_first_boot_manifest().await.is_ok() {
         runtime.settle_done_unlisted_first_boot_rows().await;
     }
 
@@ -677,228 +660,33 @@ async fn register_roster_metadata(
     }
 
     Ok(RegisteredRoster {
-        outcomes: registered.outcomes,
-        seats: registered.seats,
+        outcomes: declared.outcomes,
+        unlisted: declared.unlisted,
         managed_edges,
     })
 }
 
-/// What [`register_identity_metadata`] made of its identities.
-struct RegisteredIdentities {
-    outcomes: BTreeMap<AgentIdentity, RestoreOutcome>,
-    seats: BTreeMap<AgentIdentity, SeatOutcome>,
-}
-
-/// Register exactly `specs`' identities: each one's spec, its typed
-/// refusal when Core holds its identity intent row or the first-boot
-/// manifest is unreadable, and its seat in Core's mob, which carries its
-/// pending first-boot row out. A held pass creates the fresh identities it
-/// covers itself, so they are not seated. The roster-wide half (uniqueness,
-/// topology, desired edges, the manifest read) stays with the caller.
-///
-/// One read of Core's member history answers every identity's host
-/// adoption, and the seat step plans every identity from one more: no Core
-/// read per identity.
-async fn register_identity_metadata(
-    runtime: &IdentityRuntime,
-    specs: &[DurableAgentSpec],
-    first_boot_unreadable: Option<&Arc<IdentityRuntimeError>>,
-    customizer: Option<&dyn AgentCustomizer>,
-    pass: RosterPass,
-) -> Result<RegisteredIdentities, IdentityRuntimeError> {
-    let roster = specs;
-    let identities: Vec<AgentIdentity> = roster.iter().map(|s| s.identity.clone()).collect();
-    // Reserve the full roster in one stable order, so a queued reset, delete
-    // or raw-member creation cannot interleave with the registration.
-    let mut authority_guards = acquire_roster_authority_guards(runtime, &identities).await?;
-    let history = runtime.core_view_history().await;
-    let held_pass = runtime.held_create_pass();
-
-    let mut outcomes = BTreeMap::new();
-    let mut to_seat = Vec::new();
-    let mut listed = Vec::new();
-    for spec in roster {
-        let identity = &spec.identity;
-        // Each reservation ends with its identity's registration: the seat
-        // step takes the lifecycle locks of the identities it seats for its
-        // Core step alone, so a host's call into another identity (a
-        // customizer that sends to it while it builds a draft) never waits
-        // on this registration.
-        let (_lifecycle_guard, _alias_guard) =
-            authority_guards.remove(identity).ok_or_else(|| {
-                IdentityRuntimeError::Internal(format!(
-                    "validated roster reservation disappeared for {identity}"
-                ))
-            })?;
-        runtime.register_locked(spec.clone()).await;
-        let adopted = match &history {
-            Ok(history) => IdentityRuntime::refuse_host_adopted_in(history.as_ref(), identity),
-            Err(error) => Err(IdentityRuntimeError::IdentityHistoryUnavailable {
-                identity: identity.clone(),
-                detail: format!("reading Core's identity management: {error}"),
-            }),
-        };
-        if let Err(error) = adopted {
-            tracing::warn!(
-                %identity,
-                %error,
-                "roster entry names an identity Meta may not act on; it is registered for the \
-                 views and reported refused"
-            );
-            outcomes.insert(identity.clone(), RestoreOutcome::Refused(Arc::new(error)));
-            continue;
-        }
-        if let Some(error) = first_boot_unreadable {
-            outcomes.insert(identity.clone(), RestoreOutcome::Refused(Arc::clone(error)));
-            continue;
-        }
-        outcomes.insert(
-            identity.clone(),
-            RestoreOutcome::Dormant {
-                draft: IdentityRuntime::base_build_draft(spec),
-            },
-        );
-        listed.push(spec.clone());
-        // A lazy pass leaves a hosted identity Core does not hold for its
-        // first use: it stays registered and dormant, and its first
-        // delivery, or the background warm, creates it through its host.
-        let hosted_left_for_first_use = pass == RosterPass::Lazy
-            && super::runtime::durable_spec_is_hosted(spec)
-            && !matches!(&history, Ok(Some(history)) if history
-                .last_binding(&crate::member_comms_id::roster_member_id_for_identity(
-                    identity.as_str(),
-                ))
-                .is_some_and(meerkat_mob::MemberBinding::is_live));
-        if !hosted_left_for_first_use
-            && held_pass.as_ref().is_none_or(|pass| !pass.covers(identity))
-        {
-            to_seat.push(spec.clone());
-        }
-    }
-
-    // The roster is registered: the runtime is composed. Every member Core
-    // built held before now has its customizer tools published and its hold
-    // released, and every later build of a registered identity is prepared
-    // inline ([`IdentityRuntime::compose_member_builds`]).
-    runtime.compose_member_builds().await;
-
-    let mut seats = BTreeMap::new();
-    if runtime.has_session_bridge() {
-        for (identity, result) in runtime.seat_identities(&to_seat, customizer).await {
-            match result {
-                Ok(seat) => {
-                    seats.insert(identity, seat);
-                }
-                Err(error) => {
-                    // A candidate launch's refusal defers the identity; it
-                    // is no failure.
-                    if super::runtime::candidate_deferral_of(&error).is_none() {
-                        tracing::warn!(
-                            %identity,
-                            %error,
-                            "the identity's seat step in Core's mob was refused; the next \
-                             roster compile tries it again, and so does the identity's next \
-                             delivery while Core does not hold it"
-                        );
-                    }
-                    outcomes.insert(identity, RestoreOutcome::Refused(Arc::new(error)));
-                }
-            }
-        }
-    }
-    for (identity, error) in runtime.respawn_unmarked_identities(&listed).await {
-        // A candidate launch's refusal defers the identity; it is no failure.
-        if super::runtime::candidate_deferral_of(&error).is_none() {
-            tracing::warn!(
-                %identity,
-                %error,
-                "the identity's member lacks the durable-identity marker and its respawn \
-                 failed; the next roster compile tries it again"
-            );
-        }
-        outcomes.insert(identity, RestoreOutcome::Refused(Arc::new(error)));
-    }
-
-    Ok(RegisteredIdentities { outcomes, seats })
-}
-
-/// The restore outcome each seated identity reports: Core binds it to its
-/// own committed session (`Resumed`), or to a fresh session it minted
-/// (`Created`). Both describe a member Core holds, materialized now or on
-/// first touch. One read of Core's member history names each binding's
-/// incarnation; an identity whose binding does not read keeps its
-/// registration outcome.
-async fn seated_restore_outcomes(
-    runtime: &IdentityRuntime,
-    mut outcomes: BTreeMap<AgentIdentity, RestoreOutcome>,
-    seats: &BTreeMap<AgentIdentity, SeatOutcome>,
-) -> BTreeMap<AgentIdentity, RestoreOutcome> {
-    if seats.is_empty() {
-        return outcomes;
-    }
-    let history = runtime.core_view_history().await.ok().flatten();
-    for (identity, seat) in seats {
-        if !matches!(outcomes.get(identity), Some(RestoreOutcome::Dormant { .. })) {
-            continue;
-        }
-        let Some(binding) = history
-            .as_ref()
-            .and_then(|history| seated_binding(history, identity))
-        else {
-            continue;
-        };
-        let outcome = if seat.minted {
-            RestoreOutcome::Created {
-                binding,
-                draft: seat.draft.clone(),
-            }
-        } else {
-            RestoreOutcome::Resumed {
-                binding,
-                draft: seat.draft.clone(),
-            }
-        };
-        outcomes.insert(identity.clone(), outcome);
-    }
-    outcomes
-}
-
-/// The binding Core holds `identity` on, from its member history.
-fn seated_binding(
-    history: &meerkat_mob::MemberBindingHistory,
-    identity: &AgentIdentity,
-) -> Option<MemberRuntimeBinding> {
-    let member = crate::member_comms_id::roster_member_id_for_identity(identity.as_str());
-    let binding = history.last_binding(&member)?;
-    Some(MemberRuntimeBinding {
-        agent_runtime_id: super::runtime::live_binding_runtime_id(binding)?,
-        session_id: binding.session_id().cloned(),
-    })
-}
-
 /// Register one fresh member while the rest of the roster keeps running:
-/// the per-identity half of [`restore_flow`] for exactly `spec`. A held pass
-/// that covers it creates it held; otherwise it is seated in Core's mob
-/// without being materialized. Nothing else is reconciled and the managed
-/// peer edges are not touched, so the result carries this member's outcome
-/// and no edges.
+/// the per-identity half of [`restore_flow`] for exactly `spec`, declared in
+/// Core's mob as a one-identity partial roster. A held pass that covers it
+/// creates it held; otherwise Core seats it without materializing it.
+/// Nothing else is reconciled and the managed peer edges are not touched, so
+/// the result carries this member's outcome and no edges.
 pub(crate) async fn add_member_flow(
     runtime: &IdentityRuntime,
     spec: &DurableAgentSpec,
     customizer: Option<&dyn AgentCustomizer>,
 ) -> Result<RestoreFlowResult, IdentityRuntimeError> {
-    let first_boot_unreadable = runtime.load_first_boot_manifest().await.err().map(Arc::new);
-    let registered = register_identity_metadata(
-        runtime,
-        std::slice::from_ref(spec),
-        first_boot_unreadable.as_ref(),
-        customizer,
-        RosterPass::Default,
-    )
-    .await?;
-    let mut outcomes =
-        seated_restore_outcomes(runtime, registered.outcomes, &registered.seats).await;
-    let initial = outcomes.remove(&spec.identity);
+    let mut declared = runtime
+        .declare_roster_pass(
+            std::slice::from_ref(spec),
+            false,
+            true,
+            customizer,
+            HostedIdentities::CreateNow,
+        )
+        .await;
+    let initial = declared.outcomes.remove(&spec.identity);
     let held_pass = runtime
         .held_create_pass()
         .filter(|pass| pass.covers(&spec.identity));
@@ -938,5 +726,6 @@ pub(crate) async fn add_member_flow(
     Ok(RestoreFlowResult {
         outcomes: BTreeMap::from([(spec.identity.clone(), outcome)]),
         managed_edges: Vec::new(),
+        unlisted: BTreeMap::new(),
     })
 }

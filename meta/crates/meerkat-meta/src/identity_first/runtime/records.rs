@@ -11,8 +11,10 @@
 //!   Dormant, which no read materializes;
 //! - the rotation intent: a fresh life (`reset`, `delete_identity`) Meta
 //!   asked Core to start, recorded before Core is asked and removed once
-//!   Core answers, so the next roster compile drives a rotation a crash
-//!   interrupted to its end.
+//!   Core answers. Core finishes a rotation a crash interrupted from its own
+//!   record, and no roster pass reads this one: it stays written for a
+//!   rollback, whose roster pass drives the rotation it names to its end, or
+//!   settles it when Core already did.
 //!
 //! Without a durable store both are kept for this process only.
 
@@ -28,27 +30,27 @@ use crate::runtime::{IdentityRotationIntent, IdentityToolRecord, PersistentMetad
 
 /// The members the mob must leave to Meta's preparation when it starts
 /// (`MobBuilder::with_host_pending_members`), read before the mob is built:
-/// each identity with a pending first-boot row, and each with a recorded
-/// rotation a crash interrupted. The mob materializes none of them at
-/// start, and refuses each one's wake retryable until Meta's seat step for
-/// it (the first roster pass) carries the row or the rotation out and ends
-/// the mark in the same step.
+/// each identity with a pending first-boot row. The mob materializes none
+/// of them at start, and refuses each one's wake retryable until the
+/// roster pass's declaration of it carries the row out: Core ends the mark
+/// in the declaration step that carries the request out.
 ///
-/// Only identities the roster lists are named: the roster pass seats only
+/// A rotation a crash interrupted names no member: Core finishes it from its
+/// own record (its recovery of an interrupted rotation), so no seed waits for
+/// a Meta re-issue.
+///
+/// Only identities the roster lists are named: the roster pass declares only
 /// those, and the mob would hold an unlisted identity for a preparation no
-/// pass makes (its retirement would wait on it). Its row or record waits
-/// for a roster that lists it, as before. A hosted identity (placed, or
-/// bound to an external runtime) is never named either: its host owns its
-/// materialization, Core seats no such member, and no seat step could end
+/// pass makes (its retirement would wait on it). Its row waits for a roster
+/// that lists it, as before. A hosted identity (placed, or bound to an
+/// external runtime) is never named either: its host owns its
+/// materialization, Core seats no such member, and no declaration could end
 /// its mark.
 ///
 /// A first-boot manifest that cannot be read names every roster identity:
 /// which of them it covers is unknown, and the roster pass refuses them all.
-/// A rotation record store that cannot be read is logged and names none: the
-/// rotation re-drive itself waits for a store that reads.
 pub(crate) async fn host_pending_members_before_build(
     first_boot: Option<&FirstBootLocation>,
-    records: Option<(&dyn PersistentMetadataStore, &str)>,
     roster: &[DurableAgentSpec],
 ) -> Vec<meerkat_mob::AgentIdentity> {
     let mut pending = BTreeSet::new();
@@ -79,22 +81,6 @@ pub(crate) async fn host_pending_members_before_build(
                  identity is left to the roster pass, which refuses them until it reads"
             );
             pending.extend(roster.iter().map(|spec| spec.identity.clone()));
-        }
-    }
-    if let Some((store, mob_id)) = records {
-        match store.load_identity_rotation_intents(mob_id).await {
-            Ok(intents) => {
-                pending.extend(
-                    intents
-                        .iter()
-                        .filter_map(|intent| AgentIdentity::parse(&intent.identity).ok()),
-                );
-            }
-            Err(error) => tracing::error!(
-                %error,
-                "the identities' rotation records cannot be read before the mob is built; no \
-                 interrupted rotation is left to the roster pass's preparation"
-            ),
         }
     }
     let listed = roster
@@ -179,8 +165,8 @@ impl IdentityRuntime {
     }
 
     /// Remove `identity`'s rotation intent once Core answered its rotation.
-    /// A failed removal is logged: the next roster compile finds the
-    /// rotation done and removes it.
+    /// A failed removal is logged: the record stays until the identity's next
+    /// rotation replaces it.
     pub(super) async fn clear_rotation_intent(&self, identity: &AgentIdentity) {
         let (store, mob_id) = self.identity_record_store();
         if let Err(error) = store
@@ -191,7 +177,7 @@ impl IdentityRuntime {
                 %identity,
                 %error,
                 "the identity's finished rotation could not be removed from its records; the \
-                 next roster compile finds it done and removes it"
+                 identity's next rotation replaces the record"
             );
         }
     }
@@ -199,8 +185,8 @@ impl IdentityRuntime {
     /// Put `identity`'s rotation record back as it was before a rotation
     /// Core refused before any of it started: `earlier`, the record an
     /// earlier call left, or none. A failed write is logged: the record of
-    /// the refused rotation then stays, and the identity's next roster
-    /// compile may carry that rotation out.
+    /// the refused rotation then stays, and a rollback's roster pass may
+    /// carry that rotation out.
     pub(super) async fn restore_rotation_intent(
         &self,
         identity: &AgentIdentity,
@@ -219,8 +205,8 @@ impl IdentityRuntime {
             tracing::warn!(
                 %identity,
                 %error,
-                "the record of a rotation Core refused could not be taken back; the identity's \
-                 next roster compile may carry that rotation out"
+                "the record of a rotation Core refused could not be taken back; a rollback's \
+                 roster pass may carry that rotation out"
             );
         }
     }

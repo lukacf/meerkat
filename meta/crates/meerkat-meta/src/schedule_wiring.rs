@@ -3670,11 +3670,18 @@ comms = true
             "precondition: identity-first roster ids are marker-encoded"
         );
         let roster_identity = meerkat_mob::ids::AgentIdentity::from(roster_id.clone());
+        // Seated under the durable-identity continuity marker, as
+        // identity-first materialization seats a member, so the declaration
+        // of the identity's registration below adopts it.
+        let mut member_spec = meerkat_mob::SpawnMemberSpec::new(
+            meerkat_mob::ProfileName::from("general"),
+            roster_identity.clone(),
+        );
+        member_spec.continuity_intent = meerkat_mob::SpawnContinuityIntent::DurableIdentity {
+            continuity_key: roster_id.clone(),
+        };
         handle
-            .ensure_member(meerkat_mob::SpawnMemberSpec::new(
-                meerkat_mob::ProfileName::from("general"),
-                roster_identity.clone(),
-            ))
+            .ensure_member(member_spec)
             .await
             .expect("spawn identity-first member");
         handle

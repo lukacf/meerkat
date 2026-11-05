@@ -1145,21 +1145,25 @@ comms = true
 
         let identity = DurableIdentity::parse("domain:late-bound").expect("identity");
         // Seated at the roster row of its durable identity, as identity-first
-        // materialization seats it: Core's journal binds the member there.
+        // materialization seats it, under the durable-identity continuity
+        // marker: Core's journal binds the member there, and the declaration
+        // of the identity's registration adopts it.
         let roster_member =
             crate::member_comms_id::roster_member_id_for_identity(identity.as_str());
         let handle = runtime.mob_handle();
+        let mut member_spec = meerkat_mob::SpawnMemberSpec::new(
+            meerkat_mob::ProfileName::from("worker"),
+            roster_member.clone(),
+        )
+        .with_labels(BTreeMap::from([(
+            DELEGATE_IDLE_RETIRE_SECS_LABEL.to_string(),
+            "0".to_string(),
+        )]));
+        member_spec.continuity_intent = meerkat_mob::SpawnContinuityIntent::DurableIdentity {
+            continuity_key: roster_member.to_string(),
+        };
         handle
-            .ensure_member(
-                meerkat_mob::SpawnMemberSpec::new(
-                    meerkat_mob::ProfileName::from("worker"),
-                    roster_member.clone(),
-                )
-                .with_labels(BTreeMap::from([(
-                    DELEGATE_IDLE_RETIRE_SECS_LABEL.to_string(),
-                    "0".to_string(),
-                )])),
-            )
+            .ensure_member(member_spec)
             .await
             .expect("spawn pre-attached identity member");
 

@@ -7740,6 +7740,360 @@ pub(crate) mod tests {
         router.shutdown().await;
     }
 
+    /// A governed attachment's control that counts the decisions asked of it,
+    /// allowing each until the test turns it to refusing.
+    #[cfg(feature = "workspace-tests")]
+    struct CountingControl {
+        server: McpServerConfig,
+        asked: std::sync::atomic::AtomicUsize,
+        refusing: std::sync::atomic::AtomicBool,
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    impl CountingControl {
+        fn new(server: &McpServerConfig) -> Arc<Self> {
+            Arc::new(Self {
+                server: server.clone(),
+                asked: std::sync::atomic::AtomicUsize::new(0),
+                refusing: std::sync::atomic::AtomicBool::new(false),
+            })
+        }
+
+        fn asked(&self) -> usize {
+            self.asked.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn refuse_from_now(&self) {
+            self.refusing
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    impl McpAttachmentAuthority for CountingControl {
+        fn server(&self) -> &McpServerConfig {
+            &self.server
+        }
+
+        fn authorize_apply(&self) -> Result<(), McpAttachmentRefusal> {
+            self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.refusing.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(McpAttachmentRefusal::Denied);
+            }
+            Ok(())
+        }
+
+        fn authorize_persist(
+            &self,
+            _scope: meerkat_core::mcp_config::McpScope,
+        ) -> Result<(), McpAttachmentRefusal> {
+            Err(McpAttachmentRefusal::Denied)
+        }
+    }
+
+    /// Waits until "guarded" settles (applied or failed) and returns that
+    /// notice.
+    #[cfg(feature = "workspace-tests")]
+    async fn wait_until_settled(router: &mut McpRouter) -> McpLifecycleAction {
+        let deadline = Instant::now() + async_connect_test_timeout();
+        loop {
+            let ext = router.take_external_updates();
+            if let Some(notice) = ext.notices.into_iter().find(|notice| {
+                notice.target == "guarded"
+                    && matches!(
+                        notice.phase,
+                        McpLifecyclePhase::Applied | McpLifecyclePhase::Failed
+                    )
+            }) {
+                return notice;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for guarded to settle"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// An OAuth-protected HTTP server with an explicit account, so a missing
+    /// credential fails its connection before any request is sent.
+    #[cfg(feature = "workspace-tests")]
+    fn selected_account_http_config(url: String) -> McpServerConfig {
+        let mut config = McpServerConfig::streamable_http("guarded", url, HashMap::new());
+        if let McpTransportConfig::Http(http) = &mut config.transport {
+            http.oauth_account = Some("subject-7".into());
+        }
+        config
+    }
+
+    /// A router whose governed add of "guarded" under `control` failed
+    /// `AuthorizationRequired` and was accepted: the retry record exists and
+    /// the name is governed. The resolver holds no credential until the
+    /// test signs in.
+    #[cfg(feature = "workspace-tests")]
+    async fn governed_router_awaiting_authorization(
+        config: McpServerConfig,
+        control: &Arc<CountingControl>,
+    ) -> (
+        McpRouter,
+        McpServerIdentity,
+        Arc<crate::connection::tests::FakeMcpAuthResolver>,
+    ) {
+        use crate::connection::tests::FakeMcpAuthResolver;
+
+        let target = McpServerIdentity::from_config(&config).unwrap();
+        let resolver =
+            Arc::new(FakeMcpAuthResolver::new(None, "unused").with_human_authorization_required());
+        let mut router = generated_handle_owner_router()
+            .with_mcp_auth(McpAuthMode::Interactive, Some(resolver.clone()));
+        let control: Arc<dyn McpAttachmentAuthority> = control.clone();
+        router
+            .stage_add_governed(config, control)
+            .expect("stage the governed add");
+        router.apply_staged().await.expect("apply the governed add");
+        wait_for_phase(&mut router, McpLifecyclePhase::Failed).await;
+        assert_eq!(
+            router.servers_awaiting_authorization(),
+            vec![target.clone()]
+        );
+        assert!(router.governed_servers.contains("guarded"));
+        (router, target, resolver)
+    }
+
+    /// A governed add whose first attempt failed `AuthorizationRequired`
+    /// before any request (an explicit account without a credential), so its
+    /// control was never asked: the retry after sign-in connects only under
+    /// that control, which the new connection asks, and the attachment stays
+    /// governed.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_governed_sign_in_retry_asks_its_control() {
+        use crate::connection::tests::spawn_http_mcp_server;
+
+        let (url, _server) = spawn_http_mcp_server("interactive-token").await;
+        let config = selected_account_http_config(url);
+        let control = CountingControl::new(&config);
+        let (mut router, target, resolver) =
+            governed_router_awaiting_authorization(config, &control).await;
+        assert_eq!(control.asked(), 0, "the first attempt sent no request");
+
+        *resolver.stored_token_for_testing() = Some("interactive-token".into());
+        assert_eq!(
+            router.retry_authorized(&target).unwrap(),
+            AuthorizedRetry::Staged
+        );
+        router.apply_staged().await.expect("apply the retry");
+        let settled = wait_until_settled(&mut router).await;
+        assert_eq!(settled.phase, McpLifecyclePhase::Applied, "{settled:?}");
+        assert_eq!(router.active_server_names(), vec!["guarded".to_string()]);
+        assert_eq!(control.asked(), 1, "the reconnect asked the control");
+        assert!(
+            router.governed_servers.contains("guarded"),
+            "the attachment stays governed"
+        );
+        assert!(router.servers_awaiting_authorization().is_empty());
+        router.shutdown().await;
+    }
+
+    /// A governed add whose first request asked its control and met a 401
+    /// challenge: the retry after sign-in is a new connection, which asks
+    /// the control again, and the attachment stays governed.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_governed_retry_after_a_challenge_asks_its_control_again() {
+        use crate::connection::tests::spawn_http_mcp_server;
+
+        let (url, _server) = spawn_http_mcp_server("interactive-token").await;
+        let config = McpServerConfig::streamable_http("guarded", url, HashMap::new());
+        let control = CountingControl::new(&config);
+        let (mut router, target, resolver) =
+            governed_router_awaiting_authorization(config, &control).await;
+        assert_eq!(
+            control.asked(),
+            1,
+            "the first request asked the control, then met 401"
+        );
+
+        *resolver.stored_token_for_testing() = Some("interactive-token".into());
+        assert_eq!(
+            router.retry_authorized(&target).unwrap(),
+            AuthorizedRetry::Staged
+        );
+        router.apply_staged().await.expect("apply the retry");
+        let settled = wait_until_settled(&mut router).await;
+        assert_eq!(settled.phase, McpLifecyclePhase::Applied, "{settled:?}");
+        assert_eq!(router.active_server_names(), vec!["guarded".to_string()]);
+        assert_eq!(control.asked(), 2, "the reconnect asked the control again");
+        assert!(
+            router.governed_servers.contains("guarded"),
+            "the attachment stays governed"
+        );
+        router.shutdown().await;
+    }
+
+    /// A governed server released on sign-out, with the sign-in landing
+    /// before the release's removal applies: the next boundary re-adds it
+    /// only under the control it was attached under, which the new
+    /// connection asks, and the attachment is governed again.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_released_governed_server_is_restaged_under_its_control() {
+        use crate::connection::tests::{FakeMcpAuthResolver, spawn_http_mcp_server};
+
+        let (url, _server) = spawn_http_mcp_server("interactive-token").await;
+        let config = selected_account_http_config(url);
+        let target = McpServerIdentity::from_config(&config).unwrap();
+        let resolver = Arc::new(
+            FakeMcpAuthResolver::new(Some("interactive-token"), "unused")
+                .with_human_authorization_required(),
+        );
+        let mut router = generated_handle_owner_router()
+            .with_mcp_auth(McpAuthMode::Interactive, Some(resolver.clone()));
+        let control = CountingControl::new(&config);
+        let as_control: Arc<dyn McpAttachmentAuthority> = control.clone();
+        router
+            .stage_add_governed(config, as_control)
+            .expect("stage the governed add");
+        router.apply_staged().await.expect("apply the governed add");
+        wait_for_phase(&mut router, McpLifecyclePhase::Applied).await;
+        assert_eq!(
+            control.asked(),
+            1,
+            "the governed connection asked its control"
+        );
+
+        // Sign-out releases it; the sign-in lands before the removal applies.
+        *resolver.stored_token_for_testing() = None;
+        assert_eq!(
+            router.credential_released(&target).unwrap(),
+            ReleasedCredential::Unpublished
+        );
+        *resolver.stored_token_for_testing() = Some("interactive-token".into());
+        assert_eq!(
+            router.retry_authorized(&target).unwrap(),
+            AuthorizedRetry::AfterRelease
+        );
+        router.apply_staged().await.expect("apply the release");
+        assert!(router.active_server_names().is_empty());
+        router
+            .apply_staged()
+            .await
+            .expect("apply the retained restage");
+        let settled = wait_until_settled(&mut router).await;
+        assert_eq!(settled.phase, McpLifecyclePhase::Applied, "{settled:?}");
+        assert_eq!(router.active_server_names(), vec!["guarded".to_string()]);
+        assert_eq!(control.asked(), 2, "the reconnect asked the control");
+        assert!(
+            router.governed_servers.contains("guarded"),
+            "the attachment is governed again"
+        );
+        assert!(router.servers_awaiting_authorization().is_empty());
+        router.shutdown().await;
+    }
+
+    /// The retried connection asks the control again: a control that now
+    /// refuses fails the reconnect, and nothing is published.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_control_refusing_the_retry_keeps_the_server_unpublished() {
+        use crate::connection::tests::spawn_http_mcp_server;
+
+        let (url, _server) = spawn_http_mcp_server("interactive-token").await;
+        let config = selected_account_http_config(url);
+        let control = CountingControl::new(&config);
+        let (mut router, target, resolver) =
+            governed_router_awaiting_authorization(config, &control).await;
+        // The decision changed after the first attempt.
+        control.refuse_from_now();
+
+        *resolver.stored_token_for_testing() = Some("interactive-token".into());
+        assert_eq!(
+            router.retry_authorized(&target).unwrap(),
+            AuthorizedRetry::Staged
+        );
+        router.apply_staged().await.expect("apply the retry");
+        let settled = wait_until_settled(&mut router).await;
+        assert_eq!(settled.phase, McpLifecyclePhase::Failed, "{settled:?}");
+        assert_eq!(control.asked(), 1, "the reconnect asked the control");
+        assert!(router.active_server_names().is_empty());
+        assert!(!router.list_tools().iter().any(|tool| tool.name == "echo"));
+        router.shutdown().await;
+    }
+
+    /// A name that is governed while its retry record carries no control is
+    /// refused at sign-in, typed, and never re-added plainly: nothing is
+    /// staged and the record is kept.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_governed_name_without_a_retained_control_is_not_retried_plainly() {
+        let (mut router, target, resolver, _server) = router_awaiting_authorization().await;
+        // The name is governed, and the router holds no control for it.
+        router.governed_servers.insert("guarded".to_string());
+
+        *resolver.stored_token_for_testing() = Some("interactive-token".into());
+        let refused = router.retry_authorized(&target);
+        assert!(
+            matches!(
+                refused,
+                Err(McpError::AttachmentRefused(McpAttachmentRefusal::Mismatch))
+            ),
+            "{refused:?}"
+        );
+        assert!(!router.has_staged_intent("guarded"), "nothing is staged");
+        assert!(!router.staged_payloads.contains_key("guarded"));
+        assert_eq!(
+            router.servers_awaiting_authorization(),
+            vec![target],
+            "the record is kept"
+        );
+        router.apply_staged().await.expect("apply nothing");
+        assert!(router.active_server_names().is_empty(), "nothing connects");
+        router.shutdown().await;
+    }
+
+    /// A server released while its name was governed with no control held is
+    /// not restaged plainly after sign-in: the boundary reports the refusal
+    /// and the record is kept.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_released_governed_name_without_a_retained_control_is_not_restaged() {
+        let (mut router, target, resolver, _server) = router_connected_under_credential().await;
+        // The name is governed, and the router holds no control for it.
+        router.governed_servers.insert("guarded".to_string());
+        *resolver.stored_token_for_testing() = None;
+        assert_eq!(
+            router.credential_released(&target).unwrap(),
+            ReleasedCredential::Unpublished
+        );
+        *resolver.stored_token_for_testing() = Some("interactive-token".into());
+        assert_eq!(
+            router.retry_authorized(&target).unwrap(),
+            AuthorizedRetry::AfterRelease
+        );
+        router.apply_staged().await.expect("apply the release");
+        assert!(router.active_server_names().is_empty());
+
+        let refused = router.apply_staged().await.expect("the boundary runs");
+        assert!(
+            refused.delta.lifecycle_actions.iter().any(|action| {
+                action.target == "guarded"
+                    && action.operation == ToolConfigChangeOperation::Add
+                    && action.phase == McpLifecyclePhase::Failed
+            }),
+            "the refused re-add is in the boundary result: {:?}",
+            refused.delta.lifecycle_actions
+        );
+        assert!(!router.staged_payloads.contains_key("guarded"));
+        router.apply_staged().await.expect("apply nothing more");
+        assert!(router.active_server_names().is_empty(), "nothing connects");
+        assert_eq!(
+            router.servers_awaiting_authorization(),
+            vec![target],
+            "the record is kept"
+        );
+        router.shutdown().await;
+    }
+
     #[cfg(feature = "workspace-tests")]
     #[tokio::test]
     async fn retry_touches_only_the_exact_retained_target() {

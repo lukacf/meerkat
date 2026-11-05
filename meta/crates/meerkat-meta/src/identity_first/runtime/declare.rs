@@ -228,7 +228,7 @@ impl IdentityRuntime {
         let lifecycle_lock = self.lifecycle_lock_for(&identity).await;
         let Some(bridge) = self.bridge.clone() else {
             let _lifecycle_guard = lifecycle_lock.lock().await;
-            self.record_registration(spec, registration).await?;
+            self.record_registration(spec, registration, None).await?;
             return Ok(DeclaredIdentityAnswer::RecordedOnly);
         };
         let specs = std::slice::from_ref(&spec);
@@ -240,7 +240,8 @@ impl IdentityRuntime {
                 Ok(inputs) => inputs,
                 Err(error) => {
                     let _lifecycle_guard = lifecycle_lock.lock().await;
-                    self.record_registration(spec.clone(), registration).await?;
+                    self.record_registration(spec.clone(), registration, None)
+                        .await?;
                     return Err(error);
                 }
             };
@@ -268,8 +269,12 @@ impl IdentityRuntime {
                         let build_owed = composed.is_empty()
                             && matches!(&outcome, Ok(DeclaredIdentityAnswer::BuildRequired));
                         if !build_owed {
-                            self.record_registration(spec.clone(), registration).await?;
-                            self.note_declaration_answer(&identity, &outcome).await;
+                            // The registration and Core's answer for the
+                            // views land in one write: no view reads the
+                            // registration without its note.
+                            let refused = self.refusal_note(&identity, &outcome);
+                            self.record_registration(spec.clone(), registration, refused)
+                                .await?;
                         }
                         (outcome, applied.bound, applied.rows_settled)
                     }
@@ -534,10 +539,15 @@ impl IdentityRuntime {
                     }
                     continue;
                 }
+                let outcome = applied.outcomes.get(&spec.identity);
                 if register {
-                    self.register_locked(spec.clone()).await;
-                }
-                if let Some(outcome) = applied.outcomes.get(&spec.identity) {
+                    // The registration and Core's answer for the views land
+                    // in one write: no view reads the registration without
+                    // its note.
+                    let refused =
+                        outcome.and_then(|outcome| self.refusal_note(&spec.identity, outcome));
+                    self.register_locked_noting(spec.clone(), refused).await;
+                } else if let Some(outcome) = outcome {
                     self.note_declaration_answer(&spec.identity, outcome).await;
                 }
             }
@@ -1185,20 +1195,34 @@ impl IdentityRuntime {
         }
     }
 
+    /// The note Core's answer `outcome` gives `identity`'s registration for
+    /// the views ([`super::IdentityEntry::declaration_refused`]): whether
+    /// Core refuses it for good ([`Self::refuses_for_good`]), or `None` for a
+    /// refusal before Core was asked, which leaves the note as it was.
+    fn refusal_note(
+        &self,
+        identity: &AgentIdentity,
+        outcome: &Result<DeclaredIdentityAnswer, IdentityRuntimeError>,
+    ) -> Option<bool> {
+        outcome
+            .is_ok()
+            .then(|| self.refuses_for_good(identity, outcome))
+    }
+
     /// Note Core's answer `outcome` for registered `identity`'s declaration
     /// for the views ([`super::IdentityEntry::declaration_refused`]): set
     /// while Core refuses it for good ([`Self::refuses_for_good`]), cleared
     /// by any other answer Core gives. A refusal before Core was asked
-    /// leaves the note as it was.
+    /// leaves the note as it was. A registration notes the answer in its own
+    /// write instead ([`Self::refusal_note`]).
     pub(super) async fn note_declaration_answer(
         &self,
         identity: &AgentIdentity,
         outcome: &Result<DeclaredIdentityAnswer, IdentityRuntimeError>,
     ) {
-        if outcome.is_err() {
+        let Some(refused) = self.refusal_note(identity, outcome) else {
             return;
-        }
-        let refused = self.refuses_for_good(identity, outcome);
+        };
         // Only a change is written: every write wakes the completion
         // waiters, and an unchanged note changes no view.
         let unchanged = self
@@ -1568,18 +1592,24 @@ impl IdentityRuntime {
         }
     }
     /// Record `spec` as its identity's registration: a new or replaced
-    /// entry, or an update of a registered one.
+    /// entry, or an update of a registered one, with Core's answer noted for
+    /// the views in the same write when `declaration_refused` is `Some`
+    /// ([`Self::refusal_note`]); `None` keeps the note.
     async fn record_registration(
         &self,
         spec: DurableAgentSpec,
         registration: Registration,
+        declaration_refused: Option<bool>,
     ) -> Result<(), IdentityRuntimeError> {
         match registration {
             Registration::Register => {
-                self.register_locked(spec).await;
+                self.register_locked_noting(spec, declaration_refused).await;
                 Ok(())
             }
-            Registration::Update => self.update_spec_locked(spec).await,
+            Registration::Update => {
+                self.update_spec_locked_noting(spec, declaration_refused)
+                    .await
+            }
         }
     }
 

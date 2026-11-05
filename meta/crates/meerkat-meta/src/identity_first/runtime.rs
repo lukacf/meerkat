@@ -7105,11 +7105,24 @@ impl IdentityRuntime {
     /// [`Self::register`]'s body for callers that already hold the
     /// identity's lifecycle lock (roster registration).
     pub(crate) async fn register_locked(&self, spec: DurableAgentSpec) {
+        self.register_locked_noting(spec, None).await;
+    }
+
+    /// [`Self::register_locked`], noting Core's answer for the views in the
+    /// same write when `declaration_refused` is `Some`
+    /// ([`IdentityEntry::declaration_refused`]): no view reads the
+    /// registration without the note. `None` keeps the note the identity's
+    /// previous registration carried.
+    pub(crate) async fn register_locked_noting(
+        &self,
+        spec: DurableAgentSpec,
+        declaration_refused: Option<bool>,
+    ) {
         let identity = spec.identity.clone();
         let bootstrap_generation = self.identity_bootstrap_status_with_generation().0;
         {
             let mut entries = self.entries.write().await;
-            let (wake_refusal, replaced_session, declaration_refused) = entries
+            let (wake_refusal, replaced_session, previous_refused) = entries
                 .get(&identity)
                 .map(|existing| {
                     (
@@ -7128,7 +7141,7 @@ impl IdentityRuntime {
                     replaced_session,
                     last_delivery_error: None,
                     last_reload: None,
-                    declaration_refused,
+                    declaration_refused: declaration_refused.unwrap_or(previous_refused),
                 },
             );
         }
@@ -9554,11 +9567,25 @@ impl IdentityRuntime {
         &self,
         spec: DurableAgentSpec,
     ) -> Result<(), IdentityRuntimeError> {
+        self.update_spec_locked_noting(spec, None).await
+    }
+
+    /// [`Self::update_spec_locked`], noting Core's answer for the views in
+    /// the same write when `declaration_refused` is `Some`
+    /// ([`IdentityEntry::declaration_refused`]); `None` keeps the note.
+    pub(crate) async fn update_spec_locked_noting(
+        &self,
+        spec: DurableAgentSpec,
+        declaration_refused: Option<bool>,
+    ) -> Result<(), IdentityRuntimeError> {
         let mut entries = self.entries.write().await;
         let entry = entries
             .get_mut(&spec.identity)
             .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(spec.identity.clone()))?;
         entry.spec = spec;
+        if let Some(refused) = declaration_refused {
+            entry.declaration_refused = refused;
+        }
         Ok(())
     }
 

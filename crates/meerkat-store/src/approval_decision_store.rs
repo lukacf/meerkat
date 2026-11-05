@@ -25,14 +25,20 @@ use std::time::Duration;
 
 use meerkat_core::approval::ApprovalStoreError;
 use meerkat_core::approval::decision::{
-    DECISION_PAGE_MAX, DecisionId, DecisionListFilter, DecisionPage, DecisionPrincipalKey,
-    DecisionRow, DecisionStore, StoredDecision, UnreadableDecision,
+    DECISION_PAGE_MAX, DecisionExecutorClaim, DecisionId, DecisionListFilter, DecisionPage,
+    DecisionPrincipalKey, DecisionRow, DecisionStore, StoredDecision, UnreadableDecision,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, ToSql, Transaction, TransactionBehavior, params_from_iter};
 
 /// The file name of a host's durable decisions, under its store path.
 pub const APPROVAL_DECISIONS_FILE: &str = "approval_decisions.sqlite3";
+
+/// The extension of the executor lock file beside a decision file: for
+/// `approval_decisions.sqlite3` it is `approval_decisions.executor.lock`.
+/// The executor of the store holds an exclusive OS lock on it
+/// ([`DecisionStore::claim_executor`]); the lock ends with its process.
+pub const DECISION_EXECUTOR_LOCK_EXTENSION: &str = "executor.lock";
 
 const CREATE_DECISIONS_TABLE_SQL: &str = r"
 CREATE TABLE approval_decisions (
@@ -317,6 +323,12 @@ impl SqliteDecisionStore {
         &self.path
     }
 
+    /// The executor lock file beside the database file.
+    #[must_use]
+    pub fn executor_lock_path(&self) -> PathBuf {
+        self.path.with_extension(DECISION_EXECUTOR_LOCK_EXTENSION)
+    }
+
     /// A connection to the file, created when `create` is set. Every open
     /// checks the domain's ledger before anything else: a file a newer
     /// binary migrated is refused, never read.
@@ -507,6 +519,39 @@ impl DecisionStore for SqliteDecisionStore {
 
     fn is_persistent(&self) -> bool {
         true
+    }
+
+    /// Holds an exclusive OS lock on the executor lock file beside the
+    /// database file ([`SqliteDecisionStore::executor_lock_path`]), creating
+    /// the file (and the store directory) if needed. The lock is the one
+    /// claim of the store across processes: another open of the file, in
+    /// this process or any other, finds it held, and it ends when the claim
+    /// drops or its process ends. Creating the lock file is the only write;
+    /// the database file is not touched.
+    fn claim_executor(&self) -> Result<DecisionExecutorClaim, ApprovalStoreError> {
+        let path = self.executor_lock_path();
+        let not_committed = |what: &str, error: &std::io::Error| {
+            ApprovalStoreError::NotCommitted(format!(
+                "cannot {what} the decision executor lock {}: {error}",
+                path.display()
+            ))
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| not_committed("create the directory of", &error))?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|error| not_committed("open", &error))?;
+        match file.try_lock() {
+            Ok(()) => Ok(DecisionExecutorClaim::new(file)),
+            Err(std::fs::TryLockError::WouldBlock) => Err(ApprovalStoreError::Contended),
+            Err(std::fs::TryLockError::Error(error)) => Err(not_committed("lock", &error)),
+        }
     }
 }
 

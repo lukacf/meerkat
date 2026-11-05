@@ -95,6 +95,14 @@ authority-change retirement for a review whose currentness read was stale,
 expects the new ones. See
 [Survive owner changes in progress](/rust/native-authorization#survive-owner-changes-in-progress).
 
+### Wrappers and decorators
+
+Forward this new method too. It has a default, so a wrapper without it
+compiles, but the default disables what it carries:
+
+- a `DecisionStore` wrapper: `claim_executor`. Its default refuses, so no
+  `DecisionExecutorLoop` starts over the wrapper (`DecisionError::Unavailable`).
+
 ## Upgrading to 0.9.9
 
 This section is for systems running 0.9.8. The full list of changes is in

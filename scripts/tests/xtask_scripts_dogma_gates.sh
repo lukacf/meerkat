@@ -182,47 +182,20 @@ done
 
 # ── #296: governance/spec changes route formal/governance checks ─────────────
 echo "#296 agent gates route governance/spec changes:"
-if grep -Fq 'is_governance_path' scripts/cargo-agent-gate \
-  && grep -Fq 'machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit' scripts/cargo-agent-gate; then
-  ok "cargo-agent-gate has governance allowlist + formal gate routing"
-else
-  bad "cargo-agent-gate missing governance allowlist or formal gate routing"
-fi
 if grep -Fq 'is_governance_path' scripts/buildbuddy-agent-gate \
   && grep -Fq 'machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit' scripts/buildbuddy-agent-gate; then
   ok "buildbuddy-agent-gate has governance allowlist + formal gate routing"
 else
   bad "buildbuddy-agent-gate missing governance allowlist or formal gate routing"
 fi
-# Behavioral: a spec-only change is no longer reported as "no changes" and is
+# Behavioral: a governance-only change is not reported as "no changes" and is
 # routed to the governance gate (dry-run avoids invoking cargo/make work).
-gate_out=$(scripts/cargo-agent-gate --dry-run -- specs/machines/example.tla 2>&1 || true)
-if printf '%s' "$gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit' \
-  && ! printf '%s' "$gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
-  ok "cargo-agent-gate dry-run routes specs/machines change to governance gate"
-else
-  bad "cargo-agent-gate dry-run did not route specs/machines change to governance gate"
-fi
 docs_gate_out=$(scripts/buildbuddy-agent-gate --dry-run -- docs/reference/machine-authority.mdx 2>&1 || true)
 if printf '%s' "$docs_gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit' \
   && ! printf '%s' "$docs_gate_out" | grep -Fq 'no build-relevant changes detected.'; then
   ok "buildbuddy-agent-gate dry-run routes machine-authority docs to governance gate"
 else
   bad "buildbuddy-agent-gate dry-run did not route machine-authority docs"
-fi
-generated_machine_gate_out=$(scripts/cargo-agent-gate --dry-run -- crates/meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs 2>&1 || true)
-if printf '%s' "$generated_machine_gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate seam-inventory rmat-audit' \
-  && ! printf '%s' "$generated_machine_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
-  ok "cargo-agent-gate dry-run routes generated machine catalog changes to governance gate"
-else
-  bad "cargo-agent-gate dry-run did not route generated machine catalog changes"
-fi
-mob_identity_gate_out=$(scripts/cargo-agent-gate --dry-run -- crates/meerkat-mob/src/ids.rs 2>&1 || true)
-if printf '%s' "$mob_identity_gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit' \
-  && ! printf '%s' "$mob_identity_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
-  ok "cargo-agent-gate dry-run routes mob identity authority changes to governance gate"
-else
-  bad "cargo-agent-gate dry-run did not route mob identity authority changes"
 fi
 generated_buildbuddy_gate_out=$(scripts/buildbuddy-agent-gate --dry-run -- crates/meerkat-core/src/generated/protocol_runtime.rs 2>&1 || true)
 if printf '%s' "$generated_buildbuddy_gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate seam-inventory rmat-audit' \
@@ -237,40 +210,12 @@ if grep -Fq '//crates/meerkat-machine-schema:docs_machine_authority_alignment_te
 else
   bad "BuildBuddy machine-authority lanes omit machine-authority docs alignment"
 fi
-schema_gate_out=$(scripts/cargo-agent-gate --dry-run -- artifacts/schemas/rest-openapi.json 2>&1 || true)
-if printf '%s' "$schema_gate_out" | grep -Fq 'verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment' \
-  && ! printf '%s' "$schema_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
-  ok "cargo-agent-gate dry-run routes schema artifacts to generated contract ratchets"
-else
-  bad "cargo-agent-gate dry-run did not route schema artifacts to generated contract ratchets"
-fi
 sdk_gate_out=$(scripts/buildbuddy-agent-gate --dry-run -- sdks/typescript/src/generated/types.ts sdks/python/meerkat/generated/types.py 2>&1 || true)
 if printf '%s' "$sdk_gate_out" | grep -Fq 'verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment' \
   && ! printf '%s' "$sdk_gate_out" | grep -Fq 'no build-relevant changes detected.'; then
   ok "buildbuddy-agent-gate dry-run routes SDK generated artifacts to generated contract ratchets"
 else
   bad "buildbuddy-agent-gate dry-run did not route SDK generated artifacts"
-fi
-surface_gate_out=$(scripts/cargo-agent-gate --dry-run -- crates/meerkat-mcp/src/router.rs crates/meerkat-mob-mcp/src/agent_tools.rs docs/api/mcp.mdx sdks/typescript/README.md 2>&1 || true)
-if printf '%s' "$surface_gate_out" | grep -Fq 'verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment' \
-  && ! printf '%s' "$surface_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
-  ok "cargo-agent-gate dry-run routes public surface docs/router/mob-mcp changes to generated contract ratchets"
-else
-  bad "cargo-agent-gate dry-run did not route public surface docs/router/mob-mcp changes"
-fi
-web_gate_out=$(scripts/cargo-agent-gate --dry-run -- sdks/web/src/runtime.ts 2>&1 || true)
-if printf '%s' "$web_gate_out" | grep -Fq 'test-sdk-web' \
-  && ! printf '%s' "$web_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
-  ok "cargo-agent-gate dry-run routes Web SDK changes to Web SDK tests"
-else
-  bad "cargo-agent-gate dry-run did not route Web SDK changes"
-fi
-wasm_gate_out=$(scripts/cargo-agent-gate --dry-run -- crates/meerkat-web-runtime/src/lib.rs 2>&1 || true)
-if printf '%s' "$wasm_gate_out" | grep -Fq 'wasm-check' \
-  && ! printf '%s' "$wasm_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
-  ok "cargo-agent-gate dry-run routes web runtime changes to wasm-check"
-else
-  bad "cargo-agent-gate dry-run did not route web runtime changes"
 fi
 rest_gate_out=$(scripts/buildbuddy-agent-gate --dry-run -- crates/meerkat-rest/src/lib.rs crates/meerkat-rpc/src/session_runtime.rs 2>&1 || true)
 if printf '%s' "$rest_gate_out" | grep -Fq 'verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment' \
@@ -420,7 +365,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # input_controller_holds_are_kept_unstaged_governed_inputs invariant violated.
 # durable_decision_audit.sh requires a final distinct-state count at or above
 # its floor, a coverage block in which each of its covered actions (of module
-# durable_decision_audit) generated a state, its fifteen witnesses violated,
+# durable_decision_audit) generated a state, its seventeen witnesses violated,
 # and with --mutants each seeded defect's invariant violated (the generated
 # first_presentation_is_a_reading included).
 # instruction_boundary_audit.sh (session_document) requires its six
@@ -882,7 +827,7 @@ printf '%s\n' \
   'echo "Error: Action property AuditResumedRunWaitsForDestination is violated."' \
   'echo "Error: Action property AuditResumedRunBindsItsDestination is violated."' \
   'echo "Error: Invariant input_controller_holds_are_kept_unstaged_governed_inputs is violated."' \
-  'for action in AuditHoldHuman AuditHoldReview AuditHoldRefusedWindow AuditHoldRefusedSelfReview AuditHoldReplayed AuditHoldConflict AuditPresentAtDeadline AuditPresentRefusedSubjectChanged AuditPresentRefusedIncomplete AuditPresentToApprover AuditPresentRefusedUntimed AuditPresentRefusedWrongApproverAudience AuditPresentToReviewer AuditPresentRefusedWrongReviewerAudience AuditPresentRefusedNotOpen AuditDecideAtDeadline AuditDecideRefusedReviewStage AuditDecideRefusedEvidenceRequired AuditDecideRefusedSubjectChanged AuditDecideRefusedNotEligible AuditDecideRefusedSelfApproval AuditDecideRefusedPresentationIncomplete AuditDecideRefusedDecidedBeforePresentation AuditDecideApproved AuditDecideRejected AuditDecideRefusedNotOpen AuditReviewAtDeadline AuditReviewRefusedHumanStage AuditReviewRefusedWrongReviewer AuditReviewRefusedEvidenceRequired AuditReviewRefusedSubjectChanged AuditReviewRefusedPresentationIncomplete AuditReviewAllowed AuditReviewDenied AuditReviewEscalated AuditReviewRefusedNotOpen AuditWithdrawAtDeadline AuditWithdrawByHost AuditWithdrawByRequester AuditWithdrawRefusedNotRequester AuditWithdrawRefusedNotOpen AuditExpireOpenDue AuditExpireOpenNotDue AuditExpireApprovedDue AuditExpireApprovedSettlementOwed AuditExpireApprovedNotDue AuditExpireSettled AuditAuthorizeExecution AuditAuthorizeExecutionAtDeadline AuditAuthorizeExecutionRefusedSettlementOwed AuditAuthorizeExecutionRefusedBinding AuditAuthorizeExecutionRefusedNotApproved AuditReleaseExecution AuditReleaseExecutionAtDeadline AuditReleaseExecutionRefusedNotAuthorized AuditReleaseExecutionRefusedNotApproved AuditRecordExecuted AuditRecordExecutedRefusedNotAuthorized AuditRecordExecutedRefusedBinding AuditRecordExecutedReplayed AuditRecordExecutedReplayRefusedBinding AuditRecordExecutedRefusedNotApproved AuditCloseRefused AuditCloseRefusedWithPermit AuditCloseRefusedAtDeadline AuditCloseRefusedNotApproved AuditSettleNoticeDelivered AuditSettleNoticeFailed AuditSettleNoticeReplayed AuditSettleNoticeRefused AuditSettleNoticeRefusedNotEnded AuditCommit; do echo "<$action line 1, col 1 to line 1, col 2 of module durable_decision_audit>: 1:1"; done' \
+  'for action in AuditHoldHuman AuditHoldReview AuditHoldRefusedWindow AuditHoldRefusedSelfReview AuditHoldReplayed AuditHoldConflict AuditPresentAtDeadline AuditPresentRefusedSubjectChanged AuditPresentRefusedIncomplete AuditPresentToApprover AuditPresentRefusedUntimed AuditPresentRefusedWrongApproverAudience AuditPresentToReviewer AuditPresentRefusedWrongReviewerAudience AuditPresentRefusedNotOpen AuditDecideAtDeadline AuditDecideRefusedReviewStage AuditDecideRefusedEvidenceRequired AuditDecideRefusedSubjectChanged AuditDecideRefusedNotEligible AuditDecideRefusedSelfApproval AuditDecideRefusedPresentationIncomplete AuditDecideRefusedDecidedBeforePresentation AuditDecideApproved AuditDecideRejected AuditDecideRefusedNotOpen AuditReviewAtDeadline AuditReviewRefusedHumanStage AuditReviewRefusedWrongReviewer AuditReviewRefusedEvidenceRequired AuditReviewRefusedSubjectChanged AuditReviewRefusedPresentationIncomplete AuditReviewAllowed AuditReviewDenied AuditReviewEscalated AuditReviewRefusedNotOpen AuditWithdrawAtDeadline AuditWithdrawByHost AuditWithdrawByRequester AuditWithdrawRefusedNotRequester AuditWithdrawRefusedNotOpen AuditExpireOpenDue AuditExpireOpenNotDue AuditExpireApprovedDue AuditExpireApprovedSettlementOwed AuditExpireApprovedNotDue AuditExpireSettled AuditAuthorizeExecution AuditAuthorizeExecutionAtDeadline AuditAuthorizeExecutionRefusedSettlementOwed AuditAuthorizeExecutionRefusedBinding AuditAuthorizeExecutionRefusedNotApproved AuditAuthorizeExecutionRefusedApproverRevoked AuditAuthorizeExecutionRefusedRevokedSettlementOwed AuditReleaseExecution AuditReleaseExecutionAtDeadline AuditReleaseExecutionRefusedNotAuthorized AuditReleaseExecutionRefusedNotApproved AuditRecordExecuted AuditRecordExecutedRefusedNotAuthorized AuditRecordExecutedRefusedBinding AuditRecordExecutedReplayed AuditRecordExecutedReplayRefusedBinding AuditRecordExecutedRefusedNotApproved AuditCloseRefused AuditCloseRefusedWithPermit AuditCloseRefusedAtDeadline AuditCloseRefusedNotApproved AuditSettleNoticeDelivered AuditSettleNoticeFailed AuditSettleNoticeReplayed AuditSettleNoticeRefused AuditSettleNoticeRefusedNotEnded AuditCommit; do echo "<$action line 1, col 1 to line 1, col 2 of module durable_decision_audit>: 1:1"; done' \
   'echo "Error: Invariant NotAuditWitnessHumanApprovalExecutedAndNoticed is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetriedAfterRelease is violated."' \
   'echo "Error: Invariant NotAuditWitnessExecutionRefused is violated."' \
@@ -898,6 +843,8 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessAuthorizeAtDeadlineRefused is violated."' \
   'echo "Error: Invariant NotAuditWitnessDecidedBeforePresentationRefused is violated."' \
   'echo "Error: Invariant NotAuditWitnessApprovedAtThePresentation is violated."' \
+  'echo "Error: Invariant NotAuditWitnessApproverRevokedEndsRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRevokedPermitSettledExecuted is violated."' \
   'echo "Error: Invariant AuditTerminalsLatch is violated."' \
   'echo "Error: Invariant AuditApprovalIsAttested is violated."' \
   'echo "Error: Invariant AuditRejectionIsAttested is violated."' \
@@ -910,6 +857,7 @@ printf '%s\n' \
   'echo "Error: Invariant AuditNoPermitAtOrAfterDeadline is violated."' \
   'echo "Error: Invariant AuditReleaseClearsPermit is violated."' \
   'echo "Error: Invariant AuditDecisionFollowsPresentation is violated."' \
+  'echo "Error: Invariant AuditPermitOnlyForCurrentApprover is violated."' \
   'echo "Error: Invariant AuditCommittedIsSettleable is violated."' \
   'echo "Error: Invariant AuditFirstPresentationIsTheEarliest is violated."' \
   'echo "Error: Invariant first_presentation_is_a_reading is violated."' \

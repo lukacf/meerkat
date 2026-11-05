@@ -1078,6 +1078,13 @@ impl meerkat_core::approval::consent::ConsentEligibility for Eligible {
     }
 }
 
+/// The host's answer that the approver who decided is still current.
+fn approver_current() -> meerkat_core::approval::consent::ConsentEligibilityAnswer {
+    meerkat_core::approval::consent::ConsentEligibilityAnswer::Eligible(std::sync::Arc::new(
+        Eligible,
+    ))
+}
+
 fn now_ms() -> u64 {
     u64::try_from(
         std::time::SystemTime::now()
@@ -1175,7 +1182,12 @@ fn decided_permit(
         )
         .expect("approve");
     service
-        .authorize_execution(&held.decision_id, &operation_id, &request_digest)
+        .authorize_execution(
+            &held.decision_id,
+            &operation_id,
+            &request_digest,
+            &approver_current(),
+        )
         .expect("authorize the execution")
 }
 

@@ -390,6 +390,56 @@ const HOOK_STACK = 8 * 1024 * 1024;
   assert.equal(exported.length, 1, "scripts/pre-push-unit.sh exports one default RUST_MIN_STACK");
   assert.equal(Number(exported[0][1]), HOOK_STACK, "the hook's lanes run on the closure rows' stack");
 }
+
+// The hooks whose lanes CI runs before merge stay manual-only: no push runs
+// the deterministic gate (cargo-test, scripts/pre-push-unit.sh, whose lanes
+// the closure-tests rows run) or the machine codegen and TLC lanes
+// (machine-codegen-drift and machine-codegen-verify; the ratchets and
+// tlc-audits jobs). The hook config is read without a YAML package: a hook
+// starts at `      - id: NAME`, its keys are indented eight spaces and its
+// stages are a flow list; anything else is refused rather than guessed.
+const MANUAL_ONLY_HOOKS = ["cargo-test", "machine-codegen-drift", "machine-codegen-verify"];
+function automaticManualOnlyHooks(config) {
+  const defaults = config.match(/^default_stages: \[([^\]]*)\]$/m);
+  assert.ok(defaults, ".pre-commit-config.yaml gives default_stages as a flow list");
+  const listed = (value) => value.split(",").map((item) => item.trim()).filter(Boolean);
+  const stages = new Map();
+  for (const block of config.split(/^      - id: /m).slice(1)) {
+    const id = block.slice(0, block.indexOf("\n")).trim();
+    assert.ok(!stages.has(id), `${id} is defined once`);
+    const keys = [...block.matchAll(/^        stages:(.*)$/gm)];
+    assert.ok(keys.length <= 1, `${id} names its stages once`);
+    if (keys.length === 0) {
+      stages.set(id, listed(defaults[1]));
+      continue;
+    }
+    const flow = keys[0][1].match(/^ \[([^\]]*)\]$/);
+    assert.ok(flow, `${id}: stages is a flow list`);
+    stages.set(id, listed(flow[1]));
+  }
+  for (const id of MANUAL_ONLY_HOOKS) assert.ok(stages.has(id), `.pre-commit-config.yaml defines ${id}`);
+  return MANUAL_ONLY_HOOKS.filter((id) => JSON.stringify(stages.get(id)) !== JSON.stringify(["manual"]));
+}
+{
+  const config = readFileSync(resolve(root, ".pre-commit-config.yaml"), "utf8");
+  assert.deepEqual(automaticManualOnlyHooks(config), [], "cargo-test and the machine codegen hooks stay manual-only");
+  // Nor does any hook run Clippy: the required CI Clippy lanes lint every
+  // package before merge.
+  assert.ok(!/pre-push-clippy|id: cargo-clippy/.test(config), "no hook runs the Clippy body");
+  assert.ok(!existsSync(resolve(root, "scripts/pre-push-clippy.sh")), "scripts/pre-push-clippy.sh stays deleted");
+  // Each made automatic, on a push stage or on the default stages, fails.
+  const manual = "        stages: [manual]\n";
+  for (const id of MANUAL_ONLY_HOOKS) {
+    const start = config.indexOf(`\n      - id: ${id}\n`);
+    const next = config.indexOf("\n      - id: ", start + 1);
+    const at = config.indexOf(manual, start);
+    assert.ok(start >= 0 && at > start && (next < 0 || at < next), `${id} declares ${manual.trim()}`);
+    const pushed = `${config.slice(0, at)}        stages: [pre-push]\n${config.slice(at + manual.length)}`;
+    assert.deepEqual(automaticManualOnlyHooks(pushed), [id], `${id} on the push stage fails the check`);
+    const defaulted = config.slice(0, at) + config.slice(at + manual.length);
+    assert.deepEqual(automaticManualOnlyHooks(defaulted), [id], `${id} on the default stages fails the check`);
+  }
+}
 const OTHER_E2E_LANES = ["e2e_auth_lane", "e2e_build_lane", "e2e_system_lane", "e2e_live_lane", "e2e_smoke_lane", "e2e_models_lane"];
 
 // The closure-tests rows: the deterministic workspace lanes' coverage
@@ -1073,7 +1123,7 @@ for (const path of [
   ".config/nextest.toml",
   "rust-toolchain.toml",
   "scripts/repo-cargo",
-  "scripts/cargo-agent-gate",
+  "scripts/cargo-fast-nextest",
   "scripts/ci-cargo-lanes.mjs",
   "scripts/ci-hook-coverage.mjs",
   "scripts/ci-verify-row-binaries.mjs",
@@ -1457,8 +1507,8 @@ for (const path of [
 }
 
 // The typed governance gates run on the agent gate's governance paths: the
-// machine-authority paths and the dogma documents (scripts/cargo-agent-gate,
-// is_governance_path), which ran them in the pre-push hook's ratchets.
+// machine-authority paths and the dogma documents (scripts/buildbuddy-agent-gate,
+// is_governance_path).
 {
   assert.equal(planFor(["specs/machines/meerkat_machine/model.tla"]).governance_gates, true, "machine authority runs the governance gates");
   for (const path of [
@@ -1474,9 +1524,9 @@ for (const path of [
   for (const path of ["docs/architecture/meerkat-dogma-notes.md", ".claude/skills/meerkat-architecture/SKILL.md", "docs/internal/machine-posters/mob_machine.html"]) {
     assert.equal(planFor([path]).governance_gates, false, `${path} does not run the governance gates`);
   }
-  const gate = readFileSync(resolve(root, "scripts/cargo-agent-gate"), "utf8");
+  const gate = readFileSync(resolve(root, "scripts/buildbuddy-agent-gate"), "utf8");
   const start = gate.indexOf("is_governance_path() {");
-  assert.ok(start >= 0, "scripts/cargo-agent-gate defines is_governance_path");
+  assert.ok(start >= 0, "scripts/buildbuddy-agent-gate defines is_governance_path");
   const body = gate.slice(start, gate.indexOf("\n}\n", start));
   assert.ok(body.includes("scripts/machine-authority-changed"), "the agent gate's governance paths start from machine authority");
   const patterns = body

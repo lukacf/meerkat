@@ -16,6 +16,8 @@
 //!   decides from the input's effects alone.
 //! - [`permit`]: [`DecisionExecutionPermit`], the machine-authorized right to
 //!   execute one approved decision's held request.
+//! - [`executor`]: [`DecisionExecutorLoop`], the one executor of a store's
+//!   registered decision kinds, which keeps the permit's obligations.
 //!
 //! Nothing caches a decision, nothing is read at open, and nothing scans
 //! every row: a call touches one row or one index page.
@@ -32,15 +34,22 @@ use meerkat_core::time_compat::{SystemTime, UNIX_EPOCH};
     clippy::unnecessary_map_on_constructor
 )]
 pub mod dsl;
+pub mod executor;
 pub mod permit;
 pub mod service;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod service_tests;
 
+pub use executor::{
+    DecisionApproverCurrentness, DecisionDeferral, DecisionExecution, DecisionExecutor,
+    DecisionExecutorLoop, DecisionExecutorLoopError, DecisionExecutorPass,
+    DecisionExecutorRecordUnavailable, DecisionPassOutcome,
+};
 pub use permit::DecisionExecutionPermit;
 pub use service::{
-    DecisionError, DecisionListing, DecisionRefusal, DecisionWithdrawer, DurableDecisionService,
+    APPROVER_NOT_CURRENT_REFUSAL, DecisionError, DecisionListing, DecisionRefusal,
+    DecisionWithdrawer, DurableDecisionService,
 };
 
 /// Whether a decision owner may write.

@@ -223,9 +223,20 @@ fn expire(now_ms: u64) -> Input {
 }
 
 fn authorize(request: &str, now_ms: u64) -> Input {
+    authorize_with(request, true, now_ms)
+}
+
+/// An authorization asked when the approver who decided is no longer
+/// current (revoked, or forbidden by policy since).
+fn authorize_revoked(request: &str, now_ms: u64) -> Input {
+    authorize_with(request, false, now_ms)
+}
+
+fn authorize_with(request: &str, approver_current: bool, now_ms: u64) -> Input {
     Input::AuthorizeExecution {
         operation_id: OPERATION.to_owned(),
         request_digest: digest(request),
+        approver_current,
         now_ms,
     }
 }
@@ -363,7 +374,7 @@ enum Expected {
 
 #[test]
 fn every_command_class_in_every_phase_is_total_and_only_mutates_where_intended() {
-    let commands: [(&str, fn() -> Input); 17] = [
+    let commands: [(&str, fn() -> Input); 18] = [
         ("Hold", hold),
         ("HoldOther", conflicting_hold),
         ("HoldUnnamed", unnamed_hold),
@@ -378,6 +389,9 @@ fn every_command_class_in_every_phase_is_total_and_only_mutates_where_intended()
         ("ExpireAtDeadline", || expire(DEADLINE)),
         ("Authorize", || authorize(REQUEST, HELD_AT + 40)),
         ("AuthorizeAtDeadline", || authorize(REQUEST, DEADLINE)),
+        ("AuthorizeRevoked", || {
+            authorize_revoked(REQUEST, HELD_AT + 40)
+        }),
         ("Release", || release(HELD_AT + 40)),
         ("Record", || record(REQUEST, HELD_AT + 40)),
         ("CloseRefused", || close_refused(HELD_AT + 40)),
@@ -407,7 +421,12 @@ fn every_command_class_in_every_phase_is_total_and_only_mutates_where_intended()
             }
             (
                 Phase::Open,
-                "Authorize" | "AuthorizeAtDeadline" | "Release" | "Record" | "CloseRefused",
+                "Authorize"
+                | "AuthorizeAtDeadline"
+                | "AuthorizeRevoked"
+                | "Release"
+                | "Record"
+                | "CloseRefused",
             ) => SelfLoop(&["Refused(NotApproved)"]),
             (Phase::Open | Phase::Approved, "SettleDelivered" | "SettleFailed") => {
                 SelfLoop(&["Refused(NotOwed)"])
@@ -417,17 +436,25 @@ fn every_command_class_in_every_phase_is_total_and_only_mutates_where_intended()
             (Phase::Approved, "AuthorizeAtDeadline") => {
                 Advance(Phase::Expired, &["Expired", "Refused(Expired)"])
             }
+            (Phase::Approved, "AuthorizeRevoked") => Advance(
+                Phase::ExecutionRefused,
+                &["ExecutionRefused", "Refused(NotEligible)"],
+            ),
             (Phase::Approved, "Release" | "Record") => SelfLoop(&["Refused(NotAuthorized)"]),
             (Phase::Approved, "CloseRefused") => {
                 Advance(Phase::ExecutionRefused, &["ExecutionRefused"])
             }
             (_, "ExpireEarly" | "ExpireAtDeadline") if ended => SelfLoop(&[]),
             (Phase::Executed, "Record") => SelfLoop(&["ExecutionReplayed"]),
-            (_, "Authorize" | "AuthorizeAtDeadline" | "Release" | "Record" | "CloseRefused")
-                if ended =>
-            {
-                SelfLoop(&["Refused(NotApproved)"])
-            }
+            (
+                _,
+                "Authorize"
+                | "AuthorizeAtDeadline"
+                | "AuthorizeRevoked"
+                | "Release"
+                | "Record"
+                | "CloseRefused",
+            ) if ended => SelfLoop(&["Refused(NotApproved)"]),
             (_, "SettleDelivered" | "SettleFailed") if ended => Advance(phase, &["NoticeSettled"]),
             (phase, command) => panic!("no expectation for ({phase:?}, {command})"),
         }
@@ -1374,6 +1401,7 @@ fn execution_is_authorized_only_while_approved_with_the_held_binding() {
         Input::AuthorizeExecution {
             operation_id: "operation-0002".to_owned(),
             request_digest: digest(REQUEST),
+            approver_current: true,
             now_ms: HELD_AT + 20,
         },
     ] {
@@ -1388,6 +1416,74 @@ fn execution_is_authorized_only_while_approved_with_the_held_binding() {
         let refused = apply(&mut authority, authorize(REQUEST, HELD_AT + 20));
         assert_eq!(refusal(&refused), DurableDecisionRefusal::NotApproved);
     }
+}
+
+#[test]
+fn an_approver_who_is_no_longer_current_gets_no_permit() {
+    // No permit is outstanding: no permit is issued, and the decision ends
+    // refused and owes its notice.
+    let mut authority = authority_in(Phase::Approved);
+    let refused = apply(&mut authority, authorize_revoked(REQUEST, HELD_AT + 20));
+    assert_eq!(
+        refused.effects(),
+        &[
+            Effect::ExecutionRefused {
+                decision_id: DECISION.to_owned(),
+                closed_at_ms: HELD_AT + 20,
+            },
+            Effect::Refused {
+                decision_id: DECISION.to_owned(),
+                reason: DurableDecisionRefusal::NotEligible,
+            },
+        ]
+    );
+    let state = authority.state();
+    assert_eq!(state.lifecycle_phase, Phase::ExecutionRefused);
+    assert!(!state.permit_issued);
+    assert_eq!(state.ended_at_ms, Some(HELD_AT + 20));
+    assert_eq!(state.notice, DurableDecisionNotice::Owed);
+    // The ended decision never executes.
+    let refused_again = apply(&mut authority, authorize(REQUEST, HELD_AT + 21));
+    assert_eq!(refusal(&refused_again), DurableDecisionRefusal::NotApproved);
+
+    // A permit is outstanding: the owner may have committed under it, so
+    // nothing changes until it settles the permit; after a release with no
+    // commit, the decision ends refused.
+    let mut authority = authority_in(Phase::Approved);
+    apply(&mut authority, authorize(REQUEST, HELD_AT + 20));
+    assert!(authority.state().permit_issued);
+    let before = authority.state().clone();
+    let owed = apply(&mut authority, authorize_revoked(REQUEST, HELD_AT + 21));
+    assert_eq!(refusal(&owed), DurableDecisionRefusal::SettlementOwed);
+    assert_eq!(authority.state(), &before);
+    apply(&mut authority, release(HELD_AT + 22));
+    assert!(!authority.state().permit_issued);
+    apply(&mut authority, authorize_revoked(REQUEST, HELD_AT + 23));
+    assert_eq!(authority.state().lifecycle_phase, Phase::ExecutionRefused);
+    // A commit landed under the outstanding permit still settles executed.
+    let mut authority = authority_in(Phase::Approved);
+    apply(&mut authority, authorize(REQUEST, HELD_AT + 20));
+    apply(&mut authority, authorize_revoked(REQUEST, HELD_AT + 21));
+    apply(&mut authority, record(REQUEST, HELD_AT + 22));
+    assert_eq!(authority.state().lifecycle_phase, Phase::Executed);
+
+    // The deadline and the binding are checked first: at the deadline the
+    // approval lapses as expired, and another binding is a mismatch.
+    let mut authority = authority_in(Phase::Approved);
+    let lapsed = apply(&mut authority, authorize_revoked(REQUEST, DEADLINE));
+    assert_eq!(labels(&lapsed), ["Expired", "Refused(Expired)"]);
+    assert_eq!(authority.state().lifecycle_phase, Phase::Expired);
+    let mut authority = authority_in(Phase::Approved);
+    let before = authority.state().clone();
+    let mismatched = apply(
+        &mut authority,
+        authorize_revoked(OTHER_REQUEST, HELD_AT + 20),
+    );
+    assert_eq!(
+        refusal(&mismatched),
+        DurableDecisionRefusal::BindingMismatch
+    );
+    assert_eq!(authority.state(), &before);
 }
 
 #[test]

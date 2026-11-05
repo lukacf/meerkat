@@ -1557,7 +1557,7 @@ function isExampleWebPath(path) {
 
 // The typed governance gates (effect-authority, ownership-ledger, strict
 // RMAT, strict seam inventory, machine-authority docs) run on the agent
-// gate's governance paths (scripts/cargo-agent-gate, is_governance_path):
+// gate's governance paths (scripts/buildbuddy-agent-gate, is_governance_path):
 // the machine-authority paths and these dogma documents; the runtime
 // authority bypass audit runs on them too, and on every Rust change. The
 // self-test keeps the two lists equal.
@@ -1583,7 +1583,6 @@ function isGlobalPath(path) {
     path === "Makefile" ||
     path === ".config/nextest.toml" ||
     path === "scripts/repo-cargo" ||
-    path === "scripts/agent-gate" ||
     path === "scripts/rust-lane-doctor" ||
     path === "scripts/ci-cargo-lanes.mjs" ||
     path === "scripts/ci-cargo-lanes-selftest.mjs" ||

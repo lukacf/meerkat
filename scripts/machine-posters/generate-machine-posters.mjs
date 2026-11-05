@@ -902,7 +902,7 @@ const MACHINE_SPECS = [
           y: 1010,
           w: 300,
           h: 110,
-          subtitle: "owner refused the held request",
+          subtitle: "owner refused it, or its approver is no longer current",
         },
         Executed: {
           x: 1420,
@@ -942,7 +942,7 @@ const MACHINE_SPECS = [
           },
           {
             title: "Permit + Executed Fact",
-            note: "A permit is issued only before the deadline; while one is outstanding the decision waits for the owner's settlement.",
+            note: "A permit is issued only before the deadline and only while the approver who decided is still current; while one is outstanding the decision waits for the owner's settlement.",
             fields: ["permit_issued", "executed_request_digest"],
           },
           {
@@ -989,7 +989,7 @@ const MACHINE_SPECS = [
         {
           id: "execution",
           title: "Execution Permit + Executed Fact",
-          note: "The owner executes the held binding under a permit and settles it: executed, released, or refused.",
+          note: "The owner executes the held binding under a permit and settles it: executed, released, or refused. An approver no longer current gets no permit, and the decision ends refused.",
           x: 1220,
           y: 60,
           w: 540,

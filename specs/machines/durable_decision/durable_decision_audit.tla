@@ -31,8 +31,10 @@
 \* permit at most once (AuditCommit: its commit refuses a permit at or after
 \* the permit's deadline, so the commit is made before it); after its commit
 \* it never asks for, releases or refuses a permit again, and only records
-\* the execution. Any other party's input, a deadline observation and a
-\* replayed settlement may still arrive.
+\* the execution. An authorization carries the host's answer for the
+\* approver who decided: still current, or no longer current. Any other
+\* party's input, a deadline observation and a replayed settlement may still
+\* arrive.
 \*
 \* Properties. Each step property is checked on every step by its wrapper,
 \* which records the property in audit_broken when the step breaks it; the
@@ -72,6 +74,12 @@
 \*     (the earliest the audit saw recorded, or the one the decision
 \*     carries, a time of 0 being none), and is refused for the order only
 \*     when observed before it.
+\*   AuditPermitOnlyForCurrentApprover: a permit is issued, or issued again,
+\*     only for an approver who is still current. For one who is no longer
+\*     current, an authorization of the held binding on an approved decision
+\*     before its deadline ends the decision refused when no permit is
+\*     outstanding, and changes nothing while one is: the owner settles it
+\*     first, and a commit made under it still settles as executed.
 \* and two state invariants:
 \*   AuditCommittedIsSettleable: once the owner committed, the decision is
 \*     Executed, or Approved with the permit still outstanding, so the commit
@@ -86,7 +94,7 @@
 \*     that fired.
 \*
 \* Reachability (the runner): every wrapper fires in the bounded space,
-\* checked from TLC's coverage, and fifteen scenarios are checked as
+\* checked from TLC's coverage, and seventeen scenarios are checked as
 \* expected violations of their negations: a human approval executed and its
 \* notice delivered; an execution retried after a release; an approval
 \* closed by the owner's permanent refusal; a review escalated and then
@@ -97,10 +105,13 @@
 \* hold; a permit outstanding across the deadline settled as executed; a
 \* release after the deadline that records the expiry; an authorization at
 \* the deadline refused; a decision observed before the first presentation
-\* refused and then an approval; and an approval observed in the same
-\* millisecond as the first presentation. With --mutants the runner seeds one
-\* defect per property into a copy of the generated model and requires TLC
-\* to refuse each with that property.
+\* refused and then an approval; an approval observed in the same
+\* millisecond as the first presentation; an approver no longer current
+\* whose decision ends refused with no permit; and an approver no longer
+\* current while a permit is outstanding, whose commit still settles as
+\* executed. With --mutants the runner seeds one defect per property into a
+\* copy of the generated model and requires TLC to refuse each with that
+\* property.
 \*
 \* The executor's obligations. The machine records that a permit is
 \* outstanding, not who holds it or whether a commit landed under it. The
@@ -111,7 +122,8 @@
 \* reads its own commit record before it releases). AuditCommittedIsSettleable
 \* holds only under them: a release after the commit orphans it (hold,
 \* approve, authorize, commit, release). DecisionExecutionPermit and the
-\* settlement calls of DurableDecisionService state the same obligations.
+\* settlement calls of DurableDecisionService state the same obligations,
+\* and DecisionExecutorLoop keeps them.
 \*
 \* The TLC config is DERIVED from the generated ci.cfg on every run by
 \* durable_decision_audit.sh:
@@ -225,6 +237,13 @@ AuditExecutionInputs ==
     { [operation_id |-> AuditHeld, request_digest |-> g, now_ms |-> n] :
       g \in {AuditHeld, AuditOther}, n \in AuditTimes }
 
+\* An authorization also carries the host's answer for the approver who
+\* decided: still current, or no longer current.
+AuditAuthorizeInputs ==
+    { [operation_id |-> AuditHeld, request_digest |-> g, approver_current |-> c,
+       now_ms |-> n] :
+      g \in {AuditHeld, AuditOther}, c \in BOOLEAN, n \in AuditTimes }
+
 AuditNoticeInputs == { [delivered |-> b] : b \in BOOLEAN }
 
 \* One application of a generated arm to an input record, per input.
@@ -241,7 +260,8 @@ ReviewArm(Arm(_, _, _, _, _), in) ==
     Arm(in.verdict, in.reviewer, in.digest, in.evidence_digest, in.now_ms)
 WithdrawArm(Arm(_, _, _), in) == Arm(in.withdrawer, in.by_host, in.now_ms)
 ExpireArm(Arm(_), in) == Arm(in.now_ms)
-AuthorizeExecutionArm(Arm(_, _, _), in) == Arm(in.operation_id, in.request_digest, in.now_ms)
+AuthorizeExecutionArm(Arm(_, _, _, _), in) ==
+    Arm(in.operation_id, in.request_digest, in.approver_current, in.now_ms)
 ReleaseExecutionArm(Arm(_), in) == Arm(in.now_ms)
 RecordExecutedArm(Arm(_, _, _), in) == Arm(in.operation_id, in.request_digest, in.now_ms)
 CloseRefusedArm(Arm(_), in) == Arm(in.now_ms)
@@ -357,6 +377,25 @@ AuditPermitBeforeDeadline(arm, in) ==
 AuditReleaseClears(kind) ==
     (kind = "ReleaseExecution" /\ phase = "Approved" /\ permit_issued) => ~permit_issued'
 
+\* A permit is issued, or issued again, only for an approver who is still
+\* current. For one who is no longer current, an authorization of the held
+\* binding on an approved decision before its deadline ends the decision
+\* refused when no permit is outstanding, and changes nothing while one is.
+AuditApproverCurrentKept(kind, arm, in) ==
+    kind = "AuthorizeExecution" =>
+        /\ (~permit_issued /\ permit_issued') => in.approver_current
+        /\ arm = "AuthorizeExecution" => in.approver_current
+        /\ (/\ ~in.approver_current
+            /\ phase = "Approved"
+            /\ in.operation_id = operation_id
+            /\ in.request_digest = request_digest
+            /\ in.now_ms < deadline_at_ms)
+           => IF permit_issued
+              THEN /\ phase' = "Approved"
+                   /\ permit_issued'
+              ELSE /\ phase' = "ExecutionRefused"
+                   /\ ended_at_ms' = Some(in.now_ms)
+
 \* The time of a present optional time. It never names the option's value
 \* field: TLC compares record fields in the order their names were first
 \* seen, and the model's None must keep comparing its tag first.
@@ -428,6 +467,8 @@ AuditBreaks(kind, arm, in) ==
     \cup (IF AuditReleaseClears(kind) THEN {} ELSE {"ReleaseClearsPermit"})
     \cup (IF AuditPresentationOrderKept(kind, arm, in) THEN {}
           ELSE {"DecisionFollowsPresentation"})
+    \cup (IF AuditApproverCurrentKept(kind, arm, in) THEN {}
+          ELSE {"PermitOnlyForCurrentApprover"})
 
 \* The scenario marks a step leaves for the witnesses.
 AuditMarks(arm, in) ==
@@ -450,6 +491,10 @@ AuditMarks(arm, in) ==
     \cup (IF arm = "DecideApproved" /\ AuditFirstShown(in) # None
               /\ in.observed_at_ms = AuditTimeOf(AuditFirstShown(in))
           THEN {"ApprovedAtThePresentation"} ELSE {})
+    \cup (IF arm = "AuthorizeExecutionRefusedApproverRevoked"
+          THEN {"ApproverRevokedRefused"} ELSE {})
+    \cup (IF arm = "AuthorizeExecutionRefusedRevokedSettlementOwed"
+          THEN {"RevokedSettlementOwed"} ELSE {})
 
 \* Every wrapper ends with this step: the step properties it broke, the
 \* marks it left and the earliest approver presentation accepted.
@@ -726,6 +771,16 @@ AuditAuthorizeExecutionRefusedNotApproved(in) ==
        \/ AuthorizeExecutionArm(AuthorizeExecutionRefusedNotApprovedExecutionRefused, in)
     /\ AuditStep("AuthorizeExecution", "AuthorizeExecutionRefusedNotApproved", in)
 
+AuditAuthorizeExecutionRefusedApproverRevoked(in) ==
+    /\ ~audit_committed
+    /\ AuthorizeExecutionArm(AuthorizeExecutionRefusedApproverRevoked, in)
+    /\ AuditStep("AuthorizeExecution", "AuthorizeExecutionRefusedApproverRevoked", in)
+
+AuditAuthorizeExecutionRefusedRevokedSettlementOwed(in) ==
+    /\ ~audit_committed
+    /\ AuthorizeExecutionArm(AuthorizeExecutionRefusedRevokedSettlementOwed, in)
+    /\ AuditStep("AuthorizeExecution", "AuthorizeExecutionRefusedRevokedSettlementOwed", in)
+
 AuditReleaseExecution(in) ==
     /\ ~audit_committed
     /\ ReleaseExecutionArm(ReleaseExecution, in)
@@ -889,11 +944,13 @@ AuditNext ==
     \/ \E in \in AuditClockInputs : AuditExpireApprovedSettlementOwed(in)
     \/ \E in \in AuditClockInputs : AuditExpireApprovedNotDue(in)
     \/ \E in \in AuditClockInputs : AuditExpireSettled(in)
-    \/ \E in \in AuditExecutionInputs : AuditAuthorizeExecution(in)
-    \/ \E in \in AuditExecutionInputs : AuditAuthorizeExecutionAtDeadline(in)
-    \/ \E in \in AuditExecutionInputs : AuditAuthorizeExecutionRefusedSettlementOwed(in)
-    \/ \E in \in AuditExecutionInputs : AuditAuthorizeExecutionRefusedBinding(in)
-    \/ \E in \in AuditExecutionInputs : AuditAuthorizeExecutionRefusedNotApproved(in)
+    \/ \E in \in AuditAuthorizeInputs : AuditAuthorizeExecution(in)
+    \/ \E in \in AuditAuthorizeInputs : AuditAuthorizeExecutionAtDeadline(in)
+    \/ \E in \in AuditAuthorizeInputs : AuditAuthorizeExecutionRefusedSettlementOwed(in)
+    \/ \E in \in AuditAuthorizeInputs : AuditAuthorizeExecutionRefusedBinding(in)
+    \/ \E in \in AuditAuthorizeInputs : AuditAuthorizeExecutionRefusedNotApproved(in)
+    \/ \E in \in AuditAuthorizeInputs : AuditAuthorizeExecutionRefusedApproverRevoked(in)
+    \/ \E in \in AuditAuthorizeInputs : AuditAuthorizeExecutionRefusedRevokedSettlementOwed(in)
     \/ \E in \in AuditClockInputs : AuditReleaseExecution(in)
     \/ \E in \in AuditClockInputs : AuditReleaseExecutionAtDeadline(in)
     \/ \E in \in AuditClockInputs : AuditReleaseExecutionRefusedNotAuthorized(in)
@@ -934,6 +991,7 @@ AuditNoticeOwedOnceAtTheEnd == "NoticeOwedOnceAtTheEnd" \notin audit_broken
 AuditNoPermitAtOrAfterDeadline == "NoPermitAtOrAfterDeadline" \notin audit_broken
 AuditReleaseClearsPermit == "ReleaseClearsPermit" \notin audit_broken
 AuditDecisionFollowsPresentation == "DecisionFollowsPresentation" \notin audit_broken
+AuditPermitOnlyForCurrentApprover == "PermitOnlyForCurrentApprover" \notin audit_broken
 
 AuditCommittedIsSettleable ==
     audit_committed => (phase = "Executed" \/ (phase = "Approved" /\ permit_issued))
@@ -985,6 +1043,15 @@ AuditWitnessDecidedBeforePresentationRefused ==
 \* An approval observed in the same millisecond as the first presentation.
 AuditWitnessApprovedAtThePresentation ==
     phase = "Approved" /\ "ApprovedAtThePresentation" \in audit_seen
+\* An approver no longer current at the authorization: no permit, and the
+\* decision ends refused.
+AuditWitnessApproverRevokedEndsRefused ==
+    phase = "ExecutionRefused" /\ "ApproverRevokedRefused" \in audit_seen
+\* An approver no longer current while a permit is outstanding: no new
+\* permit, and the commit made under the outstanding one settles as
+\* executed.
+AuditWitnessRevokedPermitSettledExecuted ==
+    audit_committed /\ phase = "Executed" /\ "RevokedSettlementOwed" \in audit_seen
 
 NotAuditWitnessHumanApprovalExecutedAndNoticed == ~AuditWitnessHumanApprovalExecutedAndNoticed
 NotAuditWitnessRetriedAfterRelease == ~AuditWitnessRetriedAfterRelease
@@ -1002,4 +1069,6 @@ NotAuditWitnessAuthorizeAtDeadlineRefused == ~AuditWitnessAuthorizeAtDeadlineRef
 NotAuditWitnessDecidedBeforePresentationRefused ==
     ~AuditWitnessDecidedBeforePresentationRefused
 NotAuditWitnessApprovedAtThePresentation == ~AuditWitnessApprovedAtThePresentation
+NotAuditWitnessApproverRevokedEndsRefused == ~AuditWitnessApproverRevokedEndsRefused
+NotAuditWitnessRevokedPermitSettledExecuted == ~AuditWitnessRevokedPermitSettledExecuted
 ====

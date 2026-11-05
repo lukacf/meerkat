@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use super::MeerkatMachine;
-use crate::delivery_inbox::{RuntimeDeliveryError, runtimes_with_pending_deliveries_in};
+use crate::delivery_inbox::{RuntimeDeliveryError, runtime_delivery_backlog_in};
 use crate::identifiers::LogicalRuntimeId;
 use crate::store::RuntimeStoreError;
 
@@ -14,7 +14,8 @@ pub struct RuntimeBootObligations {
     /// Runtimes whose durable state holds recovery work, as far as the store
     /// can tell.
     pub recovery_work: RuntimeRecoveryWork,
-    /// Runtimes holding committed-but-unapplied deliveries.
+    /// Runtimes holding committed-but-unapplied deliveries, and runtimes the
+    /// store cannot answer for until it is reopened, which may hold them.
     pub pending_deliveries: HashSet<LogicalRuntimeId>,
 }
 
@@ -44,8 +45,14 @@ impl MeerkatMachine {
     /// runtimes with recovery work
     /// ([`RuntimeStore::list_runtimes_with_recovery_work`](crate::store::RuntimeStore::list_runtimes_with_recovery_work))
     /// and the runtimes with pending deliveries (the population
-    /// [`RuntimeDeliveryInbox::runtimes_with_pending_deliveries`](crate::RuntimeDeliveryInbox::runtimes_with_pending_deliveries)
+    /// [`RuntimeDeliveryInbox::runtime_delivery_backlog`](crate::RuntimeDeliveryInbox::runtime_delivery_backlog)
     /// reads). Two store-wide reads, neither of which loads a runtime body.
+    ///
+    /// A runtime the store cannot answer for until it is reopened (a host
+    /// store whose scope of that runtime is poisoned) is an obligation: the
+    /// recovery scan lists it as holding work, and it counts as holding
+    /// pending deliveries. The answer stays observed for every other
+    /// runtime, so one such runtime never makes a boot wake every member.
     ///
     /// A store that cannot list either answers
     /// [`RuntimeRecoveryWork::Unobserved`] with the read it could not make:
@@ -72,8 +79,17 @@ impl MeerkatMachine {
             ),
             Err(error) => return Err(error),
         };
-        let pending_deliveries = match runtimes_with_pending_deliveries_in(store.as_ref()).await {
-            Ok(runtimes) => runtimes.into_iter().collect(),
+        let pending_deliveries = match runtime_delivery_backlog_in(store.as_ref()).await {
+            Ok(backlog) => backlog
+                .pending
+                .into_iter()
+                .chain(
+                    backlog
+                        .unavailable
+                        .into_iter()
+                        .map(|unavailable| unavailable.runtime_id),
+                )
+                .collect(),
             // Deliveries the store cannot list may be pending for any member.
             Err(RuntimeDeliveryError::Store(RuntimeStoreError::Unsupported(_))) => {
                 return Ok(RuntimeBootObligations {
@@ -437,6 +453,81 @@ mod tests {
                     RuntimeRecoveryWorkUnobserved::DeliveryListingUnsupported,
                 ),
                 pending_deliveries: HashSet::new(),
+            }
+        );
+    }
+
+    /// A host store realm with one poisoned runtime scope still answers the
+    /// boot's scan, observed: the poisoned runtime is an obligation (its
+    /// facts cannot be trusted, so it holds recovery work and may hold a
+    /// pending delivery), and every healthy runtime answers as its memory
+    /// holds it. Before, both reads refused, and every mob boot over the
+    /// realm planned every member as holding work.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_poisoned_runtime_is_an_obligation_and_the_scan_stays_observed() {
+        use crate::store::spi::test_host::TestHost;
+        use crate::store::spi::{SpiRealm, SpiRealmConfig, SpiRuntimeStore};
+
+        let host = Arc::new(TestHost::new());
+        let realm = SpiRealm::open(Arc::clone(&host) as _, SpiRealmConfig::default())
+            .await
+            .expect("the realm opens");
+        let store: Arc<dyn RuntimeStore> =
+            Arc::new(SpiRuntimeStore::open(realm).await.expect("the store opens"));
+        let input = |state| {
+            InputStatePersistenceRecord::from_machine_snapshot(state).expect("a machine snapshot")
+        };
+        let working = LogicalRuntimeId::new("boot-obligations-working");
+        store
+            .persist_input_state(
+                &working,
+                &input(StoredInputState::new_accepted(InputId::new())),
+            )
+            .await
+            .expect("a nonterminal input lands");
+        let delivered = LogicalRuntimeId::new("boot-obligations-delivered");
+        RuntimeDeliveryInbox::new(Arc::clone(&store))
+            .submit(
+                &delivered,
+                RuntimeDeliverySubmission::new(
+                    RuntimeDeliveryId::new("boot-obligations-delivery").unwrap(),
+                    RuntimeDeliveryKind::JobTerminal,
+                    "boot-obligations-job",
+                    1,
+                    "boot-obligations-interaction",
+                    b"payload".to_vec(),
+                )
+                .unwrap(),
+            )
+            .await
+            .expect("a delivery lands");
+        let doomed = LogicalRuntimeId::new("boot-obligations-doomed");
+        host.faults.lock().unwrap().conflict = 1;
+        assert!(
+            store
+                .persist_input_state(
+                    &doomed,
+                    &input(StoredInputState::new_accepted(InputId::new()))
+                )
+                .await
+                .is_err(),
+            "the store refuses the batch, and the runtime's scope is poisoned"
+        );
+
+        let obligations = MeerkatMachine::persistent_without_blobs(store)
+            .unwrap()
+            .boot_recovery_obligations()
+            .await
+            .expect("the scan answers");
+        assert_eq!(
+            obligations,
+            RuntimeBootObligations {
+                recovery_work: RuntimeRecoveryWork::Observed(HashSet::from([
+                    working,
+                    doomed.clone(),
+                ])),
+                pending_deliveries: HashSet::from([delivered, doomed]),
             }
         );
     }

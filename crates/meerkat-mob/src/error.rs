@@ -2308,12 +2308,16 @@ impl MemberCustodyDeferralCause {
                 Self::of_session_store_failure(error)
             }
             meerkat_core::SessionError::Store(source) => {
-                Some(match session_store_failure_class(source.as_ref()) {
-                    SessionStoreFailureClass::Unavailable => Self::StoreUnavailable,
+                match session_store_failure_class(source.as_ref()) {
+                    SessionStoreFailureClass::Unavailable => Some(Self::StoreUnavailable),
                     SessionStoreFailureClass::Malformed | SessionStoreFailureClass::Refused => {
-                        Self::StoreUnreadable
+                        Some(Self::StoreUnreadable)
                     }
-                })
+                    // A refusal until the realm reopens defers nothing: it
+                    // fails the operation that met it, as it did before the
+                    // store typed it.
+                    SessionStoreFailureClass::RefusedUntilReopen => None,
+                }
             }
             _ => None,
         }

@@ -23,7 +23,11 @@
 //!   a permit this machine authorized and then records the commit here. The
 //!   machine owns only the legality of the permit and of the executed fact.
 //! - **Eligibility.** Whether a decider may act for the sealed approver id is
-//!   the host's current answer, passed in as `eligible` at each decision.
+//!   the host's current answer, passed in as `eligible` at each decision;
+//!   whether the approver who decided may still do so (not revoked, not
+//!   forbidden by policy since) is passed in as `approver_current` at each
+//!   execution authorization. A decision whose approver is no longer current
+//!   gets no permit.
 //! - **Time.** It reads no clock. Every timed input carries the host's
 //!   `now_ms` observation, and the guards compare it with the decision's
 //!   sealed `deadline_at_ms`.
@@ -187,7 +191,8 @@ pub mod types {
         BindingMismatch,
         /// No execution permit is outstanding.
         NotAuthorized,
-        /// The deadline passed while a permit is outstanding: the owner must
+        /// A permit is outstanding and no new one may be issued (the deadline
+        /// passed, or the approver is no longer current): the owner must
         /// settle the permit before anything else.
         SettlementOwed,
         /// No notice is owed, or this receipt contradicts the settled one.
@@ -208,7 +213,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
 
         meerkat_machine_dsl::machine! {
             machine DurableDecisionMachine {
-                version: 1,
+                version: 2,
                 rust: $rust_crate / $rust_module,
 
                 state {
@@ -353,9 +358,13 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     // A deadline driver or a read observed the clock.
                     Expire { now_ms: u64 },
                     // The owner asks for a permit to execute the held request.
+                    // `approver_current` is the host's answer, at this
+                    // authorization, that the approver who decided may still
+                    // do so.
                     AuthorizeExecution {
                         operation_id: String,
                         request_digest: DecisionDigest,
+                        approver_current: bool,
                         now_ms: u64,
                     },
                     // The owner made no commit under the outstanding permit.
@@ -1602,13 +1611,15 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 // ----------------------------------------------------------
 
                 // The only source of an execution permit: an approved
-                // decision, the held binding, before the deadline.
+                // decision, the held binding, before the deadline, while the
+                // approver who decided is still current.
                 transition AuthorizeExecution {
-                    on input AuthorizeExecution { operation_id, request_digest, now_ms }
+                    on input AuthorizeExecution { operation_id, request_digest, approver_current, now_ms }
                     guard "approved" { self.lifecycle_phase == Phase::Approved }
                     guard "same_operation" { operation_id == self.operation_id }
                     guard "same_request" { request_digest == self.request_digest }
                     guard "before_deadline" { now_ms < self.deadline_at_ms }
+                    guard "approver_current" { approver_current }
                     update {
                         self.permit_issued = true;
                     }
@@ -1622,7 +1633,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 }
 
                 transition AuthorizeExecutionAtDeadline {
-                    on input AuthorizeExecution { operation_id, request_digest, now_ms }
+                    on input AuthorizeExecution { operation_id, request_digest, approver_current, now_ms }
                     guard "approved" { self.lifecycle_phase == Phase::Approved }
                     guard "same_operation" { operation_id == self.operation_id }
                     guard "same_request" { request_digest == self.request_digest }
@@ -1642,7 +1653,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 }
 
                 transition AuthorizeExecutionRefusedSettlementOwed {
-                    on input AuthorizeExecution { operation_id, request_digest, now_ms }
+                    on input AuthorizeExecution { operation_id, request_digest, approver_current, now_ms }
                     guard "approved" { self.lifecycle_phase == Phase::Approved }
                     guard "same_operation" { operation_id == self.operation_id }
                     guard "same_request" { request_digest == self.request_digest }
@@ -1657,7 +1668,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 }
 
                 transition AuthorizeExecutionRefusedBinding {
-                    on input AuthorizeExecution { operation_id, request_digest, now_ms }
+                    on input AuthorizeExecution { operation_id, request_digest, approver_current, now_ms }
                     guard "approved" { self.lifecycle_phase == Phase::Approved }
                     guard "binding_differs" {
                         operation_id != self.operation_id || request_digest != self.request_digest
@@ -1672,7 +1683,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
 
                 transition AuthorizeExecutionRefusedNotApproved {
                     per_phase [Open, Rejected, Expired, Withdrawn, Executed, ExecutionRefused]
-                    on input AuthorizeExecution { operation_id, request_digest, now_ms }
+                    on input AuthorizeExecution { operation_id, request_digest, approver_current, now_ms }
                     update {}
                     to Open
                     emit Refused {
@@ -1965,6 +1976,54 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     update {}
                     to Open
                     emit Refused { decision_id: self.decision_id, reason: DurableDecisionRefusal::NotOwed }
+                }
+
+                // ----------------------------------------------------------
+                // AuthorizeExecution when the approver is no longer current
+                // (declared last, so the transition ids of the earlier arms
+                // keep their order)
+                // ----------------------------------------------------------
+
+                // The approver who decided was revoked, or policy forbids
+                // them now, and no permit is outstanding: no permit is
+                // issued, and the decision ends refused and owes its notice.
+                transition AuthorizeExecutionRefusedApproverRevoked {
+                    on input AuthorizeExecution { operation_id, request_digest, approver_current, now_ms }
+                    guard "approved" { self.lifecycle_phase == Phase::Approved }
+                    guard "same_operation" { operation_id == self.operation_id }
+                    guard "same_request" { request_digest == self.request_digest }
+                    guard "before_deadline" { now_ms < self.deadline_at_ms }
+                    guard "approver_revoked" { !approver_current }
+                    guard "no_permit" { !self.permit_issued }
+                    update {
+                        self.ended_at_ms = Some(now_ms);
+                        self.notice = owed_if_due(self.notice);
+                    }
+                    to ExecutionRefused
+                    emit ExecutionRefused { decision_id: self.decision_id, closed_at_ms: now_ms }
+                    emit Refused {
+                        decision_id: self.decision_id,
+                        reason: DurableDecisionRefusal::NotEligible
+                    }
+                }
+
+                // The approver is no longer current while a permit is
+                // outstanding: the owner may have committed under it, so it
+                // settles the permit first, and no new permit is issued.
+                transition AuthorizeExecutionRefusedRevokedSettlementOwed {
+                    on input AuthorizeExecution { operation_id, request_digest, approver_current, now_ms }
+                    guard "approved" { self.lifecycle_phase == Phase::Approved }
+                    guard "same_operation" { operation_id == self.operation_id }
+                    guard "same_request" { request_digest == self.request_digest }
+                    guard "before_deadline" { now_ms < self.deadline_at_ms }
+                    guard "approver_revoked" { !approver_current }
+                    guard "permit_outstanding" { self.permit_issued }
+                    update {}
+                    to Approved
+                    emit Refused {
+                        decision_id: self.decision_id,
+                        reason: DurableDecisionRefusal::SettlementOwed
+                    }
                 }
             }
         }

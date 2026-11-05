@@ -15,7 +15,9 @@
 //! no other call observes a scope's state before the host acknowledged it.
 //! Adapters add a realm gate on top (shared for single-scope calls,
 //! exclusive for cross-scope reads); the realm itself never serializes two
-//! scopes' commits.
+//! scopes' commits. A commit that settles slowly counts in
+//! `SpiRealm::slow_settles` while it does, so an exclusive waiter can step
+//! out of such a gate's queue instead of holding back every later call.
 //!
 //! # Fencing
 //!
@@ -63,7 +65,10 @@
 //! head's commit id) before a scope's next version is written, and a
 //! poisoned scope writes no next version at all. A batch whose outcome stays
 //! unknown is remembered as such, so a later re-acquire does not read it as
-//! another writer's.
+//! another writer's. The realm keeps every poisoned scope with its cause
+//! ([`SpiRealm::poisoned_scopes`]), and a read across many scopes refuses
+//! only while a scope of a family it reads is poisoned
+//! ([`SpiRealm::check_cross_scope_read_of`]).
 //!
 //! # Cancellation
 //!
@@ -78,7 +83,7 @@
 use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -265,6 +270,18 @@ impl std::fmt::Display for ScopeId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}", self.family.tag, self.key)
     }
+}
+
+/// A poisoned scope ([`SpiRealm::poisoned_scopes`]): it refuses every call
+/// until the realm is reopened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PoisonedScope {
+    /// The scope.
+    pub id: ScopeId,
+    /// Why it was poisoned: the failure of the batch that touched it, or
+    /// the rule a call broke.
+    pub cause: String,
 }
 
 /// One scope's lock and journal state.
@@ -575,6 +592,8 @@ pub struct SpiRealm {
     /// Commits hold it shared; a re-acquire holds it exclusive, so no batch
     /// carrying the old token is in flight when the token changes.
     fence_gate: tokio::sync::RwLock<()>,
+    /// How many commits settle slowly now ([`Self::slow_settles`]).
+    slow_settles: tokio::sync::watch::Sender<usize>,
     /// Serializes re-acquires.
     renew_gate: Mutex<()>,
     /// The re-acquire [`Self::ensure_lease`] runs on a task of its own, while
@@ -592,7 +611,11 @@ pub struct SpiRealm {
     /// on the scope settles it.
     uncertain: StdMutex<HashMap<(ScopeKind, String), Vec<Option<ScopeVersion>>>>,
     realm_poison: StdMutex<Option<String>>,
-    poisoned_scopes: AtomicUsize,
+    /// Every poisoned scope, with its cause: a scope enters once, when it is
+    /// poisoned, and stays until the realm is reopened. A read across many
+    /// scopes checks only the families it reads
+    /// ([`Self::check_cross_scope_read_of`]).
+    poisoned: StdMutex<BTreeMap<ScopeId, String>>,
     cells: StdMutex<HashMap<ScopeId, Arc<ScopeCell>>>,
     listed: StdMutex<HashMap<String, Vec<ListedHead>>>,
     /// Families claimed so far, with the refusal of a claim that failed.
@@ -723,6 +746,45 @@ pub(crate) fn dispatch_wait_bound(
         .saturating_add(renew_timeout)
 }
 
+/// The pause before a commit's next attempt, after `attempt` failed ones (1
+/// after the first): the doubling schedule (100 ms, doubling up to 3.2 s)
+/// lengthened by up to half of itself, never past 3.2 s. The share comes
+/// from the batch's commit id and the attempt number, so batches that fail
+/// together do not retry together, and one batch pauses the same on every
+/// run. No pause is shorter than the schedule's, so a batch makes no more
+/// attempts within its retry budget than the schedule allows.
+pub(crate) fn commit_retry_pause(commit_id: &CommitId, attempt: u32) -> Duration {
+    let schedule = 50_u64.saturating_mul(1 << attempt.min(6));
+    let longest = 50_u64 << 6;
+    let mut seed = commit_id.as_str().as_bytes().to_vec();
+    seed.extend_from_slice(&attempt.to_be_bytes());
+    let draw = codec::sha256(&seed)
+        .iter()
+        .take(8)
+        .fold(0_u64, |draw, byte| (draw << 8) | u64::from(*byte));
+    let share = draw % (schedule / 2 + 1);
+    Duration::from_millis(schedule.saturating_add(share).min(longest))
+}
+
+/// One commit counted in [`SpiRealm::slow_settles`] for as long as it lives.
+/// It is a local of the settle's own future, so the count falls on every way
+/// a settle ends: landed, refused (the caller poisons), fenced out, past its
+/// retry budget, or dropped mid-settle (a cancelled call).
+struct SlowSettle<'a>(&'a tokio::sync::watch::Sender<usize>);
+
+impl<'a> SlowSettle<'a> {
+    fn count(slow_settles: &'a tokio::sync::watch::Sender<usize>) -> Self {
+        slow_settles.send_modify(|count| *count = count.saturating_add(1));
+        Self(slow_settles)
+    }
+}
+
+impl Drop for SlowSettle<'_> {
+    fn drop(&mut self) {
+        self.0.send_modify(|count| *count = count.saturating_sub(1));
+    }
+}
+
 /// The re-acquire in flight, shared by every caller that waits on it.
 type SharedReacquire =
     futures::future::Shared<futures::future::BoxFuture<'static, Result<(), SpiError>>>;
@@ -790,12 +852,13 @@ impl SpiRealm {
             lease_start: StdMutex::new(started),
             stopped: AtomicBool::new(false),
             fence_gate: tokio::sync::RwLock::new(()),
+            slow_settles: tokio::sync::watch::Sender::new(0),
             renew_gate: Mutex::new(()),
             reacquire_in_flight: StdMutex::new(None),
             known_heads: StdMutex::new(HashMap::new()),
             uncertain: StdMutex::new(HashMap::new()),
             realm_poison: StdMutex::new(None),
-            poisoned_scopes: AtomicUsize::new(0),
+            poisoned: StdMutex::new(BTreeMap::new()),
             cells: StdMutex::new(HashMap::new()),
             listed: StdMutex::new(HashMap::new()),
             claimed: StdMutex::new(HashMap::new()),
@@ -869,7 +932,33 @@ impl SpiRealm {
     /// Whether any scope is poisoned.
     #[must_use]
     pub fn has_poisoned_scopes(&self) -> bool {
-        self.poisoned_scopes.load(Ordering::Acquire) > 0
+        !lock(&self.poisoned).is_empty()
+    }
+
+    /// Every poisoned scope, in scope order, with its cause. A scope stays
+    /// poisoned until the realm is reopened.
+    #[must_use]
+    pub fn poisoned_scopes(&self) -> Vec<PoisonedScope> {
+        lock(&self.poisoned)
+            .iter()
+            .map(|(id, cause)| PoisonedScope {
+                id: id.clone(),
+                cause: cause.clone(),
+            })
+            .collect()
+    }
+
+    /// The poisoned scopes of `family`, in key order, with their causes.
+    #[must_use]
+    pub fn poisoned_scopes_of(&self, family: ScopeFamily) -> Vec<PoisonedScope> {
+        lock(&self.poisoned)
+            .iter()
+            .filter(|(id, _)| id.family == family)
+            .map(|(id, cause)| PoisonedScope {
+                id: id.clone(),
+                cause: cause.clone(),
+            })
+            .collect()
     }
 
     /// Refuse when the realm is poisoned.
@@ -881,15 +970,67 @@ impl SpiRealm {
     }
 
     /// Refuse a cross-scope read while the realm or any scope is poisoned:
-    /// a poisoned scope's memory may be ahead of the host.
+    /// a poisoned scope's memory may be ahead of the host. The conservative
+    /// form, for a read that may depend on a scope of any family; an
+    /// adapter names the families a read depends on with
+    /// [`Self::check_cross_scope_read_of`].
+    ///
+    /// # Errors
+    /// [`SpiError::RealmPoisoned`], or [`SpiError::ScopesPoisoned`] naming
+    /// every poisoned scope.
     pub fn check_cross_scope_read(&self) -> Result<(), SpiError> {
         self.check_realm()?;
-        if self.has_poisoned_scopes() {
-            return Err(SpiError::RealmPoisoned(
-                "a scope is poisoned; cross-scope reads refuse until the realm is reopened".into(),
-            ));
+        let poisoned = self.poisoned_scopes();
+        if poisoned.is_empty() {
+            Ok(())
+        } else {
+            Err(SpiError::ScopesPoisoned { scopes: poisoned })
         }
-        Ok(())
+    }
+
+    /// Refuse a read across every scope of `families` while the realm, or a
+    /// scope of one of those families, is poisoned: that scope's memory may
+    /// differ from the host, and the read answers from memory.
+    ///
+    /// A scope of another family cannot change what such a read answers. A
+    /// scope's memory changes only under its own lock, in a call that
+    /// commits before releasing it, or the scope is poisoned, and a call that
+    /// touches memory outside the scopes it locked poisons the scope it
+    /// touched (or the realm, when that scope is busy). So a read of these
+    /// families' memory never depends on another family's poisoned scope,
+    /// and is answered while one exists.
+    ///
+    /// # Errors
+    /// [`SpiError::RealmPoisoned`], or [`SpiError::ScopesPoisoned`] naming
+    /// the poisoned scopes of `families`.
+    pub fn check_cross_scope_read_of(&self, families: &[ScopeFamily]) -> Result<(), SpiError> {
+        self.check_realm()?;
+        let poisoned: Vec<PoisonedScope> = lock(&self.poisoned)
+            .iter()
+            .filter(|(id, _)| families.contains(&id.family))
+            .map(|(id, cause)| PoisonedScope {
+                id: id.clone(),
+                cause: cause.clone(),
+            })
+            .collect();
+        if poisoned.is_empty() {
+            Ok(())
+        } else {
+            Err(SpiError::ScopesPoisoned { scopes: poisoned })
+        }
+    }
+
+    /// How many commits settle slowly now, as a watch. A commit counts from
+    /// its first retryable answer (`Unavailable`, or `Indeterminate` before
+    /// its head is read), or from the moment its first host call outlasts the
+    /// host's declared longest commit ([`FenceTiming::max_commit_latency`]),
+    /// until its settle ends, however it ends. An adapter whose calls hold a
+    /// gate until their commits settle waits outside that gate's queue while
+    /// one counts, so one slow settle does not hold back every other call
+    /// behind a queued exclusive waiter.
+    #[must_use]
+    pub(crate) fn slow_settles(&self) -> tokio::sync::watch::Receiver<usize> {
+        self.slow_settles.subscribe()
     }
 
     /// Refuse a call on a poisoned scope (or realm).
@@ -1212,7 +1353,7 @@ impl SpiRealm {
     fn poison_scope(&self, state: &mut ScopeState, cause: &str) {
         if state.poison.is_none() {
             state.poison = Some(cause.to_string());
-            self.poisoned_scopes.fetch_add(1, Ordering::AcqRel);
+            lock(&self.poisoned).insert(state.id.clone(), cause.to_string());
             tracing::error!(scope = %state.id, %cause, "host store scope poisoned; it refuses until the realm is reopened");
         }
     }
@@ -1912,24 +2053,47 @@ impl SpiRealm {
 
     /// Commit `batch`, settling an unknown or unavailable outcome by
     /// retrying the same batch (same commit id) and by reading the first
-    /// scope's head, within the retry budget.
+    /// scope's head, within the retry budget, pausing before each retry as
+    /// [`commit_retry_pause`] says. From its first retryable answer, or once
+    /// its first call outlasts the host's declared longest commit, the
+    /// settle counts in [`Self::slow_settles`] until it ends.
     async fn commit_settled(&self, batch: &CommitBatch) -> Result<(), SpiError> {
         let deadline = Instant::now() + self.config.commit_retry_budget;
+        // A local of this future: it drops on every return below, and with
+        // the future when the caller drops the settle mid-way.
+        let mut slow: Option<SlowSettle<'_>> = None;
         let mut attempt: u32 = 0;
         loop {
-            let error = match self.host.commit(batch).await {
+            let mut call = self.host.commit(batch);
+            let answer = if slow.is_some() {
+                call.await
+            } else {
+                tokio::select! {
+                    biased;
+                    answer = &mut call => answer,
+                    () = tokio::time::sleep(self.timing.max_commit_latency()) => {
+                        slow = Some(SlowSettle::count(&self.slow_settles));
+                        call.await
+                    }
+                }
+            };
+            let error = match answer {
                 Ok(()) => return Ok(()),
                 Err(HostStoreError::Indeterminate(detail)) => {
+                    slow.get_or_insert_with(|| SlowSettle::count(&self.slow_settles));
                     if self.landed(batch).await {
                         return Ok(());
                     }
                     HostStoreError::Indeterminate(detail)
                 }
-                Err(HostStoreError::Unavailable(detail)) => HostStoreError::Unavailable(detail),
+                Err(HostStoreError::Unavailable(detail)) => {
+                    slow.get_or_insert_with(|| SlowSettle::count(&self.slow_settles));
+                    HostStoreError::Unavailable(detail)
+                }
                 Err(other) => return Err(SpiError::Host(other)),
             };
             attempt = attempt.saturating_add(1);
-            let backoff = Duration::from_millis(50_u64.saturating_mul(1 << attempt.min(6)));
+            let backoff = commit_retry_pause(batch.commit_id(), attempt);
             if Instant::now() + backoff >= deadline {
                 return Err(SpiError::Host(error));
             }

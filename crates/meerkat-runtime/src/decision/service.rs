@@ -23,10 +23,11 @@ use meerkat_core::approval::consent::{ConsentEligibility, ConsentEligibilityAnsw
 use meerkat_core::approval::decision::{
     ApproverId, AttestedDecision, AttributedReview, ConsentProvenance, DECISION_PAGE_MAX,
     DECISION_PRESENTATIONS_MAX, DecisionContractError, DecisionDescriptor, DecisionExecutorClaim,
-    DecisionHoldRequest, DecisionId, DecisionListFilter, DecisionMachineState, DecisionNotice,
-    DecisionOperationId, DecisionOutcome, DecisionPage, DecisionPhase, DecisionPrincipalKey,
-    DecisionReference, DecisionReviewVerdict, DecisionRow, DecisionStage, DecisionStore,
-    PresentationAudience, PresentationRecord, Sha256Digest, StoredDecision, UnreadableDecision,
+    DecisionHoldRequest, DecisionId, DecisionKind, DecisionListFilter, DecisionMachineState,
+    DecisionNotice, DecisionOperationId, DecisionOutcome, DecisionPage, DecisionPhase,
+    DecisionPrincipalKey, DecisionReference, DecisionReviewVerdict, DecisionRow, DecisionStage,
+    DecisionStore, PresentationAudience, PresentationRecord, Sha256Digest, StoredDecision,
+    UnreadableDecision,
 };
 use meerkat_core::approval::{ApprovalConsentDeliveryState, ApprovalStoreError};
 use serde::{Deserialize, Serialize};
@@ -203,8 +204,9 @@ pub enum DecisionError {
     /// again.
     #[error("the approver of decision {0} cannot be checked now")]
     Unsettled(DecisionId),
-    /// Another executor holds this decision store's executor claim.
-    #[error("another executor holds the decision store")]
+    /// Another executor holds the executor claim asked for: of the decision
+    /// kind, or of the whole decision store.
+    #[error("another executor holds the decision store or kind")]
     ExecutorHeld,
 }
 
@@ -527,6 +529,14 @@ fn keep_presentation(row: &mut StoredDecision, presentation: PresentationRecord)
         .saturating_sub(DECISION_PRESENTATIONS_MAX);
     if excess > 0 {
         row.presentations = row.presentations.split_off(excess);
+    }
+}
+
+/// The owner's error for an executor claim the store refused.
+fn executor_claim_error(error: ApprovalStoreError) -> DecisionError {
+    match error {
+        ApprovalStoreError::Contended => DecisionError::ExecutorHeld,
+        other => DecisionError::Unavailable(other.to_string()),
     }
 }
 
@@ -1266,22 +1276,45 @@ impl DurableDecisionService {
         issued_permit(&row, &authorization)
     }
 
-    /// Claim the executor role of this owner's store
-    /// ([`DecisionStore::claim_executor`]): at most one executor of a store
-    /// is live at a time, in this process or any other, and the role ends
-    /// when the claim drops or its process ends. A candidate launch claims
-    /// none.
+    /// Claim the executor role of the decisions of `kind` in this owner's
+    /// store ([`DecisionStore::claim_executor_kind`]): at most one executor
+    /// of a kind of a store is live at a time, in this process or any
+    /// other, and the role ends when the claim drops or its process ends.
+    /// Executors of different kinds of one store run side by side. A
+    /// candidate launch claims none.
     ///
     /// # Errors
     /// [`DecisionError::ExecutorHeld`] while another executor holds the
-    /// store; [`DecisionError::CandidateLaunch`]; other store failures as
-    /// [`DecisionError::Unavailable`].
+    /// kind, or the whole store; [`DecisionError::CandidateLaunch`]; other
+    /// store failures as [`DecisionError::Unavailable`].
+    pub fn claim_executor_kind(
+        &self,
+        kind: &DecisionKind,
+    ) -> Result<DecisionExecutorClaim, DecisionError> {
+        self.require_writes()?;
+        self.store()?
+            .claim_executor_kind(kind)
+            .map_err(executor_claim_error)
+    }
+
+    /// Claim the executor role of this owner's whole store
+    /// ([`DecisionStore::claim_executor`]), as an executor of 0.9.10 does:
+    /// no executor of any kind of the store runs beside it, in this process
+    /// or any other, and the role ends when the claim drops or its process
+    /// ends. A candidate launch claims none.
+    ///
+    /// # Errors
+    /// [`DecisionError::ExecutorHeld`] while another executor holds the
+    /// store or one of its kinds; [`DecisionError::CandidateLaunch`]; other
+    /// store failures as [`DecisionError::Unavailable`].
+    #[deprecated(
+        since = "0.9.11",
+        note = "an executor claims each decision kind it executes with `claim_executor_kind`"
+    )]
+    #[allow(deprecated)]
     pub fn claim_executor(&self) -> Result<DecisionExecutorClaim, DecisionError> {
         self.require_writes()?;
-        self.store()?.claim_executor().map_err(|error| match error {
-            ApprovalStoreError::Contended => DecisionError::ExecutorHeld,
-            other => DecisionError::Unavailable(other.to_string()),
-        })
+        self.store()?.claim_executor().map_err(executor_claim_error)
     }
 
     /// Settle `permit`, under which no commit was made (a retryable refusal

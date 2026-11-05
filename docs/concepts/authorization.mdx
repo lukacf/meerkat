@@ -265,14 +265,18 @@ owner then executes the held request at most once.
   never runs after it.
 - **One executor.** `DecisionExecutorLoop` executes the approved decisions of
   a store, through one registered executor per decision kind. It holds the
-  store's executor claim while it runs (for the SQLite file, an OS lock on
-  `approval_decisions.executor.lock` beside it, released when its process
-  ends), so a second executor of the store, in this process or another, is
-  refused at start, and a candidate launch starts none. It keeps the three
-  obligations the machine cannot see: one executor per decision; after a
-  commit, the only settlement is recording it; and after a restart or a
-  dropped pass it settles first, from the owner's own record of the
-  operation, which reports every commit that can still land.
+  executor claim of each kind it executes while it runs (for the SQLite file,
+  an OS lock on `approval_decisions.executor.<kind>.lock` beside it, and a
+  shared one on `approval_decisions.executor.lock`, released when its process
+  ends). Another executor of a kind, in this process or another, executes
+  none of its decisions while the claim lives: each pass lists the kind as
+  unclaimed and asks for it again, so it takes over once the first executor
+  ends. Executors of different kinds of one store run side by side, and a
+  candidate launch starts none. It keeps the three obligations the machine
+  cannot see: one executor per decision; after a commit, the only settlement
+  is recording it; and after a restart or a dropped pass it settles first,
+  from the owner's own record of the operation, which reports every commit
+  that can still land.
 - **One notice.** An ended decision whose requester can be told owes it one
   notice, settled by its delivery receipt. A delivery whose receipt was not
   recorded is made again, so the owner delivers idempotently.

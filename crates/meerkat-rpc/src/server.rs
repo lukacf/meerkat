@@ -4552,7 +4552,7 @@ mod tests {
                 .await
                 .expect("write the request");
 
-            let served = tokio::time::timeout(std::time::Duration::from_secs(120), server.run())
+            let served = tokio::time::timeout(std::time::Duration::from_mins(2), server.run())
                 .await
                 .expect("the connection ends");
             assert!(served.is_err(), "the refused line ends the connection");

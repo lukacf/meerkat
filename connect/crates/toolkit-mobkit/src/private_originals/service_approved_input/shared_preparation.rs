@@ -385,6 +385,12 @@ impl InstalledSharedEntry {
 }
 
 impl InstalledServiceTask {
+    /// A fixture's stage probe on this task's own source.
+    #[cfg(test)]
+    pub(crate) fn observe_stage_for_test(&self, stage: &'static str) {
+        self.source.observe_service_task_stage_for_test(stage);
+    }
+
     /// Correlation is selected from this captured task, never tool arguments.
     pub(crate) fn shared_entry_diagnostic_context(
         &self,

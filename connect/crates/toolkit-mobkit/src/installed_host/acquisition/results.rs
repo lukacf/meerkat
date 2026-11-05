@@ -61,6 +61,10 @@ impl InstalledAcquisition {
             .originals
             .setup_result_source_from(context, &self.helper_selections())
             .await;
+        #[cfg(test)]
+        self.host
+            .originals
+            .observe_service_task_stage_for_test("report.authorization");
         let initial_current = context.check_tool_authorization(call, None)?;
         let context = initial_current.as_ref().unwrap_or(context);
         let source = source.map_err(source_error)?;

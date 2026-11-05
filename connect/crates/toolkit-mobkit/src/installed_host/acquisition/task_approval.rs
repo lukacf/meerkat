@@ -378,6 +378,8 @@ impl InstalledServiceTaskSource {
         // The reservation is source custody that a cancellation drains, so
         // this check never waits while holding it. A refusal to rebuild
         // stays typed here and settles the unused reservation.
+        #[cfg(test)]
+        task.observe_stage_for_test("reserve.authorization");
         if let Err(error) = service_task_check(context.check_tool_authorization(call, plan)) {
             // No private transport command has been prepared on this path.
             entry.settle_unentered()?;

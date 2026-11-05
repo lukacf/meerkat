@@ -389,3 +389,237 @@ async fn real_denial_after_a_shared_effect_stays_immediate() {
         checked.elapsed
     );
 }
+
+/// What the task source's reservation of the held report call's shared
+/// entry answered, and how long it took.
+struct Reserved {
+    result: Result<(), ServiceTaskError>,
+    elapsed: Duration,
+    remaining: Option<Duration>,
+    reached: Arc<Reached>,
+}
+
+/// Reserve the held report call's shared entry once through the actual task
+/// source, beginning an owner change of the work's own publication at the
+/// first arrival at the reservation's current-authorization check, published
+/// after `hold` or never. A reserved entry is settled unused.
+async fn reserve_with(hold: Option<Duration>) -> Reserved {
+    let script = acquisition_denial::Script::for_approved();
+    let report = Report::new(script.tools().result_tool());
+    let (fixture, _runtime_store) =
+        Fixture::for_configured_helper_report(script.clone(), report.clone()).await;
+    let reached = Arc::new(Reached::default());
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT,
+        Box::pin(async {
+            let first = fixture.submit().await;
+            fixture.finish(&first).await.unwrap();
+            let context = report.take_context().await;
+            let remaining = context.remaining_tool_time();
+            let owner = script.installed_owner();
+            let mut bootstrap = AcquisitionBootstrap::selected(owner.clone());
+            assert!(Arc::ptr_eq(
+                &bootstrap.prepare(None, None).unwrap().unwrap(),
+                &owner
+            ));
+            let bootstrap = Arc::new(Mutex::new(bootstrap));
+            let tasks = InstalledServiceTaskSource::new(&bootstrap);
+            let publication = fixture.source.owner.publication();
+            let probe = reached.clone();
+            let act = Mutex::new(Some(hold));
+            fixture
+                .source
+                .probe_service_task_stages_for_test(Box::new(move |arrived| {
+                    *probe.stages.lock().unwrap().entry(arrived).or_default() += 1;
+                    if arrived != "reserve.authorization" {
+                        return;
+                    }
+                    if let Some(hold) = act.lock().unwrap().take() {
+                        let change = HeldChange::begin(publication.clone(), hold);
+                        assert!(probe.change.lock().unwrap().replace(change).is_none());
+                    }
+                }));
+            let started = Instant::now();
+            let result = report.reserve_shared_entry(&tasks).await;
+            let elapsed = started.elapsed();
+            if let Some(change) = reached.change.lock().unwrap().take() {
+                change.release();
+            }
+            (result, elapsed, remaining)
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    if let Some(change) = reached.change.lock().unwrap().take() {
+        change.release();
+    }
+    report.release();
+    report.leaf.context.lock().unwrap().take();
+    let cleanup = fixture.shutdown().await;
+    assert!(cleanup.is_ok(), "{cleanup:?}");
+    match checked {
+        Ok(Ok((result, elapsed, remaining))) => Reserved {
+            result,
+            elapsed,
+            remaining,
+            reached,
+        },
+        Ok(Err(_)) => panic!("the shared entry reservation exceeded its bounded deadline"),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+// The reservation is source custody a cancellation drains, so its check
+// never waits while holding it: a refusal to rebuild settles the unused
+// reservation, waits out the change holding nothing, and reserves again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settled_owner_change_at_the_reservation_check_is_reserved_again_after_the_wait() {
+    let hold = Duration::from_millis(200);
+    let reserved = reserve_with(Some(hold)).await;
+    assert_tool_time_covers_the_wait(reserved.remaining);
+    assert!(
+        reserved.result.is_ok(),
+        "a settled owner change at the reservation's check is waited out: {:?}",
+        reserved.result
+    );
+    assert!(
+        reserved.elapsed >= hold - Duration::from_millis(50),
+        "the reservation waited for the change: {:?}",
+        reserved.elapsed
+    );
+    assert_eq!(
+        reserved.reached.count("reserve.authorization"),
+        2,
+        "the refused reservation was settled and the entry reserved again once"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persistent_owner_change_at_the_reservation_check_ends_typed_within_the_bound() {
+    let reserved = reserve_with(None).await;
+    assert_tool_time_covers_the_wait(reserved.remaining);
+    assert!(
+        matches!(
+            reserved.result,
+            Err(ServiceTaskError::ReprepareRequired { .. })
+        ),
+        "a change that outlasts the bound stays a typed refusal to rebuild: {:?}",
+        reserved.result
+    );
+    assert!(
+        reserved.elapsed >= OWNER_CHANGE_WAIT_BOUND - Duration::from_millis(100)
+            && reserved.elapsed < OWNER_CHANGE_WAIT_BOUND + Duration::from_secs(2),
+        "the reservation waits out Core's bound once, never renewed: {:?}",
+        reserved.elapsed
+    );
+    assert_eq!(
+        reserved.reached.count("reserve.authorization"),
+        1,
+        "no reservation after the bound"
+    );
+}
+
+/// What the held report call answered once its dispatch resumed, with an
+/// owner change of the work's own publication begun at the report's first
+/// current-authorization check, and how long the helper's turn took from the
+/// resume.
+struct Reported {
+    feedback: Vec<ToolResult>,
+    elapsed: Duration,
+    remaining: Option<Duration>,
+}
+
+async fn report_with(hold: Duration) -> Reported {
+    let script = acquisition_denial::Script::for_approved();
+    let report = Report::new(script.tools().result_tool());
+    let (fixture, _runtime_store) =
+        Fixture::for_configured_helper_report(script.clone(), report.clone()).await;
+    let held = Arc::new(Mutex::new(None::<HeldChange>));
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT,
+        Box::pin(async {
+            let first = fixture.submit().await;
+            fixture.finish(&first).await.unwrap();
+            let context = report.take_context().await;
+            let remaining = context.remaining_tool_time();
+            drop(context);
+            let helper =
+                AgentIdentity::parse(crate::installed_host::controller_first_input_fixture::HELPER)
+                    .unwrap();
+            let helper_before = fixture.runtime.completion_cursor(&helper).await;
+            let publication = fixture.source.owner.publication();
+            let probe = held.clone();
+            let act = Mutex::new(Some(hold));
+            fixture
+                .source
+                .probe_service_task_stages_for_test(Box::new(move |arrived| {
+                    if arrived != "report.authorization" {
+                        return;
+                    }
+                    if let Some(hold) = act.lock().unwrap().take() {
+                        let change = HeldChange::begin(publication.clone(), Some(hold));
+                        assert!(probe.lock().unwrap().replace(change).is_none());
+                    }
+                }));
+            let started = Instant::now();
+            report.release();
+            fixture
+                .runtime
+                .wait_for_completion(&helper, helper_before, WAIT)
+                .await
+                .unwrap();
+            let elapsed = started.elapsed();
+            if let Some(change) = held.lock().unwrap().take() {
+                change.release();
+            }
+            let feedback = report.feedback.lock().unwrap().clone();
+            (feedback, elapsed, remaining)
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    if let Some(change) = held.lock().unwrap().take() {
+        change.release();
+    }
+    report.release();
+    report.leaf.context.lock().unwrap().take();
+    let cleanup = fixture.shutdown().await;
+    assert!(cleanup.is_ok(), "{cleanup:?}");
+    match checked {
+        Ok(Ok((feedback, elapsed, remaining))) => Reported {
+            feedback,
+            elapsed,
+            remaining,
+        },
+        Ok(Err(_)) => panic!("the helper's report exceeded its bounded deadline"),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+// The report's checks hold nothing, so each waits out an owner change in
+// progress within the report's one waiting state, and the report goes on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settled_owner_change_at_the_report_check_is_waited_out_and_reported() {
+    let hold = Duration::from_millis(200);
+    let reported = report_with(hold).await;
+    assert_tool_time_covers_the_wait(reported.remaining);
+    assert_eq!(
+        reported.feedback.len(),
+        1,
+        "the report's result reached the helper: {:?}",
+        reported.feedback
+    );
+    assert!(
+        !reported.feedback[0].is_error,
+        "a settled owner change at the report's check is waited out, not refused: {:?}",
+        reported.feedback
+    );
+    let reply: serde_json::Value =
+        serde_json::from_str(&reported.feedback[0].text_content()).unwrap();
+    assert_eq!(reply["phase"], "unavailable", "{reply}");
+    assert!(
+        reported.elapsed >= hold - Duration::from_millis(50),
+        "the report waited for the change: {:?}",
+        reported.elapsed
+    );
+}

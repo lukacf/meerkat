@@ -60,6 +60,9 @@ pub(crate) mod shared_check_probe {
         EntryClosing,
         /// The entry monitor settled the claimed entry's source.
         EntrySettled,
+        /// A reviewed install holds its dispatch guard; its check before the
+        /// physical dispatch runs next.
+        InstallGuarded,
     }
     type Probe = Arc<dyn Fn(Step, &str) -> Option<std::time::Duration> + Send + Sync>;
     static PROBE: Mutex<Option<Probe>> = Mutex::new(None);
@@ -1963,6 +1966,8 @@ impl CheckedInstalls {
         // Human review can outlast the originating permission. Recheck this
         // exact borrowed call and actual plan without extracting/rebuilding the
         // native prepared check. The outer native gate remains its own owner.
+        #[cfg(all(test, unix))]
+        shared_check_probe::observe(shared_check_probe::Step::InstallGuarded, call.id);
         let refreshed = match context.check_tool_authorization(call, plan) {
             Ok(current) => current,
             Err(error) => {

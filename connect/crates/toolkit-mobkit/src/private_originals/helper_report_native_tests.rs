@@ -35,6 +35,13 @@ struct SharedCheckRequest {
     reply: tokio::sync::oneshot::Sender<Result<(), meerkat_core::ToolError>>,
 }
 
+/// A reservation of the call's shared entry, run by the held real leaf on its
+/// own call; a reserved entry is settled unused at once.
+struct SharedReserveRequest {
+    source: InstalledServiceTaskSource,
+    reply: tokio::sync::oneshot::Sender<Result<(), ServiceTaskError>>,
+}
+
 pub(super) struct Report {
     leaf: Arc<ReportLeaf>,
     selection: OnceLock<InstalledSetupSelection>,
@@ -49,6 +56,7 @@ impl Report {
                 context: Mutex::new(None),
                 preparation: Mutex::new(None),
                 shared_check: Mutex::new(None),
+                shared_reserve: Mutex::new(None),
                 arrived: tokio::sync::Notify::new(),
                 released: AtomicBool::new(false),
                 resume: tokio::sync::Notify::new(),
@@ -134,6 +142,30 @@ impl Report {
             .await
             .expect("held report dispatch must answer the check")
     }
+    /// Ask the held real leaf to reserve its own call's shared entry through
+    /// the task source, and settle the reserved entry unused.
+    async fn reserve_shared_entry(
+        &self,
+        source: &InstalledServiceTaskSource,
+    ) -> Result<(), ServiceTaskError> {
+        assert!(!self.leaf.released.load(Ordering::SeqCst));
+        let (reply, received) = tokio::sync::oneshot::channel();
+        assert!(
+            self.leaf
+                .shared_reserve
+                .lock()
+                .unwrap()
+                .replace(SharedReserveRequest {
+                    source: source.clone(),
+                    reply,
+                })
+                .is_none()
+        );
+        self.leaf.resume.notify_one();
+        received
+            .await
+            .expect("held report dispatch must answer the reservation")
+    }
 }
 
 /// Forward every native dispatcher seam unchanged. The pause retains the
@@ -143,6 +175,7 @@ struct ReportLeaf {
     context: Mutex<Option<ToolDispatchContext>>,
     preparation: Mutex<Option<ReportPreparationRequest>>,
     shared_check: Mutex<Option<SharedCheckRequest>>,
+    shared_reserve: Mutex<Option<SharedReserveRequest>>,
     arrived: tokio::sync::Notify,
     released: AtomicBool,
     resume: tokio::sync::Notify,
@@ -359,6 +392,20 @@ impl ReportLeaf {
                     )
                     .await
                     .map(drop);
+                let _ = request.reply.send(result);
+            }
+            let shared_reserve = self.shared_reserve.lock().unwrap().take();
+            if let Some(request) = shared_reserve {
+                // The task source's reservation of this exact call's shared
+                // entry; an entry it reserves is settled unused at once.
+                let result = match request
+                    .source
+                    .reserve_shared_entry(call, context, plan, None)
+                    .await
+                {
+                    Ok(entry) => entry.settle_unentered().map_err(ServiceTaskError::from),
+                    Err(error) => Err(error),
+                };
                 let _ = request.reply.send(result);
             }
             if self.released.load(Ordering::SeqCst) {

@@ -4,6 +4,9 @@
 //! check's entry is still unsettled, and the check's dispatch, its join and
 //! its release each run once. A change that outlasts the bound ends that
 //! check typed and uncertified, with no replay of the join or the release.
+//! A reviewed install's check before its physical dispatch, which holds the
+//! install's dispatch guard, answers a change at once: refused, certified
+//! not dispatched and typed, and the model's one fresh install goes on.
 use super::*;
 use crate::service_install::shared_check_probe::{self, Step};
 use meerkat_authorization::publication::LocalAuthorizationPublication;
@@ -12,6 +15,8 @@ use std::time::Instant;
 
 /// B's first selected check: the call the controls act on.
 const CALL: &str = "b-helper-check";
+/// B's first install: the call the install control acts on.
+const INSTALL_CALL: &str = "b-helper-install";
 /// How long the check's entry close waits, so the entry stays unsettled
 /// while the check after the join runs.
 const CLOSE_DELAY: Duration = Duration::from_millis(800);
@@ -54,12 +59,14 @@ enum Hold {
     UntilRefused,
 }
 
-/// At `at` of B's first check, begin an owner change on `publication` on a
-/// thread of its own, held per `hold`; delay that check's entry close.
+/// At `at` of B's call `target`, begin an owner change on `publication` on a
+/// thread of its own, held per `hold`. A control of B's first check also
+/// delays that check's entry close.
 fn install(
     observed: &Arc<Observed>,
     publication: LocalAuthorizationPublication,
     at: Step,
+    target: &'static str,
     hold: Hold,
 ) {
     let (release, released) = std::sync::mpsc::channel::<()>();
@@ -72,11 +79,11 @@ fn install(
             .lock()
             .unwrap()
             .push((step, call.to_owned(), Instant::now()));
-        if call != CALL {
+        if call != target {
             return None;
         }
         match step {
-            Step::EntryClosing => return Some(CLOSE_DELAY),
+            Step::EntryClosing if target == CALL => return Some(CLOSE_DELAY),
             Step::JoinedRefused | Step::ReleasedRefused => {
                 if let Some(release) = release.lock().unwrap().take() {
                     let _ = release.send(());
@@ -111,6 +118,11 @@ fn install(
 /// check, and answer what every selected check went through. With a change
 /// that is published, the case's own settled feedback proof runs as well.
 fn control(at: Step, hold: Hold) -> (Arc<Observed>, Arc<Script>) {
+    control_at(at, CALL, hold)
+}
+
+/// [`control`] with the change held at `at` of B's call `target`.
+fn control_at(at: Step, target: &'static str, hold: Hold) -> (Arc<Observed>, Arc<Script>) {
     let (pipes, parent) = SdkParent::pair();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
@@ -129,7 +141,7 @@ fn control(at: Step, hold: Hold) -> (Arc<Observed>, Arc<Script>) {
                 .unwrap()
                 .authorization_publication_for_test()
                 .expect("the host's private originals share one publication");
-            install(&seen, publication, at, hold);
+            install(&seen, publication, at, target, hold);
             case.run().await;
         })
         .catch_unwind()
@@ -259,4 +271,42 @@ fn owner_change_outlasting_the_check_after_the_join_ends_typed_without_replay() 
             "{step:?} of the fresh check"
         );
     }
+}
+
+// B's first install holds its dispatch guard, which owns the physical
+// dispatch, when its check before that dispatch meets an owner change held
+// for 120 ms. The check answers at once, refused, certified not dispatched
+// and typed; the physical install never ran for it. The model's one fresh
+// install runs its own review, guard and check, and succeeds.
+#[test]
+fn owner_change_at_the_install_check_is_refused_certified_and_installed_fresh() {
+    let hold = Duration::from_millis(120);
+    let (observed, script) = control_at(Step::InstallGuarded, INSTALL_CALL, Hold::For(hold));
+    assert_eq!(
+        observed.count(Step::InstallGuarded, INSTALL_CALL),
+        1,
+        "the refused install's check ran once"
+    );
+    let fresh = format!("{INSTALL_CALL}-fresh");
+    assert_eq!(
+        observed.count(Step::InstallGuarded, &fresh),
+        1,
+        "the fresh install held its own guard once"
+    );
+    let seen = script.seen_results.lock().unwrap();
+    let refused = seen
+        .get(INSTALL_CALL)
+        .expect("the refused install's result");
+    assert!(
+        refused.is_error && find_feedback::certified_reprepare(refused),
+        "refused at once before the physical dispatch, typed and certified not dispatched: {}",
+        refused.text_content()
+    );
+    assert!(
+        !seen
+            .get(&fresh)
+            .expect("the fresh install's result")
+            .is_error,
+        "the one fresh install succeeded"
+    );
 }

@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Meta Forge 0.3.1 installs the matched Meta 0.9.10 and Toolkit/Connect 0.9.10
-selection. Build and Resume now check the saved guide within the same writer
-reservation that publishes the build.
+## [0.9.10] - 2026-11-04
+
+Meta 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10 and Connect
+0.9.10, released together) and pins Core `=0.9.10`. Meta Forge 0.3.1 ships
+with it and installs the matched Meta 0.9.10, Connect 0.9.10 and Connect
+Python SDK (`meerkat-toolkit`) 0.9.10 set. Its Build and Resume now check the
+saved guide within the same writer reservation that publishes the build.
 
 Forge 0.3.1 is part of the Meerkat 0.9.10 release and is the first Forge
 release from this repository: tag `meta-installer-v0.3.1`, with packages named
@@ -17,12 +21,23 @@ release from this repository: tag `meta-installer-v0.3.1`, with packages named
 Releases up to Forge 0.3.0 stay in `lukacf/meerkat-meta` (tags
 `forge-v<version>`, packages `meta-forge-<version>-<target>.zip`). Three
 selections stay as in Forge 0.3.0: the Guide runs Meta 0.9.3 with Core 0.9.3,
-agent teams pin the published Meta 0.9.6 runtime, and the protected
-application receiver keeps its Meta 0.9.7 SDK tuple. Acceptance is per target:
-each package is accepted only on evidence for that exact package, and the
-`linux-x86_64` evidence does not stand in for `macos-arm64`.
+agent teams pin the published Meta 0.9.6 runtime, and the application receiver
+keeps the Meta 0.9.7 SDK. Each target's package is released on its own
+verification.
 
 ### Upgrade
+
+- Meta 0.9.10 pins Core `=0.9.10`: a host that embeds Meta moves Meta and
+  Core to 0.9.10 together (Meta 0.9.9 pinned Core `=0.9.9`).
+
+- Core 0.9.10 fixes that reach Meta gateways are listed in Core's CHANGELOG:
+  the restart recovery of live voice delegations with dormant members (a
+  gateway composes it when `openai_live`, `experimental_live` or
+  `console_voice` is registered), the peer address of dormant members in
+  roster reads, governed operations that no longer refuse after a completed
+  grant change, a refusal met at a tool's own effect entry before any effect,
+  which now reads as not dispatched (`tool_invoked: false`), and per-tool
+  timeouts (`[tools.tool_timeouts]`) that accept duration strings.
 
 - An application that Forge 0.3.0 prepared with its Connect gateway (0.9.5 on
   Linux, 0.9.4 on macOS) is prepared again at its next install step. Forge
@@ -91,10 +106,12 @@ each package is accepted only on evidence for that exact package, and the
   for applications without a connection setup helper. Forge 0.3.0 selected
   Meta 0.9.7 with Toolkit 0.9.5 on Linux x86_64 and Meta 0.9.4 with Toolkit
   0.9.4 on macOS arm64.
+
 - Forge 0.3.1 accepts the Meta 0.9.10 and Toolkit 0.9.10 SDK wheels in a
   selected Meta and Toolkit SDK pair, besides the releases it accepted
   before. The Toolkit wheel's `native-host` extra must still require exactly
   the selected Meta version.
+
 - Forge 0.3.1 downloads a Meta release after 0.9.7 from this repository's
   `meta-v<version>` release, and 0.9.7 or earlier from `lukacf/meerkat-meta`'s
   `v<version>` release as before: both for the pinned agent team runtime and
@@ -120,6 +137,60 @@ each package is accepted only on evidence for that exact package, and the
   could still start the builder from the earlier read. A busy, missing or
   unreadable store refuses the build at once, and a refused build starts
   nothing.
+
+### Known limitations
+
+- Meta's roster pass still decides the lifecycle of the identities a host
+  declares: which are seated, and which are retired when the roster no
+  longer lists them. It does not use Core's declared-roster apply
+  (`MobHandle::apply_declared_roster`) yet, so the verdicts and role-change
+  holds Core's 0.9.9 notes describe for that apply do not govern a Meta
+  host's declared identities.
+
+- Agents and Console users cannot create durable identities through Meta
+  yet. The identity policy a launch takes
+  (`runtime_options.identity_creation`, or
+  `GatewayHostComposition::identity_creation_policy` for a native host) is
+  validated at launch but not enforced: no executor, decision ingress, host
+  RPC method, agent tool or Meta SDK method carries an identity request, and
+  the Console has no form that creates a durable agent. Durable identities
+  still come from the host's roster declarations.
+
+- Meta has no host verbs and no SDK methods for operator instructions. A
+  native host sets, revokes and reads them with Core's Rust API on the mob
+  handle (`UnifiedRuntime::mob_handle`, then
+  `MobHandle::set_operator_instruction`, `revoke_operator_instruction` and
+  `operator_instruction_status`); a host that reaches Meta only over RPC or
+  an SDK cannot set them.
+
+- Meta builds its members with no tool grant gate and has no grant methods,
+  so scoped tool grants do not apply to Meta members: nothing in Meta's RPC,
+  the Console or the Meta SDKs issues, lists or revokes a grant.
+
+- The Console reads the status of a member whose events it cannot follow
+  (its session has no live actor, for example after its store scope was
+  refused) again on every change of its team, and does not wait after a
+  status read that does not answer. A few such members keep it reading
+  their status without pause, which costs CPU and log volume (at DEBUG, one
+  actor log line per read). Keep the team runtime's log at INFO; restarting
+  the gateway clears a refused scope. A host that builds the Console
+  aggregator itself can turn its history backfill off
+  (`session_history_backfill_enabled: false` in `ConsoleAggregatorOptions`).
+- While its store refuses appends, the event log asks the store again for
+  every event that arrives, and it sends its whole retry buffer (up to 4096
+  events) as one append. A store that refuses requests above a size limit
+  can then refuse every later flush, so the event log takes no event again
+  until the process restarts. Use an event log store that takes 4096 events
+  in one append, or restart the process when `event_log_flush_failure`
+  error events keep coming after the store is back.
+
+- `meta/compact_member` after a failed turn: when the forced maintenance turn
+  ends in a definite failure (a provider error, a rate limit, or a request
+  that compaction could not shrink), the temporary compaction threshold (1024
+  tokens by default) stays on the member, durably, and every later
+  `compact_member` on that identity is refused as busy until the gateway
+  restarts. After a failed `compact_member`, call `meta/respawn` for the
+  identity, then restart the gateway.
 
 ## [0.9.9] - 2026-11-03
 

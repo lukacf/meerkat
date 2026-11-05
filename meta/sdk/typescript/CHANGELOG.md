@@ -1,6 +1,10 @@
-# Changelog — @rkat/meta-sdk (TypeScript SDK)
+# Changelog: @rkat/meta-sdk (TypeScript SDK)
 
 ## Unreleased
+
+## 0.9.10
+
+No SDK API changes; released with Meta 0.9.10.
 
 ## 0.9.9
 

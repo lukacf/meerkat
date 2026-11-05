@@ -1,7 +1,9 @@
 //! Session cost accounting (pure): token totals per model and their price.
 //!
 //! The UI adds every `TurnCompleted` usage to the totals of the model the
-//! status bar shows, and prices the totals with a [`PriceTable`] whenever the
+//! provider accounted it to (the identity `TurnUsage` carries; the status
+//! bar's model when it names none), every classifier call to the classifier
+//! model, and prices the totals with a [`PriceTable`] whenever the
 //! footer is drawn or `/cost` is asked for. Meerkat reports
 //! `input_tokens` without the prompt-cache tokens (Anthropic semantics; the
 //! other clients report no cache tokens), so the cost of one model is

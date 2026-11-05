@@ -21,6 +21,10 @@
 //!   [`MeerkatMachine::cancel_input_if_present`].
 //! - [`SessionHandle::events`] follows every event of the session
 //!   (`SessionService::subscribe_session_events`), across runs.
+//! - [`SessionHandle::switch_model`] changes the live session's model (and
+//!   endpoint) through the runtime's session-LLM reconfigure host
+//!   ([`SessionServiceRuntimeExt::reconfigure_session_llm_identity`]); the
+//!   next model call uses it.
 //! - With [`SessionOptions::approval`], every build of the session (fresh
 //!   or resumed) carries the approval gate as its `ToolDispatchAdmission`
 //!   ([`crate::approval::admission::install`]); a resumed session's
@@ -35,19 +39,22 @@ use meerkat::surface::{
     PersistentRuntimeExecutor, materialize_session_with_reserved_admission_and_actor_slot,
 };
 use meerkat_core::comms::EventStream;
-use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
+use meerkat_core::lifecycle::run_primitive::{RuntimeTurnMetadata, TurnMetadataOverride};
 use meerkat_core::service::{
     CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions,
 };
 use meerkat_core::{
-    AgentToolDispatcher, ContentInput, HandlingMode, InputId, Provider, Session, SessionId,
-    SystemPromptOverride,
+    AgentToolDispatcher, AuthBindingRef, ContentInput, HandlingMode, InputId, Provider, Session,
+    SessionId, SystemPromptOverride,
 };
 use meerkat_runtime::completion::CompletionHandle;
-use meerkat_runtime::{AcceptOutcome, IdempotencyKey, Input, MeerkatMachine, PromptInput};
+use meerkat_runtime::{
+    AcceptOutcome, IdempotencyKey, Input, MeerkatMachine, PromptInput,
+    SessionLlmReconfigureRequest, SessionServiceRuntimeExt,
+};
 
 use crate::approval::{ApprovalEngine, admission};
-use crate::bootstrap::{CODING_PERSONA, Runtime, TuiService};
+use crate::bootstrap::{CODING_PERSONA, ModelChoice, Runtime, TuiService};
 use crate::error::TuiError;
 
 pub use resolve::{list_sessions, resolve_session_ref};
@@ -62,11 +69,10 @@ pub struct SessionOptions {
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     /// Instruction sections appended after [`CODING_PERSONA`].
     pub additional_instructions: Vec<String>,
-    /// Model of a fresh session, else the runtime's. A resumed session keeps
-    /// its stored model (switching models is a later phase).
-    pub model: Option<String>,
-    /// Provider of [`SessionOptions::model`], else the runtime's.
-    pub provider: Option<Provider>,
+    /// Model, provider and auth binding of a fresh session, else the
+    /// runtime's start-up choice. A resumed session keeps its stored model
+    /// and binding (switch with [`SessionHandle::switch_model`]).
+    pub choice: Option<ModelChoice>,
     /// The approval engine whose gate every tool call of the session passes.
     /// `None` runs tools ungated (embedders and tests only).
     pub approval: Option<Arc<ApprovalEngine>>,
@@ -90,6 +96,9 @@ pub struct SessionHandle {
     id: SessionId,
     model: String,
     provider: Provider,
+    auth_binding: Option<AuthBindingRef>,
+    /// The runtime's profile generation when the agent was built.
+    profiles: u64,
     approval: Option<Arc<ApprovalEngine>>,
 }
 
@@ -112,18 +121,18 @@ impl SessionHandle {
     /// be built or the runtime refuses the registration.
     pub async fn create(runtime: &Runtime, options: SessionOptions) -> Result<Self, TuiError> {
         let session = Session::new();
-        let model = options
-            .model
+        let choice = options
+            .choice
             .clone()
-            .unwrap_or_else(|| runtime.model.clone());
-        let provider = options.provider.unwrap_or(runtime.provider);
+            .unwrap_or_else(|| runtime.choice.clone());
         let approval = options.approval.clone();
-        let mut build = build_options(options, provider);
+        let mut build = build_options(options, choice.provider);
+        build.auth_binding.clone_from(&choice.auth_binding);
         build.mint_session_with_id(session.id().clone());
         if let Some(engine) = &approval {
             admission::install(&mut build, engine, session.id().clone());
         }
-        Self::open(runtime, session, model, provider, build, approval).await
+        Self::open(runtime, session, choice, build, approval).await
     }
 
     /// Resume a persisted session of the realm and make it live.
@@ -145,28 +154,43 @@ impl SessionHandle {
                 reference: id.to_string(),
                 reason: "session not found in this realm".to_string(),
             })?;
-        let (model, provider) = session.session_metadata().map_or_else(
-            || (runtime.model.clone(), runtime.provider),
-            |meta| (meta.model, meta.provider),
+        let choice = session.session_metadata().map_or_else(
+            || runtime.choice.clone(),
+            |meta| ModelChoice {
+                endpoint: String::new(),
+                model: meta.model,
+                provider: meta.provider,
+                auth_binding: meta.auth_binding,
+            },
         );
+        // A model only an endpoint knows (switched to in an earlier run)
+        // needs its profile again before the agent is rebuilt.
+        runtime.ensure_profile(&choice, None).await?;
         let approval = options.approval.clone();
-        let mut build = build_options(options, provider);
+        let mut build = build_options(options, choice.provider);
+        build.auth_binding.clone_from(&choice.auth_binding);
         build.resume_existing_session(session.clone());
         if let Some(engine) = &approval {
             admission::install(&mut build, engine, session.id().clone());
             engine.seed_transcript(&session);
         }
-        Self::open(runtime, session, model, provider, build, approval).await
+        Self::open(runtime, session, choice, build, approval).await
     }
 
     async fn open(
         runtime: &Runtime,
         session: Session,
-        model: String,
-        provider: Provider,
+        choice: ModelChoice,
         build: SessionBuildOptions,
         approval: Option<Arc<ApprovalEngine>>,
     ) -> Result<Self, TuiError> {
+        let ModelChoice {
+            model,
+            provider,
+            auth_binding,
+            ..
+        } = choice;
+        let profiles = runtime.profiles();
         let id = session.id().clone();
         let request = CreateSessionRequest {
             injected_context: Vec::new(),
@@ -203,6 +227,8 @@ impl SessionHandle {
             id,
             model,
             provider,
+            auth_binding,
+            profiles,
             approval,
         })
     }
@@ -229,6 +255,51 @@ impl SessionHandle {
     #[must_use]
     pub fn provider(&self) -> Provider {
         self.provider
+    }
+
+    /// The explicit auth binding the session resolves its client through
+    /// (`None`: default resolution).
+    #[must_use]
+    pub fn auth_binding(&self) -> Option<&AuthBindingRef> {
+        self.auth_binding.as_ref()
+    }
+
+    /// The runtime's profile generation when this session's agent was built:
+    /// its model registry holds the profiles added up to then.
+    #[must_use]
+    pub fn profiles(&self) -> u64 {
+        self.profiles
+    }
+
+    /// Switch the live session to `choice`'s model, provider and binding
+    /// through the runtime's session-LLM reconfigure host. The identity is
+    /// persisted with the session, and the next model call uses it. The
+    /// target needs a capability profile ([`Runtime::ensure_profile`]).
+    ///
+    /// # Errors
+    ///
+    /// [`TuiError::Runtime`] when the runtime refuses the switch (no
+    /// profile, a client that cannot be built, a session not ready).
+    pub async fn switch_model(&mut self, choice: &ModelChoice) -> Result<(), TuiError> {
+        let request = SessionLlmReconfigureRequest {
+            model: Some(choice.model.clone()),
+            provider: Some(choice.provider.as_str().to_string()),
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(match &choice.auth_binding {
+                Some(binding) => TurnMetadataOverride::Set(binding.clone()),
+                None => TurnMetadataOverride::Clear,
+            }),
+        };
+        let report = self
+            .machine
+            .reconfigure_session_llm_identity(&self.id, request)
+            .await?;
+        tracing::debug!(?report, "switched the session's model");
+        self.model.clone_from(&choice.model);
+        self.provider = choice.provider;
+        self.auth_binding.clone_from(&choice.auth_binding);
+        Ok(())
     }
 
     /// Follow every event of the session, across runs, from now on.

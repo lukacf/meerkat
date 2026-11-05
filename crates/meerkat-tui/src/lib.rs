@@ -18,8 +18,8 @@
 //! - [`approval`] — auto-mode approval engine (tiers, rules, shell analysis, classifier, escalation)
 //! - [`tools`] — in-crate file tools
 //! - [`memory`] — file-based memory notes
-//! - [`endpoints`] — LLM endpoints and `endpoint:model` references
-//! - [`models`] — model catalog and live model lists
+//! - [`endpoints`] — LLM endpoints, `endpoint:model` references, their lowering into realm bindings, per-session choice sidecars
+//! - [`models`] — live model lists of every endpoint (never the catalog)
 //! - [`bootstrap`] — realm/config/factory/service construction, provider credentials
 //! - [`session`] — session handle: create, resume, turns, steer, interrupt
 //! - [`runner`] — the event loop joining the session and the UI

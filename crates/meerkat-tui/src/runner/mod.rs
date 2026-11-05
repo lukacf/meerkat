@@ -16,13 +16,17 @@
 //! The approval gate's side lives in [`approval`]: escalation dialogs,
 //! `/rules`, `/auto`, decision notices and classifier usage.
 //!
+//! `/model` and the picker live in [`models`], the price table and the cost
+//! sidecar in [`cost`].
+//!
 //! Effects of later phases are answered honestly instead of being stubbed:
-//! model switching and the cost sidecar (P4), `/remember` (P6) and manual
-//! `/compact` (the runtime compacts on its own; a manual trigger needs an
-//! upstream primitive).
+//! `/remember` (P6) and manual `/compact` (the runtime compacts on its own; a
+//! manual trigger needs an upstream primitive).
 
 mod approval;
+mod cost;
 mod lifecycle;
+mod models;
 mod quit;
 #[doc(hidden)]
 pub mod testing;
@@ -41,7 +45,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 
 use crate::approval::ApprovalEngine;
-use crate::bootstrap::{self, BootstrapOptions, Runtime};
+use crate::bootstrap::{self, BootstrapOptions, ModelChoice, Runtime};
 use crate::cli::Args;
 use crate::delivery::{PendingId, SteerFailure};
 use crate::error::TuiError;
@@ -53,7 +57,8 @@ use crate::ui::{
     UiChannels, run_ui,
 };
 
-pub use lifecycle::{Start, blocks_from_session, open_start, session_messages};
+pub use lifecycle::{Start, blocks_from_session, open_start, session_endpoint, session_messages};
+pub use models::DEFAULT_CONTEXT_WINDOW;
 pub use quit::SavedUnsent;
 
 /// Capacity of the primary agent-event channel.
@@ -80,10 +85,10 @@ pub async fn run(args: Args) -> Result<(), TuiError> {
         bootstrap::bootstrap_with(scope, config, &args, BootstrapOptions::default()).await?;
     let (template, diff_rx) = Template::new(&runtime)?;
     let start = Start::from_args(&args);
-    let (session, transcript) = open_start(&runtime, template.options(), &start).await?;
+    let (session, transcript) = open_start(&runtime, template.options(None), &start).await?;
 
     let mut status = StatusInfo::default();
-    status.set_model(session.provider().as_str(), session.model());
+    status.set_model(&runtime.choice.endpoint, session.model());
     status.set_session(&session.id().to_string());
     let realm_root = runtime.scope.realm_root();
     let history = History::load(realm_root.join("tui_history"));
@@ -106,11 +111,6 @@ pub async fn run(args: Args) -> Result<(), TuiError> {
     let (_scoped_tx, scoped_rx) = mpsc::channel(AGENT_EVENT_CAPACITY);
     let (ui_tx, ui_rx) = mpsc::unbounded_channel::<Msg>();
     let (effect_tx, effect_rx) = mpsc::unbounded_channel::<Effect>();
-    if transcript.is_some() {
-        for msg in session_messages(&session, transcript.as_ref()) {
-            let _ = ui_tx.send(msg);
-        }
-    }
     if let Some(text) = quit::unsent_notice(&realm_root) {
         let _ = ui_tx.send(Msg::Notice {
             level: NoticeLevel::Warn,
@@ -131,6 +131,7 @@ pub async fn run(args: Args) -> Result<(), TuiError> {
         runtime,
         template,
         session,
+        transcript,
         agent_tx,
         ui_tx,
         effect_rx,
@@ -236,16 +237,16 @@ impl Template {
         ))
     }
 
-    /// Options for a session build. The notes index is re-read every time,
-    /// so `/new` and `/resume` pick up notes saved meanwhile.
-    pub(crate) fn options(&self) -> SessionOptions {
+    /// Options for a session build on `choice` (`None`: the start-up
+    /// choice). The notes index is re-read every time, so `/new` and
+    /// `/resume` pick up notes saved meanwhile.
+    pub(crate) fn options(&self, choice: Option<ModelChoice>) -> SessionOptions {
         SessionOptions {
             external_tools: Some(Arc::clone(&self.external_tools)),
             additional_instructions: prompt_index(self.notes.user(), self.notes.workspace())
                 .into_iter()
                 .collect(),
-            model: None,
-            provider: None,
+            choice,
             approval: Some(Arc::clone(&self.approval)),
         }
     }
@@ -372,6 +373,8 @@ pub(crate) struct RunnerParts {
     pub(crate) runtime: Runtime,
     pub(crate) template: Template,
     pub(crate) session: SessionHandle,
+    /// The start session's committed transcript when it was resumed.
+    pub(crate) transcript: Option<meerkat_core::Session>,
     pub(crate) agent_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
     pub(crate) ui_tx: mpsc::UnboundedSender<Msg>,
     pub(crate) effect_rx: mpsc::UnboundedReceiver<Effect>,
@@ -398,6 +401,20 @@ pub(crate) struct Runner {
     held_unsent: Vec<(Option<PendingId>, String)>,
     /// The approval engine's channels and open escalations.
     approval: approval::ApprovalDesk,
+    /// Endpoint of the current session's model.
+    current_endpoint: String,
+    /// Model lists of every endpoint, once fetched.
+    models: Option<crate::models::ModelCache>,
+    /// A model-list fetch running in the background.
+    model_fetch: Option<models::ModelFetch>,
+    /// The picker opens when the running fetch finishes.
+    picker_waiting: bool,
+    /// A `/model <id>` waiting for the lists.
+    pending_set: Option<String>,
+    /// Prices for the cost readout.
+    prices: Arc<crate::pricing::PriceTable>,
+    /// A community price-list refresh running in the background.
+    price_fetch: Option<cost::PriceFetch>,
 }
 
 impl Runner {
@@ -406,6 +423,7 @@ impl Runner {
             mut runtime,
             template,
             session,
+            transcript,
             agent_tx,
             ui_tx,
             effect_rx,
@@ -418,6 +436,12 @@ impl Runner {
             runtime.approval.events.take(),
         );
         let notices = std::mem::take(&mut runtime.approval.notices);
+        let models = runtime.models.take();
+        let prices = Arc::new(runtime.pricing.table.clone());
+        let price_fetch = runtime.pricing.refresh_url().map(|url| {
+            cost::spawn_price_fetch(url.to_string(), runtime.pricing.cache_path.clone())
+        });
+        let current_endpoint = runtime.choice.endpoint.clone();
         let mut runner = Self {
             runtime,
             template,
@@ -433,10 +457,27 @@ impl Runner {
             delivered: Vec::new(),
             held_unsent: Vec::new(),
             approval: desk,
+            current_endpoint,
+            models,
+            model_fetch: None,
+            picker_waiting: false,
+            pending_set: None,
+            prices,
+            price_fetch,
         };
         runner.push_auto_status();
+        for notice in runner.runtime.confinement.notices.clone() {
+            runner.notice(NoticeLevel::Info, notice);
+        }
         for notice in notices {
             runner.notice(NoticeLevel::Warn, notice);
+        }
+        runner.push_prices();
+        runner.show_session(transcript.as_ref(), false);
+        // Fetch the lists in the background, for the picker, bare-id
+        // lookups, the gauge and endpoint prices.
+        if runner.models.is_none() && runner.runtime.endpoints.iter().any(|e| e.has_key()) {
+            runner.ensure_fetch(false);
         }
         runner.follow_events().await;
         runner
@@ -461,6 +502,8 @@ impl Runner {
                 Some(done) = self.completion_rx.recv() => self.on_completed(done).await,
                 Some(request) = recv(&mut self.approval.escalations) => self.on_escalation(request),
                 Some(event) = recv_unbounded(&mut self.approval.events) => self.on_approval_event(event),
+                joined = join(&mut self.model_fetch) => self.model_fetch_finished(joined).await,
+                joined = join(&mut self.price_fetch) => self.price_fetch_finished(joined),
                 Some(diff) = self.diff_rx.recv() => self.send(Msg::Diff {
                     tool_use_id: diff.tool_use_id,
                     path: diff.path.display().to_string(),
@@ -518,10 +561,8 @@ impl Runner {
             | Effect::ListRules
             | Effect::SetAutoMode(_)
             | Effect::ResumeAutoMode) => self.handle_approval_effect(effect),
-            Effect::SetModel(_) | Effect::RequestModelPicker { .. } => self.notice(
-                NoticeLevel::Warn,
-                "switching models is not available in this build yet; restart with --model",
-            ),
+            Effect::SetModel(reference) => self.set_model(reference).await,
+            Effect::RequestModelPicker { refresh } => self.request_model_picker(refresh),
             Effect::Remember(_) => self.notice(
                 NoticeLevel::Warn,
                 "/remember is not available in this build yet; edit AGENTS.md instead",
@@ -530,9 +571,7 @@ impl Runner {
                 "manual compaction is not available: the runtime compacts the context automatically"
                     .to_string(),
             )))),
-            // The per-session cost sidecar arrives with the cost phase; the
-            // readout itself lives in the UI.
-            Effect::CostSnapshot(_) => {}
+            Effect::CostSnapshot(snapshot) => self.save_cost_snapshot(&snapshot),
         }
     }
 
@@ -845,6 +884,16 @@ impl Runner {
 async fn next_event(events: &mut Option<EventStream>) -> Option<EventEnvelope<AgentEvent>> {
     match events {
         Some(stream) => stream.next().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The result of an optional background task, or never.
+async fn join<T>(
+    task: &mut Option<tokio::task::JoinHandle<T>>,
+) -> Result<T, tokio::task::JoinError> {
+    match task {
+        Some(handle) => handle.await,
         None => std::future::pending().await,
     }
 }

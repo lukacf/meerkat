@@ -1,6 +1,33 @@
 //! Tier classification: decides, without any LLM call, whether a tool call is
 //! denied by a user rule (Tier 0), always allowed (Tier 1), an in-project edit
 //! (Tier 2), or must be reviewed by the classifier (Tier 3).
+//!
+//! # The tiers and the OS confinement
+//!
+//! The tiers do not change with `--confinement`: the sandbox is defense in
+//! depth under the gate, not a reason to review less. What the shell's
+//! confinement ([`crate::bootstrap::confinement`]) already contains, for a
+//! Tier-3 shell command the classifier allows (or wrongly allows):
+//!
+//! - **Writes outside the workspace** (`rm -rf ~/…`, editing `~/.bashrc`,
+//!   `~/.ssh`, `/etc`): refused by the backend in `workspace` and `strict`
+//!   mode, except in the temp dir, the Cargo home and the user cache dir,
+//!   which the workspace mode grants.
+//! - **Reading secrets outside the workspace** (`~/.ssh`, `~/.aws`, browser
+//!   profiles, the credential store): not visible to the process at all;
+//!   only the workspace, the granted extras and the platform baseline are.
+//! - **Exfiltration and downloads** (`curl … | sh`, posting files to a
+//!   remote host): contained only in `strict` mode, which denies IP network
+//!   access; the default `workspace` mode keeps the network so `cargo fetch`
+//!   works, so the classifier remains the only guard there.
+//! - **Lingering processes** (`nohup`, daemons): every shell launch runs in
+//!   durable process custody, so an interrupted or crashed run's processes
+//!   are stopped, whatever the mode.
+//!
+//! Not contained by any mode: anything inside the workspace (deleting the
+//! project, rewriting git history, editing `.rkat/` state; protected paths
+//! keep Tier 2 off them, and on Linux the backend has no deny lists), and
+//! everything the model does through the network in `workspace` mode.
 
 use super::patch_targets::{ParseError, affected_paths};
 use super::rules::{RuleId, RuleSet};

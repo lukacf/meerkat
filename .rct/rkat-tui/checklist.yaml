@@ -111,7 +111,7 @@ phases:
         done_when: "A scripted-client test returns a classifier verdict that the gate applies."
   - id: 3
     title: "Confinement And Custody"
-    status: pending
+    status: done
     reviewers: [spec-auditor]
     verification_commands:
       - "./scripts/repo-cargo nextest run -p meerkat-tui"
@@ -119,11 +119,11 @@ phases:
       - id: P3-T001
         spec_id: CONTRACT-006
         text: "Wire --confinement into AgentFactory::with_shell_confinement."
-        done: false
+        done: true
         done_when: "A test proves each mode reaches the launch confinement."
   - id: 4
     title: "Models, Endpoints, Cost"
-    status: pending
+    status: done
     reviewers: [spec-auditor]
     verification_commands:
       - "./scripts/repo-cargo nextest run -p meerkat-tui"
@@ -131,7 +131,7 @@ phases:
       - id: P4-T001
         spec_id: REQ-004
         text: "Hot-swap the session model from the picker."
-        done: false
+        done: true
         done_when: "A test switches the model mid-session and the next turn uses it."
   - id: 5
     title: "Mobs"

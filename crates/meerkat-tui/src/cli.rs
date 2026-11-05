@@ -104,10 +104,11 @@ pub struct Args {
     #[arg(long)]
     pub state_root: Option<PathBuf>,
 
-    /// OS process confinement for the shell, command hooks and MCP stdio
-    /// servers the session launches: `workspace` confines each launch to the
-    /// workspace directory, `strict` additionally denies IP network access,
-    /// `off` launches them unconfined.
+    /// OS process confinement of the shell commands the session runs:
+    /// `workspace` lets them write only the workspace, the temp dir, the
+    /// Cargo home and the cache dir (network allowed), `strict` additionally
+    /// denies IP network access, `off` runs them unconfined. A mode this host
+    /// cannot enforce (e.g. no unprivileged user namespaces) refuses to start.
     #[arg(long, value_enum, value_name = "MODE", default_value_t = ConfinementArg::Workspace)]
     pub confinement: ConfinementArg,
 

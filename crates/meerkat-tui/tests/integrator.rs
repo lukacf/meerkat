@@ -331,12 +331,6 @@ async fn later_phase_effects_answer_honestly() {
         .wait_for(|msg| matches!(msg, Msg::CompactFinished(_)))
         .await;
     assert!(matches!(msg, Msg::CompactFinished(Err(_))), "{msg:?}");
-    rig.send(Effect::SetModel("gpt-5.5".into()));
-    let msg = rig.wait_for(|msg| matches!(msg, Msg::Notice { .. })).await;
-    assert!(
-        matches!(&msg, Msg::Notice { text, .. } if text.contains("not available")),
-        "{msg:?}"
-    );
     // A steer without a running turn is refused so the UI sends it as a turn.
     rig.send(steer(7, "idle"));
     let msg = rig

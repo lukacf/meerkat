@@ -85,7 +85,6 @@ ignored = [
     "meerkat-memory",
     "meerkat-mob",
     "meerkat-mob-mcp",
-    "meerkat-sandbox",
     "meerkat-session",
 ]
 

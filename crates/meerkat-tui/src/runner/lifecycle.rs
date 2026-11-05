@@ -5,8 +5,10 @@
 use meerkat_core::{AssistantBlock, Message, Session, SessionMeta, TranscriptUserRole};
 
 use super::Runner;
+use super::cost::session_cost;
 use crate::bootstrap::Runtime;
 use crate::cli::Args;
+use crate::endpoints::{ENDPOINT_REALM, EndpointRef, load_choice, restore_choice};
 use crate::error::TuiError;
 use crate::session::{SessionHandle, SessionOptions, list_sessions, resolve_session_ref};
 use crate::ui::{Block, Msg, NoticeLevel, SessionCost, StatusUpdate, ToolState};
@@ -55,43 +57,59 @@ pub async fn open_start(
     }
 }
 
-/// UI messages that show `session` (status bar, transcript, cost); the
-/// transcript and cost come from `transcript` when resuming.
-pub fn session_messages(session: &SessionHandle, transcript: Option<&Session>) -> Vec<Msg> {
+/// UI messages that show `session` on `endpoint` (status bar, transcript,
+/// cost totals `cost`). A resumed session's transcript comes from
+/// `transcript`; a fresh one clears the transcript when `reset` is set.
+pub fn session_messages(
+    session: &SessionHandle,
+    endpoint: &str,
+    transcript: Option<&Session>,
+    cost: SessionCost,
+    reset: bool,
+) -> Vec<Msg> {
+    let usage = transcript.map(Session::total_usage).unwrap_or_default();
     let mut msgs = vec![
         Msg::Status(StatusUpdate::Session(session.id().to_string())),
         Msg::Status(StatusUpdate::Model {
-            provider: session.provider().as_str().to_string(),
+            provider: endpoint.to_string(),
             model: session.model().to_string(),
         }),
+        Msg::Status(StatusUpdate::Tokens {
+            input: usage.input_tokens,
+            output: usage.output_tokens,
+        }),
+        Msg::Status(StatusUpdate::CostTotals(cost)),
     ];
     match transcript {
-        Some(transcript) => {
-            let usage = transcript.total_usage();
-            msgs.push(Msg::Status(StatusUpdate::Tokens {
-                input: usage.input_tokens,
-                output: usage.output_tokens,
-            }));
-            // Per-model cost sidecars arrive with the cost phase (P4); until
-            // then the resumed totals are derived and marked approximate.
-            msgs.push(Msg::Status(StatusUpdate::CostTotals(SessionCost::derived(
-                session.model(),
-                &usage,
-            ))));
-            msgs.push(Msg::ResetTranscript(blocks_from_session(transcript)));
-        }
-        None => {
-            msgs.push(Msg::Status(StatusUpdate::Tokens {
-                input: 0,
-                output: 0,
-            }));
-            msgs.push(Msg::Status(
-                StatusUpdate::CostTotals(SessionCost::default()),
-            ));
-            msgs.push(Msg::ResetTranscript(Vec::new()));
-        }
+        Some(transcript) => msgs.push(Msg::ResetTranscript(blocks_from_session(transcript))),
+        None if reset => msgs.push(Msg::ResetTranscript(Vec::new())),
+        None => {}
     }
     msgs
+}
+
+/// The endpoint a session runs on: a configured endpoint's binding names
+/// it; else the session's sidecar, else its provider's built-in endpoint
+/// (see [`restore_choice`]). Returns a notice when it had to fall back.
+#[must_use]
+pub fn session_endpoint(runtime: &Runtime, session: &SessionHandle) -> (String, Option<String>) {
+    if let Some(binding) = session.auth_binding()
+        && binding.realm.as_str() == ENDPOINT_REALM
+        && runtime.endpoints.get(binding.binding.as_str()).is_some()
+    {
+        return (binding.binding.as_str().to_string(), None);
+    }
+    let realm = runtime.scope.realm_root();
+    let stored = load_choice(&realm, &session.id().to_string())
+        .filter(|stored| stored.model == session.model());
+    let (choice, notice) = restore_choice(
+        stored,
+        Some((session.provider(), session.model().to_string())),
+        runtime.endpoints.as_slice(),
+        |name| runtime.endpoints.get(name).is_some(),
+        &EndpointRef::new(runtime.choice.endpoint.clone(), session.model()),
+    );
+    (choice.endpoint, notice)
 }
 
 impl Runner {
@@ -100,7 +118,11 @@ impl Runner {
         if self.refuse_switch_while_busy() {
             return;
         }
-        match SessionHandle::create(&self.runtime, self.template.options()).await {
+        let choice = self
+            .runtime
+            .choice_for(&self.current_choice())
+            .unwrap_or_else(|_| self.runtime.choice.clone());
+        match SessionHandle::create(&self.runtime, self.template.options(Some(choice))).await {
             Ok(session) => self.switch_to(session, None).await,
             Err(err) => self.notice(
                 NoticeLevel::Error,
@@ -125,17 +147,17 @@ impl Runner {
             self.notice(NoticeLevel::Info, "already in this session");
             return;
         }
-        let opened = match SessionHandle::resume(&self.runtime, &id, self.template.options()).await
-        {
-            Ok(session) => session,
-            Err(err) => {
-                self.notice(
-                    NoticeLevel::Error,
-                    format!("could not resume {reference}: {err}"),
-                );
-                return;
-            }
-        };
+        let opened =
+            match SessionHandle::resume(&self.runtime, &id, self.template.options(None)).await {
+                Ok(session) => session,
+                Err(err) => {
+                    self.notice(
+                        NoticeLevel::Error,
+                        format!("could not resume {reference}: {err}"),
+                    );
+                    return;
+                }
+            };
         match opened.read().await {
             Ok(transcript) => self.switch_to(opened, Some(transcript)).await,
             Err(err) => {
@@ -183,9 +205,39 @@ impl Runner {
         if let Err(err) = previous.retire().await {
             tracing::warn!(error = %err, session = %previous.id(), "could not retire the previous session");
         }
-        for msg in session_messages(&self.session, transcript.as_ref()) {
+        self.show_session(transcript.as_ref(), true);
+    }
+
+    /// Seed the UI with the current session: its endpoint, status, cost
+    /// totals (the sidecar's for a resumed session) and transcript; record
+    /// the choice in the sidecar.
+    pub(super) fn show_session(&mut self, transcript: Option<&Session>, reset: bool) {
+        let (endpoint, notice) = match transcript {
+            Some(_) => session_endpoint(&self.runtime, &self.session),
+            None => (self.current_endpoint.clone(), None),
+        };
+        self.current_endpoint = endpoint;
+        if let Some(text) = notice {
+            self.notice(NoticeLevel::Warn, text);
+        }
+        let cost = transcript.map_or_else(SessionCost::default, |transcript| {
+            session_cost(
+                &self.runtime.scope.realm_root(),
+                transcript,
+                self.session.model(),
+            )
+        });
+        for msg in session_messages(
+            &self.session,
+            &self.current_endpoint,
+            transcript,
+            cost,
+            reset,
+        ) {
             self.send(msg);
         }
+        self.push_context_window();
+        self.save_current_choice();
     }
 }
 

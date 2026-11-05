@@ -8,7 +8,8 @@
 //! The API key is only ever placed in request headers — never in a URL, log
 //! line or error message.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use meerkat_core::Provider;
@@ -16,7 +17,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use crate::bootstrap::credentials::ProviderCredentials;
-use crate::endpoints::{Dialect, Endpoint};
+use crate::endpoints::{Dialect, Endpoint, ModelIndex};
 use crate::pricing::ModelPrice;
 
 /// Default Anthropic API base (mirrors `meerkat-client`).
@@ -76,6 +77,11 @@ pub enum ListModelsError {
     /// The provider has no supported list-models endpoint.
     #[error("listing models is not supported for provider `{}`", .0.as_str())]
     Unsupported(Provider),
+    /// The endpoint's credential is not one the TUI can read (a token
+    /// store, OAuth or command source): sessions still use it, but the list
+    /// cannot be fetched.
+    #[error("no API key to list models with (the credential is resolved by the engine)")]
+    NoKey,
 }
 
 impl From<reqwest::Error> for ListModelsError {
@@ -172,6 +178,9 @@ pub async fn list_endpoint(
     endpoint: &Endpoint,
     timeout: Duration,
 ) -> Result<EndpointListing, ListModelsError> {
+    if !endpoint.has_key() {
+        return Err(ListModelsError::NoKey);
+    }
     let creds = endpoint.credentials();
     let mut listing = EndpointListing {
         models: list_models(&creds, timeout).await?,
@@ -570,6 +579,106 @@ async fn list_gemini(
         }
     }
     Ok(entries)
+}
+
+// ---------------------------------------------------------------------------
+// Process-wide model lists
+// ---------------------------------------------------------------------------
+
+/// Timeout of each list-models request.
+pub const LIST_MODELS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Per-endpoint results of one fetch, in endpoint order.
+pub type FetchResults = Vec<(String, Result<EndpointListing, ListModelsError>)>;
+
+/// Fetches the model lists of a set of endpoints (in parallel, each with its
+/// own timeout). Injectable so hosts and tests can serve lists without
+/// network access.
+pub type ModelLister =
+    Arc<dyn Fn(Vec<Endpoint>) -> futures::future::BoxFuture<'static, FetchResults> + Send + Sync>;
+
+/// The live lister: [`list_all_endpoints`] with [`LIST_MODELS_TIMEOUT`].
+#[must_use]
+pub fn live_lister() -> ModelLister {
+    Arc::new(|endpoints: Vec<Endpoint>| {
+        Box::pin(async move { list_all_endpoints(&endpoints, LIST_MODELS_TIMEOUT).await })
+    })
+}
+
+/// Model lists by endpoint name: the list, or a one-line warning. Fetched
+/// once per process (and on `/model refresh`).
+#[derive(Debug, Clone, Default)]
+pub struct ModelCache {
+    lists: HashMap<String, Result<Vec<ModelEntry>, String>>,
+}
+
+impl ModelCache {
+    /// A cache from fetch results, and the prices the endpoints reported.
+    #[must_use]
+    pub fn from_results(results: FetchResults) -> (Self, Vec<(String, ModelPrice)>) {
+        let mut prices = Vec::new();
+        let lists = results
+            .into_iter()
+            .map(|(name, result)| {
+                let result = match result {
+                    Ok(listing) => {
+                        prices.extend(listing.prices);
+                        Ok(listing.models)
+                    }
+                    Err(err) => {
+                        tracing::warn!(endpoint = %name, error = %err, "could not list models");
+                        Err(fetch_warning(&err))
+                    }
+                };
+                (name, result)
+            })
+            .collect();
+        (Self { lists }, prices)
+    }
+
+    /// A cache in which every endpoint of `names` failed with `warning`.
+    #[must_use]
+    pub fn failed(names: impl IntoIterator<Item = String>, warning: &str) -> Self {
+        Self {
+            lists: names
+                .into_iter()
+                .map(|name| (name, Err(warning.to_string())))
+                .collect(),
+        }
+    }
+
+    /// The list (or warning) of `endpoint`, `None` when it was not fetched.
+    #[must_use]
+    pub fn get(&self, endpoint: &str) -> Option<&Result<Vec<ModelEntry>, String>> {
+        self.lists.get(endpoint)
+    }
+
+    /// The entry for `model` in `endpoint`'s list.
+    #[must_use]
+    pub fn entry(&self, endpoint: &str, model: &str) -> Option<&ModelEntry> {
+        self.lists
+            .get(endpoint)?
+            .as_ref()
+            .ok()?
+            .iter()
+            .find(|entry| entry.id == model)
+    }
+
+    /// The first model `endpoint` lists.
+    #[must_use]
+    pub fn first(&self, endpoint: &str) -> Option<&ModelEntry> {
+        self.lists.get(endpoint)?.as_ref().ok()?.first()
+    }
+
+    /// Which endpoints list which ids (the successful lists only).
+    #[must_use]
+    pub fn index(&self) -> ModelIndex {
+        ModelIndex::from_lists(
+            self.lists.iter().filter_map(|(name, list)| {
+                list.as_ref().ok().map(|l| (name.as_str(), l.as_slice()))
+            }),
+        )
+    }
 }
 
 #[cfg(test)]

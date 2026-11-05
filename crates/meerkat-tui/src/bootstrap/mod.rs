@@ -18,16 +18,24 @@
 //! every session the TUI opens installs its gate as the build's
 //! `ToolDispatchAdmission` (see [`crate::session`]).
 //!
+//! It also lowers `--confinement` into the shell's OS confinement
+//! ([`confinement::plan`], installed with `AgentFactory::with_shell_confinement`),
+//! discovers the LLM endpoints ([`crate::endpoints`]), picks the start-up
+//! model ([`plan_model`]) and loads the price table.
+//!
+//! The factory reads its config from a TUI-owned in-memory store
+//! ([`Runtime::config_store`]): the realm config plus the endpoint layer
+//! ([`crate::endpoints::lower_into`]) and the `[models.<id>]` profiles of
+//! models only an endpoint knows ([`Runtime::ensure_profile`]). Nothing of it
+//! is written to a realm document.
+//!
 //! Seams for later phases (deliberately absent here, not stubbed):
-//! - P3 confinement: `AgentFactory::with_shell_confinement`; until then the
-//!   shell runs unconfined behind the approval gate ([`build_factory`]).
-//! - P4 endpoints and models: model selection here is `--model` /
-//!   `--provider` / the realm config only ([`resolve_model`]).
 //! - P5 mobs: `AgentFactory::mob(true)`.
 //! - P6 instruction files beyond the native `AGENTS.md` discovery, MCP from
 //!   `.rkat/mcp.toml`, native semantic memory.
 
 pub mod approval;
+pub mod confinement;
 pub mod credentials;
 pub mod dirs;
 pub mod persona;
@@ -35,19 +43,29 @@ pub mod scope;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use meerkat::surface::build_runtime_backed_service_with_default_reconfigure_host;
 use meerkat::{
     AgentFactory, FactoryAgentBuilder, LlmClient, PersistentSessionService, SessionStore,
 };
-use meerkat_core::{Config, Provider};
+use meerkat_core::connection::RealmId;
+use meerkat_core::{AuthBindingRef, Config, ConfigStore, MemoryConfigStore, Provider};
 use meerkat_runtime::MeerkatMachine;
 use meerkat_store::{RealmBackend, realm_paths_in};
+use meerkat_tools::builtin::shell::ShellConfinement;
 
 use crate::cli::Args;
+use crate::endpoints::{
+    EndpointRef, EndpointRegistry, StartupPlan, StartupRequest, ensure_model_profile, lower_into,
+    needs_lookup, plan_startup,
+};
 use crate::error::TuiError;
+use crate::models::{ModelCache, ModelEntry, ModelLister, live_lister};
+use crate::pricing::PricingSetup;
 
 pub use approval::{ApprovalOverrides, ApprovalParts};
+pub use confinement::{ConfinementPlan, HostPaths};
 pub use dirs::GlobalDirs;
 pub use persona::CODING_PERSONA;
 pub use scope::{RuntimeScope, load_config, resolve_scope};
@@ -63,16 +81,53 @@ const CONFIG_STATE_FILE: &str = "config_state.json";
 /// The session service the TUI drives.
 pub type TuiService = PersistentSessionService<FactoryAgentBuilder>;
 
+/// The model a session runs on, and where it comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelChoice {
+    /// Endpoint name (`anthropic`, `litellm`, …).
+    pub endpoint: String,
+    /// Model id as the endpoint knows it.
+    pub model: String,
+    /// The provider whose client speaks the endpoint's dialect.
+    pub provider: Provider,
+    /// The explicit auth binding of a configured endpoint (`None`: default
+    /// resolution, the built-in endpoints).
+    pub auth_binding: Option<AuthBindingRef>,
+}
+
+impl ModelChoice {
+    /// The choice as an `endpoint:model` reference.
+    #[must_use]
+    pub fn reference(&self) -> EndpointRef {
+        EndpointRef::new(self.endpoint.clone(), self.model.clone())
+    }
+}
+
 /// Everything a running TUI needs from the engine.
 pub struct Runtime {
     /// Project, conventions roots and realm.
     pub scope: RuntimeScope,
-    /// Realm config with env overrides applied.
+    /// Realm config with env overrides applied (without the endpoint layer).
     pub config: Config,
-    /// Model for new sessions.
-    pub model: String,
-    /// Provider of [`Runtime::model`].
-    pub provider: Provider,
+    /// The effective config the factory reads (realm config plus the
+    /// endpoint layer); `/model` adds profiles to it.
+    pub config_store: Arc<MemoryConfigStore>,
+    /// Bumped whenever [`Runtime::ensure_profile`] adds a profile. An agent
+    /// captures its model registry when it is built, so a session built at
+    /// an older generation is rebuilt before it can switch to a new model.
+    pub profile_generation: Arc<AtomicU64>,
+    /// Model of new sessions.
+    pub choice: ModelChoice,
+    /// The LLM endpoints of this process.
+    pub endpoints: EndpointRegistry,
+    /// Model lists fetched during start-up, if any.
+    pub models: Option<ModelCache>,
+    /// Fetches the endpoints' model lists.
+    pub lister: ModelLister,
+    /// The price table and where to refresh it.
+    pub pricing: PricingSetup,
+    /// The shell's OS confinement.
+    pub confinement: ConfinementPlan,
     /// Session lifecycle substrate.
     pub service: Arc<TuiService>,
     /// Runtime control plane: input admission, interrupt, registrations.
@@ -89,11 +144,75 @@ impl std::fmt::Debug for Runtime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Runtime")
             .field("scope", &self.scope)
-            .field("model", &self.model)
-            .field("provider", &self.provider)
+            .field("choice", &self.choice)
+            .field("endpoints", &self.endpoints.names())
+            .field("confinement", &self.confinement.mode)
             .field("backend", &self.backend)
             .finish_non_exhaustive()
     }
+}
+
+impl Runtime {
+    /// The choice for `reference` on this process's endpoints.
+    ///
+    /// # Errors
+    ///
+    /// [`TuiError::Endpoint`] when the endpoint is unknown.
+    pub fn choice_for(&self, reference: &EndpointRef) -> Result<ModelChoice, TuiError> {
+        choice_for(&self.endpoints, reference)
+    }
+
+    /// Make sure the factory knows a capability profile for `choice`'s model
+    /// (see [`ensure_model_profile`]), adding a `[models.<id>]` entry to the
+    /// in-memory config when only the endpoint knows it.
+    ///
+    /// # Errors
+    ///
+    /// [`TuiError::Endpoint`] when the profile cannot be added.
+    pub async fn ensure_profile(
+        &self,
+        choice: &ModelChoice,
+        listed: Option<&ModelEntry>,
+    ) -> Result<(), TuiError> {
+        let mut config = self
+            .config_store
+            .get()
+            .await
+            .map_err(|err| TuiError::Endpoint(format!("read the session config: {err}")))?;
+        if ensure_model_profile(&mut config, choice.provider, &choice.model, listed)? {
+            self.config_store.set(config).await.map_err(|err| {
+                TuiError::Endpoint(format!("cannot register model `{}`: {err}", choice.model))
+            })?;
+            self.profile_generation.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    /// The current [`Runtime::profile_generation`].
+    #[must_use]
+    pub fn profiles(&self) -> u64 {
+        self.profile_generation.load(Ordering::SeqCst)
+    }
+}
+
+/// The choice for `reference` on `endpoints`.
+fn choice_for(
+    endpoints: &EndpointRegistry,
+    reference: &EndpointRef,
+) -> Result<ModelChoice, TuiError> {
+    let endpoint = endpoints.get(&reference.endpoint).ok_or_else(|| {
+        TuiError::Endpoint(format!(
+            "unknown endpoint `{}` (configured: {})",
+            reference.endpoint,
+            endpoints.names().join(", ")
+        ))
+    })?;
+    Ok(ModelChoice {
+        endpoint: endpoint.name.clone(),
+        model: reference.model.clone(),
+        provider: endpoint.provider(),
+        auth_binding: endpoint.binding(),
+    })
 }
 
 /// Engine-level overrides for [`bootstrap_with`].
@@ -101,11 +220,17 @@ impl std::fmt::Debug for Runtime {
 pub struct BootstrapOptions {
     /// Serve every session with this client instead of resolving provider
     /// credentials (tests, or a host that already built a client). With an
-    /// override the user's provider token store is not opened, and the
-    /// classifier runs on the same client.
+    /// override the user's provider token store is not opened, the
+    /// classifier runs on the same client, and every built-in endpoint
+    /// exists (keyless, so its list is not fetched).
     pub llm_override: Option<Arc<dyn LlmClient>>,
     /// Approval-engine overrides (classifier, escalation timeout).
     pub approval: ApprovalOverrides,
+    /// Fetch model lists with this instead of the live endpoints.
+    pub lister: Option<ModelLister>,
+    /// The directories outside the workspace a confined shell may use
+    /// (default: [`HostPaths::detect`]).
+    pub host_paths: Option<HostPaths>,
 }
 
 /// Resolve the runtime scope and load the realm config.
@@ -133,7 +258,8 @@ pub async fn bootstrap(args: &Args, options: BootstrapOptions) -> Result<Runtime
 ///
 /// # Errors
 ///
-/// [`TuiError::Provider`] when no provider can be determined for the model,
+/// [`TuiError::Endpoint`] when no start-up model can be chosen,
+/// [`TuiError::Confinement`] when `--confinement` cannot be enforced,
 /// [`TuiError::Persistence`] when the realm cannot be opened,
 /// [`TuiError::Overlay`] / [`TuiError::Approval`] when the approval rules or
 /// ledger cannot be loaded, and [`TuiError::Composition`] when the runtime
@@ -144,7 +270,31 @@ pub async fn bootstrap_with(
     args: &Args,
     options: BootstrapOptions,
 ) -> Result<Runtime, TuiError> {
-    let (model, provider) = resolve_model(args, &config)?;
+    let (mut layered, mut approval_notices) = approval::load_layers(&scope, args)?;
+    let realm = RealmId::parse(scope.realm_id.clone()).ok();
+    let (mut endpoints, endpoint_notices) =
+        EndpointRegistry::discover(&config, realm.as_ref(), &layered.endpoints);
+    if options.llm_override.is_some() {
+        endpoints.add_keyless_builtins();
+    }
+    let lister = options.lister.clone().unwrap_or_else(live_lister);
+    let (choice, models) = plan_model(args, &config, &endpoints, &lister).await?;
+
+    let mut effective = config.clone();
+    lower_into(&mut effective, endpoints.as_slice())?;
+    let listed = models
+        .as_ref()
+        .and_then(|cache| cache.entry(&choice.endpoint, &choice.model));
+    ensure_model_profile(&mut effective, choice.provider, &choice.model, listed)?;
+
+    let host_paths = options.host_paths.clone().unwrap_or_else(HostPaths::detect);
+    let confinement = confinement::plan(
+        args.effective_confinement(),
+        scope.project_root.as_path(),
+        &config,
+        &host_paths,
+    )?;
+
     let (manifest, persistence) = meerkat::open_realm_persistence_in(
         &scope.state_root,
         &scope.realm_id,
@@ -158,20 +308,41 @@ pub async fn bootstrap_with(
         .store_path()
         .map_or_else(|| realm_root.clone(), PathBuf::from);
 
-    let factory = build_factory(&scope, store_path, options.llm_override.is_none());
+    let factory = build_factory(
+        &scope,
+        store_path,
+        options.llm_override.is_none(),
+        &confinement.shell,
+    );
+    let pricing = PricingSetup::load(
+        std::mem::take(&mut layered.pricing),
+        scope.global.as_ref().map(GlobalDirs::pricing_cache),
+        !args.no_pricing_fetch,
+    );
+    approval_notices.extend(endpoint_notices.iter().map(ToString::to_string));
     let approval = approval::build(
         &scope,
-        args,
+        layered,
+        approval_notices,
         approval::ClassifierSource {
             factory: &factory,
-            config: &config,
-            provider,
+            config: &effective,
+            provider: choice.provider,
+            auth_binding: choice.auth_binding.clone(),
             llm_override: options.llm_override.clone(),
         },
         &options.approval,
     )
     .await?;
-    let mut builder = FactoryAgentBuilder::new(factory, config.clone());
+    let config_store = Arc::new(MemoryConfigStore::new(
+        effective.clone(),
+        meerkat_models::canonical(),
+    ));
+    let mut builder = FactoryAgentBuilder::new_with_config_store(
+        factory,
+        effective,
+        Arc::clone(&config_store) as Arc<dyn ConfigStore>,
+    );
     builder.default_llm_client = options.llm_override;
     let (service, machine) = build_runtime_backed_service_with_default_reconfigure_host(
         builder,
@@ -183,8 +354,14 @@ pub async fn bootstrap_with(
     Ok(Runtime {
         scope,
         config,
-        model,
-        provider,
+        config_store,
+        profile_generation: Arc::new(AtomicU64::new(0)),
+        choice,
+        endpoints,
+        models,
+        lister,
+        pricing,
+        confinement,
         service,
         machine,
         store,
@@ -198,17 +375,22 @@ pub async fn bootstrap_with(
 /// `project_root` and `context_root` are the workspace, so the factory's
 /// native `AGENTS.md`, skills and hooks discovery see the project. Builtin
 /// tools and the shell are on: every call passes the approval gate each
-/// session installs (OS confinement of the shell arrives in P3). Mob tools
-/// stay off until P5. The file and note
-/// tools come in per session as external tools (see [`crate::session`]).
+/// session installs, and the shell runs under the OS confinement the caller
+/// installs ([`confinement::plan`]). Mob tools stay off until P5. The file
+/// and note tools come in per session as external tools (see
+/// [`crate::session`]). The factory's `runtime_root` is the realm, so every
+/// shell call runs in durable process custody (`<realm>/process_custody`),
+/// which the runtime-backed composition settles on every attachment.
 /// `with_token_store` attaches the user's provider token store, so OAuth and
 /// stored keys resolve like they do for `rkat`.
 fn build_factory(
     scope: &RuntimeScope,
     store_path: PathBuf,
     with_token_store: bool,
+    shell_confinement: &ShellConfinement,
 ) -> AgentFactory {
     let mut factory = AgentFactory::new(store_path)
+        .with_shell_confinement(shell_confinement.clone())
         .runtime_root(scope.realm_root())
         .project_root(scope.project_root.as_path())
         .context_root(scope.context_root.clone())
@@ -230,41 +412,73 @@ fn build_factory(
     factory
 }
 
-/// The model of new sessions and its provider.
+/// The model of new sessions, and the lists fetched to choose it.
 ///
-/// `--model` wins over the realm config's `agent.model`. The provider is
-/// `--provider` / `--endpoint` when it names a built-in provider, else
-/// inferred from the model id through the model catalog.
+/// `--model` (`endpoint:id` or a bare id), `--endpoint`/`--provider` and the
+/// realm config's `agent.model` are planned with [`plan_startup`]; the
+/// endpoints' lists are fetched first when a bare `--model` id could belong
+/// to several endpoints, or when the plan asks for an endpoint's first listed
+/// model.
 ///
 /// # Errors
 ///
-/// [`TuiError::Provider`] when `--provider` names no built-in provider or the
-/// model's provider cannot be inferred.
-pub fn resolve_model(args: &Args, config: &Config) -> Result<(String, Provider), TuiError> {
-    let model = args
-        .model
-        .clone()
-        .unwrap_or_else(|| config.agent.model.clone());
-    let named = args.provider.as_deref().or(args.endpoint.as_deref());
-    let provider = match named {
-        Some(name) => Provider::parse_strict(name).ok_or_else(|| {
-            TuiError::Provider(format!(
-                "`{name}` is not a built-in provider (anthropic, openai, gemini); custom endpoints arrive in a later release"
-            ))
-        })?,
-        None => meerkat_models::catalog::infer_provider(&model).ok_or_else(|| {
-            TuiError::Provider(format!(
-                "cannot tell the provider of model `{model}`; pass --provider"
-            ))
-        })?,
+/// [`TuiError::Endpoint`] when no endpoint is configured, the reference does
+/// not resolve, or the endpoint to take the first model of lists none.
+pub async fn plan_model(
+    args: &Args,
+    config: &Config,
+    endpoints: &EndpointRegistry,
+    lister: &ModelLister,
+) -> Result<(ModelChoice, Option<ModelCache>), TuiError> {
+    let request = StartupRequest {
+        model: args.model.as_deref(),
+        endpoint: args.endpoint.as_deref().or(args.provider.as_deref()),
+        config_model: &config.agent.model,
     };
-    Ok((model, provider))
+    let fetch = || async {
+        let listable = endpoints.iter().filter(|e| e.has_key()).cloned().collect();
+        ModelCache::from_results(lister(listable).await).0
+    };
+    let mut cache = None;
+    if request.endpoint.is_none()
+        && request
+            .model
+            .is_some_and(|model| needs_lookup(model, endpoints.as_slice()))
+    {
+        cache = Some(fetch().await);
+    }
+    let index = cache.as_ref().map(ModelCache::index).unwrap_or_default();
+    let reference = match plan_startup(request, endpoints.as_slice(), &index)? {
+        StartupPlan::Resolved(reference) => reference,
+        StartupPlan::FirstListed(name) => {
+            if cache.is_none() {
+                cache = Some(fetch().await);
+            }
+            let first = cache
+                .as_ref()
+                .and_then(|cache| cache.first(&name))
+                .ok_or_else(|| {
+                    let why = cache
+                        .as_ref()
+                        .and_then(|cache| cache.get(&name))
+                        .and_then(|list| list.as_ref().err().cloned())
+                        .unwrap_or_else(|| "it lists no models".to_string());
+                    TuiError::Endpoint(format!(
+                        "no model selected and endpoint `{name}` offers none ({why}); pass --model {name}:<id>"
+                    ))
+                })?;
+            EndpointRef::new(name, first.id.clone())
+        }
+    };
+    Ok((choice_for(endpoints, &reference)?, cache))
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::endpoints::{Dialect, Endpoint, SecretString};
+    use crate::models::{EndpointListing, ModelSource};
     use clap::Parser;
 
     fn args(extra: &[&str]) -> Args {
@@ -273,40 +487,131 @@ mod tests {
         Args::try_parse_from(argv).unwrap()
     }
 
-    #[test]
-    fn model_flag_wins_and_provider_is_inferred() {
-        let config = Config::default();
-        let (model, provider) =
-            resolve_model(&args(&["--model", "claude-sonnet-4-6"]), &config).unwrap();
-        assert_eq!(model, "claude-sonnet-4-6");
-        assert_eq!(provider, Provider::Anthropic);
-        let (model, provider) = resolve_model(&args(&["--model", "gpt-5.5"]), &config).unwrap();
-        assert_eq!((model.as_str(), provider), ("gpt-5.5", Provider::OpenAI));
+    fn ep(name: &str, dialect: Dialect, builtin: bool) -> Endpoint {
+        Endpoint {
+            name: name.to_string(),
+            dialect,
+            base_url: (!builtin).then(|| "http://127.0.0.1:4000".to_string()),
+            api_key: SecretString::new("k"),
+            key_env: None,
+            builtin,
+            priority: 0,
+        }
     }
 
-    #[test]
-    fn explicit_provider_and_errors() {
-        let config = Config::default();
-        let (_, provider) = resolve_model(
-            &args(&["--model", "my-local-model", "--provider", "openai"]),
-            &config,
-        )
-        .unwrap();
-        assert_eq!(provider, Provider::OpenAI);
-        let err = resolve_model(&args(&["--model", "my-local-model"]), &config).unwrap_err();
-        assert!(err.to_string().contains("--provider"), "{err}");
-        let err = resolve_model(&args(&["--provider", "litellm"]), &config).unwrap_err();
-        assert!(err.to_string().contains("not a built-in provider"), "{err}");
+    fn entry(id: &str) -> ModelEntry {
+        ModelEntry {
+            id: id.to_string(),
+            display_name: None,
+            source: ModelSource::Provider,
+            context_window: Some(64_000),
+            max_output_tokens: None,
+        }
     }
 
-    #[test]
-    fn default_model_comes_from_the_config() {
+    /// Lists `litellm: [llama3:8b, gpt-5.5]`, `openai: [gpt-5.5]`.
+    fn lister() -> ModelLister {
+        Arc::new(|endpoints: Vec<Endpoint>| {
+            Box::pin(async move {
+                endpoints
+                    .into_iter()
+                    .map(|e| {
+                        let models = match e.name.as_str() {
+                            "litellm" => vec![entry("llama3:8b"), entry("gpt-5.5")],
+                            "openai" => vec![entry("gpt-5.5")],
+                            _ => Vec::new(),
+                        };
+                        (
+                            e.name,
+                            Ok(EndpointListing {
+                                models,
+                                prices: Vec::new(),
+                            }),
+                        )
+                    })
+                    .collect()
+            })
+        })
+    }
+
+    fn registry() -> EndpointRegistry {
+        EndpointRegistry::from_endpoints(vec![
+            ep("anthropic", Dialect::Anthropic, true),
+            ep("openai", Dialect::OpenAi, true),
+            ep("litellm", Dialect::OpenAi, false),
+        ])
+    }
+
+    async fn plan(extra: &[&str], config_model: &str) -> Result<ModelChoice, TuiError> {
         let mut config = Config::default();
-        config.agent.model = "gemini-3.5-flash".to_string();
-        let (model, provider) = resolve_model(&args(&[]), &config).unwrap();
+        config.agent.model = config_model.to_string();
+        plan_model(&args(extra), &config, &registry(), &lister())
+            .await
+            .map(|(choice, _)| choice)
+    }
+
+    #[tokio::test]
+    async fn startup_model_planning() {
+        let choice = plan(&["--model", "claude-sonnet-4-6"], "").await.unwrap();
+        assert_eq!(choice.endpoint, "anthropic");
+        assert_eq!(choice.provider, Provider::Anthropic);
+        assert!(choice.auth_binding.is_none());
+        // A bare id only one endpoint lists resolves by lookup.
+        let choice = plan(&["--model", "llama3:8b"], "").await.unwrap();
         assert_eq!(
-            (model.as_str(), provider),
-            ("gemini-3.5-flash", Provider::Gemini)
+            (choice.endpoint.as_str(), choice.model.as_str()),
+            ("litellm", "llama3:8b")
         );
+        let binding = choice.auth_binding.unwrap();
+        assert_eq!(binding.realm.as_str(), crate::endpoints::ENDPOINT_REALM);
+        assert_eq!(binding.binding.as_str(), "litellm");
+        // Listed by both: the built-in of its dialect wins.
+        let choice = plan(&["--model", "gpt-5.5"], "").await.unwrap();
+        assert_eq!(choice.endpoint, "openai");
+        // Explicit endpoint.
+        let choice = plan(&["--model", "litellm:gpt-5.5"], "").await.unwrap();
+        assert_eq!(choice.endpoint, "litellm");
+        assert_eq!(choice.provider, Provider::OpenAI);
+        // `--provider` / `--endpoint` with a bare id.
+        let choice = plan(&["--endpoint", "litellm", "--model", "x"], "")
+            .await
+            .unwrap();
+        assert_eq!(choice.reference().to_string(), "litellm:x");
+        // `--endpoint` alone on a configured endpoint: its first listed model.
+        let choice = plan(&["--endpoint", "litellm"], "").await.unwrap();
+        assert_eq!(choice.reference().to_string(), "litellm:llama3:8b");
+        // The config model.
+        let choice = plan(&[], "gpt-5.5").await.unwrap();
+        assert_eq!(choice.reference().to_string(), "openai:gpt-5.5");
+        let err = plan(&["--provider", "nope"], "").await.unwrap_err();
+        assert!(err.to_string().contains("unknown endpoint `nope`"), "{err}");
+    }
+
+    #[test]
+    fn each_confinement_mode_reaches_the_factory_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = std::fs::canonicalize(dir.path()).unwrap();
+        let ws_arg = ws.to_str().unwrap();
+        for mode in ["workspace", "strict", "off"] {
+            let args = args(&["-w", ws_arg, "--confinement", mode]);
+            let scope = resolve_scope(&args).unwrap();
+            let shell = match confinement::lower(
+                args.effective_confinement(),
+                scope.project_root.as_path(),
+                &HostPaths::default(),
+            )
+            .unwrap()
+            {
+                Some(requirement) => ShellConfinement::Required { requirement },
+                None => ShellConfinement::TrustedHost,
+            };
+            let factory = build_factory(&scope, ws.join("store"), false, &shell);
+            assert_eq!(factory.shell_confinement(), &shell, "{mode}");
+            assert_eq!(
+                mode == "off",
+                shell == ShellConfinement::TrustedHost,
+                "{mode}"
+            );
+        }
     }
 }

@@ -1018,12 +1018,20 @@ impl App {
                         self.streamed_text = true;
                     }
                     // A turn without provider accounting advances no counter.
+                    // Its usage counts for the model the provider accounted
+                    // it to (the session's model unless it names none).
                     AgentEvent::TurnCompleted {
                         usage: Some(usage), ..
                     } => {
                         self.status.context_used = Some(context_tokens(usage));
                         self.status.context_approx = false;
-                        self.status.cost.record(&self.status.model, usage);
+                        let accounted = usage.accounting().model.trim();
+                        let model = if accounted.is_empty() {
+                            self.status.model.clone()
+                        } else {
+                            accounted.to_string()
+                        };
+                        self.status.cost.record(&model, usage);
                         fx.push(Effect::CostSnapshot(self.status.cost.clone()));
                     }
                     AgentEvent::CompactionCompleted { summary_tokens, .. } => {
@@ -3785,14 +3793,19 @@ mod tests {
         ))
     }
 
-    fn completed(input: u64, output: u64) -> Msg {
+    /// A turn whose usage the provider accounted to `model`.
+    fn completed_by(model: &str, input: u64, output: u64) -> Msg {
         agent(AgentEvent::TurnCompleted {
             stop_reason: StopReason::EndTurn,
-            usage: test_usage(Usage {
-                input_tokens: input,
-                output_tokens: output,
-                ..Usage::default()
-            }),
+            usage: Some(meerkat_core::TurnUsage::host_declared(
+                meerkat_core::Provider::Anthropic,
+                model,
+                Usage {
+                    input_tokens: input,
+                    output_tokens: output,
+                    ..Usage::default()
+                },
+            )),
             assistant_message_id: None,
         })
     }
@@ -3802,13 +3815,13 @@ mod tests {
     }
 
     #[test]
-    fn turn_completed_attributes_cost_to_the_current_model_and_snapshots() {
+    fn turn_completed_attributes_cost_to_the_accounted_model_and_snapshots() {
         let mut app = App::new(StatusInfo::default());
         app.update(Msg::Status(StatusUpdate::Model {
             provider: "anthropic".into(),
             model: "a".into(),
         }));
-        let fx = app.update(completed(1_000_000, 0));
+        let fx = app.update(completed_by("a", 1_000_000, 0));
         let mut expected = SessionCost::default();
         expected.add(
             "a",
@@ -3823,7 +3836,7 @@ mod tests {
             provider: "openai".into(),
             model: "b".into(),
         }));
-        let fx = app.update(completed(0, 1_000_000));
+        let fx = app.update(completed_by("b", 0, 1_000_000));
         expected.add(
             "b",
             &UsageTotals {
@@ -3854,6 +3867,47 @@ mod tests {
             "a", 0.42, 1.0,
         )]))));
         assert!(footer(&app).contains(" │ ~$0.42 │ "), "{}", footer(&app));
+        // Usage the provider accounted to another model (a dated snapshot
+        // id, a fallback) counts for that model, whatever the status says.
+        app.update(completed_by("c-2026-01-01", 2_000_000, 1_000_000));
+        assert_eq!(app.status.cost.per_model["c-2026-01-01"].input, 2_000_000);
+        assert_eq!(app.status.cost.per_model["b"].input, 0);
+    }
+
+    #[test]
+    fn session_cost_arithmetic_from_turns_and_the_classifier() {
+        let mut app = App::new(StatusInfo::default());
+        app.status.set_model("anthropic", "main");
+        app.update(Msg::Status(StatusUpdate::Prices(priced(&[
+            ("main", 3.0, 15.0),
+            ("judge", 1.0, 5.0),
+        ]))));
+        // 2 turns on `main`: 1.5M in / 0.2M out → 1.5×3 + 0.2×15 = $7.50.
+        app.update(completed_by("main", 1_000_000, 100_000));
+        app.update(completed_by("main", 500_000, 100_000));
+        // The classifier bucket: 1M in / 0.1M out → 1×1 + 0.1×5 = $1.50.
+        app.update(Msg::ClassifierUsage {
+            model: "judge".into(),
+            usage: Usage {
+                input_tokens: 1_000_000,
+                output_tokens: 100_000,
+                ..Usage::default()
+            },
+        });
+        let (usd, all) = app.status.cost.cost_usd(&app.status.prices);
+        assert!(all);
+        assert!((usd - 9.0).abs() < 1e-9, "{usd}");
+        assert!(footer(&app).contains(" │ $9.00 │ "), "{}", footer(&app));
+        let breakdown = app.status.cost.breakdown(&app.status.prices);
+        assert!(
+            breakdown.contains("main: in 1500000 · out 200000"),
+            "{breakdown}"
+        );
+        assert!(
+            breakdown.contains("judge: in 1000000 · out 100000"),
+            "{breakdown}"
+        );
+        assert!(breakdown.contains("total: $9.00"), "{breakdown}");
     }
 
     #[test]
@@ -3866,7 +3920,7 @@ mod tests {
         app.update(Msg::Status(StatusUpdate::Prices(priced(&[(
             "a", 3.0, 15.0,
         )]))));
-        app.update(completed(2_000_000, 100_000));
+        app.update(completed_by("a", 2_000_000, 100_000));
         assert!(submit(&mut app, "/cost").is_empty());
         let (level, text) = last_notice(&app).unwrap();
         assert_eq!(level, NoticeLevel::Info);
@@ -3882,7 +3936,7 @@ mod tests {
             "a", 1.0, 1.0,
         )]))));
         app.status.set_model("anthropic", "a");
-        app.update(completed(5_000_000, 0));
+        app.update(completed_by("a", 5_000_000, 0));
         assert!(footer(&app).contains("$5.00"), "{}", footer(&app));
         // Resuming a session with recorded totals.
         let mut recorded = SessionCost::default();
@@ -3896,7 +3950,7 @@ mod tests {
         app.update(Msg::Status(StatusUpdate::CostTotals(recorded)));
         assert!(footer(&app).contains(" │ $0.42"), "{}", footer(&app));
         // The next call adds to the resumed total.
-        app.update(completed(580_000, 0));
+        app.update(completed_by("a", 580_000, 0));
         assert!(footer(&app).contains(" │ $1.00"), "{}", footer(&app));
         // Totals derived from the session's usage are marked approximate.
         let derived = SessionCost::derived(

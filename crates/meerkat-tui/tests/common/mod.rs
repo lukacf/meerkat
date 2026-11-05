@@ -20,7 +20,8 @@ use meerkat_core::{
 };
 use meerkat_tui::Args;
 use meerkat_tui::approval::ApprovalEngine;
-use meerkat_tui::bootstrap::{self, ApprovalOverrides, BootstrapOptions, TuiService};
+use meerkat_tui::bootstrap::{self, ApprovalOverrides, BootstrapOptions, HostPaths, TuiService};
+use meerkat_tui::models::{EndpointListing, ModelLister};
 use meerkat_tui::runner::Start;
 use meerkat_tui::runner::testing::{RunnerHarness, SavedUnsent, spawn_runner};
 use meerkat_tui::ui::{Effect, Msg, TurnOutcome};
@@ -278,11 +279,12 @@ impl Workspace {
     }
 }
 
-/// Arguments for a workspace-local realm at `root`.
-pub fn args_for(root: &Path) -> Args {
+/// Arguments for a workspace-local realm at `root` (unconfined, no price
+/// fetch), plus `extra`.
+pub fn args_with(root: &Path, extra: &[&str]) -> Args {
     let root = root.to_str().unwrap();
     let cfg = format!("{root}/.cfg");
-    Args::try_parse_from([
+    let mut argv = vec![
         "rkat-tui",
         "-w",
         root,
@@ -292,8 +294,44 @@ pub fn args_for(root: &Path) -> Args {
         &cfg,
         "--model",
         MODEL,
-    ])
-    .unwrap()
+        "--no-pricing-fetch",
+    ];
+    if !extra.iter().any(|arg| arg.starts_with("--confinement")) {
+        argv.push("--no-confinement");
+    }
+    argv.extend_from_slice(extra);
+    Args::try_parse_from(argv).unwrap()
+}
+
+/// Arguments for a workspace-local realm at `root`.
+pub fn args_for(root: &Path) -> Args {
+    args_with(root, &[])
+}
+
+/// A model lister that lists nothing (no network).
+pub fn no_lists() -> ModelLister {
+    Arc::new(|endpoints: Vec<meerkat_tui::endpoints::Endpoint>| {
+        Box::pin(async move {
+            endpoints
+                .into_iter()
+                .map(|e| (e.name, Ok(EndpointListing::default())))
+                .collect()
+        })
+    })
+}
+
+/// Everything a [`Rig`] can be started with.
+#[derive(Clone, Default)]
+pub struct RigOptions {
+    /// Extra command-line arguments.
+    pub args: Vec<String>,
+    /// Approval-engine overrides.
+    pub approval: ApprovalOverrides,
+    /// Model lister (default: [`no_lists`]).
+    pub lister: Option<ModelLister>,
+    /// Directories a confined shell may use besides the workspace (default:
+    /// none, so everything outside the workspace is out of reach).
+    pub host_paths: Option<HostPaths>,
 }
 
 /// A runner over a real runtime-backed service, with its channels.
@@ -324,15 +362,48 @@ impl Rig {
         start: Start,
         approval: ApprovalOverrides,
     ) -> Self {
-        let runtime = bootstrap::bootstrap(
-            &args_for(root),
-            BootstrapOptions {
-                llm_override: Some(Arc::clone(llm) as Arc<dyn LlmClient>),
+        Self::start_opts(
+            root,
+            llm,
+            start,
+            RigOptions {
                 approval,
+                ..RigOptions::default()
             },
         )
         .await
-        .expect("bootstrap");
+    }
+
+    /// [`Rig::start`] with every option.
+    pub async fn start_opts(
+        root: &Path,
+        llm: &Arc<ScriptedLlmClient>,
+        start: Start,
+        options: RigOptions,
+    ) -> Self {
+        Self::try_start_opts(root, llm, start, options)
+            .await
+            .expect("bootstrap")
+    }
+
+    /// [`Rig::start_opts`], returning a bootstrap failure.
+    pub async fn try_start_opts(
+        root: &Path,
+        llm: &Arc<ScriptedLlmClient>,
+        start: Start,
+        options: RigOptions,
+    ) -> Result<Self, meerkat_tui::TuiError> {
+        let extra: Vec<&str> = options.args.iter().map(String::as_str).collect();
+        let runtime = bootstrap::bootstrap(
+            &args_with(root, &extra),
+            BootstrapOptions {
+                llm_override: Some(Arc::clone(llm) as Arc<dyn LlmClient>),
+                approval: options.approval,
+                lister: Some(options.lister.unwrap_or_else(no_lists)),
+                host_paths: Some(options.host_paths.unwrap_or_default()),
+            },
+        )
+        .await?;
         let service = Arc::clone(&runtime.service);
         let approval = Arc::clone(&runtime.approval.engine);
         let store = Arc::clone(&runtime.store);
@@ -352,7 +423,7 @@ impl Rig {
                 sink.lock().push(env.payload);
             }
         });
-        Self {
+        Ok(Self {
             service,
             approval,
             store,
@@ -363,7 +434,7 @@ impl Rig {
             unsent_path,
             task,
             seen: Vec::new(),
-        }
+        })
     }
 
     pub fn send(&self, effect: Effect) {
@@ -372,16 +443,25 @@ impl Rig {
 
     /// The next message matching `pred` (earlier ones are kept in `seen`).
     pub async fn wait_for(&mut self, pred: impl Fn(&Msg) -> bool) -> Msg {
-        within(async {
+        let seen = &mut self.seen;
+        let ui_rx = &mut self.ui_rx;
+        let found = tokio::time::timeout(TIMEOUT, async {
             loop {
-                let msg = self.ui_rx.recv().await.expect("runner gone");
-                self.seen.push(msg.clone());
+                let msg = ui_rx.recv().await.expect("runner gone");
+                seen.push(msg.clone());
                 if pred(&msg) {
                     return msg;
                 }
             }
         })
-        .await
+        .await;
+        match found {
+            Ok(msg) => msg,
+            Err(_) => {
+                let tail = &self.seen[self.seen.len().saturating_sub(12)..];
+                panic!("timed out waiting for a message; the last ones: {tail:#?}")
+            }
+        }
     }
 
     /// The next turn outcome.

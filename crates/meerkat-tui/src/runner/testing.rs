@@ -10,9 +10,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 pub use super::quit::{SavedUnsent, UNSENT_FILE};
-use super::{
-    AGENT_EVENT_CAPACITY, Runner, RunnerParts, Start, Template, open_start, session_messages,
-};
+use super::{AGENT_EVENT_CAPACITY, Runner, RunnerParts, Start, Template, open_start};
 use crate::bootstrap::Runtime;
 use crate::error::TuiError;
 use crate::ui::{Effect, Msg};
@@ -42,21 +40,17 @@ pub struct RunnerHarness {
 /// When the tools cannot be composed or the start session cannot be opened.
 pub async fn spawn_runner(runtime: Runtime, start: &Start) -> Result<RunnerHarness, TuiError> {
     let (template, diff_rx) = Template::new(&runtime)?;
-    let (session, transcript) = open_start(&runtime, template.options(), start).await?;
+    let (session, transcript) = open_start(&runtime, template.options(None), start).await?;
     let first_session = session.id().clone();
     let unsent_path = runtime.scope.realm_root().join(UNSENT_FILE);
     let (agent_tx, agent_rx) = mpsc::channel(AGENT_EVENT_CAPACITY);
     let (ui_tx, ui_rx) = mpsc::unbounded_channel();
     let (effects, effect_rx) = mpsc::unbounded_channel();
-    if transcript.is_some() {
-        for msg in session_messages(&session, transcript.as_ref()) {
-            let _ = ui_tx.send(msg);
-        }
-    }
     let runner = Runner::new(RunnerParts {
         runtime,
         template,
         session,
+        transcript,
         agent_tx,
         ui_tx,
         effect_rx,

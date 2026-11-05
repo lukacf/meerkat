@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use meerkat::{AgentFactory, LlmClient};
-use meerkat_core::{Config, Provider, SessionLlmIdentity};
+use meerkat_core::{AuthBindingRef, Config, Provider, SessionLlmIdentity};
 use tokio::sync::mpsc;
 
 use crate::approval::classifier::{
@@ -73,23 +73,24 @@ pub(crate) struct ClassifierSource<'a> {
     pub config: &'a Config,
     /// Provider of the start-up model.
     pub provider: Provider,
+    /// The auth binding of the start-up endpoint (`None` for a built-in one).
+    pub auth_binding: Option<AuthBindingRef>,
     /// Client every session uses instead of resolving credentials, if any.
     pub llm_override: Option<Arc<dyn LlmClient>>,
 }
 
-/// Build the approval engine for `scope`.
+/// Load the layered `tui.toml` (global, realm, project, command line) of
+/// `scope`: rules, `[auto]` settings, endpoints and price overrides, plus
+/// the notices loading produced.
 ///
 /// # Errors
 ///
 /// [`TuiError::Overlay`] for invalid command-line rule flags,
-/// [`TuiError::Approval`] when a rules file cannot be read or the
-/// escalation ledger cannot be opened.
-pub(crate) async fn build(
+/// [`TuiError::Approval`] when a rules file cannot be read.
+pub(crate) fn load_layers(
     scope: &RuntimeScope,
     args: &Args,
-    source: ClassifierSource<'_>,
-    overrides: &ApprovalOverrides,
-) -> Result<ApprovalParts, TuiError> {
+) -> Result<(rules::Layered, Vec<String>), TuiError> {
     let cli_layer = ConfigOverlay::from_args(args)?.rules_file()?;
     let realm_dir = scope.realm_root();
     let realm_rules = realm_dir.join(RULES_FILE_NAME);
@@ -124,7 +125,23 @@ pub(crate) async fn build(
     ) {
         notices.push(notice.to_string());
     }
+    Ok((layered, notices))
+}
 
+/// Build the approval engine for `scope` from the loaded `layered` rules.
+///
+/// # Errors
+///
+/// [`TuiError::Approval`] when the escalation ledger cannot be opened.
+pub(crate) async fn build(
+    scope: &RuntimeScope,
+    layered: rules::Layered,
+    mut notices: Vec<String>,
+    source: ClassifierSource<'_>,
+    overrides: &ApprovalOverrides,
+) -> Result<ApprovalParts, TuiError> {
+    let realm_dir = scope.realm_root();
+    let realm_rules = realm_dir.join(RULES_FILE_NAME);
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let (broker, escalations) = EscalationBroker::new(ESCALATION_CAPACITY);
     let cwd = std::env::current_dir().map_err(|e| TuiError::io("read current directory", e))?;
@@ -199,7 +216,7 @@ async fn make_classifier(
                 provider: source.provider,
                 self_hosted_server_id: None,
                 provider_params: None,
-                auth_binding: None,
+                auth_binding: source.auth_binding.clone(),
             };
             match source
                 .factory

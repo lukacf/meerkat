@@ -107,6 +107,9 @@ pub enum TuiError {
     /// The approval rules or the escalation ledger could not be loaded.
     #[error("approval setup failed: {0}")]
     Approval(#[from] crate::approval::ApprovalError),
+    /// The selected process confinement cannot be installed on this host.
+    #[error("process confinement: {0}")]
+    Confinement(String),
 }
 
 impl TuiError {
@@ -132,6 +135,7 @@ impl TuiError {
             | Self::McpConfig(_)
             | Self::Overlay(_)
             | Self::Approval(_)
+            | Self::Confinement(_)
             | Self::NotATerminal => 2,
             Self::Io { .. }
             | Self::Persistence(_)

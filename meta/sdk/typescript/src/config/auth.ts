@@ -54,8 +54,9 @@ export interface JwtAuthConfig {
   readonly audience: string | null;
   readonly leewaySeconds: number;
   /** `"personal"` when every token names one person; without it the console
-   *  treats these tokens as a shared account that never counts as a person. */
-  readonly accounts: "personal" | "shared" | null;
+   *  treats these tokens as a shared account that never counts as a person.
+   *  Optional, so a config built by hand without it still type-checks. */
+  readonly accounts?: "personal" | "shared" | null;
   toDict(): Record<string, unknown>;
 }
 
@@ -90,6 +91,6 @@ export function jwtAuthConfigToDict(
     issuer: config.issuer,
     audience: config.audience,
     leeway_seconds: config.leewaySeconds,
-    ...(config.accounts === null ? {} : { accounts: config.accounts }),
+    ...(config.accounts ? { accounts: config.accounts } : {}),
   };
 }

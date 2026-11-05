@@ -1495,6 +1495,21 @@ pub async fn console_rpc_handler(
         return (StatusCode::OK, Json::<Value>(response));
     }
     let Some(runtime) = &state.runtime else {
+        // A change checks its caller again right before its handler runs,
+        // as the runtime dispatch does.
+        if is_console_mutating_rpc_method(&request_method)
+            && let Err(refusal) = ConsoleSendGovernance::for_request(&state, &auth_context)
+                .refuse_unless_caller_current()
+        {
+            return (
+                StatusCode::OK,
+                Json::<Value>(response_value(
+                    parsed_request.id.clone().unwrap_or(Value::Null),
+                    None,
+                    Some(refusal.json_rpc_error()),
+                )),
+            );
+        }
         let response_value = Box::pin(handle_console_aggregator_rpc(
             state.console_aggregator.clone(),
             parsed_request,
@@ -2335,6 +2350,51 @@ impl AdmittedConsoleSendError {
     }
 }
 
+impl From<CheckedConsoleSendError> for AdmittedConsoleSendError {
+    fn from(error: CheckedConsoleSendError) -> Self {
+        match error {
+            CheckedConsoleSendError::Send(error) => Self::Send(error),
+            CheckedConsoleSendError::CallerNotCurrent => Self::CallerNotCurrent,
+        }
+    }
+}
+
+/// Why a Console send that checks its caller right before it is made was
+/// not made.
+#[derive(Debug)]
+pub(crate) enum CheckedConsoleSendError {
+    /// The send was refused or failed.
+    Send(ConsoleSendError),
+    /// The caller's login ended before the send was reserved or sent.
+    CallerNotCurrent,
+}
+
+impl From<ConsoleSendError> for CheckedConsoleSendError {
+    fn from(error: ConsoleSendError) -> Self {
+        Self::Send(error)
+    }
+}
+
+impl CheckedConsoleSendError {
+    /// The refusal as a console RPC answers it.
+    fn json_rpc_error(self) -> JsonRpcError {
+        match self {
+            Self::Send(error) => console_send_json_rpc_error(error),
+            Self::CallerNotCurrent => ConsoleCallerRefusal::NotCurrent.json_rpc_error(),
+        }
+    }
+
+    /// The send's own error. A test's caller has no login to end, so its
+    /// sends never answer `CallerNotCurrent`.
+    #[cfg(test)]
+    pub(crate) fn into_send_error(self) -> ConsoleSendError {
+        match self {
+            Self::Send(error) => error,
+            Self::CallerNotCurrent => ConsoleSendError::State("the caller's login ended"),
+        }
+    }
+}
+
 /// A Console send by a caller the Console has admitted, `access_view` and
 /// `governance` being that caller's: the candidate-launch refusal, the stock
 /// send gate ([`console_send_gate`]), the operator note, then the governed
@@ -2363,7 +2423,8 @@ pub(crate) async fn send_as_admitted_console_caller(
     )
     .await
     .map_err(AdmittedConsoleSendError::Gate)?;
-    // The caller is checked again after the gate's reads, before the send.
+    // The caller is checked after the gate's reads, before the operator
+    // note, and again right before the send is reserved or sent.
     governance
         .refuse_unless_caller_current()
         .map_err(|_| AdmittedConsoleSendError::CallerNotCurrent)?;
@@ -2390,12 +2451,9 @@ pub(crate) async fn send_as_admitted_console_caller(
             ))
             .await
         }
-        None => match governance.refuse_ungoverned_delivery(request.identity.as_str()) {
-            Ok(()) => Box::pin(aggregator.send_scoped(request, &governance.scope)).await,
-            Err(error) => Err(error),
-        },
+        None => Box::pin(console_send_member_lane(aggregator, request, governance)).await,
     };
-    sent.map_err(AdmittedConsoleSendError::Send)
+    sent.map_err(AdmittedConsoleSendError::from)
 }
 
 /// `POST /console/send/recover`: the REST twin of `meta/console/recover_send`.
@@ -2466,6 +2524,13 @@ async fn console_send_recover_handler(
         .identity_runtime
         .as_ref()
         .map(|identity_runtime| Arc::clone(identity_runtime.runtime()));
+    // The caller is checked again after the gate's reads, right before the
+    // send is settled, as `meta/console/recover_send` checks it.
+    if let Err(refusal) =
+        ConsoleSendGovernance::for_request(&state, &auth_context).refuse_unless_caller_current()
+    {
+        return refusal.into_response();
+    }
     match Box::pin(recover_console_send(
         aggregator,
         identity_runtime.as_ref(),
@@ -3048,6 +3113,7 @@ async fn console_send_with_identity_first_fallback(
         &crate::http_console::ConsoleSendGovernance::default(),
     )
     .await
+    .map_err(CheckedConsoleSendError::into_send_error)
 }
 
 async fn console_send_governed_with_identity_first_fallback(
@@ -3056,7 +3122,7 @@ async fn console_send_governed_with_identity_first_fallback(
     console_events: Option<&ConsoleEventStore>,
     request: ConsoleSendRequest,
     governance: &ConsoleSendGovernance,
-) -> Result<crate::console_aggregator::ConsoleInteractionAccepted, ConsoleSendError> {
+) -> Result<crate::console_aggregator::ConsoleInteractionAccepted, CheckedConsoleSendError> {
     let member_send_request = request.clone();
     match Box::pin(console_send_identity_first_governed(
         aggregator,
@@ -3067,12 +3133,31 @@ async fn console_send_governed_with_identity_first_fallback(
     ))
     .await
     {
-        Err(ConsoleSendError::UnknownIdentity(_)) => {
-            governance.refuse_ungoverned_delivery(member_send_request.identity.as_str())?;
-            Box::pin(aggregator.send_scoped(member_send_request, &governance.scope)).await
+        Err(CheckedConsoleSendError::Send(ConsoleSendError::UnknownIdentity(_))) => {
+            Box::pin(console_send_member_lane(
+                aggregator,
+                member_send_request,
+                governance,
+            ))
+            .await
         }
         result => result,
     }
+}
+
+/// A Console send through the member lane (no identity runtime serves the
+/// target): refused when the target's input is governed, and when the
+/// caller's login ended, checked right before the send.
+async fn console_send_member_lane(
+    aggregator: &MetaConsoleAggregator,
+    request: ConsoleSendRequest,
+    governance: &ConsoleSendGovernance,
+) -> Result<crate::console_aggregator::ConsoleInteractionAccepted, CheckedConsoleSendError> {
+    governance.refuse_ungoverned_delivery(request.identity.as_str())?;
+    governance
+        .refuse_unless_caller_current()
+        .map_err(|_| CheckedConsoleSendError::CallerNotCurrent)?;
+    Ok(Box::pin(aggregator.send_scoped(request, &governance.scope)).await?)
 }
 
 #[cfg(test)]
@@ -3114,6 +3199,7 @@ async fn console_send_identity_first(
         &crate::http_console::ConsoleSendGovernance::default(),
     )
     .await
+    .map_err(CheckedConsoleSendError::into_send_error)
 }
 
 async fn console_send_identity_first_governed(
@@ -3122,7 +3208,7 @@ async fn console_send_identity_first_governed(
     console_events: Option<&ConsoleEventStore>,
     mut request: ConsoleSendRequest,
     governance: &ConsoleSendGovernance,
-) -> Result<crate::console_aggregator::ConsoleInteractionAccepted, ConsoleSendError> {
+) -> Result<crate::console_aggregator::ConsoleInteractionAccepted, CheckedConsoleSendError> {
     let requested_identity = request.identity.clone();
     let parsed_identity = crate::identity_first::AgentIdentity::parse(request.identity.as_str())
         .map_err(|err| ConsoleSendError::InvalidRequest(format!("invalid identity: {err}")))?;
@@ -3131,9 +3217,9 @@ async fn console_send_identity_first_governed(
     if let ContentInput::Text(text) = &content
         && text.trim().is_empty()
     {
-        return Err(ConsoleSendError::InvalidContent(
-            "content must be non-empty".to_string(),
-        ));
+        return Err(
+            ConsoleSendError::InvalidContent("content must be non-empty".to_string()).into(),
+        );
     }
 
     if let ContentInput::Blocks(blocks) = &content
@@ -3141,7 +3227,8 @@ async fn console_send_identity_first_governed(
     {
         return Err(ConsoleSendError::InvalidContent(
             "content blocks must be non-empty".to_string(),
-        ));
+        )
+        .into());
     }
     let handling_mode = parse_identity_first_handling_mode(request.handling_mode.as_deref())?;
 
@@ -3160,7 +3247,8 @@ async fn console_send_identity_first_governed(
                 return Err(identity_runtime_error_to_console_send_error(
                     requested_identity.as_str(),
                     original_err,
-                ));
+                )
+                .into());
             };
             let identity = crate::identity_first::AgentIdentity::parse(canonical_identity.as_str())
                 .map_err(|err| {
@@ -3174,7 +3262,8 @@ async fn console_send_identity_first_governed(
                     return Err(identity_runtime_error_to_console_send_error(
                         requested_identity.as_str(),
                         original_err,
-                    ));
+                    )
+                    .into());
                 }
                 // The alias names a registered identity whose status read
                 // failed: refused, never handed to the member lane.
@@ -3182,7 +3271,8 @@ async fn console_send_identity_first_governed(
                     return Err(identity_runtime_error_to_console_send_error(
                         requested_identity.as_str(),
                         err,
-                    ));
+                    )
+                    .into());
                 }
             };
             request.identity = canonical_identity;
@@ -3192,7 +3282,8 @@ async fn console_send_identity_first_governed(
             return Err(identity_runtime_error_to_console_send_error(
                 requested_identity.as_str(),
                 err,
-            ));
+            )
+            .into());
         }
     };
     // A governed target is admitted only through the host's binder for the
@@ -3204,7 +3295,8 @@ async fn console_send_identity_first_governed(
     if governed.is_some() && !request.skill_refs.is_empty() {
         return Err(ConsoleSendError::InvalidRequest(
             "a governed Console send carries no skill selection".to_string(),
-        ));
+        )
+        .into());
     }
     // Refuse a selection the target cannot carry before anything is
     // reserved, so the caller never sees an acceptance for a turn that will
@@ -3216,7 +3308,8 @@ async fn console_send_identity_first_governed(
     {
         return Err(ConsoleSendError::InvalidRequest(
             "selected skills require a local session-backed member".to_string(),
-        ));
+        )
+        .into());
     }
     let session_id = status
         .session_id
@@ -3226,6 +3319,11 @@ async fn console_send_identity_first_governed(
         .agent_runtime_id
         .as_ref()
         .map(|id| id.as_str().to_string());
+    // The caller is checked again after the reads above, right before the
+    // send is reserved: a login that ended meanwhile sends nothing.
+    governance
+        .refuse_unless_caller_current()
+        .map_err(|_| CheckedConsoleSendError::CallerNotCurrent)?;
     let (accepted, claim) = match Box::pin(aggregator.reserve_identity_first_interaction_scoped(
         request.clone(),
         session_id.as_deref(),
@@ -3250,7 +3348,10 @@ async fn console_send_identity_first_governed(
                 .await
             {
                 NativeSendObservation::Admitted { .. } => {
-                    return aggregator.settle_admitted_send(&frame, &claim).await;
+                    return aggregator
+                        .settle_admitted_send(&frame, &claim)
+                        .await
+                        .map_err(Into::into);
                 }
                 // Dispatched again only as a host-human send: keyed by the
                 // send's delivery identity and pinned to the session it
@@ -3346,10 +3447,9 @@ async fn console_send_identity_first_governed(
                     error = %err,
                     "console identity-first steer was accepted but delivery failed"
                 );
-                return Err(identity_runtime_error_to_console_send_error(
-                    identity.as_str(),
-                    err,
-                ));
+                return Err(
+                    identity_runtime_error_to_console_send_error(identity.as_str(), err).into(),
+                );
             }
         }
         return Ok(accepted);
@@ -7697,6 +7797,20 @@ pub async fn console_rpc_multipart_handler(
     }
     let response_value = if parsed_request.method == "meta/console/send" && state.runtime.is_none()
     {
+        // The send checks its caller again right before it is handed to the
+        // aggregator, as the runtime dispatch does.
+        if let Err(refusal) =
+            ConsoleSendGovernance::for_request(&state, &auth_context).refuse_unless_caller_current()
+        {
+            return (
+                StatusCode::OK,
+                Json::<Value>(response_value(
+                    response_id,
+                    None,
+                    Some(refusal.json_rpc_error()),
+                )),
+            );
+        }
         Box::pin(handle_console_aggregator_rpc(
             state.console_aggregator.clone(),
             parsed_request,
@@ -11377,39 +11491,28 @@ async fn handle_console_runtime_rpc_with_visibility(
                     }),
                 );
             };
-            if let Some(identity_runtime) = &identity_runtime {
-                return match Box::pin(console_send_governed_with_identity_first_fallback(
-                    aggregator,
-                    identity_runtime.clone(),
-                    console_events.as_ref(),
-                    send_request,
-                    governance,
-                ))
-                .await
-                {
-                    Ok(accepted) => response_value(
-                        response_id,
-                        Some(serde_json::to_value(accepted).unwrap_or(Value::Null)),
-                        None,
-                    ),
-                    Err(err) => {
-                        response_value(response_id, None, Some(console_send_json_rpc_error(err)))
-                    }
-                };
-            }
-            if let Err(err) = governance.refuse_ungoverned_delivery(send_request.identity.as_str())
-            {
-                return response_value(response_id, None, Some(console_send_json_rpc_error(err)));
-            }
-            match Box::pin(aggregator.send_scoped(send_request, &governance.scope)).await {
+            let sent = match &identity_runtime {
+                Some(identity_runtime) => {
+                    Box::pin(console_send_governed_with_identity_first_fallback(
+                        aggregator,
+                        identity_runtime.clone(),
+                        console_events.as_ref(),
+                        send_request,
+                        governance,
+                    ))
+                    .await
+                }
+                None => {
+                    Box::pin(console_send_member_lane(aggregator, send_request, governance)).await
+                }
+            };
+            match sent {
                 Ok(accepted) => response_value(
                     response_id,
                     Some(serde_json::to_value(accepted).unwrap_or(Value::Null)),
                     None,
                 ),
-                Err(err) => {
-                    response_value(response_id, None, Some(console_send_json_rpc_error(err)))
-                }
+                Err(err) => response_value(response_id, None, Some(err.json_rpc_error())),
             }
         })
         .await,

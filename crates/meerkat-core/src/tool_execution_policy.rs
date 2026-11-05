@@ -3620,4 +3620,460 @@ pub(crate) mod tests {
             );
         }
     }
+
+    /// [`ToolDispatchContext::check_tool_authorization_before_effect`],
+    /// called from outside the agent module: a check made before the tool
+    /// code it guards, which certifies a refusal met while no effect of the
+    /// dispatch entered, records no entry and spends nothing.
+    mod check_before_effect {
+        use super::*;
+        use crate::authorization::{
+            AuthorizationOperation, OperationAuthorizationError, OperationAuthorizationFacts,
+            OperationEntryBoundary, OperationObservation, OperationObservationError,
+            OperationRefusalKind, OperationRefused, OperationReviewTier,
+            PreparedAuthorizationBinding, PreparedOperationAuthorization, PreparedOperationCheck,
+            RefusalDispatch, ToolAuthorizationFacts, ToolAuthorizationTarget, WorkAuthorization,
+        };
+        use std::sync::atomic::AtomicUsize;
+        use std::time::Duration;
+
+        /// Work owners whose decisions carry `tier` and answer `Denied` once
+        /// `revoked` is set. They record every entry their decisions observe.
+        struct RevocableOwners {
+            tier: OperationReviewTier,
+            revoked: AtomicBool,
+            entries: Mutex<Vec<OperationEntryBoundary>>,
+        }
+
+        impl RevocableOwners {
+            fn new(tier: OperationReviewTier) -> Arc<Self> {
+                Arc::new(Self {
+                    tier,
+                    revoked: AtomicBool::new(false),
+                    entries: Mutex::new(Vec::new()),
+                })
+            }
+
+            fn answer(&self) -> Result<(), OperationAuthorizationError> {
+                if self.revoked.load(Ordering::SeqCst) {
+                    Err(OperationRefused::new(OperationRefusalKind::Denied).into())
+                } else {
+                    Ok(())
+                }
+            }
+
+            fn entries(&self) -> Vec<OperationEntryBoundary> {
+                self.entries.lock().unwrap().clone()
+            }
+        }
+
+        struct RevocableWork(Arc<RevocableOwners>);
+
+        struct RevocableDecision(Arc<RevocableOwners>);
+
+        impl WorkAuthorization for RevocableWork {
+            fn prepare(
+                &self,
+                _binding: &PreparedAuthorizationBinding,
+            ) -> Result<Arc<dyn PreparedOperationAuthorization>, OperationAuthorizationError>
+            {
+                self.0.answer()?;
+                Ok(Arc::new(RevocableDecision(Arc::clone(&self.0))))
+            }
+
+            /// The fixture work names no action account and no mandate.
+            fn review_operation_context(
+                &self,
+                _binding: &PreparedAuthorizationBinding,
+            ) -> Result<
+                crate::authorization::ReviewOperationContextResolution,
+                OperationAuthorizationError,
+            > {
+                Ok(crate::authorization::ReviewOperationContextResolution::NotApplicable)
+            }
+        }
+
+        impl PreparedOperationAuthorization for RevocableDecision {
+            fn review_tier(&self) -> OperationReviewTier {
+                self.0.tier
+            }
+
+            fn check_current(
+                &self,
+                _binding: &PreparedAuthorizationBinding,
+            ) -> Result<(), OperationAuthorizationError> {
+                self.0.answer()
+            }
+
+            fn observe(
+                &self,
+                _binding: &PreparedAuthorizationBinding,
+                event: OperationObservation,
+            ) -> Result<(), OperationObservationError> {
+                if let OperationObservation::Entry(boundary) = event {
+                    self.0.entries.lock().unwrap().push(boundary);
+                }
+                Ok(())
+            }
+        }
+
+        /// One step a leaf takes with the context it was handed.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum Step {
+            /// The owners revoke the work's authority.
+            Revoke,
+            /// `check_tool_authorization_before_effect`.
+            Check,
+            /// `enter_reviewed_effect_held`, then one body.
+            Enter,
+        }
+
+        /// One step's answer, with the number of entries the call's
+        /// decisions had recorded once it answered.
+        type Answer = (Step, Result<(), ToolError>, usize);
+
+        /// A leaf that takes its steps in order and answers with its last
+        /// step's answer. It keeps every step's answer and counts the bodies
+        /// it ran.
+        struct SteppingLeaf {
+            owners: Arc<RevocableOwners>,
+            steps: Vec<Step>,
+            bodies: AtomicUsize,
+            answers: Mutex<Vec<Answer>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentToolDispatcher for SteppingLeaf {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::from([tool_def("effect")])
+            }
+
+            fn review_entry_support(
+                &self,
+                _tool_name: &str,
+            ) -> crate::approval::review::ReviewEntrySupport {
+                crate::approval::review::ReviewEntrySupport::ConsumesAtEntry
+            }
+
+            async fn dispatch(
+                &self,
+                _call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                panic!("a governed dispatch keeps its context")
+            }
+
+            async fn dispatch_with_context(
+                &self,
+                call: ToolCallView<'_>,
+                context: &ToolDispatchContext,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                let mut last = Ok(());
+                for step in &self.steps {
+                    let answer = match step {
+                        Step::Revoke => {
+                            self.owners.revoked.store(true, Ordering::SeqCst);
+                            Ok(())
+                        }
+                        Step::Check => context
+                            .check_tool_authorization_before_effect(call, None)
+                            .map(drop),
+                        Step::Enter => {
+                            context
+                                .enter_reviewed_effect_held(call, None)
+                                .map(|_entered| {
+                                    self.bodies.fetch_add(1, Ordering::SeqCst);
+                                })
+                        }
+                    };
+                    let entries = self.owners.entries.lock().unwrap().len();
+                    self.answers
+                        .lock()
+                        .unwrap()
+                        .push((*step, answer.clone(), entries));
+                    last = answer;
+                }
+                last.map(|()| {
+                    crate::ops::ToolDispatchOutcome::from(ToolResult::new(
+                        call.id.to_string(),
+                        "effect ran".to_string(),
+                        false,
+                    ))
+                })
+            }
+        }
+
+        /// A model reviewer that allows every candidate and counts its
+        /// reviews.
+        #[derive(Default)]
+        struct CountingAllow(AtomicUsize);
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::approval::review::OperationReviewer for CountingAllow {
+            async fn review(
+                &self,
+                _candidate: &crate::approval::review::ReviewCandidate<'_>,
+            ) -> Result<
+                crate::approval::review::ReviewVerdict,
+                crate::approval::review::ReviewerFailure,
+            > {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(crate::approval::review::ReviewVerdict::Allow)
+            }
+        }
+
+        /// What one fenced call of a [`SteppingLeaf`] did.
+        struct SteppedCall {
+            result: Result<crate::ops::ToolDispatchOutcome, ToolError>,
+            answers: Vec<Answer>,
+            bodies: usize,
+            reviews: usize,
+            entries: Vec<OperationEntryBoundary>,
+        }
+
+        /// One fenced call of a leaf taking `steps`, at `tier`. An R2 call
+        /// is reviewed by a model reviewer that allows it.
+        async fn stepped_call(tier: OperationReviewTier, steps: &[Step]) -> SteppedCall {
+            let owners = RevocableOwners::new(tier);
+            let leaf = Arc::new(SteppingLeaf {
+                owners: Arc::clone(&owners),
+                steps: steps.to_vec(),
+                bodies: AtomicUsize::new(0),
+                answers: Mutex::new(Vec::new()),
+            });
+            let root: Arc<dyn AgentToolDispatcher> =
+                Arc::clone(&leaf) as Arc<dyn AgentToolDispatcher>;
+            let reviewer = Arc::new(CountingAllow::default());
+            let mut context = ToolDispatchContext::default().with_work_authorization(Some(
+                crate::WorkAuthorizationContext::new(
+                    Arc::new(RevocableWork(Arc::clone(&owners))),
+                    crate::OperationExecutionScope::Domain,
+                ),
+            ));
+            if tier == OperationReviewTier::R2 {
+                context = context.with_operation_review(Some(Arc::new(
+                    crate::approval::review::BoundOperationReview::new(
+                        Arc::clone(&reviewer)
+                            as Arc<dyn crate::approval::review::OperationReviewer>,
+                        crate::approval::ApprovalService::new(),
+                        Duration::from_secs(30),
+                    ),
+                )));
+            }
+            let args = empty_args();
+            let call = ToolCallView {
+                id: "call-1",
+                name: "effect",
+                args: &args,
+            };
+            let resolution = crate::ToolExecutionResolutionContext::new(
+                crate::ToolDeadlineChain::new(vec![crate::ToolDeadlineContributor::finite(
+                    crate::ToolDeadlineOwner::CoreToolDispatch,
+                    Duration::from_mins(1),
+                )])
+                .unwrap(),
+            );
+            let plan =
+                crate::resolve_tool_execution_plan_fenced(&root, call, &context, &resolution)
+                    .unwrap();
+            let result =
+                crate::dispatch_tool_execution_plan_fenced(&root, call, &context, &plan).await;
+            SteppedCall {
+                result,
+                answers: std::mem::take(&mut *leaf.answers.lock().unwrap()),
+                bodies: leaf.bodies.load(Ordering::SeqCst),
+                reviews: reviewer.0.load(Ordering::SeqCst),
+                entries: owners.entries(),
+            }
+        }
+
+        /// The operation refusal `error` carries, beside the model payload
+        /// `data` it renders (its closed kind and `tool_invoked`).
+        fn refusal_and_data(error: &ToolError) -> Option<(OperationRefused, serde_json::Value)> {
+            let ToolError::AuthorizationRefused { refusal } = error.primary_error() else {
+                return None;
+            };
+            Some((*refusal, error.to_error_payload()["data"].clone()))
+        }
+
+        /// A refusal the check meets while no effect of the dispatch entered
+        /// is certified not dispatched: the model reads
+        /// `tool_invoked: false`, the leaf's body never ran and the check
+        /// recorded no entry.
+        ///
+        /// RED without the certification (the check answering
+        /// `check_tool_authorization`'s refusal unchanged): `tool_invoked`
+        /// reads `"unknown"`.
+        #[tokio::test]
+        async fn a_refusal_before_any_effect_is_certified_not_dispatched() {
+            let call = stepped_call(OperationReviewTier::R1, &[Step::Revoke, Step::Check]).await;
+            let Some((Step::Check, Err(error), entries)) = call.answers.last() else {
+                panic!("the check refused: {:?}", call.answers);
+            };
+            let (refusal, data) = refusal_and_data(error).expect("an operation refusal");
+            assert_eq!(refusal.kind(), OperationRefusalKind::Denied);
+            assert_eq!(
+                data,
+                serde_json::json!({"kind": "denied", "tool_invoked": false}),
+                "a refusal met before any effect is certified not dispatched"
+            );
+            assert_eq!(refusal.dispatch(), RefusalDispatch::NotDispatched);
+            assert_eq!(
+                call.result.as_ref().err(),
+                Some(error),
+                "the leaf answered with the check's refusal"
+            );
+            assert_eq!(call.bodies, 0, "no body ran");
+            assert_eq!(
+                (*entries, call.entries.as_slice()),
+                (1, [OperationEntryBoundary::ToolDispatch].as_slice()),
+                "the check recorded no entry"
+            );
+        }
+
+        /// Once an effect of the dispatch entered (the leaf's own effect
+        /// entry passed and its body ran), the same refusal makes no claim:
+        /// the model reads `tool_invoked: "unknown"`.
+        #[tokio::test]
+        async fn after_an_effect_entered_the_refusal_makes_no_claim() {
+            let call = stepped_call(
+                OperationReviewTier::R1,
+                &[Step::Enter, Step::Revoke, Step::Check],
+            )
+            .await;
+            assert_eq!(
+                call.answers.first(),
+                Some(&(Step::Enter, Ok(()), 2)),
+                "the effect entered first"
+            );
+            let Some((Step::Check, Err(error), _)) = call.answers.last() else {
+                panic!("the check refused: {:?}", call.answers);
+            };
+            let (refusal, data) = refusal_and_data(error).expect("an operation refusal");
+            assert_eq!(refusal.kind(), OperationRefusalKind::Denied);
+            assert_eq!(
+                (refusal.dispatch(), data),
+                (
+                    RefusalDispatch::Unknown,
+                    serde_json::json!({"kind": "denied", "tool_invoked": "unknown"})
+                ),
+                "after an effect the refusal makes no claim"
+            );
+            assert_eq!(call.bodies, 1, "the body ran before the check");
+        }
+
+        /// Outside a fenced dispatch (a context without the dispatch's review
+        /// entry) the check answers exactly as `check_tool_authorization`:
+        /// current, malformed, ungoverned, and refused with no claim.
+        #[test]
+        fn outside_a_fenced_dispatch_the_answer_is_unchanged() {
+            let owners = RevocableOwners::new(OperationReviewTier::R1);
+            let work = crate::WorkAuthorizationContext::new(
+                Arc::new(RevocableWork(Arc::clone(&owners))),
+                crate::OperationExecutionScope::Domain,
+            );
+            let plan = crate::ToolExecutionContract::default()
+                .resolve_default(
+                    crate::ToolDeadlineChain::new(vec![crate::ToolDeadlineContributor::finite(
+                        crate::ToolDeadlineOwner::CoreToolDispatch,
+                        Duration::from_secs(1),
+                    )])
+                    .unwrap(),
+                )
+                .unwrap();
+            let binding = PreparedAuthorizationBinding::new(OperationAuthorizationFacts {
+                operation_id: crate::OperationId::new(),
+                execution_scope: crate::OperationExecutionScope::Domain,
+                run_id: None,
+                context_revision: None,
+                operation: AuthorizationOperation::Tool(ToolAuthorizationFacts {
+                    call_id: Arc::from("call-1"),
+                    name: "effect".into(),
+                    arguments: Arc::from(empty_args()),
+                    target: ToolAuthorizationTarget::Dispatcher(Arc::new(plan)),
+                }),
+            });
+            let prepared = PreparedOperationCheck::prepare(work.clone(), binding).unwrap();
+            let (call, _) = prepared.tool_dispatch_parts().unwrap();
+            let governed = ToolDispatchContext::default()
+                .with_work_authorization(Some(work.clone()))
+                .with_prepared_authorization(prepared.clone());
+            let malformed = ToolDispatchContext::default().with_work_authorization(Some(work));
+            let ungoverned = ToolDispatchContext::default();
+            let answers = |context: &ToolDispatchContext| {
+                (
+                    context
+                        .check_tool_authorization_before_effect(call, None)
+                        .map(|current| current.is_some()),
+                    context
+                        .check_tool_authorization(call, None)
+                        .map(|current| current.is_some()),
+                )
+            };
+
+            for (row, context) in [
+                ("current", &governed),
+                ("malformed", &malformed),
+                ("ungoverned", &ungoverned),
+            ] {
+                let (before_effect, plain) = answers(context);
+                assert_eq!(before_effect, plain, "{row}");
+            }
+            owners.revoked.store(true, Ordering::SeqCst);
+            let (before_effect, plain) = answers(&governed);
+            assert_eq!(before_effect, plain, "refused");
+            let Err(error) = before_effect else {
+                panic!("the check refused");
+            };
+            let (refusal, data) = refusal_and_data(&error).expect("an operation refusal");
+            assert_eq!(
+                (refusal.dispatch(), data),
+                (
+                    RefusalDispatch::Unknown,
+                    serde_json::json!({"kind": "denied", "tool_invoked": "unknown"})
+                ),
+                "outside a fenced dispatch the refusal makes no claim"
+            );
+        }
+
+        /// The check spends nothing: at R2, after two checks the leaf's own
+        /// effect entry still spends the admitted review, once (a second
+        /// entry finds it spent), and the call was reviewed once. Neither
+        /// check recorded an entry.
+        #[tokio::test]
+        async fn the_check_leaves_the_review_to_the_effect_entry() {
+            let call = stepped_call(
+                OperationReviewTier::R2,
+                &[Step::Check, Step::Check, Step::Enter, Step::Enter],
+            )
+            .await;
+            assert_eq!(
+                call.answers[..3],
+                [
+                    (Step::Check, Ok(()), 1),
+                    (Step::Check, Ok(()), 1),
+                    (Step::Enter, Ok(()), 2),
+                ],
+                "two checks recorded no entry, then the entry spent the review"
+            );
+            assert!(
+                matches!(
+                    &call.answers[3],
+                    (
+                        Step::Enter,
+                        Err(ToolError::ReviewUnsatisfied {
+                            kind: crate::approval::review::ReviewUnsatisfiedKind::AlreadyConsumed,
+                            ..
+                        }),
+                        _
+                    )
+                ),
+                "spent once, by the entry: {:?}",
+                call.answers[3]
+            );
+            assert_eq!(call.bodies, 1, "one body ran");
+            assert_eq!(call.reviews, 1, "reviewed once");
+        }
+    }
 }

@@ -2,7 +2,7 @@
 # TLC audit of MobMachine identity entries and the declared apply.
 #
 # usage: identity_entry_audit.sh [--mutants]
-#                                [--part entry|apply|legacy|roles|hosted|<run>]
+#                                [--part entry|listed|unlisted|apply|legacy|roles|hosted|<run>]
 #                                [extra tlc args...]
 #
 # Derives each run's TLC config from the generated ci.cfg next to this script
@@ -11,26 +11,35 @@
 # other variable's update or invariant of the generated model reads
 # (model_step_count and topology_epoch). The runner first checks that the
 # model still reads neither counter anywhere else, and fails otherwise. It
-# checks nine runs, each over its whole space with TLC coverage, in five
-# parts (--part entry: the entry and lifecycle runs; apply: the apply run;
+# checks ten runs, each over its whole space with TLC coverage, in seven
+# parts (--part listed: the entry_listed run's space; unlisted: the
+# entry_unlisted run's space; entry: the lifecycle run and the witnesses and
+# mutants of both entry runs and of the lifecycle run; apply: the apply run;
 # legacy: the legacy run; roles: the roles and hold runs; hosted: the held,
 # placed and resume runs; all of them by default; --part <run> checks one
-# run):
+# run, its witnesses and its mutants):
 #
-# - entry (identity_entry_audit.tla; three identities, two runtime ids, fence
-#   tokens 1..2, generations 0..1, two sessions): a replayed member and a
+# - entry_listed and entry_unlisted (identity_entry_audit.tla; three
+#   identities, two runtime ids, fence tokens 1..2, generations 0..1, two
+#   sessions): a replayed member and a
 #   member seated by the spawn ladder with or without entry custody, the
 #   replay of entry rows, every arm of the legacy adoption over all sixteen
 #   combinations of the shell's raw observations (the member bound to a
-#   session or to none), the admission probe, the agent lane's member
+#   session or to none), split by the roster's listing: entry_listed drives
+#   the eight of a listed identity, entry_unlisted the eight of an unlisted
+#   one, and each reaches the whole space, so the two check every state and
+#   step a single run over all sixteen would (the runner checks the
+#   generated model's shape that makes it so, check_adoption_split), the
+#   admission probe, the agent lane's member
 #   admission, the worker reconcile and ensure, the build seed's composition
-#   authority, the seal, Stop and Resume. It checks every generated
+#   authority, the seal, Stop and Resume. Each checks every generated
 #   invariant (the entry invariants among
 #   them: every entry is seated or unseated with a typed cause, no worker
 #   reconcile spawns or retires an entry, entry custody belongs to an open
 #   ladder), that exactly one arm of the admission probe, of the agent lane's
 #   admission and of the legacy adoption answers every input
-#   (AuditProbeExactlyOne, AuditAgentLaneExactlyOne, AuditAdoptionExactlyOne),
+#   (AuditProbeExactlyOne, AuditAgentLaneExactlyOne, AuditAdoptionExactlyOne,
+#   the last over the run's eight observations),
 #   that an entry's name probed without custody is refused as an entry's
 #   (AuditProbeRefusesEntryName), that an identity becomes an entry only by
 #   the declared apply, a custody commit, an adoption from qualifying legacy
@@ -39,7 +48,7 @@
 #   (AuditAdoptionNeedsObservation), and that the retirement without an
 #   adoption answers only an unlisted member with both marks and no intent
 #   row, placed or bound to no session, and not retiring
-#   (AuditRetireUnadoptedQualifies).
+#   (AuditRetireUnadoptedQualifies, over the run's eight observations).
 # - lifecycle (identity_entry_lifecycle_audit.tla, over
 #   member_residency_audit's retire run and its domains: two identities,
 #   three runtime ids, fence tokens 1..3, generations 0..1, three sessions,
@@ -134,13 +143,13 @@
 # (a step goal), and requires TLC to report exactly that violation, so the
 # properties are not vacuous. With --mutants it then seeds defects into a
 # copy of the generated model and requires TLC to refuse each with the
-# invariant or property it breaks: in the entry run, a reconcile that
+# invariant or property it breaks: in the entry runs, a reconcile that
 # retires an entry, an admission probe that answers an entry's name without
-# custody as a plain duplicate, an adoption without the observation, an
+# custody as a plain duplicate, an adoption without the observation and the
+# replay of an entry row on an unseated identity (the listed run), and an
 # unlisted adoption that takes one legacy mark and a retirement without an
-# adoption that ignores the host's intent row (each refused by its target
-# action property alone), and the replay of an entry row on an unseated
-# identity; in the lifecycle run, an
+# adoption that ignores the host's intent row (the unlisted run, each
+# refused by its target action property alone); in the lifecycle run, an
 # archive terminal that drops the kept entry's unseated cause, the destroy's
 # member archive that keeps the entry, a DestroyMob that keeps the entries,
 # a DestroyFromAny that keeps an open ladder's entry custody, a rotation's
@@ -175,10 +184,12 @@ while [[ $# -gt 0 ]]; do
     *) break ;;
   esac
 done
-# usage: part_of <run>: the part that checks <run>.
+# usage: part_of <run>: the part that checks <run>'s whole space.
 part_of() {
   case "$1" in
-    entry|lifecycle) echo entry ;;
+    entry_listed) echo listed ;;
+    entry_unlisted) echo unlisted ;;
+    lifecycle) echo entry ;;
     apply) echo apply ;;
     legacy) echo legacy ;;
     roles|hold) echo roles ;;
@@ -186,22 +197,39 @@ part_of() {
     *) return 1 ;;
   esac
 }
+# usage: goal_part_of <run>: the part that checks <run>'s witnesses and
+# mutants. The entry part checks the two entry runs' own, so that each of
+# their whole-space runs is a part of its own.
+goal_part_of() {
+  case "$1" in
+    entry_listed|entry_unlisted) echo entry ;;
+    *) part_of "$1" ;;
+  esac
+}
 case "${run_part}" in
-  all|entry|apply|legacy|roles|hosted) ;;
+  all|entry|listed|unlisted|apply|legacy|roles|hosted) ;;
   *)
     if ! part_of "${run_part}" > /dev/null; then
-      echo "error: unknown part '${run_part}' (entry, apply, legacy, roles, hosted or a run)" >&2
+      echo "error: unknown part '${run_part}' (entry, listed, unlisted, apply, legacy, roles, hosted or a run)" >&2
       exit 2
     fi
     ;;
 esac
-# usage: in_part <run>: whether the selected part checks <run>.
+# usage: in_part <run>: whether the selected part checks <run>'s whole space.
 in_part() {
   [[ "${run_part}" == "all" || "${run_part}" == "$1" || "${run_part}" == "$(part_of "$1")" ]]
 }
+# usage: in_goal_part <run>: whether the selected part checks <run>'s
+# witnesses and mutants.
+in_goal_part() {
+  [[ "${run_part}" == "all" || "${run_part}" == "$1" || "${run_part}" == "$(goal_part_of "$1")" ]]
+}
 # Each run's distinct-state floor is 90% of the whole space its first green
-# run found, so a guard that silently disables arms fails the lane.
-entry_states=12960
+# run found, so a guard that silently disables arms fails the lane. Each
+# entry run finds the whole space of the single entry run it splits (see
+# above).
+entry_listed_states=12960
+entry_unlisted_states=12960
 lifecycle_states=12024
 apply_states=1476
 legacy_states=3904
@@ -212,7 +240,11 @@ hold_states=356
 resume_states=4126
 
 # Every arm each run must fire. TLC names an arm after the generated
-# operator, since every audit wrapper here is a plain application.
+# operator, since every audit wrapper here is a plain application. The two
+# entry runs share every arm but four adoption arms that answer only one
+# listing: the listed run's observations reach AdoptLegacyIdentityEntryAdopted
+# and NotAdoptable, the unlisted run's AdoptedUnlisted and RetireUnadopted, so
+# together they fire every arm the single entry run fired.
 entry_covered_actions=(
   RecoverRosterMemberRunning
   RecoverMemberSessionBindingFreshRunning
@@ -224,11 +256,7 @@ entry_covered_actions=(
   AbortSpawnExecActiveRunning
   RecoverIdentityEntrySeatedRunning
   RecoverIdentityEntrySeatedStopped
-  AdoptLegacyIdentityEntryAdopted
-  AdoptLegacyIdentityEntryAdoptedUnlisted
   AdoptLegacyIdentityEntryNameHeldByWorker
-  AdoptLegacyIdentityEntryRetireUnadopted
-  AdoptLegacyIdentityEntryNotAdoptable
   AdoptLegacyIdentityEntryStaleObservation
   AdoptLegacyIdentityEntryNotSeated
   AdoptLegacyIdentityEntryAlreadyAnEntry
@@ -253,6 +281,16 @@ entry_covered_actions=(
   BeginPlacedCompletionLifecycleQuiesceFreshStop
   StopRunning
   ResumeStopped
+)
+entry_listed_covered_actions=(
+  "${entry_covered_actions[@]}"
+  AdoptLegacyIdentityEntryAdopted
+  AdoptLegacyIdentityEntryNotAdoptable
+)
+entry_unlisted_covered_actions=(
+  "${entry_covered_actions[@]}"
+  AdoptLegacyIdentityEntryAdoptedUnlisted
+  AdoptLegacyIdentityEntryRetireUnadopted
 )
 
 lifecycle_covered_actions=(
@@ -610,14 +648,62 @@ view_positions="$(view_counter_positions)"
 step_index="${view_positions% *}"
 epoch_index="${view_positions#* }"
 
+# The two entry runs split the adoption's steps by the roster's listing, and
+# each still explores the whole space: under the VIEW every adoption arm but
+# the two that record an entry is a self-loop (it updates only phase, to the
+# value its guard reads, and model_step_count), and those two (Adopted for a
+# listed identity, AdoptedUnlisted for an unlisted one) make the same update
+# under the same guards apart from one guard that reads only the
+# observations. Each run fires one of them (its covered actions), so a step
+# that changes the VIEW is a step of both runs, both reach every state, and
+# every adoption step is checked by the run its listing belongs to. Fails
+# when the generated model no longer has that shape.
+check_adoption_split() {
+  MODEL="${spec_dir}/model.tla" python3 - <<'PY'
+import os, re, sys
+text = open(os.environ["MODEL"]).read()
+arms = {m.group(1): m.group(2).split("\n") for m in re.finditer(
+    r"^AdoptLegacyIdentityEntry(\w+)\([^)]*\) ==\n(.*?)\n\n", text, re.S | re.M)}
+observation = re.compile(r"\b(durable_identity_marker|own_identity_label|listed|intent_row)\b")
+
+def split(lines):
+    updates = [line for line in lines if "' = " in line or "UnchangedFrame_" in line]
+    return [line for line in lines if line not in updates], updates
+
+recording = ("Adopted", "AdoptedUnlisted")
+if not set(recording) <= set(arms):
+    sys.exit("error: the entry runs' split expects AdoptLegacyIdentityEntryAdopted and AdoptedUnlisted in model.tla")
+shapes = []
+for name in recording:
+    guards, updates = split(arms[name])
+    reads = [line for line in guards if observation.search(line)]
+    if len(reads) != 1 or observation.sub("", re.sub(r"\b(TRUE|FALSE|IF|THEN|ELSE)\b", "", reads[0])).strip(" /\\()=~") \
+            or any(observation.search(line) for line in updates):
+        sys.exit(f"error: AdoptLegacyIdentityEntry{name} must read the observations in one guard of their own, and only there")
+    shapes.append(([line for line in guards if line not in reads], updates))
+if shapes[0] != shapes[1]:
+    sys.exit("error: AdoptLegacyIdentityEntryAdopted and AdoptedUnlisted no longer differ only in their observation guard")
+for name, lines in arms.items():
+    if name in recording:
+        continue
+    guards, updates = split(lines)
+    phase = re.fullmatch(r'    /\\ phase = ("\w+")', guards[0] if guards else "")
+    if not phase or updates[:2] != [f"    /\\ phase' = {phase.group(1)}", "    /\\ model_step_count' = model_step_count + 1"] \
+            or len(updates) != 3 or not re.fullmatch(r"    /\\ UnchangedFrame_[0-9a-f]+", updates[2]):
+        sys.exit(f"error: AdoptLegacyIdentityEntry{name} changes more than model_step_count, so the entry runs' split no longer holds")
+PY
+}
+if in_part entry_listed || in_part entry_unlisted || in_goal_part entry_listed || in_goal_part entry_unlisted; then
+  check_adoption_split
+fi
+
 # usage: write_cfg <run> <file> <extra invariant lines> <extra property lines>
-# where <run> is entry or lifecycle.
 write_cfg() {
   local run="$1" cfg="$2" invariants="$3" properties="$4"
-  local spec run_properties run_invariants section_end
+  local spec run_properties run_invariants section_end listings
   cp "${ci_cfg}" "${cfg}"
   case "${run}" in
-    entry)
+    entry_listed|entry_unlisted)
       spec="AuditSpec"
       run_properties="
   AuditEntryOnlyWithCause
@@ -628,6 +714,11 @@ write_cfg() {
   AuditProbeRefusesEntryName
   AuditAgentLaneExactlyOne
   AuditAdoptionExactlyOne"
+      # The roster's listing the run drives the adoption with.
+      listings=TRUE
+      if [[ "${run}" == "entry_unlisted" ]]; then
+        listings=FALSE
+      fi
       replace_exact_line "  AgentIdentityValues = {}" '  AgentIdentityValues = {"agentidentity_1", "agentidentity_2", "agentidentity_3"}' "${cfg}"
       replace_exact_line "  AgentRuntimeIdValues = {}" '  AgentRuntimeIdValues = {"agentruntimeid_1", "agentruntimeid_2"}' "${cfg}"
       replace_exact_line "  FenceTokenValues = {1}" "  FenceTokenValues = {1, 2}" "${cfg}"
@@ -636,7 +727,8 @@ write_cfg() {
       replace_exact_line "  StringValues = {}" '  StringValues = {"profile_1", "model_1", "digest_1"}' "${cfg}"
       replace_exact_line "CONSTANTS" "CONSTANTS
   AuditStepIndex = ${step_index}
-  AuditEpochIndex = ${epoch_index}" "${cfg}"
+  AuditEpochIndex = ${epoch_index}
+  AuditListings = {${listings}}" "${cfg}"
       ;;
     lifecycle)
       spec="LifecycleSpec"
@@ -845,7 +937,7 @@ run_tlc() {
   shift 3
   local module status=0
   case "${run}" in
-    entry) module="identity_entry_audit" ;;
+    entry_listed|entry_unlisted) module="identity_entry_audit" ;;
     lifecycle) module="identity_entry_lifecycle_audit" ;;
     apply|legacy|roles|held|placed|hold|resume) module="identity_entry_apply_audit" ;;
     *)
@@ -917,7 +1009,7 @@ check_space() {
   done
 }
 
-for run in entry lifecycle apply legacy roles hold resume held placed; do
+for run in entry_listed entry_unlisted lifecycle apply legacy roles hold resume held placed; do
   if in_part "${run}"; then
     floor_var="${run}_states"
     arms_var="${run}_covered_actions[@]"
@@ -928,11 +1020,12 @@ done
 # Each witness is <run>:<kind>:<name>: a state goal's negation joins the
 # invariants, a step goal's negation ([][~step]_vars) joins the properties.
 for witness in \
-  "entry:Action property:CustodyCommit" "entry:Action property:CustodyAborted" \
-  "entry:Action property:Replayed" "entry:Action property:ReplayedStopped" \
-  "entry:Action property:Adopted" "entry:Action property:ReconcileSparesEntry" \
-  "entry:Action property:ReconcileSpawnsWorkerOnly" "entry:Action property:Unseated" \
-  "entry:Invariant:ProbeRefused" "entry:Invariant:LaneRefusedStopped" "entry:Invariant:TwoEntries" \
+  "entry_listed:Action property:CustodyCommit" "entry_listed:Action property:CustodyAborted" \
+  "entry_listed:Action property:Replayed" "entry_listed:Action property:ReplayedStopped" \
+  "entry_listed:Action property:Adopted" "entry_listed:Action property:ReconcileSparesEntry" \
+  "entry_listed:Action property:ReconcileSpawnsWorkerOnly" "entry_listed:Action property:Unseated" \
+  "entry_listed:Invariant:ProbeRefused" "entry_listed:Invariant:LaneRefusedStopped" \
+  "entry_listed:Invariant:TwoEntries" \
   "lifecycle:Action property:EntrySeated" "lifecycle:Invariant:EntryLive" \
   "lifecycle:Action property:EntryRetiredLive" "lifecycle:Action property:EntryArchived" \
   "lifecycle:Action property:EntryReseatedOnRecord" \
@@ -975,7 +1068,7 @@ for witness in \
   "resume:Action property:ResumeAnswersHeld" "resume:Action property:ResumeAuthorizesSettled" \
   "resume:Action property:ResumeAnswersHeldStopped"; do
   run="${witness%%:*}"
-  if ! in_part "${run}"; then
+  if ! in_goal_part "${run}"; then
     continue
   fi
   rest="${witness#*:}"
@@ -1098,7 +1191,7 @@ PY
   # place and must find each anchor it names.
   mutate() {
     local run="$1" name="$2" violation="$3"
-    if ! in_part "${run}"; then
+    if ! in_goal_part "${run}"; then
       cat > /dev/null
       return 0
     fi
@@ -1126,7 +1219,7 @@ PY
   # be refused by exactly that target.
   mutate_target() {
     local run="$1" name="$2" kind="$3" target="$4"
-    if ! in_part "${run}"; then
+    if ! in_goal_part "${run}"; then
       cat > /dev/null
       return 0
     fi
@@ -1151,7 +1244,7 @@ PY
 
   # A reconcile that retires an entry: the retire helper ranges over every
   # bound identity again.
-  mutate entry reconcile_retires_entry "Invariant worker_reconcile_spares_entries" <<'PY'
+  mutate entry_listed reconcile_retires_entry "Invariant worker_reconcile_spares_entries" <<'PY'
 import os
 path = os.environ["MODEL"]
 text = open(path).read()
@@ -1168,7 +1261,7 @@ PY
   # without custody as a plain duplicate, as before identity entries. (The
   # spawn ladder cannot open on a seated entry's name: its
   # current_binding_absent guard already refuses the bound identity.)
-  mutate entry probe_answers_entry_as_duplicate "Invariant AuditProbeExactlyOne" <<'PY'
+  mutate entry_listed probe_answers_entry_as_duplicate "Invariant AuditProbeExactlyOne" <<'PY'
 import os, re
 path = os.environ["MODEL"]
 text = open(path).read()
@@ -1185,7 +1278,7 @@ PY
 
   # An adoption without the shell's legacy observation: the listed
   # adoption takes any marks.
-  mutate entry adoption_without_observation \
+  mutate entry_listed adoption_without_observation \
     "Invariant AuditAdoptionExactlyOne|Action property AuditAdoptionNeedsObservation|Action property AuditEntryOnlyWithCause" <<'PY'
 import os, re
 path = os.environ["MODEL"]
@@ -1203,7 +1296,7 @@ PY
 
   # An unlisted adoption that takes one legacy mark: refused by the rule
   # that an entry is recorded only from qualifying marks, alone.
-  mutate_target entry unlisted_adoption_takes_one_mark \
+  mutate_target entry_unlisted unlisted_adoption_takes_one_mark \
     "Action property" AuditAdoptionNeedsObservation <<'PY'
 replace_in_arm("AdoptLegacyIdentityEntryAdoptedUnlisted",
                "(durable_identity_marker = TRUE) /\\ (own_identity_label = TRUE)",
@@ -1212,13 +1305,13 @@ PY
 
   # A retirement without an adoption that ignores the host's intent row:
   # refused by the rule that names the one member it answers, alone.
-  mutate_target entry retire_unadopted_ignores_intent_row \
+  mutate_target entry_unlisted retire_unadopted_ignores_intent_row \
     "Action property" AuditRetireUnadoptedQualifies <<'PY'
 replace_in_arm("AdoptLegacyIdentityEntryRetireUnadopted", " /\\ (intent_row = FALSE))", ")")
 PY
 
   # The replay of an entry row on an identity that is not seated.
-  mutate entry replay_on_unseated_identity "Invariant entry_is_seated_or_has_an_unseated_cause" <<'PY'
+  mutate entry_listed replay_on_unseated_identity "Invariant entry_is_seated_or_has_an_unseated_cause" <<'PY'
 import os, re
 path = os.environ["MODEL"]
 text = open(path).read()

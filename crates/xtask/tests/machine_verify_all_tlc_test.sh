@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # usage: machine_verify_all_tlc_test.sh <xtask-bin> [--part <part>]
-#        machine_verify_all_tlc_test.sh --part audits-a|...|audits-o|audits-q|...|audits-x
+#        machine_verify_all_tlc_test.sh --part audits-a|...|audits-o|audits-q|...|audits-y
 # The canonical TLC lane, split into parts so each fits a CI job limit:
 #   machine-verify  the bounded adaptive witness plus `machine-verify --all`
 #   audits-a        hand-written audit shard A
@@ -28,9 +28,10 @@ set -euo pipefail
 #   audits-v        hand-written audit shard V
 #   audits-w        hand-written audit shard W
 #   audits-x        hand-written audit shard X
+#   audits-y        hand-written audit shard Y
 #   all             every part (the default: `make machine-verify`, the
 #                   nightly bounded TLC job and the release gate)
-# Bazel runs the twenty-four parts as separate targets
+# Bazel runs the twenty-five parts as separate targets
 # (machine_verify_all_tlc_test, machine_verify_audits_a_tlc_test,
 # machine_verify_audits_b_tlc_test, machine_verify_audits_c_tlc_test,
 # machine_verify_audits_d_tlc_test, machine_verify_audits_e_tlc_test,
@@ -42,14 +43,15 @@ set -euo pipefail
 # machine_verify_audits_q_tlc_test, machine_verify_audits_r_tlc_test,
 # machine_verify_audits_s_tlc_test, machine_verify_audits_t_tlc_test,
 # machine_verify_audits_u_tlc_test, machine_verify_audits_v_tlc_test,
-# machine_verify_audits_w_tlc_test, machine_verify_audits_x_tlc_test) so the
+# machine_verify_audits_w_tlc_test, machine_verify_audits_x_tlc_test,
+# machine_verify_audits_y_tlc_test) so the
 # BuildBuddy machine-authority lane runs them in parallel; together they are
-# exactly `all`. CI's tlc-audits job runs the twenty-three audit shards, one
+# exactly `all`. CI's tlc-audits job runs the twenty-four audit shards, one
 # job each.
 # The audit shards never execute xtask, so they alone may omit its path.
 audit_shard() {
   case "$1" in
-    audits-a|audits-b|audits-c|audits-d|audits-e|audits-f|audits-g|audits-h|audits-i|audits-j|audits-k|audits-l|audits-m|audits-n|audits-o|audits-q|audits-r|audits-s|audits-t|audits-u|audits-v|audits-w|audits-x) return 0 ;;
+    audits-a|audits-b|audits-c|audits-d|audits-e|audits-f|audits-g|audits-h|audits-i|audits-j|audits-k|audits-l|audits-m|audits-n|audits-o|audits-q|audits-r|audits-s|audits-t|audits-u|audits-v|audits-w|audits-x|audits-y) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -58,13 +60,13 @@ if [[ "${1:-}" == "--part" ]] && audit_shard "${2:-}"; then
   xtask_bin=""
   lane_part="$2"
 else
-  xtask_bin="${1:?xtask binary path is required (only --part audits-a..audits-o or audits-q..audits-x may omit it)}"
+  xtask_bin="${1:?xtask binary path is required (only --part audits-a..audits-o or audits-q..audits-y may omit it)}"
   if [[ "${2:-}" == "--part" ]]; then
-    lane_part="${3:?--part needs machine-verify, an audit shard (audits-a..audits-o, audits-q..audits-x) or all}"
+    lane_part="${3:?--part needs machine-verify, an audit shard (audits-a..audits-o, audits-q..audits-y) or all}"
   fi
 fi
 if [[ "${lane_part}" != "machine-verify" && "${lane_part}" != "all" ]] && ! audit_shard "${lane_part}"; then
-  echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a..audits-o, audits-q..audits-x, all)" >&2
+  echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a..audits-o, audits-q..audits-y, all)" >&2
   exit 2
 fi
 # run_part <part>: whether this invocation runs <part>.
@@ -781,7 +783,7 @@ fi
 # MobMachine identity entries (an identity the host declared as its own,
 # as opposed to a worker member) are reached only with identities, which the
 # ci profile has none of. A hand-written audit over the same generated model
-# checks ten runs over their whole reachable space, in seven parts, each in
+# checks ten runs over their whole reachable space, in eight parts, each in
 # a shard of its own. Its two entry runs drive a replayed member and a member
 # seated by the spawn ladder with or without entry custody, the replay of
 # entry rows, every legacy adoption arm over the shell's sixteen raw
@@ -846,7 +848,10 @@ fi
 # not and its incarnation local or hosted elsewhere), the replay of its
 # start row (stale or not), Stop, Resume and Complete, and the mob's reset
 # from each phase it leaves (its preflight with a member seated, its commit
-# on an empty roster). --part roles (shard audits-n): a seated entry
+# on an empty roster); the witnesses and mutants of its unlisted end (four
+# witnesses of the end on each copy and the five mutants that keep its mark
+# there) run in --part legacy-end (shard audits-y). --part roles (shard
+# audits-n): a seated entry
 # declared under another role or mode, a first-boot preparation, every
 # WakeMember cause and a same-session rotation under another role that
 # names the member's key under the new role's comms name or no endpoint,
@@ -896,6 +901,10 @@ fi
 if run_part audits-m; then
   echo "running bounded identity entry declared apply legacy TLC audit"
   TLC_WORKERS="${tlc_workers}" "${identity_entry_audit}" --mutants --part legacy
+fi
+if run_part audits-y; then
+  echo "running bounded identity entry declared apply legacy end TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${identity_entry_audit}" --mutants --part legacy-end
 fi
 if run_part audits-n; then
   echo "running bounded identity entry declared apply roles TLC audit"
@@ -1318,7 +1327,15 @@ run_machine_verify() {
 # audits-k, audits-m, audits-n and audits-o = the identity entry audit's
 # declared apply parts with --mutants, each alone: apply 384-460 (the shard
 # 396-484 s), legacy 596-726 (605-751 s), roles 563-740 (604-745 s, and
-# 776 s on a pull request's runner) and hosted 353-623 (366-640 s);
+# 776 s on a pull request's runner) and hosted 353-623 (366-640 s). The
+# legacy part then took 1171 s (the shard 1182 s) on a pull request's run
+# 42057238243: its whole space 260, 13 witnesses 401 and 16 mutants 510.
+# The 4 witnesses and 5 mutants of its unlisted end, 562 s of it, moved to
+# audits-y, so about 620 s for audits-m (256 s locally with 4 TLC
+# workers), from those runs' times there;
+# audits-y = the legacy run's unlisted end (--part legacy-end), alone:
+# about 575 s from those runs' times there (227 s locally; this run
+# class's hosted factor was 1.7-2.7x on that runner);
 # audits-l = the identity entry audit's entry part with --mutants (--part
 # entry), alone: the audit 404-715, the shard 588-741 s while the part also
 # held the single entry run (101 s of main's 0.9.10 release run
@@ -1354,8 +1371,8 @@ run_machine_verify() {
 # about 1.2-3.8x the local times with 4 TLC workers recorded for these
 # audits, so size a new audit by a hosted run. The job times out at 20
 # minutes; each shard is sized to stay within about 720 s hosted, 60
-# percent of that. audits-m and audits-n, one audit part each, reach
-# 741-776 s and get shorter only when their parts split. A new audit
+# percent of that. audits-n, one audit part, reaches 745-776 s and gets
+# shorter only when its part splits. A new audit
 # joins the lightest shard, or a new shard when it would take that shard
 # past about 720 s hosted. Shard of the two audits the
 # `all` lane runs concurrently with machine-verify below:

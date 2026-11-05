@@ -2,7 +2,7 @@
 # TLC audit of MobMachine identity entries and the declared apply.
 #
 # usage: identity_entry_audit.sh [--mutants]
-#                                [--part entry|listed|unlisted|apply|legacy|roles|hosted|<run>]
+#                                [--part entry|listed|unlisted|apply|legacy|legacy-end|roles|hosted|<run>]
 #                                [extra tlc args...]
 #
 # Derives each run's TLC config from the generated ci.cfg next to this script
@@ -11,13 +11,15 @@
 # other variable's update or invariant of the generated model reads
 # (model_step_count and topology_epoch). The runner first checks that the
 # model still reads neither counter anywhere else, and fails otherwise. It
-# checks ten runs, each over its whole space with TLC coverage, in seven
+# checks ten runs, each over its whole space with TLC coverage, in eight
 # parts (--part listed: the entry_listed run's space; unlisted: the
 # entry_unlisted run's space; entry: the lifecycle run and the witnesses and
 # mutants of both entry runs and of the lifecycle run; apply: the apply run;
-# legacy: the legacy run; roles: the roles and hold runs; hosted: the held,
-# placed and resume runs; all of them by default; --part <run> checks one
-# run, its witnesses and its mutants):
+# legacy: the legacy run but its unlisted end; legacy-end: the legacy run's
+# unlisted end, four witnesses and five mutants (legacy_end_goals); roles:
+# the roles and hold runs; hosted: the held, placed and resume runs; all of
+# them by default; --part <run> checks one run, its witnesses and its
+# mutants):
 #
 # - entry_listed and entry_unlisted (identity_entry_audit.tla; three
 #   identities, two runtime ids, fence tokens 1..2, generations 0..1, two
@@ -197,32 +199,53 @@ part_of() {
     *) return 1 ;;
   esac
 }
-# usage: goal_part_of <run>: the part that checks <run>'s witnesses and
-# mutants. The entry part checks the two entry runs' own, so that each of
-# their whole-space runs is a part of its own.
+# The legacy run's unlisted end, its four witnesses and its five mutants (the
+# end on every copy: live, stopped, after the runtime retired and replayed),
+# is a part of its own, legacy-end, so that each of the two legacy parts
+# fits its shard.
+legacy_end_goals=(
+  AdoptedThenUnlisted UnlistedEndStopped UnlistedEndRetired UnlistedReplayEnd
+  stopped_end_keeps_mark retired_end_keeps_mark retired_stopped_end_keeps_mark
+  replay_keeps_mark absent_replay_keeps_mark
+)
+# usage: goal_part_of <run> <goal>: the part that checks <run>'s witness or
+# mutant <goal>. The entry part checks the two entry runs' own, so that each
+# of their whole-space runs is a part of its own.
 goal_part_of() {
   case "$1" in
     entry_listed|entry_unlisted) echo entry ;;
+    legacy)
+      if [[ " ${legacy_end_goals[*]} " == *" ${2:-} "* ]]; then
+        echo legacy-end
+      else
+        echo legacy
+      fi
+      ;;
     *) part_of "$1" ;;
   esac
 }
-case "${run_part}" in
-  all|entry|listed|unlisted|apply|legacy|roles|hosted) ;;
-  *)
-    if ! part_of "${run_part}" > /dev/null; then
-      echo "error: unknown part '${run_part}' (entry, listed, unlisted, apply, legacy, roles, hosted or a run)" >&2
-      exit 2
-    fi
-    ;;
-esac
+# usage: is_part <name>: whether <name> names a part; --part <name> checks
+# that part, and any other name checks the run it names.
+is_part() {
+  case "$1" in
+    all|entry|listed|unlisted|apply|legacy|legacy-end|roles|hosted) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+if ! is_part "${run_part}" && ! part_of "${run_part}" > /dev/null; then
+  echo "error: unknown part '${run_part}' (entry, listed, unlisted, apply, legacy, legacy-end, roles, hosted or a run)" >&2
+  exit 2
+fi
 # usage: in_part <run>: whether the selected part checks <run>'s whole space.
 in_part() {
-  [[ "${run_part}" == "all" || "${run_part}" == "$1" || "${run_part}" == "$(part_of "$1")" ]]
+  [[ "${run_part}" == "all" || "${run_part}" == "$(part_of "$1")" ]] \
+    || { ! is_part "${run_part}" && [[ "${run_part}" == "$1" ]]; }
 }
-# usage: in_goal_part <run>: whether the selected part checks <run>'s
-# witnesses and mutants.
+# usage: in_goal_part <run> <goal>: whether the selected part checks <run>'s
+# witness or mutant <goal>.
 in_goal_part() {
-  [[ "${run_part}" == "all" || "${run_part}" == "$1" || "${run_part}" == "$(goal_part_of "$1")" ]]
+  [[ "${run_part}" == "all" || "${run_part}" == "$(goal_part_of "$1" "${2:-}")" ]] \
+    || { ! is_part "${run_part}" && [[ "${run_part}" == "$1" ]]; }
 }
 # Each run's distinct-state floor is 90% of the whole space its first green
 # run found, so a guard that silently disables arms fails the lane. Each
@@ -1068,12 +1091,12 @@ for witness in \
   "resume:Action property:ResumeAnswersHeld" "resume:Action property:ResumeAuthorizesSettled" \
   "resume:Action property:ResumeAnswersHeldStopped"; do
   run="${witness%%:*}"
-  if ! in_goal_part "${run}"; then
-    continue
-  fi
   rest="${witness#*:}"
   kind="${rest%%:*}"
   name="${rest#*:}"
+  if ! in_goal_part "${run}" "${name}"; then
+    continue
+  fi
   cfg="${work_dir}/witness-${name}.cfg"
   if [[ "${kind}" == "Invariant" ]]; then
     write_cfg "${run}" "${cfg}" "
@@ -1191,7 +1214,7 @@ PY
   # place and must find each anchor it names.
   mutate() {
     local run="$1" name="$2" violation="$3"
-    if ! in_goal_part "${run}"; then
+    if ! in_goal_part "${run}" "${name}"; then
       cat > /dev/null
       return 0
     fi
@@ -1219,7 +1242,7 @@ PY
   # be refused by exactly that target.
   mutate_target() {
     local run="$1" name="$2" kind="$3" target="$4"
-    if ! in_goal_part "${run}"; then
+    if ! in_goal_part "${run}" "${name}"; then
       cat > /dev/null
       return 0
     fi

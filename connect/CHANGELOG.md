@@ -25,6 +25,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   settles the Find as `review_unsatisfied` (`context_changed`) instead, by
   design: nothing runs under a decision that was not reviewed.
 
+- Setup calls no longer fail at once when they meet an authorization change
+  that another task is making: a setup helper's report, a reviewed install,
+  `setup_state`, `setup_stop`, a shared setup's entry reservation and a
+  setup workflow's call. Each waits for the change within the owner-change
+  bound and checks again. A call that holds a reserved entry or a prepared
+  review releases it first and starts that step over, checking everything
+  afresh. A change that outlasts the bound is still refused as
+  `operation_refused` with kind `reprepare_required`. A setup workflow's
+  call no longer reports that refusal as access denied.
+
+- A setup call refused that way before any of its work ran now says so:
+  the refusal carries `tool_invoked: false`, so the call can be retried
+  safely. This also covers a reviewed install that meets such a change just
+  before it is sent, which is still refused at once. A refusal after part
+  of the call ran still says nothing about whether it ran.
+
 - A Find no longer fails as temporarily unavailable (`tool_unavailable`)
   while another original's Find is writing the shared source state. Its
   setup helper admission waits for that write within the owner-change bound;

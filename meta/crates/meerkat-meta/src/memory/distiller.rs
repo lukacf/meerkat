@@ -3440,4 +3440,117 @@ mod tests {
             1
         );
     }
+
+    /// A stored member session whose build recorded `labels` as its member
+    /// labels, with a short transcript to distill.
+    async fn member_session(
+        store: &Arc<meerkat::MemoryStore>,
+        labels: &[(&str, &str)],
+    ) -> meerkat_core::types::SessionId {
+        let mut session = meerkat_core::Session::new();
+        session
+            .set_session_metadata(meerkat_core::SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: "gpt-5.5".to_string(),
+                model_fallback: None,
+                max_tokens: 1024,
+                structured_output_retries: meerkat_core::config::default_structured_output_retries(
+                ),
+                provider: meerkat_core::Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: meerkat_core::SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: Some(meerkat_core::PeerMeta {
+                    description: None,
+                    labels: labels
+                        .iter()
+                        .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                        .collect(),
+                }),
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                auth_binding: None,
+                mob_member_binding: None,
+            })
+            .expect("record the member labels");
+        session.push(Message::User(UserMessage::text("use the wrapper")));
+        session.push(Message::User(UserMessage::text(
+            "always ./scripts/repo-cargo, never raw cargo",
+        )));
+        meerkat::SessionStore::save(&**store, &session)
+            .await
+            .expect("store the session");
+        session.id().clone()
+    }
+
+    /// A side chat that is private to a person is never distilled, whatever
+    /// asks for it: its transcript is that person's alone. A side chat that is
+    /// private to nobody (forked on a console without sign-in) is distilled
+    /// into its own memory, as any member is.
+    #[tokio::test]
+    async fn distiller_skips_private_side_chats() {
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let private = member_session(
+            &store,
+            &[
+                ("side_chat_of", "alpha"),
+                ("console.private_to", "console-caller:v1:owner"),
+            ],
+        )
+        .await;
+        let shared = member_session(
+            &store,
+            &[("side_chat_of", "alpha"), ("console.private_to", "")],
+        )
+        .await;
+        let provider = Arc::new(CapturingProvider::default());
+        let client = Arc::new(ScriptedLlm::new(vec![ONE_OP_REPLY, ONE_OP_REPLY]));
+        let engine = Arc::new(DistillerEngine::new(
+            DistillerProfile::embedded_default(),
+            enabled_config(),
+            Arc::new(ScriptedHandle {
+                client: client.clone(),
+            }),
+            provider.clone(),
+            Arc::new(StaticTombstones(Vec::new())),
+            Arc::new(SessionStoreTranscriptSource::new(store.clone())),
+            None,
+            None,
+            "team",
+        ));
+
+        for cause in [
+            DistillCause::Interactions,
+            DistillCause::Retire,
+            DistillCause::Compaction,
+        ] {
+            let outcome = engine
+                .distill_now("alpha-side", &private.to_string(), cause)
+                .await;
+            assert!(
+                matches!(&outcome, DistillOutcome::Skipped { reason } if reason.contains("private")),
+                "{cause:?}: {outcome:?}"
+            );
+        }
+        assert!(
+            provider.remembers.lock().unwrap().is_empty(),
+            "nothing is remembered from a private side chat"
+        );
+
+        let outcome = engine
+            .distill_now(
+                "alpha-side-shared",
+                &shared.to_string(),
+                DistillCause::Retire,
+            )
+            .await;
+        assert!(
+            matches!(outcome, DistillOutcome::Completed { written: 1, .. }),
+            "{outcome:?}"
+        );
+    }
 }

@@ -3177,6 +3177,10 @@ mod console_experience_binding_tests;
 mod console_side_chat_tests;
 
 #[cfg(test)]
+#[path = "console_private_side_chat_tests.rs"]
+mod console_private_side_chat_tests;
+
+#[cfg(test)]
 #[path = "console_schedule_tests.rs"]
 mod console_schedule_tests;
 

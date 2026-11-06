@@ -136068,7 +136068,8 @@ mob_DeclareOwnedIdentityEdgeDeclared(arg_edge, arg_owner) ==
        /\ ((packet.payload.edge \in DOMAIN mob_identity_edge_owners) = FALSE)
        /\ (((mob__mob_machine_wiring_edge_other(packet.payload.edge, packet.payload.owner) \in DOMAIN mob_identity_entry_origins) = TRUE) /\ ((mob__mob_machine_wiring_edge_other(packet.payload.edge, packet.payload.owner) \in mob_identity_entry_removing) = FALSE))
        /\ mob_phase' = "Running"
-       /\ UnchangedFrame_2d28b2b20823ba2c
+       /\ mob_identity_edge_owners' = MapSet(mob_identity_edge_owners, packet.payload.edge, packet.payload.owner)
+       /\ UnchangedFrame_ed90773214b99698
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -136559,7 +136560,8 @@ mob_RecoverOwnedIdentityEdgeRecoveredRunning(arg_edge, arg_owner) ==
        /\ ((packet.payload.edge \in DOMAIN mob_identity_edge_owners) = FALSE)
        /\ (((mob__mob_machine_wiring_edge_a(packet.payload.edge) \in mob_identity_entry_tombstones) = FALSE) /\ ((mob__mob_machine_wiring_edge_b(packet.payload.edge) \in mob_identity_entry_tombstones) = FALSE) /\ ((mob__mob_machine_wiring_edge_a(packet.payload.edge) \in mob_identity_entry_removing) = FALSE) /\ ((mob__mob_machine_wiring_edge_b(packet.payload.edge) \in mob_identity_entry_removing) = FALSE))
        /\ mob_phase' = "Running"
-       /\ UnchangedFrame_2d28b2b20823ba2c
+       /\ mob_identity_edge_owners' = MapSet(mob_identity_edge_owners, packet.payload.edge, packet.payload.owner)
+       /\ UnchangedFrame_ed90773214b99698
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -136583,7 +136585,8 @@ mob_RecoverOwnedIdentityEdgeRecoveredStopped(arg_edge, arg_owner) ==
        /\ ((packet.payload.edge \in DOMAIN mob_identity_edge_owners) = FALSE)
        /\ (((mob__mob_machine_wiring_edge_a(packet.payload.edge) \in mob_identity_entry_tombstones) = FALSE) /\ ((mob__mob_machine_wiring_edge_b(packet.payload.edge) \in mob_identity_entry_tombstones) = FALSE) /\ ((mob__mob_machine_wiring_edge_a(packet.payload.edge) \in mob_identity_entry_removing) = FALSE) /\ ((mob__mob_machine_wiring_edge_b(packet.payload.edge) \in mob_identity_entry_removing) = FALSE))
        /\ mob_phase' = "Stopped"
-       /\ UnchangedFrame_2d28b2b20823ba2c
+       /\ mob_identity_edge_owners' = MapSet(mob_identity_edge_owners, packet.payload.edge, packet.payload.owner)
+       /\ UnchangedFrame_ed90773214b99698
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes

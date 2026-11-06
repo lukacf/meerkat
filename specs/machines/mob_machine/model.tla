@@ -26812,7 +26812,8 @@ DeclareOwnedIdentityEdgeDeclared(edge, owner) ==
     /\ (((mob_machine_wiring_edge_other(edge, owner) \in DOMAIN identity_entry_origins) = TRUE) /\ ((mob_machine_wiring_edge_other(edge, owner) \in identity_entry_removing) = FALSE))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_58e344be0f88f435
+    /\ identity_edge_owners' = MapSet(identity_edge_owners, edge, owner)
+    /\ UnchangedFrame_cfdef6b57e7dfed0
 
 
 DeclareOwnedIdentityEdgeAlreadyOwned(edge, owner) ==
@@ -27004,7 +27005,8 @@ RecoverOwnedIdentityEdgeRecoveredRunning(edge, owner) ==
     /\ (((mob_machine_wiring_edge_a(edge) \in identity_entry_tombstones) = FALSE) /\ ((mob_machine_wiring_edge_b(edge) \in identity_entry_tombstones) = FALSE) /\ ((mob_machine_wiring_edge_a(edge) \in identity_entry_removing) = FALSE) /\ ((mob_machine_wiring_edge_b(edge) \in identity_entry_removing) = FALSE))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_58e344be0f88f435
+    /\ identity_edge_owners' = MapSet(identity_edge_owners, edge, owner)
+    /\ UnchangedFrame_cfdef6b57e7dfed0
 
 
 RecoverOwnedIdentityEdgeRecoveredStopped(edge, owner) ==
@@ -27015,7 +27017,8 @@ RecoverOwnedIdentityEdgeRecoveredStopped(edge, owner) ==
     /\ (((mob_machine_wiring_edge_a(edge) \in identity_entry_tombstones) = FALSE) /\ ((mob_machine_wiring_edge_b(edge) \in identity_entry_tombstones) = FALSE) /\ ((mob_machine_wiring_edge_a(edge) \in identity_entry_removing) = FALSE) /\ ((mob_machine_wiring_edge_b(edge) \in identity_entry_removing) = FALSE))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_58e344be0f88f435
+    /\ identity_edge_owners' = MapSet(identity_edge_owners, edge, owner)
+    /\ UnchangedFrame_cfdef6b57e7dfed0
 
 
 RecoverOwnedIdentityEdgeSkippedRunning(edge, owner) ==

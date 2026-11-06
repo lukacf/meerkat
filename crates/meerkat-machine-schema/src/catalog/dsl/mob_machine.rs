@@ -35280,7 +35280,7 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.identity_entry_removing.contains(mob_machine_wiring_edge_other(edge, owner)) == false
             }
             update {
-                // RED: no owner recorded.
+                self.identity_edge_owners.insert(edge, owner);
             }
             to Running
             emit OwnedIdentityEdgeDeclared { edge: edge, verdict: OwnedEdgeDeclareVerdict::Declared }
@@ -35470,7 +35470,7 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.identity_entry_removing.contains(mob_machine_wiring_edge_b(edge)) == false
             }
             update {
-                // RED: no owner recorded.
+                self.identity_edge_owners.insert(edge, owner);
             }
             to Running
         }

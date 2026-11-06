@@ -344,6 +344,7 @@ pub(crate) fn handle_console_rest_json_route_with_pending_rows(
             resolved_auth.as_ref(),
             live_snapshot,
             access,
+            None,
             memory_panel_available,
             workgraph_available,
             pending,
@@ -419,7 +420,10 @@ pub(crate) fn authorize_console_rest_json_route(
 }
 
 /// The response to a request [`authorize_console_rest_json_route`] accepted,
-/// given the authentication it resolved.
+/// given the authentication it resolved. `audience` is the caller's agent
+/// audience when the Console resolved it ([`crate::http_console`]'s routes:
+/// the caller owns the agents private to them); without one the experience
+/// is decided by a view of the resolved subject that owns no private agent.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_console_rest_json_route(
     decisions: &RuntimeDecisionState,
@@ -428,26 +432,38 @@ pub(crate) fn render_console_rest_json_route(
     resolved_auth: Option<&ConsoleAccessRequest>,
     live_snapshot: Option<&ConsoleLiveSnapshot>,
     access: Option<&AccessController>,
+    audience: Option<&AccessView>,
     memory_panel_available: bool,
     workgraph_available: bool,
     pending: &BTreeSet<String>,
 ) -> ConsoleRestJsonResponse {
     let (base_path, query_params) = split_path_and_query(&request.path);
-    // Subject for ABAC. When app auth is not required the auth resolver
-    // returns None without looking at credentials; still identify callers
-    // that *did* present a valid token so per-user grants apply on
-    // auth-optional consoles. Invalid tokens fall back to anonymous.
-    let mut access_subject = resolved_auth.map(|auth| auth.email.clone());
-    if access_subject.is_none()
-        && access.is_some()
-        && !decisions.console.require_app_auth
-        && let Some(token) = query_params.get("auth_token")
-    {
-        access_subject = resolve_authorized_console_auth_from_token(decisions, fences, token)
-            .map(|auth| auth.email);
-    }
-    let access_view =
-        access.map(|controller| controller.view_for_subject(access_subject.as_deref()));
+    let view = match audience {
+        Some(audience) => audience.clone(),
+        None => {
+            // Subject for ABAC. When app auth is not required the auth
+            // resolver returns None without looking at credentials; still
+            // identify callers that *did* present a valid token so per-user
+            // grants apply on auth-optional consoles. Invalid tokens fall
+            // back to anonymous.
+            let mut access_subject = resolved_auth.map(|auth| auth.email.clone());
+            if access_subject.is_none()
+                && access.is_some()
+                && !decisions.console.require_app_auth
+                && let Some(token) = query_params.get("auth_token")
+            {
+                access_subject =
+                    resolve_authorized_console_auth_from_token(decisions, fences, token)
+                        .map(|auth| auth.email);
+            }
+            access
+                .cloned()
+                .unwrap_or_else(AccessController::audience_only)
+                .view_for_caller(access_subject.as_deref(), None)
+        }
+    };
+    // The access configuration's own view, when one is installed.
+    let access_view = access.map(|_| &view);
 
     let modules: Vec<String> = decisions
         .modules
@@ -457,12 +473,10 @@ pub(crate) fn render_console_rest_json_route(
     let mut live_snapshot = live_snapshot
         .cloned()
         .unwrap_or_else(|| default_console_live_snapshot(decisions));
-    if let Some(controller) = access {
-        prime_access_attributes(controller, &live_snapshot);
-    }
-    if let Some(view) = &access_view {
-        filter_snapshot_for_access(&mut live_snapshot, view);
-    }
+    // Every caller's experience is decided per agent: a view that enforces
+    // nothing still hides the agents private to another person.
+    prime_access_attributes(&view.controller(), &live_snapshot);
+    filter_snapshot_for_access(&mut live_snapshot, &view);
     let mut body = if base_path == CONSOLE_EXPERIENCE_ROUTE {
         build_console_experience_contract(&modules, &live_snapshot, &decisions.console, pending)
     } else {
@@ -471,16 +485,59 @@ pub(crate) fn render_console_rest_json_route(
             "modules": modules
         })
     };
-    if base_path == CONSOLE_EXPERIENCE_ROUTE
-        && let Some(view) = &access_view
-    {
-        apply_access_to_experience(&mut body, view);
+    if base_path == CONSOLE_EXPERIENCE_ROUTE {
+        apply_side_chat_audience_to_experience(&mut body, &view);
+        if let Some(view) = access_view {
+            apply_access_to_experience(&mut body, view);
+        }
     }
     if base_path == CONSOLE_EXPERIENCE_ROUTE {
-        apply_memory_to_experience(&mut body, access_view.as_ref(), memory_panel_available);
-        apply_workgraph_to_experience(&mut body, access_view.as_ref(), workgraph_available);
+        apply_memory_to_experience(&mut body, access_view, memory_panel_available);
+        apply_workgraph_to_experience(&mut body, access_view, workgraph_available);
     }
     ConsoleRestJsonResponse { status: 200, body }
+}
+
+/// The audience a side chat row names for the caller, in its
+/// `side_chat_audience` field: `private_to_you` for the person it is private
+/// to, `private_to_creator` for an access admin viewing another person's,
+/// and `shared` for a side chat that is private to no one (one opened on a
+/// console without sign-in, by a caller who is not a signed-in person, or
+/// before side chats were private), which everyone who may see its source
+/// sees. Rows that are no side chat carry no field.
+fn apply_side_chat_audience_to_experience(body: &mut Value, view: &AccessView) {
+    let Some(agents) = body
+        .pointer_mut("/agent_sidebar/live_snapshot/agents")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for agent in agents {
+        let is_side_chat = agent
+            .get("side_chat_of")
+            .and_then(Value::as_str)
+            .is_some_and(|source| !source.trim().is_empty());
+        if !is_side_chat {
+            continue;
+        }
+        let owner = agent
+            .get("labels")
+            .and_then(|labels| labels.get(crate::access::PRIVATE_TO_LABEL))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|owner| !owner.is_empty());
+        let audience = match owner {
+            None => "shared",
+            Some(owner) if view.private_owner_key() == Some(owner) => "private_to_you",
+            Some(_) => "private_to_creator",
+        };
+        if let Some(row) = agent.as_object_mut() {
+            row.insert(
+                "side_chat_audience".to_string(),
+                serde_json::json!(audience),
+            );
+        }
+    }
 }
 
 /// Append the `workgraph` affordance section. `can_view`/`can_manage` are
@@ -630,12 +687,10 @@ pub(crate) fn console_member_access_attributes(
 }
 
 fn filter_snapshot_for_access(snapshot: &mut ConsoleLiveSnapshot, view: &AccessView) {
-    if !view.enforced() {
-        return;
-    }
     // Each member is judged by the attributes its row carries, then along
     // its lineage, as every agent-scoped check judges it: a member an agent
-    // spawned follows its spawner, and a side chat its source.
+    // spawned follows its spawner, and a side chat its source. A view that
+    // enforces nothing still hides the agents private to another person.
     snapshot.members.retain(|member| {
         view.decide_agent_with_attributes(
             crate::access::ACTION_AGENT_VIEW,

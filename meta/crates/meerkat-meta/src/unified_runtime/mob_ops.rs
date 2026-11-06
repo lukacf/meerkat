@@ -174,7 +174,7 @@ impl UnifiedRuntime {
     /// contain). Hooks and error events keep speaking the alias.
     pub async fn spawn(&self, mut spec: SpawnMemberSpec) -> Result<SpawnResult, MobRuntimeError> {
         if let Some(labels) = spec.labels.as_ref() {
-            crate::member_comms_id::validate_raw_identity_labels(labels)
+            crate::member_comms_id::validate_member_creation_labels(labels)
                 .map_err(|message| MobRuntimeError::InvalidConfig(message.to_string()))?;
         }
         let raw_reservation = crate::member_comms_id::reserve_raw_member_target(
@@ -217,7 +217,7 @@ impl UnifiedRuntime {
             .collect::<Vec<_>>();
         for spec in &specs {
             if let Some(labels) = spec.labels.as_ref() {
-                crate::member_comms_id::validate_raw_identity_labels(labels)
+                crate::member_comms_id::validate_member_creation_labels(labels)
                     .map_err(|message| MobRuntimeError::InvalidConfig(message.to_string()))?;
             }
         }

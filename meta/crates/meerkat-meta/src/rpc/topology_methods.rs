@@ -96,7 +96,9 @@ pub(crate) async fn handle_query(
 ) -> JsonRpcResponse {
     match topology.query().await {
         Ok(mut snapshot) => {
-            if let Some(view) = view.filter(|view| view.enforced()) {
+            // Every view decides: one that enforces nothing still hides the
+            // agents private to another person.
+            if let Some(view) = view {
                 snapshot.retain_visible_to(view);
             }
             project_node_affordances(&mut snapshot.nodes, topology, view, read_only);
@@ -239,7 +241,7 @@ pub(crate) async fn handle_operation(
     };
     match topology.controller().operation(operation_id).await {
         Ok(mut receipt) => {
-            if let Some(view) = view.filter(|view| view.enforced()) {
+            if let Some(view) = view {
                 let visible = receipt.results.iter().all(|result| {
                     [&result.edge.a, &result.edge.b]
                         .into_iter()
@@ -303,13 +305,14 @@ pub(crate) async fn handle_audit(
         Ok(page) => page,
         Err(error) => return failure(response_id, error),
     };
-    let enforced = view.filter(|view| view.enforced());
+    // Every view decides each record: one that enforces nothing still hides
+    // the agents private to another person.
     let mut records = Vec::new();
     let mut next_after_seq = page.next_after_seq;
     let mut consumed_all = true;
     for record in page.records {
         next_after_seq = record.seq;
-        let visible = enforced.is_none_or(|view| {
+        let visible = view.is_none_or(|view| {
             record.operations.iter().all(|operation| {
                 [&operation.edge.a, &operation.edge.b]
                     .into_iter()
@@ -357,7 +360,22 @@ fn authorize_operations(
     operations: &[TopologyMutation],
     mutation: bool,
 ) -> Option<AccessViolation> {
-    let view = view.filter(|view| view.enforced())?;
+    let view = view?;
+    // An endpoint the caller may not know of (private to another person) is
+    // refused whether or not access is enforced, naming no endpoint.
+    if operations.iter().any(|operation| {
+        [&operation.edge.a, &operation.edge.b]
+            .into_iter()
+            .any(|endpoint| view.hides_agent(endpoint.identity.as_str()))
+    }) {
+        return Some(AccessViolation {
+            action: ACTION_TOPOLOGY_VIEW,
+            resource: None,
+        });
+    }
+    if !view.enforced() {
+        return None;
+    }
     let local_authority = topology.authority();
     if operations.len() > 1 {
         for operation in operations {
@@ -413,7 +431,7 @@ fn attribution_allowed_for_operations(
     view: Option<&AccessView>,
     operations: &[TopologyMutation],
 ) -> bool {
-    view.filter(|view| view.enforced()).is_none_or(|view| {
+    view.is_none_or(|view| {
         operations.iter().all(|operation| {
             [&operation.edge.a, &operation.edge.b]
                 .into_iter()
@@ -429,7 +447,7 @@ fn attribution_allowed_for_results(
     view: Option<&AccessView>,
     results: &[crate::topology_control::TopologyEdgeResult],
 ) -> bool {
-    view.filter(|view| view.enforced()).is_none_or(|view| {
+    view.is_none_or(|view| {
         results.iter().all(|result| {
             [&result.edge.a, &result.edge.b]
                 .into_iter()

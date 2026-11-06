@@ -340,6 +340,7 @@ async fn a_side_chat_forks_the_source_unwired_and_closes_on_retire() -> TestResu
             crate::side_chat::SideChatLineage {
                 source_identity: "alpha".to_string(),
                 source_session_id: source_session_id.clone(),
+                private_to: None,
             },
         )]),
         "the roster's fork facts name the side chat's source and the session it was forked from"

@@ -98,6 +98,8 @@ pub(crate) struct Faults {
     pub(crate) renew_delay: Option<Duration>,
     /// How long the next listing call takes before it answers (once).
     pub(crate) list_delay: Option<Duration>,
+    /// Listing calls that answer `Unavailable` without listing anything.
+    pub(crate) list_unavailable: u32,
     /// The most heads every listing call answers, whatever limit it was
     /// asked for: a store whose pages are shorter than Core's.
     pub(crate) list_page_cap: Option<usize>,
@@ -432,6 +434,10 @@ impl HostStore for TestHost {
         self.record(HostCall::ListHeads { kind });
         let (delay, cap) = {
             let mut faults = self.faults();
+            if faults.list_unavailable > 0 {
+                faults.list_unavailable -= 1;
+                return Err(HostStoreError::Unavailable("injected".into()));
+            }
             (faults.list_delay.take(), faults.list_page_cap)
         };
         if let Some(delay) = delay {

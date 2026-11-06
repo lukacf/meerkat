@@ -3192,6 +3192,10 @@ mod console_actor_tests;
 mod console_sign_out_tests;
 
 #[cfg(test)]
+#[path = "console_flow_editor_caller_tests.rs"]
+mod console_flow_editor_caller_tests;
+
+#[cfg(test)]
 async fn console_send_identity_first(
     aggregator: &MetaConsoleAggregator,
     identity_runtime: Arc<crate::identity_first::IdentityRuntime>,

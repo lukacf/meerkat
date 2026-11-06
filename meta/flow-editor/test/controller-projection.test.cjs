@@ -11824,8 +11824,51 @@ async function exerciseReadOnlyRenderDraftGuardRetry() {
   }
 }
 
+// The editor acts for the caller its Meta surface named when it loaded
+// (`meta/capabilities` reports `auth.caller_scope`, the scope
+// `meta/console/whoami` reports to the same caller). Every request it sends
+// after that carries the scope as `expected_caller_scope`, so Meta refuses a
+// change the editor makes after another person signed in to this browser
+// (`caller_changed`) instead of making it as that person. A surface that
+// names no caller (the standalone server) leaves the field out.
+async function exerciseCallerScope() {
+  const originalFetch = global.fetch;
+  const calls = [];
+  let capabilities = {
+    methods: ["meta/capabilities"],
+    auth: { mode: "reference_app", reason: "reference app", caller_scope: "console-caller:v1:abc" },
+  };
+  global.fetch = async (url, options) => {
+    const request = JSON.parse(options.body);
+    calls.push(request);
+    const result = request.method === "meta/capabilities"
+      ? capabilities
+      : { source: request.method, row: { id: "f_scope" }, rows: [] };
+    return { ok: true, json: async () => ({ jsonrpc: "2.0", id: request.id, result }) };
+  };
+  try {
+    controller.configure({ rpcUrl: "/flow-editor/rpc" });
+    await controller.loadCapabilities();
+    assert.equal(calls[0].params.expected_caller_scope, undefined, "the capabilities read carries no scope yet");
+    await controller.createDocument({ template: "blank" });
+    assert.equal(calls[1].params.expected_caller_scope, "console-caller:v1:abc", "a draft write carries the caller the editor loaded");
+    await controller.deployDocument({ ...storedGraphDocument }, { execute: true });
+    assert.equal(calls[2].params.expected_caller_scope, "console-caller:v1:abc", "a host deploy carries it too");
+    assert.equal(calls[2].params.execute, true, "the deploy keeps its own params");
+
+    capabilities = { methods: ["meta/capabilities"], auth: { mode: "none", reason: "standalone" } };
+    await controller.loadCapabilities();
+    await controller.createDocument({ template: "blank" });
+    assert.equal(calls[4].params.expected_caller_scope, undefined, "a surface that names no caller gets none");
+  } finally {
+    global.fetch = originalFetch;
+    controller.configure({ rpcUrl: "/flow-editor/rpc" });
+  }
+}
+
 exerciseAuthoringOperationRunner()
   .then(exerciseReadOnlyRenderDraftGuardRetry)
+  .then(exerciseCallerScope)
   .then(() => {
     console.log("controller projection metadata ok");
   })

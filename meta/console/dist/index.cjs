@@ -60968,9 +60968,9 @@ async function resolveWorkGraphBindingRevision(run, bindingId) {
   }
   return revision;
 }
-function workGraphClaimOwnerId(subject, fallback) {
-  const trimmed = typeof subject === "string" ? subject.trim() : "";
-  return trimmed || fallback;
+function workGraphClaimOwnedBy(item, principal) {
+  const key = item.claim?.owner?.key;
+  return Boolean(principal) && key?.kind === "principal" && key.id === principal;
 }
 
 // src/lib/topology.ts
@@ -78489,13 +78489,13 @@ function WorkGraphPerson({
     /* @__PURE__ */ (0, import_jsx_runtime112.jsx)("span", { className: "cc-agent__name", children: person.name })
   ] });
 }
-function workGraphItemActions(item, itemId2, canManage, { onClaim, onClose, onRelease }, options = {}) {
+function workGraphItemActions(item, itemId2, canManage, { onClaim, onClose, onRelease, canRelease }, options = {}) {
   const status = item.status || "open";
   const revision = typeof item.revision === "number" ? item.revision : void 0;
   const title = item.title || "this work item";
   const claim = canManage && onClaim && status === "open" && !workGraphItemOwner(item);
   const close = canManage && onClose && !isWorkGraphTerminal(status) && status !== "blocked";
-  const release = options.release && canManage && onRelease && status === "in_progress";
+  const release = options.release && canManage && onRelease && status === "in_progress" && (canRelease?.(item) ?? true);
   if (!claim && !close && !release) return null;
   const variant = options.variant ?? "ghost";
   return /* @__PURE__ */ (0, import_jsx_runtime112.jsxs)(import_jsx_runtime112.Fragment, { children: [
@@ -79463,6 +79463,7 @@ function WorkGraphPanel({
   onClaim,
   onClose,
   onRelease,
+  canRelease,
   onGoalConfirm,
   onGoalRequestClose,
   onAttentionPause,
@@ -79556,6 +79557,7 @@ function WorkGraphPanel({
     onClaim,
     onClose,
     onRelease,
+    canRelease,
     onGoalConfirm,
     onGoalRequestClose,
     onAttentionPause,
@@ -91232,7 +91234,6 @@ function agentWorkItems(items, identity, agent) {
     priority: item.priority ?? null
   }));
 }
-var DEFAULT_APPROVER_ID = "console-ops-lead";
 function isWorkGraphSignalFrame(frame2) {
   if (frame2.event.startsWith("workgraph.")) return true;
   if (frame2.event !== "tool_execution_completed" && frame2.event !== "tool_result_received") {
@@ -92945,7 +92946,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     let active = true;
     const scope = sendScope;
     void Promise.resolve().then(() => consoleTransport.whoami ? consoleTransport.whoami() : null).then((whoami) => {
-      if (active) setApprovalDecider({ scope, person: whoami?.actorKind === "person" });
+      if (!active) return;
+      const claimant = whoami && whoami.actorKind !== "anonymous" ? whoami.principal : void 0;
+      setApprovalDecider({ scope, person: whoami?.actorKind === "person", ...claimant ? { claimant } : {} });
     }).catch(() => {
       if (active) setApprovalDecider({ scope, person: false });
     });
@@ -92954,6 +92957,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     };
   }, [consoleTransport, sendScope]);
   const approvalsDecidable = approvalDecider?.scope === sendScope ? approvalDecider.person : void 0;
+  const workGraphClaimant = approvalDecider?.scope === sendScope ? approvalDecider.claimant : void 0;
   import_react102.default.useEffect(() => {
     setApprovalSnapshot(void 0);
     setSelectedApprovalId(void 0);
@@ -94714,15 +94718,14 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       };
       const revisionOr = (revision, resolve) => revision !== void 0 ? () => Promise.resolve(revision) : resolve;
       return {
-        onClaim: ({ itemId: itemId2, revision }) => dispatch2(
+        // The gateway owns a claim by the connection's caller, so the
+        // request names no owner. A caller who can own nothing is offered
+        // no claim, and only a signed-in person confirms a goal.
+        onClaim: workGraphClaimant === void 0 ? void 0 : ({ itemId: itemId2, revision }) => dispatch2(
           revisionOr(revision, () => resolveWorkGraphItemRevision(runWorkGraphQuery, itemId2)),
           (expectedRevision) => runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphClaim, {
             id: itemId2,
-            expected_revision: expectedRevision,
-            owner: {
-              kind: "principal",
-              id: workGraphClaimOwnerId(experience?.access?.subject, DEFAULT_APPROVER_ID)
-            }
+            expected_revision: expectedRevision
           }, cardIdentity)
         ),
         onClose: ({ itemId: itemId2, revision }) => dispatch2(
@@ -94732,7 +94735,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             expected_revision: expectedRevision
           }, cardIdentity)
         ),
-        onGoalConfirm: ({ bindingId, revision }) => dispatch2(
+        onGoalConfirm: approvalsDecidable !== true ? void 0 : ({ bindingId, revision }) => dispatch2(
           revisionOr(revision, () => resolveWorkGraphGoalItemRevision(runWorkGraphQuery, bindingId)),
           (expectedRevision) => runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphGoalConfirm, {
             binding_id: bindingId,
@@ -94771,7 +94774,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       };
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [runWorkGraphCommand, runWorkGraphQuery, experience?.access?.subject]
+    [runWorkGraphCommand, runWorkGraphQuery, workGraphClaimant, approvalsDecidable]
   );
   const workGraphCardActions = import_react102.default.useCallback(
     (cardIdentity) => {
@@ -95602,7 +95605,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             },
             onQueryRecords: queryMemoryRecords,
             onLoadEvidence: loadMemoryEvidence,
-            onDecideQuarantine: memoryData.canDecideQuarantine && !frontendReadOnly && experience?.console_policy?.read_only !== true ? decideMemoryQuarantine : void 0,
+            onDecideQuarantine: memoryData.canDecideQuarantine && approvalsDecidable === true && !frontendReadOnly && experience?.console_policy?.read_only !== true ? decideMemoryQuarantine : void 0,
             onOpenGating: (
               // Only offered where the nav itself offers gating — on runtimes
               // without a mob control surface (or with gating hidden) the
@@ -95625,6 +95628,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             onRefresh: () => void refreshWorkGraphData(),
             onClaim: workGraphPanelHandlers.onClaim,
             onClose: workGraphPanelHandlers.onClose,
+            canRelease: (item) => workGraphClaimOwnedBy(item, workGraphClaimant),
             onRelease: ({ itemId: itemId2, revision }) => {
               void (async () => {
                 let expectedRevision = revision;

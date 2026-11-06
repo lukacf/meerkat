@@ -305,15 +305,24 @@ fn runtimes_with_recovery_work(inner: &Inner, ops: &OpsLifecycleState) -> Vec<Lo
         .collect();
     candidates
         .into_iter()
-        .filter(|rt| {
-            runtime_has_recovery_obligation(
-                &boot_facts(inner, ops, rt),
-                inner.runtime_lifecycle.get(*rt).map(Vec::as_slice),
-                inner.session_catalog.get(*rt),
-            )
-        })
+        .filter(|runtime| runtime_holds_recovery_work_in(inner, ops, runtime))
         .map(LogicalRuntimeId::new)
         .collect()
+}
+
+/// Whether `runtime_id` holds recovery work, by the one predicate the scan
+/// asks of each runtime ([`runtimes_with_recovery_work`]). A runtime the
+/// store never held has default facts and no lifecycle record: none.
+fn runtime_holds_recovery_work_in(
+    inner: &Inner,
+    ops: &OpsLifecycleState,
+    runtime_id: &str,
+) -> bool {
+    runtime_has_recovery_obligation(
+        &boot_facts(inner, ops, runtime_id),
+        inner.runtime_lifecycle.get(runtime_id).map(Vec::as_slice),
+        inner.session_catalog.get(runtime_id),
+    )
 }
 
 fn store_input_state_prechecked(
@@ -3421,6 +3430,19 @@ impl RuntimeStore for InMemoryRuntimeStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(runtimes_with_recovery_work(&inner, &ops))
+    }
+
+    /// One runtime's facts, read under the same locks as the scan.
+    async fn runtime_holds_recovery_work(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<bool, RuntimeStoreError> {
+        let inner = self.inner.lock().await;
+        let ops = self
+            .ops_lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(runtime_holds_recovery_work_in(&inner, &ops, &runtime_id.0))
     }
 
     async fn list_runtime_delivery_records(

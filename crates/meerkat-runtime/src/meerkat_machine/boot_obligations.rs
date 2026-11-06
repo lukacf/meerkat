@@ -4,7 +4,9 @@
 use std::collections::HashSet;
 
 use super::MeerkatMachine;
-use crate::delivery_inbox::{RuntimeDeliveryError, runtime_delivery_backlog_in};
+use crate::delivery_inbox::{
+    RuntimeDeliveryError, runtime_delivery_backlog_in, runtime_delivery_pending_in,
+};
 use crate::identifiers::LogicalRuntimeId;
 use crate::store::RuntimeStoreError;
 
@@ -142,18 +144,80 @@ impl MeerkatMachine {
         })
     }
 
-    /// What `session_id`'s runtime holds durably, read cold.
+    /// What `session_id`'s runtime holds durably, read cold: whether a
+    /// session nothing in this process has registered (a mob member a host
+    /// holds dormant, say) holds work its next registration would pick up,
+    /// read without registering it.
     ///
-    /// RED stub: answers an empty `HoldsWork` for every session.
+    /// A session registered in this process answers
+    /// [`SessionWorkState::Registered`]: its live authority is what counts
+    /// (the run it marked resumable, the holds on its run starts and its
+    /// queues live only there), so read it live. For any other session, two
+    /// reads of its one runtime, neither of which loads its body: the
+    /// predicate a mob boot asks of the whole store
+    /// ([`RuntimeStore::runtime_holds_recovery_work`](crate::store::RuntimeStore::runtime_holds_recovery_work)),
+    /// and the backlog of its delivery authority. The read registers
+    /// nothing and wakes nothing: a dormant member stays dormant.
+    ///
+    /// A store that cannot answer either read answers
+    /// [`SessionWorkState::Unobserved`] with the read it could not make,
+    /// never a guessed idle. A runtime the store cannot answer for until it
+    /// is reopened (a host store whose scope of that runtime is poisoned)
+    /// holds work, as the boot read lists it. A machine without a store
+    /// holds nothing durable: [`SessionWorkState::Idle`].
+    ///
+    /// The answer is a snapshot, not a fence: a registration, a delivery or
+    /// a wake that lands after the read is not in it.
+    ///
+    /// # Errors
+    /// Any other store failure, and a delivery authority that does not
+    /// decode.
     pub async fn session_work_state(
         &self,
         session_id: &meerkat_core::types::SessionId,
     ) -> Result<SessionWorkState, RuntimeStoreError> {
-        let _ = session_id;
-        Ok(SessionWorkState::HoldsWork(SessionDurableWork {
-            recovery_work: false,
-            pending_deliveries: false,
-        }))
+        if self
+            .current_session_registration_witness(session_id)
+            .await
+            .is_some()
+        {
+            return Ok(SessionWorkState::Registered);
+        }
+        let Some(store) = self.store.as_ref() else {
+            return Ok(SessionWorkState::Idle);
+        };
+        let runtime_id = LogicalRuntimeId::for_session(session_id);
+        let recovery_work = match store.runtime_holds_recovery_work(&runtime_id).await {
+            Ok(holds) => holds,
+            Err(RuntimeStoreError::Unsupported(_)) => {
+                return Ok(SessionWorkState::Unobserved(
+                    RuntimeRecoveryWorkUnobserved::RecoveryScanUnsupported,
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        let pending_deliveries =
+            match runtime_delivery_pending_in(store.as_ref(), &runtime_id).await {
+                Ok(pending) => pending,
+                Err(RuntimeDeliveryError::Store(RuntimeStoreError::Unsupported(_))) => {
+                    return Ok(SessionWorkState::Unobserved(
+                        RuntimeRecoveryWorkUnobserved::DeliveryListingUnsupported,
+                    ));
+                }
+                // The store cannot answer for the runtime until it is
+                // reopened: it may hold pending deliveries.
+                Err(RuntimeDeliveryError::Store(RuntimeStoreError::ScopeRefused { .. })) => true,
+                Err(RuntimeDeliveryError::Store(error)) => return Err(error),
+                Err(error) => return Err(RuntimeStoreError::ReadFailed(error.to_string())),
+            };
+        Ok(if recovery_work || pending_deliveries {
+            SessionWorkState::HoldsWork(SessionDurableWork {
+                recovery_work,
+                pending_deliveries,
+            })
+        } else {
+            SessionWorkState::Idle
+        })
     }
 }
 

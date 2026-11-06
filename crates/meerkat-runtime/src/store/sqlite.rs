@@ -11358,6 +11358,24 @@ ORDER BY runtime_id";
     fn list_runtimes_with_recovery_work_in(
         conn: &Connection,
     ) -> Result<Vec<LogicalRuntimeId>, RuntimeStoreError> {
+        runtimes_with_recovery_work_in(conn, None)
+    }
+
+    /// Whether `runtime_id` holds recovery work: the scan's one statement and
+    /// predicate, filtered to that runtime. A runtime with no row holds none.
+    fn runtime_holds_recovery_work_in(
+        conn: &Connection,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<bool, RuntimeStoreError> {
+        Ok(!runtimes_with_recovery_work_in(conn, Some(runtime_id.0.as_str()))?.is_empty())
+    }
+
+    /// The runtimes with recovery work (`list_runtimes_with_recovery_work_in`):
+    /// every runtime, or only `only` when it is given.
+    fn runtimes_with_recovery_work_in(
+        conn: &Connection,
+        only: Option<&str>,
+    ) -> Result<Vec<LogicalRuntimeId>, RuntimeStoreError> {
         let query = format!(
             r"
             WITH candidates(runtime_id) AS (
@@ -11406,6 +11424,7 @@ ORDER BY runtime_id";
                 ON catalog.runtime_id = candidates.runtime_id
             LEFT JOIN runtime_ops_lifecycle AS ops
                 ON ops.runtime_id = candidates.runtime_id
+            WHERE ?1 IS NULL OR candidates.runtime_id = ?1
             ORDER BY candidates.runtime_id
             "
         );
@@ -11413,7 +11432,7 @@ ORDER BY runtime_id";
             .prepare(&query)
             .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
         let rows = statement
-            .query_map([], |row| {
+            .query_map([only], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     BootFactsV1 {
@@ -17190,6 +17209,22 @@ ORDER BY runtime_id";
             spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 list_runtimes_with_recovery_work_in(&conn)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        /// The scan's statement filtered to one runtime, on its own
+        /// connection.
+        async fn runtime_holds_recovery_work(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<bool, RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            spawn_blocking_holding_claim(move || {
+                let conn = open_runtime_connection(&path)?;
+                runtime_holds_recovery_work_in(&conn, &runtime_id)
             })
             .await
             .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?

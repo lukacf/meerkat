@@ -283,9 +283,9 @@ kept. Four steps, per member:
 1. **Hold the member before the start.** Stage the host's own recovery hold,
    `HostRunStartHoldReason::HostRecovery`, with
    `MobBuilder::hold_restored_member_run_starts`. No mob or Meta code stages
-   or releases this hold, so it stands until the host releases it. A hold
-   lives in the process only: stage it at every start until the recovery is
-   done.
+   or releases this hold, so it stands until the host releases it; a retire
+   or destroy of the member drops it with the member. A hold lives in the
+   process only: stage it at every start until the recovery is done.
 2. **Wake the member.** The start materializes every member whose store
    holds an open run; wake a member it left dormant with
    `MobHandle::ensure_member_live`. The member's registration keeps the
@@ -296,21 +296,66 @@ kept. Four steps, per member:
    a store that cannot tell (never read it as idle). The read loads no
    session body and registers nothing.
 3. **Settle the run.** `MobHandle::settle_member_retained_run` answers
-   `RetainedRunSettlement::Settled { run_id, inputs }` once the run's inputs
-   have ended, each with its committed terminal. It answers `NotRetained`
-   when the member's runtime keeps no run, and `Busy { current_run_id }`
-   when a run is current (it continued before the hold, or another run
-   started): the verb never stops a running run; `stop_member_run` does. A
-   member that is not materialized in this process is refused with
-   `MobError::MemberSessionNotLive`: the verb never wakes a member, since
-   a wake without the hold would let the run continue.
-4. **Release the hold.** `MobHandle::release_member_run_starts` with
-   `HostRunStartHoldReason::HostRecovery`. The settled run never starts
-   again, and the member serves its next input as usual.
+   `RetainedRunSettlement::Settled { run_id, inputs }` once the settlement
+   committed: the member's registration no longer keeps the run, and each
+   input holds its committed terminal. It answers `NotRetained` when the
+   member's runtime keeps no run, `Busy { current_run_id: Some(_) }` when a
+   run is current (it continued before the hold, or another run started:
+   the verb never stops a running run; `stop_member_run` does), and
+   `Busy { current_run_id: None }` when the registration cannot settle the
+   run now (it is initializing, draining for its unregister, retired or
+   stopped). A member that is not materialized in this process is refused
+   with `MobError::MemberSessionNotLive`: the verb never wakes a member,
+   since a wake without the hold would let the run continue. A settlement
+   that did not commit is refused too, and never answered `Settled`:
+   `MobError::MemberReloadRequired` when its write failed (the reload loses
+   the settle, so reload the member with
+   `MobHandle::reload_member_registration`, which applies the hold again,
+   and settle again), and `MobError::MemberSessionNotLive` when another
+   writer took the session's store fence, or when an unregister ended the
+   run first (its inputs then end `stopped`).
+4. **Release the hold on every path that leaves no open run.**
+   `MobHandle::release_member_run_starts` with
+   `HostRunStartHoldReason::HostRecovery`: after `Settled`, `NotRetained` and
+   `Busy { current_run_id: Some(_) }`, and for a member that holds no work. A
+   hold left staged keeps the member from ever starting a run, even at its
+   next wake days later. While the run may still be open
+   (`Busy { current_run_id: None }`, or a refusal), keep the hold and settle
+   that member again; releasing it there would let the run continue.
 
 ```rust
-use meerkat_mob::{HostRunStartHoldReason, MobBuilder};
-use meerkat_runtime::{RetainedRunSettlement, SessionWorkState};
+use meerkat_mob::{AgentIdentity, HostRunStartHoldReason, MobBuilder, MobHandle};
+use meerkat_runtime::{MeerkatMachine, RetainedRunSettlement, SessionWorkState};
+
+/// What a member's recovery leaves.
+enum Recovered {
+    /// No open run is kept: release the hold.
+    Done,
+    /// The run may still be open: keep the hold, settle again later.
+    StillOpen,
+}
+
+async fn recover(
+    handle: &MobHandle,
+    machine: &MeerkatMachine,
+    identity: &AgentIdentity,
+) -> Result<Recovered, Box<dyn std::error::Error + Send + Sync>> {
+    if handle.member_unmaterialized(identity) {
+        // A dormant member whose store holds no work keeps no run.
+        let Some(session_id) = handle.resolve_bridge_session_id(identity).await else {
+            return Ok(Recovered::Done);
+        };
+        if machine.session_work_state(&session_id).await? == SessionWorkState::Idle {
+            return Ok(Recovered::Done);
+        }
+        handle.ensure_member_live(identity).await?;
+    }
+    Ok(match handle.settle_member_retained_run(identity).await? {
+        RetainedRunSettlement::Busy { current_run_id: None } => Recovered::StillOpen,
+        // Settled, NotRetained, or a run is current.
+        _ => Recovered::Done,
+    })
+}
 
 // `machine` is the MeerkatMachine the mob's session service runs on.
 let handle = MobBuilder::for_resume(storage)
@@ -318,26 +363,27 @@ let handle = MobBuilder::for_resume(storage)
     .hold_restored_member_run_starts(HostRunStartHoldReason::HostRecovery, members.clone())
     .resume()
     .await?;
+let mut settle_again = Vec::new();
 for identity in &members {
-    if handle.member_unmaterialized(identity) {
-        let Some(session_id) = handle.resolve_bridge_session_id(identity).await else {
-            continue;
-        };
-        if machine.session_work_state(&session_id).await? == SessionWorkState::Idle {
-            continue;
+    match recover(&handle, &machine, identity).await {
+        Ok(Recovered::Done) => {
+            let released = handle
+                .release_member_run_starts(identity, HostRunStartHoldReason::HostRecovery)
+                .await;
+            if released.is_err() {
+                settle_again.push(identity.clone());
+            }
         }
+        // The run may still be open, or the member needs a reload first:
+        // the hold keeps the run from continuing until a later round.
+        Ok(Recovered::StillOpen) | Err(_) => settle_again.push(identity.clone()),
     }
-    handle.ensure_member_live(identity).await?;
-    match handle.settle_member_retained_run(identity).await? {
-        RetainedRunSettlement::Settled { run_id, inputs } => { /* ended, no model request */ }
-        RetainedRunSettlement::Busy { current_run_id } => { /* a run is current */ }
-        _ => { /* NotRetained: nothing kept, or settled already */ }
-    }
-    handle
-        .release_member_run_starts(identity, HostRunStartHoldReason::HostRecovery)
-        .await?;
 }
 ```
+
+Run the loop again over `settle_again` (after reloading a member refused
+`MemberReloadRequired`) until it is empty: each round either settles the run
+or finds none kept, and then releases the hold.
 
 A retry is safe. A settle that arrives while an earlier one is still
 settling the same run joins it and gets the same answer. A retry after the
@@ -348,7 +394,10 @@ proof is the run's inputs, which read `cancelled` through
 A runtime embedding with no mob takes the same steps on its
 `MeerkatMachine`: `stage_registration_run_start_hold_only` with
 `RunStartHoldReason::HostRecovery` before the session registers,
-`settle_retained_run`, then `release_run_starts`.
+`settle_retained_run`, then `release_run_starts` on the same paths. A
+settlement whose write failed answers `RuntimeDriverError::RecoveryRepairBlocked`:
+reload the registration (`recover_or_discard_reload_required_registration_if_current`),
+which applies the staged hold again, and settle again.
 
 ## Tools That Run Again
 

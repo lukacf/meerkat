@@ -419,17 +419,25 @@ Contract and limits: `docs/guides/durable-runs.mdx`.
 - Settling a kept run without a model request (0.9.11, a host's Recover
   flow): hold the member with `HostRunStartHoldReason::HostRecovery`
   (`MobBuilder::hold_restored_member_run_starts`, before the start; no mob or
-  Meta path stages or releases it), wake it under the hold
-  (`MobHandle::ensure_member_live`), call
+  Meta path stages or releases it, and a retire or destroy of the member
+  drops it), wake it under the hold (`MobHandle::ensure_member_live`), call
   `MobHandle::settle_member_retained_run` (runtime:
-  `MeerkatMachine::settle_retained_run`), then release the hold.
-  `RetainedRunSettlement::Settled { run_id, inputs }` once the run's inputs
-  ended cancelled (closed as interrupted, never resumed); `NotRetained` when
-  nothing is kept, which is also the answer to a retry after the settle;
-  `Busy { current_run_id }` when a run is current (it is never stopped). A
-  member not live in this process is refused `MobError::MemberSessionNotLive`
-  and never woken. `MeerkatMachine::session_work_state` reads one session's
-  durable work cold, without loading or registering it: `Registered`, `Idle`,
+  `MeerkatMachine::settle_retained_run`), then release the hold on every
+  answer that leaves no open run. `RetainedRunSettlement::Settled { run_id,
+  inputs }` once the settlement committed (the run's inputs ended cancelled,
+  closed as interrupted, never resumed); `NotRetained` when nothing is kept,
+  which is also the answer to a retry after the settle;
+  `Busy { current_run_id: Some(_) }` when a run is current (it is never
+  stopped); `Busy { current_run_id: None }` when the registration cannot
+  settle now: keep the hold and settle again. A settlement that did not
+  commit is never `Settled`: `MobError::MemberReloadRequired` when its write
+  failed (reload, settle again), `MobError::MemberSessionNotLive` when the
+  session leaves the process (another writer took its store fence, or an
+  unregister ended the run first, its inputs then stopped). A member not live
+  in this process is refused `MobError::MemberSessionNotLive` and never
+  woken. `MeerkatMachine::session_work_state` reads cold whether one session
+  holds the work a start wakes a member for, without loading or registering
+  it: `Registered`, `Idle`,
   `HoldsWork(SessionDurableWork { recovery_work, pending_deliveries })` or
   `Unobserved(cause)` (never idle).
 - Not resumed, closed as interrupted with content kept: a bound input already

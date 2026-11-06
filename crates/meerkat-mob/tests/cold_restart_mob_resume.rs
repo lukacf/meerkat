@@ -13037,13 +13037,15 @@ async fn held_members_open_run_resumes_on_release(
 /// member `w-1` for its recovery (`HostRecovery`, staged before the start, as
 /// a host's Recover flow stages it): the start materializes `w-1` (it holds
 /// recovery work), its runtime loop parks on the hold, and no model request
-/// is made.
+/// is made. Before the start, the host reads `w-1`'s session cold
+/// (`cold_before_start`), and the read registers nothing.
 #[cfg(feature = "test-support")]
 struct HeldForRecovery {
     handle: MobHandle,
     runtime: Arc<meerkat_runtime::MeerkatMachine>,
     client: Arc<HoldingToolLoopClient>,
     worker: AgentIdentity,
+    cold_before_start: meerkat_runtime::SessionWorkState,
 }
 
 #[cfg(feature = "test-support")]
@@ -13059,18 +13061,10 @@ async fn start_held_for_recovery(
         .expect("the session service's runtime owner");
     // The host finds the member that holds work without waking anything: a
     // cold read of its session, before any start registers it.
-    let cold = runtime
+    let cold_before_start = runtime
         .session_work_state(&run.w1_sid)
         .await
         .expect("the cold read answers");
-    assert!(
-        matches!(
-            cold,
-            meerkat_runtime::SessionWorkState::HoldsWork(work)
-                if work.recovery_work && !work.pending_deliveries
-        ),
-        "the cold read finds the kept run: {cold:?}"
-    );
     assert!(
         runtime
             .current_session_registration_witness(&run.w1_sid)
@@ -13110,6 +13104,7 @@ async fn start_held_for_recovery(
         runtime,
         client,
         worker,
+        cold_before_start,
     }
 }
 
@@ -13203,7 +13198,8 @@ async fn a_host_recover_settles_a_held_members_kept_run_without_a_model_request(
 /// start left dormant (the lead: it holds no work) is refused
 /// `MemberSessionNotLive`, and the settle wakes nothing: the lead stays
 /// unmaterialized, its session unregistered, and no model request is made.
-/// The cold read of the dormant lead reads idle, and wakes nothing either.
+/// The cold read of the worker before the start found its kept run, and the
+/// cold read of the dormant lead reads idle; neither wakes anything.
 /// RED before: no such verb, and no per-session cold read.
 #[cfg(feature = "test-support")]
 #[tokio::test(flavor = "multi_thread")]
@@ -13240,6 +13236,15 @@ async fn a_host_settle_of_a_dormant_member_is_refused_and_wakes_nothing() {
                 if agent_identity == &lead && session_id == &lead_sid
         ),
         "a dormant member is refused typed: {refused:?}"
+    );
+    assert!(
+        matches!(
+            held.cold_before_start,
+            meerkat_runtime::SessionWorkState::HoldsWork(work)
+                if work.recovery_work && !work.pending_deliveries
+        ),
+        "the cold read before the start finds the worker's kept run: {:?}",
+        held.cold_before_start
     );
     assert_eq!(
         held.runtime

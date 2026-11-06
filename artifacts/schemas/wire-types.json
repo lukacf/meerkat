@@ -5051,6 +5051,112 @@
           }
         ]
       },
+      "PrincipalId": {
+        "description": "Stable, caller-visible principal id.\n\nLegacy deserialization preserves previously persisted strings, including\nthose rejected by [`Self::new`]. Qualified [`PrincipalRef`] deserialization\nvalidates the id; migrating unqualified persisted ids is a separate step.",
+        "type": "string"
+      },
+      "PrincipalKind": {
+        "description": "Generic principal categories. Product-specific role names belong outside\ncore and may be mapped to these typed categories by clients.",
+        "enum": [
+          "human",
+          "personal_agent",
+          "shared_agent",
+          "runtime_host",
+          "service_account"
+        ],
+        "type": "string"
+      },
+      "PrincipalQualification": {
+        "description": "Whether an identity has an explicit trust-domain namespace.\n\nUnqualified identity preserves trusted-embedded and legacy wire contracts;\nit must not be silently assigned a domain for governed use. Qualification\nis identity vocabulary, not proof of authentication or authorization.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unqualified",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "qualified",
+                "type": "string"
+              },
+              "trust_domain_id": {
+                "$ref": "#/$defs/TrustDomainId"
+              }
+            },
+            "required": [
+              "kind",
+              "trust_domain_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PrincipalRef": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "qualification": {
+                  "properties": {
+                    "kind": {
+                      "const": "qualified"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
+                }
+              },
+              "required": [
+                "qualification"
+              ]
+            },
+            "then": {
+              "properties": {
+                "id": {
+                  "allOf": [
+                    {
+                      "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+                    },
+                    {
+                      "not": {
+                        "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "description": "Typed principal reference.\n\nPublic fields preserve the existing data contract, so an in-memory value\nis not proof of valid or authenticated identity. Governed admission must\ncall [`Self::validate_qualified`] and separately establish caller authority.",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/PrincipalId"
+          },
+          "kind": {
+            "$ref": "#/$defs/PrincipalKind"
+          },
+          "qualification": {
+            "$ref": "#/$defs/PrincipalQualification"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
       "ProfileId": {
         "description": "Opaque slug identifying an auth profile override on a connection.",
         "type": "string"
@@ -7910,6 +8016,17 @@
             ],
             "description": "Session-owned provenance; not accepted by transcript rewrite wire inputs."
           },
+          "requester": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TurnRequester"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The original requester the turn served: the requester its inputs\nshare, stamped at admission from the inputs, never inferred from\ncontent. Absent when the turn's inputs carry none."
+          },
           "run_id": {
             "anyOf": [
               {
@@ -8192,6 +8309,36 @@
             "type": "string"
           }
         ]
+      },
+      "TrustDomainId": {
+        "allOf": [
+          {
+            "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+          },
+          {
+            "not": {
+              "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+            }
+          }
+        ],
+        "description": "Exact, opaque trust-domain namespace for a qualified principal id.\n\nDomain ids are not inferred from hostnames or normalized. Constructing one\nvalidates its syntax, not the caller's authority to assert that domain.",
+        "type": "string"
+      },
+      "TurnRequester": {
+        "description": "The original requester of a turn: the principal its inputs share, and\nwhether it reached them directly.\n\nThe principal is opaque to Core. A host supplies it for the inputs it\nadmits (the authenticated caller it acts for), or a governed input's work\nassociation names it. Core carries it and never interprets it: it has no\nperson, account or assurance concept for it.",
+        "properties": {
+          "carried": {
+            "description": "Set when an input of the turn reached it through an actor other than\nthe requester: governed work another agent sent (a peer hop), or work\nanother owner admitted for the requester. Absent when the requester's\nown ingress admitted every input.",
+            "type": "boolean"
+          },
+          "principal": {
+            "$ref": "#/$defs/PrincipalRef"
+          }
+        },
+        "required": [
+          "principal"
+        ],
+        "type": "object"
       },
       "TurnTerminalCauseKind": {
         "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
@@ -31200,6 +31347,112 @@
           }
         ]
       },
+      "PrincipalId": {
+        "description": "Stable, caller-visible principal id.\n\nLegacy deserialization preserves previously persisted strings, including\nthose rejected by [`Self::new`]. Qualified [`PrincipalRef`] deserialization\nvalidates the id; migrating unqualified persisted ids is a separate step.",
+        "type": "string"
+      },
+      "PrincipalKind": {
+        "description": "Generic principal categories. Product-specific role names belong outside\ncore and may be mapped to these typed categories by clients.",
+        "enum": [
+          "human",
+          "personal_agent",
+          "shared_agent",
+          "runtime_host",
+          "service_account"
+        ],
+        "type": "string"
+      },
+      "PrincipalQualification": {
+        "description": "Whether an identity has an explicit trust-domain namespace.\n\nUnqualified identity preserves trusted-embedded and legacy wire contracts;\nit must not be silently assigned a domain for governed use. Qualification\nis identity vocabulary, not proof of authentication or authorization.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unqualified",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "qualified",
+                "type": "string"
+              },
+              "trust_domain_id": {
+                "$ref": "#/$defs/TrustDomainId"
+              }
+            },
+            "required": [
+              "kind",
+              "trust_domain_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PrincipalRef": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "qualification": {
+                  "properties": {
+                    "kind": {
+                      "const": "qualified"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
+                }
+              },
+              "required": [
+                "qualification"
+              ]
+            },
+            "then": {
+              "properties": {
+                "id": {
+                  "allOf": [
+                    {
+                      "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+                    },
+                    {
+                      "not": {
+                        "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "description": "Typed principal reference.\n\nPublic fields preserve the existing data contract, so an in-memory value\nis not proof of valid or authenticated identity. Governed admission must\ncall [`Self::validate_qualified`] and separately establish caller authority.",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/PrincipalId"
+          },
+          "kind": {
+            "$ref": "#/$defs/PrincipalKind"
+          },
+          "qualification": {
+            "$ref": "#/$defs/PrincipalQualification"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
       "ProfileId": {
         "description": "Opaque slug identifying an auth profile override on a connection.",
         "type": "string"
@@ -34059,6 +34312,17 @@
             ],
             "description": "Session-owned provenance; not accepted by transcript rewrite wire inputs."
           },
+          "requester": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TurnRequester"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The original requester the turn served: the requester its inputs\nshare, stamped at admission from the inputs, never inferred from\ncontent. Absent when the turn's inputs carry none."
+          },
           "run_id": {
             "anyOf": [
               {
@@ -34341,6 +34605,36 @@
             "type": "string"
           }
         ]
+      },
+      "TrustDomainId": {
+        "allOf": [
+          {
+            "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+          },
+          {
+            "not": {
+              "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+            }
+          }
+        ],
+        "description": "Exact, opaque trust-domain namespace for a qualified principal id.\n\nDomain ids are not inferred from hostnames or normalized. Constructing one\nvalidates its syntax, not the caller's authority to assert that domain.",
+        "type": "string"
+      },
+      "TurnRequester": {
+        "description": "The original requester of a turn: the principal its inputs share, and\nwhether it reached them directly.\n\nThe principal is opaque to Core. A host supplies it for the inputs it\nadmits (the authenticated caller it acts for), or a governed input's work\nassociation names it. Core carries it and never interprets it: it has no\nperson, account or assurance concept for it.",
+        "properties": {
+          "carried": {
+            "description": "Set when an input of the turn reached it through an actor other than\nthe requester: governed work another agent sent (a peer hop), or work\nanother owner admitted for the requester. Absent when the requester's\nown ingress admitted every input.",
+            "type": "boolean"
+          },
+          "principal": {
+            "$ref": "#/$defs/PrincipalRef"
+          }
+        },
+        "required": [
+          "principal"
+        ],
+        "type": "object"
       },
       "TurnTerminalCauseKind": {
         "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
@@ -48669,6 +48963,112 @@
           }
         ]
       },
+      "PrincipalId": {
+        "description": "Stable, caller-visible principal id.\n\nLegacy deserialization preserves previously persisted strings, including\nthose rejected by [`Self::new`]. Qualified [`PrincipalRef`] deserialization\nvalidates the id; migrating unqualified persisted ids is a separate step.",
+        "type": "string"
+      },
+      "PrincipalKind": {
+        "description": "Generic principal categories. Product-specific role names belong outside\ncore and may be mapped to these typed categories by clients.",
+        "enum": [
+          "human",
+          "personal_agent",
+          "shared_agent",
+          "runtime_host",
+          "service_account"
+        ],
+        "type": "string"
+      },
+      "PrincipalQualification": {
+        "description": "Whether an identity has an explicit trust-domain namespace.\n\nUnqualified identity preserves trusted-embedded and legacy wire contracts;\nit must not be silently assigned a domain for governed use. Qualification\nis identity vocabulary, not proof of authentication or authorization.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unqualified",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "qualified",
+                "type": "string"
+              },
+              "trust_domain_id": {
+                "$ref": "#/$defs/TrustDomainId"
+              }
+            },
+            "required": [
+              "kind",
+              "trust_domain_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PrincipalRef": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "qualification": {
+                  "properties": {
+                    "kind": {
+                      "const": "qualified"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
+                }
+              },
+              "required": [
+                "qualification"
+              ]
+            },
+            "then": {
+              "properties": {
+                "id": {
+                  "allOf": [
+                    {
+                      "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+                    },
+                    {
+                      "not": {
+                        "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "description": "Typed principal reference.\n\nPublic fields preserve the existing data contract, so an in-memory value\nis not proof of valid or authenticated identity. Governed admission must\ncall [`Self::validate_qualified`] and separately establish caller authority.",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/PrincipalId"
+          },
+          "kind": {
+            "$ref": "#/$defs/PrincipalKind"
+          },
+          "qualification": {
+            "$ref": "#/$defs/PrincipalQualification"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
       "ProfileId": {
         "description": "Opaque slug identifying an auth profile override on a connection.",
         "type": "string"
@@ -51598,6 +51998,17 @@
             ],
             "description": "Session-owned provenance; not accepted by transcript rewrite wire inputs."
           },
+          "requester": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TurnRequester"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The original requester the turn served: the requester its inputs\nshare, stamped at admission from the inputs, never inferred from\ncontent. Absent when the turn's inputs carry none."
+          },
           "run_id": {
             "anyOf": [
               {
@@ -51900,6 +52311,36 @@
             "type": "string"
           }
         ]
+      },
+      "TrustDomainId": {
+        "allOf": [
+          {
+            "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+          },
+          {
+            "not": {
+              "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+            }
+          }
+        ],
+        "description": "Exact, opaque trust-domain namespace for a qualified principal id.\n\nDomain ids are not inferred from hostnames or normalized. Constructing one\nvalidates its syntax, not the caller's authority to assert that domain.",
+        "type": "string"
+      },
+      "TurnRequester": {
+        "description": "The original requester of a turn: the principal its inputs share, and\nwhether it reached them directly.\n\nThe principal is opaque to Core. A host supplies it for the inputs it\nadmits (the authenticated caller it acts for), or a governed input's work\nassociation names it. Core carries it and never interprets it: it has no\nperson, account or assurance concept for it.",
+        "properties": {
+          "carried": {
+            "description": "Set when an input of the turn reached it through an actor other than\nthe requester: governed work another agent sent (a peer hop), or work\nanother owner admitted for the requester. Absent when the requester's\nown ingress admitted every input.",
+            "type": "boolean"
+          },
+          "principal": {
+            "$ref": "#/$defs/PrincipalRef"
+          }
+        },
+        "required": [
+          "principal"
+        ],
+        "type": "object"
       },
       "TurnTerminalCauseKind": {
         "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
@@ -69496,6 +69937,112 @@
           }
         ]
       },
+      "PrincipalId": {
+        "description": "Stable, caller-visible principal id.\n\nLegacy deserialization preserves previously persisted strings, including\nthose rejected by [`Self::new`]. Qualified [`PrincipalRef`] deserialization\nvalidates the id; migrating unqualified persisted ids is a separate step.",
+        "type": "string"
+      },
+      "PrincipalKind": {
+        "description": "Generic principal categories. Product-specific role names belong outside\ncore and may be mapped to these typed categories by clients.",
+        "enum": [
+          "human",
+          "personal_agent",
+          "shared_agent",
+          "runtime_host",
+          "service_account"
+        ],
+        "type": "string"
+      },
+      "PrincipalQualification": {
+        "description": "Whether an identity has an explicit trust-domain namespace.\n\nUnqualified identity preserves trusted-embedded and legacy wire contracts;\nit must not be silently assigned a domain for governed use. Qualification\nis identity vocabulary, not proof of authentication or authorization.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unqualified",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "qualified",
+                "type": "string"
+              },
+              "trust_domain_id": {
+                "$ref": "#/$defs/TrustDomainId"
+              }
+            },
+            "required": [
+              "kind",
+              "trust_domain_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PrincipalRef": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "qualification": {
+                  "properties": {
+                    "kind": {
+                      "const": "qualified"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
+                }
+              },
+              "required": [
+                "qualification"
+              ]
+            },
+            "then": {
+              "properties": {
+                "id": {
+                  "allOf": [
+                    {
+                      "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+                    },
+                    {
+                      "not": {
+                        "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "description": "Typed principal reference.\n\nPublic fields preserve the existing data contract, so an in-memory value\nis not proof of valid or authenticated identity. Governed admission must\ncall [`Self::validate_qualified`] and separately establish caller authority.",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/PrincipalId"
+          },
+          "kind": {
+            "$ref": "#/$defs/PrincipalKind"
+          },
+          "qualification": {
+            "$ref": "#/$defs/PrincipalQualification"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
       "ProfileId": {
         "description": "Opaque slug identifying an auth profile override on a connection.",
         "type": "string"
@@ -72649,6 +73196,17 @@
             ],
             "description": "Session-owned provenance; not accepted by transcript rewrite wire inputs."
           },
+          "requester": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TurnRequester"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The original requester the turn served: the requester its inputs\nshare, stamped at admission from the inputs, never inferred from\ncontent. Absent when the turn's inputs carry none."
+          },
           "run_id": {
             "anyOf": [
               {
@@ -72952,10 +73510,40 @@
           }
         ]
       },
+      "TrustDomainId": {
+        "allOf": [
+          {
+            "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+          },
+          {
+            "not": {
+              "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+            }
+          }
+        ],
+        "description": "Exact, opaque trust-domain namespace for a qualified principal id.\n\nDomain ids are not inferred from hostnames or normalized. Constructing one\nvalidates its syntax, not the caller's authority to assert that domain.",
+        "type": "string"
+      },
       "TurnRequestContext": {
         "description": "Exact host-generated context projected into provider requests for one\nruntime-owned logical turn.\n\nThis is deliberately not a [`crate::types::Message`]: it cannot be appended\nto a [`crate::Session`] or acquire durable transcript semantics. Runtime\ninput persistence owns the bytes until the input reaches a terminal state;\nthe agent only borrows this clone-cheap value while composing foreground\nprovider requests for that turn.",
         "minLength": 1,
         "type": "string"
+      },
+      "TurnRequester": {
+        "description": "The original requester of a turn: the principal its inputs share, and\nwhether it reached them directly.\n\nThe principal is opaque to Core. A host supplies it for the inputs it\nadmits (the authenticated caller it acts for), or a governed input's work\nassociation names it. Core carries it and never interprets it: it has no\nperson, account or assurance concept for it.",
+        "properties": {
+          "carried": {
+            "description": "Set when an input of the turn reached it through an actor other than\nthe requester: governed work another agent sent (a peer hop), or work\nanother owner admitted for the requester. Absent when the requester's\nown ingress admitted every input.",
+            "type": "boolean"
+          },
+          "principal": {
+            "$ref": "#/$defs/PrincipalRef"
+          }
+        },
+        "required": [
+          "principal"
+        ],
+        "type": "object"
       },
       "TurnTerminalCauseKind": {
         "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
@@ -90449,6 +91037,112 @@
           }
         ]
       },
+      "PrincipalId": {
+        "description": "Stable, caller-visible principal id.\n\nLegacy deserialization preserves previously persisted strings, including\nthose rejected by [`Self::new`]. Qualified [`PrincipalRef`] deserialization\nvalidates the id; migrating unqualified persisted ids is a separate step.",
+        "type": "string"
+      },
+      "PrincipalKind": {
+        "description": "Generic principal categories. Product-specific role names belong outside\ncore and may be mapped to these typed categories by clients.",
+        "enum": [
+          "human",
+          "personal_agent",
+          "shared_agent",
+          "runtime_host",
+          "service_account"
+        ],
+        "type": "string"
+      },
+      "PrincipalQualification": {
+        "description": "Whether an identity has an explicit trust-domain namespace.\n\nUnqualified identity preserves trusted-embedded and legacy wire contracts;\nit must not be silently assigned a domain for governed use. Qualification\nis identity vocabulary, not proof of authentication or authorization.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unqualified",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "qualified",
+                "type": "string"
+              },
+              "trust_domain_id": {
+                "$ref": "#/$defs/TrustDomainId"
+              }
+            },
+            "required": [
+              "kind",
+              "trust_domain_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PrincipalRef": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "qualification": {
+                  "properties": {
+                    "kind": {
+                      "const": "qualified"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
+                }
+              },
+              "required": [
+                "qualification"
+              ]
+            },
+            "then": {
+              "properties": {
+                "id": {
+                  "allOf": [
+                    {
+                      "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+                    },
+                    {
+                      "not": {
+                        "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "description": "Typed principal reference.\n\nPublic fields preserve the existing data contract, so an in-memory value\nis not proof of valid or authenticated identity. Governed admission must\ncall [`Self::validate_qualified`] and separately establish caller authority.",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/PrincipalId"
+          },
+          "kind": {
+            "$ref": "#/$defs/PrincipalKind"
+          },
+          "qualification": {
+            "$ref": "#/$defs/PrincipalQualification"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
       "ProfileId": {
         "description": "Opaque slug identifying an auth profile override on a connection.",
         "type": "string"
@@ -93378,6 +94072,17 @@
             ],
             "description": "Session-owned provenance; not accepted by transcript rewrite wire inputs."
           },
+          "requester": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TurnRequester"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The original requester the turn served: the requester its inputs\nshare, stamped at admission from the inputs, never inferred from\ncontent. Absent when the turn's inputs carry none."
+          },
           "run_id": {
             "anyOf": [
               {
@@ -93680,6 +94385,36 @@
             "type": "string"
           }
         ]
+      },
+      "TrustDomainId": {
+        "allOf": [
+          {
+            "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+          },
+          {
+            "not": {
+              "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+            }
+          }
+        ],
+        "description": "Exact, opaque trust-domain namespace for a qualified principal id.\n\nDomain ids are not inferred from hostnames or normalized. Constructing one\nvalidates its syntax, not the caller's authority to assert that domain.",
+        "type": "string"
+      },
+      "TurnRequester": {
+        "description": "The original requester of a turn: the principal its inputs share, and\nwhether it reached them directly.\n\nThe principal is opaque to Core. A host supplies it for the inputs it\nadmits (the authenticated caller it acts for), or a governed input's work\nassociation names it. Core carries it and never interprets it: it has no\nperson, account or assurance concept for it.",
+        "properties": {
+          "carried": {
+            "description": "Set when an input of the turn reached it through an actor other than\nthe requester: governed work another agent sent (a peer hop), or work\nanother owner admitted for the requester. Absent when the requester's\nown ingress admitted every input.",
+            "type": "boolean"
+          },
+          "principal": {
+            "$ref": "#/$defs/PrincipalRef"
+          }
+        },
+        "required": [
+          "principal"
+        ],
+        "type": "object"
       },
       "TurnTerminalCauseKind": {
         "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
@@ -97017,6 +97752,23 @@
         },
         "type": "object"
       },
+      "DecisionGovernanceConfig": {
+        "additionalProperties": false,
+        "description": "The durable decisions the operator of an `rkat-rpc` stdio connection\ndecides: those addressed to one of `operator_approver_ids`. The operator\nis the process's operating-system user (on a governed pipe, the\ncomposition's operator); the connection presents it the open decisions\nof these approver ids when its client lists them, and it decides only a\ndecision the connection presented, while the decision's approver id is\nstill listed here.\n\nChanging the list is approver-authority administration, so it lives in\nthe host-administered governance section: an ordinary config write can\nneither add, change nor remove it.",
+        "properties": {
+          "operator_approver_ids": {
+            "default": [
+              "operator"
+            ],
+            "description": "The approver ids the operator acts for. Absent, it is `[\"operator\"]`;\nan explicitly empty list presents nothing and decides nothing.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "ExecutionConfinement": {
         "additionalProperties": false,
         "description": "Validated immutable requirements. Final host-path and backend validation\nbelongs to the adapter at preparation, not this platform-neutral contract.",
@@ -97154,8 +97906,12 @@
       },
       "GovernanceConfig": {
         "additionalProperties": false,
-        "description": "Governance of a realm's native composition. Empty by default: a stock\ngoverned realm keeps every operation at its local R1 tier and calls no\nreviewer. A present section ([`crate::Config::governance`]), even an\nempty one, replaces an inherited one as a whole.",
+        "description": "Governance of a realm's native composition. By default a stock governed\nrealm keeps every operation at its local R1 tier and calls no reviewer,\nand the stdio operator decides for the approver id `operator`.\nA present section ([`crate::Config::governance`]), even an empty one,\nreplaces an inherited one as a whole.",
         "properties": {
+          "decisions": {
+            "$ref": "#/$defs/DecisionGovernanceConfig",
+            "description": "The approver ids the stdio operator decides durable decisions for."
+          },
           "review": {
             "$ref": "#/$defs/StockReviewConfig",
             "description": "The review the stock governed host requires."
@@ -99080,6 +99836,1333 @@
       "patch"
     ],
     "title": "ContractVersion",
+    "type": "object"
+  },
+  "DecisionListResult": {
+    "$defs": {
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      },
+      "WireDecision": {
+        "description": "One durable decision, as its row stands at the read.",
+        "properties": {
+          "approver_id": {
+            "description": "Who may approve the decision: the host maps it to the humans who may\nact for it.",
+            "type": "string"
+          },
+          "created_at_ms": {
+            "description": "The host clock reading of the hold, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "deadline_at_ms": {
+            "description": "The sealed deadline, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "decided_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "decision_id": {
+            "description": "`decision:` and 64 lowercase hex digits.",
+            "type": "string"
+          },
+          "ended_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "execution_refusal": {
+            "description": "The owner's typed refusal of an execution-refused decision.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "first_presented_to_approver_at_ms": {
+            "description": "When a complete presentation first reached the approver, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "The host's token naming what kind of operation the decision holds.",
+            "type": "string"
+          },
+          "notice": {
+            "$ref": "#/$defs/WireDecisionNoticeState",
+            "description": "Where the requester notice stands."
+          },
+          "operation_id": {
+            "description": "The held operation's id, as its owner names it.",
+            "type": "string"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireDecisionOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set exactly when the decision was decided."
+          },
+          "permit_issued": {
+            "description": "Whether an execution permit is outstanding.",
+            "type": "boolean"
+          },
+          "phase": {
+            "$ref": "#/$defs/WireDecisionPhase"
+          },
+          "presentations": {
+            "description": "The latest complete presentation per audience.",
+            "items": {
+              "$ref": "#/$defs/WirePresentationRecord"
+            },
+            "type": "array"
+          },
+          "renderer": {
+            "description": "The token of the renderer that produced the rendering.",
+            "type": "string"
+          },
+          "request": {
+            "description": "The held request, when the read asked for it (`include_request`)."
+          },
+          "request_digest": {
+            "description": "The held request's digest, as the operation's owner computes it.",
+            "type": "string"
+          },
+          "requester": {
+            "description": "The requester's principal key.",
+            "type": "string"
+          },
+          "reviewer": {
+            "description": "The reviewer of a review-stage decision (a principal key).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "description": "The row's revision: 1 at the hold, one more at each write.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "stage": {
+            "$ref": "#/$defs/WireDecisionStage"
+          },
+          "subject_digest": {
+            "description": "The digest of the decision's rendering, computed by the server.",
+            "type": "string"
+          },
+          "subject_key": {
+            "description": "The host's key of the subject the decision is held for.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision_id",
+          "kind",
+          "subject_key",
+          "operation_id",
+          "request_digest",
+          "requester",
+          "approver_id",
+          "phase",
+          "stage",
+          "notice",
+          "deadline_at_ms",
+          "created_at_ms",
+          "subject_digest",
+          "renderer",
+          "permit_issued",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "WireDecisionAssurance": {
+        "description": "How the human who decided was authenticated on the decision event.",
+        "oneOf": [
+          {
+            "const": "person_authenticated",
+            "description": "The person was authenticated on the actual event.",
+            "type": "string"
+          },
+          {
+            "const": "service_credential",
+            "description": "A delegated service credential authenticated the event.",
+            "type": "string"
+          },
+          {
+            "const": "device_trusted",
+            "description": "Only device or network trust was established.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: an assurance this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionEvidence": {
+        "description": "The durable evidence a decision was decided with. An authentication\nscope is never projected.",
+        "oneOf": [
+          {
+            "description": "An authenticated human's decision.",
+            "properties": {
+              "approve": {
+                "type": "boolean"
+              },
+              "approver_id": {
+                "type": "string"
+              },
+              "assurance": {
+                "$ref": "#/$defs/WireDecisionAssurance"
+              },
+              "decider": {
+                "description": "The decider's principal key.",
+                "type": "string"
+              },
+              "event_ref": {
+                "type": "string"
+              },
+              "ingress": {
+                "description": "How the decision event reached the host.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "human",
+                "type": "string"
+              },
+              "observed_at_ms": {
+                "description": "When the ingress observed the event, in UNIX ms; absent in\nevidence recorded before decisions carried it.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "presentation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WirePresentationRecord"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The presentation the decision event carried, if any."
+              },
+              "presented_digest": {
+                "type": "string"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "decider",
+              "assurance",
+              "ingress",
+              "event_ref",
+              "approver_id",
+              "presented_digest",
+              "approve"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A reviewer's attributed verdict.",
+            "properties": {
+              "feedback": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "review",
+                "type": "string"
+              },
+              "origin_session": {
+                "type": "string"
+              },
+              "presented_digest": {
+                "type": "string"
+              },
+              "reviewer": {
+                "description": "The reviewer's principal key.",
+                "type": "string"
+              },
+              "verdict": {
+                "$ref": "#/$defs/WireDecisionReviewVerdict"
+              },
+              "verdict_call_ref": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer",
+              "origin_session",
+              "verdict_call_ref",
+              "verdict",
+              "presented_digest"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: evidence of a kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireDecisionNoticeState": {
+        "description": "Where the requester notice of a decision stands.",
+        "oneOf": [
+          {
+            "const": "not_required",
+            "description": "The requester is not routable: no notice is ever owed.",
+            "type": "string"
+          },
+          {
+            "const": "not_due",
+            "description": "The decision has not ended.",
+            "type": "string"
+          },
+          {
+            "const": "owed",
+            "description": "The decision ended and its notice is owed.",
+            "type": "string"
+          },
+          {
+            "const": "delivered",
+            "description": "The notice was delivered.",
+            "type": "string"
+          },
+          {
+            "const": "failed",
+            "description": "The notice failed terminally.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a notice state this version does not know.\nThe server never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionOutcome": {
+        "description": "A decided decision's outcome: who decided, and the evidence.",
+        "properties": {
+          "evidence": {
+            "$ref": "#/$defs/WireDecisionEvidence"
+          },
+          "tier": {
+            "$ref": "#/$defs/WireDecisionTier"
+          }
+        },
+        "required": [
+          "tier",
+          "evidence"
+        ],
+        "type": "object"
+      },
+      "WireDecisionPhase": {
+        "description": "Where a decision stands.",
+        "oneOf": [
+          {
+            "const": "open",
+            "description": "Held, and not yet decided, withdrawn or expired.",
+            "type": "string"
+          },
+          {
+            "const": "approved",
+            "description": "Approved; the held request not yet executed.",
+            "type": "string"
+          },
+          {
+            "const": "rejected",
+            "description": "Rejected. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "expired",
+            "description": "Observed at or after its deadline undecided, or approved and never\nexecuted. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "withdrawn",
+            "description": "Withdrawn by its requester or the host before a decision. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "executed",
+            "description": "The held request was executed. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "execution_refused",
+            "description": "The operation's owner refused the held request. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a phase this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionReviewVerdict": {
+        "description": "A reviewer's verdict.",
+        "oneOf": [
+          {
+            "const": "allow",
+            "description": "Approve the held operation.",
+            "type": "string"
+          },
+          {
+            "const": "deny",
+            "description": "Reject it.",
+            "type": "string"
+          },
+          {
+            "const": "escalate",
+            "description": "Hand the decision to the human approver.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a verdict this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionStage": {
+        "description": "Who decides an open decision now.",
+        "oneOf": [
+          {
+            "const": "human",
+            "description": "An authenticated human acting for the approver id.",
+            "type": "string"
+          },
+          {
+            "const": "review",
+            "description": "The named reviewer.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a stage this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionTier": {
+        "description": "Who decided a decision.",
+        "oneOf": [
+          {
+            "const": "human",
+            "description": "An authenticated human acting for the approver id.",
+            "type": "string"
+          },
+          {
+            "const": "review",
+            "description": "The named reviewer, through its verdict.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a tier this version does not know. The server\nnever sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WirePresentationAudience": {
+        "description": "Who a recorded presentation was shown to.",
+        "oneOf": [
+          {
+            "description": "Whoever acts for the decision's approver id.",
+            "properties": {
+              "approver_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approver",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approver_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decision's named reviewer (a principal key).",
+            "properties": {
+              "kind": {
+                "const": "reviewer",
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an audience this version does not know. The\nserver never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WirePresentationRecord": {
+        "description": "One recorded presentation of a decision's rendering.",
+        "properties": {
+          "at_ms": {
+            "description": "The host's clock reading of the presentation, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "audience": {
+            "$ref": "#/$defs/WirePresentationAudience"
+          },
+          "channel_ref": {
+            "description": "Where the presentation was shown.",
+            "type": "string"
+          },
+          "max_part_bytes": {
+            "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "message_ref": {
+            "type": "string"
+          },
+          "parts_shown": {
+            "description": "The parts the audience was shown.",
+            "items": {
+              "$ref": "#/$defs/WireCanonicalPart"
+            },
+            "type": "array"
+          },
+          "subject_digest": {
+            "description": "The digest of the rendering that was presented.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "audience",
+          "subject_digest",
+          "parts_shown",
+          "channel_ref",
+          "message_ref",
+          "at_ms"
+        ],
+        "type": "object"
+      },
+      "WireUnreadableDecision": {
+        "description": "A stored decision row the server cannot read (written by a newer\nversion, or torn). Nothing executes it.",
+        "properties": {
+          "decision_id": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision_id",
+          "detail"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`decision/list` result. Each decision is read at the server's clock: one\npast its deadline reads as expired.",
+    "properties": {
+      "decisions": {
+        "items": {
+          "$ref": "#/$defs/WireDecision"
+        },
+        "type": "array"
+      },
+      "next_after": {
+        "description": "The id to read the next page after, when there may be more rows.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "unreadable": {
+        "default": [],
+        "description": "The rows of the page the server cannot read.",
+        "items": {
+          "$ref": "#/$defs/WireUnreadableDecision"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "decisions"
+    ],
+    "title": "DecisionListResult",
+    "type": "object"
+  },
+  "DecisionRenderingResult": {
+    "$defs": {
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`decision/rendering` result: the one canonical rendering of the held\nrequest and its canonical parts for the asked part size.",
+    "properties": {
+      "decision_id": {
+        "type": "string"
+      },
+      "max_part_bytes": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "parts": {
+        "items": {
+          "$ref": "#/$defs/WireCanonicalPart"
+        },
+        "type": "array"
+      },
+      "renderer": {
+        "type": "string"
+      },
+      "rendering": {
+        "type": "string"
+      },
+      "subject_digest": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "decision_id",
+      "rendering",
+      "renderer",
+      "subject_digest",
+      "parts"
+    ],
+    "title": "DecisionRenderingResult",
+    "type": "object"
+  },
+  "DecisionResult": {
+    "$defs": {
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      },
+      "WireDecision": {
+        "description": "One durable decision, as its row stands at the read.",
+        "properties": {
+          "approver_id": {
+            "description": "Who may approve the decision: the host maps it to the humans who may\nact for it.",
+            "type": "string"
+          },
+          "created_at_ms": {
+            "description": "The host clock reading of the hold, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "deadline_at_ms": {
+            "description": "The sealed deadline, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "decided_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "decision_id": {
+            "description": "`decision:` and 64 lowercase hex digits.",
+            "type": "string"
+          },
+          "ended_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "execution_refusal": {
+            "description": "The owner's typed refusal of an execution-refused decision.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "first_presented_to_approver_at_ms": {
+            "description": "When a complete presentation first reached the approver, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "The host's token naming what kind of operation the decision holds.",
+            "type": "string"
+          },
+          "notice": {
+            "$ref": "#/$defs/WireDecisionNoticeState",
+            "description": "Where the requester notice stands."
+          },
+          "operation_id": {
+            "description": "The held operation's id, as its owner names it.",
+            "type": "string"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireDecisionOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set exactly when the decision was decided."
+          },
+          "permit_issued": {
+            "description": "Whether an execution permit is outstanding.",
+            "type": "boolean"
+          },
+          "phase": {
+            "$ref": "#/$defs/WireDecisionPhase"
+          },
+          "presentations": {
+            "description": "The latest complete presentation per audience.",
+            "items": {
+              "$ref": "#/$defs/WirePresentationRecord"
+            },
+            "type": "array"
+          },
+          "renderer": {
+            "description": "The token of the renderer that produced the rendering.",
+            "type": "string"
+          },
+          "request": {
+            "description": "The held request, when the read asked for it (`include_request`)."
+          },
+          "request_digest": {
+            "description": "The held request's digest, as the operation's owner computes it.",
+            "type": "string"
+          },
+          "requester": {
+            "description": "The requester's principal key.",
+            "type": "string"
+          },
+          "reviewer": {
+            "description": "The reviewer of a review-stage decision (a principal key).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "description": "The row's revision: 1 at the hold, one more at each write.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "stage": {
+            "$ref": "#/$defs/WireDecisionStage"
+          },
+          "subject_digest": {
+            "description": "The digest of the decision's rendering, computed by the server.",
+            "type": "string"
+          },
+          "subject_key": {
+            "description": "The host's key of the subject the decision is held for.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision_id",
+          "kind",
+          "subject_key",
+          "operation_id",
+          "request_digest",
+          "requester",
+          "approver_id",
+          "phase",
+          "stage",
+          "notice",
+          "deadline_at_ms",
+          "created_at_ms",
+          "subject_digest",
+          "renderer",
+          "permit_issued",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "WireDecisionAssurance": {
+        "description": "How the human who decided was authenticated on the decision event.",
+        "oneOf": [
+          {
+            "const": "person_authenticated",
+            "description": "The person was authenticated on the actual event.",
+            "type": "string"
+          },
+          {
+            "const": "service_credential",
+            "description": "A delegated service credential authenticated the event.",
+            "type": "string"
+          },
+          {
+            "const": "device_trusted",
+            "description": "Only device or network trust was established.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: an assurance this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionEvidence": {
+        "description": "The durable evidence a decision was decided with. An authentication\nscope is never projected.",
+        "oneOf": [
+          {
+            "description": "An authenticated human's decision.",
+            "properties": {
+              "approve": {
+                "type": "boolean"
+              },
+              "approver_id": {
+                "type": "string"
+              },
+              "assurance": {
+                "$ref": "#/$defs/WireDecisionAssurance"
+              },
+              "decider": {
+                "description": "The decider's principal key.",
+                "type": "string"
+              },
+              "event_ref": {
+                "type": "string"
+              },
+              "ingress": {
+                "description": "How the decision event reached the host.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "human",
+                "type": "string"
+              },
+              "observed_at_ms": {
+                "description": "When the ingress observed the event, in UNIX ms; absent in\nevidence recorded before decisions carried it.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "presentation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WirePresentationRecord"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The presentation the decision event carried, if any."
+              },
+              "presented_digest": {
+                "type": "string"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "decider",
+              "assurance",
+              "ingress",
+              "event_ref",
+              "approver_id",
+              "presented_digest",
+              "approve"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A reviewer's attributed verdict.",
+            "properties": {
+              "feedback": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "review",
+                "type": "string"
+              },
+              "origin_session": {
+                "type": "string"
+              },
+              "presented_digest": {
+                "type": "string"
+              },
+              "reviewer": {
+                "description": "The reviewer's principal key.",
+                "type": "string"
+              },
+              "verdict": {
+                "$ref": "#/$defs/WireDecisionReviewVerdict"
+              },
+              "verdict_call_ref": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer",
+              "origin_session",
+              "verdict_call_ref",
+              "verdict",
+              "presented_digest"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: evidence of a kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireDecisionNoticeState": {
+        "description": "Where the requester notice of a decision stands.",
+        "oneOf": [
+          {
+            "const": "not_required",
+            "description": "The requester is not routable: no notice is ever owed.",
+            "type": "string"
+          },
+          {
+            "const": "not_due",
+            "description": "The decision has not ended.",
+            "type": "string"
+          },
+          {
+            "const": "owed",
+            "description": "The decision ended and its notice is owed.",
+            "type": "string"
+          },
+          {
+            "const": "delivered",
+            "description": "The notice was delivered.",
+            "type": "string"
+          },
+          {
+            "const": "failed",
+            "description": "The notice failed terminally.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a notice state this version does not know.\nThe server never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionOutcome": {
+        "description": "A decided decision's outcome: who decided, and the evidence.",
+        "properties": {
+          "evidence": {
+            "$ref": "#/$defs/WireDecisionEvidence"
+          },
+          "tier": {
+            "$ref": "#/$defs/WireDecisionTier"
+          }
+        },
+        "required": [
+          "tier",
+          "evidence"
+        ],
+        "type": "object"
+      },
+      "WireDecisionPhase": {
+        "description": "Where a decision stands.",
+        "oneOf": [
+          {
+            "const": "open",
+            "description": "Held, and not yet decided, withdrawn or expired.",
+            "type": "string"
+          },
+          {
+            "const": "approved",
+            "description": "Approved; the held request not yet executed.",
+            "type": "string"
+          },
+          {
+            "const": "rejected",
+            "description": "Rejected. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "expired",
+            "description": "Observed at or after its deadline undecided, or approved and never\nexecuted. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "withdrawn",
+            "description": "Withdrawn by its requester or the host before a decision. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "executed",
+            "description": "The held request was executed. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "execution_refused",
+            "description": "The operation's owner refused the held request. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a phase this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionReviewVerdict": {
+        "description": "A reviewer's verdict.",
+        "oneOf": [
+          {
+            "const": "allow",
+            "description": "Approve the held operation.",
+            "type": "string"
+          },
+          {
+            "const": "deny",
+            "description": "Reject it.",
+            "type": "string"
+          },
+          {
+            "const": "escalate",
+            "description": "Hand the decision to the human approver.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a verdict this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionStage": {
+        "description": "Who decides an open decision now.",
+        "oneOf": [
+          {
+            "const": "human",
+            "description": "An authenticated human acting for the approver id.",
+            "type": "string"
+          },
+          {
+            "const": "review",
+            "description": "The named reviewer.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a stage this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionTier": {
+        "description": "Who decided a decision.",
+        "oneOf": [
+          {
+            "const": "human",
+            "description": "An authenticated human acting for the approver id.",
+            "type": "string"
+          },
+          {
+            "const": "review",
+            "description": "The named reviewer, through its verdict.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a tier this version does not know. The server\nnever sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WirePresentationAudience": {
+        "description": "Who a recorded presentation was shown to.",
+        "oneOf": [
+          {
+            "description": "Whoever acts for the decision's approver id.",
+            "properties": {
+              "approver_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approver",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approver_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decision's named reviewer (a principal key).",
+            "properties": {
+              "kind": {
+                "const": "reviewer",
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an audience this version does not know. The\nserver never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WirePresentationRecord": {
+        "description": "One recorded presentation of a decision's rendering.",
+        "properties": {
+          "at_ms": {
+            "description": "The host's clock reading of the presentation, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "audience": {
+            "$ref": "#/$defs/WirePresentationAudience"
+          },
+          "channel_ref": {
+            "description": "Where the presentation was shown.",
+            "type": "string"
+          },
+          "max_part_bytes": {
+            "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "message_ref": {
+            "type": "string"
+          },
+          "parts_shown": {
+            "description": "The parts the audience was shown.",
+            "items": {
+              "$ref": "#/$defs/WireCanonicalPart"
+            },
+            "type": "array"
+          },
+          "subject_digest": {
+            "description": "The digest of the rendering that was presented.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "audience",
+          "subject_digest",
+          "parts_shown",
+          "channel_ref",
+          "message_ref",
+          "at_ms"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The result of `decision/get`, `decision/present`, `decision/withdraw`\nand `decision/decide`: the decision as it stands after the call.",
+    "properties": {
+      "decision": {
+        "$ref": "#/$defs/WireDecision"
+      }
+    },
+    "required": [
+      "decision"
+    ],
+    "title": "DecisionResult",
     "type": "object"
   },
   "DeferredCreateResult": {
@@ -104198,6 +106281,112 @@
           }
         ]
       },
+      "PrincipalId": {
+        "description": "Stable, caller-visible principal id.\n\nLegacy deserialization preserves previously persisted strings, including\nthose rejected by [`Self::new`]. Qualified [`PrincipalRef`] deserialization\nvalidates the id; migrating unqualified persisted ids is a separate step.",
+        "type": "string"
+      },
+      "PrincipalKind": {
+        "description": "Generic principal categories. Product-specific role names belong outside\ncore and may be mapped to these typed categories by clients.",
+        "enum": [
+          "human",
+          "personal_agent",
+          "shared_agent",
+          "runtime_host",
+          "service_account"
+        ],
+        "type": "string"
+      },
+      "PrincipalQualification": {
+        "description": "Whether an identity has an explicit trust-domain namespace.\n\nUnqualified identity preserves trusted-embedded and legacy wire contracts;\nit must not be silently assigned a domain for governed use. Qualification\nis identity vocabulary, not proof of authentication or authorization.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unqualified",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "qualified",
+                "type": "string"
+              },
+              "trust_domain_id": {
+                "$ref": "#/$defs/TrustDomainId"
+              }
+            },
+            "required": [
+              "kind",
+              "trust_domain_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PrincipalRef": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "qualification": {
+                  "properties": {
+                    "kind": {
+                      "const": "qualified"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
+                }
+              },
+              "required": [
+                "qualification"
+              ]
+            },
+            "then": {
+              "properties": {
+                "id": {
+                  "allOf": [
+                    {
+                      "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+                    },
+                    {
+                      "not": {
+                        "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "description": "Typed principal reference.\n\nPublic fields preserve the existing data contract, so an in-memory value\nis not proof of valid or authenticated identity. Governed admission must\ncall [`Self::validate_qualified`] and separately establish caller authority.",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/PrincipalId"
+          },
+          "kind": {
+            "$ref": "#/$defs/PrincipalKind"
+          },
+          "qualification": {
+            "$ref": "#/$defs/PrincipalQualification"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
       "ProfileId": {
         "description": "Opaque slug identifying an auth profile override on a connection.",
         "type": "string"
@@ -107082,6 +109271,17 @@
             ],
             "description": "Session-owned provenance; not accepted by transcript rewrite wire inputs."
           },
+          "requester": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TurnRequester"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The original requester the turn served: the requester its inputs\nshare, stamped at admission from the inputs, never inferred from\ncontent. Absent when the turn's inputs carry none."
+          },
           "run_id": {
             "anyOf": [
               {
@@ -107364,6 +109564,36 @@
             "type": "string"
           }
         ]
+      },
+      "TrustDomainId": {
+        "allOf": [
+          {
+            "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+          },
+          {
+            "not": {
+              "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+            }
+          }
+        ],
+        "description": "Exact, opaque trust-domain namespace for a qualified principal id.\n\nDomain ids are not inferred from hostnames or normalized. Constructing one\nvalidates its syntax, not the caller's authority to assert that domain.",
+        "type": "string"
+      },
+      "TurnRequester": {
+        "description": "The original requester of a turn: the principal its inputs share, and\nwhether it reached them directly.\n\nThe principal is opaque to Core. A host supplies it for the inputs it\nadmits (the authenticated caller it acts for), or a governed input's work\nassociation names it. Core carries it and never interprets it: it has no\nperson, account or assurance concept for it.",
+        "properties": {
+          "carried": {
+            "description": "Set when an input of the turn reached it through an actor other than\nthe requester: governed work another agent sent (a peer hop), or work\nanother owner admitted for the requester. Absent when the requester's\nown ingress admitted every input.",
+            "type": "boolean"
+          },
+          "principal": {
+            "$ref": "#/$defs/PrincipalRef"
+          }
+        },
+        "required": [
+          "principal"
+        ],
+        "type": "object"
       },
       "TurnTerminalCauseKind": {
         "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
@@ -164737,6 +166967,36 @@
     "title": "WireCallbackPendingStatus",
     "type": "string"
   },
+  "WireCanonicalPart": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+    "properties": {
+      "count": {
+        "description": "How many parts the split has.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "index": {
+        "description": "The part's position, from 0.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "part_digest": {
+        "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+        "type": "string"
+      }
+    },
+    "required": [
+      "index",
+      "count",
+      "part_digest"
+    ],
+    "title": "WireCanonicalPart",
+    "type": "object"
+  },
   "WireConnectorAccountSelection": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Which provider account a connector login must prove.\n\n`known` refuses any other verified account. `discover` admits the login\nwith no account and binds the provider-verified account at completion;\nit publishes only into an empty slot.",
@@ -165815,6 +168075,2328 @@
     ],
     "title": "WireCredentialUseDisposition",
     "type": "string"
+  },
+  "WireDecision": {
+    "$defs": {
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      },
+      "WireDecisionAssurance": {
+        "description": "How the human who decided was authenticated on the decision event.",
+        "oneOf": [
+          {
+            "const": "person_authenticated",
+            "description": "The person was authenticated on the actual event.",
+            "type": "string"
+          },
+          {
+            "const": "service_credential",
+            "description": "A delegated service credential authenticated the event.",
+            "type": "string"
+          },
+          {
+            "const": "device_trusted",
+            "description": "Only device or network trust was established.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: an assurance this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionEvidence": {
+        "description": "The durable evidence a decision was decided with. An authentication\nscope is never projected.",
+        "oneOf": [
+          {
+            "description": "An authenticated human's decision.",
+            "properties": {
+              "approve": {
+                "type": "boolean"
+              },
+              "approver_id": {
+                "type": "string"
+              },
+              "assurance": {
+                "$ref": "#/$defs/WireDecisionAssurance"
+              },
+              "decider": {
+                "description": "The decider's principal key.",
+                "type": "string"
+              },
+              "event_ref": {
+                "type": "string"
+              },
+              "ingress": {
+                "description": "How the decision event reached the host.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "human",
+                "type": "string"
+              },
+              "observed_at_ms": {
+                "description": "When the ingress observed the event, in UNIX ms; absent in\nevidence recorded before decisions carried it.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "presentation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WirePresentationRecord"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The presentation the decision event carried, if any."
+              },
+              "presented_digest": {
+                "type": "string"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "decider",
+              "assurance",
+              "ingress",
+              "event_ref",
+              "approver_id",
+              "presented_digest",
+              "approve"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A reviewer's attributed verdict.",
+            "properties": {
+              "feedback": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "review",
+                "type": "string"
+              },
+              "origin_session": {
+                "type": "string"
+              },
+              "presented_digest": {
+                "type": "string"
+              },
+              "reviewer": {
+                "description": "The reviewer's principal key.",
+                "type": "string"
+              },
+              "verdict": {
+                "$ref": "#/$defs/WireDecisionReviewVerdict"
+              },
+              "verdict_call_ref": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer",
+              "origin_session",
+              "verdict_call_ref",
+              "verdict",
+              "presented_digest"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: evidence of a kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireDecisionNoticeState": {
+        "description": "Where the requester notice of a decision stands.",
+        "oneOf": [
+          {
+            "const": "not_required",
+            "description": "The requester is not routable: no notice is ever owed.",
+            "type": "string"
+          },
+          {
+            "const": "not_due",
+            "description": "The decision has not ended.",
+            "type": "string"
+          },
+          {
+            "const": "owed",
+            "description": "The decision ended and its notice is owed.",
+            "type": "string"
+          },
+          {
+            "const": "delivered",
+            "description": "The notice was delivered.",
+            "type": "string"
+          },
+          {
+            "const": "failed",
+            "description": "The notice failed terminally.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a notice state this version does not know.\nThe server never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionOutcome": {
+        "description": "A decided decision's outcome: who decided, and the evidence.",
+        "properties": {
+          "evidence": {
+            "$ref": "#/$defs/WireDecisionEvidence"
+          },
+          "tier": {
+            "$ref": "#/$defs/WireDecisionTier"
+          }
+        },
+        "required": [
+          "tier",
+          "evidence"
+        ],
+        "type": "object"
+      },
+      "WireDecisionPhase": {
+        "description": "Where a decision stands.",
+        "oneOf": [
+          {
+            "const": "open",
+            "description": "Held, and not yet decided, withdrawn or expired.",
+            "type": "string"
+          },
+          {
+            "const": "approved",
+            "description": "Approved; the held request not yet executed.",
+            "type": "string"
+          },
+          {
+            "const": "rejected",
+            "description": "Rejected. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "expired",
+            "description": "Observed at or after its deadline undecided, or approved and never\nexecuted. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "withdrawn",
+            "description": "Withdrawn by its requester or the host before a decision. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "executed",
+            "description": "The held request was executed. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "execution_refused",
+            "description": "The operation's owner refused the held request. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a phase this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionReviewVerdict": {
+        "description": "A reviewer's verdict.",
+        "oneOf": [
+          {
+            "const": "allow",
+            "description": "Approve the held operation.",
+            "type": "string"
+          },
+          {
+            "const": "deny",
+            "description": "Reject it.",
+            "type": "string"
+          },
+          {
+            "const": "escalate",
+            "description": "Hand the decision to the human approver.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a verdict this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionStage": {
+        "description": "Who decides an open decision now.",
+        "oneOf": [
+          {
+            "const": "human",
+            "description": "An authenticated human acting for the approver id.",
+            "type": "string"
+          },
+          {
+            "const": "review",
+            "description": "The named reviewer.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a stage this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionTier": {
+        "description": "Who decided a decision.",
+        "oneOf": [
+          {
+            "const": "human",
+            "description": "An authenticated human acting for the approver id.",
+            "type": "string"
+          },
+          {
+            "const": "review",
+            "description": "The named reviewer, through its verdict.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a tier this version does not know. The server\nnever sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WirePresentationAudience": {
+        "description": "Who a recorded presentation was shown to.",
+        "oneOf": [
+          {
+            "description": "Whoever acts for the decision's approver id.",
+            "properties": {
+              "approver_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approver",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approver_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decision's named reviewer (a principal key).",
+            "properties": {
+              "kind": {
+                "const": "reviewer",
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an audience this version does not know. The\nserver never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WirePresentationRecord": {
+        "description": "One recorded presentation of a decision's rendering.",
+        "properties": {
+          "at_ms": {
+            "description": "The host's clock reading of the presentation, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "audience": {
+            "$ref": "#/$defs/WirePresentationAudience"
+          },
+          "channel_ref": {
+            "description": "Where the presentation was shown.",
+            "type": "string"
+          },
+          "max_part_bytes": {
+            "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "message_ref": {
+            "type": "string"
+          },
+          "parts_shown": {
+            "description": "The parts the audience was shown.",
+            "items": {
+              "$ref": "#/$defs/WireCanonicalPart"
+            },
+            "type": "array"
+          },
+          "subject_digest": {
+            "description": "The digest of the rendering that was presented.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "audience",
+          "subject_digest",
+          "parts_shown",
+          "channel_ref",
+          "message_ref",
+          "at_ms"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One durable decision, as its row stands at the read.",
+    "properties": {
+      "approver_id": {
+        "description": "Who may approve the decision: the host maps it to the humans who may\nact for it.",
+        "type": "string"
+      },
+      "created_at_ms": {
+        "description": "The host clock reading of the hold, in UNIX ms.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "deadline_at_ms": {
+        "description": "The sealed deadline, in UNIX ms.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "decided_at_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "decision_id": {
+        "description": "`decision:` and 64 lowercase hex digits.",
+        "type": "string"
+      },
+      "ended_at_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "execution_refusal": {
+        "description": "The owner's typed refusal of an execution-refused decision.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "first_presented_to_approver_at_ms": {
+        "description": "When a complete presentation first reached the approver, in UNIX ms.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "kind": {
+        "description": "The host's token naming what kind of operation the decision holds.",
+        "type": "string"
+      },
+      "notice": {
+        "$ref": "#/$defs/WireDecisionNoticeState",
+        "description": "Where the requester notice stands."
+      },
+      "operation_id": {
+        "description": "The held operation's id, as its owner names it.",
+        "type": "string"
+      },
+      "outcome": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireDecisionOutcome"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Set exactly when the decision was decided."
+      },
+      "permit_issued": {
+        "description": "Whether an execution permit is outstanding.",
+        "type": "boolean"
+      },
+      "phase": {
+        "$ref": "#/$defs/WireDecisionPhase"
+      },
+      "presentations": {
+        "description": "The latest complete presentation per audience.",
+        "items": {
+          "$ref": "#/$defs/WirePresentationRecord"
+        },
+        "type": "array"
+      },
+      "renderer": {
+        "description": "The token of the renderer that produced the rendering.",
+        "type": "string"
+      },
+      "request": {
+        "description": "The held request, when the read asked for it (`include_request`)."
+      },
+      "request_digest": {
+        "description": "The held request's digest, as the operation's owner computes it.",
+        "type": "string"
+      },
+      "requester": {
+        "description": "The requester's principal key.",
+        "type": "string"
+      },
+      "reviewer": {
+        "description": "The reviewer of a review-stage decision (a principal key).",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "revision": {
+        "description": "The row's revision: 1 at the hold, one more at each write.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "stage": {
+        "$ref": "#/$defs/WireDecisionStage"
+      },
+      "subject_digest": {
+        "description": "The digest of the decision's rendering, computed by the server.",
+        "type": "string"
+      },
+      "subject_key": {
+        "description": "The host's key of the subject the decision is held for.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "decision_id",
+      "kind",
+      "subject_key",
+      "operation_id",
+      "request_digest",
+      "requester",
+      "approver_id",
+      "phase",
+      "stage",
+      "notice",
+      "deadline_at_ms",
+      "created_at_ms",
+      "subject_digest",
+      "renderer",
+      "permit_issued",
+      "revision"
+    ],
+    "title": "WireDecision",
+    "type": "object"
+  },
+  "WireDecisionAssurance": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "How the human who decided was authenticated on the decision event.",
+    "oneOf": [
+      {
+        "const": "person_authenticated",
+        "description": "The person was authenticated on the actual event.",
+        "type": "string"
+      },
+      {
+        "const": "service_credential",
+        "description": "A delegated service credential authenticated the event.",
+        "type": "string"
+      },
+      {
+        "const": "device_trusted",
+        "description": "Only device or network trust was established.",
+        "type": "string"
+      },
+      {
+        "const": "unknown",
+        "description": "Forward compatibility: an assurance this version does not know. The\nserver never sends it.",
+        "type": "string"
+      }
+    ],
+    "title": "WireDecisionAssurance"
+  },
+  "WireDecisionErrorData": {
+    "$defs": {
+      "WireDecisionRefusal": {
+        "description": "Why a decision refused a call. Closed: a refusal bears authority, so a\nclient never reads one it does not know as another.",
+        "oneOf": [
+          {
+            "description": "The hold's deadline is not after the hold's clock reading.",
+            "properties": {
+              "kind": {
+                "const": "invalid_window",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The hold names the requester as its own reviewer.",
+            "properties": {
+              "kind": {
+                "const": "self_review",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decision is held with another binding.",
+            "properties": {
+              "kind": {
+                "const": "hold_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decision is no longer open: the first valid decision won.",
+            "properties": {
+              "kind": {
+                "const": "not_open",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The deadline passed; the call recorded the expiry.",
+            "properties": {
+              "kind": {
+                "const": "expired",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The presented digest is not the held subject digest.",
+            "properties": {
+              "kind": {
+                "const": "subject_changed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The presentation did not cover the whole held subject, none reached\nthe deciding party, or it was shown at 0 (no reading of when).",
+            "properties": {
+              "kind": {
+                "const": "presentation_incomplete",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The presentation was shown to a party that does not decide now.",
+            "properties": {
+              "kind": {
+                "const": "wrong_audience",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A human decision while the review stage is open.",
+            "properties": {
+              "kind": {
+                "const": "review_stage",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A review verdict while the human stage is open.",
+            "properties": {
+              "kind": {
+                "const": "human_stage",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decision carries no attested evidence.",
+            "properties": {
+              "kind": {
+                "const": "evidence_required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decider does not act for the approver id, or is not currently\neligible.",
+            "properties": {
+              "kind": {
+                "const": "not_eligible",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The requester tried to decide its own request.",
+            "properties": {
+              "kind": {
+                "const": "self_approval",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The verdict is not the named reviewer's.",
+            "properties": {
+              "kind": {
+                "const": "wrong_reviewer",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Only the requester or the host may withdraw.",
+            "properties": {
+              "kind": {
+                "const": "not_requester",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decision is not approved.",
+            "properties": {
+              "kind": {
+                "const": "not_approved",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The execution names another operation or request.",
+            "properties": {
+              "kind": {
+                "const": "binding_mismatch",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "No execution permit is outstanding.",
+            "properties": {
+              "kind": {
+                "const": "not_authorized",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The deadline passed while a permit is outstanding: the permit is\nsettled first.",
+            "properties": {
+              "kind": {
+                "const": "settlement_owed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "No notice is owed, or the receipt contradicts the settled one.",
+            "properties": {
+              "kind": {
+                "const": "not_owed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The human decision was observed before the decision's first\npresentation to the approver.",
+            "properties": {
+              "kind": {
+                "const": "decided_before_presentation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The typed `data` of a `decision/*` error. Closed, like the refusals it\ncarries.",
+    "oneOf": [
+      {
+        "description": "The decision refused the call (code -32602); nothing changed, except\nan expiry the call recorded.",
+        "properties": {
+          "decision_refusal": {
+            "$ref": "#/$defs/WireDecisionRefusal"
+          },
+          "kind": {
+            "const": "decision_refused",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "decision_refusal"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "No decision has the id (code -32602).",
+        "properties": {
+          "kind": {
+            "const": "decision_not_found",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The decision's row cannot be read (code -32603). Nothing executes it.",
+        "properties": {
+          "kind": {
+            "const": "decision_unreadable",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The runtime serves a candidate launch, which writes no decision\n(code -32020).",
+        "properties": {
+          "kind": {
+            "const": "candidate_launch",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The runtime keeps no durable decisions: an ephemeral persistence\n(code -32020).",
+        "properties": {
+          "kind": {
+            "const": "no_decision_store",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireDecisionErrorData"
+  },
+  "WireDecisionEvidence": {
+    "$defs": {
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      },
+      "WireDecisionAssurance": {
+        "description": "How the human who decided was authenticated on the decision event.",
+        "oneOf": [
+          {
+            "const": "person_authenticated",
+            "description": "The person was authenticated on the actual event.",
+            "type": "string"
+          },
+          {
+            "const": "service_credential",
+            "description": "A delegated service credential authenticated the event.",
+            "type": "string"
+          },
+          {
+            "const": "device_trusted",
+            "description": "Only device or network trust was established.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: an assurance this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionReviewVerdict": {
+        "description": "A reviewer's verdict.",
+        "oneOf": [
+          {
+            "const": "allow",
+            "description": "Approve the held operation.",
+            "type": "string"
+          },
+          {
+            "const": "deny",
+            "description": "Reject it.",
+            "type": "string"
+          },
+          {
+            "const": "escalate",
+            "description": "Hand the decision to the human approver.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a verdict this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WirePresentationAudience": {
+        "description": "Who a recorded presentation was shown to.",
+        "oneOf": [
+          {
+            "description": "Whoever acts for the decision's approver id.",
+            "properties": {
+              "approver_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approver",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approver_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decision's named reviewer (a principal key).",
+            "properties": {
+              "kind": {
+                "const": "reviewer",
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an audience this version does not know. The\nserver never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WirePresentationRecord": {
+        "description": "One recorded presentation of a decision's rendering.",
+        "properties": {
+          "at_ms": {
+            "description": "The host's clock reading of the presentation, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "audience": {
+            "$ref": "#/$defs/WirePresentationAudience"
+          },
+          "channel_ref": {
+            "description": "Where the presentation was shown.",
+            "type": "string"
+          },
+          "max_part_bytes": {
+            "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "message_ref": {
+            "type": "string"
+          },
+          "parts_shown": {
+            "description": "The parts the audience was shown.",
+            "items": {
+              "$ref": "#/$defs/WireCanonicalPart"
+            },
+            "type": "array"
+          },
+          "subject_digest": {
+            "description": "The digest of the rendering that was presented.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "audience",
+          "subject_digest",
+          "parts_shown",
+          "channel_ref",
+          "message_ref",
+          "at_ms"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The durable evidence a decision was decided with. An authentication\nscope is never projected.",
+    "oneOf": [
+      {
+        "description": "An authenticated human's decision.",
+        "properties": {
+          "approve": {
+            "type": "boolean"
+          },
+          "approver_id": {
+            "type": "string"
+          },
+          "assurance": {
+            "$ref": "#/$defs/WireDecisionAssurance"
+          },
+          "decider": {
+            "description": "The decider's principal key.",
+            "type": "string"
+          },
+          "event_ref": {
+            "type": "string"
+          },
+          "ingress": {
+            "description": "How the decision event reached the host.",
+            "type": "string"
+          },
+          "kind": {
+            "const": "human",
+            "type": "string"
+          },
+          "observed_at_ms": {
+            "description": "When the ingress observed the event, in UNIX ms; absent in\nevidence recorded before decisions carried it.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "presentation": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePresentationRecord"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The presentation the decision event carried, if any."
+          },
+          "presented_digest": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "decider",
+          "assurance",
+          "ingress",
+          "event_ref",
+          "approver_id",
+          "presented_digest",
+          "approve"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "A reviewer's attributed verdict.",
+        "properties": {
+          "feedback": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "const": "review",
+            "type": "string"
+          },
+          "origin_session": {
+            "type": "string"
+          },
+          "presented_digest": {
+            "type": "string"
+          },
+          "reviewer": {
+            "description": "The reviewer's principal key.",
+            "type": "string"
+          },
+          "verdict": {
+            "$ref": "#/$defs/WireDecisionReviewVerdict"
+          },
+          "verdict_call_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "reviewer",
+          "origin_session",
+          "verdict_call_ref",
+          "verdict",
+          "presented_digest"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Forward compatibility: evidence of a kind this version does not know.\nThe server never sends it.",
+        "properties": {
+          "kind": {
+            "const": "unknown",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireDecisionEvidence"
+  },
+  "WireDecisionNotice": {
+    "$defs": {
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      },
+      "WireDecisionNoticeEvent": {
+        "description": "What a decision notice reports.",
+        "oneOf": [
+          {
+            "const": "presented",
+            "description": "The connection presented the decision to its operator.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: an event this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionNoticePresentation": {
+        "description": "The rendering a `presented` notice showed: the decision's whole\nrendering, its renderer and digest, and its canonical parts (one part:\nthe whole rendering).",
+        "properties": {
+          "parts": {
+            "items": {
+              "$ref": "#/$defs/WireCanonicalPart"
+            },
+            "type": "array"
+          },
+          "renderer": {
+            "type": "string"
+          },
+          "rendering": {
+            "type": "string"
+          },
+          "subject_digest": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "rendering",
+          "renderer",
+          "subject_digest",
+          "parts"
+        ],
+        "type": "object"
+      },
+      "WireDecisionPhase": {
+        "description": "Where a decision stands.",
+        "oneOf": [
+          {
+            "const": "open",
+            "description": "Held, and not yet decided, withdrawn or expired.",
+            "type": "string"
+          },
+          {
+            "const": "approved",
+            "description": "Approved; the held request not yet executed.",
+            "type": "string"
+          },
+          {
+            "const": "rejected",
+            "description": "Rejected. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "expired",
+            "description": "Observed at or after its deadline undecided, or approved and never\nexecuted. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "withdrawn",
+            "description": "Withdrawn by its requester or the host before a decision. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "executed",
+            "description": "The held request was executed. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "execution_refused",
+            "description": "The operation's owner refused the held request. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a phase this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`decision/notice` parameters: what an `rkat-rpc` stdio connection showed\nits operator about one durable decision. When its client lists\n(`decision/list`), the connection presents each open decision of the\nreturned page that is addressed to an approver id its operator acts for\nand that it has not presented yet: it writes a `presented` notice\ncarrying the whole rendering, then records that presentation (to the\napprover, with this notice's id as its message reference) before it\nanswers the list. A notice grants nothing: the operator decides with\n`decision/decide` on the same connection.",
+    "properties": {
+      "approver_id": {
+        "description": "The approver id the decision is held for.",
+        "type": "string"
+      },
+      "decision_id": {
+        "type": "string"
+      },
+      "event": {
+        "$ref": "#/$defs/WireDecisionNoticeEvent"
+      },
+      "kind": {
+        "description": "The decision's kind token.",
+        "type": "string"
+      },
+      "notice_id": {
+        "description": "The notice's id: the message reference of the presentation it\nrecords.",
+        "type": "string"
+      },
+      "phase": {
+        "$ref": "#/$defs/WireDecisionPhase",
+        "description": "The decision's phase when the notice was written."
+      },
+      "presentation": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireDecisionNoticePresentation"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "What the operator was shown; set on a `presented` notice."
+      },
+      "requester": {
+        "description": "The requester's principal key.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "notice_id",
+      "decision_id",
+      "kind",
+      "event",
+      "phase",
+      "approver_id",
+      "requester"
+    ],
+    "title": "WireDecisionNotice",
+    "type": "object"
+  },
+  "WireDecisionNoticeEvent": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "What a decision notice reports.",
+    "oneOf": [
+      {
+        "const": "presented",
+        "description": "The connection presented the decision to its operator.",
+        "type": "string"
+      },
+      {
+        "const": "unknown",
+        "description": "Forward compatibility: an event this version does not know. The\nserver never sends it.",
+        "type": "string"
+      }
+    ],
+    "title": "WireDecisionNoticeEvent"
+  },
+  "WireDecisionNoticePresentation": {
+    "$defs": {
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The rendering a `presented` notice showed: the decision's whole\nrendering, its renderer and digest, and its canonical parts (one part:\nthe whole rendering).",
+    "properties": {
+      "parts": {
+        "items": {
+          "$ref": "#/$defs/WireCanonicalPart"
+        },
+        "type": "array"
+      },
+      "renderer": {
+        "type": "string"
+      },
+      "rendering": {
+        "type": "string"
+      },
+      "subject_digest": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "rendering",
+      "renderer",
+      "subject_digest",
+      "parts"
+    ],
+    "title": "WireDecisionNoticePresentation",
+    "type": "object"
+  },
+  "WireDecisionNoticeState": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Where the requester notice of a decision stands.",
+    "oneOf": [
+      {
+        "const": "not_required",
+        "description": "The requester is not routable: no notice is ever owed.",
+        "type": "string"
+      },
+      {
+        "const": "not_due",
+        "description": "The decision has not ended.",
+        "type": "string"
+      },
+      {
+        "const": "owed",
+        "description": "The decision ended and its notice is owed.",
+        "type": "string"
+      },
+      {
+        "const": "delivered",
+        "description": "The notice was delivered.",
+        "type": "string"
+      },
+      {
+        "const": "failed",
+        "description": "The notice failed terminally.",
+        "type": "string"
+      },
+      {
+        "const": "unknown",
+        "description": "Forward compatibility: a notice state this version does not know.\nThe server never sends it.",
+        "type": "string"
+      }
+    ],
+    "title": "WireDecisionNoticeState"
+  },
+  "WireDecisionOutcome": {
+    "$defs": {
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      },
+      "WireDecisionAssurance": {
+        "description": "How the human who decided was authenticated on the decision event.",
+        "oneOf": [
+          {
+            "const": "person_authenticated",
+            "description": "The person was authenticated on the actual event.",
+            "type": "string"
+          },
+          {
+            "const": "service_credential",
+            "description": "A delegated service credential authenticated the event.",
+            "type": "string"
+          },
+          {
+            "const": "device_trusted",
+            "description": "Only device or network trust was established.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: an assurance this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionEvidence": {
+        "description": "The durable evidence a decision was decided with. An authentication\nscope is never projected.",
+        "oneOf": [
+          {
+            "description": "An authenticated human's decision.",
+            "properties": {
+              "approve": {
+                "type": "boolean"
+              },
+              "approver_id": {
+                "type": "string"
+              },
+              "assurance": {
+                "$ref": "#/$defs/WireDecisionAssurance"
+              },
+              "decider": {
+                "description": "The decider's principal key.",
+                "type": "string"
+              },
+              "event_ref": {
+                "type": "string"
+              },
+              "ingress": {
+                "description": "How the decision event reached the host.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "human",
+                "type": "string"
+              },
+              "observed_at_ms": {
+                "description": "When the ingress observed the event, in UNIX ms; absent in\nevidence recorded before decisions carried it.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "presentation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WirePresentationRecord"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The presentation the decision event carried, if any."
+              },
+              "presented_digest": {
+                "type": "string"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "decider",
+              "assurance",
+              "ingress",
+              "event_ref",
+              "approver_id",
+              "presented_digest",
+              "approve"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A reviewer's attributed verdict.",
+            "properties": {
+              "feedback": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "review",
+                "type": "string"
+              },
+              "origin_session": {
+                "type": "string"
+              },
+              "presented_digest": {
+                "type": "string"
+              },
+              "reviewer": {
+                "description": "The reviewer's principal key.",
+                "type": "string"
+              },
+              "verdict": {
+                "$ref": "#/$defs/WireDecisionReviewVerdict"
+              },
+              "verdict_call_ref": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer",
+              "origin_session",
+              "verdict_call_ref",
+              "verdict",
+              "presented_digest"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: evidence of a kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireDecisionReviewVerdict": {
+        "description": "A reviewer's verdict.",
+        "oneOf": [
+          {
+            "const": "allow",
+            "description": "Approve the held operation.",
+            "type": "string"
+          },
+          {
+            "const": "deny",
+            "description": "Reject it.",
+            "type": "string"
+          },
+          {
+            "const": "escalate",
+            "description": "Hand the decision to the human approver.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a verdict this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionTier": {
+        "description": "Who decided a decision.",
+        "oneOf": [
+          {
+            "const": "human",
+            "description": "An authenticated human acting for the approver id.",
+            "type": "string"
+          },
+          {
+            "const": "review",
+            "description": "The named reviewer, through its verdict.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a tier this version does not know. The server\nnever sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WirePresentationAudience": {
+        "description": "Who a recorded presentation was shown to.",
+        "oneOf": [
+          {
+            "description": "Whoever acts for the decision's approver id.",
+            "properties": {
+              "approver_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approver",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approver_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decision's named reviewer (a principal key).",
+            "properties": {
+              "kind": {
+                "const": "reviewer",
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an audience this version does not know. The\nserver never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WirePresentationRecord": {
+        "description": "One recorded presentation of a decision's rendering.",
+        "properties": {
+          "at_ms": {
+            "description": "The host's clock reading of the presentation, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "audience": {
+            "$ref": "#/$defs/WirePresentationAudience"
+          },
+          "channel_ref": {
+            "description": "Where the presentation was shown.",
+            "type": "string"
+          },
+          "max_part_bytes": {
+            "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "message_ref": {
+            "type": "string"
+          },
+          "parts_shown": {
+            "description": "The parts the audience was shown.",
+            "items": {
+              "$ref": "#/$defs/WireCanonicalPart"
+            },
+            "type": "array"
+          },
+          "subject_digest": {
+            "description": "The digest of the rendering that was presented.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "audience",
+          "subject_digest",
+          "parts_shown",
+          "channel_ref",
+          "message_ref",
+          "at_ms"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A decided decision's outcome: who decided, and the evidence.",
+    "properties": {
+      "evidence": {
+        "$ref": "#/$defs/WireDecisionEvidence"
+      },
+      "tier": {
+        "$ref": "#/$defs/WireDecisionTier"
+      }
+    },
+    "required": [
+      "tier",
+      "evidence"
+    ],
+    "title": "WireDecisionOutcome",
+    "type": "object"
+  },
+  "WireDecisionPhase": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Where a decision stands.",
+    "oneOf": [
+      {
+        "const": "open",
+        "description": "Held, and not yet decided, withdrawn or expired.",
+        "type": "string"
+      },
+      {
+        "const": "approved",
+        "description": "Approved; the held request not yet executed.",
+        "type": "string"
+      },
+      {
+        "const": "rejected",
+        "description": "Rejected. Terminal.",
+        "type": "string"
+      },
+      {
+        "const": "expired",
+        "description": "Observed at or after its deadline undecided, or approved and never\nexecuted. Terminal.",
+        "type": "string"
+      },
+      {
+        "const": "withdrawn",
+        "description": "Withdrawn by its requester or the host before a decision. Terminal.",
+        "type": "string"
+      },
+      {
+        "const": "executed",
+        "description": "The held request was executed. Terminal.",
+        "type": "string"
+      },
+      {
+        "const": "execution_refused",
+        "description": "The operation's owner refused the held request. Terminal.",
+        "type": "string"
+      },
+      {
+        "const": "unknown",
+        "description": "Forward compatibility: a phase this version does not know. The\nserver never sends it.",
+        "type": "string"
+      }
+    ],
+    "title": "WireDecisionPhase"
+  },
+  "WireDecisionRefusal": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Why a decision refused a call. Closed: a refusal bears authority, so a\nclient never reads one it does not know as another.",
+    "oneOf": [
+      {
+        "description": "The hold's deadline is not after the hold's clock reading.",
+        "properties": {
+          "kind": {
+            "const": "invalid_window",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The hold names the requester as its own reviewer.",
+        "properties": {
+          "kind": {
+            "const": "self_review",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The decision is held with another binding.",
+        "properties": {
+          "kind": {
+            "const": "hold_conflict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The decision is no longer open: the first valid decision won.",
+        "properties": {
+          "kind": {
+            "const": "not_open",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The deadline passed; the call recorded the expiry.",
+        "properties": {
+          "kind": {
+            "const": "expired",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The presented digest is not the held subject digest.",
+        "properties": {
+          "kind": {
+            "const": "subject_changed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The presentation did not cover the whole held subject, none reached\nthe deciding party, or it was shown at 0 (no reading of when).",
+        "properties": {
+          "kind": {
+            "const": "presentation_incomplete",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The presentation was shown to a party that does not decide now.",
+        "properties": {
+          "kind": {
+            "const": "wrong_audience",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "A human decision while the review stage is open.",
+        "properties": {
+          "kind": {
+            "const": "review_stage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "A review verdict while the human stage is open.",
+        "properties": {
+          "kind": {
+            "const": "human_stage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The decision carries no attested evidence.",
+        "properties": {
+          "kind": {
+            "const": "evidence_required",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The decider does not act for the approver id, or is not currently\neligible.",
+        "properties": {
+          "kind": {
+            "const": "not_eligible",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The requester tried to decide its own request.",
+        "properties": {
+          "kind": {
+            "const": "self_approval",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The verdict is not the named reviewer's.",
+        "properties": {
+          "kind": {
+            "const": "wrong_reviewer",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Only the requester or the host may withdraw.",
+        "properties": {
+          "kind": {
+            "const": "not_requester",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The decision is not approved.",
+        "properties": {
+          "kind": {
+            "const": "not_approved",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The execution names another operation or request.",
+        "properties": {
+          "kind": {
+            "const": "binding_mismatch",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "No execution permit is outstanding.",
+        "properties": {
+          "kind": {
+            "const": "not_authorized",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The deadline passed while a permit is outstanding: the permit is\nsettled first.",
+        "properties": {
+          "kind": {
+            "const": "settlement_owed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "No notice is owed, or the receipt contradicts the settled one.",
+        "properties": {
+          "kind": {
+            "const": "not_owed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The human decision was observed before the decision's first\npresentation to the approver.",
+        "properties": {
+          "kind": {
+            "const": "decided_before_presentation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireDecisionRefusal"
+  },
+  "WireDecisionReviewVerdict": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A reviewer's verdict.",
+    "oneOf": [
+      {
+        "const": "allow",
+        "description": "Approve the held operation.",
+        "type": "string"
+      },
+      {
+        "const": "deny",
+        "description": "Reject it.",
+        "type": "string"
+      },
+      {
+        "const": "escalate",
+        "description": "Hand the decision to the human approver.",
+        "type": "string"
+      },
+      {
+        "const": "unknown",
+        "description": "Forward compatibility: a verdict this version does not know. The\nserver never sends it.",
+        "type": "string"
+      }
+    ],
+    "title": "WireDecisionReviewVerdict"
+  },
+  "WireDecisionStage": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Who decides an open decision now.",
+    "oneOf": [
+      {
+        "const": "human",
+        "description": "An authenticated human acting for the approver id.",
+        "type": "string"
+      },
+      {
+        "const": "review",
+        "description": "The named reviewer.",
+        "type": "string"
+      },
+      {
+        "const": "unknown",
+        "description": "Forward compatibility: a stage this version does not know. The\nserver never sends it.",
+        "type": "string"
+      }
+    ],
+    "title": "WireDecisionStage"
+  },
+  "WireDecisionTier": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Who decided a decision.",
+    "oneOf": [
+      {
+        "const": "human",
+        "description": "An authenticated human acting for the approver id.",
+        "type": "string"
+      },
+      {
+        "const": "review",
+        "description": "The named reviewer, through its verdict.",
+        "type": "string"
+      },
+      {
+        "const": "unknown",
+        "description": "Forward compatibility: a tier this version does not know. The server\nnever sends it.",
+        "type": "string"
+      }
+    ],
+    "title": "WireDecisionTier"
   },
   "WireDeviceCompleteResult": {
     "$defs": {
@@ -170977,6 +175559,112 @@
           }
         ]
       },
+      "PrincipalId": {
+        "description": "Stable, caller-visible principal id.\n\nLegacy deserialization preserves previously persisted strings, including\nthose rejected by [`Self::new`]. Qualified [`PrincipalRef`] deserialization\nvalidates the id; migrating unqualified persisted ids is a separate step.",
+        "type": "string"
+      },
+      "PrincipalKind": {
+        "description": "Generic principal categories. Product-specific role names belong outside\ncore and may be mapped to these typed categories by clients.",
+        "enum": [
+          "human",
+          "personal_agent",
+          "shared_agent",
+          "runtime_host",
+          "service_account"
+        ],
+        "type": "string"
+      },
+      "PrincipalQualification": {
+        "description": "Whether an identity has an explicit trust-domain namespace.\n\nUnqualified identity preserves trusted-embedded and legacy wire contracts;\nit must not be silently assigned a domain for governed use. Qualification\nis identity vocabulary, not proof of authentication or authorization.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unqualified",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "qualified",
+                "type": "string"
+              },
+              "trust_domain_id": {
+                "$ref": "#/$defs/TrustDomainId"
+              }
+            },
+            "required": [
+              "kind",
+              "trust_domain_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PrincipalRef": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "qualification": {
+                  "properties": {
+                    "kind": {
+                      "const": "qualified"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
+                }
+              },
+              "required": [
+                "qualification"
+              ]
+            },
+            "then": {
+              "properties": {
+                "id": {
+                  "allOf": [
+                    {
+                      "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+                    },
+                    {
+                      "not": {
+                        "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "description": "Typed principal reference.\n\nPublic fields preserve the existing data contract, so an in-memory value\nis not proof of valid or authenticated identity. Governed admission must\ncall [`Self::validate_qualified`] and separately establish caller authority.",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/PrincipalId"
+          },
+          "kind": {
+            "$ref": "#/$defs/PrincipalKind"
+          },
+          "qualification": {
+            "$ref": "#/$defs/PrincipalQualification"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
       "ProfileId": {
         "description": "Opaque slug identifying an auth profile override on a connection.",
         "type": "string"
@@ -173836,6 +178524,17 @@
             ],
             "description": "Session-owned provenance; not accepted by transcript rewrite wire inputs."
           },
+          "requester": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TurnRequester"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The original requester the turn served: the requester its inputs\nshare, stamped at admission from the inputs, never inferred from\ncontent. Absent when the turn's inputs carry none."
+          },
           "run_id": {
             "anyOf": [
               {
@@ -174118,6 +178817,36 @@
             "type": "string"
           }
         ]
+      },
+      "TrustDomainId": {
+        "allOf": [
+          {
+            "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+          },
+          {
+            "not": {
+              "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+            }
+          }
+        ],
+        "description": "Exact, opaque trust-domain namespace for a qualified principal id.\n\nDomain ids are not inferred from hostnames or normalized. Constructing one\nvalidates its syntax, not the caller's authority to assert that domain.",
+        "type": "string"
+      },
+      "TurnRequester": {
+        "description": "The original requester of a turn: the principal its inputs share, and\nwhether it reached them directly.\n\nThe principal is opaque to Core. A host supplies it for the inputs it\nadmits (the authenticated caller it acts for), or a governed input's work\nassociation names it. Core carries it and never interprets it: it has no\nperson, account or assurance concept for it.",
+        "properties": {
+          "carried": {
+            "description": "Set when an input of the turn reached it through an actor other than\nthe requester: governed work another agent sent (a peer hop), or work\nanother owner admitted for the requester. Absent when the requester's\nown ingress admitted every input.",
+            "type": "boolean"
+          },
+          "principal": {
+            "$ref": "#/$defs/PrincipalRef"
+          }
+        },
+        "required": [
+          "principal"
+        ],
+        "type": "object"
       },
       "TurnTerminalCauseKind": {
         "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
@@ -192000,6 +196729,194 @@
     "title": "WirePendingToolCall",
     "type": "object"
   },
+  "WirePresentationAudience": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Who a recorded presentation was shown to.",
+    "oneOf": [
+      {
+        "description": "Whoever acts for the decision's approver id.",
+        "properties": {
+          "approver_id": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "approver",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "approver_id"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The decision's named reviewer (a principal key).",
+        "properties": {
+          "kind": {
+            "const": "reviewer",
+            "type": "string"
+          },
+          "reviewer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "reviewer"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Forward compatibility: an audience this version does not know. The\nserver never sends it.",
+        "properties": {
+          "kind": {
+            "const": "unknown",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WirePresentationAudience"
+  },
+  "WirePresentationRecord": {
+    "$defs": {
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      },
+      "WirePresentationAudience": {
+        "description": "Who a recorded presentation was shown to.",
+        "oneOf": [
+          {
+            "description": "Whoever acts for the decision's approver id.",
+            "properties": {
+              "approver_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approver",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approver_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decision's named reviewer (a principal key).",
+            "properties": {
+              "kind": {
+                "const": "reviewer",
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an audience this version does not know. The\nserver never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One recorded presentation of a decision's rendering.",
+    "properties": {
+      "at_ms": {
+        "description": "The host's clock reading of the presentation, in UNIX ms.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "audience": {
+        "$ref": "#/$defs/WirePresentationAudience"
+      },
+      "channel_ref": {
+        "description": "Where the presentation was shown.",
+        "type": "string"
+      },
+      "max_part_bytes": {
+        "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "message_ref": {
+        "type": "string"
+      },
+      "parts_shown": {
+        "description": "The parts the audience was shown.",
+        "items": {
+          "$ref": "#/$defs/WireCanonicalPart"
+        },
+        "type": "array"
+      },
+      "subject_digest": {
+        "description": "The digest of the rendering that was presented.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "audience",
+      "subject_digest",
+      "parts_shown",
+      "channel_ref",
+      "message_ref",
+      "at_ms"
+    ],
+    "title": "WirePresentationRecord",
+    "type": "object"
+  },
   "WireProjectionProvenance": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Who attests a remotely-served projection (§7/§20): `HostClaimed` facts\nare only what the owning host reports; `ControllingHostVerified` facts\nwere checked against controlling-machine records.",
@@ -208137,6 +213054,24 @@
       "peer"
     ],
     "title": "WireUnreachablePeer",
+    "type": "object"
+  },
+  "WireUnreadableDecision": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A stored decision row the server cannot read (written by a newer\nversion, or torn). Nothing executes it.",
+    "properties": {
+      "decision_id": {
+        "type": "string"
+      },
+      "detail": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "decision_id",
+      "detail"
+    ],
+    "title": "WireUnreadableDecision",
     "type": "object"
   },
   "WireUnreadableToolGrant": {

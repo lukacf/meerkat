@@ -344,8 +344,8 @@ pub use exact_operation::{
 };
 pub use gateway::{DynamicToolComposite, ToolGateway, ToolGatewayBuilder};
 pub use governance_config::{
-    GovernanceConfig, StockConsentAssurance, StockReviewConfig, StockReviewRule, StockReviewTarget,
-    StockReviewTier, StockReviewerSelection,
+    DecisionGovernanceConfig, GovernanceConfig, StockConsentAssurance, StockReviewConfig,
+    StockReviewRule, StockReviewTarget, StockReviewTier, StockReviewerSelection,
 };
 pub use handles::{
     AuthLeasePhase, CommsDrainHandle, DrainExitReason, DrainMode, DslRejectionKind,
@@ -377,6 +377,7 @@ pub use image_content::{
     hydrate_messages_for_execution,
 };
 pub use image_generation::*;
+pub use interaction::GovernedSendOrigin;
 pub use interaction::{
     InboxInteraction, InteractionContent, InteractionId, ObjectiveId, PeerIngressAdmission,
     PeerIngressAdmissionDiagnostic, PeerIngressAuthDecision, PeerIngressAuthExemption,
@@ -756,7 +757,7 @@ pub use types::{
     TOOL_ARTIFACT_REF_PART_MAX_BYTES, ToolArtifactRef, ToolArtifactRefError, ToolArtifactRefPart,
     ToolArtifactRefusal, ToolAudience, ToolCall, ToolCallIter, ToolCallView, ToolDef, ToolIdentity,
     ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind,
-    TranscriptMessageIdentity, TranscriptSource, TranscriptUserRole, TurnUsage,
+    TranscriptMessageIdentity, TranscriptSource, TranscriptUserRole, TurnRequester, TurnUsage,
     TurnUsageAccountingMissing, Usage, UserMessage, VideoData,
     assistant_blocks_have_visible_or_actionable_output, has_images, has_non_text_content,
     has_video, is_supported_video_media_type, materialize_latest_system_prompt_versions,

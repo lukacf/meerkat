@@ -19095,6 +19095,19 @@ pub mod inputs {
     pub struct AbortUntilChangedSwitchTurnReconfigure {
         pub request_id: String,
     }
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BindInputRequesterBatchKey {
+        pub input_id: String,
+        pub authority_batch_key: String,
+    }
+    impl std::fmt::Debug for BindInputRequesterBatchKey {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("BindInputRequesterBatchKey")
+                .field("input_id", &self.input_id)
+                .field("authority_batch_key", &"<redacted>")
+                .finish()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -19529,6 +19542,7 @@ pub enum Input {
     ReplaceToolGrantGate(inputs::ReplaceToolGrantGate),
     ApplyToolGrantOpenSet(inputs::ApplyToolGrantOpenSet),
     AbortUntilChangedSwitchTurnReconfigure(inputs::AbortUntilChangedSwitchTurnReconfigure),
+    BindInputRequesterBatchKey(inputs::BindInputRequesterBatchKey),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -20129,6 +20143,7 @@ impl Input {
             Self::AbortUntilChangedSwitchTurnReconfigure(_) => {
                 InputKind::AbortUntilChangedSwitchTurnReconfigure
             }
+            Self::BindInputRequesterBatchKey(_) => InputKind::BindInputRequesterBatchKey,
         }
     }
 }
@@ -20552,6 +20567,7 @@ pub enum InputKind {
     ReplaceToolGrantGate,
     ApplyToolGrantOpenSet,
     AbortUntilChangedSwitchTurnReconfigure,
+    BindInputRequesterBatchKey,
 }
 
 pub mod signals {
@@ -26095,6 +26111,11 @@ pub enum TransitionId {
     RequestUntilChangedSwitchTurnPendingConflictRunning,
     CompleteUntilChangedSwitchTurnReconfigureRetired,
     CompleteUntilChangedSwitchTurnReconfigureStopped,
+    BindInputRequesterBatchKeyIdle,
+    BindInputRequesterBatchKeyAttached,
+    BindInputRequesterBatchKeyRunning,
+    BindInputRequesterBatchKeyRetired,
+    BindInputRequesterBatchKeyStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

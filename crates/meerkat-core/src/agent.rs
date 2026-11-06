@@ -910,6 +910,10 @@ pub struct ToolDispatchContext {
     streaming: Option<crate::ToolStreamingDispatchContext>,
     live_bridge_admission: Option<LiveBridgeToolDispatchAdmission>,
     work_authorization: Option<crate::WorkAuthorizationContext>,
+    /// The original requester of the run this dispatch belongs to: the
+    /// requester its admitted inputs share. Bound with the run by the agent
+    /// loop; never taken from tool arguments or model output.
+    requester: Option<crate::types::TurnRequester>,
     prepared_authorization: Option<crate::authorization::PreparedOperationCheck>,
     /// Trusted host review composition attached by the agent. Absence never
     /// skips a required tier: R2 then settles as local unavailable feedback.
@@ -1633,6 +1637,7 @@ impl std::fmt::Debug for ToolDispatchContext {
             .field("streaming", &self.streaming)
             .field("live_bridge_admission", &self.live_bridge_admission)
             .field("work_authorization", &self.work_authorization)
+            .field("requester", &self.requester)
             .field("prepared_authorization", &self.prepared_authorization)
             .field("operation_review", &self.operation_review.is_some())
             .field("review_entry", &self.review_entry)
@@ -1663,6 +1668,7 @@ impl PartialEq for ToolDispatchContext {
             && self.round == other.round
             && self.streaming == other.streaming
             && self.live_bridge_admission == other.live_bridge_admission
+            && self.requester == other.requester
             && match (&self.work_authorization, &other.work_authorization) {
                 (Some(left), Some(right)) => left.same_context(right),
                 (None, None) => true,
@@ -1758,6 +1764,7 @@ impl ToolDispatchContext {
             streaming: None,
             live_bridge_admission: None,
             work_authorization: None,
+            requester: None,
             prepared_authorization: None,
             operation_review: None,
             review_entry: None,
@@ -1791,6 +1798,32 @@ impl ToolDispatchContext {
         self.review_entry = None;
         self.staging_wait = None;
         self
+    }
+
+    /// Bind the original requester of the run this dispatch belongs to (see
+    /// [`Self::requester`]). The agent loop binds it with the run.
+    #[must_use]
+    pub fn with_requester(mut self, requester: Option<crate::types::TurnRequester>) -> Self {
+        self.requester = requester;
+        self
+    }
+
+    /// The original requester of the run this dispatch belongs to: the
+    /// requester its admitted inputs share, direct or carried. `None` when
+    /// the run's inputs carry none.
+    #[must_use]
+    pub fn requester(&self) -> Option<&crate::types::TurnRequester> {
+        self.requester.as_ref()
+    }
+
+    /// The run's requester only when the requester's own ingress admitted
+    /// every input of the run. A consumer that acts for a person uses only
+    /// this, never a requester carried across a peer hop.
+    #[must_use]
+    pub fn direct_requester(&self) -> Option<&crate::PrincipalRef> {
+        self.requester
+            .as_ref()
+            .and_then(crate::types::TurnRequester::direct_principal)
     }
 
     /// Attach trusted host review composition. It only enables review; the
@@ -4916,6 +4949,25 @@ pub trait CommsRuntime: Send + Sync {
         Err(SendError::Unsupported(
             "send not implemented for this CommsRuntime".to_string(),
         ))
+    }
+
+    /// Dispatch a canonical comms command with the origin of the governed
+    /// work that sends it, if any ([`crate::GovernedSendOrigin`]): an
+    /// in-process delivery carries it to its receiver unchanged, and a
+    /// delivery over a network carries none. A comms tool passes the origin
+    /// of its dispatch context's work, never one from its arguments. With no
+    /// origin this is [`Self::send`].
+    ///
+    /// The default sends `cmd` without the origin, so a receiver sees a
+    /// delivery from an ungoverned sender, which a binder that keeps the
+    /// original requester refuses (`origin_unverifiable`).
+    async fn send_with_governed_origin(
+        &self,
+        cmd: CommsCommand,
+        origin: Option<crate::GovernedSendOrigin>,
+    ) -> Result<SendReceipt, SendError> {
+        let _ = origin;
+        self.send(cmd).await
     }
 
     #[doc(hidden)]

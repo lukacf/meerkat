@@ -916,6 +916,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ReplaceToolGrantGate`(gated: Set<ToolName>)
 - `ApplyToolGrantOpenSet`(open: Set<ToolName>)
 - `AbortUntilChangedSwitchTurnReconfigure`(request_id: String)
+- `BindInputRequesterBatchKey`(input_id: String, authority_batch_key: String)
 
 ## Signals
 - `Initialize`
@@ -10018,6 +10019,56 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `immutable_batch_key`
 - To: `Stopped`
 
+### `BindInputRequesterBatchKeyIdle`
+- From: `Idle`
+- On: `BindInputRequesterBatchKey`(input_id, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_batch_key`
+  - `ungoverned_input`
+  - `immutable_batch_key`
+- To: `Idle`
+
+### `BindInputRequesterBatchKeyAttached`
+- From: `Attached`
+- On: `BindInputRequesterBatchKey`(input_id, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_batch_key`
+  - `ungoverned_input`
+  - `immutable_batch_key`
+- To: `Attached`
+
+### `BindInputRequesterBatchKeyRunning`
+- From: `Running`
+- On: `BindInputRequesterBatchKey`(input_id, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_batch_key`
+  - `ungoverned_input`
+  - `immutable_batch_key`
+- To: `Running`
+
+### `BindInputRequesterBatchKeyRetired`
+- From: `Retired`
+- On: `BindInputRequesterBatchKey`(input_id, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_batch_key`
+  - `ungoverned_input`
+  - `immutable_batch_key`
+- To: `Retired`
+
+### `BindInputRequesterBatchKeyStopped`
+- From: `Stopped`
+- On: `BindInputRequesterBatchKey`(input_id, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_batch_key`
+  - `ungoverned_input`
+  - `immutable_batch_key`
+- To: `Stopped`
+
 ### `BindScopedContextIdle`
 - From: `Idle`
 - On: `BindScopedContext`(binding, scope, generation)
@@ -13624,6 +13675,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `current_run_matches`
   - `live_join_input_is_ungoverned`
   - `live_join_run_is_ungoverned`
+  - `live_join_same_requester`
   - `turn_at_model_boundary`
   - `no_cancel_after_boundary`
   - `run_not_stopped`

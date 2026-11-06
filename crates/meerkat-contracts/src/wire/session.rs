@@ -2896,6 +2896,7 @@ mod tests {
             run_id: None,
             objective_id: None,
             turn_input: None,
+            requester: None,
         };
         let mut assistant = BlockAssistantMessage::new(
             vec![AssistantBlock::Text {
@@ -2910,6 +2911,7 @@ mod tests {
             run_id: Some(run_id.clone()),
             objective_id: None,
             turn_input: None,
+            requester: None,
         };
         let page = SessionHistoryPage {
             session_id: SessionId::new(),

@@ -48,6 +48,7 @@ fn make_prompt(text: &str) -> Input {
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         content: text.into(),
         typed_turn_appends: Vec::new(),
@@ -2112,6 +2113,7 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::ResponseProgress {
                 request_id: format!("req-{label}"),
@@ -6502,6 +6504,7 @@ fn response_progress(label: &str) -> Input {
                 "same-window",
             )),
             correlation_id: None,
+            requester: None,
         },
         convention: Some(meerkat_runtime::input::PeerConvention::ResponseProgress {
             request_id: format!("request-{label}"),

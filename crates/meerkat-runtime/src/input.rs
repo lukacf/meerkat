@@ -69,6 +69,14 @@ pub struct InputHeader {
     /// Optional correlation ID.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<CorrelationId>,
+    /// The original requester of this input: an opaque, qualified principal
+    /// the host supplies from the caller it authenticated (never from a
+    /// request body, a tool argument or model output). Core never interprets
+    /// it. A governed input's requester is its work association's; one that
+    /// also carries this field must name the same principal. Read it through
+    /// [`Input::requester`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester: Option<meerkat_core::PrincipalRef>,
 }
 
 /// Where the input originated.
@@ -192,6 +200,63 @@ impl Input {
     /// Get the input ID.
     pub fn id(&self) -> &InputId {
         &self.header().id
+    }
+
+    /// The original requester of this input: the one accessor over the two
+    /// places a requester lives.
+    ///
+    /// - A governed input's requester is its work association's (a resume of
+    ///   retained work takes its canonical original's).
+    /// - Any other input's is the requester its host supplied
+    ///   ([`InputHeader::requester`]), if any.
+    ///
+    /// Admission refuses an input that carries both with different values,
+    /// so the two never disagree on an admitted input.
+    pub fn requester(&self) -> Option<&meerkat_core::PrincipalRef> {
+        match self.governed_requester_association() {
+            Some(association) => Some(&association.candidate().requester),
+            None => self.header().requester.as_ref(),
+        }
+    }
+
+    /// The original requester of this input and whether it reached the
+    /// input directly ([`meerkat_core::types::TurnRequester`]): a requester
+    /// its host supplied is direct, and so is a governed one whose
+    /// association names it as its own ingress actor. A governed requester
+    /// another actor brought (another agent's peer send, another owner's
+    /// admission) is carried.
+    pub fn turn_requester(&self) -> Option<meerkat_core::types::TurnRequester> {
+        match self.governed_requester_association() {
+            Some(association) => {
+                let claims = association.candidate();
+                Some(if claims.ingress_actor == claims.requester {
+                    meerkat_core::types::TurnRequester::direct(claims.requester.clone())
+                } else {
+                    meerkat_core::types::TurnRequester::carried(claims.requester.clone())
+                })
+            }
+            None => self
+                .header()
+                .requester
+                .clone()
+                .map(meerkat_core::types::TurnRequester::direct),
+        }
+    }
+
+    /// The work association that names this input's requester, when it is
+    /// governed work: its own, or its retained resume's canonical original.
+    fn governed_requester_association(
+        &self,
+    ) -> Option<&meerkat_authorization_contracts::work_association::InputAuthorityAssociation> {
+        let header = self.header();
+        if let Some(association) = header.authority_association.as_ref() {
+            return Some(association);
+        }
+        header
+            .retained_resume
+            .as_ref()
+            .and_then(|grant| grant.evidence().contributors.first())
+            .map(crate::input_authority::RetainedInputAuthority::association)
     }
 
     /// Typed kind for policy dispatch.
@@ -372,6 +437,7 @@ impl PromptInput {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             content: ContentInput::Text(text.into()),
             typed_turn_appends: Vec::new(),
@@ -409,6 +475,7 @@ impl PromptInput {
                 idempotency_key: Some(IdempotencyKey::new(idempotency_key)),
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             content: ContentInput::Text(String::new()),
             typed_turn_appends: vec![ConversationAppend {
@@ -472,6 +539,7 @@ impl PromptInput {
                 ingress_context: None,
                 retained_resume: None,
                 authority_association: None,
+                requester: None,
             },
             content,
             typed_turn_appends: Vec::new(),
@@ -498,6 +566,7 @@ impl PromptInput {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             content: input,
             typed_turn_appends: Vec::new(),
@@ -671,6 +740,7 @@ pub fn peer_response_terminal_input(
             idempotency_key: Some(idempotency_key),
             supersession_key: None,
             correlation_id: Some(correlation_id),
+            requester: None,
         },
         convention: Some(PeerConvention::ResponseTerminal {
             request_id,
@@ -918,6 +988,7 @@ impl ContinuationInput {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             reason: "detached_background_op_completed".to_string(),
             continuation_kind: ContinuationKind::Ordinary,
@@ -1720,6 +1791,7 @@ mod tests {
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         }
     }
 
@@ -3268,6 +3340,7 @@ mod tests {
                 idempotency_key: Some(IdempotencyKey::new(stable.to_string())),
                 supersession_key: None,
                 correlation_id: Some(CorrelationId::from_uuid(stable)),
+                requester: None,
             },
             convention: Some(PeerConvention::Message),
             content: ContentInput::Blocks(vec![

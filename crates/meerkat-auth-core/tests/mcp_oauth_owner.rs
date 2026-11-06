@@ -9794,6 +9794,74 @@ async fn client_profile_admission_settles_to_the_host_recorder_after_the_caller_
     );
 }
 
+/// A configured server URL can carry credentials in its userinfo or its
+/// query. No client-profile record carries them: the install, replace and
+/// removal of such a slot are each recorded without them.
+#[tokio::test]
+async fn client_profile_records_carry_no_credential_from_the_server_url() {
+    let method = McpOAuthClientAuthMethod::ClientSecretPost;
+    let (base, state) = spawn_fixed_client_fixture(method).await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = McpServerIdentity::from_server_config(
+        "fixed-canary",
+        "https://svc:CANARY_PW@mcp.example.com/mcp?tenant_key=CANARY_Q",
+    )
+    .with_expected_account("fixture-account-42")
+    .unwrap();
+    let redirect = authority
+        .registered_redirect_uri(&target, &registered_base())
+        .unwrap();
+    let profile = |client: &str| {
+        McpOAuthClientProfile::new(
+            base.clone(),
+            client,
+            redirect.clone(),
+            method,
+            McpOAuthClientSecret::new(FIXED_CLIENT_SECRET),
+        )
+    };
+    let recorder = Arc::new(RecordedAdministrations::default());
+    let stating = |login: &'static str| {
+        Arc::new(StatingEntry {
+            recorder: Arc::clone(&recorder),
+            login,
+        }) as Arc<dyn meerkat_core::AdministrationEntry>
+    };
+
+    authority
+        .install_client_profile_entered(
+            &target,
+            profile("client-a"),
+            Some(&registered_base()),
+            stating("login-1"),
+        )
+        .await
+        .unwrap();
+    authority
+        .replace_client_profile_entered(
+            &target,
+            profile("client-b"),
+            Some(&registered_base()),
+            stating("login-2"),
+        )
+        .await
+        .unwrap();
+    authority
+        .remove_client_profile_entered(&target, stating("login-3"))
+        .await
+        .unwrap();
+
+    let records = std::mem::take(&mut *recorder.0.lock());
+    assert_eq!(records.len(), 3, "one record per admitted update");
+    for record in &records {
+        let rendered = serde_json::to_string(record).unwrap();
+        assert!(
+            !rendered.contains("CANARY_PW") && !rendered.contains("CANARY_Q"),
+            "no record carries the server URL's userinfo or query: {rendered}"
+        );
+    }
+}
+
 /// Without a profile nothing changes: a dynamically registered credential
 /// stores no profile, and its token requests are a public client's. A
 /// profile installed later leaves it alone: it keeps refreshing as the

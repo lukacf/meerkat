@@ -1798,6 +1798,11 @@ mod tests {
         for (name, expected_params_type, expected_result_type) in [
             ("tool_grants/grant", "GrantToolParams", "GrantToolResult"),
             (
+                "tool_grants/request",
+                "RequestToolGrantParams",
+                "RequestToolGrantResult",
+            ),
+            (
                 "tool_grants/revoke",
                 "RevokeToolGrantParams",
                 "RevokeToolGrantResult",

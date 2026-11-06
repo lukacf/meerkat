@@ -616,6 +616,33 @@ mod tests {
     }
 
     #[test]
+    fn an_approved_grant_id_derives_from_its_decision_and_parses() {
+        use crate::approval::decision::{DecisionId, DecisionKind, DecisionSubjectKey};
+        let decision = |subject: &str| {
+            DecisionId::derive(
+                &DecisionKind::new("tool_grant.issue").unwrap(),
+                &DecisionSubjectKey::new(subject).unwrap(),
+            )
+        };
+        let first = ToolGrantId::approved(&decision("s:one/tool:deploy/host:a"));
+        assert_eq!(
+            first,
+            ToolGrantId::approved(&decision("s:one/tool:deploy/host:a")),
+            "a replayed execution meets the id its decision derives"
+        );
+        assert_ne!(
+            first,
+            ToolGrantId::approved(&decision("s:one/tool:deploy/host:b")),
+            "another decision derives another id"
+        );
+        assert_eq!(first.as_uuid().get_version_num(), 5);
+        assert_eq!(ToolGrantId::parse(&first.to_string()).unwrap(), first);
+        let text = serde_json::to_string(&first).unwrap();
+        assert_eq!(serde_json::from_str::<ToolGrantId>(&text).unwrap(), first);
+        assert_ne!(first, ToolGrantId::mint());
+    }
+
+    #[test]
     fn a_family_target_covers_only_its_snapshot() {
         let target = ToolGrantTarget::Family {
             family: "shell".into(),

@@ -8001,6 +8001,280 @@ mod tests {
             assert_eq!(keep_alive.data, immediate.data);
             assert_eq!(router.runtime.first_build_waiter_count_for_testing(), 0);
         }
+
+        // ----- approval-carried grants: `tool_grants/request` -----
+
+        /// A router over a realm whose persistence keeps durable decisions,
+        /// its sessions answered by the mock model.
+        async fn persistent_router(root: &std::path::Path) -> (MethodRouter, Arc<SessionRuntime>) {
+            let (_, bundle) = meerkat::open_realm_persistence_in(
+                root,
+                "grants",
+                Some(meerkat_store::RealmBackend::Sqlite),
+                None,
+            )
+            .await
+            .expect("open the realm");
+            let config = anthropic_test_config();
+            let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
+                config.clone(),
+                meerkat_models::canonical(),
+            ));
+            let runtime = SessionRuntime::new(
+                AgentFactory::new(root.join("sessions")),
+                config,
+                10,
+                bundle,
+                NotificationSink::noop(),
+            )
+            .expect("compose the RPC session runtime");
+            runtime.set_default_llm_client(Some(Arc::new(MockLlmClient::anthropic())));
+            runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+                Arc::clone(&config_store),
+                root.join("config_state.json"),
+            )));
+            runtime.set_realm_context(
+                Some(meerkat_core::connection::RealmId::parse("grants").expect("realm id")),
+                None,
+                None,
+            );
+            let runtime = Arc::new(runtime);
+            let router =
+                MethodRouter::new(Arc::clone(&runtime), config_store, NotificationSink::noop())
+                    .expect("construct the router");
+            (router, runtime)
+        }
+
+        /// A person acting for the decision's approver id approves it
+        /// through the host's decision owner, after its presentation.
+        fn approve_as_a_person(
+            runtime: &SessionRuntime,
+            decision_id: &meerkat_core::approval::decision::DecisionId,
+        ) {
+            use meerkat_core::approval::ApprovalAssurance;
+            use meerkat_core::approval::consent::{
+                AuthenticatedApprover, ConsentEligibility, ConsentIneligible,
+            };
+            use meerkat_core::approval::decision::{
+                AttestedDecision, DecisionIngress, DecisionReference, PresentationAudience,
+                PresentationRecord,
+            };
+            struct Current;
+            impl ConsentEligibility for Current {
+                fn check_current(&self) -> Result<(), ConsentIneligible> {
+                    Ok(())
+                }
+            }
+            let owner = runtime.decision_service();
+            let row = owner.get(decision_id).expect("the decision");
+            let now_ms = u64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("a clock after the epoch")
+                    .as_millis(),
+            )
+            .expect("milliseconds");
+            owner
+                .present(
+                    decision_id,
+                    &PresentationRecord::complete(
+                        PresentationAudience::Approver {
+                            approver_id: row.descriptor.approver_id.clone(),
+                        },
+                        &row.descriptor.rendering,
+                        None,
+                        DecisionReference::new("console").expect("reference"),
+                        DecisionReference::new("message-1").expect("reference"),
+                        now_ms,
+                    ),
+                )
+                .expect("present");
+            let person = meerkat_core::PrincipalRef::in_domain(
+                meerkat_core::PrincipalKind::Human,
+                "alice",
+                meerkat_core::TrustDomainId::new("example.org").expect("trust domain"),
+            )
+            .expect("principal");
+            let decided = AttestedDecision::new(
+                AuthenticatedApprover::new(person, ApprovalAssurance::PersonAuthenticated)
+                    .expect("authenticated human"),
+                DecisionIngress::new("console").expect("ingress"),
+                DecisionReference::new("event-1").expect("reference"),
+                now_ms,
+                row.descriptor.approver_id.clone(),
+                row.descriptor.rendering.subject_digest(),
+                true,
+            )
+            .expect("attested decision");
+            owner
+                .decide(decision_id, &decided, &Current)
+                .expect("approve");
+        }
+
+        /// Poll `probe` until it finds something, for at most ten seconds.
+        async fn wait_for<T, F, Fut>(mut probe: F) -> T
+        where
+            F: FnMut() -> Fut,
+            Fut: std::future::Future<Output = Option<T>>,
+        {
+            for _ in 0..200 {
+                if let Some(found) = probe().await {
+                    return found;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            panic!("nothing was found within ten seconds");
+        }
+
+        #[tokio::test]
+        async fn a_tool_grant_request_holds_a_decision_and_lists_it_requested() {
+            let temp = tempfile::tempdir().unwrap();
+            let (router, runtime) = persistent_router(temp.path()).await;
+            let session_id = shell_gated_session(&router).await;
+
+            let requested = call(
+                &router,
+                "tool_grants/request",
+                serde_json::json!({
+                    "subject": session_subject(&session_id),
+                    "target": {"kind": "family", "family": "shell"},
+                    "duration_ms": 600_000,
+                    "reason": "rotate the logs",
+                }),
+            )
+            .await;
+            let requested = result_value(&requested);
+            let grant = &requested["grant"];
+            assert_eq!(grant["status"], "requested", "{requested}");
+            let decision_id = requested["decision"]["decision_id"]
+                .as_str()
+                .expect("the decision id")
+                .to_owned();
+            assert_eq!(requested["decision"]["kind"], "tool_grant.issue");
+            assert_eq!(requested["decision"]["phase"], "open");
+            assert_eq!(requested["decision"]["approver_id"], "operator");
+            assert_eq!(
+                grant["issuer"],
+                serde_json::json!({"kind": "approval", "approval_id": decision_id})
+            );
+            assert_eq!(grant["reason"], "rotate the logs");
+            assert_eq!(grant["scope"], serde_json::json!({"kind": "window"}));
+            let grant_id = grant["grant_id"].as_str().expect("the grant id").to_owned();
+            assert_eq!(
+                grant_id,
+                meerkat_core::tool_grant::ToolGrantId::approved(
+                    &meerkat_core::approval::decision::DecisionId::new(decision_id.clone())
+                        .expect("decision id")
+                )
+                .to_string(),
+                "the request names the id its grant gets"
+            );
+
+            // Nothing is issued: the list shows the request, not a grant.
+            let shown = listed(&router, &session_id, false).await;
+            assert_eq!(shown.len(), 1, "{shown:?}");
+            assert_eq!(shown[0]["status"], "requested");
+            assert_eq!(shown[0]["grant_id"], grant_id.as_str());
+            assert!(
+                runtime
+                    .runtime_adapter()
+                    .list_tool_grants(&meerkat_core::tool_grant::ToolGrantSubject::session(
+                        meerkat_core::types::SessionId::parse(&session_id).expect("session id")
+                    ))
+                    .await
+                    .unwrap()
+                    .grants
+                    .is_empty(),
+                "no grant row before a person approves"
+            );
+
+            // A target outside the session's gate is refused, as a grant's is.
+            let refused = call(
+                &router,
+                "tool_grants/request",
+                serde_json::json!({
+                    "subject": session_subject(&session_id),
+                    "target": {"kind": "tool", "name": "deploy"},
+                    "duration_ms": 600_000,
+                }),
+            )
+            .await;
+            assert_eq!(
+                refused.error.as_ref().map(|error| error.code),
+                Some(error::INVALID_PARAMS),
+                "{refused:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_approved_tool_grant_request_issues_its_grant_through_the_executor() {
+            let temp = tempfile::tempdir().unwrap();
+            let (router, runtime) = persistent_router(temp.path()).await;
+            runtime
+                .start_tool_grant_request_executor()
+                .expect("start the request executor");
+            let session_id = shell_gated_session(&router).await;
+            let requested = call(
+                &router,
+                "tool_grants/request",
+                serde_json::json!({
+                    "subject": session_subject(&session_id),
+                    "target": {"kind": "family", "family": "shell"},
+                    "duration_ms": 600_000,
+                }),
+            )
+            .await;
+            let requested = result_value(&requested);
+            let decision_id = meerkat_core::approval::decision::DecisionId::new(
+                requested["decision"]["decision_id"]
+                    .as_str()
+                    .expect("decision id"),
+            )
+            .expect("decision id");
+            let grant_id = requested["grant"]["grant_id"]
+                .as_str()
+                .expect("grant id")
+                .to_owned();
+
+            approve_as_a_person(&runtime, &decision_id);
+            runtime.nudge_tool_grant_request_executor();
+
+            // The executor issues the grant under the requested id.
+            let issued = wait_for(|| async {
+                listed(&router, &session_id, false)
+                    .await
+                    .into_iter()
+                    .find(|grant| grant["status"] == "active")
+            })
+            .await;
+            assert_eq!(issued["grant_id"], grant_id.as_str());
+            assert_eq!(
+                issued["issuer"],
+                serde_json::json!({"kind": "approval", "approval_id": decision_id.to_string()})
+            );
+            assert_eq!(issued["target"]["family"], "shell");
+        }
+
+        #[tokio::test]
+        async fn a_tool_grant_request_without_decisions_is_capability_unavailable() {
+            let (router, _rx) = test_router().await;
+            let session_id = shell_gated_session(&router).await;
+            let refused = call(
+                &router,
+                "tool_grants/request",
+                serde_json::json!({
+                    "subject": session_subject(&session_id),
+                    "target": {"kind": "family", "family": "shell"},
+                    "duration_ms": 600_000,
+                }),
+            )
+            .await;
+            assert_eq!(
+                refused.error.as_ref().map(|error| error.code),
+                Some(meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()),
+                "{refused:?}"
+            );
+        }
     }
 
     /// When a `keep_alive` `session/create` answers: once its first turn has

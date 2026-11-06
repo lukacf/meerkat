@@ -439,6 +439,45 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn request_params_are_closed_and_bound_by_a_duration() {
+        let subject = json!({"kind": "session", "session_id": "session-1"});
+        let target = json!({"kind": "family", "family": "shell"});
+        let params: RequestToolGrantParams = serde_json::from_value(json!({
+            "subject": subject,
+            "target": target,
+            "duration_ms": 600_000,
+            "scope": {"kind": "current_run"},
+            "reason": "rotate the logs",
+        }))
+        .unwrap();
+        assert_eq!(params.duration_ms, 600_000);
+        assert_eq!(params.scope, Some(ToolGrantScopeRequest::CurrentRun {}));
+        assert_eq!(params.reason.as_deref(), Some("rotate the logs"));
+        assert_eq!(
+            serde_json::to_value(RequestToolGrantParams {
+                scope: None,
+                reason: None,
+                ..params
+            })
+            .unwrap(),
+            json!({"subject": subject, "target": target, "duration_ms": 600_000}),
+            "an unset scope and reason are not sent"
+        );
+        for refused in [
+            // The host's policy names the approver; a request never does.
+            json!({"subject": subject, "target": target, "duration_ms": 1, "approver_id": "operator"}),
+            // A request is bounded by its duration from issuance only.
+            json!({"subject": subject, "target": target, "expires_at_ms": 1}),
+            json!({"subject": subject, "target": target}),
+        ] {
+            assert!(
+                serde_json::from_value::<RequestToolGrantParams>(refused.clone()).is_err(),
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
     fn grant_params_tag_their_subject_and_target_and_refuse_unknown_fields() {
         let params = GrantToolParams {
             subject: ToolGrantSubjectRequest::Session {

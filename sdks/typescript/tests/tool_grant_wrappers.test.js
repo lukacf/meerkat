@@ -121,6 +121,51 @@ describe("scoped tool grant wrappers", () => {
     ]);
   });
 
+  it("requestToolGrant sends its target, duration and scope", async () => {
+    const requested = { grant: GRANT, decision: { decision_id: "decision:1" } };
+    const { client, calls } = fakeClient({ "tool_grants/request": requested });
+
+    const result = await client.requestToolGrant(SESSION_ID, { family: "shell" }, 600000, {
+      scope: "current_run",
+      reason: "rotate the logs",
+    });
+    await client.requestToolGrant(SESSION_ID, { tool: "deploy" }, 60000);
+
+    assert.deepEqual(calls, [
+      {
+        method: "tool_grants/request",
+        params: {
+          subject: SUBJECT,
+          target: { kind: "family", family: "shell" },
+          duration_ms: 600000,
+          scope: { kind: "current_run" },
+          reason: "rotate the logs",
+        },
+      },
+      {
+        method: "tool_grants/request",
+        params: {
+          subject: SUBJECT,
+          target: { kind: "tool", name: "deploy" },
+          duration_ms: 60000,
+        },
+      },
+    ]);
+    assert.deepEqual(result, requested);
+  });
+
+  it("requestToolGrant refuses both or neither target", async () => {
+    const { client, calls } = fakeClient({});
+    for (const target of [{ tool: "deploy", family: "shell" }, {}]) {
+      await assert.rejects(
+        client.requestToolGrant(SESSION_ID, target, 60000),
+        (error) => error.code === "INVALID_ARGS",
+        JSON.stringify(target),
+      );
+    }
+    assert.deepEqual(calls, []);
+  });
+
   it("grantTool refuses both or neither target and window forms", async () => {
     const { client, calls } = fakeClient({ "tool_grants/grant": { grant: GRANT } });
 

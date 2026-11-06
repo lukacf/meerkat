@@ -100,6 +100,7 @@ RPC_PUBLIC_WRAPPERS: dict[str, tuple[type, str]] = {
     "approval/get": (MeerkatClient, "get_approval"),
     "approval/decide": (MeerkatClient, "decide_approval"),
     "tool_grants/grant": (MeerkatClient, "grant_tool"),
+    "tool_grants/request": (MeerkatClient, "request_tool_grant"),
     "tool_grants/revoke": (MeerkatClient, "revoke_tool_grant"),
     "tool_grants/list": (MeerkatClient, "list_tool_grants"),
     "tool_grants/audit": (MeerkatClient, "tool_grant_audit"),

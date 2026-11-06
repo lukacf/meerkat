@@ -1,8 +1,10 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 //! Scoped tool grants through the runtime: the grant service over a store,
 //! a served session's grant gate on its runtime bindings, the visibility
-//! owner's gate layer and the deadline driver. Every test runs on the
-//! in-memory store and on SQLite, over a host clock the test moves.
+//! owner's gate layer and the deadline driver, and grant requests a person
+//! approves (`tool_grant.issue` decisions and their executor). Every test
+//! runs on the in-memory store and on SQLite, over a host clock the test
+//! moves.
 //!
 //! A served session here is its runtime bindings and the tool scope built
 //! over their visibility owner, with the build's grant gate installed: what
@@ -16,6 +18,17 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use meerkat_core::ToolScope;
+use meerkat_core::approval::consent::{
+    AuthenticatedApprover, ConsentEligibility, ConsentEligibilityAnswer, ConsentIneligible,
+};
+use meerkat_core::approval::decision::{
+    ApproverId, AttestedDecision, AttributedReview, DecisionHoldRequest, DecisionId,
+    DecisionIngress, DecisionKind, DecisionOperationId, DecisionPhase, DecisionPrincipalKey,
+    DecisionReference, DecisionRenderer, DecisionRendering, DecisionRequestBody,
+    DecisionReviewVerdict, DecisionSubjectKey, InMemoryDecisionStore, PresentationAudience,
+    PresentationRecord, Sha256Digest, StoredDecision,
+};
+use meerkat_core::approval::{ApprovalAssurance, ApprovalConsentDeliveryState};
 use meerkat_core::session_owner_wake::{
     SessionOwnerWakeFuture, SessionOwnerWakeOutcome, SessionOwnerWakeRegistry, SessionOwnerWaker,
 };
@@ -24,12 +37,22 @@ use meerkat_core::tool_grant::{
     ToolGrantSubject, ToolGrantTarget,
 };
 use meerkat_core::types::{SessionId, ToolDef, ToolName, ToolProvenance, ToolSourceKind};
+use meerkat_core::{PrincipalKind, PrincipalRef, RunId, TrustDomainId};
 use meerkat_runtime::MeerkatMachine;
+use meerkat_runtime::decision::{
+    DecisionApproverCurrentness, DecisionClock, DecisionClockError, DecisionExecution,
+    DecisionExecutor, DecisionExecutorLoop, DecisionExecutorPass, DecisionPassOutcome,
+    DurableDecisionService,
+};
 use meerkat_runtime::store::{InMemoryRuntimeStore, RuntimeStore, SqliteRuntimeStore};
 use meerkat_runtime::tool_grant::{
-    StoredToolGrant, ToolGrantAuditEvent, ToolGrantAuditRow, ToolGrantClock, ToolGrantClockError,
-    ToolGrantExpiryDriver, ToolGrantRefusalKind, ToolGrantRequest, ToolGrantRevocation,
-    ToolGrantService, ToolGrantServiceError, ToolGrantStatus, ToolGrantWindow,
+    StoredToolGrant, TOOL_GRANT_ISSUE_BODY, TOOL_GRANT_ISSUE_KIND, TOOL_GRANT_ISSUE_RENDERER,
+    ToolGrantAuditEvent, ToolGrantAuditRow, ToolGrantClock, ToolGrantClockError,
+    ToolGrantExpiryDriver, ToolGrantIssueBody, ToolGrantIssueExecutor, ToolGrantIssueRequest,
+    ToolGrantRefusalKind, ToolGrantRequest, ToolGrantRequestNotice, ToolGrantRequestNotices,
+    ToolGrantRequestOrigin, ToolGrantRequestOutcome, ToolGrantRequestPolicy, ToolGrantRevocation,
+    ToolGrantRunObserver, ToolGrantService, ToolGrantServiceError, ToolGrantStatus,
+    ToolGrantWindow, hold_tool_grant_request, tool_grant_requests_of,
 };
 
 /// The host clock reading every test starts at, in UNIX ms.
@@ -1458,4 +1481,644 @@ async fn durable_tail_recovery_of_an_interrupted_run_ends_its_run_scoped_grants(
         )),
         "{events:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Approval-carried grants: `tool_grant.issue` decisions
+// ---------------------------------------------------------------------------
+
+/// The decision owner reads the same clock as the grant service.
+impl DecisionClock for FakeClock {
+    fn now_ms(&self) -> Result<u64, DecisionClockError> {
+        Ok(self.0.load(Ordering::SeqCst))
+    }
+}
+
+fn principal_of(kind: PrincipalKind, id: &str) -> PrincipalRef {
+    PrincipalRef::in_domain(
+        kind,
+        id,
+        TrustDomainId::new("example.org").expect("trust domain"),
+    )
+    .expect("qualified principal")
+}
+
+/// The principal a host's request names as its requester.
+fn host_requester() -> DecisionPrincipalKey {
+    DecisionPrincipalKey::of(&principal_of(PrincipalKind::RuntimeHost, "host"))
+        .expect("principal key")
+}
+
+/// The decided party answers as current.
+struct CurrentApprover;
+
+impl ConsentEligibility for CurrentApprover {
+    fn check_current(&self) -> Result<(), ConsentIneligible> {
+        Ok(())
+    }
+}
+
+impl DecisionApproverCurrentness for CurrentApprover {
+    fn approver_answer(&self, _decision: &StoredDecision) -> ConsentEligibilityAnswer {
+        ConsentEligibilityAnswer::Eligible(Arc::new(CurrentApprover))
+    }
+}
+
+/// The notices a host was handed, each admitted to its session.
+#[derive(Default)]
+struct RecordedNotices(std::sync::Mutex<Vec<ToolGrantRequestNotice>>);
+
+impl RecordedNotices {
+    fn outcomes(&self) -> Vec<(DecisionId, ToolGrantRequestOutcome)> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|notice| (notice.decision_id.clone(), notice.outcome.clone()))
+            .collect()
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolGrantRequestNotices for RecordedNotices {
+    async fn deliver(
+        &self,
+        notice: &ToolGrantRequestNotice,
+    ) -> Option<ApprovalConsentDeliveryState> {
+        self.0.lock().unwrap().push(notice.clone());
+        let ToolGrantSubject::Session { session_id } = &notice.subject else {
+            return None;
+        };
+        Some(ApprovalConsentDeliveryState::Admitted {
+            session_id: session_id.clone(),
+            input_id: format!("notice:{}", notice.decision_id),
+        })
+    }
+}
+
+/// The run each session runs now, as the host sees it.
+#[derive(Default)]
+struct HostRuns(std::sync::Mutex<BTreeMap<String, RunId>>);
+
+impl HostRuns {
+    fn set(&self, session_id: &SessionId, run_id: Option<RunId>) {
+        let mut runs = self.0.lock().unwrap();
+        match run_id {
+            Some(run_id) => runs.insert(session_id.to_string(), run_id),
+            None => runs.remove(&session_id.to_string()),
+        };
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolGrantRunObserver for HostRuns {
+    async fn current_run(&self, session_id: &SessionId) -> Option<RunId> {
+        self.0.lock().unwrap().get(&session_id.to_string()).cloned()
+    }
+}
+
+/// A grant service and a decision owner over one clock, with the
+/// `tool_grant.issue` executor a host registers.
+struct RequestRig {
+    clock: Arc<FakeClock>,
+    grants: Arc<ToolGrantService>,
+    decisions: DurableDecisionService,
+    notices: Arc<RecordedNotices>,
+    runs: Arc<HostRuns>,
+    executor: Arc<ToolGrantIssueExecutor>,
+}
+
+/// A request lasts ten minutes from its issuance.
+const REQUESTED_FOR: Duration = Duration::from_secs(600);
+
+impl RequestRig {
+    fn new(durable: &Durable) -> Self {
+        let clock = FakeClock::at(T0);
+        let grants = Arc::new(ToolGrantService::new(durable.open()));
+        grants.set_clock(Arc::clone(&clock) as Arc<dyn ToolGrantClock>);
+        let decisions = DurableDecisionService::with_clock(
+            Arc::new(InMemoryDecisionStore::new()),
+            Arc::clone(&clock) as Arc<dyn DecisionClock>,
+        );
+        let notices = Arc::new(RecordedNotices::default());
+        let runs = Arc::new(HostRuns::default());
+        let executor = Arc::new(
+            ToolGrantIssueExecutor::new(
+                Arc::clone(&grants),
+                Arc::clone(&runs) as Arc<dyn ToolGrantRunObserver>,
+                Arc::clone(&notices) as Arc<dyn ToolGrantRequestNotices>,
+            )
+            .expect("the executor"),
+        );
+        Self {
+            clock,
+            grants,
+            decisions,
+            notices,
+            runs,
+            executor,
+        }
+    }
+
+    /// A host's request for `session`'s `deploy`, for ten minutes.
+    fn request(
+        &self,
+        session_id: &SessionId,
+        request_id: &str,
+        run_scope: Option<RunId>,
+    ) -> StoredDecision {
+        hold_tool_grant_request(
+            &self.decisions,
+            &ToolGrantRequestPolicy::default(),
+            self.grants.policy().max_lifetime_ms(),
+            self.clock.0.load(Ordering::SeqCst),
+            ToolGrantIssueRequest {
+                subject: ToolGrantSubject::session(session_id.clone()),
+                target: ToolGrantTarget::Tool {
+                    name: ToolName::from("deploy"),
+                },
+                duration: REQUESTED_FOR,
+                run_scope,
+                reason: Some("ship the fix".to_owned()),
+                origin: ToolGrantRequestOrigin::Host {
+                    request_id: request_id.to_owned(),
+                },
+                requester: host_requester(),
+            },
+        )
+        .expect("hold the request")
+    }
+
+    /// Present `decision` to its approver and decide it as a person.
+    fn decide(&self, decision: &StoredDecision, approve: bool) -> StoredDecision {
+        let now_ms = self.clock.0.load(Ordering::SeqCst);
+        let rendering = &decision.descriptor.rendering;
+        self.decisions
+            .present(
+                &decision.decision_id,
+                &PresentationRecord::complete(
+                    PresentationAudience::Approver {
+                        approver_id: decision.descriptor.approver_id.clone(),
+                    },
+                    rendering,
+                    None,
+                    DecisionReference::new("console").expect("reference"),
+                    DecisionReference::new("message-1").expect("reference"),
+                    now_ms,
+                ),
+            )
+            .expect("present");
+        let decided = AttestedDecision::new(
+            AuthenticatedApprover::new(
+                principal_of(PrincipalKind::Human, "alice"),
+                ApprovalAssurance::PersonAuthenticated,
+            )
+            .expect("authenticated human"),
+            DecisionIngress::new("console").expect("ingress"),
+            DecisionReference::new("event-1").expect("reference"),
+            now_ms,
+            decision.descriptor.approver_id.clone(),
+            rendering.subject_digest(),
+            approve,
+        )
+        .expect("attested decision");
+        self.decisions
+            .decide(&decision.decision_id, &decided, &CurrentApprover)
+            .expect("decide")
+    }
+
+    /// One pass of an executor loop that registers the request executor.
+    async fn pass(&self) -> DecisionExecutorPass {
+        let executor: Arc<dyn DecisionExecutor> = self.executor.clone();
+        let mut executors = DecisionExecutorLoop::start(
+            self.decisions.clone(),
+            [executor],
+            Arc::new(CurrentApprover),
+        )
+        .expect("start the loop");
+        executors.pass().await
+    }
+}
+
+fn outcome_of(pass: &DecisionExecutorPass, decision_id: &DecisionId) -> Vec<DecisionPassOutcome> {
+    pass.outcomes
+        .iter()
+        .filter(|(id, _)| id == decision_id)
+        .map(|(_, outcome)| outcome.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_request_holds_a_decision_and_issues_nothing_until_approved() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let rig = RequestRig::new(&durable);
+        let session_id = SessionId::new();
+        let subject = ToolGrantSubject::session(session_id.clone());
+
+        let held = rig.request(&session_id, "ask-1", None);
+        assert_eq!(
+            held.descriptor.kind.as_str(),
+            TOOL_GRANT_ISSUE_KIND,
+            "{backend:?}"
+        );
+        assert_eq!(held.state.phase, DecisionPhase::Open, "{backend:?}");
+        assert_eq!(
+            held.descriptor.approver_id.as_str(),
+            "operator",
+            "{backend:?}"
+        );
+        assert_eq!(held.descriptor.requester, host_requester(), "{backend:?}");
+        assert_eq!(held.descriptor.reviewer, None, "{backend:?}");
+        assert_eq!(
+            held.descriptor.deadline_at_ms,
+            T0 + 3_600_000,
+            "{backend:?}"
+        );
+        let body = ToolGrantIssueBody::of(&held).expect("the held body");
+        assert_eq!(body.subject, subject, "{backend:?}");
+        assert_eq!(body.duration_ms, 600_000, "{backend:?}");
+        assert_eq!(body.reason.as_deref(), Some("ship the fix"), "{backend:?}");
+
+        // The same host ask again is another request; the same one answers
+        // the decision it held.
+        let replayed = rig.request(&session_id, "ask-1", None);
+        assert_eq!(replayed.decision_id, held.decision_id, "{backend:?}");
+
+        let pass = rig.pass().await;
+        assert!(outcome_of(&pass, &held.decision_id).is_empty(), "{pass:?}");
+        assert!(
+            rig.grants.list(&subject).await.unwrap().grants.is_empty(),
+            "{backend:?}: nothing is issued before a person approves"
+        );
+        assert!(
+            rig.grants
+                .issued_for(&held.decision_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "{backend:?}"
+        );
+        let requests = tool_grant_requests_of(&rig.decisions, &subject, false).unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|(decision, _)| decision.decision_id.clone())
+                .collect::<Vec<_>>(),
+            vec![held.decision_id.clone()],
+            "{backend:?}: the list projects the open request"
+        );
+        assert!(rig.notices.outcomes().is_empty(), "{backend:?}");
+    }
+}
+
+#[tokio::test]
+async fn an_approved_request_issues_one_grant_with_the_decision_as_issuer() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let rig = RequestRig::new(&durable);
+        let session_id = SessionId::new();
+        let subject = ToolGrantSubject::session(session_id.clone());
+        let held = rig.request(&session_id, "ask-1", None);
+        rig.clock.set(T0 + 5_000);
+        assert_eq!(rig.decide(&held, true).state.phase, DecisionPhase::Approved);
+
+        rig.clock.set(T0 + 10_000);
+        let pass = rig.pass().await;
+        assert_eq!(
+            outcome_of(&pass, &held.decision_id),
+            vec![DecisionPassOutcome::Executed],
+            "{backend:?}: {pass:?}"
+        );
+        let grant = rig
+            .grants
+            .issued_for(&held.decision_id)
+            .await
+            .unwrap()
+            .expect("the approved grant");
+        assert_eq!(
+            grant.record.grant_id,
+            ToolGrantId::approved(&held.decision_id)
+        );
+        assert_eq!(
+            grant.record.issuer,
+            ToolGrantIssuer::Approval {
+                approval_id: held.decision_id.to_string()
+            }
+        );
+        assert_eq!(grant.record.subject, subject);
+        assert_eq!(grant.record.reason.as_deref(), Some("ship the fix"));
+        assert_eq!(grant.status, ToolGrantStatus::Active);
+        assert_eq!(
+            grant.issued_at_ms,
+            T0 + 10_000,
+            "the window starts at execution"
+        );
+        assert_eq!(grant.expires_at_ms, T0 + 10_000 + 600_000);
+        assert_eq!(grant.run_scope, None);
+        assert_eq!(rig.grants.list(&subject).await.unwrap().grants.len(), 1);
+        assert_eq!(
+            rig.decisions.get(&held.decision_id).unwrap().state.phase,
+            DecisionPhase::Executed
+        );
+        // The approved grant's id parses back.
+        assert_eq!(
+            ToolGrantId::parse(&grant.record.grant_id.to_string()).unwrap(),
+            grant.record.grant_id
+        );
+
+        // The next pass owes the request's notice: granted.
+        rig.pass().await;
+        assert_eq!(
+            rig.notices.outcomes(),
+            vec![(
+                held.decision_id.clone(),
+                ToolGrantRequestOutcome::Granted {
+                    grant_id: grant.record.grant_id.clone()
+                }
+            )],
+            "{backend:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_replayed_execution_meets_the_derived_id_and_settles_executed() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let rig = RequestRig::new(&durable);
+        let session_id = SessionId::new();
+        let subject = ToolGrantSubject::session(session_id.clone());
+        let held = rig.request(&session_id, "ask-1", None);
+        rig.decide(&held, true);
+
+        // An earlier executor committed the grant and stopped before its
+        // execution was recorded: the permit stays outstanding.
+        let approved = rig.decisions.get(&held.decision_id).unwrap();
+        let permit = rig
+            .decisions
+            .authorize_execution(
+                &held.decision_id,
+                &approved.descriptor.operation_id,
+                &approved.descriptor.request_digest,
+                &ConsentEligibilityAnswer::Eligible(Arc::new(CurrentApprover)),
+            )
+            .expect("permit");
+        assert_eq!(
+            rig.executor.execute(&approved, &permit).await,
+            DecisionExecution::Committed
+        );
+        // A replay under the same permit meets the issued grant.
+        assert_eq!(
+            rig.executor.execute(&approved, &permit).await,
+            DecisionExecution::Committed
+        );
+        assert_eq!(rig.grants.list(&subject).await.unwrap().grants.len(), 1);
+        // The executor stops here: the permit stays outstanding in the store.
+        drop(permit);
+
+        // The next pass settles the outstanding permit from the grant it
+        // finds and issues nothing more.
+        let pass = rig.pass().await;
+        assert_eq!(
+            outcome_of(&pass, &held.decision_id),
+            vec![DecisionPassOutcome::SettledExecuted],
+            "{backend:?}: {pass:?}"
+        );
+        assert_eq!(rig.grants.list(&subject).await.unwrap().grants.len(), 1);
+        assert_eq!(
+            rig.decisions.get(&held.decision_id).unwrap().state.phase,
+            DecisionPhase::Executed
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_rejected_or_expired_request_issues_nothing_and_lists_declined() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let rig = RequestRig::new(&durable);
+        let session_id = SessionId::new();
+        let subject = ToolGrantSubject::session(session_id.clone());
+        let rejected = rig.request(&session_id, "ask-1", None);
+        let expiring = rig.request(&session_id, "ask-2", None);
+        assert_ne!(rejected.decision_id, expiring.decision_id);
+        assert_eq!(
+            rig.decide(&rejected, false).state.phase,
+            DecisionPhase::Rejected
+        );
+
+        // The request's deadline passes undecided.
+        rig.clock.set(T0 + 3_600_000);
+        let pass = rig.pass().await;
+        assert!(
+            outcome_of(&pass, &expiring.decision_id).contains(&DecisionPassOutcome::Expired),
+            "{backend:?}: {pass:?}"
+        );
+        rig.pass().await;
+
+        assert!(rig.grants.list(&subject).await.unwrap().grants.is_empty());
+        assert!(
+            tool_grant_requests_of(&rig.decisions, &subject, false)
+                .unwrap()
+                .is_empty(),
+            "{backend:?}: no request is open"
+        );
+        let mut declined = tool_grant_requests_of(&rig.decisions, &subject, true)
+            .unwrap()
+            .into_iter()
+            .map(|(decision, _)| (decision.decision_id, decision.state.phase))
+            .collect::<Vec<_>>();
+        declined.sort();
+        let mut expected = vec![
+            (rejected.decision_id.clone(), DecisionPhase::Rejected),
+            (expiring.decision_id.clone(), DecisionPhase::Expired),
+        ];
+        expected.sort();
+        assert_eq!(declined, expected, "{backend:?}");
+        let mut notices = rig.notices.outcomes();
+        notices.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut expected = vec![
+            (
+                rejected.decision_id.clone(),
+                ToolGrantRequestOutcome::Rejected,
+            ),
+            (
+                expiring.decision_id.clone(),
+                ToolGrantRequestOutcome::Expired,
+            ),
+        ];
+        expected.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(notices, expected, "{backend:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_tool_grant_request_with_a_review_stage_is_refused() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let rig = RequestRig::new(&durable);
+        let session_id = SessionId::new();
+        let subject = ToolGrantSubject::session(session_id.clone());
+        // A host holds a tool grant request with a review stage, which a
+        // reviewer's allow approves.
+        let body = ToolGrantIssueBody {
+            body: TOOL_GRANT_ISSUE_BODY.to_owned(),
+            subject: subject.clone(),
+            target: ToolGrantTarget::Tool {
+                name: ToolName::from("deploy"),
+            },
+            duration_ms: 600_000,
+            run_scope: None,
+            reason: None,
+            origin: ToolGrantRequestOrigin::Host {
+                request_id: "ask-1".to_owned(),
+            },
+        };
+        let text = serde_json::to_string(&body).unwrap();
+        let rendering = DecisionRendering::new("Grant deploy for 10 min.").unwrap();
+        let kind = DecisionKind::new(TOOL_GRANT_ISSUE_KIND).unwrap();
+        let subject_key =
+            DecisionSubjectKey::new(format!("{}/tool:deploy/host:ask-1", subject.key())).unwrap();
+        let decision_id = DecisionId::derive(&kind, &subject_key);
+        let reviewer = principal_of(PrincipalKind::SharedAgent, "reviewer");
+        let held = rig
+            .decisions
+            .hold(
+                DecisionHoldRequest::new(
+                    kind,
+                    subject_key,
+                    DecisionOperationId::new(format!(
+                        "tool_grant:{}",
+                        ToolGrantId::approved(&decision_id)
+                    ))
+                    .unwrap(),
+                    Sha256Digest::of(text.as_bytes()),
+                    DecisionRequestBody::new(
+                        serde_json::value::RawValue::from_string(text.clone()).unwrap(),
+                    )
+                    .unwrap(),
+                    host_requester(),
+                    ApproverId::new("operator").unwrap(),
+                    T0 + 3_600_000,
+                    rendering.clone(),
+                    DecisionRenderer::new(TOOL_GRANT_ISSUE_RENDERER).unwrap(),
+                )
+                .with_reviewer(DecisionPrincipalKey::of(&reviewer).unwrap()),
+                true,
+            )
+            .expect("hold");
+        rig.decisions
+            .present(
+                &held.decision_id,
+                &PresentationRecord::complete(
+                    PresentationAudience::Reviewer {
+                        reviewer: DecisionPrincipalKey::of(&reviewer).unwrap(),
+                    },
+                    &rendering,
+                    None,
+                    DecisionReference::new("review").unwrap(),
+                    DecisionReference::new("message-1").unwrap(),
+                    T0,
+                ),
+            )
+            .expect("present to the reviewer");
+        let allowed = rig
+            .decisions
+            .review(
+                &held.decision_id,
+                &AttributedReview::new(
+                    reviewer,
+                    SessionId::new(),
+                    DecisionReference::new("call-1").unwrap(),
+                    DecisionReviewVerdict::Allow,
+                    rendering.subject_digest(),
+                )
+                .unwrap(),
+            )
+            .expect("review");
+        assert_eq!(allowed.state.phase, DecisionPhase::Approved);
+
+        let pass = rig.pass().await;
+        assert_eq!(
+            outcome_of(&pass, &held.decision_id),
+            vec![DecisionPassOutcome::ExecutionRefused],
+            "{backend:?}: a reviewer's allow never issues a grant: {pass:?}"
+        );
+        let refused = rig.decisions.get(&held.decision_id).unwrap();
+        assert_eq!(refused.state.phase, DecisionPhase::ExecutionRefused);
+        assert_eq!(
+            refused
+                .execution_refusal
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("not_a_human_decision")
+        );
+        assert!(rig.grants.list(&subject).await.unwrap().grants.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn a_current_run_request_approved_after_its_run_ended_is_closed_run_ended() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let rig = RequestRig::new(&durable);
+        let session_id = SessionId::new();
+        let subject = ToolGrantSubject::session(session_id.clone());
+        let first_run = RunId::new();
+        let second_run = RunId::new();
+        rig.runs.set(&session_id, Some(first_run.clone()));
+        let late = rig.request(&session_id, "ask-1", Some(first_run.clone()));
+        rig.decide(&late, true);
+
+        // The run ends and the session runs another before the execution.
+        rig.runs.set(&session_id, Some(second_run.clone()));
+        let pass = rig.pass().await;
+        assert_eq!(
+            outcome_of(&pass, &late.decision_id),
+            vec![DecisionPassOutcome::ExecutionRefused],
+            "{backend:?}: {pass:?}"
+        );
+        assert_eq!(
+            rig.decisions
+                .get(&late.decision_id)
+                .unwrap()
+                .execution_refusal
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("run_ended")
+        );
+        assert!(rig.grants.list(&subject).await.unwrap().grants.is_empty());
+        rig.pass().await;
+        assert_eq!(
+            rig.notices.outcomes(),
+            vec![(
+                late.decision_id.clone(),
+                ToolGrantRequestOutcome::Refused {
+                    reason: "run_ended".to_owned()
+                }
+            )],
+            "{backend:?}"
+        );
+
+        // A request approved while its run still runs issues the grant,
+        // scoped to that run.
+        let timely = rig.request(&session_id, "ask-2", Some(second_run.clone()));
+        rig.decide(&timely, true);
+        let pass = rig.pass().await;
+        assert_eq!(
+            outcome_of(&pass, &timely.decision_id),
+            vec![DecisionPassOutcome::Executed],
+            "{backend:?}: {pass:?}"
+        );
+        let grant = rig
+            .grants
+            .issued_for(&timely.decision_id)
+            .await
+            .unwrap()
+            .expect("the run-scoped grant");
+        assert_eq!(grant.run_scope, Some(second_run));
+    }
 }

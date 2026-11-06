@@ -298,6 +298,12 @@ them.
   does not know reads as `unknown`) and `WireDecisionNoticePresentation`,
   and the `decision/notice` entry of the RPC notification catalog.
 
+- OpenAI `gpt-6.1-terra` (GPT-6.1 Terra) is cataloged as a Supported OpenAI
+  model: 1.05M context with a separate 922K input ceiling, 128K output,
+  text/image input, the Sol/Luna effort ladder (`none` through `max`), and the
+  GPT-6 Responses prompt-cache defaults (implicit mode with the `30m` TTL,
+  `12h` on request). The OpenAI default stays `gpt-6-astra`.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the

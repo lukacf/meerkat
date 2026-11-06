@@ -137,6 +137,7 @@ recommended, S = supported):
 | `gpt-6-astra` (default) | R | 1.05M (922K input) / 128K | low..max |
 | `gpt-6-sol`, `gpt-6-luna` | S | 1.05M (922K input) / 128K | none..max |
 | `gpt-6.1-sol` | S | 1.05M (922K input) / 128K | low..max |
+| `gpt-6.1-terra` | S | 1.05M (922K input) / 128K | none..max |
 | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.6` (GPT-5.6 Sol) | S | 1.05M / 128K | none..max |
 | `gpt-5.5`, `gpt-5.5-pro` | R | 1.05M / 128K | none..xhigh |
 | `gpt-5.4` | S | 1.05M / 128K | none..xhigh |

@@ -19091,6 +19091,19 @@ pub mod inputs {
     pub struct ApplyToolGrantOpenSet {
         pub open: std::collections::BTreeSet<ToolName>,
     }
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BindInputRequesterBatchKey {
+        pub input_id: String,
+        pub authority_batch_key: String,
+    }
+    impl std::fmt::Debug for BindInputRequesterBatchKey {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("BindInputRequesterBatchKey")
+                .field("input_id", &self.input_id)
+                .field("authority_batch_key", &"<redacted>")
+                .finish()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -19524,6 +19537,7 @@ pub enum Input {
     ReleaseInputController(inputs::ReleaseInputController),
     ReplaceToolGrantGate(inputs::ReplaceToolGrantGate),
     ApplyToolGrantOpenSet(inputs::ApplyToolGrantOpenSet),
+    BindInputRequesterBatchKey(inputs::BindInputRequesterBatchKey),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -20121,6 +20135,7 @@ impl Input {
             Self::ReleaseInputController(_) => InputKind::ReleaseInputController,
             Self::ReplaceToolGrantGate(_) => InputKind::ReplaceToolGrantGate,
             Self::ApplyToolGrantOpenSet(_) => InputKind::ApplyToolGrantOpenSet,
+            Self::BindInputRequesterBatchKey(_) => InputKind::BindInputRequesterBatchKey,
         }
     }
 }
@@ -20543,6 +20558,7 @@ pub enum InputKind {
     ReleaseInputController,
     ReplaceToolGrantGate,
     ApplyToolGrantOpenSet,
+    BindInputRequesterBatchKey,
 }
 
 pub mod signals {
@@ -26076,6 +26092,11 @@ pub enum TransitionId {
     SuspendRunForStopFenceGapRunningToAttached,
     StopCurrentRunForRunResumableIdle,
     StopCurrentRunForRunResumableAttached,
+    BindInputRequesterBatchKeyIdle,
+    BindInputRequesterBatchKeyAttached,
+    BindInputRequesterBatchKeyRunning,
+    BindInputRequesterBatchKeyRetired,
+    BindInputRequesterBatchKeyStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

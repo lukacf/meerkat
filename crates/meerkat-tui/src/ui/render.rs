@@ -172,24 +172,33 @@ pub fn panel_window(len: usize, selected: Option<usize>) -> (usize, usize, usize
 }
 
 fn draw_input(frame: &mut Frame<'_>, app: &App, area: Rect, now: Instant) {
-    let title = if app.quit_armed(now) {
-        " press Ctrl-C again to quit "
-    } else if app.quit_confirm_armed(now) {
-        " press Ctrl-D (or /quit) again to quit anyway "
-    } else if app.chord_pending(now) {
-        " C-x- "
-    } else if app.search().is_some() {
-        " Ctrl-R older · Enter accept · Esc cancel "
-    } else if app.helper_view().is_some() {
-        " Esc back to the transcript · PgUp/PgDn scroll · Enter sends typed text "
-    } else if app.panel_selection().is_some() {
-        " Enter opens the helper (empty input; with text Enter sends) · Esc deselects "
-    } else if app.has_recallable() {
-        " Esc recall all · ↑ edit last queued · Ctrl-X Ctrl-S send now "
-    } else if app.is_running() {
-        " Enter queues · Ctrl-X Ctrl-S interrupts and sends · Esc/Ctrl-C interrupts "
-    } else {
+    // The helper panel's keys are named here, like every other key, while
+    // the panel lists something and nothing in it is selected yet.
+    let helpers = if app.helper_panel().is_empty() {
         ""
+    } else {
+        " · Ctrl+↑/↓ pick a helper"
+    };
+    let title: String = if app.quit_armed(now) {
+        " press Ctrl-C again to quit ".into()
+    } else if app.quit_confirm_armed(now) {
+        " press Ctrl-D (or /quit) again to quit anyway ".into()
+    } else if app.chord_pending(now) {
+        " C-x- ".into()
+    } else if app.search().is_some() {
+        " Ctrl-R older · Enter accept · Esc cancel ".into()
+    } else if app.helper_view().is_some() {
+        " Esc back to the transcript · PgUp/PgDn scroll · Enter sends typed text ".into()
+    } else if app.panel_selection().is_some() {
+        " Enter opens the helper (empty input; with text Enter sends) · Esc deselects ".into()
+    } else if app.has_recallable() {
+        format!(" Esc recall all · ↑ edit last queued · Ctrl-X Ctrl-S send now{helpers} ")
+    } else if app.is_running() {
+        format!(" Enter queues · Ctrl-X Ctrl-S interrupts and sends{helpers} · Esc/Ctrl-C interrupts ")
+    } else if helpers.is_empty() {
+        String::new()
+    } else {
+        " Ctrl+↑/↓ pick a helper · Enter opens it ".into()
     };
     let block = BorderBlock::default()
         .borders(Borders::TOP)

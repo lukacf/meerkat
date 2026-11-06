@@ -82,6 +82,18 @@ MAX_ACCOUNTS = 100
 MAX_ACCOUNTS_BYTES = 256 * 1024
 _SCRYPT = MappingProxyType({"n": 2**14, "r": 8, "p": 1})
 _PASSWORD_HASH = re.compile(r"scrypt:16384:8:1:([A-Za-z0-9_-]{22}):([A-Za-z0-9_-]{43})")
+# Sign-in limits are per account and per client address, so one person's
+# mistakes, or one client's guesses, do not lock everyone else out. Behind a
+# shared ingress every client has the ingress's address, so the address
+# limit sits above the account limit.
+FAILURE_WINDOW_SECONDS = 60
+FAILURES_PER_ACCOUNT = 10
+FAILURES_PER_CLIENT = 30
+FAILURE_NAMES = 1024
+LOGIN_FORMS_PER_CLIENT = 100
+LOGIN_FORMS = 1000
+SESSIONS_PER_ACCOUNT = 100
+SESSIONS = 1000
 
 
 def _console_assets(value):
@@ -559,7 +571,9 @@ class ConsoleFront:
             self.cookie = "__Host-" + self.cookie
         self.sessions, self.delivered = {}, set()
         self._logins, self._closing, self._close_task = {}, False, None
-        self.login_tokens, self.failures = {}, []
+        self.login_tokens, self.failures = {}, {}
+        # The client address each live sign-in form was issued to.
+        self._login_token_clients = {}
         self.delivery_lock = asyncio.Lock()
         self.on_input, self.transport = on_input, transport
         if connect_factory is not None and not callable(connect_factory):
@@ -891,6 +905,7 @@ class ConsoleFront:
         if self._close_task is None:
             self._closing = True
             self.login_tokens.clear()
+            self._login_token_clients.clear()
             for session in list(self.sessions):
                 self._retire_login(session, "application_stopping")
             self._close_task = asyncio.create_task(self._close_resources())
@@ -957,18 +972,44 @@ class ConsoleFront:
                 raise ValueError("Request too large.")
         return bytes(body)
 
-    def _login_response(self, now, *, error=None, status_code=200):
+    def _login_response(self, now, client, *, error=None, status_code=200):
         from starlette.responses import HTMLResponse, Response
-        if len(self.login_tokens) >= 100:
+        issued = sum(1 for nonce, address in self._login_token_clients.items()
+                     if address == client and nonce in self.login_tokens)
+        if len(self.login_tokens) >= LOGIN_FORMS or issued >= LOGIN_FORMS_PER_CLIENT:
             return Response("Try again shortly.", status_code=429)
         nonce = secrets.token_urlsafe(32)
         self.login_tokens[nonce] = now + 300
+        self._login_token_clients[nonce] = client
         response = HTMLResponse(_login_form(nonce, error, named=self.accounts is not None),
                                 status_code=status_code)
         response.set_cookie(self.cookie + "_login", nonce, httponly=True, samesite="strict", max_age=300,
                             secure=self._secure_cookie, path="/")
         response.headers.update({"Cache-Control": "no-store", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"})
         return response
+
+    def _sign_in_held(self, account, client, now):
+        """Whether recent failures hold this account or this client address."""
+        self.failures = {key: kept for key, times in self.failures.items()
+                         if (kept := [at for at in times if at > now - FAILURE_WINDOW_SECONDS])}
+        return (len(self.failures.get(("account", account), ())) >= FAILURES_PER_ACCOUNT
+                or len(self.failures.get(("client", client), ())) >= FAILURES_PER_CLIENT)
+
+    def _record_failure(self, account, client, now):
+        for key in (("account", account), ("client", client)):
+            self.failures.setdefault(key, []).append(now)
+        # A name nobody has is counted like an account, in a bounded table:
+        # the oldest such name is forgotten first.
+        unknown = [key for key in self.failures if key[0] == "account" and key[1] != self.principal
+                   and (self.accounts is None or key[1] not in self.accounts)]
+        if len(unknown) > FAILURE_NAMES:
+            del self.failures[min(unknown, key=lambda key: self.failures[key][-1])]
+
+    def _sessions_full(self, account):
+        live = [login for login in self._logins.values()
+                if not login.retired and self.sessions.get(login.session) == login.expires]
+        return (len(self.sessions) >= SESSIONS
+                or sum(1 for login in live if login.principal == account) >= SESSIONS_PER_ACCOUNT)
 
     def _login_account(self, form):
         """The account a sign-in opens. With one shared account, that account."""
@@ -1043,8 +1084,11 @@ class ConsoleFront:
                     self._retire_login(session)
         if path == "/login":
             self.login_tokens = {key: expiry for key, expiry in self.login_tokens.items() if expiry > now}
+            self._login_token_clients = {key: address for key, address in self._login_token_clients.items()
+                                         if key in self.login_tokens}
+            client = request.client.host if request.client is not None else ""
             if request.method == "GET":
-                return self._login_response(now)
+                return self._login_response(now, client)
             if request.method != "POST" or request.headers.get("origin") != self.origin:
                 return Response("Login requires a same-origin form.", status_code=403)
             try:
@@ -1057,18 +1101,19 @@ class ConsoleFront:
             nonce = form.get("nonce", "")
             if (not nonce or nonce != request.cookies.get(self.cookie + "_login")
                     or not self.login_tokens.pop(nonce, None)):
-                return self._login_response(now, error="This sign-in form expired. Enter your Console password again.", status_code=403)
-            self.failures = [at for at in self.failures if at > now - 60]
-            if len(self.failures) >= 10:
-                return Response("Too many login attempts. Try again in one minute.", status_code=429)
+                return self._login_response(now, client, error="This sign-in form expired. Enter your Console password again.", status_code=403)
+            self._login_token_clients.pop(nonce, None)
             account = self._login_account(form)
+            if self._sign_in_held(account, client, now):
+                return Response("Too many login attempts. Try again in one minute.", status_code=429)
             if not await self._password_opens(account, form.get("password", "")):
-                self.failures.append(now)
-                return self._login_response(now, error=self._login_refusal(), status_code=401)
+                self._record_failure(account, client, now)
+                return self._login_response(now, client, error=self._login_refusal(), status_code=401)
             if self._closing:
                 return Response("The Console is stopping.", status_code=503)
-            if len(self.sessions) >= 100:
-                return Response("Too many active sessions. Restart the application to clear them.", status_code=429)
+            if self._sessions_full(account):
+                return Response("Too many active sessions. Sign out of another one, or restart the application "
+                                "to clear them.", status_code=429)
             session = secrets.token_urlsafe(32)
             self.sessions[session] = now + SESSION_SECONDS
             login = _ConsoleLogin(session, self.sessions[session], principal=account,

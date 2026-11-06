@@ -306,15 +306,16 @@ pub enum AdministeredChange {
         meaning: String,
     },
     /// A host-registered OAuth client profile installed for one MCP
-    /// credential slot.
+    /// credential slot. The record names the slot by its server, realm and
+    /// credential binding, never by the server's URL, which can carry
+    /// credentials in its userinfo or its query.
     McpOauthClientProfileInstall {
         /// The realm of the credential slot, when it names one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         realm: Option<RealmId>,
         server: String,
-        server_url: String,
-        /// The slot's credential binding (an opaque digest of the server,
-        /// realm and account selection).
+        /// The slot's credential binding: an opaque slug that digests the
+        /// server's name and URL, the realm and the account selection.
         slot: String,
     },
     /// The client profile of such a slot replaced.
@@ -322,7 +323,6 @@ pub enum AdministeredChange {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         realm: Option<RealmId>,
         server: String,
-        server_url: String,
         slot: String,
     },
     /// The client profile of such a slot removed.
@@ -330,7 +330,6 @@ pub enum AdministeredChange {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         realm: Option<RealmId>,
         server: String,
-        server_url: String,
         slot: String,
     },
 }
@@ -507,7 +506,8 @@ mod tests {
     }
 
     /// A host keeps the record as it serializes: snake_case kinds and
-    /// outcomes, and the login only as its digest.
+    /// outcomes, the login only as its digest, and a client profile's slot
+    /// without the server's URL.
     #[test]
     fn the_record_has_a_stable_stored_form() {
         let at = Utc::now();
@@ -517,7 +517,6 @@ mod tests {
             change: Some(AdministeredChange::McpOauthClientProfileInstall {
                 realm: None,
                 server: "search".to_owned(),
-                server_url: "https://search.example/mcp".to_owned(),
                 slot: "search-0123".to_owned(),
             }),
             outcome: AdministrationOutcome::Committed,
@@ -530,7 +529,6 @@ mod tests {
             serde_json::json!({
                 "kind": "mcp_oauth_client_profile_install",
                 "server": "search",
-                "server_url": "https://search.example/mcp",
                 "slot": "search-0123",
             })
         );

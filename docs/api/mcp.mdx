@@ -618,8 +618,10 @@ ask its user.
   settles, its owner hands the recorder one `AdministrationRecord`: the
   administrator, the login digest, the slot's install, replacement or
   removal, whether it committed or its outcome is unknown, and when, also
-  after the caller stopped waiting. The `_entered` forms of the realm's MCP
-  service secrets (`set_mcp_service_secret_entered`,
+  after the caller stopped waiting. The record names the slot by the server
+  name, the realm and the credential binding, never by the server URL,
+  which can carry credentials in its userinfo or its query. The `_entered`
+  forms of the realm's MCP service secrets (`set_mcp_service_secret_entered`,
   `remove_mcp_service_secret_entered`) and of realm configuration writes
   (`ConfigRuntime::patch_entered`, `McpRealmPersistTarget::add_entered`)
   record the same way. No record carries a value or secret, and Core keeps

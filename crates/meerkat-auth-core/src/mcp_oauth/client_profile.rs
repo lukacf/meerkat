@@ -858,31 +858,29 @@ async fn write_profile_update(
 }
 
 /// What `update` of `target`'s slot changes, as its admission's record
-/// names it: the slot, never the client's secret.
+/// names it: the slot, by its server, realm and credential binding. Never
+/// the client's secret, and never the server's URL, which can carry
+/// credentials in its userinfo or its query.
 fn administered_change(target: &McpServerIdentity, update: &ProfileUpdate) -> AdministeredChange {
-    let (realm, server, server_url, slot) = (
+    let (realm, server, slot) = (
         target.realm().cloned(),
         target.server_name().to_owned(),
-        target.server_url().to_owned(),
         target.binding_slug(),
     );
     match update {
         ProfileUpdate::Install(..) => AdministeredChange::McpOauthClientProfileInstall {
             realm,
             server,
-            server_url,
             slot,
         },
         ProfileUpdate::Replace(..) => AdministeredChange::McpOauthClientProfileReplace {
             realm,
             server,
-            server_url,
             slot,
         },
         ProfileUpdate::Remove => AdministeredChange::McpOauthClientProfileRemove {
             realm,
             server,
-            server_url,
             slot,
         },
     }

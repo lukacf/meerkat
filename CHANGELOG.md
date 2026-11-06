@@ -195,8 +195,10 @@ them.
   `remove_mcp_service_secret_entered`, the `_client_profile_entered`
   updates, `ConfigRuntime::patch_entered` and
   `McpRealmPersistTarget::add_entered`. No record carries a value or
-  secret, and Core keeps no copy: the host keeps it in its own audit. An
-  admission that states no administrator records nothing.
+  secret: a client profile's record names its slot by the server name, the
+  realm and the credential binding, never by the server URL, which can
+  carry credentials. Core keeps no copy: the host keeps the record in its
+  own audit. An admission that states no administrator records nothing.
   `HostAuthenticationScope::digest` is the one login digest form (`sha256:`
   and the lowercase hex SHA-256 of the scope's text).
 

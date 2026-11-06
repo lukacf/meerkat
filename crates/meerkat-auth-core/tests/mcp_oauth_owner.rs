@@ -9623,10 +9623,9 @@ async fn client_profile_admission_settles_to_the_host_recorder() {
         "one record per admitted update, none for the refused one"
     );
     let scoped = target.scoped_to(authority.realm()).unwrap();
-    let (realm, server, server_url, slot) = (
+    let (realm, server, slot) = (
         scoped.realm().cloned(),
         "fixed-recorded".to_owned(),
-        format!("{base}/mcp"),
         scoped
             .auth_binding_ref()
             .unwrap()
@@ -9639,7 +9638,6 @@ async fn client_profile_admission_settles_to_the_host_recorder() {
             meerkat_core::AdministeredChange::McpOauthClientProfileInstall {
                 realm: realm.clone(),
                 server: server.clone(),
-                server_url: server_url.clone(),
                 slot: slot.clone(),
             },
             "login-1",
@@ -9648,7 +9646,6 @@ async fn client_profile_admission_settles_to_the_host_recorder() {
             meerkat_core::AdministeredChange::McpOauthClientProfileReplace {
                 realm: realm.clone(),
                 server: server.clone(),
-                server_url: server_url.clone(),
                 slot: slot.clone(),
             },
             "login-2",
@@ -9657,7 +9654,6 @@ async fn client_profile_admission_settles_to_the_host_recorder() {
             meerkat_core::AdministeredChange::McpOauthClientProfileRemove {
                 realm,
                 server,
-                server_url,
                 slot,
             },
             "login-3",

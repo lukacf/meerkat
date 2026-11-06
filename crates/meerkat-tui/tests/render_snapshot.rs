@@ -571,14 +571,86 @@ fn a_folded_helper_renders_one_line() {
         "▸ [scout · opus] ⠋ running · 2 tool calls · grep \"fn resolve\""
     );
     // Nothing of the helper's calls is drawn.
-    assert!(rows[3..9].iter().all(String::is_empty), "{rows:?}");
+    assert!(rows[3..8].iter().all(String::is_empty), "{rows:?}");
     assert!(rows[11].ends_with("ctrl+↓ helpers"), "{:?}", rows[11]);
 }
 
 #[test]
-fn an_expanded_helper_renders_its_blocks_and_the_focus_is_reversed() {
+fn the_helper_panel_renders_under_the_input() {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let mut app = helper_app();
+    let rows = render_sized(&mut app, Instant::now(), 70);
+    // Transcript (rows 0-7), the input's border and line, one panel line,
+    // the status bar.
+    assert!(rows[8].starts_with('─'), "{:?}", rows[8]);
+    assert_eq!(rows[9], "›");
+    assert_eq!(
+        rows[10],
+        "  [scout · opus] ⠋ running · 2 tool calls · grep \"fn resolve\""
+    );
+    // Ctrl+Down selects it: drawn reversed, and the hint says what Enter
+    // does.
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Down,
+        KeyModifiers::CONTROL,
+    )));
+    let mut terminal = Terminal::new(TestBackend::new(70, H)).unwrap();
+    terminal
+        .draw(|f| draw_at(f, &mut app, Instant::now()))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let selected = self::rows(&buffer);
+    assert!(buffer[(4, 10)].modifier.contains(Modifier::REVERSED));
+    assert!(!buffer[(4, 2)].modifier.contains(Modifier::REVERSED));
+    assert!(
+        selected[8].contains("Enter opens the helper"),
+        "{:?}",
+        selected[8]
+    );
+}
+
+#[test]
+fn an_expanded_helper_renders_its_blocks() {
+    let mut app = helper_app();
+    let header = app.transcript.helper_header("scout").unwrap();
+    assert!(app.transcript.set_helper_expanded(header, true));
+    let rows = render_sized(&mut app, Instant::now(), 70);
+    assert_eq!(
+        rows[2],
+        "▾ [scout · opus] ⠋ running · 2 tool calls · grep \"fn resolve\""
+    );
+    assert_eq!(rows[4], "  ○ [scout · opus] glob({\"pattern\":\"*.rs\"})");
+    assert_eq!(
+        rows[6],
+        "  ○ [scout · opus] grep({\"pattern\":\"fn resolve\"})"
+    );
+}
+
+#[test]
+fn a_helper_full_view_renders_title_prose_reasoning_and_tools() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = App::new(StatusInfo::default());
+    app.transcript.note_helper_model("scout", "opus");
+    app.transcript.push(Block::User {
+        text: "find it".into(),
+    });
+    for event in [
+        AgentEvent::ReasoningDelta {
+            delta: "Where would it be?".into(),
+            assistant_message_id: None,
+        },
+        AgentEvent::TextDelta {
+            delta: "Looking in **src**.".into(),
+            assistant_message_id: None,
+        },
+        AgentEvent::ToolCallRequested {
+            id: "a".into(),
+            name: "glob".into(),
+            args: ToolCallArguments::from_value(json!({"pattern": "*.rs"})).unwrap(),
+        },
+    ] {
+        app.update(helper("scout", event));
+    }
     app.update(Msg::Key(KeyEvent::new(
         KeyCode::Down,
         KeyModifiers::CONTROL,
@@ -591,15 +663,20 @@ fn an_expanded_helper_renders_its_blocks_and_the_focus_is_reversed() {
     let buffer = terminal.backend().buffer().clone();
     let rows = rows(&buffer);
     assert_eq!(
-        rows[2],
-        "▾ [scout · opus] ⠋ running · 2 tool calls · grep \"fn resolve\""
+        rows[0],
+        "◂ [scout · opus] ⠋ running · 1 tool call · glob \"*.rs\"  Esc back"
     );
-    assert_eq!(rows[4], "  ○ [scout · opus] glob({\"pattern\":\"*.rs\"})");
-    assert_eq!(
-        rows[6],
-        "  ○ [scout · opus] grep({\"pattern\":\"fn resolve\"})"
+    assert!(buffer[(0, 0)].modifier.contains(Modifier::REVERSED));
+    assert_eq!(rows[1], "✻ thinking (18 chars, Ctrl-O to expand)");
+    assert_eq!(rows[2], "");
+    assert_eq!(rows[3], "• Looking in src.");
+    assert_eq!(rows[4], "");
+    assert_eq!(rows[5], "  ○ [scout · opus] glob({\"pattern\":\"*.rs\"})");
+    // The transcript's own blocks are not drawn.
+    assert!(rows.iter().all(|r| !r.contains("find it")), "{rows:?}");
+    assert!(
+        rows[8].contains("Esc back to the transcript"),
+        "{:?}",
+        rows[8]
     );
-    // The focused header is drawn reversed, the rest is not.
-    assert!(buffer[(0, 2)].modifier.contains(Modifier::REVERSED));
-    assert!(!buffer[(2, 4)].modifier.contains(Modifier::REVERSED));
 }

@@ -442,9 +442,9 @@ pub struct StatusInfo {
     pub queued: usize,
     /// Number of helpers running now.
     pub helpers: usize,
-    /// Whether the transcript has helper headers (the status bar names the
-    /// key that focuses them).
-    pub helper_headers: bool,
+    /// Whether the helper panel lists any helper (the status bar names the
+    /// key that selects them).
+    pub helper_panel: bool,
     /// Whether the classifier is running.
     pub classifying: bool,
     /// Tokens in the last model call, `None` when unknown.
@@ -550,6 +550,14 @@ fn context_tokens(usage: &meerkat_core::Usage) -> u64 {
         .saturating_add(usage.output_tokens)
         .saturating_add(usage.cache_creation_tokens.unwrap_or(0))
         .saturating_add(usage.cache_read_tokens.unwrap_or(0))
+}
+
+/// An open helper full view: the helper's header and the view's own
+/// scroll position (it follows new output while at the bottom).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OpenHelperView {
+    header: BlockId,
+    scroll: ScrollState,
 }
 
 /// Transcript scroll position.
@@ -690,8 +698,11 @@ pub struct App {
     last_down: Option<LastDown>,
     /// Text to put on the system clipboard (drained by the runtime).
     clipboard: Option<QueuedCopy>,
-    /// The helper header Ctrl+Up/Down focused (Enter toggles it).
-    helper_focus: Option<BlockId>,
+    /// The helper header selected in the helper panel (Ctrl+Up/Down; Enter
+    /// on an empty input opens its full view).
+    panel_selected: Option<BlockId>,
+    /// The helper whose full view replaces the transcript, if one is open.
+    helper_view: Option<OpenHelperView>,
     /// An [`Effect::RecallQueued`] is waiting for its [`Msg::Recalled`].
     recalling: bool,
     /// Admitted messages a recall found already with the agent: Esc no
@@ -734,7 +745,8 @@ impl App {
             press: None,
             last_down: None,
             clipboard: None,
-            helper_focus: None,
+            panel_selected: None,
+            helper_view: None,
             recalling: false,
             reached: Vec::new(),
             dirty: true,
@@ -748,58 +760,77 @@ impl App {
         self
     }
 
-    /// The focused helper header, if it is still one on screen.
-    pub fn helper_focus(&self) -> Option<BlockId> {
-        self.helper_focus.filter(|id| {
-            matches!(self.transcript.block(*id), Some(Block::Helper(_)))
-                && !self.transcript.is_hidden(*id)
-        })
+    /// The helpers the panel under the input lists (see
+    /// [`Transcript::panel_helpers`]).
+    pub fn helper_panel(&self) -> Vec<BlockId> {
+        self.transcript.panel_helpers()
     }
 
-    /// Ctrl+Up (`forward == false`) / Ctrl+Down: move the helper focus over
-    /// the headers on screen, starting at the newest and wrapping around.
-    fn move_helper_focus(&mut self, forward: bool) {
-        let headers: Vec<BlockId> = self.transcript.visible_helper_headers().collect();
-        let (Some(oldest), Some(newest)) = (headers.first().copied(), headers.last().copied())
-        else {
-            self.helper_focus = None;
+    /// The helper selected in the panel, if the panel still lists it.
+    pub fn panel_selection(&self) -> Option<BlockId> {
+        self.panel_selected
+            .filter(|id| self.transcript.panel_helpers().contains(id))
+    }
+
+    /// The helper whose full view is open, if its header is still one.
+    pub fn helper_view(&self) -> Option<BlockId> {
+        self.helper_view
+            .as_ref()
+            .map(|view| view.header)
+            .filter(|id| matches!(self.transcript.block(*id), Some(Block::Helper(_))))
+    }
+
+    /// The scroll state of the open helper view (the renderer reconciles
+    /// it with the view's line count).
+    pub fn helper_view_scroll(&mut self) -> Option<&mut ScrollState> {
+        self.helper_view.as_mut().map(|view| &mut view.scroll)
+    }
+
+    /// Ctrl+Up (`forward == false`) / Ctrl+Down: move the panel selection,
+    /// starting at the first (newest) helper and wrapping around.
+    fn move_panel_selection(&mut self, forward: bool) {
+        let panel = self.transcript.panel_helpers();
+        let (Some(first), Some(last)) = (panel.first().copied(), panel.last().copied()) else {
+            self.panel_selected = None;
             return;
         };
         let next = match self
-            .helper_focus()
-            .and_then(|f| headers.iter().position(|h| *h == f))
+            .panel_selection()
+            .and_then(|s| panel.iter().position(|p| *p == s))
         {
-            None => newest,
-            Some(i) if forward => headers.get(i + 1).copied().unwrap_or(oldest),
+            None => first,
+            Some(i) if forward => panel.get(i + 1).copied().unwrap_or(first),
             Some(i) => i
                 .checked_sub(1)
-                .and_then(|j| headers.get(j).copied())
-                .unwrap_or(newest),
+                .and_then(|j| panel.get(j).copied())
+                .unwrap_or(last),
         };
-        self.helper_focus = Some(next);
-        self.reveal_block(next);
+        self.panel_selected = Some(next);
     }
 
-    /// Scroll so block `id`'s first line is on screen.
-    fn reveal_block(&mut self, id: BlockId) {
-        if self.transcript_area.width == 0 {
-            return;
+    /// Enter on an empty input with a panel selection: open that helper's
+    /// full view, or close it when it is the one open.
+    fn toggle_helper_view(&mut self, header: BlockId) {
+        if self.helper_view() == Some(header) {
+            self.helper_view = None;
+        } else {
+            self.helper_view = Some(OpenHelperView {
+                header,
+                scroll: ScrollState::default(),
+            });
         }
-        let total = self.transcript.ensure_layout(self.transcript_area.width);
-        let Some(line) = self.transcript.first_line_of(id) else {
-            return;
-        };
-        let height = self.viewport_height;
-        let first = total
-            .saturating_sub(height)
-            .saturating_sub(self.scroll.offset_from_bottom);
-        if line < first {
-            self.scroll.offset_from_bottom = total.saturating_sub(height).saturating_sub(line);
-            self.scroll.follow = false;
-        } else if line >= first + height {
-            self.scroll.offset_from_bottom = total.saturating_sub(line + 1);
-            self.scroll.follow = self.scroll.offset_from_bottom == 0;
+        self.clear_selection();
+    }
+
+    /// The scroll state the scroll keys move: the open helper view's, else
+    /// the transcript's.
+    fn active_scroll(&mut self) -> &mut ScrollState {
+        if self.helper_view().is_some()
+            && let Some(view) = self.helper_view.as_mut()
+        {
+            return &mut view.scroll;
         }
+        &mut self.scroll
     }
 
     /// Expand or fold the helper header `id`; expanding stops following new
@@ -866,7 +897,9 @@ impl App {
             let _ = write!(text, "\n{indent}{marker} {} {status}", fold.tag());
         }
         if any {
-            text.push_str("\n(/helpers expand|fold <label>|all, or Ctrl+Up/Down then Enter)");
+            text.push_str(
+                "\n(/helpers expand|fold <label>|all; Ctrl+Up/Down then Enter opens one in full)",
+            );
         } else {
             text.push_str(" none yet");
         }
@@ -1012,8 +1045,8 @@ impl App {
 
     fn mouse(&mut self, m: MouseEvent, now: Instant) -> bool {
         match m.kind {
-            MouseEventKind::ScrollUp => self.scroll.up(keymap::LINE_SCROLL),
-            MouseEventKind::ScrollDown => self.scroll.down(keymap::LINE_SCROLL),
+            MouseEventKind::ScrollUp => self.active_scroll().up(keymap::LINE_SCROLL),
+            MouseEventKind::ScrollDown => self.active_scroll().down(keymap::LINE_SCROLL),
             MouseEventKind::Down(MouseButton::Left) => {
                 return self.mouse_down(m.row, m.column, now);
             }
@@ -1411,7 +1444,8 @@ impl App {
             }
             Msg::ResetTranscript(blocks) => {
                 self.clear_selection();
-                self.helper_focus = None;
+                self.panel_selected = None;
+                self.helper_view = None;
                 self.transcript.reset(blocks);
                 self.last_seq = 0;
                 self.pending.clear_settled();
@@ -1452,7 +1486,7 @@ impl App {
             }
         }
         self.status.queued = self.pending.len();
-        self.status.helper_headers = self.transcript.has_helpers();
+        self.status.helper_panel = !self.transcript.panel_helpers().is_empty();
         self.dirty |= dirty;
         fx
     }
@@ -1490,23 +1524,22 @@ impl App {
             self.last_ctrl_c = None;
         }
         let page = self.viewport_height.saturating_sub(2).max(1);
-        // Editing drops the helper focus; Enter and Esc act on it first.
-        if matches!(action, Action::Edit(_) | Action::Newline) {
-            self.helper_focus = None;
-        }
+        let view = self.helper_view();
         match action {
-            Action::Submit => match self.helper_focus() {
-                Some(id) => {
-                    self.toggle_helper(id);
-                }
-                None => {
-                    self.helper_focus = None;
-                    self.submit(now, fx);
-                }
+            // With an empty input, Enter acts on the panel selection; with
+            // text it submits as always.
+            Action::Submit => match self.panel_selection() {
+                Some(id) if self.input.is_empty() => self.toggle_helper_view(id),
+                _ => self.submit(now, fx),
             },
-            Action::Escape if self.helper_focus().is_some() => self.helper_focus = None,
-            Action::HelperPrev => self.move_helper_focus(false),
-            Action::HelperNext => self.move_helper_focus(true),
+            // Esc closes the helper view first, then drops the selection.
+            Action::Escape if view.is_some() => {
+                self.helper_view = None;
+                self.clear_selection();
+            }
+            Action::Escape if self.panel_selection().is_some() => self.panel_selected = None,
+            Action::HelperPrev => self.move_panel_selection(false),
+            Action::HelperNext => self.move_panel_selection(true),
             Action::Newline => self.input.newline(),
             Action::CtrlC => self.ctrl_c(now, fx),
             Action::CtrlD => {
@@ -1521,22 +1554,22 @@ impl App {
                 self.recall_newest();
             }
             Action::ToggleReasoning => {
-                self.transcript.toggle_last_reasoning();
+                self.transcript.toggle_last_reasoning_in(view);
             }
             Action::ToggleToolOutput => {
-                if let Some(id) = self.transcript.last_tool_with_output() {
+                if let Some(id) = self.transcript.last_tool_with_output_in(view) {
                     self.transcript.toggle_tool(id);
                 }
             }
             Action::Copy => self.copy_again(),
             Action::HistorySearch => self.start_search(),
             Action::ChordPrefix => self.chord = Some(now),
-            Action::ScrollUp(n) => self.scroll.up(n),
-            Action::ScrollDown(n) => self.scroll.down(n),
-            Action::PageUp => self.scroll.up(page),
-            Action::PageDown => self.scroll.down(page),
-            Action::ScrollTop => self.scroll.top(),
-            Action::ScrollBottom => self.scroll.bottom(),
+            Action::ScrollUp(n) => self.active_scroll().up(n),
+            Action::ScrollDown(n) => self.active_scroll().down(n),
+            Action::PageUp => self.active_scroll().up(page),
+            Action::PageDown => self.active_scroll().down(page),
+            Action::ScrollTop => self.active_scroll().top(),
+            Action::ScrollBottom => self.active_scroll().bottom(),
             Action::Edit(edit) => self.edit(edit),
             Action::None => {}
         }
@@ -1726,6 +1759,8 @@ impl App {
     }
 
     fn begin_turn(&mut self, prompt: String, user_block: bool, now: Instant, fx: &mut Vec<Effect>) {
+        // Helpers that finished drop off the helper panel.
+        self.transcript.retire_finished_helpers();
         self.run_first_block = self.transcript.len();
         self.streamed_text = false;
         if user_block {
@@ -1819,11 +1854,15 @@ impl App {
         for block in blocks {
             if self.transcript.remove_block(block).is_some() {
                 self.pending.block_removed(block);
-                self.helper_focus = match self.helper_focus {
-                    Some(f) if f == block => None,
-                    Some(f) if f.0 > block.0 => Some(BlockId(f.0 - 1)),
-                    other => other,
+                let shift = |id: BlockId| match id {
+                    f if f == block => None,
+                    f if f.0 > block.0 => Some(BlockId(f.0 - 1)),
+                    f => Some(f),
                 };
+                self.panel_selected = self.panel_selected.and_then(shift);
+                self.helper_view = self.helper_view.take().and_then(|view| {
+                    shift(view.header).map(|header| OpenHelperView { header, ..view })
+                });
                 if self.run_first_block > block.0 {
                     self.run_first_block -= 1;
                 }
@@ -4567,65 +4606,292 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ctrl_down_focuses_the_newest_helper_and_ctrl_up_down_wrap() {
-        let (mut app, scout, fork) = helper_app();
-        assert!(app.status.helper_headers);
-        assert_eq!(app.helper_focus(), None);
-        app.update(ctrl_key(KeyCode::Down));
-        assert_eq!(app.helper_focus(), Some(fork));
-        // Down past the newest wraps to the oldest, up past the oldest to
-        // the newest.
-        app.update(ctrl_key(KeyCode::Down));
-        assert_eq!(app.helper_focus(), Some(scout));
-        app.update(ctrl_key(KeyCode::Up));
-        assert_eq!(app.helper_focus(), Some(fork));
-        app.update(ctrl_key(KeyCode::Up));
-        assert_eq!(app.helper_focus(), Some(scout));
-        // The first Ctrl+Up also starts at the newest.
-        let (mut app, _, fork) = helper_app();
-        app.update(ctrl_key(KeyCode::Up));
-        assert_eq!(app.helper_focus(), Some(fork));
-        // No helpers: nothing to focus.
-        let mut app = App::new(StatusInfo::default());
-        app.update(ctrl_key(KeyCode::Down));
-        assert_eq!(app.helper_focus(), None);
-        assert!(!app.status.helper_headers);
+    /// The live update listing exactly `labels` (top-level helpers).
+    fn live(labels: &[&str]) -> Msg {
+        Msg::Status(StatusUpdate::Helpers(
+            labels
+                .iter()
+                .map(|label| crate::mobs::HelperStatus {
+                    label: (*label).into(),
+                    model: "m".into(),
+                    depth: 1,
+                })
+                .collect(),
+        ))
+    }
+
+    /// Draw the whole app into an `80 x height` test terminal and return
+    /// its rows (trailing blanks trimmed).
+    fn screen(app: &mut App, height: u16) -> Vec<String> {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, height)).unwrap();
+        terminal
+            .draw(|f| render::draw_at(f, app, Instant::now()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..80)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
     }
 
     #[test]
-    fn enter_toggles_the_focused_helper_without_submitting() {
+    fn the_panel_lists_running_helpers_newest_first_and_drops_finished_ones_at_the_next_turn() {
+        let (mut app, scout, fork) = helper_app();
+        assert_eq!(app.helper_panel(), vec![fork, scout]);
+        assert!(app.status.helper_panel);
+        // scout finishes: still listed during this turn, as done.
+        app.update(live(&["fork-1"]));
+        assert_eq!(app.helper_panel(), vec![fork, scout]);
+        assert!(matches!(
+            app.transcript.block(scout),
+            Some(Block::Helper(fold)) if fold.state == HelperState::Done
+        ));
+        // The next turn starts: the finished helper drops off, the running
+        // one stays; the inline header stays in the transcript.
+        type_str(&mut app, "next");
+        app.update(key(KeyCode::Enter));
+        assert!(app.is_running());
+        assert_eq!(app.helper_panel(), vec![fork]);
+        assert_eq!(app.transcript.helper_header("scout"), Some(scout));
+        // Once nothing runs and nothing finished this turn, the panel is
+        // empty and hidden.
+        app.update(live(&[]));
+        assert_eq!(app.helper_panel(), vec![fork]);
+        app.update(Msg::TurnFinished(TurnOutcome {
+            result: Ok(summary()),
+            undelivered: Vec::new(),
+        }));
+        type_str(&mut app, "again");
+        app.update(key(KeyCode::Enter));
+        assert!(app.helper_panel().is_empty());
+        assert!(!app.status.helper_panel);
+    }
+
+    #[test]
+    fn a_nested_helper_is_listed_under_its_parent() {
+        let (mut app, scout, fork) = helper_app();
+        app.update(Msg::Scoped(
+            crate::mobs::HelperTag {
+                owner: meerkat_core::SessionId::new(),
+                path: vec!["scout".into(), "inner".into()],
+                model: "m".into(),
+            }
+            .scope(AgentEvent::ToolCallRequested {
+                id: "b".into(),
+                name: "grep".into(),
+                args: test_args(json!({})),
+            }),
+        ));
+        let inner = app.transcript.helper_header("inner").unwrap();
+        assert_eq!(app.helper_panel(), vec![fork, scout, inner]);
+        let rows = screen(&mut app, 12);
+        // Under the input (its border, one line), above the status bar.
+        assert_eq!(rows[8], "  [fork-1 · m] ⠋ running · 1 tool call · glob \"*\"");
+        assert_eq!(rows[9], "  [scout · m] ⠋ running · 1 tool call · glob \"*\"");
+        assert_eq!(rows[10], "    [inner] ⠋ running · 1 tool call · grep");
+    }
+
+    #[test]
+    fn the_panel_shows_at_most_six_lines() {
+        let mut app = App::new(StatusInfo::default());
+        let labels: Vec<String> = (0..8).map(|i| format!("h{i}")).collect();
+        let names: Vec<&str> = labels.iter().map(String::as_str).collect();
+        app.update(live(&names));
+        assert_eq!(app.helper_panel().len(), 8);
+        let rows = screen(&mut app, 16);
+        // Five helpers (newest first), then the rest counted.
+        assert!(rows[9].starts_with("  [h7 · m]"), "{rows:?}");
+        assert!(rows[13].starts_with("  [h3 · m]"), "{rows:?}");
+        assert_eq!(rows[14], "  … and 3 more");
+        // Selecting past the window moves it (the first press selects the
+        // newest, seven more the oldest).
+        for _ in 0..8 {
+            app.update(ctrl_key(KeyCode::Down));
+        }
+        let rows = screen(&mut app, 16);
+        assert!(rows[13].starts_with("  [h0 · m]"), "{rows:?}");
+        assert_eq!(render::panel_window(8, Some(7)), (3, 5, 3));
+        assert_eq!(render::panel_window(6, Some(5)), (0, 6, 0));
+    }
+
+    #[test]
+    fn ctrl_down_selects_the_newest_helper_and_ctrl_up_down_wrap() {
+        let (mut app, scout, fork) = helper_app();
+        assert_eq!(app.panel_selection(), None);
+        app.update(ctrl_key(KeyCode::Down));
+        assert_eq!(app.panel_selection(), Some(fork));
+        // Down past the last (oldest) wraps to the first, up past the first
+        // to the last.
+        app.update(ctrl_key(KeyCode::Down));
+        assert_eq!(app.panel_selection(), Some(scout));
+        app.update(ctrl_key(KeyCode::Down));
+        assert_eq!(app.panel_selection(), Some(fork));
+        app.update(ctrl_key(KeyCode::Up));
+        assert_eq!(app.panel_selection(), Some(scout));
+        // The first Ctrl+Up also starts at the newest.
         let (mut app, _, fork) = helper_app();
-        type_str(&mut app, "draft");
+        app.update(ctrl_key(KeyCode::Up));
+        assert_eq!(app.panel_selection(), Some(fork));
+        // Typing keeps the selection.
+        type_str(&mut app, "x");
+        assert_eq!(app.panel_selection(), Some(fork));
+        // No helpers: nothing to select.
+        let mut app = App::new(StatusInfo::default());
+        app.update(ctrl_key(KeyCode::Down));
+        assert_eq!(app.panel_selection(), None);
+        assert!(!app.status.helper_panel);
+    }
+
+    #[test]
+    fn enter_with_an_empty_input_opens_the_full_view_without_submitting() {
+        let (mut app, scout, fork) = helper_app();
         app.update(ctrl_key(KeyCode::Down));
         let fx = app.update(key(KeyCode::Enter));
         assert!(fx.is_empty(), "{fx:?}");
         assert!(!app.is_running());
-        assert_eq!(app.input.text(), "draft");
-        assert!(expanded(&app, fork));
-        // Still focused: Enter folds it again.
-        app.update(key(KeyCode::Enter));
+        assert_eq!(app.helper_view(), Some(fork));
+        // The inline header is not expanded by the view.
         assert!(!expanded(&app, fork));
-        assert_eq!(app.helper_focus(), Some(fork));
+        // Another selection switches the view; Enter on the open one
+        // closes it.
+        app.update(ctrl_key(KeyCode::Down));
+        app.update(key(KeyCode::Enter));
+        assert_eq!(app.helper_view(), Some(scout));
+        app.update(key(KeyCode::Enter));
+        assert_eq!(app.helper_view(), None);
     }
 
     #[test]
-    fn esc_and_editing_drop_the_helper_focus() {
+    fn enter_with_text_submits_despite_a_selection() {
         let (mut app, _, fork) = helper_app();
         app.update(ctrl_key(KeyCode::Down));
-        assert_eq!(app.helper_focus(), Some(fork));
-        // Esc drops the focus and does nothing else.
+        app.update(key(KeyCode::Enter));
+        assert_eq!(app.helper_view(), Some(fork));
+        // The editor keeps working while the view is open.
+        type_str(&mut app, "draft");
+        let fx = app.update(key(KeyCode::Enter));
+        assert_eq!(fx, vec![Effect::StartTurn("draft".into())]);
+        assert!(app.input.is_empty());
+        // The view and the selection stay.
+        assert_eq!(app.helper_view(), Some(fork));
+        assert_eq!(app.panel_selection(), Some(fork));
+    }
+
+    #[test]
+    fn esc_closes_the_view_then_drops_the_selection() {
+        let (mut app, _, fork) = helper_app();
+        app.update(ctrl_key(KeyCode::Down));
+        app.update(key(KeyCode::Enter));
+        assert_eq!(app.helper_view(), Some(fork));
         let fx = app.update(key(KeyCode::Esc));
         assert!(fx.is_empty());
-        assert_eq!(app.helper_focus(), None);
-        // Typing drops it too (and types); Enter then submits.
+        assert_eq!(app.helper_view(), None);
+        assert_eq!(app.panel_selection(), Some(fork));
+        let fx = app.update(key(KeyCode::Esc));
+        assert!(fx.is_empty());
+        assert_eq!(app.panel_selection(), None);
+        // A finished helper's view stays open until Esc.
         app.update(ctrl_key(KeyCode::Down));
-        type_str(&mut app, "x");
-        assert_eq!(app.helper_focus(), None);
-        assert_eq!(app.input.text(), "x");
-        let fx = app.update(key(KeyCode::Enter));
-        assert_eq!(fx, vec![Effect::StartTurn("x".into())]);
-        assert!(!expanded(&app, fork));
+        app.update(key(KeyCode::Enter));
+        app.update(live(&[]));
+        assert_eq!(app.helper_view(), Some(fork));
+    }
+
+    /// A tool call of the helper `fork-1` with id `id`.
+    fn fork_call(id: &str) -> Msg {
+        helper_msg(
+            "fork-1",
+            AgentEvent::ToolCallRequested {
+                id: id.into(),
+                name: "read_file".into(),
+                args: test_args(json!({"path": id})),
+            },
+        )
+    }
+
+    #[test]
+    fn the_helper_view_follows_new_output_while_at_the_bottom() {
+        let (mut app, _, _) = helper_app();
+        app.update(ctrl_key(KeyCode::Down));
+        app.update(key(KeyCode::Enter));
+        for i in 0..10 {
+            app.update(fork_call(&format!("f{i}")));
+        }
+        // 12 rows: the view gets 7 (title + 6), then the input, the panel
+        // (two helpers) and the status bar.
+        let rows = screen(&mut app, 12);
+        assert!(rows[0].starts_with("◂ [fork-1 · m]"), "{rows:?}");
+        assert!(rows[5].contains("read_file({\"path\":\"f9\"})"), "{rows:?}");
+        app.update(fork_call("f10"));
+        let rows = screen(&mut app, 12);
+        assert!(rows[5].contains("\"f10\""), "{rows:?}");
+        // Scrolled back, new output does not move the view.
+        app.update(key(KeyCode::PageUp));
+        let before = screen(&mut app, 12);
+        app.update(fork_call("f11"));
+        let after = screen(&mut app, 12);
+        assert_eq!(before[1..7], after[1..7]);
+        // The transcript's own scroll is untouched.
+        assert!(app.scroll.follow);
+        // Back at the bottom it follows again.
+        app.update(Msg::Key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL)));
+        let rows = screen(&mut app, 12);
+        assert!(rows[5].contains("\"f11\""), "{rows:?}");
+    }
+
+    #[test]
+    fn a_helpers_prose_and_reasoning_are_in_its_view_in_order() {
+        let (mut app, _, fork) = helper_app();
+        for event in [
+            AgentEvent::TurnStarted {
+                turn_number: 1,
+                assistant_message_id: None,
+            },
+            AgentEvent::ReasoningDelta {
+                delta: "Where is it?".into(),
+                assistant_message_id: None,
+            },
+            AgentEvent::TextDelta {
+                delta: "It is in **a.rs**.".into(),
+                assistant_message_id: None,
+            },
+            AgentEvent::TextComplete {
+                content: "It is in **a.rs**.".into(),
+                assistant_message_id: None,
+            },
+        ] {
+            app.update(helper_msg("fork-1", event));
+        }
+        app.update(fork_call("f1"));
+        let kinds: Vec<&str> = app
+            .transcript
+            .helper_view_blocks(fork)
+            .into_iter()
+            .map(|id| match app.transcript.block(id) {
+                Some(Block::Tool { .. }) => "tool",
+                Some(Block::Reasoning { .. }) => "reasoning",
+                Some(Block::Assistant { .. }) => "prose",
+                other => panic!("unexpected block {other:?}"),
+            })
+            .collect();
+        assert_eq!(kinds, ["tool", "reasoning", "prose", "tool"]);
+        // Ctrl-O in the view toggles the helper's reasoning.
+        app.update(ctrl_key(KeyCode::Down));
+        app.update(key(KeyCode::Enter));
+        app.update(ctrl('o'));
+        let reasoning = app.transcript.helper_view_blocks(fork)[1];
+        assert!(matches!(
+            app.transcript.block(reasoning),
+            Some(Block::Reasoning { collapsed: false, .. })
+        ));
+        // Folded inline: nothing of it is on the transcript.
+        assert!(app.transcript.is_hidden(reasoning));
     }
 
     #[test]
@@ -4674,11 +4940,13 @@ mod tests {
     }
 
     #[test]
-    fn a_reset_drops_the_helper_focus() {
+    fn a_reset_drops_the_selection_and_the_view() {
         let (mut app, _, _) = helper_app();
         app.update(ctrl_key(KeyCode::Down));
+        app.update(key(KeyCode::Enter));
         app.update(Msg::ResetTranscript(Vec::new()));
-        assert_eq!(app.helper_focus(), None);
-        assert!(!app.status.helper_headers);
+        assert_eq!(app.panel_selection(), None);
+        assert_eq!(app.helper_view(), None);
+        assert!(!app.status.helper_panel);
     }
 }

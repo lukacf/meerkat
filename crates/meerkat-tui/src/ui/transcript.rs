@@ -159,9 +159,9 @@ pub enum HelperLast {
 
 /// A helper's header: one line standing for everything the helper did.
 ///
-/// The helper's own blocks (tool calls, errors, the headers of helpers it
-/// spawned) stay in the transcript, owned by this header; the renderer skips
-/// them while the header is folded.
+/// The helper's own blocks (its prose, reasoning, tool calls, errors, the
+/// headers of helpers it spawned) stay in the transcript, owned by this
+/// header; the renderer skips them while the header is folded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelperFold {
     /// Member identity (`scout`, `fork-1`).
@@ -182,9 +182,20 @@ pub struct HelperFold {
     pub depth: usize,
     /// Spinner frame of a running helper.
     pub spin: usize,
+    /// Whether the helper panel lists it after it finished: set when the
+    /// header is made, cleared for finished helpers when the next turn
+    /// starts ([`Transcript::retire_finished_helpers`]).
+    pub this_turn: bool,
 }
 
 impl HelperFold {
+    /// Whether the helper panel lists it: running, or finished during the
+    /// current turn.
+    #[must_use]
+    pub fn in_panel(&self) -> bool {
+        self.state.is_running() || self.this_turn
+    }
+
     /// `[label · model]`, or `[label]` while the model is unknown.
     #[must_use]
     pub fn tag(&self) -> String {
@@ -352,6 +363,22 @@ pub struct Transcript {
     helper_clock: Option<Instant>,
     /// Number of helper headers.
     helper_count: usize,
+    /// Each helper's open prose and reasoning blocks, by its header.
+    helper_streams: IndexMap<BlockId, HelperStream>,
+    /// Per block, its layout at one width as a helper's full view draws it
+    /// (folded helpers do not hide it there).
+    view_layout: Vec<Option<CachedLayout>>,
+}
+
+/// A helper's streaming state: the prose and reasoning blocks its deltas
+/// append to, and whether its current model call streamed any (so the
+/// completion does not repeat it).
+#[derive(Debug, Clone, Copy, Default)]
+struct HelperStream {
+    assistant: Option<BlockId>,
+    reasoning: Option<BlockId>,
+    text_seen: bool,
+    reasoning_seen: bool,
 }
 
 impl Transcript {
@@ -480,6 +507,106 @@ impl Transcript {
         self.helper_count > 0
     }
 
+    /// A turn starts: the helpers that finished drop off the helper panel.
+    pub fn retire_finished_helpers(&mut self) {
+        let finished: Vec<BlockId> = self
+            .helper_headers()
+            .filter(|(_, fold)| fold.this_turn && !fold.state.is_running())
+            .map(|(id, _)| id)
+            .collect();
+        for id in finished {
+            self.update_fold(id, |fold| fold.this_turn = false);
+        }
+    }
+
+    /// The helpers the panel lists (running, or finished during the current
+    /// turn): the newest top-level helper first, each followed by the
+    /// helpers nested in it, in spawn order.
+    pub fn panel_helpers(&self) -> Vec<BlockId> {
+        let mut groups: IndexMap<BlockId, Vec<BlockId>> = IndexMap::new();
+        for (id, fold) in self.helper_headers() {
+            if !fold.in_panel() {
+                continue;
+            }
+            let mut root = id;
+            while let Some(Some(up)) = self.owner.get(root.0) {
+                root = *up;
+            }
+            groups.entry(root).or_default().push(id);
+        }
+        groups.into_values().rev().flatten().collect()
+    }
+
+    /// Whether `block` belongs to the helper `header` and shows in its full
+    /// view: no folded helper sits between them.
+    fn shown_in_view(&self, block: BlockId, header: BlockId) -> bool {
+        let mut at = block;
+        while let Some(Some(up)) = self.owner.get(at.0) {
+            if *up == header {
+                return true;
+            }
+            if matches!(self.block(*up), Some(Block::Helper(f)) if !f.expanded) {
+                return false;
+            }
+            at = *up;
+        }
+        false
+    }
+
+    /// The blocks the full view of the helper `header` shows, in order: its
+    /// prose, reasoning, tool calls, notes and the headers of the helpers
+    /// it spawned (with their blocks while expanded).
+    pub fn helper_view_blocks(&self, header: BlockId) -> Vec<BlockId> {
+        (header.0 + 1..self.blocks.len())
+            .map(BlockId)
+            .filter(|id| self.shown_in_view(*id, header))
+            .collect()
+    }
+
+    /// The laid-out lines of the full view of the helper `header` at
+    /// `width` (without its title line).
+    pub fn helper_view_lines(&mut self, header: BlockId, width: u16) -> Vec<Line<'static>> {
+        let ids = self.helper_view_blocks(header);
+        let mut lines = Vec::new();
+        for id in ids {
+            let stale = self
+                .view_layout
+                .get(id.0)
+                .is_some_and(|slot| slot.as_ref().is_none_or(|c| c.width != width));
+            if stale
+                && let Some(block) = self.blocks.get(id.0)
+                && let Some(slot) = self.view_layout.get_mut(id.0)
+            {
+                *slot = Some(CachedLayout {
+                    width,
+                    lines: block_lines(block, width),
+                });
+            }
+            if let Some(Some(cached)) = self.view_layout.get(id.0) {
+                lines.extend(cached.lines.iter().cloned());
+            }
+        }
+        lines
+    }
+
+    /// The blocks a toggle key looks at: the transcript's blocks on screen
+    /// (`scope == None`) or the full view of the helper `scope`, newest
+    /// first.
+    fn scoped_blocks_rev(&self, scope: Option<BlockId>) -> Vec<BlockId> {
+        match scope {
+            Some(header) => {
+                let mut ids = self.helper_view_blocks(header);
+                ids.reverse();
+                ids
+            }
+            None => (0..self.blocks.len())
+                .rev()
+                .map(BlockId)
+                .filter(|id| !self.is_hidden(*id))
+                .collect(),
+        }
+    }
+
     /// Expand or fold the helper header `id`. Returns the new `expanded`
     /// state, or `None` when `id` is not a helper header.
     pub fn toggle_helper(&mut self, id: BlockId) -> Option<bool> {
@@ -553,6 +680,7 @@ impl Transcript {
             usage: None,
             depth: path.len(),
             spin: 0,
+            this_turn: true,
         }));
         self.set_owner(id, parent);
         self.helper_folds.insert((*label).to_string(), id);
@@ -640,6 +768,7 @@ impl Transcript {
         for mut block in blocks {
             if let Block::Helper(fold) = &mut block {
                 fold.expanded = false;
+                fold.this_turn = false;
                 if fold.state.is_running() {
                     fold.state = HelperState::Done;
                 }
@@ -651,6 +780,9 @@ impl Transcript {
     /// Mutable access to a block; invalidates its layout.
     pub fn block_mut(&mut self, id: BlockId) -> Option<&mut Block> {
         if let Some(slot) = self.layout.get_mut(id.0) {
+            *slot = None;
+        }
+        if let Some(slot) = self.view_layout.get_mut(id.0) {
             *slot = None;
         }
         self.blocks.get_mut(id.0)
@@ -681,6 +813,9 @@ impl Transcript {
         if id.0 < self.layout.len() {
             self.layout.remove(id.0);
         }
+        if id.0 < self.view_layout.len() {
+            self.view_layout.remove(id.0);
+        }
         if id.0 < self.owner.len() {
             self.owner.remove(id.0);
         }
@@ -698,26 +833,50 @@ impl Transcript {
         }
         self.open_assistant = self.open_assistant.filter(|b| *b != id).map(shift);
         self.open_reasoning = self.open_reasoning.filter(|b| *b != id).map(shift);
+        let streams = std::mem::take(&mut self.helper_streams);
+        self.helper_streams = streams
+            .into_iter()
+            .filter(|(header, _)| *header != id)
+            .map(|(header, s)| {
+                let open = |b: Option<BlockId>| b.filter(|b| *b != id).map(shift);
+                (
+                    shift(header),
+                    HelperStream {
+                        assistant: open(s.assistant),
+                        reasoning: open(s.reasoning),
+                        ..s
+                    },
+                )
+            })
+            .collect();
         Some(block)
     }
 
     /// Drop every cached layout (e.g. on resize).
     pub fn invalidate_all(&mut self) {
-        for slot in &mut self.layout {
+        for slot in self.layout.iter_mut().chain(self.view_layout.iter_mut()) {
             *slot = None;
         }
     }
 
-    /// Toggle collapse on the most recent reasoning block. Returns whether one existed.
+    /// Toggle collapse on the most recent reasoning block on screen.
+    /// Returns whether one existed.
     pub fn toggle_last_reasoning(&mut self) -> bool {
-        let Some(idx) = self
-            .blocks
-            .iter()
-            .rposition(|b| matches!(b, Block::Reasoning { .. }))
+        self.toggle_last_reasoning_in(None)
+    }
+
+    /// Toggle collapse on the most recent reasoning block of the transcript
+    /// on screen (`None`) or of the full view of the helper `scope`.
+    /// Returns whether one existed.
+    pub fn toggle_last_reasoning_in(&mut self, scope: Option<BlockId>) -> bool {
+        let Some(id) = self
+            .scoped_blocks_rev(scope)
+            .into_iter()
+            .find(|id| matches!(self.block(*id), Some(Block::Reasoning { .. })))
         else {
             return false;
         };
-        if let Some(Block::Reasoning { collapsed, .. }) = self.block_mut(BlockId(idx)) {
+        if let Some(Block::Reasoning { collapsed, .. }) = self.block_mut(id) {
             *collapsed = !*collapsed;
         }
         true
@@ -740,12 +899,15 @@ impl Transcript {
 
     /// The most recent tool block on screen with output to show or hide.
     pub fn last_tool_with_output(&self) -> Option<BlockId> {
-        self.blocks
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(i, b)| tool_has_output(b) && !self.is_hidden(BlockId(*i)))
-            .map(|(i, _)| BlockId(i))
+        self.last_tool_with_output_in(None)
+    }
+
+    /// The most recent tool block with output of the transcript on screen
+    /// (`None`) or of the full view of the helper `scope`.
+    pub fn last_tool_with_output_in(&self, scope: Option<BlockId>) -> Option<BlockId> {
+        self.scoped_blocks_rev(scope)
+            .into_iter()
+            .find(|id| self.block(*id).is_some_and(tool_has_output))
     }
 
     /// The tool block of a call by its tool-use id as the model issued it: a
@@ -1071,21 +1233,40 @@ impl Transcript {
                     f.state = HelperState::Done;
                 }
             }),
-            AgentEvent::TurnCompleted {
-                usage: Some(usage), ..
-            } => {
-                let tokens = usage.input_tokens.saturating_add(usage.output_tokens);
-                self.update_fold(fold, |f| {
-                    f.usage = Some(f.usage.unwrap_or(0).saturating_add(tokens));
-                });
+            AgentEvent::TurnStarted { .. } => {
+                *self.helper_stream(fold) = HelperStream::default();
             }
+            AgentEvent::TurnCompleted { usage, .. } => {
+                self.close_helper_streams(fold);
+                if let Some(usage) = usage {
+                    let tokens = usage.input_tokens.saturating_add(usage.output_tokens);
+                    self.update_fold(fold, |f| {
+                        f.usage = Some(f.usage.unwrap_or(0).saturating_add(tokens));
+                    });
+                }
+            }
+            AgentEvent::TextDelta { delta, .. } => self.append_helper_text(fold, delta),
             AgentEvent::TextComplete { content, .. } => {
+                let stream = *self.helper_stream(fold);
+                if stream.assistant.is_none() && !stream.text_seen && !content.is_empty() {
+                    self.append_helper_text(fold, content);
+                }
+                self.helper_stream(fold).assistant = None;
                 if let Some(line) = content.lines().find(|l| !l.trim().is_empty()) {
                     let line = truncate_chars(line.trim(), MAX_HELPER_PREVIEW);
                     self.update_fold(fold, |f| f.last = HelperLast::Text(line));
                 }
             }
+            AgentEvent::ReasoningDelta { delta, .. } => self.append_helper_reasoning(fold, delta),
+            AgentEvent::ReasoningComplete { content, .. } => {
+                let stream = *self.helper_stream(fold);
+                if stream.reasoning.is_none() && !stream.reasoning_seen && !content.is_empty() {
+                    self.append_helper_reasoning(fold, content);
+                }
+                self.helper_stream(fold).reasoning = None;
+            }
             AgentEvent::ToolCallRequested { id, name, args } => {
+                self.close_helper_streams(fold);
                 let preview = helper_args_preview(args.as_value());
                 self.update_fold(fold, |f| {
                     f.calls += 1;
@@ -1140,8 +1321,63 @@ impl Transcript {
         }
         self.blocks.push(block);
         self.layout.push(None);
+        self.view_layout.push(None);
         self.owner.push(None);
         id
+    }
+
+    /// The helper `header`'s streaming state (made when missing).
+    fn helper_stream(&mut self, header: BlockId) -> &mut HelperStream {
+        self.helper_streams.entry(header).or_default()
+    }
+
+    /// Append prose of the helper `header` to its open prose block (made,
+    /// owned by the header, when none is open).
+    fn append_helper_text(&mut self, header: BlockId, delta: &str) {
+        let stream = *self.helper_stream(header);
+        if let Some(id) = stream.assistant
+            && let Some(Block::Assistant { md }) = self.block_mut(id)
+        {
+            md.push_str(delta);
+        } else {
+            let id = self.push_raw(Block::Assistant {
+                md: delta.to_string(),
+            });
+            self.set_owner(id, Some(header));
+            self.helper_stream(header).assistant = Some(id);
+        }
+        let stream = self.helper_stream(header);
+        stream.reasoning = None;
+        stream.text_seen = true;
+    }
+
+    /// Append reasoning of the helper `header` to its open reasoning block
+    /// (made collapsed, owned by the header, when none is open).
+    fn append_helper_reasoning(&mut self, header: BlockId, delta: &str) {
+        let stream = *self.helper_stream(header);
+        if let Some(id) = stream.reasoning
+            && let Some(Block::Reasoning { text, .. }) = self.block_mut(id)
+        {
+            text.push_str(delta);
+        } else {
+            let id = self.push_raw(Block::Reasoning {
+                text: delta.to_string(),
+                collapsed: true,
+            });
+            self.set_owner(id, Some(header));
+            self.helper_stream(header).reasoning = Some(id);
+        }
+        let stream = self.helper_stream(header);
+        stream.assistant = None;
+        stream.reasoning_seen = true;
+    }
+
+    /// Close the helper `header`'s open prose and reasoning blocks.
+    fn close_helper_streams(&mut self, header: BlockId) {
+        if let Some(stream) = self.helper_streams.get_mut(&header) {
+            stream.assistant = None;
+            stream.reasoning = None;
+        }
     }
 
     fn close_streams(&mut self) {
@@ -1900,6 +2136,110 @@ mod tests {
             fold_of(&t, "scout").last,
             HelperLast::Text("Found it in resolve.rs.".into())
         );
+    }
+
+    #[test]
+    fn helper_text_and_reasoning_become_blocks_owned_by_its_fold() {
+        let mut t = Transcript::new();
+        t.push(Block::User { text: "go".into() });
+        let started = || AgentEvent::TurnStarted {
+            turn_number: 0,
+            assistant_message_id: None,
+        };
+        let reasoning = |d: &str| AgentEvent::ReasoningDelta {
+            delta: d.into(),
+            assistant_message_id: None,
+        };
+        let text = |d: &str| AgentEvent::TextDelta {
+            delta: d.into(),
+            assistant_message_id: None,
+        };
+        t.apply_scoped_event(&helper_event(&["scout"], started()));
+        t.apply_scoped_event(&helper_event(&["scout"], reasoning("Look ")));
+        t.apply_scoped_event(&helper_event(&["scout"], reasoning("around.")));
+        t.apply_scoped_event(&helper_event(&["scout"], text("First ")));
+        // The session's own text in between neither closes nor joins the
+        // helper's.
+        t.apply_agent_event(&text("main"));
+        t.apply_scoped_event(&helper_event(&["scout"], text("finding.\nMore.")));
+        t.apply_scoped_event(&helper_event(
+            &["scout"],
+            AgentEvent::TextComplete {
+                content: "First finding.\nMore.".into(),
+                assistant_message_id: None,
+            },
+        ));
+        t.apply_scoped_event(&helper_call(&["scout"], "a", "glob", json!({})));
+        // A completion without deltas makes its block.
+        t.apply_scoped_event(&helper_event(&["scout"], started()));
+        t.apply_scoped_event(&helper_event(
+            &["scout"],
+            AgentEvent::ReasoningComplete {
+                content: "Done looking.".into(),
+                assistant_message_id: None,
+            },
+        ));
+        t.apply_scoped_event(&helper_event(
+            &["scout"],
+            AgentEvent::TextComplete {
+                content: "Second.".into(),
+                assistant_message_id: None,
+            },
+        ));
+        let header = t.helper_header("scout").unwrap();
+        let view: Vec<Block> = t
+            .helper_view_blocks(header)
+            .into_iter()
+            .filter_map(|id| t.block(id).cloned())
+            .collect();
+        assert_eq!(view.len(), 5, "{view:?}");
+        assert!(matches!(&view[0], Block::Reasoning { text, collapsed: true } if text == "Look around."));
+        assert!(matches!(&view[1], Block::Assistant { md } if md == "First finding.\nMore."));
+        assert!(matches!(&view[2], Block::Tool { name, .. } if name == "[scout] glob"));
+        assert!(matches!(&view[3], Block::Reasoning { text, .. } if text == "Done looking."));
+        assert!(matches!(&view[4], Block::Assistant { md } if md == "Second."));
+        // The session's text is its own block, outside the helper.
+        let main = t
+            .blocks()
+            .iter()
+            .position(|b| matches!(b, Block::Assistant { md } if md == "main"))
+            .unwrap();
+        assert!(!t.helper_view_blocks(header).contains(&BlockId(main)));
+        assert!(!t.is_hidden(BlockId(main)));
+        // Folded, the helper's prose and reasoning are hidden; the preview
+        // is the first line of its latest text.
+        assert!(t
+            .helper_view_blocks(header)
+            .iter()
+            .all(|id| t.is_hidden(*id)));
+        assert_eq!(fold_of(&t, "scout").last, HelperLast::Text("Second.".into()));
+        // Ctrl-O on the transcript skips the hidden helper reasoning; in
+        // the view it toggles the helper's latest.
+        assert!(!t.toggle_last_reasoning());
+        assert!(t.toggle_last_reasoning_in(Some(header)));
+        let latest = t.helper_view_blocks(header)[3];
+        assert!(matches!(t.block(latest), Some(Block::Reasoning { collapsed: false, .. })));
+        // The view lays out every block, folded or not.
+        let lines = t.helper_view_lines(header, 80);
+        let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
+        assert!(text.iter().any(|l| l.contains("✻ thinking (12 chars")), "{text:?}");
+        assert!(text.iter().any(|l| l.contains("First finding.")), "{text:?}");
+    }
+
+    #[test]
+    fn finished_helpers_leave_the_panel_when_a_turn_starts() {
+        let mut t = Transcript::new();
+        t.note_live_helpers([("a", "m", 1), ("b", "m", 1)]);
+        let (a, b) = (t.helper_header("a").unwrap(), t.helper_header("b").unwrap());
+        assert_eq!(t.panel_helpers(), vec![b, a]);
+        t.note_live_helpers([("b", "m", 1)]);
+        assert_eq!(t.panel_helpers(), vec![b, a]);
+        t.retire_finished_helpers();
+        assert_eq!(t.panel_helpers(), vec![b]);
+        // Removing an earlier block shifts the panel's ids with the blocks.
+        t.push(Block::User { text: "x".into() });
+        assert!(t.remove_block(a).is_some());
+        assert_eq!(t.panel_helpers(), vec![BlockId(b.0 - 1)]);
     }
 
     #[test]

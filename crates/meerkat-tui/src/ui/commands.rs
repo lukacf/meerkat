@@ -174,8 +174,9 @@ Keys:
                                  undelivered messages are saved)
   Ctrl-O                         toggle the last reasoning block
   Ctrl-T                         toggle the output of the last tool call
-  Ctrl+Up/Down                   focus a helper header (newest first); Enter expands or folds
-                                 it, Esc or typing drops the focus; a click toggles a header
+  Ctrl+Up/Down                   select a helper in the panel under the input (newest first);
+                                 Enter on an empty input opens its full view (Esc returns,
+                                 PgUp/PgDn scroll it); a click unfolds a header in the transcript
   Ctrl-R                         search history (Ctrl-R again: older · Enter accept · Esc cancel)
   Ctrl-X Ctrl-S                  interrupt and send the input (sends normally when idle)
   Up/Down                        move between lines · recall prompt history

@@ -274,19 +274,32 @@ helper), so delegating never unlocks an action. The transcript shows each
 helper as one `[label · model]` line, the status bar counts running helpers,
 and an interrupt cancels them.
 
-**Watching a helper.** A helper is folded to one header line where it was
-spawned: `▸ [scout · model] ⠋ running · 4 tool calls · grep "fn resolve"`
-while it works (its last call, or the first line of its latest text), then
-`done · 7 tool calls · 2.1k tokens` (or `failed`, `cancelled`,
-`unmeasured`). Its calls and errors, and the headers of helpers it spawned,
-stay in the transcript behind the header. Ctrl+↓/Ctrl+↑ focus a header (the
-newest first, wrapping around); Enter expands or folds the focused one, Esc
-or typing drops the focus. A click on a header toggles it too, and
-`/helpers` lists the helpers, `/helpers expand|fold <label>|all` opens or
-folds them. An open helper shows its calls indented as before (tool output
-still collapsed, Ctrl-T toggles it). `[ui] helpers = "expanded"` in
-`tui.toml` starts every helper open (default `"folded"`); a resumed session
-shows its helpers folded.
+**Watching a helper.** While helpers work, a panel under the input lists
+them, one line each, indented by nesting depth (the newest top-level helper
+first, its nested helpers under it): `[scout · model] ⠋ running · 4 tool
+calls · grep "fn resolve"` while it works (its last call, or the first line
+of its latest text), then `done · 7 tool calls · 2.1k tokens` (or `failed`,
+`cancelled`, `unmeasured`). A helper that finished stays listed until the
+next turn starts. The panel takes at most six lines (beyond that, a window
+around the selection and `… and N more`) and is hidden when empty.
+Ctrl+↓/Ctrl+↑ move a selection in the panel (the newest first, wrapping
+around). Enter on an **empty** input opens the selected helper's **full
+view** in place of the transcript (Enter with text in the input sends it as
+usual, and the input keeps working while the view is open): the helper's
+header as the title, then everything it did in order: its prose
+(markdown), its reasoning (one line, Ctrl-O toggles the latest), its tool
+calls with collapsed output (Ctrl-T toggles the latest) and notes, and the
+headers of helpers it spawned. PgUp/PgDn, Shift+↑/↓ and the wheel scroll
+it; it follows new output while at the bottom. The view stays open after
+the helper finishes, so its result can be read; Esc returns to the
+transcript, a second Esc drops the selection.
+
+The transcript keeps each helper's header where it was spawned, as the
+record: `▸ [scout · model] done · 7 tool calls`. A click on it unfolds the
+helper's blocks in place (indented, tool output still collapsed), and
+`/helpers` lists the helpers, `/helpers expand|fold <label>|all` unfolds or
+folds them. `[ui] helpers = "expanded"` in `tui.toml` starts every header
+unfolded (default `"folded"`); a resumed session shows its helpers folded.
 
 Helpers nest one level deep by default, as in Claude Code: the session may
 delegate, its helpers may not, so a chain of helpers each carrying a full
@@ -557,8 +570,9 @@ insert a newline; Ctrl-C interrupts (twice to quit when idle); Esc recalls
 held messages, else interrupts; ↑ on an empty editor edits the newest held
 message, else recalls prompt history; Ctrl-R searches history (workspace,
 then global); Ctrl-X Ctrl-S interrupts and sends the input; Ctrl-O toggles
-the last reasoning block; Ctrl+↑/↓ focus a helper header and Enter toggles
-it; PgUp/PgDn and Shift+↑/↓ scroll; Home/End jump when the editor is empty.
+the last reasoning block; Ctrl+↑/↓ select a helper in the panel under the
+input and Enter on an empty input opens its full view (Esc returns);
+PgUp/PgDn and Shift+↑/↓ scroll; Home/End jump when the editor is empty.
 
 The mouse is captured by default: the wheel scrolls and a click expands or
 collapses a tool call's output (Ctrl-T for the latest). Dragging selects text

@@ -11,13 +11,15 @@ use ratatui::widgets::{Block as BorderBlock, Borders, Paragraph};
 use super::markdown::{display_width, render_markdown, sanitize, truncate_to_width, wrap_text};
 use super::modal::draw_modal;
 use super::transcript::{
-    Block, DiffView, HelperFold, HelperState, NoticeLevel, ToolState, args_preview,
+    Block, BlockId, DiffView, HelperFold, HelperState, NoticeLevel, ToolState, args_preview,
     result_line_count,
 };
 use super::{App, HistorySearch, StatusInfo};
 
 /// Maximum visible input lines.
 pub const MAX_INPUT_LINES: usize = 6;
+/// Most lines of the helper panel under the input.
+pub const MAX_PANEL_LINES: usize = 6;
 /// Maximum diff lines shown under a tool block.
 const MAX_DIFF_LINES: usize = 40;
 /// Braille spinner frames.
@@ -40,15 +42,24 @@ pub fn draw_at(frame: &mut Frame<'_>, app: &mut App, now: Instant) {
     } else {
         app.input.lines().len().clamp(1, MAX_INPUT_LINES) as u16
     };
-    let [transcript_area, input_area, status_area] = Layout::vertical([
+    let panel = app.helper_panel();
+    let panel_rows = panel.len().min(MAX_PANEL_LINES) as u16;
+    let [transcript_area, input_area, panel_area, status_area] = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(input_rows + 1),
+        Constraint::Length(panel_rows),
         Constraint::Length(1),
     ])
     .areas(area);
 
-    draw_transcript(frame, app, transcript_area);
+    match app.helper_view() {
+        Some(header) => draw_helper_view(frame, app, header, transcript_area),
+        None => draw_transcript(frame, app, transcript_area),
+    }
     draw_input(frame, app, input_area, now);
+    if !panel.is_empty() {
+        draw_panel(frame, app, &panel, panel_area);
+    }
     // The paragraph does not wrap, so an over-long status bar is clipped.
     frame.render_widget(
         Paragraph::new(status_bar(&app.status, now))
@@ -67,16 +78,6 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let start = app.scroll.window(total, height);
     let mut lines = app.transcript.visible_lines(start, height);
     let rows = app.transcript.visible_blocks(start, height);
-    // The focused helper's header (its first line) is drawn reversed.
-    if let Some(focus) = app.helper_focus()
-        && let Some(first) = app.transcript.first_line_of(focus)
-        && let Some(i) = first.checked_sub(start)
-        && rows.get(i) == Some(&focus)
-        && let Some(line) = lines.get_mut(i)
-    {
-        let focused = std::mem::take(line).patch_style(Modifier::REVERSED);
-        *line = focused;
-    }
     if let Some(sel) = app.selection() {
         lines = lines
             .into_iter()
@@ -88,6 +89,81 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+/// A helper's full view in place of the transcript: its header text as the
+/// title line, then its blocks, scrolled by the view's own scroll state.
+fn draw_helper_view(frame: &mut Frame<'_>, app: &mut App, header: BlockId, area: Rect) {
+    let height = usize::from(area.height);
+    app.set_viewport_height(height.saturating_sub(1));
+    // No transcript rows: clicks and selection do not reach the transcript.
+    app.set_transcript_rows(area, 0, Vec::new());
+    let w = usize::from(area.width).max(4);
+    let title = match app.transcript.block(header) {
+        Some(Block::Helper(fold)) => helper_line(fold, w, "◂ ", "  Esc back"),
+        _ => Line::default(),
+    };
+    let body = app.transcript.helper_view_lines(header, area.width);
+    let body_height = height.saturating_sub(1);
+    let start = app
+        .helper_view_scroll()
+        .map_or(0, |scroll| scroll.window(body.len(), body_height));
+    let mut lines = Vec::with_capacity(height);
+    lines.push(title.patch_style(Modifier::REVERSED));
+    lines.extend(body.into_iter().skip(start).take(body_height));
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// The helper panel under the input: one line per helper, indented by
+/// nesting depth, the selected one reversed; past [`MAX_PANEL_LINES`]
+/// helpers a window around the selection and `… and N more`.
+fn draw_panel(frame: &mut Frame<'_>, app: &App, panel: &[BlockId], area: Rect) {
+    let w = usize::from(area.width).max(4);
+    let selected = app
+        .panel_selection()
+        .and_then(|id| panel.iter().position(|p| *p == id));
+    let (first, shown, more) = panel_window(panel.len(), selected);
+    let mut lines: Vec<Line<'static>> = panel
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(shown)
+        .filter_map(|(i, id)| match app.transcript.block(*id) {
+            Some(Block::Helper(fold)) => {
+                let indent = "  ".repeat(fold.depth);
+                let line = helper_line(fold, w, &indent, "");
+                Some(if selected == Some(i) {
+                    line.patch_style(Modifier::REVERSED)
+                } else {
+                    line
+                })
+            }
+            _ => None,
+        })
+        .collect();
+    if more > 0 {
+        lines.push(Line::styled(
+            format!("  … and {more} more"),
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Which panel entries are drawn for `len` helpers with the entry
+/// `selected`: `(first, count, more)`. Up to [`MAX_PANEL_LINES`] helpers
+/// all show; beyond that one line fewer, around the selection, and a line
+/// saying how many more there are.
+pub fn panel_window(len: usize, selected: Option<usize>) -> (usize, usize, usize) {
+    if len <= MAX_PANEL_LINES {
+        return (0, len, 0);
+    }
+    let shown = MAX_PANEL_LINES - 1;
+    let first = selected
+        .unwrap_or(0)
+        .saturating_sub(shown - 1)
+        .min(len - shown);
+    (first, shown, len - shown)
+}
+
 fn draw_input(frame: &mut Frame<'_>, app: &App, area: Rect, now: Instant) {
     let title = if app.quit_armed(now) {
         " press Ctrl-C again to quit "
@@ -97,6 +173,10 @@ fn draw_input(frame: &mut Frame<'_>, app: &App, area: Rect, now: Instant) {
         " C-x- "
     } else if app.search().is_some() {
         " Ctrl-R older · Enter accept · Esc cancel "
+    } else if app.helper_view().is_some() {
+        " Esc back to the transcript · PgUp/PgDn scroll · Enter sends typed text "
+    } else if app.panel_selection().is_some() {
+        " Enter opens the helper (empty input; with text Enter sends) · Esc deselects "
     } else if app.has_recallable() {
         " Esc recall all · ↑ edit last queued · Ctrl-X Ctrl-S send now "
     } else if app.is_running() {
@@ -369,7 +449,7 @@ pub fn status_bar(status: &StatusInfo, now: Instant) -> Line<'static> {
             Style::default().fg(Color::Magenta),
         ));
     }
-    if status.helpers > 0 || status.helper_headers {
+    if status.helpers > 0 || status.helper_panel {
         segs.push(Span::raw("ctrl+↓ helpers"));
     }
     let mut spans = Vec::with_capacity(segs.len() * 2 + 1);
@@ -558,12 +638,19 @@ pub fn block_lines(block: &Block, width: u16) -> Vec<Line<'static>> {
     out
 }
 
-/// A helper's one-line header: `▸ [scout · model] ⠋ running · 4 tool calls ·
-/// grep "fn resolve"` (`▾` when expanded), cut to the width.
+/// A helper's one-line header in the transcript: `▸ [scout · model] ⠋
+/// running · 4 tool calls · grep "fn resolve"` (`▾` when expanded), cut to
+/// the width.
 fn helper_header(fold: &HelperFold, w: usize) -> Line<'static> {
     let indent = "  ".repeat(fold.depth.saturating_sub(1));
-    let marker = if fold.expanded { "▾" } else { "▸" };
-    let head = format!("{indent}{marker} {} ", sanitize(&fold.tag()));
+    let marker = if fold.expanded { "▾ " } else { "▸ " };
+    helper_line(fold, w, &format!("{indent}{marker}"), "")
+}
+
+/// A helper's header text after `lead`: its tag, then its status, then
+/// `tail` (dim), cut to the width.
+fn helper_line(fold: &HelperFold, w: usize, lead: &str, tail: &str) -> Line<'static> {
+    let head = format!("{lead}{} ", sanitize(&fold.tag()));
     let status = sanitize(&fold.status_text());
     let status_style = match fold.state {
         HelperState::Running => Style::default().fg(Color::Yellow),
@@ -574,6 +661,8 @@ fn helper_header(fold: &HelperFold, w: usize) -> Line<'static> {
     };
     let head = truncate_to_width(&head, w);
     let rest = w.saturating_sub(display_width(&head));
+    let status = truncate_to_width(&status, rest);
+    let rest = rest.saturating_sub(display_width(&status));
     Line::from(vec![
         Span::styled(
             head,
@@ -581,7 +670,11 @@ fn helper_header(fold: &HelperFold, w: usize) -> Line<'static> {
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(truncate_to_width(&status, rest), status_style),
+        Span::styled(status, status_style),
+        Span::styled(
+            truncate_to_width(tail, rest),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
     ])
 }
 

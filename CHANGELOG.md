@@ -108,7 +108,11 @@ them.
   to a protected path in the project (`.env*`, `build.rs`, `.cargo/`,
   `AGENTS.md`, `.gitmodules`, …) always asks you in the escalation dialog,
   naming the path and why, instead of going to the classifier; an allow
-  rule for the path (the dialog's "allow + rule") stops the prompts. See
+  rule for the path (the dialog's "allow + rule") stops the prompts.
+  Running helpers (and those finished this turn) are listed in a panel
+  under the input; Ctrl+↑/↓ select one and Enter on an empty input opens
+  its full view (its prose, reasoning, tool calls and nested helpers) in
+  place of the transcript until Esc. See
   `crates/meerkat-tui/README.md`.
 
 - `meerkat-mob-mcp`: `MobMcpState::with_implicit_mob_customizer` takes an

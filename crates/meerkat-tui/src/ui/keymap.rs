@@ -71,9 +71,9 @@ pub enum Action {
     ScrollTop,
     /// Jump to the bottom and follow new output.
     ScrollBottom,
-    /// Focus the previous (older) helper header (Ctrl+Up; the newest first).
+    /// Move the helper panel selection up (Ctrl+Up; the newest first).
     HelperPrev,
-    /// Focus the next (newer) helper header (Ctrl+Down; the newest first).
+    /// Move the helper panel selection down (Ctrl+Down; the newest first).
     HelperNext,
     /// Edit the input.
     Edit(EditAction),

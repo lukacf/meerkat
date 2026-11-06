@@ -11576,6 +11576,65 @@ mod tests {
             assert_eq!(transport.request_count(), 7);
         }
 
+        /// A token exchange outage that leaves no token to serve, and whose
+        /// exchange said when to come back (`Retry-After`), answers every
+        /// request until then with its retryable class without calling the
+        /// exchange; the first request after that instant tries it again.
+        #[tokio::test]
+        async fn an_exchange_outage_answers_until_its_retry_after() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_at("derived-one", clock.at(3600), 200),
+                models_response(),
+                with_retry_after(
+                    json_response(503, serde_json::json!({"message": "unavailable"})),
+                    60,
+                ),
+                token_at("derived-two", clock.at(3761 + 3600), 200),
+                models_response(),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.session([]).await;
+
+            // The token expired; the exchange is unavailable for 60 s.
+            clock.set(3700);
+            let events = session.turn().await;
+            let [Err(error)] = events.as_slice() else {
+                panic!("the turn fails once: {events:?}");
+            };
+            assert!(retried(error), "{error:?}");
+            assert_eq!(transport.request_count(), 3);
+
+            for at in [3701, 3730, 3759] {
+                clock.set(at);
+                let events = session.turn().await;
+                let [Err(error)] = events.as_slice() else {
+                    panic!("{at}: the turn fails once: {events:?}");
+                };
+                assert!(
+                    matches!(
+                        error,
+                        meerkat_llm_core::LlmError::ServerError { status: 503, .. }
+                    ) && retried(error),
+                    "{at}: the recorded outage answers with its retryable class: {error:?}"
+                );
+                assert_eq!(
+                    transport.request_count(),
+                    3,
+                    "{at}: the exchange is not called before its Retry-After"
+                );
+            }
+
+            clock.set(3761);
+            let events = session.turn().await;
+            assert!(
+                events.is_empty(),
+                "after its Retry-After the exchange is tried again: {events:?}"
+            );
+            assert_eq!(transport.request_count(), 5);
+            assert_eq!(session.bearers(), ["Bearer derived-two"]);
+        }
+
         #[tokio::test]
         async fn a_failure_after_a_recorded_outage_fails_the_turn_as_itself() {
             let clock = TestClock::new();

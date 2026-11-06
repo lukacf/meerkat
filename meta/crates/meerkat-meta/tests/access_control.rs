@@ -5755,7 +5755,9 @@ mod checked_v1_acceptance {
                 id: "existing-rule".to_string(),
                 description: Some(PRIVATE_CONFIG.to_string()),
                 subjects: vec![NEW_ADMIN.to_string()],
-                actions: vec!["agent.send".to_string()],
+                // Names `schedule.manage` itself, so the owner keeps this
+                // configuration exactly as written.
+                actions: vec!["agent.send".to_string(), "schedule.manage".to_string()],
                 agents: vec!["router".to_string()],
                 ..AccessRule::default()
             }],

@@ -56,8 +56,9 @@ pub(crate) const CONSOLE_SCHEDULED_SEND_SCHEMA: &str = "meta.console.scheduled_s
 const CONSOLE_DOOR_WAIT: Duration = Duration::from_secs(30);
 
 /// The Console caller a console schedule fires as: the caller who last
-/// defined it (created, changed or resumed it), as `/console/send` resolves
-/// that caller. A fire is admitted as this caller
+/// defined it (created, changed or resumed it; a change by another caller
+/// is an explicit takeover, [`ConsoleScheduledSend::redefined`]), as
+/// `/console/send` resolves that caller. A fire is admitted as this caller
 /// ([`Self::admitted_now`]), judges this caller's access and is deduplicated
 /// in this caller's send scope, as a live send by it would be.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,6 +149,15 @@ impl ConsoleScheduleSender {
         }
     }
 
+    /// Whether `other` is the same Console caller as this sender: the same
+    /// send scope, so the open Console's shared account again, one verified
+    /// human by issuer and subject (whatever principal or provider its
+    /// token names now), or one other principal by principal, provider and
+    /// issuer. A change by any other caller takes the schedule over.
+    pub(crate) fn is_same_caller(&self, other: &Self) -> bool {
+        self.scope() == other.scope()
+    }
+
     /// Whether the Console admits this sender now, as it admits a live
     /// request by it: an anonymous sender only while the Console requires no
     /// sign-in; a principal only under the issuer the Console trusts now,
@@ -214,6 +224,23 @@ impl ConsoleScheduleSender {
     }
 }
 
+/// How many earlier senders a console schedule keeps: the newest, oldest
+/// first. Each one is a takeover; the console audit log keeps every change.
+pub(crate) const CONSOLE_SCHEDULE_SENDER_HISTORY_LIMIT: usize = 16;
+
+/// A sender a takeover replaced: who the schedule sent as, when that sender
+/// last defined it, and when another caller took it over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConsoleScheduleFormerSender {
+    pub(crate) sender: ConsoleScheduleSender,
+    /// When that sender last defined the send, in whole seconds since the
+    /// epoch.
+    pub(crate) defined_at: u64,
+    /// When another caller took the schedule over, in whole seconds since
+    /// the epoch.
+    pub(crate) replaced_at: u64,
+}
+
 /// A console schedule's deferred send, held as its host-runnable params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ConsoleScheduledSend {
@@ -229,6 +256,12 @@ pub(crate) struct ConsoleScheduledSend {
     /// epoch. A fire refuses a verified human's send whose Console sessions
     /// were revoked after it.
     pub(crate) defined_at: u64,
+    /// The senders takeovers replaced, oldest first, at most
+    /// [`CONSOLE_SCHEDULE_SENDER_HISTORY_LIMIT`]: empty while the schedule's
+    /// first sender sends it. A build before the history reads a schedule
+    /// as if it had none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) sender_history: Vec<ConsoleScheduleFormerSender>,
 }
 
 impl ConsoleScheduledSend {
@@ -244,6 +277,41 @@ impl ConsoleScheduledSend {
             content,
             sender,
             defined_at,
+            sender_history: Vec::new(),
+        }
+    }
+
+    /// This send as `sender` defines it again at `now` (whole seconds since
+    /// the epoch), to `identity` with `content`. The same caller as this
+    /// send's sender keeps it, with a new definition time; any other caller
+    /// takes it over, and this send's sender joins the history, which keeps
+    /// its newest [`CONSOLE_SCHEDULE_SENDER_HISTORY_LIMIT`] entries.
+    pub(crate) fn redefined(
+        &self,
+        identity: String,
+        content: String,
+        sender: ConsoleScheduleSender,
+        now: u64,
+    ) -> Self {
+        let mut sender_history = self.sender_history.clone();
+        if !self.sender.is_same_caller(&sender) {
+            sender_history.push(ConsoleScheduleFormerSender {
+                sender: self.sender.clone(),
+                defined_at: self.defined_at,
+                replaced_at: now,
+            });
+            let excess = sender_history
+                .len()
+                .saturating_sub(CONSOLE_SCHEDULE_SENDER_HISTORY_LIMIT);
+            sender_history.drain(..excess);
+        }
+        Self {
+            schema: CONSOLE_SCHEDULED_SEND_SCHEMA.to_string(),
+            identity,
+            content,
+            sender,
+            defined_at: now,
+            sender_history,
         }
     }
 
@@ -957,6 +1025,99 @@ mod tests {
         assert!(refuse_reserved_runnable_name(&reserved).is_err());
         let other = HostRunnableName::parse("nightly-report").unwrap();
         assert!(refuse_reserved_runnable_name(&other).is_ok());
+    }
+
+    /// One caller is one send scope: a verified human by issuer and subject,
+    /// whatever principal or provider the token names now; another principal
+    /// by principal, provider and issuer; the open Console's shared account.
+    #[test]
+    fn a_sender_is_the_same_caller_by_its_send_scope() {
+        let renamed = ConsoleScheduleSender::Human {
+            principal: "erin.new@example.test".to_string(),
+            provider: "google_oauth".to_string(),
+            issuer: ISSUER.to_string(),
+            subject: "erin-sub".to_string(),
+        };
+        assert!(sender().is_same_caller(&renamed));
+        let other_person = ConsoleScheduleSender::Human {
+            principal: "erin@example.test".to_string(),
+            provider: "generic_oidc".to_string(),
+            issuer: ISSUER.to_string(),
+            subject: "frank-sub".to_string(),
+        };
+        assert!(!sender().is_same_caller(&other_person));
+        assert!(robot().is_same_caller(&robot()));
+        assert!(!robot().is_same_caller(&sender()));
+        assert!(ConsoleScheduleSender::Anonymous.is_same_caller(&ConsoleScheduleSender::Anonymous));
+        assert!(!ConsoleScheduleSender::Anonymous.is_same_caller(&sender()));
+    }
+
+    /// A send defined again by its sender keeps the sender and its history,
+    /// with a new definition time; another caller takes it over, and the
+    /// replaced sender joins the history, which keeps its newest entries.
+    #[test]
+    fn a_takeover_adds_the_replaced_sender_to_a_bounded_history() {
+        let first = send();
+        let own = first.redefined(
+            "agent:notes".to_string(),
+            "Post the evening summary.".to_string(),
+            sender(),
+            1_700_000_100,
+        );
+        assert_eq!(own.sender, sender());
+        assert_eq!(own.defined_at, 1_700_000_100);
+        assert!(own.sender_history.is_empty());
+
+        let taken = own.redefined(
+            "agent:notes".to_string(),
+            own.content.clone(),
+            robot(),
+            1_700_000_200,
+        );
+        assert_eq!(taken.sender, robot());
+        assert_eq!(
+            taken.sender_history,
+            vec![ConsoleScheduleFormerSender {
+                sender: sender(),
+                defined_at: 1_700_000_100,
+                replaced_at: 1_700_000_200,
+            }]
+        );
+        // The history travels with the send through its target.
+        assert_eq!(
+            ConsoleScheduledSend::of_target(&taken.target().unwrap()),
+            Some(taken.clone())
+        );
+        // A send without a history reads as one with none.
+        let mut earlier = serde_json::to_value(send()).unwrap();
+        earlier.as_object_mut().unwrap().remove("sender_history");
+        assert_eq!(
+            ConsoleScheduledSend::from_params(&earlier.to_string()),
+            Some(send())
+        );
+
+        let mut handed = taken;
+        for step in 0..40_u64 {
+            let next = if step % 2 == 0 { sender() } else { robot() };
+            handed = handed.redefined(
+                "agent:notes".to_string(),
+                handed.content.clone(),
+                next,
+                1_700_001_000 + step,
+            );
+        }
+        assert_eq!(
+            handed.sender_history.len(),
+            CONSOLE_SCHEDULE_SENDER_HISTORY_LIMIT
+        );
+        assert_eq!(
+            handed
+                .sender_history
+                .last()
+                .map(|former| former.replaced_at),
+            Some(1_700_001_039),
+            "the newest takeover is kept"
+        );
     }
 
     struct RecordingDoor(std::sync::Mutex<Vec<(ConsoleScheduledSend, String)>>);

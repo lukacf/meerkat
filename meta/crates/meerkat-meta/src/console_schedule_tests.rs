@@ -432,9 +432,9 @@ fn enforced(
     })?)
 }
 
-/// The list is a read of the agent and every write a send to it; the
-/// writes are console mutations a read-only console and a candidate launch
-/// refuse.
+/// The list is a read of the agent and every write a send to it that also
+/// needs `schedule.manage`; the writes are console mutations a read-only
+/// console and a candidate launch refuse.
 #[test]
 fn console_schedules_are_gated_as_view_and_send_on_their_agent() {
     let params = json!({ "identity": "alpha", "schedule_id": "not-read-here" });
@@ -447,7 +447,10 @@ fn console_schedules_are_gated_as_view_and_send_on_their_agent() {
     for method in schedules::SCHEDULE_WRITE_METHODS {
         assert_eq!(
             console_rpc_access_requirements(method, &params),
-            Some(vec![(ACTION_AGENT_SEND, Some("alpha".to_string()))]),
+            Some(vec![
+                (ACTION_AGENT_SEND, Some("alpha".to_string())),
+                (ACTION_SCHEDULE_MANAGE, Some("alpha".to_string())),
+            ]),
             "{method}"
         );
         assert!(is_console_mutating_rpc_method(method), "{method}");
@@ -550,8 +553,8 @@ async fn the_family_is_offered_where_a_schedule_service_is_attached() -> TestRes
 }
 
 /// A console schedule is created as a send to its agent by its caller,
-/// listed under that agent only, changed into the changer's send, paused,
-/// resumed as the resumer's send, and deleted.
+/// listed under that agent only, taken over by another caller's change,
+/// paused, taken back by a resume, and deleted.
 #[tokio::test]
 async fn a_console_schedule_lives_through_create_update_pause_resume_and_delete() -> TestResult {
     let fixture = fixture(
@@ -630,7 +633,8 @@ async fn a_console_schedule_lives_through_create_update_pause_resume_and_delete(
     .await;
     assert_eq!(other["result"]["schedules"], json!([]), "{other:#?}");
 
-    // A change is the changer's send; what it does not name stays.
+    // Another caller's change takes the schedule over; what it does not
+    // name stays.
     let updated = call(
         &fixture,
         Caller::human(FRANK),
@@ -639,6 +643,7 @@ async fn a_console_schedule_lives_through_create_update_pause_resume_and_delete(
             "identity": "alpha",
             "schedule_id": schedule_id,
             "content": "Post the evening summary.",
+            "take_over_sender": true,
         }),
     )
     .await;
@@ -676,12 +681,12 @@ async fn a_console_schedule_lives_through_create_update_pause_resume_and_delete(
         "a pause keeps the sender"
     );
 
-    // A resume is the resumer's send.
+    // A resume by another caller takes the schedule over too.
     let resumed = call(
         &fixture,
         Caller::human(ERIN),
         "meta/schedule/resume",
-        json!({ "identity": "alpha", "schedule_id": schedule_id }),
+        json!({ "identity": "alpha", "schedule_id": schedule_id, "take_over_sender": true }),
     )
     .await;
     assert_eq!(resumed["result"]["phase"], json!("active"), "{resumed:#?}");
@@ -960,8 +965,9 @@ async fn schedule_methods_judge_view_and_send_on_the_agent() -> TestResult {
 }
 
 /// Only a caller who may send to the agent sees who its schedules send as:
-/// a viewer who holds `agent.view` alone reads the list with the sender
-/// withheld, while the sender's own writes and lists show it.
+/// a viewer who holds `agent.view` alone reads the list with the sender and
+/// its earlier senders withheld, while the senders' own writes and lists
+/// show them.
 #[tokio::test]
 async fn only_a_caller_who_may_send_sees_who_a_schedule_sends_as() -> TestResult {
     let fixture = fixture(
@@ -977,6 +983,12 @@ async fn only_a_caller_who_may_send_sees_who_a_schedule_sends_as() -> TestResult
             &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND],
             "alpha",
         ),
+        grant(
+            "frank-drives-alpha",
+            FRANK,
+            &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND],
+            "alpha",
+        ),
     ])?;
     let erin = Caller::human(ERIN).under(&controller);
     let created = call(
@@ -988,6 +1000,19 @@ async fn only_a_caller_who_may_send_sees_who_a_schedule_sends_as() -> TestResult
     .await;
     assert_eq!(created["result"]["sender"], json!(ERIN), "{created:#?}");
     assert_eq!(created["result"]["sender_hidden"], json!(false));
+    let taken = call(
+        &fixture,
+        Caller::human(FRANK).under(&controller),
+        "meta/schedule/update",
+        json!({
+            "identity": "alpha",
+            "schedule_id": created["result"]["schedule_id"],
+            "content": "Post the morning summary.",
+            "take_over_sender": true,
+        }),
+    )
+    .await;
+    assert_eq!(taken["result"]["sender"], json!(FRANK), "{taken:#?}");
 
     let viewed = call(
         &fixture,
@@ -999,6 +1024,7 @@ async fn only_a_caller_who_may_send_sees_who_a_schedule_sends_as() -> TestResult
     let item = &viewed["result"]["schedules"][0];
     assert!(item["sender"].is_null(), "{viewed:#?}");
     assert_eq!(item["sender_hidden"], json!(true), "{viewed:#?}");
+    assert_eq!(item["sender_history"], json!([]), "{viewed:#?}");
     assert_eq!(
         item["content"],
         json!("Post the morning summary."),
@@ -1013,8 +1039,13 @@ async fn only_a_caller_who_may_send_sees_who_a_schedule_sends_as() -> TestResult
     )
     .await;
     let item = &managed["result"]["schedules"][0];
-    assert_eq!(item["sender"], json!(ERIN), "{managed:#?}");
+    assert_eq!(item["sender"], json!(FRANK), "{managed:#?}");
     assert_eq!(item["sender_hidden"], json!(false));
+    assert_eq!(
+        item["sender_history"][0]["sender"],
+        json!(ERIN),
+        "{managed:#?}"
+    );
     fixture.stop().await;
     Ok(())
 }
@@ -1772,6 +1803,7 @@ async fn a_write_at_a_stale_revision_is_a_conflict() -> TestResult {
             "identity": "alpha",
             "schedule_id": schedule_id,
             "content": "Changed meanwhile.",
+            "take_over_sender": true,
         }),
     )
     .await;

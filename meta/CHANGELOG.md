@@ -36,6 +36,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `caller_changed`, and a call whose caller's login ended while it ran gets
   the route's `403` `mcp_app_unavailable`.
 
+- Changing who a console schedule sends as is an explicit takeover:
+  `meta/schedule/update` or `meta/schedule/resume` by a caller who is not
+  the schedule's sender needs `take_over_sender: true`, and without it is
+  refused with `-32009` `sender_takeover_required` (a new refusal kind, with
+  `sender`, who the schedule sends as) and changes nothing. The stock
+  Console asks before it takes a schedule over.
+- Console schedule writes need the new access action `schedule.manage`
+  beside `agent.send`. An access configuration that names no schedule action
+  grants it wherever a rule grants or denies `agent.send`, so its rules keep
+  their meaning.
+
 ### Security
 
 - Tokens minted with an `auth_config` shared secret no longer count as a
@@ -73,6 +84,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - a probe that asks `/healthz` for JSON by a pod or service name now gets
     403; the plain `/healthz` answer is unchanged.
 
+- An access configuration saved by this release names `schedule.manage`
+  wherever it grants `agent.send`; an earlier Meta refuses to load a
+  configuration that names it, so remove those entries before going back to
+  one.
+
 ### Added
 
 - `meta/console/whoami` reports who the console acts as: the actor
@@ -87,6 +103,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Console changes accept `expected_caller_scope` (the `caller_scope` read
   from `meta/console/whoami`), and a change made for another caller is
   refused with `caller_changed`.
+
+- A console schedule keeps its sender history: `sender_history` names who
+  it sent as before each takeover and when it was taken over (the newest
+  16), shown to callers who may send to its agent.
+- Access action `schedule.manage` restricts who changes an agent's console
+  schedules.
+
+### Fixed
+
+- Concurrent console schedule edits no longer overwrite each other:
+  `meta/schedule/update` and `meta/schedule/resume` take
+  `expected_revision`, the stock Console sends the revision it showed, and
+  a change made from an older read is refused with
+  `schedule_revision_conflict`.
 
 ## [0.9.10] - 2026-11-04
 

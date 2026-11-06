@@ -6,6 +6,7 @@ import { isAgentRetired } from "../lib/agent-status";
 import {
   CONSOLE_SCHEDULE_COMMANDS,
   consoleScheduleEditing,
+  describeFormerSender,
   describeSchedulePhase,
   describeScheduleSender,
   describeScheduleTrigger,
@@ -16,6 +17,9 @@ import {
   scheduleDraftFromSchedule,
   scheduleErrorMessage,
   scheduleIsGone,
+  scheduleResumeParams,
+  scheduleTakeover,
+  scheduleTakeoverParams,
   scheduleUpdateParams,
   viewerTimeZone,
   type ConsoleSchedule,
@@ -36,7 +40,13 @@ import {
   type ScheduleKind,
   type ScheduleRunPlan,
 } from "../lib/schedule-runs";
-import { ScheduleForm, toggleDraftWeekday, useMeasuredWidth } from "./SchedulesSection";
+import {
+  ScheduleForm,
+  ScheduleTakeoverNotice,
+  toggleDraftWeekday,
+  useMeasuredWidth,
+  type PendingScheduleTakeover,
+} from "./SchedulesSection";
 import {
   Agenda,
   type AgendaBand,
@@ -220,6 +230,8 @@ export function SchedulesPanel({
   const [drawer, setDrawer] = React.useState<Drawer | null>(null);
   const [busy, setBusy] = React.useState<string | null>(null);
   const [actionError, setActionError] = React.useState<string | null>(null);
+  // A change held back until the viewer confirms taking the schedule over.
+  const [takeover, setTakeover] = React.useState<PendingScheduleTakeover | null>(null);
   const [confirmingDelete, setConfirmingDelete] = React.useState<string | null>(null);
   const [phaseFilter, setPhaseFilter] = React.useState<PhaseFilter>("all");
   // A drawer the viewer opened takes focus (spec A3.10); one a deep link
@@ -355,15 +367,23 @@ export function SchedulesPanel({
   async function write(identity: string, command: ConsoleScheduleCommand, params: Record<string, unknown>, key: string): Promise<boolean> {
     setBusy(key);
     setActionError(null);
+    setTakeover(null);
     let done = false;
     try {
       await runRef.current(identity, command, params);
       done = true;
     } catch (error) {
       if (alive.current) {
-        const message = scheduleErrorMessage(error, command);
-        setActionError(message);
-        setDrawer((current) => (current?.kind === "form" ? { ...current, error: message } : current));
+        // A change that would take the schedule over waits for the viewer;
+        // nothing was changed.
+        const asked = scheduleTakeover(error);
+        if (asked) {
+          setTakeover({ identity, command, params, key, takeover: asked });
+        } else {
+          const message = scheduleErrorMessage(error, command);
+          setActionError(message);
+          setDrawer((current) => (current?.kind === "form" ? { ...current, error: message } : current));
+        }
         if (scheduleIsGone(error)) {
           setConfirmingDelete(null);
           setDrawer(null);
@@ -375,10 +395,21 @@ export function SchedulesPanel({
     return done;
   }
 
+  /** Repeat the held-back change as a takeover; an edit's drawer closes once
+   * it is saved. */
+  function confirmTakeover() {
+    if (!takeover || busy) return;
+    const { identity, command, params, key } = takeover;
+    void write(identity, command, scheduleTakeoverParams(params), key).then((done) => {
+      if (done && alive.current && command === CONSOLE_SCHEDULE_COMMANDS.update) setDrawer(null);
+    });
+  }
+
   function openNew(preferred?: string, takeFocus = true) {
     setDrawerFocus(takeFocus);
     setActionError(null);
     setConfirmingDelete(null);
+    setTakeover(null);
     const identity = preferred && changeable.includes(preferred) ? preferred : changeable[0];
     if (!identity) return;
     setDrawer({
@@ -394,6 +425,7 @@ export function SchedulesPanel({
     setDrawerFocus(true);
     setActionError(null);
     setConfirmingDelete(null);
+    setTakeover(null);
     setDrawer({
       kind: "form",
       identity: schedule.identity,
@@ -409,7 +441,10 @@ export function SchedulesPanel({
     setDrawer({ kind: "detail", identity: schedule.identity, scheduleId: schedule.scheduleId });
   }
 
+  // A takeover confirms the edit as it was asked: editing the form again
+  // drops the question, and the next save asks again if it has to.
   function patchForm(patch: Partial<Extract<Drawer, { kind: "form" }>>) {
+    if (patch.draft) setTakeover((current) => (current?.command === CONSOLE_SCHEDULE_COMMANDS.update ? null : current));
     setDrawer((current) => (current?.kind === "form" ? { ...current, ...patch } : current));
   }
 
@@ -431,7 +466,10 @@ export function SchedulesPanel({
 
   function runAction(schedule: ConsoleSchedule, command: ConsoleScheduleCommand) {
     if (busy) return;
-    void write(schedule.identity, command, { schedule_id: schedule.scheduleId }, `${schedule.scheduleId}:${command}`).then((done) => {
+    const params = command === CONSOLE_SCHEDULE_COMMANDS.resume
+      ? scheduleResumeParams(schedule)
+      : { schedule_id: schedule.scheduleId };
+    void write(schedule.identity, command, params, `${schedule.scheduleId}:${command}`).then((done) => {
       if (done && alive.current && command === CONSOLE_SCHEDULE_COMMANDS.delete) {
         setConfirmingDelete(null);
         setDrawer((current) =>
@@ -829,6 +867,24 @@ export function SchedulesPanel({
   }
 
   // ── Drawer ──────────────────────────────────────────────────────────
+  // An edit's takeover question sits in its form; a resume's above the views.
+  const takeoverInForm = drawer?.kind === "form" && takeover?.command === CONSOLE_SCHEDULE_COMMANDS.update;
+  const takeoverNotice = takeover ? (
+    <ScheduleTakeoverNotice
+      pending={takeover}
+      busy={busy !== null}
+      onConfirm={confirmTakeover}
+      onCancel={() => setTakeover(null)}
+      agentName={(raw) => directory.lookup(raw)?.label}
+      testId="schedules-takeover"
+      confirmTestId="schedules-takeover-confirm"
+      cancelTestId="schedules-takeover-cancel"
+    />
+  ) : null;
+  const closeForm = () => {
+    setDrawer(null);
+    setTakeover((current) => (current?.command === CONSOLE_SCHEDULE_COMMANDS.update ? null : current));
+  };
   let drawerNode: React.ReactNode = null;
   if (drawer?.kind === "form") {
     const form = drawer;
@@ -856,7 +912,7 @@ export function SchedulesPanel({
       <DetailDrawer
         title={form.schedule ? `Edit ${form.schedule.name || "schedule"}` : "New schedule"}
         subtitle={<>For <AgentName id={form.identity} /></>}
-        onClose={() => setDrawer(null)}
+        onClose={closeForm}
         autoFocus={drawerFocus}
         testId="schedules-drawer"
         closeTestId="schedules-drawer-close"
@@ -872,9 +928,10 @@ export function SchedulesPanel({
           onChange={(patch) => patchForm({ draft: { ...form.draft, ...patch }, error: null })}
           onToggleWeekday={(day) => patchForm({ draft: toggleDraftWeekday(form.draft, day), error: null })}
           onSubmit={submit}
-          onCancel={() => setDrawer(null)}
+          onCancel={closeForm}
           formatTime={formatTime}
           lead={agentChoice}
+          notice={takeoverInForm ? takeoverNotice : null}
           className="schedules__form"
         />
       </DetailDrawer>
@@ -952,6 +1009,17 @@ export function SchedulesPanel({
               </p>
             </DrawerSection>
           )}
+          {schedule.senderHistory.length > 0 ? (
+            <DrawerSection label="Earlier senders" count={schedule.senderHistory.length}>
+              <ol className="schedules__runs" data-testid={`schedules-sender-history:${schedule.scheduleId}`}>
+                {schedule.senderHistory.map((former, index) => (
+                  <li key={`${index}:${former.replacedAt ?? ""}`} title={former.sender || undefined}>
+                    {describeFormerSender(former, (raw) => directory.lookup(raw)?.label, formatTime)}
+                  </li>
+                ))}
+              </ol>
+            </DrawerSection>
+          ) : null}
         </DetailDrawer>
       );
     }
@@ -1007,6 +1075,7 @@ export function SchedulesPanel({
             {actionError}
           </Notice>
         ) : null}
+        {takeover && !takeoverInForm ? takeoverNotice : null}
         <DrawerLayout
           main={<div className="schedules__main">{main}</div>}
           drawer={drawerNode}

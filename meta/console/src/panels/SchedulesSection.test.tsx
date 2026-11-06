@@ -229,9 +229,9 @@ describe("SchedulesSection", () => {
     expect(present(view, "schedules-empty:alpha")).toBe(true);
 
     expect(state.calls.filter((call) => call.command !== "listSchedules")).toEqual([
-      { command: "updateSchedule", params: { schedule_id: "sch_1", content: "Post it now" } },
+      { command: "updateSchedule", params: { schedule_id: "sch_1", content: "Post it now", expected_revision: 1 } },
       { command: "pauseSchedule", params: { schedule_id: "sch_1" } },
-      { command: "resumeSchedule", params: { schedule_id: "sch_1" } },
+      { command: "resumeSchedule", params: { schedule_id: "sch_1", expected_revision: 3 } },
       { command: "deleteSchedule", params: { schedule_id: "sch_1" } },
     ]);
   });

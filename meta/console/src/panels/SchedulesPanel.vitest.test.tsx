@@ -233,6 +233,48 @@ describe("SchedulesPanel", () => {
     expect(present(view, "schedules-drawer")).toBe(true);
   });
 
+  it("asks before a resume or an edit takes a schedule over from its sender", async () => {
+    const { run } = demo();
+    const takeover = Object.assign(new Error("takeover"), {
+      rpcError: { code: -32009, message: "takeover", data: { kind: "sender_takeover_required", sender: "ops@example.test" } },
+    });
+    const calls: Array<{ command: ConsoleScheduleCommand; params: Record<string, unknown> }> = [];
+    const asking = vi.fn(async (identity: string, command: ConsoleScheduleCommand, params: Record<string, unknown>) => {
+      calls.push({ command, params });
+      if ((command === "resumeSchedule" || command === "updateSchedule") && params.take_over_sender !== true) throw takeover;
+      return run(identity, command, params);
+    });
+    const view = render(panel({ run: asking }));
+    await loaded(view);
+    fireEvent.click(view.getByTestId("schedules-view:list"));
+
+    fireEvent.click(view.getByTestId("schedules-resume:sch_weekend_handover"));
+    await waitFor(() => expect(present(view, "schedules-takeover")).toBe(true));
+    expect(view.getByTestId("schedules-takeover").textContent?.includes("ops@example.test")).toBe(true);
+    expect(view.getByTestId("schedules-phase:sch_weekend_handover").textContent).toBe("Paused");
+    fireEvent.click(view.getByTestId("schedules-takeover-confirm"));
+    await waitFor(() => expect(view.getByTestId("schedules-phase:sch_weekend_handover").textContent).toBe("Active"));
+    const resumes = calls.filter((call) => call.command === "resumeSchedule");
+    expect(resumes.length).toBe(2);
+    expect(resumes[1].params.take_over_sender).toBe(true);
+    expect(resumes[1].params.expected_revision).toBe(resumes[0].params.expected_revision);
+    expect(typeof resumes[0].params.expected_revision).toBe("number");
+
+    await waitFor(() => expect((view.getByTestId("schedules-edit:sch_inbox_sweep") as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(view.getByTestId("schedules-edit:sch_inbox_sweep"));
+    const form = view.getByTestId("schedule-form:support");
+    fireEvent.change(within(form).getByTestId("schedule-form-content"), { target: { value: "Sweep the inbox now" } });
+    fireEvent.submit(form);
+    await waitFor(() => expect(present(view, "schedules-takeover")).toBe(true));
+    // The edit's question sits in its form.
+    expect(within(view.getByTestId("schedules-drawer")).queryByTestId("schedules-takeover") !== null).toBe(true);
+    fireEvent.click(view.getByTestId("schedules-takeover-confirm"));
+    await waitFor(() => expect(present(view, "schedules-drawer")).toBe(false));
+    const updates = calls.filter((call) => call.command === "updateSchedule");
+    expect(updates.map((call) => call.params.take_over_sender === true)).toEqual([false, true]);
+    expect(updates[1].params.content).toBe("Sweep the inbox now");
+  });
+
   it("counts an agent whose list it may not read, and says when a read failed", async () => {
     const { run } = demo({ refuse: ["billing"] });
     const failing = vi.fn(async (identity: string, command: ConsoleScheduleCommand, params: Record<string, unknown>) => {

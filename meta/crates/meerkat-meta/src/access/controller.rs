@@ -180,7 +180,10 @@ impl AccessController {
         // §10.3 migration: memory-naive configs (written before the memory
         // read actions existed) get `agent.memory.read` alongside
         // `agent.view`; see `normalize_access_config_for_memory_actions`.
+        // Configs that name no schedule action get `schedule.manage`
+        // alongside `agent.send` the same way.
         super::model::normalize_access_config_for_memory_actions(&mut config);
+        super::model::normalize_access_config_for_schedule_actions(&mut config);
         validate_access_config(&config)?;
         Ok(Self {
             inner: Arc::new(AccessControllerInner {
@@ -423,6 +426,7 @@ impl AccessController {
     ) -> Result<u64, AccessConfigError> {
         mutation.apply(&mut config)?;
         super::model::normalize_access_config_for_memory_actions(&mut config);
+        super::model::normalize_access_config_for_schedule_actions(&mut config);
         validate_access_config(&config)?;
         self.commit(config)
     }
@@ -1826,8 +1830,10 @@ mod tests {
         controller.replace_config(config.clone()).expect("replace");
 
         // The accepted config is the §10.3-normalized one (this fixture is
-        // memory-naive, so `agent.memory.read` rides its view rule).
+        // memory-naive, so `agent.memory.read` rides its view rule), and
+        // names no schedule action, so `schedule.manage` rides its send rule.
         super::super::model::normalize_access_config_for_memory_actions(&mut config);
+        super::super::model::normalize_access_config_for_schedule_actions(&mut config);
         let reloaded = AccessController::load(&path).expect("reload");
         let (reloaded_config, _) = reloaded.snapshot();
         assert_eq!(*reloaded_config, config);
@@ -2575,7 +2581,9 @@ mod tests {
                 rules: vec![AccessRule {
                     id: "private-rule".into(),
                     description: Some(PRIVATE.into()),
-                    actions: vec!["agent.send".into()],
+                    // Names `schedule.manage` itself, so the owner takes it
+                    // literally and stores exactly this configuration.
+                    actions: vec!["agent.send".into(), "schedule.manage".into()],
                     subjects: vec![B.into()],
                     ..Default::default()
                 }],

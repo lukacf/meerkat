@@ -8,8 +8,12 @@ import {
   NO_CONSOLE_SCHEDULES,
   consoleScheduleEditing,
   consoleScheduleOffer,
+  describeFormerSender,
   describeInterval,
+  describeLatestTakeover,
   describeScheduleSender,
+  describeScheduleSenderHistory,
+  describeScheduleTakeover,
   describeScheduleTrigger,
   emptyScheduleDraft,
   localDateTimeInput,
@@ -19,6 +23,10 @@ import {
   scheduleDraftFromSchedule,
   scheduleErrorMessage,
   scheduleIsGone,
+  scheduleResumeParams,
+  scheduleTakeover,
+  scheduleTakeoverConfirmLabel,
+  scheduleTakeoverParams,
   scheduleUpdateParams,
   type ConsoleSchedule,
   type ConsoleScheduleDraft,
@@ -142,10 +150,24 @@ test("a list answer is read fail-closed: no schedules array lists none, and unre
       item({ schedule_id: "sch_3", content: 7 }),
       "not a schedule",
       item({ schedule_id: "sch_4", name: "", sender: null, next_due_at_utc: null, phase: "paused", trigger: { type: "cron", expression: "* * * * *" } }),
-      item({ schedule_id: "sch_5", sender: "erin@example.test", sender_hidden: true }),
+      item({
+        schedule_id: "sch_5",
+        sender: "erin@example.test",
+        sender_hidden: true,
+        sender_history: [{ sender: "frank@example.test", replaced_at_utc: "2030-01-01T09:00:00Z" }],
+      }),
+      item({
+        schedule_id: "sch_6",
+        sender: "erin@example.test",
+        sender_history: [
+          { sender: "frank@example.test", defined_at_utc: "2030-01-01T07:00:00Z", replaced_at_utc: "2030-01-01T09:00:00Z" },
+          "not a former sender",
+          { sender: null, replaced_at_utc: 7 },
+        ],
+      }),
     ],
   });
-  assert.deepEqual(listed.map((entry) => entry.scheduleId), ["sch_1", "sch_4", "sch_5"]);
+  assert.deepEqual(listed.map((entry) => entry.scheduleId), ["sch_1", "sch_4", "sch_5", "sch_6"]);
   assert.deepEqual(listed[0], {
     scheduleId: "sch_1",
     identity: "alpha",
@@ -156,6 +178,7 @@ test("a list answer is read fail-closed: no schedules array lists none, and unre
     revision: 3,
     sender: "console:shared",
     senderHidden: false,
+    senderHistory: [],
     definedAt: "2030-01-01T08:00:00Z",
     createdAt: "2030-01-01T08:00:00Z",
     updatedAt: "2030-01-01T08:30:00Z",
@@ -169,6 +192,11 @@ test("a list answer is read fail-closed: no schedules array lists none, and unre
   assert.equal(listed[1].senderHidden, false);
   assert.equal(listed[2].senderHidden, true);
   assert.equal(listed[2].sender, null, "a withheld sender is never shown");
+  assert.deepEqual(listed[2].senderHistory, [], "nor are the senders before it");
+  assert.deepEqual(listed[3].senderHistory, [
+    { sender: "frank@example.test", definedAt: "2030-01-01T07:00:00Z", replacedAt: "2030-01-01T09:00:00Z" },
+    { sender: null, definedAt: null, replacedAt: null },
+  ]);
 });
 
 test("a schedule's timing reads in words", () => {
@@ -295,13 +323,13 @@ test("an edit keeps the timing unless it is changed, and names only a changed na
   assert.equal(edit.start, localDateTimeInput(new Date("2030-01-01T09:00:00Z")));
 
   assert.deepEqual(scheduleUpdateParams(existing, { ...edit, content: "Post it now" }, now), {
-    params: { schedule_id: "sch_1", content: "Post it now" },
+    params: { schedule_id: "sch_1", content: "Post it now", expected_revision: 3 },
   });
   assert.deepEqual(scheduleUpdateParams(existing, { ...edit, name: "Daily standup" }, now), {
-    params: { schedule_id: "sch_1", content: "Post the standup summary", name: "Daily standup" },
+    params: { schedule_id: "sch_1", content: "Post the standup summary", name: "Daily standup", expected_revision: 3 },
   });
   assert.deepEqual(scheduleUpdateParams(existing, { ...edit, name: "" }, now), {
-    params: { schedule_id: "sch_1", content: "Post the standup summary", name: "" },
+    params: { schedule_id: "sch_1", content: "Post the standup summary", name: "", expected_revision: 3 },
   });
   const at = new Date(2030, 0, 5, 10, 0, 0);
   assert.deepEqual(scheduleUpdateParams(existing, { ...edit, timing: "once", at: localDateTimeInput(at) }, now), {
@@ -309,6 +337,7 @@ test("an edit keeps the timing unless it is changed, and names only a changed na
       schedule_id: "sch_1",
       content: "Post the standup summary",
       trigger: { type: "once", due_at_utc: at.toISOString() },
+      expected_revision: 3,
     },
   });
   assert.deepEqual(scheduleUpdateParams(existing, { ...edit, content: "" }, now), { error: "Write the message to send." });
@@ -354,6 +383,10 @@ test("a refusal reads by its kind, and server text shows only for invalid params
   assert.match(scheduleErrorMessage(rpcError(-32010, { kind: "read_only" }), create), /read-only/);
   assert.match(scheduleErrorMessage(rpcError(-32030, { kind: "access_denied" }), list), /not view this agent's schedules/);
   assert.match(scheduleErrorMessage(rpcError(-32030, { kind: "access_denied" }), create), /not message this agent/);
+  assert.equal(
+    scheduleErrorMessage(rpcError(-32030, { kind: "access_denied", action: "schedule.manage" }), create),
+    "You may not change this agent's schedules.",
+  );
   assert.match(scheduleErrorMessage(rpcError(-32047, { kind: "candidate_launch" }), create), /candidate launch/);
   assert.equal(scheduleErrorMessage(rpcError(-32001, { kind: "schedule_not_found" }), create), "This schedule no longer exists.");
   assert.match(
@@ -391,4 +424,50 @@ test("a schedule's sender reads in words; a console identity is never shown as i
   for (const sender of ["console:shared", "console:night_shift"]) {
     assert.doesNotMatch(describeScheduleSender(sender), /console:/, sender);
   }
+});
+
+test("a takeover refusal names who the schedule sends as, and its confirmation repeats the change as a takeover", () => {
+  const update = CONSOLE_SCHEDULE_COMMANDS.update;
+  const resume = CONSOLE_SCHEDULE_COMMANDS.resume;
+  const refused = rpcError(-32009, { kind: "sender_takeover_required", sender: "erin@example.test" });
+  assert.deepEqual(scheduleTakeover(refused), { sender: "erin@example.test" });
+  assert.deepEqual(scheduleTakeover(rpcError(-32009, { kind: "sender_takeover_required", sender: null })), { sender: null });
+  assert.equal(scheduleTakeover(rpcError(-32009, { kind: "schedule_revision_conflict" })), null);
+  assert.equal(scheduleTakeover(new Error("x")), null);
+  assert.match(scheduleErrorMessage(refused, update), /sends as someone else/);
+
+  assert.equal(
+    describeScheduleTakeover({ sender: "erin@example.test" }, update),
+    "This schedule sends as erin@example.test. Saving your change makes you its sender: it sends as you from then on.",
+  );
+  assert.equal(
+    describeScheduleTakeover({ sender: null }, resume),
+    "This schedule sends as this console. Resuming it makes you its sender: it sends as you from then on.",
+  );
+  assert.equal(scheduleTakeoverConfirmLabel(update), "Take over and save");
+  assert.equal(scheduleTakeoverConfirmLabel(resume), "Take over and resume");
+  assert.deepEqual(scheduleTakeoverParams({ schedule_id: "sch_1", expected_revision: 3 }), {
+    schedule_id: "sch_1",
+    expected_revision: 3,
+    take_over_sender: true,
+  });
+  assert.deepEqual(scheduleResumeParams(schedule()), { schedule_id: "sch_1", expected_revision: 3 });
+  assert.deepEqual(scheduleResumeParams(schedule({ revision: null })), { schedule_id: "sch_1" });
+});
+
+test("a schedule's earlier senders read in words, the latest takeover first", () => {
+  const history = [
+    { sender: "frank@example.test", definedAt: "2030-01-01T07:00:00Z", replacedAt: "2030-01-01T09:00:00Z" },
+    { sender: null, definedAt: null, replacedAt: "2030-01-02T09:00:00Z" },
+  ];
+  assert.equal(describeLatestTakeover([], undefined, verbatim), null);
+  assert.equal(describeLatestTakeover(history, undefined, verbatim), "Taken over from this console on 2030-01-02T09:00:00Z");
+  assert.equal(
+    describeScheduleSenderHistory(history, undefined, verbatim),
+    "Sent as frank@example.test until 2030-01-01T09:00:00Z\nSent as this console until 2030-01-02T09:00:00Z",
+  );
+  assert.equal(
+    describeFormerSender({ sender: "identity:alpha", definedAt: null, replacedAt: null }, (key) => (key === "identity:alpha" ? "Alpha" : undefined)),
+    "Sent as Alpha",
+  );
 });

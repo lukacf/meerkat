@@ -40,9 +40,9 @@ use crate::access::{
     ACTION_AGENT_MEMORY_WRITE, ACTION_AGENT_RESET, ACTION_AGENT_RESPAWN, ACTION_AGENT_RETIRE,
     ACTION_AGENT_SEND, ACTION_AGENT_SPAWN, ACTION_AGENT_VIEW, ACTION_GATING_DECIDE,
     ACTION_GATING_VIEW, ACTION_MEMORY_QUARANTINE_REVIEW, ACTION_MOB_MEMORY_READ,
-    ACTION_MOB_OBSERVE, ACTION_OPERATOR_MEMORY_READ, ACTION_RUNTIME_ADMIN, ACTION_WORKGRAPH_MANAGE,
-    ACTION_WORKGRAPH_VIEW, AccessController, AccessGroup, AccessResource, AccessRule, AccessView,
-    AgentResourceAttributes, LiveAccessView,
+    ACTION_MOB_OBSERVE, ACTION_OPERATOR_MEMORY_READ, ACTION_RUNTIME_ADMIN, ACTION_SCHEDULE_MANAGE,
+    ACTION_WORKGRAPH_MANAGE, ACTION_WORKGRAPH_VIEW, AccessController, AccessGroup, AccessResource,
+    AccessRule, AccessView, AgentResourceAttributes, LiveAccessView,
 };
 use crate::blob_store::{BinaryBlobPayload, BinaryBlobStore, is_valid_blob_id_value};
 use crate::console_aggregator::{
@@ -4822,14 +4822,19 @@ fn console_rpc_access_requirements(
         "meta/console/send" | "meta/console/recover_send" => one(ACTION_AGENT_SEND, identity),
         // A console schedule is a deferred send to its agent, named by
         // `identity`: listing them needs what viewing the agent needs, and
-        // every write what sending to it needs. That the schedule is that
-        // agent's is judged in the handler.
+        // every write what sending to it needs and `schedule.manage`, which
+        // lets a deployment keep some who message the agent from changing
+        // its schedules. That the schedule is that agent's is judged in the
+        // handler.
         "meta/schedule/list" => one(ACTION_AGENT_VIEW, identity),
         "meta/schedule/create"
         | "meta/schedule/update"
         | "meta/schedule/pause"
         | "meta/schedule/resume"
-        | "meta/schedule/delete" => one(ACTION_AGENT_SEND, identity),
+        | "meta/schedule/delete" => Some(vec![
+            (ACTION_AGENT_SEND, identity.clone()),
+            (ACTION_SCHEDULE_MANAGE, identity),
+        ]),
         crate::console_voice::VOICE_CONTEXT_STATUS_METHOD
         | crate::console_voice::VOICE_CAPTIONS_METHOD => one(ACTION_AGENT_VIEW, identity),
         crate::console_voice::VOICE_OPEN_METHOD

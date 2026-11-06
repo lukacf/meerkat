@@ -1274,13 +1274,13 @@ pub async fn console_json_handler(
         && uri.path() == "/console/experience"
         && !state.decisions.console.read_only
         && let Some(voice) = voice
+        && voice.0.configured()
+        && caller.as_ref().is_some_and(|auth| auth.principal.is_some())
     {
-        if voice.0.configured() && caller.as_ref().is_some_and(|auth| auth.principal.is_some()) {
-            response.body["voice"] = json!({
-                "available": false,
-                "readiness_method": crate::console_voice::VOICE_READINESS_METHOD
-            });
-        }
+        response.body["voice"] = json!({
+            "available": false,
+            "readiness_method": crate::console_voice::VOICE_READINESS_METHOD
+        });
     }
     let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     (status, Json::<Value>(response.body))

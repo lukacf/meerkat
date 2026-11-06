@@ -25731,6 +25731,7 @@ function latestRoutableFrameIsTerminal(frames) {
 // ../packages/console-core/src/contract.ts
 var CONSOLE_RPC_METHODS = {
   capabilities: "meta/capabilities",
+  whoami: "meta/console/whoami",
   send: "meta/console/send",
   recoverSend: "meta/console/recover_send",
   listIdentities: "meta/console/list_identities",
@@ -26816,6 +26817,7 @@ var REFUSAL_WORDS = {
   approver_mismatch: "This request is waiting for another approver.",
   unknown_pending_id: "This request was already decided or has expired.",
   empty_principal: "Sign in to decide approvals.",
+  approver_unauthenticated: "Only a signed-in person can decide approvals. Sign in as yourself; nothing was decided.",
   gating_ids_unavailable: "The decision couldn't be recorded right now. Nothing changed; try again."
 };
 function approvalRefusal(error48) {
@@ -54598,6 +54600,7 @@ var CONSOLE_RPC_PATHS2 = {
 };
 var CONSOLE_RPC_METHODS2 = {
   capabilities: "meta/capabilities",
+  whoami: "meta/console/whoami",
   send: "meta/console/send",
   recoverSend: "meta/console/recover_send",
   listIdentities: "meta/console/list_identities",
@@ -60650,6 +60653,9 @@ function createHttpConsoleTransport2({
     capabilities: async () => normalizeCapabilities(
       await callConsoleRpc2(baseUrl, CONSOLE_RPC_METHODS2.capabilities, {}, timeout2())
     ),
+    whoami: async () => normalizeWhoami2(
+      await callConsoleRpc2(baseUrl, CONSOLE_RPC_METHODS2.whoami, {}, timeout2())
+    ),
     queryTimeline: (input) => queryTimeline2(baseUrl, input, input.limit, timeout2(), input.signal),
     subscribeTimeline: (input, onFrame, options) => subscribeTimelineEvents2(baseUrl, input, onFrame, {
       signal: input.signal,
@@ -60846,6 +60852,20 @@ function normalizeCapabilities(value) {
     runtime_capabilities: record10.runtime_capabilities,
     method_capabilities: record10.method_capabilities,
     ...record10.topology_control && typeof record10.topology_control === "object" ? { topologyControl: record10.topology_control } : {}
+  };
+}
+function normalizeWhoami2(value) {
+  const record10 = value && typeof value === "object" ? value : {};
+  const actor = record10.actor && typeof record10.actor === "object" ? record10.actor : {};
+  const text14 = (field) => typeof field === "string" && field.trim() ? field : void 0;
+  const expiresAt = record10.login_expires_at_ms;
+  return {
+    actorKind: text14(actor.kind) ?? "anonymous",
+    ...text14(actor.principal) ? { principal: text14(actor.principal) } : {},
+    approverIds: Array.isArray(record10.approver_ids) ? record10.approver_ids.filter((id) => typeof id === "string" && id.trim().length > 0) : [],
+    canAdminister: record10.can_administer === true,
+    ...text14(record10.caller_scope) ? { callerScope: text14(record10.caller_scope) } : {},
+    ...typeof expiresAt === "number" && Number.isFinite(expiresAt) ? { loginExpiresAtMs: expiresAt } : {}
   };
 }
 var ConsoleCapabilityUnavailableError2 = class extends Error {
@@ -91522,6 +91542,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         loadExperience: () => call(() => source.loadExperience()),
         loadModules: source.loadModules ? () => call(() => source.loadModules()) : void 0,
         capabilities: () => call(() => source.capabilities()),
+        whoami: source.whoami ? () => call(() => source.whoami()) : void 0,
         queryTimeline: (input) => call(() => source.queryTimeline(input)),
         send: (input) => call(() => source.send(input)),
         executeCommand: source.executeCommand ? (input) => call(() => source.executeCommand(input)) : void 0,
@@ -92919,24 +92940,39 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [approvalOpens, setApprovalOpens] = import_react102.default.useState(0);
   const approvalResourceRef = import_react102.default.useRef(null);
   const approvalScope = "".concat(sendScope, ":").concat(experience?.runtime_id || "loading");
+  const [approvalDecider, setApprovalDecider] = import_react102.default.useState();
+  import_react102.default.useEffect(() => {
+    let active = true;
+    const scope = sendScope;
+    void Promise.resolve().then(() => consoleTransport.whoami ? consoleTransport.whoami() : null).then((whoami) => {
+      if (active) setApprovalDecider({ scope, person: whoami?.actorKind === "person" });
+    }).catch(() => {
+      if (active) setApprovalDecider({ scope, person: false });
+    });
+    return () => {
+      active = false;
+    };
+  }, [consoleTransport, sendScope]);
+  const approvalsDecidable = approvalDecider?.scope === sendScope ? approvalDecider.person : void 0;
   import_react102.default.useEffect(() => {
     setApprovalSnapshot(void 0);
     setSelectedApprovalId(void 0);
-    if (!experience || !hasMobControlSurface) return;
+    if (!experience || !hasMobControlSurface || approvalsDecidable === void 0) return;
     const target = controlWorkbenchTarget("gating");
     const resource = createPendingApprovalResource({
       scopeKey: approvalScope,
-      readOnly: consoleReadOnly,
+      readOnly: consoleReadOnly || !approvalsDecidable,
       load: async (signal) => (await consoleController.commands.execute({
         command: CONSOLE_COMMAND_NAMES2.listGatingPending,
         target,
         signal
       })).result,
+      // No approver in the request: the gateway decides as the signed-in person.
       decide: async (pendingId, decision, signal) => (await consoleController.commands.execute({
         command: CONSOLE_COMMAND_NAMES2.decideGating,
         target,
         signal,
-        params: { pending_id: pendingId, approver_id: DEFAULT_APPROVER_ID, decision, reason: "console_".concat(decision) }
+        params: { pending_id: pendingId, decision, reason: "console_".concat(decision) }
       })).result
     });
     approvalResourceRef.current = resource;
@@ -92948,7 +92984,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       resource.dispose();
       if (approvalResourceRef.current === resource) approvalResourceRef.current = null;
     };
-  }, [approvalScope, Boolean(experience), hasMobControlSurface, consoleReadOnly, consoleController]);
+  }, [approvalScope, Boolean(experience), hasMobControlSurface, consoleReadOnly, approvalsDecidable, consoleController]);
   const activeApprovals = approvalSnapshot?.owner === consoleController && approvalSnapshot.snapshot.scopeKey === approvalScope ? approvalSnapshot.snapshot : void 0;
   const hostAttentionKey = JSON.stringify(experience?.console_config?.attention?.sources || []);
   const hostAttentionSources = import_react102.default.useMemo(

@@ -495,6 +495,14 @@ pub(crate) fn render_console_rest_json_route(
         apply_memory_to_experience(&mut body, access_view, memory_panel_available);
         apply_workgraph_to_experience(&mut body, access_view, workgraph_available);
     }
+    // A side chat's creator shows only to that person and to access admins.
+    crate::side_chat::clear_unseen_side_chat_creators(
+        &mut body,
+        crate::side_chat::SideChatCreatorViewer::new(
+            access_subject.as_deref(),
+            access_view.as_ref(),
+        ),
+    );
     ConsoleRestJsonResponse { status: 200, body }
 }
 

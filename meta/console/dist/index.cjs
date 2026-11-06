@@ -21899,7 +21899,7 @@ function normalizeGatingAuditEntry(value) {
     approverId: trimString(detail.approver_id),
     decidingPrincipal: trimString(detail.deciding_principal),
     approverBinding: trimString(detail.approver_binding),
-    deciderAssurance: trimString(detail.assurance),
+    deciderAssurance: trimString(detail.deciding_assurance),
     automaticAllowance: record10.event_type === "evaluated" && (record10.outcome === "allowed" || record10.outcome === "allowed_with_audit")
   };
 }
@@ -63152,6 +63152,7 @@ function withDetail(line, detail) {
   return detail ? "".concat(line, " \xB7 ").concat(detail) : line;
 }
 var DEBUG_RECORD_AUTHOR = /^\s*(Agent|Steward|Distiller)\s*\{\s*(identity|run_id)\s*:\s*"((?:[^"\\]|\\.)*)"\s*,?\s*\}\s*$/;
+var DEBUG_OPERATOR_AUTHOR = /^\s*Operator\s*\{\s*principal\s*:\s*(?:None|Some\(\s*"((?:[^"\\]|\\.)*)"\s*\))\s*,?\s*\}\s*$/;
 var DEBUG_UNIT_AUTHOR = /^\s*(Operator|Application)\s*$/;
 function unescapeDebugText(text14) {
   return text14.replace(/\\(u\{([0-9a-fA-F]{1,6})\}|.)/g, (_match, escape, hex3) => {
@@ -63178,6 +63179,7 @@ function parseMemoryAuthor(value) {
     const author = value.author;
     const identity = value.identity;
     const runId = value.run_id;
+    const principal = value.principal;
     switch (author) {
       case "agent":
         return typeof identity === "string" && identity.trim() ? { author: "agent", identity: identity.trim() } : null;
@@ -63185,6 +63187,7 @@ function parseMemoryAuthor(value) {
       case "distiller":
         return typeof runId === "string" && runId ? { author, run_id: runId } : { author };
       case "operator":
+        return typeof principal === "string" && principal.trim() ? { author: "operator", principal: principal.trim() } : { author: "operator" };
       case "application":
         return { author };
       default:
@@ -63201,6 +63204,11 @@ function parseMemoryAuthor(value) {
     const kind = variant === "Steward" ? "steward" : "distiller";
     return text14 ? { author: kind, run_id: text14 } : { author: kind };
   }
+  const operator = DEBUG_OPERATOR_AUTHOR.exec(value);
+  if (operator) {
+    const principal = operator[1] === void 0 ? "" : unescapeDebugText(operator[1]).trim();
+    return principal ? { author: "operator", principal } : { author: "operator" };
+  }
   const unit = DEBUG_UNIT_AUTHOR.exec(value);
   if (unit) return { author: unit[1] === "Operator" ? "operator" : "application" };
   const key = value.trim();
@@ -63216,7 +63224,7 @@ function memoryAuthorWords(author, names = {}) {
     case "distiller":
       return "the memory distiller";
     case "operator":
-      return "an operator";
+      return author.principal || "an operator";
     case "application":
       return "the application";
   }
@@ -69269,7 +69277,7 @@ function authorDisplay(author, nameOf = stripAgentKeyPrefix) {
     case "distiller":
       return "The memory distiller";
     case "operator":
-      return "An operator";
+      return author.principal ? "".concat(author.principal, " (operator)") : "An operator";
     case "application":
       return "The application";
     default:

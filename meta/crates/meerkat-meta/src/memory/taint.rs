@@ -1754,8 +1754,12 @@ mod tests {
                 .is_none()
         );
         assert!(
-            gate.quarantine_reason(&MemoryAuthor::Operator, StagedBatchKind::FreshWrite, &[])
-                .is_none()
+            gate.quarantine_reason(
+                &MemoryAuthor::Operator { principal: None },
+                StagedBatchKind::FreshWrite,
+                &[]
+            )
+            .is_none()
         );
 
         // llm_writes=quarantined forces quarantine with no taint at all —
@@ -1803,7 +1807,11 @@ mod tests {
         );
         assert!(
             strict
-                .quarantine_reason(&MemoryAuthor::Operator, StagedBatchKind::FreshWrite, &[])
+                .quarantine_reason(
+                    &MemoryAuthor::Operator { principal: None },
+                    StagedBatchKind::FreshWrite,
+                    &[]
+                )
                 .is_none()
         );
     }
@@ -1880,7 +1888,7 @@ mod tests {
         // Non-LLM authors are never evidence-gated.
         assert!(
             gate.quarantine_reason(
-                &MemoryAuthor::Operator,
+                &MemoryAuthor::Operator { principal: None },
                 StagedBatchKind::FreshWrite,
                 &evidence_for(&session)
             )

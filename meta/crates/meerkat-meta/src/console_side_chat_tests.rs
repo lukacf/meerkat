@@ -3009,3 +3009,124 @@ async fn a_creator_label_no_fork_wrote_counts_nowhere() -> TestResult {
     );
     Ok(())
 }
+
+/// `GET /console/experience` on `router` as the caller `token` signs in.
+async fn experience_as(router: &axum::Router, token: &str) -> Value {
+    use tower::ServiceExt;
+    let response = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/console/experience")
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .expect("experience request"),
+        )
+        .await
+        .expect("experience response");
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1 << 24)
+        .await
+        .expect("experience body");
+    serde_json::from_slice(&body).expect("experience json")
+}
+
+/// A side chat's creator is someone's principal: the console shows it to
+/// that person and to access admins, and clears it for every other viewer
+/// of the side chat, on the member list and in the experience. The viewer
+/// still sees the side chat and its source.
+#[tokio::test]
+async fn side_chat_creator_hidden_from_other_viewers() -> TestResult {
+    use super::console_human_admission_tests::{BOB, state};
+    use super::console_token_lapse_tests::{console_rpc_as, human_claims, now_seconds, token};
+    const ROOT: &str = "root@example.test";
+    const ROBOT: &str = "svc:robot";
+
+    let (_temp_dir, runtime) =
+        persistent_console_runtime("console-side-chat-creator-viewers", "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let controller = enforced(vec![
+        grant(
+            "bob-drives-the-source",
+            BOB,
+            &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND],
+            "alpha",
+        ),
+        grant(
+            "bob-names-the-side-chat",
+            BOB,
+            &[ACTION_AGENT_SPAWN],
+            "alpha-side",
+        ),
+        grant(
+            "the-robot-reads-the-source",
+            ROBOT,
+            &[ACTION_AGENT_VIEW],
+            "alpha",
+        ),
+    ])?;
+    let forked = fork_as(&runtime, &controller, BOB, "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "the fork succeeds: {forked:#?}");
+
+    let mut console = state();
+    console
+        .decisions
+        .auth
+        .email_allowlist
+        .push(ROOT.to_string());
+    let router = console_json_router_with_state(ConsoleJsonState {
+        runtime: Some(runtime.clone()),
+        access: Some(controller.clone()),
+        ..console
+    });
+    let expires = Some(now_seconds() + 3600);
+    let viewers = [
+        ("the creator", token(human_claims(), expires), Some(BOB)),
+        (
+            "an access admin",
+            token(
+                json!({ "sub": "oidc-sub-root", "email": ROOT, "provider": "google_oauth" }),
+                expires,
+            ),
+            Some(BOB),
+        ),
+        (
+            "another viewer",
+            token(json!({ "email": ROBOT }), expires),
+            None,
+        ),
+    ];
+    for (viewer, token, creator) in &viewers {
+        let listed = console_rpc_as(&router, Some(token), "meta/list_members", json!({})).await;
+        let row = listed["result"]
+            .as_array()
+            .and_then(|rows| {
+                rows.iter().find(|row| {
+                    row["agent_identity"] == json!("alpha-side")
+                        || row["member_id"] == json!("alpha-side")
+                })
+            })
+            .unwrap_or_else(|| panic!("{viewer} lists the side chat: {listed:#}"));
+        assert_eq!(
+            row["labels"][CREATOR].as_str(),
+            *creator,
+            "{viewer}'s member list: {row:#}"
+        );
+
+        let experience = experience_as(&router, token).await;
+        let rows = experience["agent_sidebar"]["live_snapshot"]["agents"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let side_chat = sidebar_row(&rows, "alpha-side")
+            .unwrap_or_else(|| panic!("{viewer} sees the side chat: {experience:#}"));
+        assert_eq!(side_chat["side_chat_of"], json!("alpha"), "{viewer}");
+        assert_eq!(
+            side_chat["labels"][CREATOR].as_str(),
+            *creator,
+            "{viewer}'s experience: {side_chat:#}"
+        );
+    }
+    Ok(())
+}

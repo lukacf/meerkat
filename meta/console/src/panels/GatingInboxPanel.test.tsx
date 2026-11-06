@@ -178,11 +178,11 @@ describe("GatingInboxPanel recorded audit", () => {
   it("names who decided, as which approver, and with what assurance", () => {
     const decided = {
       ...evaluated, audit_id: "person-decision", pending_id: "pending-2", event_type: "approval_decided", risk_tier: "r3", outcome: "allowed",
-      detail: { decision: "approve", approver_id: "release-manager", deciding_principal: "alice@example.test", approver_binding: "held", assurance: "person_authenticated" },
+      detail: { decision: "approve", approver_id: "release-manager", deciding_principal: "alice@example.test", approver_binding: "held", deciding_assurance: "person_authenticated" },
     };
     const device = {
       ...decided, audit_id: "operator-decision", action_id: "stdio-check",
-      detail: { decision: "approve", approver_id: "ops-lead", deciding_principal: "ops-lead", approver_binding: "principal", assurance: "device_trusted" },
+      detail: { decision: "approve", approver_id: "ops-lead", deciding_principal: "ops-lead", approver_binding: "principal", deciding_assurance: "device_trusted" },
     };
     const unnamed = { ...decided, audit_id: "label-only", action_id: "older-record", detail: { decision: "approve", approver_id: "duty-approver" } };
     const view = render(<GatingInboxPanel pending={[]} audit={[decided, device, unnamed]} onDecide={vi.fn()} />);

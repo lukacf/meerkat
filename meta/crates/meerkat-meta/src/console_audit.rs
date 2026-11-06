@@ -500,10 +500,11 @@ impl ConsoleAuditLog {
 /// The identifiers among `params` a row keeps as the change's target: each
 /// top-level `id` or `*_id` field and the fields that name what a change is
 /// of (an identity, a realm, a role, a principal, a group or rule name, a
-/// decision, an action), when their value is a string, a number or a
-/// boolean, and the id of an access rule an upsert carries. Content
-/// (messages, memory bodies, labels, configurations, reasons) is never
-/// kept.
+/// decision, an action, the revision a checked edit expected), when their
+/// value is a string, a number or a boolean, and the id of an access rule
+/// an upsert carries. A checked access edit's fields are read inside its
+/// `checked_v1` envelope. Content (messages, memory bodies, labels,
+/// configurations, reasons) is never kept.
 pub(crate) fn audit_target(params: &Value) -> Map<String, Value> {
     const NAMED: &[&str] = &[
         "identity",
@@ -516,7 +517,12 @@ pub(crate) fn audit_target(params: &Value) -> Map<String, Value> {
         "action",
         "operation",
         "enabled",
+        "expected_revision",
     ];
+    let params = params
+        .get("checked_v1")
+        .filter(|envelope| envelope.is_object())
+        .unwrap_or(params);
     let mut target = identifier_fields(params, |key| NAMED.contains(&key));
     if let Some(rule_id) = params
         .get("rule")
@@ -753,5 +759,35 @@ mod tests {
         );
         assert_eq!(failed.outcome, ConsoleAuditOutcome::Failed);
         assert!(failed.receipt.is_empty());
+    }
+
+    /// A checked access edit carries its fields in its `checked_v1`
+    /// envelope: the row keeps the identifiers there and the revision the
+    /// edit expected, never the owner instance or the configuration.
+    #[test]
+    fn a_checked_access_edit_keeps_the_identifiers_of_its_envelope() {
+        let target = audit_target(&json!({
+            "checked_v1": {
+                "owner_instance": "0123abcd",
+                "expected_revision": 4,
+                "rule": { "id": "ops-view", "subjects": ["svc:robot"] },
+            }
+        }));
+        assert_eq!(
+            Value::Object(target),
+            json!({ "expected_revision": 4, "rule_id": "ops-view" })
+        );
+        let target = audit_target(&json!({
+            "checked_v1": {
+                "owner_instance": "0123abcd",
+                "expected_revision": 5,
+                "name": "ops",
+                "group": { "members": ["svc:robot"] },
+            }
+        }));
+        assert_eq!(
+            Value::Object(target),
+            json!({ "expected_revision": 5, "name": "ops" })
+        );
     }
 }

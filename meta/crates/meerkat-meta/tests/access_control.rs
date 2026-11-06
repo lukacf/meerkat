@@ -2837,7 +2837,7 @@ async fn seeded_memory_store(
         .remember_authored(
             &identity_scope("router"),
             record("Router root"),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("router root");
@@ -2846,7 +2846,7 @@ async fn seeded_memory_store(
             &identity_scope("router"),
             &router_root.memory_id,
             record("Router tip"),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("router tip");
@@ -2854,7 +2854,7 @@ async fn seeded_memory_store(
         .remember_authored(
             &identity_scope("delivery"),
             record("Delivery fact"),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("delivery record");
@@ -2865,7 +2865,7 @@ async fn seeded_memory_store(
                 mob: "access-control-mob".to_string(),
             },
             record("Mob convention"),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("mob record");
@@ -2875,7 +2875,7 @@ async fn seeded_memory_store(
                 realm: "default".to_string(),
             },
             record("Realm fact"),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("realm record");
@@ -2888,7 +2888,7 @@ async fn seeded_memory_store(
                 operator: "op-luka".to_string(),
             },
             record("Operator preference"),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("operator record");
@@ -3595,7 +3595,7 @@ async fn seed_realm_level_panel_rows(
                 mob: "access-control-mob".to_string(),
             },
             proposal("Mob proposal"),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("mob proposal");
@@ -3606,7 +3606,7 @@ async fn seed_realm_level_panel_rows(
                 operator: "op-owner".to_string(),
             },
             proposal("Operator proposal"),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("operator proposal");
@@ -4046,7 +4046,7 @@ async fn plain_dream_store(root: &std::path::Path) -> meerkat_meta::SqliteAgentM
             .remember_authored(
                 &identity_scope(identity),
                 record(&format!("{identity} fact")),
-                MemoryAuthor::Operator,
+                MemoryAuthor::Operator { principal: None },
             )
             .await
             .expect("identity record");
@@ -4201,7 +4201,11 @@ async fn memory_panel_dream_history_needs_the_review_grant_after_a_quarantined_t
         "the write must land quarantined: {quarantined:?}"
     );
     let forgotten = store
-        .forget_authored(&router, &quarantined.memory_id, MemoryAuthor::Operator)
+        .forget_authored(
+            &router,
+            &quarantined.memory_id,
+            MemoryAuthor::Operator { principal: None },
+        )
         .await
         .expect("forget the quarantined write");
     assert!(
@@ -4291,7 +4295,7 @@ async fn memory_panel_reads_honour_a_label_deny_and_fail_closed_on_unknown_ident
                     evidence: Vec::new(),
                     verification: None,
                 },
-                MemoryAuthor::Operator,
+                MemoryAuthor::Operator { principal: None },
             )
             .await
             .expect("identity record");
@@ -4405,7 +4409,7 @@ async fn memory_panel_dream_history_judges_every_scope_the_realm_names() {
                 evidence: Vec::new(),
                 verification: None,
             },
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("operator proposal");
@@ -4627,7 +4631,7 @@ async fn memory_panel_pending_promotion_of_a_proposal_needs_its_scope() {
                 operator: "op-owner".to_string(),
             },
             record("Operator preference"),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("operator proposal");

@@ -270,7 +270,7 @@ mod tests {
                     evidence: vec![],
                     verification: None,
                 },
-                MemoryAuthor::Operator,
+                MemoryAuthor::Operator { principal: None },
             )
             .await
             .expect("seed memory record");

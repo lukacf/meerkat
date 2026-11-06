@@ -222,6 +222,16 @@ impl ConsoleActorKind {
 }
 
 impl ConsoleHttpAuthContext {
+    /// Who this caller is to a side chat's creator label, which the console
+    /// shows only to its creator and to access admins
+    /// ([`crate::side_chat::clear_unseen_side_chat_creators`]).
+    fn side_chat_creator_viewer(&self) -> crate::side_chat::SideChatCreatorViewer<'_> {
+        crate::side_chat::SideChatCreatorViewer::new(
+            self.principal.as_deref(),
+            self.access_view.as_ref(),
+        )
+    }
+
     /// Who the Console acts as for this request.
     fn actor_kind(&self) -> ConsoleActorKind {
         match (&self.human, &self.principal) {
@@ -1564,10 +1574,14 @@ pub async fn console_rpc_handler(
     let audited = audit::ConsoleAuditIntent::of(&state, &parsed_request);
     let request_method = parsed_request.method.clone();
     let response = console_rpc_answer(&state, voice, &auth_context, parsed_request).await;
-    let response = advertise_console_attention(response, &request_method, &state);
+    let mut response = advertise_console_attention(response, &request_method, &state);
     if let Some(intent) = audited {
         intent.record(&auth_context, &response).await;
     }
+    crate::side_chat::clear_unseen_side_chat_creators(
+        &mut response,
+        auth_context.side_chat_creator_viewer(),
+    );
     (StatusCode::OK, Json::<Value>(response))
 }
 
@@ -2356,11 +2370,14 @@ async fn console_identities_handler(
     ))
     .await
     {
-        Ok(identities) => (
-            StatusCode::OK,
-            Json::<Value>(json!({ "identities": identities })),
-        )
-            .into_response(),
+        Ok(identities) => {
+            let mut body = json!({ "identities": identities });
+            crate::side_chat::clear_unseen_side_chat_creators(
+                &mut body,
+                auth_context.side_chat_creator_viewer(),
+            );
+            (StatusCode::OK, Json::<Value>(body)).into_response()
+        }
         Err(err) => {
             tracing::warn!(target: "meta::console", error = %err, "console identities request failed");
             console_json_error(
@@ -3428,6 +3445,10 @@ mod console_reply_tests;
 #[cfg(test)]
 #[path = "console_audit_tests.rs"]
 mod console_audit_tests;
+
+#[cfg(test)]
+#[path = "console_attribution_tests.rs"]
+mod console_attribution_tests;
 
 #[cfg(test)]
 async fn console_send_identity_first(
@@ -5455,10 +5476,11 @@ fn console_revoke_sessions_rpc(
     let Some(principal) = request.params.get("principal").and_then(Value::as_str) else {
         return invalid_params(response_id, "principal must be a string");
     };
-    match state
-        .session_fences
-        .revoke_sessions(principal, std::time::SystemTime::now())
-    {
+    match state.session_fences.revoke_sessions_by(
+        principal,
+        std::time::SystemTime::now(),
+        auth.principal.as_deref(),
+    ) {
         Ok(fence) => response_value(
             response_id,
             Some(crate::rpc::console_session_fence_json(&fence)),
@@ -6221,7 +6243,7 @@ mod memory_panel_records_paging_tests {
         let token = store
             .stage(crate::StagedMutationBatch {
                 realm: realm.to_string(),
-                author: MemoryAuthor::Operator,
+                author: MemoryAuthor::Operator { principal: None },
                 kind: StagedBatchKind::FreshWrite,
                 ops,
             })
@@ -6820,6 +6842,15 @@ fn memory_quarantine_reviewer(
             .filter(|principal| !principal.is_empty())
             .map(str::to_string),
     }
+}
+
+/// The author recorded on a memory written from the console: the operator,
+/// named by the authenticated console principal exactly as a quarantine
+/// reviewer is ([`memory_quarantine_reviewer`]).
+fn console_memory_author(
+    authenticated_principal: Option<&str>,
+) -> crate::memory::records::MemoryAuthor {
+    memory_quarantine_reviewer(authenticated_principal).author()
 }
 
 /// The operator half of quarantine review (§10.1 "until steward/operator
@@ -7599,13 +7630,19 @@ fn handle_access_admin_rpc(
     };
     let result = match request.method.as_str() {
         "meta/access/get" => {
-            let (config, revision) =
-                match controller.admin_config(view.and_then(AccessView::subject)) {
-                    Ok(snapshot) => snapshot,
-                    Err(error) => return Some(access_edit_rpc_error(response_id, error)),
-                };
-            let mut result = json!({ "config": &*config, "revision": revision });
+            let read = match controller.admin_read(view.and_then(AccessView::subject)) {
+                Ok(read) => read,
+                Err(error) => return Some(access_edit_rpc_error(response_id, error)),
+            };
+            let mut result = json!({ "config": &*read.config, "revision": read.revision });
             add_access_edit_metadata(controller, &mut result);
+            if let Some(edit) = read.last_edit {
+                result["last_edit"] = json!({
+                    "principal": edit.principal,
+                    "at_ms": edit.at_ms,
+                    "revision": edit.revision,
+                });
+            }
             Ok(result)
         }
         "meta/access/set" => {
@@ -7933,11 +7970,15 @@ pub async fn console_rpc_multipart_handler(
     // A blob upload is a console change the console audit log records once
     // its answer is known, a refusal included (`crate::console_audit`).
     let audited = audit::ConsoleAuditIntent::of(&state, &parsed_request);
-    let (status, response) =
+    let (status, mut response) =
         console_rpc_multipart_answer(&state, &auth_context, parsed_request, files).await;
     if let Some(intent) = audited {
         intent.record(&auth_context, &response).await;
     }
+    crate::side_chat::clear_unseen_side_chat_creators(
+        &mut response,
+        auth_context.side_chat_creator_viewer(),
+    );
     (status, Json::<Value>(response))
 }
 
@@ -11333,10 +11374,11 @@ async fn handle_console_runtime_rpc_with_visibility(
             };
             match parse_agent_memory_remember_params(&request.params) {
                 Ok(remember_request) => match identity_runtime
-                    .remember_agent_memory(
+                    .remember_agent_memory_by(
                         &remember_request.realm,
                         &remember_request.identity,
                         remember_request.memory,
+                        console_memory_author(authenticated_principal),
                     )
                     .await
                 {
@@ -11371,10 +11413,11 @@ async fn handle_console_runtime_rpc_with_visibility(
             };
             match parse_agent_memory_forget_params(&request.params) {
                 Ok(forget_request) => match identity_runtime
-                    .forget_agent_memory(
+                    .forget_agent_memory_by(
                         &forget_request.realm,
                         &forget_request.identity,
                         &forget_request.memory_id,
+                        console_memory_author(authenticated_principal),
                     )
                     .await
                 {
@@ -11441,11 +11484,12 @@ async fn handle_console_runtime_rpc_with_visibility(
             };
             match parse_agent_memory_update_params(&request.params) {
                 Ok(update_request) => match identity_runtime
-                    .update_agent_memory(
+                    .update_agent_memory_by(
                         &update_request.realm,
                         &update_request.identity,
                         &update_request.memory_id,
                         update_request.memory,
+                        console_memory_author(authenticated_principal),
                     )
                     .await
                 {
@@ -19361,7 +19405,7 @@ comms = true
                 .remember_authored(
                     &scope(identity),
                     fact(&format!("{identity} fact")),
-                    MemoryAuthor::Operator,
+                    MemoryAuthor::Operator { principal: None },
                 )
                 .await?;
             store
@@ -19371,7 +19415,7 @@ comms = true
                 .propose(
                     &scope(identity),
                     fact(&format!("{identity} proposal")),
-                    MemoryAuthor::Operator,
+                    MemoryAuthor::Operator { principal: None },
                 )
                 .await?;
             records.insert(identity, receipt.memory_id);
@@ -19635,7 +19679,7 @@ comms = true
                     operator: "op-owner".to_string(),
                 },
                 fact("operator preference"),
-                MemoryAuthor::Operator,
+                MemoryAuthor::Operator { principal: None },
             )
             .await?;
         let stage = shared

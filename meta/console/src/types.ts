@@ -499,7 +499,7 @@ export type MemoryAuthor =
   | { author: "agent"; identity?: string }
   | { author: "steward"; run_id?: string }
   | { author: "distiller"; run_id?: string }
-  | { author: "operator" }
+  | { author: "operator"; principal?: string }
   | { author: "application" };
 
 export interface MemoryProvenance {

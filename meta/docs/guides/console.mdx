@@ -446,7 +446,9 @@ as they were.
   tools, and inherits the agent's labels.
 - It records who opened it: your console principal, in its
   `side_chat_creator` label (nothing on an open console when you sent no
-  token). The record grants nothing.
+  token). The record grants nothing, and the console shows it only to you
+  and to access admins: other viewers of the side chat see it without the
+  label.
 - On a console with sign-in, a side chat is private to the person who
   opened it: its audience is the agent's narrowed to that person, plus the
   access admins (`admins`). Everyone else meets it on no surface (sidebar,

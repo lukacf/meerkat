@@ -686,7 +686,10 @@ The side chat:
   a side chat Meerkat's roster verifies, on the same surfaces as
   `side_chat_of`; a `side_chat_creator` label supplied any other way, or
   carried by the agent and copied by the fork, is dropped. It records the
-  creator and grants nothing;
+  creator and grants nothing. The console's answers (`/console/rpc`,
+  `/console/rpc/multipart`, `/console/experience`, `GET /console/identities`)
+  show it only to the creator and to access admins, and leave it out for
+  every other caller;
 - does not take the agent's own console flags: where the agent carries them,
   `addressable`, `singleton`, `console_watched`, `console_degraded`,
   `console_degraded_reason`, `console_alert_level`, `console_inbox_count`
@@ -3224,6 +3227,7 @@ one never moves it back.
 | `principal` | `string` | The principal revoked |
 | `not_before` | `integer` | The fence, in seconds since the epoch |
 | `accepts_tokens_issued_from` | `integer` | The earliest `iat` accepted from now on (`not_before` + 30) |
+| `revoked_by` | `string` or `null` | The console caller whose revocation set the fence, as `meta/console/whoami` names their principal (an earlier revocation leaves the fence and its revoker); `null` when that revocation named no one, as one on the stdio gateway (the host's own) does |
 
 Errors: `-32602` for a missing or empty principal; `-32004` when the runtime
 has no durable session fence record (no persistent state directory), so the

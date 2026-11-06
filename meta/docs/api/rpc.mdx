@@ -3098,7 +3098,7 @@ one never moves it back.
 
 | Param | Type | Description |
 |-------|------|-------------|
-| `principal` | `string` | The principal: the email, or the `sub` when the token carries no email |
+| `principal` | `string` | The principal: the email, or the `sub` when the token carries no email. On the console's `/console/rpc` it may be left out: it is then the caller's own |
 
 | Result field | Type | Description |
 |--------------|------|-------------|
@@ -3114,10 +3114,11 @@ synced after the record's file was replaced: the revocation then took effect
 but may not survive a power loss, and revoking again confirms it.
 
 The console's `/console/rpc` serves the same method. With an access
-controller, enforced or not, only an access admin may call it, as for the
-`meta/access/*` edits; on a console without one, any caller a token
-identified may, as with other console actions. A read-only console refuses
-it.
+controller, enforced or not, only an access admin may call it, for any
+principal, as for the `meta/access/*` edits. On a console without one, a
+caller a token identified revokes only their own sessions: naming another
+principal is refused with `-32030` (`access_denied`) and fences no one, and
+a caller no token identified revokes none. A read-only console refuses it.
 
 ---
 

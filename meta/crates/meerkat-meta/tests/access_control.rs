@@ -6328,13 +6328,13 @@ mod checked_v1_acceptance {
 
     /// An invalid save says what is wrong with it: `invalid_access_config`
     /// carries `reason`, a stable token, and `detail`, the text that names
-    /// the rule, action, group or approver at fault, on the checked and the
-    /// unchecked write of each method that can leave the configuration
-    /// invalid (`set`, `rules/upsert`, `rules/delete` and `groups/delete`).
-    /// The code and the fixed message stay, nothing is written, and the
-    /// refusal names nothing private.
+    /// the rule, action, group or approver at fault, on the checked write of
+    /// each method that can leave the configuration invalid (`set`,
+    /// `rules/upsert`, `rules/delete` and `groups/delete`). The code and the
+    /// fixed message stay, nothing is written, and the refusal names nothing
+    /// private.
     #[tokio::test]
-    async fn invalid_saves_name_their_reason_on_checked_and_unchecked_writes() {
+    async fn invalid_saves_name_their_reason() {
         fn strings(values: &[&str]) -> Vec<String> {
             values.iter().map(ToString::to_string).collect()
         }
@@ -6476,40 +6476,33 @@ mod checked_v1_acceptance {
             ),
         ];
         for (method, payload, reason, detail) in cases {
-            for (form, params) in [
-                (
-                    "checked",
-                    checked(&base.owner, base.revision, payload.clone()),
-                ),
-                ("unchecked", payload),
-            ] {
-                let response = authenticated_rpc(&fixture.app, ADMIN_A, method, params).await;
-                assert_eq!(
-                    response["error"]["code"],
-                    json!(-32602),
-                    "{method}, {form}: {response:#?}"
-                );
-                assert_eq!(
-                    response["error"]["message"],
-                    json!("Invalid access configuration."),
-                    "{method}, {form}: {response:#?}"
-                );
-                assert_eq!(
-                    response["error"]["data"],
-                    json!({
-                        "kind": "invalid_access_config",
-                        "reason": reason,
-                        "detail": detail,
-                    }),
-                    "{method}, {form}: {response:#?}"
-                );
-                safe_error(&response, &fixture);
-                assert_eq!(
-                    checkpoint(&fixture),
-                    initial,
-                    "{method}, {form}: nothing is written"
-                );
-            }
+            let params = checked(&base.owner, base.revision, payload);
+            let response = authenticated_rpc(&fixture.app, ADMIN_A, method, params).await;
+            assert_eq!(
+                response["error"]["code"],
+                json!(-32602),
+                "{method}: {response:#?}"
+            );
+            assert_eq!(
+                response["error"]["message"],
+                json!("Invalid access configuration."),
+                "{method}: {response:#?}"
+            );
+            assert_eq!(
+                response["error"]["data"],
+                json!({
+                    "kind": "invalid_access_config",
+                    "reason": reason,
+                    "detail": detail,
+                }),
+                "{method}: {response:#?}"
+            );
+            safe_error(&response, &fixture);
+            assert_eq!(
+                checkpoint(&fixture),
+                initial,
+                "{method}: nothing is written"
+            );
         }
     }
 

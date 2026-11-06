@@ -46,6 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   beside `agent.send`. An access configuration that names no schedule action
   grants it wherever a rule grants or denies `agent.send`, so its rules keep
   their meaning.
+- Every console access write needs `checked_v1`: a `meta/access/*` write
+  without it (its payload at the top level) is refused with `-32602`
+  `revision_required` (a new refusal kind) and changes nothing.
+- On a console without an access controller, `meta/console/revoke_sessions`
+  revokes only the caller's own sessions: naming another principal is
+  refused with `-32030` `access_denied`, and a caller no token identified
+  revokes none. `principal` may be left out there; it is then the caller's
+  own.
 
 ### Security
 
@@ -62,6 +70,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - An open console refuses requests addressed to a host it does not serve,
   so a page that rebinds its own name to the console's address cannot
   drive it.
+
+- An access edit on the console always names the revision it was made
+  against, so no edit lands over one its client never saw.
+- On a console without an access controller, a caller can no longer end
+  another person's sessions.
 
 ### Upgrade
 
@@ -88,6 +101,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   wherever it grants `agent.send`; an earlier Meta refuses to load a
   configuration that names it, so remove those entries before going back to
   one.
+- A client that writes the access policy over `/console/rpc` without
+  `checked_v1` reads `owner_instance` and `revision` from `meta/access/get`
+  and sends the edit inside `checked_v1`; the stock Console already does.
+- To end another person's sessions on a console without an access
+  controller, call `meta/console/revoke_sessions` on the runtime's RPC
+  surface, or install an access controller and revoke as an access admin.
 
 ### Added
 

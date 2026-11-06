@@ -297,12 +297,14 @@ lists it, by the principal and a non-expiring flag only, in `meta/status`
 To revoke every session of a principal, call `meta/console/revoke_sessions`
 with the principal (the email, or the `sub` when the token carries no
 email), on the runtime's RPC surface or on the console's `/console/rpc`. On
-the console route an access admin may revoke when an access controller is
-installed, enforced or not; without an access controller, any authenticated
-console caller may revoke sessions, as with other console actions. The
+the console route an access admin may revoke anyone's sessions when an
+access controller is installed, enforced or not. Without an access
+controller, a console caller revokes only their own sessions: `principal`
+names them, or is left out, and naming another principal is refused
+(`-32030`, `access_denied`) and fences no one. The
 principal is matched exactly as the token names it, case included, as the
-allowlist compares it: a revocation for another spelling answers success and
-fences nothing.
+allowlist compares it: a revocation for another spelling fences nothing,
+even when it answers success.
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"meta/console/revoke_sessions","params":{"principal":"alice@example.com"}}

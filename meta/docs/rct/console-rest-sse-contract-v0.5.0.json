@@ -1415,8 +1415,8 @@
             "required_fields": [
               "config"
             ],
-            "fields_location": "params.checked_v1 for a checked write, together with owner_instance and expected_revision; otherwise params",
-            "note": "A checked write sends only params.checked_v1. A mixed, malformed or unknown checked envelope fails with -32602 and never falls back to the unchecked write."
+            "fields_location": "params.checked_v1, together with owner_instance and expected_revision",
+            "note": "A write sends only params.checked_v1. One without it fails with -32602 (data.kind revision_required) and changes nothing; a mixed, malformed or unknown checked envelope fails with -32602."
           },
           "success": {
             "required_fields": [
@@ -1445,8 +1445,8 @@
             "required_fields": [
               "enabled"
             ],
-            "fields_location": "params.checked_v1 for a checked write, together with owner_instance and expected_revision; otherwise params",
-            "note": "A checked write sends only params.checked_v1. A mixed, malformed or unknown checked envelope fails with -32602 and never falls back to the unchecked write."
+            "fields_location": "params.checked_v1, together with owner_instance and expected_revision",
+            "note": "A write sends only params.checked_v1. One without it fails with -32602 (data.kind revision_required) and changes nothing; a mixed, malformed or unknown checked envelope fails with -32602."
           },
           "success": {
             "required_fields": [
@@ -1475,8 +1475,8 @@
             "required_fields": [
               "rule"
             ],
-            "fields_location": "params.checked_v1 for a checked write, together with owner_instance and expected_revision; otherwise params",
-            "note": "A checked write sends only params.checked_v1. A mixed, malformed or unknown checked envelope fails with -32602 and never falls back to the unchecked write."
+            "fields_location": "params.checked_v1, together with owner_instance and expected_revision",
+            "note": "A write sends only params.checked_v1. One without it fails with -32602 (data.kind revision_required) and changes nothing; a mixed, malformed or unknown checked envelope fails with -32602."
           },
           "success": {
             "required_fields": [
@@ -1505,8 +1505,8 @@
             "required_fields": [
               "id"
             ],
-            "fields_location": "params.checked_v1 for a checked write, together with owner_instance and expected_revision; otherwise params",
-            "note": "A checked write sends only params.checked_v1. A mixed, malformed or unknown checked envelope fails with -32602 and never falls back to the unchecked write."
+            "fields_location": "params.checked_v1, together with owner_instance and expected_revision",
+            "note": "A write sends only params.checked_v1. One without it fails with -32602 (data.kind revision_required) and changes nothing; a mixed, malformed or unknown checked envelope fails with -32602."
           },
           "success": {
             "required_fields": [
@@ -1536,8 +1536,8 @@
               "name",
               "group"
             ],
-            "fields_location": "params.checked_v1 for a checked write, together with owner_instance and expected_revision; otherwise params",
-            "note": "A checked write sends only params.checked_v1. A mixed, malformed or unknown checked envelope fails with -32602 and never falls back to the unchecked write."
+            "fields_location": "params.checked_v1, together with owner_instance and expected_revision",
+            "note": "A write sends only params.checked_v1. One without it fails with -32602 (data.kind revision_required) and changes nothing; a mixed, malformed or unknown checked envelope fails with -32602."
           },
           "success": {
             "required_fields": [
@@ -1566,8 +1566,8 @@
             "required_fields": [
               "name"
             ],
-            "fields_location": "params.checked_v1 for a checked write, together with owner_instance and expected_revision; otherwise params",
-            "note": "A checked write sends only params.checked_v1. A mixed, malformed or unknown checked envelope fails with -32602 and never falls back to the unchecked write."
+            "fields_location": "params.checked_v1, together with owner_instance and expected_revision",
+            "note": "A write sends only params.checked_v1. One without it fails with -32602 (data.kind revision_required) and changes nothing; a mixed, malformed or unknown checked envelope fails with -32602."
           },
           "success": {
             "required_fields": [

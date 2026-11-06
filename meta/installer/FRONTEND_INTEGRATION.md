@@ -11,8 +11,12 @@ create Slack, Telegram or another transport.
 
 The object returned by `application.build(context)` may expose
 `frontend_management(request)`. The hook may be synchronous or asynchronous.
-The application must also declare local-password Console authentication and
-its private setup fields. Forge binds the hook to the exact loaded application
+The application must also declare Console authentication (`local-accounts` or
+`local-password`) and its private setup fields. Only a person's named account
+(`local-accounts`) prepares and submits a change: a single shared account
+(`local-password`) reads the descriptor, inventory and status, and its
+`prepare` and `submit` are refused with HTTP 403 and code
+`approver_unauthenticated`. Forge binds the hook to the exact loaded application
 and deployment source. Changed source refuses further commands; importing new
 code does not silently update that binding.
 
@@ -21,7 +25,7 @@ The hook receives the frozen `FrontendManagementRequest` from `console_auth.py`:
 | Field | Supplied by the Console facade |
 | --- | --- |
 | `operation` | `inventory`, `prepare`, `submit` or `status` |
-| `principal` | The configured, authenticated human account |
+| `principal` | The signed-in account: the person's own named account, or the one shared account |
 | `host` | The current application ID, host ID and loaded source digest |
 | `payload` | The operation-specific object described below |
 | `approved` | True only for an exact, protected human submission |

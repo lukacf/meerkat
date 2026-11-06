@@ -190,7 +190,10 @@ enter model prompts or browser storage, and are written directly to the
 installation's mode-600 `.env`. Reusing the provider keys you gave Forge is an
 explicit choice in the form. If setup asks for a **Console user**, that is the
 local identity for this installation; the **Console password** opens its
-private Console and is separate from your provider keys.
+private Console and is separate from your provider keys. An application with
+named Console accounts adds one account per further person on the deployment
+computer, so each person signs in as themselves; a single shared Console
+password lets everyone who knows it chat, but approves nothing.
 
 **Readiness.** Forge reports an installation ready when the application
 reports startup, the expected identities exist and its loopback Console is

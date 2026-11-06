@@ -448,6 +448,16 @@ on its sign-in page, not your API key or your provider website password. The
 sign-in form asks only for that password; the installation applies your configured
 user identity automatically.
 
+An application with named Console accounts also asks for an account name at
+sign-in. Leave it empty to use the installation's own account (the Console user
+and password above). Everyone else signs in with the account name and password
+the operator set up for them: after the private settings, `.venv/bin/python
+setup.py` asks for named accounts to add, give a new password or remove (`:remove
+NAME`), and keeps only password hashes on the deployment computer. Changes apply
+at the next start. A single shared Console password lets everyone who knows it
+chat, but approvals (frontend changes, the controller review and setup prompts)
+need a person's own account.
+
 Follow the installation action and its checks. **Install and start** starts an
 ordinary supported package. **Install application** checks the selected
 Meta/Toolkit runtime and leaves the application stopped. Its **Application setup
@@ -748,8 +758,10 @@ Console may open without a separate sign-in. Signing in does not send a job.
 
 **Sign out** in the password-protected Console ends your current Console login
 without stopping the application or deleting its saved state. Successful sign-out
-returns to the password screen. If that screen does not appear, treat sign-out
-as unconfirmed; closing the tab is not confirmation.
+returns to the password screen. If the Console did not confirm the sign-out, the
+page says so: you are signed out of that browser, and the tokens the Console
+already holds for that login expire within two minutes. If neither page appears,
+treat sign-out as unconfirmed; closing the tab is not confirmation.
 
 To add another conversation channel to a custom application, return to the same
 saved setup. Tell the guide which people should use it and whether it should

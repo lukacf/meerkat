@@ -128,6 +128,27 @@ describe("auth.jwtAuthConfigToDict", () => {
     assert.equal(dict.issuer, "iss");
     assert.equal(dict.audience, "aud");
   });
+
+  it("states accounts only when set", () => {
+    assert.equal("accounts" in auth.jwtAuthConfigToDict(auth.jwt("key")), false);
+    const dict = auth.jwtAuthConfigToDict(
+      auth.jwt("key", { accounts: "personal" }),
+    );
+    assert.equal(dict.accounts, "personal");
+  });
+
+  it("takes a config built by hand without accounts", () => {
+    const config: auth.JwtAuthConfig = {
+      sharedSecret: "key",
+      issuer: null,
+      audience: null,
+      leewaySeconds: 60,
+      toDict() {
+        return auth.jwtAuthConfigToDict(config);
+      },
+    };
+    assert.equal("accounts" in config.toDict(), false);
+  });
 });
 
 // ---------------------------------------------------------------------------

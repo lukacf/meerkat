@@ -333,6 +333,8 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # runner's coverage parsing stays pinned to that form.
 # empty_resume_residency_audit.sh requires its four witnesses violated, and
 # with --mutants each seeded defect's invariant or property violated.
+# switch_turn_withdrawal_audit.sh requires its five witnesses violated, and
+# with --mutants each seeded defect's property or invariant violated.
 # durable_tail_classification_audit.sh requires its Ready witness violated,
 # and with --mutants each seeded defect's target invariant violated.
 # durable_tail_recovery_ownership_audit.sh requires its four witnesses
@@ -352,9 +354,10 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # covered action of every run generated a state, its seventy-seven step
 # witnesses and six state witnesses violated, and with --mutants its
 # reconcile mutant's generated invariant, its probe mutant's invariant, its
-# adoption mutant's invariant or property, its replay, archive and destroy
-# mutants' generated invariants, its rotation, seat, respawn and
-# preserving-archive mutants' action properties, its declared apply
+# adoption mutant's invariant or property, its unlisted adoption and
+# unadopted retirement mutants' target action properties, its replay,
+# archive and destroy mutants' generated invariants, its rotation, seat,
+# respawn and preserving-archive mutants' action properties, its declared apply
 # mutants' generated invariants (the in-flight seal mutant's run with its
 # target invariant alone), totality invariants and action properties
 # (one per declared apply invariant, property and guard; the reset
@@ -682,6 +685,16 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessCompositionClaimed is violated."' \
   'echo "Error: Invariant AuditVerdictExactlyOne is violated."' \
   'echo "Error: Action property AuditPlacementOwnership is violated."' \
+  'echo "Error: Action property NotAuditWitnessQueuedInputKept is violated."' \
+  'echo "Error: Action property NotAuditWitnessStoppedWithdrawn is violated."' \
+  'echo "Error: Action property AuditAbortWithdrawsOnlyTheRequest is violated."' \
+  'echo "Error: Action property AuditAbortOnlyForThePendingRequest is violated."' \
+  'echo "Error: Action property NotAuditWitnessConflictRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessStoppedCompleted is violated."' \
+  'echo "Error: Action property AuditPendingSwitchEndsOnlyWithItsRequest is violated."' \
+  'echo "Error: Action property AuditCompleteSettlesTheRequest is violated."' \
+  'echo "Error: Action property NotAuditWitnessFiniteConflictRefused is violated."' \
+  'echo "Error: Invariant AuditNoDenialUnderThePendingSwitch is violated."' \
   'echo "Error: Assumption line 1, col 1 to line 1, col 2 of module member_residency_audit is false."' \
   'echo "Error: The first argument of <= should be an integer, but instead it is:"' \
   'echo "200000 states generated, 200000 distinct states found, 0 states left on queue."' \
@@ -722,7 +735,7 @@ printf '%s\n' \
   'echo "Error: Action property AuditTerminalLatched is violated."' \
   'echo "Error: Invariant AuditTerminalNeverAdmits is violated."' \
   'echo "Error: Invariant AuditVisibleOnlyWhileLive is violated."' \
-  'for action in AbortSpawnExecActiveRunning RecoverIdentityEntrySeatedRunning RecoverIdentityEntrySeatedStopped AdoptLegacyIdentityEntryAdopted AdoptLegacyIdentityEntryNameHeldByWorker AdoptLegacyIdentityEntryNotAdoptable AdoptLegacyIdentityEntryStaleObservation AdoptLegacyIdentityEntryNotSeated AdoptLegacyIdentityEntryAlreadyAnEntry AdoptLegacyIdentityEntryNonAuthoritative AdoptLegacyIdentityEntryMobNotRunningStopped ProbeMemberAdmissionDuplicateRunning ProbeMemberAdmissionAdmittedRunning ProbeMemberAdmissionIdentityMemberRunning ProbeMemberAdmissionDuplicateStopped ProbeMemberAdmissionAdmittedStopped ProbeMemberAdmissionIdentityMemberStopped ResolveAgentLaneMemberAdmissionAdmittedRunning ResolveAgentLaneMemberAdmissionIdentityMemberRunning ResolveAgentLaneMemberAdmissionAdmittedStopped ResolveAgentLaneMemberAdmissionIdentityMemberStopped ReconcileRunning ReconcileStopped EnsureMemberRunningExisting EnsureMemberRunningMissing DestroyFromAny ResetToRunning DeclareIdentityEntryKept DeclareIdentityEntrySeatOwed DeclareIdentityEntryLifecycleInFlight DeclareIdentityEntryRefusedNameHeldByWorker DeclareIdentityEntryRefusedHostAdopted DeclareIdentityEntryRefusedNonAuthoritative DeclareIdentityEntryMobNotRunningDestroyed SealDeclaredRosterSealed SealDeclaredRosterNonAuthoritative SealDeclaredRosterMobNotRunningDestroyed RecoverIdentityEntryRetiringMarkedRunning ForgetArchivedSession DeclareIdentityEntryRuntimeModeRestamp DeclareIdentityEntryRoleMigrate DeclareIdentityEntryRoleRotate DeclareIdentityEntryRoleMigrationHeld DeclareIdentityEntryHostedOnFirstUse DeclareIdentityEntryAwaitHeldCreation DeclareIdentityEntryMobNotRunningStopped DeclareIdentityEntryMobNotRunningCompleted SealDeclaredRosterMobNotRunningStopped SealDeclaredRosterMobNotRunningCompleted BeginSpawnExecRemote AbortSpawnExecMaterializePendingRunning BindOwnerBridgeSessionRunning BeginHostBindFreshUnplaced CommitHostBind RecoverIdentityEntryRetiringStaleRunning OpenDeclaredApplyOpened OpenDeclaredApplyBusy OpenDeclaredApplyMobNotRunningStopped OpenDeclaredApplyMobNotRunningCompleted CloseDeclaredApplyRunning CloseDeclaredApplyStopped CloseDeclaredApplyCompleted CommitSpawnMembershipRemote ObserveMemberRetirementArchivedPlacedLiveRunning RetireRemoteReleasingRunning AuthorizeExplicitResumeMemberHeldRunning AdmitResetRunning AdmitResetStopped AdmitResetCompleted BeginPlacedCompletionLifecycleQuiesceStoppedReplay BeginPlacedCompletionLifecycleQuiesceCompletedReplay AuthorizeExplicitResumeMemberHeldStopped OpenDeclaredApplyMobNotRunningDestroyed CloseDeclaredApplyDestroyed; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'for action in AbortSpawnExecActiveRunning RecoverIdentityEntrySeatedRunning RecoverIdentityEntrySeatedStopped AdoptLegacyIdentityEntryAdopted AdoptLegacyIdentityEntryAdoptedUnlisted AdoptLegacyIdentityEntryNameHeldByWorker AdoptLegacyIdentityEntryRetireUnadopted AdoptLegacyIdentityEntryNotAdoptable AdoptLegacyIdentityEntryStaleObservation AdoptLegacyIdentityEntryNotSeated AdoptLegacyIdentityEntryAlreadyAnEntry AdoptLegacyIdentityEntryNonAuthoritative AdoptLegacyIdentityEntryMobNotRunningStopped ProbeMemberAdmissionDuplicateRunning ProbeMemberAdmissionAdmittedRunning ProbeMemberAdmissionIdentityMemberRunning ProbeMemberAdmissionDuplicateStopped ProbeMemberAdmissionAdmittedStopped ProbeMemberAdmissionIdentityMemberStopped ResolveAgentLaneMemberAdmissionAdmittedRunning ResolveAgentLaneMemberAdmissionIdentityMemberRunning ResolveAgentLaneMemberAdmissionAdmittedStopped ResolveAgentLaneMemberAdmissionIdentityMemberStopped ReconcileRunning ReconcileStopped EnsureMemberRunningExisting EnsureMemberRunningMissing DestroyFromAny ResetToRunning DeclareIdentityEntryKept DeclareIdentityEntrySeatOwed DeclareIdentityEntryLifecycleInFlight DeclareIdentityEntryRefusedNameHeldByWorker DeclareIdentityEntryRefusedHostAdopted DeclareIdentityEntryRefusedNonAuthoritative DeclareIdentityEntryMobNotRunningDestroyed SealDeclaredRosterSealed SealDeclaredRosterNonAuthoritative SealDeclaredRosterMobNotRunningDestroyed RecoverIdentityEntryRetiringMarkedRunning ForgetArchivedSession DeclareIdentityEntryRuntimeModeRestamp DeclareIdentityEntryRoleMigrate DeclareIdentityEntryRoleRotate DeclareIdentityEntryRoleMigrationHeld DeclareIdentityEntryHostedOnFirstUse DeclareIdentityEntryAwaitHeldCreation DeclareIdentityEntryMobNotRunningStopped DeclareIdentityEntryMobNotRunningCompleted SealDeclaredRosterMobNotRunningStopped SealDeclaredRosterMobNotRunningCompleted BeginSpawnExecRemote AbortSpawnExecMaterializePendingRunning BindOwnerBridgeSessionRunning BeginHostBindFreshUnplaced CommitHostBind RecoverIdentityEntryRetiringStaleRunning OpenDeclaredApplyOpened OpenDeclaredApplyBusy OpenDeclaredApplyMobNotRunningStopped OpenDeclaredApplyMobNotRunningCompleted CloseDeclaredApplyRunning CloseDeclaredApplyStopped CloseDeclaredApplyCompleted CommitSpawnMembershipRemote ObserveMemberRetirementArchivedPlacedLiveRunning RetireRemoteReleasingRunning AuthorizeExplicitResumeMemberHeldRunning AdmitResetRunning AdmitResetStopped AdmitResetCompleted BeginPlacedCompletionLifecycleQuiesceStoppedReplay BeginPlacedCompletionLifecycleQuiesceCompletedReplay AuthorizeExplicitResumeMemberHeldStopped OpenDeclaredApplyMobNotRunningDestroyed CloseDeclaredApplyDestroyed; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
   'echo "Error: Action property NotAuditWitnessCustodyCommit is violated."' \
   'echo "Error: Action property NotAuditWitnessCustodyAborted is violated."' \
   'echo "Error: Action property NotAuditWitnessReplayed is violated."' \
@@ -812,6 +825,8 @@ printf '%s\n' \
   'echo "Error: Invariant worker_reconcile_spares_entries is violated."' \
   'echo "Error: Invariant AuditProbeExactlyOne is violated."' \
   'echo "Error: Invariant AuditAdoptionExactlyOne is violated."' \
+  'echo "Error: Action property AuditAdoptionNeedsObservation is violated."' \
+  'echo "Error: Action property AuditRetireUnadoptedQualifies is violated."' \
   'echo "Error: Invariant entry_is_seated_or_has_an_unseated_cause is violated."' \
   'echo "Error: Invariant NotAuditWitnessHeldWhileRunCurrent is violated."' \
   'echo "Error: Invariant NotAuditWitnessReleasedThenStaged is violated."' \
@@ -1110,7 +1125,7 @@ lane_part_output() {
 audit_lines() {
   grep -E '^running (bounded .* TLC audit|member [a-z]+ TLC audit|MobMachine arm coverage gate)$' | sort
 }
-audit_shards="audits-a audits-b audits-c audits-d audits-e audits-f audits-g audits-h audits-i audits-j audits-k audits-l audits-m audits-n audits-o audits-q audits-r audits-s audits-t audits-u audits-v"
+audit_shards="audits-a audits-b audits-c audits-d audits-e audits-f audits-g audits-h audits-i audits-j audits-k audits-l audits-m audits-n audits-o audits-q audits-r audits-s audits-t audits-u audits-v audits-w audits-x audits-y"
 shard_outputs="$(mktemp -d)"
 failed_parts=""
 idle_shards=""

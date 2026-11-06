@@ -1,0 +1,19 @@
+# The test-feature canary fixture. scripts/test-feature-canary-selftest.sh
+# copies this file as Cargo.toml, and lib.rs.txt as src/lib.rs, into a
+# scratch directory outside the repository and builds the crate there; the
+# files keep a .txt suffix so no tool here takes them for a workspace crate.
+# scripts/test_published_crates_standalone.py holds the canary to the shape
+# the Core crates' lib.rs files must have.
+[package]
+name = "test-feature-canary-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[features]
+canary-test-feature = []
+
+[package.metadata.meerkat.standalone-tests]
+features = ["canary-test-feature"]
+
+[workspace]

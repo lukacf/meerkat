@@ -249,6 +249,23 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
         ))
     }
 
+    /// Switch a session's model, for a number of turns or until changed.
+    ///
+    /// An until-changed switch stays pending while its LLM reconfigure runs,
+    /// and a switch that reaches the session while another one is pending is
+    /// denied (`ScopedOverrideConflict`). Dropping the returned future before
+    /// it resolves can leave the switch pending: later switches are then
+    /// denied until the same request (the same `request_id`) is retried or
+    /// the session is reloaded. A request that reuses the pending switch's
+    /// `request_id` and cannot be accepted (a finite request, or one that is
+    /// not approved or whose target cannot carry the session's transcript)
+    /// fails with an error and leaves the pending switch as it is. A denied
+    /// `request_id` stays denied: a retry with it is answered with the
+    /// recorded denial and changes nothing, so a switch requested again after
+    /// a denial needs a new `request_id`. Callers must not make concurrent
+    /// calls with the same `request_id`: the default turn-finalization
+    /// boundary of [`SessionLlmReconfigureHost`](crate::SessionLlmReconfigureHost)
+    /// is a no-op and does not serialize until-changed switches.
     async fn request_switch_turn(
         &self,
         _session_id: &SessionId,

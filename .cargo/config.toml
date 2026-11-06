@@ -20,6 +20,18 @@ RUST_MIN_STACK = "8388608"
 # environment from replacing it. MODULE.bazel sets the same value for Bazel;
 # meerkat-sqlite's lock_profile_sources test keeps the two in step.
 LIBSQLITE3_FLAGS = { value = "-DSQLITE_DEFAULT_MEMSTATUS=0 -USQLITE_ENABLE_MEMORY_MANAGEMENT -DSQLITE_DISABLE_PAGECACHE_OVERFLOW_STATS", force = true }
+# Arms the test-feature canaries. A crate's tests build with its test
+# features (its [package.metadata.meerkat.standalone-tests] features and
+# `workspace-tests` when it declares that feature), which no dev-dependency
+# turns on: every test command here passes them (`node
+# scripts/core-workspace-args.mjs --tests` prints them). A test build of such
+# a crate without them fails to compile in this repository (the canary in its
+# lib.rs reads this variable and names the command to run) instead of
+# compiling the tests they gate out. Only code generation evaluates the
+# canary, so `cargo check`, clippy and editors' check runs never trip it. The
+# published packages build outside this configuration, so their plain
+# `cargo test` never sees it.
+MEERKAT_WORKSPACE_TEST_FEATURES = "required"
 
 [alias]
 # Machine-authority workflow entrypoint
@@ -34,9 +46,16 @@ xtask = "run -p xtask --features machine-authority --"
 # default members are not exactly Core's members). `--workspace` would add the
 # other products' packages and their feature requests on Core's crates; their
 # own lanes test them.
+#
+# The test aliases pass every Core member's test features (the `--features`
+# that `node scripts/core-workspace-args.mjs --tests` prints; no
+# dev-dependency turns them on, and a test build without them fails to
+# compile). make ci-lanes-selftest fails when a list here differs from it.
 fast = [
   "nextest",
   "run",
+  "--features",
+  "meerkat/local-authorization,meerkat/session-store,meerkat/session-compaction,meerkat/jsonl-store,meerkat/memory-store,meerkat/memory-store-session,meerkat/comms,meerkat/mcp,meerkat/skills,meerkat/schedule,meerkat/workgraph,meerkat/atif,meerkat/workspace-tests,meerkat-auth-core/workspace-tests,meerkat-authorization/workspace-tests,meerkat-comms/workspace-tests,meerkat-core/workspace-tests,meerkat-llm-core/workspace-tests,meerkat-mcp/workspace-tests,meerkat-mob/test-support,meerkat-openai/workspace-tests,meerkat-rpc/workspace-tests,meerkat-runtime/test-support,meerkat-runtime/sqlite-store,meerkat-runtime/live,meerkat-runtime/local-authorization",
   "--profile",
   "fast",
   "--show-progress",
@@ -49,6 +68,8 @@ fast = [
 rct = [
   "nextest",
   "run",
+  "--features",
+  "meerkat/local-authorization,meerkat/session-store,meerkat/session-compaction,meerkat/jsonl-store,meerkat/memory-store,meerkat/memory-store-session,meerkat/comms,meerkat/mcp,meerkat/skills,meerkat/schedule,meerkat/workgraph,meerkat/atif,meerkat/workspace-tests,meerkat-auth-core/workspace-tests,meerkat-authorization/workspace-tests,meerkat-comms/workspace-tests,meerkat-core/workspace-tests,meerkat-llm-core/workspace-tests,meerkat-mcp/workspace-tests,meerkat-mob/test-support,meerkat-openai/workspace-tests,meerkat-rpc/workspace-tests,meerkat-runtime/test-support,meerkat-runtime/sqlite-store,meerkat-runtime/live,meerkat-runtime/local-authorization",
   "--profile",
   "fast",
   "--show-progress",
@@ -60,7 +81,7 @@ rct = [
 ]
 
 # Unit tests only (no integration tests, skips doctests)
-unit = "nextest run --lib --show-progress none --status-level none --final-status-level fail"
+unit = "nextest run --lib --features meerkat/local-authorization,meerkat/session-store,meerkat/session-compaction,meerkat/jsonl-store,meerkat/memory-store,meerkat/memory-store-session,meerkat/comms,meerkat/mcp,meerkat/skills,meerkat/schedule,meerkat/workgraph,meerkat/atif,meerkat/workspace-tests,meerkat-auth-core/workspace-tests,meerkat-authorization/workspace-tests,meerkat-comms/workspace-tests,meerkat-core/workspace-tests,meerkat-llm-core/workspace-tests,meerkat-mcp/workspace-tests,meerkat-mob/test-support,meerkat-openai/workspace-tests,meerkat-rpc/workspace-tests,meerkat-runtime/test-support,meerkat-runtime/sqlite-store,meerkat-runtime/live,meerkat-runtime/local-authorization --show-progress none --status-level none --final-status-level fail"
 
 # Integration-fast tests only (ignored tests are not run). Exclude the
 # dedicated e2e lane wrapper binaries; they have their own CI jobs and are not
@@ -69,6 +90,8 @@ int = [
   "nextest",
   "run",
   "--tests",
+  "--features",
+  "meerkat/local-authorization,meerkat/session-store,meerkat/session-compaction,meerkat/jsonl-store,meerkat/memory-store,meerkat/memory-store-session,meerkat/comms,meerkat/mcp,meerkat/skills,meerkat/schedule,meerkat/workgraph,meerkat/atif,meerkat/workspace-tests,meerkat-auth-core/workspace-tests,meerkat-authorization/workspace-tests,meerkat-comms/workspace-tests,meerkat-core/workspace-tests,meerkat-llm-core/workspace-tests,meerkat-mcp/workspace-tests,meerkat-mob/test-support,meerkat-openai/workspace-tests,meerkat-rpc/workspace-tests,meerkat-runtime/test-support,meerkat-runtime/sqlite-store,meerkat-runtime/live,meerkat-runtime/local-authorization",
   "--profile",
   "fast",
   "--show-progress",

@@ -33,8 +33,8 @@ mod store;
 mod tests;
 
 pub use evidence::{
-    AttestedDecision, AttributedReview, DECISION_REASON_MAX_BYTES, DecisionEvidence,
-    DecisionReviewVerdict, DecisionTier,
+    AttestedDecision, AttributedReview, AuthenticatedDecisionEvent, DECISION_REASON_MAX_BYTES,
+    DecisionEvidence, DecisionReviewVerdict, DecisionTier,
 };
 pub use keys::{
     ApproverId, DECISION_APPROVER_ID_MAX_BYTES, DECISION_REFERENCE_MAX_BYTES,

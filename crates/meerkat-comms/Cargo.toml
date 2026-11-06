@@ -71,12 +71,6 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
 [dev-dependencies]
-# Enables `workspace-tests` for this crate's own tests; path-only, so the
-# published package does not carry it. It adds nothing else: with default
-# features on, every test build would turn them back on, and a
-# `--no-default-features` test build would not check the feature set it
-# names.
-meerkat-comms = { path = ".", default-features = false, features = ["workspace-tests"] }
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros", "time", "test-util"] }
 tempfile = { workspace = true }
 ciborium = { workspace = true }
@@ -88,9 +82,10 @@ capability = []
 integration-real-tests = []
 # Internal, not for consumers: compiles the unit tests that need the
 # workspace (a crate this one cannot depend on once published). Only the
-# path-only self dev-dependency enables it, and `cargo package` strips that
-# dev-dependency, so the published package compiles those tests out
-# (ci/standalone-workspace-only.toml names them).
+# workspace's own test builds turn it on (they pass every crate's test
+# features: scripts/core-workspace-args.mjs --tests), so the published
+# package compiles those tests out (ci/standalone-workspace-only.toml
+# names them).
 workspace-tests = []
 
 [[test]]

@@ -146,6 +146,7 @@ let decisions = build_runtime_decision_state(RuntimeDecisionInputs {
         jwks_json: jwks_json,                    // at least one key
         audience: "my-console".into(),
         require_verified_email: false,
+        shared_account_tokens: false,
     },
     console: ConsolePolicy::default(),           // require_app_auth: true
     ops: RuntimeOpsPolicy::default(),

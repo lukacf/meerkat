@@ -1378,6 +1378,15 @@ impl ToolkitOriginalOwner {
         if !source.original.first_binding_for(&stored.key) {
             return Err(OriginalWriterError::Unavailable);
         }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::SubmitPersist,
+            &admitted.item_id().to_string(),
+        ) {
+            crate::source_hold_probe::retain(
+                self.hold_sources_for_test(hold.owner_change, hold.duration),
+            );
+        }
         let transition = self
             .prepare_helper_custody_enrollment(store, admitted, source, &stored, session, input)?;
         if transition.data != stored.data {

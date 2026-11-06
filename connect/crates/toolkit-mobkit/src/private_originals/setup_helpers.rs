@@ -1048,6 +1048,13 @@ impl PrivateOriginals {
                     review.bind(binder.clone()),
                 )
                 .await;
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(hold) = crate::source_hold_probe::observe(
+                crate::source_hold_probe::Site::SubmitReturned,
+                &prepared.admitted.item_id().to_string(),
+            ) {
+                tokio::time::sleep(hold.duration).await;
+            }
             if result.as_ref().err().is_some_and(|error| {
                 helper_admission_reprepare_required(error, &prepared.session_id)
             }) {
@@ -1589,6 +1596,13 @@ impl GovernedInputBinder for SubmitHelperBinder {
         }
         if tokio::time::Instant::now() >= self.source_deadline {
             return Err("Toolkit helper submission deadline elapsed".into());
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::SubmitFinalCheck,
+            &self.admitted.item_id().to_string(),
+        ) {
+            crate::source_hold_probe::retain(self.source.hold_sources_for_test(hold));
         }
         self.source
             .owner

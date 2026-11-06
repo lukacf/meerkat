@@ -939,6 +939,16 @@ pub mod source_hold_probe {
         /// A helper submission's custody attempt, its write just done, before
         /// its source checks; keyed by work item.
         SubmitPersisted,
+        /// A helper submission's custody attempt before its source checks
+        /// and its write; keyed by work item.
+        SubmitPersist,
+        /// A helper submission's binder before its final source check, the
+        /// custody attempt done; keyed by work item.
+        SubmitFinalCheck,
+        /// A helper submission whose dispatch just returned, before its
+        /// answer is read; a hold here delays the submission itself, as a
+        /// task descheduled there would be; keyed by work item.
+        SubmitReturned,
     }
     /// A control's answer at a site, given its key.
     pub type Probe = Arc<dyn Fn(Site, &str) -> Option<Hold> + Send + Sync>;

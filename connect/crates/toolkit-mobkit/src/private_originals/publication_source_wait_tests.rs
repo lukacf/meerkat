@@ -48,6 +48,8 @@ pub(super) struct Found {
     pub(super) turn_completed: bool,
     /// The helper custody attempt writes of the whole run.
     pub(super) attempt_writes: usize,
+    /// The hits of the control's site in the whole run.
+    pub(super) site_hits: usize,
 }
 
 fn helper_scope(fixture: &Fixture) -> toolkit_store::StoreScope {
@@ -138,7 +140,41 @@ pub(super) async fn finds_with_hold_at(
     fresh_finds: usize,
     concurrent_change: bool,
 ) -> Found {
-    let script = acquisition_denial::Script::for_approved();
+    finds_with(
+        approved_script(),
+        site,
+        nth,
+        hold,
+        fresh_finds,
+        concurrent_change,
+        &[],
+    )
+    .await
+}
+
+/// The Finds' script with the fixture's usual setup limits.
+pub(super) fn approved_script() -> Arc<acquisition_denial::Script> {
+    acquisition_denial::Script::for_approved()
+}
+
+/// The Finds' script whose setup operation expires `timeout_ms` after it is
+/// created: the helper's source deadline.
+pub(super) fn expiring_script(timeout_ms: u64) -> Arc<acquisition_denial::Script> {
+    acquisition_denial::Script::for_expiring_setup(timeout_ms)
+}
+
+/// [`finds_with_hold_at`] with the control's own `script`, and `extra`
+/// holds made at their own sites, each on its `nth` hit (from 1); at
+/// [`Site::SubmitReturned`] a hold delays the submission itself.
+pub(super) async fn finds_with(
+    script: Arc<acquisition_denial::Script>,
+    site: Site,
+    nth: usize,
+    hold: Hold,
+    fresh_finds: usize,
+    concurrent_change: bool,
+    extra: &[(Site, usize, Hold)],
+) -> Found {
     script.arm_fresh_finds(fresh_finds);
     let report = Report::new(script.tools().result_tool());
     let (fixture, _runtime_store) =
@@ -163,7 +199,15 @@ pub(super) async fn finds_with_hold_at(
     let owner = fixture.source.owner.clone();
     let concurrent: Arc<Mutex<Option<Duration>>> = Arc::default();
     let measured = concurrent.clone();
+    let extra: Vec<(Site, usize, Hold)> = extra.to_vec();
+    let extra_hits: Mutex<Vec<usize>> = Mutex::new(vec![0; extra.len()]);
     source_hold_probe::install(Arc::new(move |at, _key| {
+        if let Some(index) = extra.iter().position(|(other, _, _)| *other == at) {
+            let mut hits = extra_hits.lock().unwrap();
+            hits[index] += 1;
+            let (_, nth, hold) = extra[index];
+            return (hits[index] == nth).then_some(hold);
+        }
         if at != site {
             return None;
         }
@@ -264,6 +308,7 @@ pub(super) async fn finds_with_hold_at(
                     .iter()
                     .filter(|event| **event == "helper_custody_attempt_written")
                     .count(),
+                site_hits: reached.lock().unwrap().hits,
             }
         }),
     ))

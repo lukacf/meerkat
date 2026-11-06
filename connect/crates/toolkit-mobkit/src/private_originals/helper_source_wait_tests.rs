@@ -27,7 +27,9 @@
 //! made again, never the binding write. Past the bounds the refusal is typed
 //! `tool_unavailable`, never a denial. Another actor's owner change begun
 //! while a bind waits is not held up by it.
-use super::publication_source_wait::{Found, finds_with_hold_at, reply};
+use super::publication_source_wait::{
+    Found, approved_script, expiring_script, finds_with, finds_with_hold_at, reply,
+};
 
 use crate::source_hold_probe::{Hold, Site};
 use meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
@@ -374,5 +376,98 @@ async fn submission_bind_held_past_the_bound_answers_retry_safe() {
         "answered once the submission's deadline ran out, before the hold ended: {:?}",
         found.answered_after
     );
+    assert_eq!(found.attempt_writes, 0, "no custody attempt was written");
+}
+
+// The binder meets the held collection at its custody attempt's source
+// checks, before the attempt's write: the submission waits and binds again,
+// and the attempt is written once, by the bind that went.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn submission_persist_waits_out_a_held_source_collection_before_its_attempt_write() {
+    let found = finds_with_hold_at(Site::SubmitPersist, 1, collection_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+    assert_eq!(
+        found.attempt_writes, 1,
+        "the custody attempt was written once"
+    );
+}
+
+// The binder meets the held collection at its final source check, the
+// custody attempt done: the submission waits and binds again, the equal
+// pending attempt is reused, and the input is admitted once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn submission_final_check_waits_out_a_held_source_collection() {
+    let found = finds_with_hold_at(Site::SubmitFinalCheck, 1, collection_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+    assert_eq!(
+        found.attempt_writes, 1,
+        "the custody attempt was written once and reused"
+    );
+}
+
+// The binder meets the held collection at its first source check, and the
+// submission is delayed past its one deadline once its dispatch returned, the
+// hold long over (a task descheduled there): no late dispatch is made, and
+// the Find answers retry_safe with nothing admitted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn submission_past_its_deadline_after_a_held_bind_dispatches_no_more() {
+    let delayed = Hold {
+        owner_change: false,
+        duration: OWNER_CHANGE_WAIT_BOUND + Duration::from_millis(300),
+    };
+    let found = finds_with(
+        approved_script(),
+        Site::SubmitBind,
+        1,
+        collection_held(),
+        0,
+        false,
+        &[(Site::SubmitReturned, 1, delayed)],
+    )
+    .await;
+    assert!(found.turn_completed, "the original's turn completed");
+    assert_eq!(found.feedback.len(), 1, "{:?}", found.feedback);
+    let first = &found.feedback[0];
+    assert_eq!(
+        reply(first)["worker"]["state"],
+        "retry_safe",
+        "{}",
+        reply(first)
+    );
+    assert_eq!(found.site_hits, 1, "the binder ran once: no late dispatch");
+    assert_eq!(found.attempt_writes, 0, "no custody attempt was written");
+}
+
+// The binder meets the held collection at its first source check, and the
+// submission is delayed past the helper's source deadline once its dispatch
+// returned: the expired source is denied, never attempted again, and nothing
+// is admitted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn submission_past_its_source_deadline_after_a_held_bind_is_denied() {
+    const SETUP_TIMEOUT_MS: u64 = 5_000;
+    let delayed = Hold {
+        owner_change: false,
+        duration: Duration::from_millis(SETUP_TIMEOUT_MS + 200),
+    };
+    let found = finds_with(
+        expiring_script(SETUP_TIMEOUT_MS),
+        Site::SubmitBind,
+        1,
+        collection_held(),
+        0,
+        false,
+        &[(Site::SubmitReturned, 1, delayed)],
+    )
+    .await;
+    assert!(found.turn_completed, "the original's turn completed");
+    assert_eq!(found.feedback.len(), 1, "{:?}", found.feedback);
+    let first = &found.feedback[0];
+    assert!(first.is_error, "{}", reply(first));
+    let expected = meerkat_core::ToolError::AccessDenied {
+        name: crate::FIND_AND_INSTALL.into(),
+    }
+    .to_error_payload();
+    assert_eq!(reply(first), expected, "an expired source is a denial");
+    assert_eq!(found.site_hits, 1, "the binder ran once: no late dispatch");
     assert_eq!(found.attempt_writes, 0, "no custody attempt was written");
 }

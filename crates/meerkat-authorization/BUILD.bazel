@@ -170,7 +170,6 @@ rust_test(
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_anthropic_agent_factory_build",
         "//crates/meerkat:meerkat_auth_core_agent_factory_build",
-        "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
         "//crates/meerkat:meerkat_core_agent_factory_build",
         "//crates/meerkat:meerkat_llm_core_agent_factory_build",

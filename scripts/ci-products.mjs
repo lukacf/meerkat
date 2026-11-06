@@ -9,6 +9,9 @@
 // product's feature requests must not change what Core's rows compile), and
 // a change inside a product's root never escalates to Core's lanes.
 //
+// It also holds each member's test features (testFeaturesOf), which every
+// test build of a member passes.
+//
 // Pure apart from loadProducts(): no git, no cargo, nothing runs at import.
 
 import { readFileSync } from "node:fs";
@@ -128,6 +131,51 @@ export function productPackageArgs(byProduct, product) {
   const names = byProduct.get(product) ?? [];
   if (names.length === 0) throw new Error(`product ${product} has no workspace member`);
   return names.flatMap((name) => ["-p", name]);
+}
+
+// Test features. A workspace member's own tests build with the features its
+// [package.metadata.meerkat.standalone-tests] lists, plus `workspace-tests`
+// when it declares that feature (the unit tests that need a crate its
+// published package cannot depend on). No dev-dependency turns them on: a
+// path-only self dev-dependency did, and it made the crate's lib test wait
+// for its own library. So every command that builds a member's test targets
+// in this repository passes them (testFeatureArgs), and a crate's test build
+// without them fails to compile there (its lib.rs canary, which
+// .cargo/config.toml [env] MEERKAT_WORKSPACE_TEST_FEATURES arms). A
+// non-test build (build, check without test targets, doc) passes none.
+export const WORKSPACE_TESTS_FEATURE = "workspace-tests";
+
+// The test features of a member (a cargo metadata package): its declared
+// standalone-test features, then `workspace-tests` when it declares that
+// feature. Throws on a declaration the published test contract refuses.
+export function testFeaturesOf(pkg) {
+  const declared = pkg.metadata?.meerkat?.["standalone-tests"]?.features ?? [];
+  if (!Array.isArray(declared) || declared.some((feature) => typeof feature !== "string" || feature === "")) {
+    throw new Error(`${pkg.name}: [package.metadata.meerkat.standalone-tests] features must list feature names`);
+  }
+  const features = pkg.features ?? {};
+  for (const feature of declared) {
+    if (feature === WORKSPACE_TESTS_FEATURE) {
+      throw new Error(`${pkg.name}: standalone-tests features must not include ${WORKSPACE_TESTS_FEATURE}`);
+    }
+    if (!Object.hasOwn(features, feature)) {
+      throw new Error(`${pkg.name}: standalone-tests feature ${feature} is not declared in [features]`);
+    }
+  }
+  const result = [...new Set(declared)];
+  if (Object.hasOwn(features, WORKSPACE_TESTS_FEATURE)) result.push(WORKSPACE_TESTS_FEATURE);
+  return result;
+}
+
+// The `--features` arguments of a test build that selects `packages` (cargo
+// metadata packages): every selected member's test features, each named by
+// its package (a bare name would reach every selected member that declares
+// it), in package order; none when no selected member has any.
+export function testFeatureArgs(packages) {
+  const features = [...packages]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .flatMap((pkg) => testFeaturesOf(pkg).map((feature) => `${pkg.name}/${feature}`));
+  return features.length > 0 ? ["--features", features.join(",")] : [];
 }
 
 // The workspace's default members must be exactly Core's members: a bare

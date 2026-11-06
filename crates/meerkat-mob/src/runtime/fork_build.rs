@@ -867,7 +867,7 @@ impl super::actor::MobActor {
                 | ForkOverlayRule::SourceUnavailable(_) => {
                     return Some(FollowedSourceOverlay::Rebuild {
                         session_id: machine_session_binding(&current, state)?,
-                        seat_build: roster.seat_build(&current),
+                        seat_build: roster.next_build(&current),
                         entry: Box::new(entry.clone()),
                     });
                 }

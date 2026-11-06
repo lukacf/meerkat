@@ -2215,6 +2215,180 @@ mod tests {
         handle.abort();
         Ok(())
     }
+
+    /// A stand-in GitHub Copilot Chat Completions endpoint that answers every
+    /// request with `data` as its SSE `data:` lines, in order.
+    #[cfg(feature = "copilot")]
+    async fn spawn_copilot_chat_stub(data: &[&str]) -> (String, tokio::task::JoinHandle<()>) {
+        async fn respond(State(payload): State<String>) -> impl IntoResponse {
+            ([("content-type", "text/event-stream")], payload)
+        }
+        let payload: String = data
+            .iter()
+            .map(|line| format!("data: {line}\n\n"))
+            .collect();
+        let app = Router::new()
+            .route("/chat/completions", post(respond))
+            .with_state(payload);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (base, server)
+    }
+
+    /// The two GitHub Copilot Chat Completions clients the runtimes build, on
+    /// `api_base`: an OpenAI model's route and a Gemini model's route.
+    #[cfg(feature = "copilot")]
+    fn copilot_chat_clients(api_base: &str) -> [(&'static str, Arc<dyn LlmClient>); 2] {
+        use meerkat_copilot::CopilotChatCompletionsClientFactory as _;
+        let authorizer: Arc<dyn meerkat_core::HttpAuthorizer> = Arc::new(TestAuthorizer);
+        let openai = copilot_openai_route_client(
+            meerkat_copilot::CopilotEndpoint::ChatCompletions,
+            api_base.to_string(),
+            Arc::clone(&authorizer),
+            &CopilotOpenAiRouteTarget {
+                model: "gpt-test".to_string(),
+                supports_temperature: true,
+                supports_image_input: true,
+                supports_image_tool_results: true,
+            },
+        )
+        .expect("the OpenAI model's chat route builds");
+        let gemini = OpenAiCopilotChatCompletionsClientFactory
+            .build(meerkat_copilot::CopilotChatCompletionsClientSpec::new(
+                Provider::Gemini,
+                "gemini-test".to_string(),
+                api_base.to_string(),
+                authorizer,
+                true,
+                true,
+                true,
+                true,
+            ))
+            .expect("the Gemini model's chat route builds");
+        [("OpenAI model", openai), ("Gemini model", gemini)]
+    }
+
+    /// The events of one request on `client`.
+    #[cfg(feature = "copilot")]
+    async fn copilot_chat_events(
+        client: &Arc<dyn LlmClient>,
+    ) -> Vec<Result<meerkat_llm_core::LlmEvent, meerkat_llm_core::LlmError>> {
+        use futures::StreamExt as _;
+        let request = meerkat_llm_core::LlmRequest::new(
+            "gpt-test",
+            vec![Message::User(UserMessage::text("hello"))],
+        );
+        client.stream(&request).collect().await
+    }
+
+    /// `events` end with the retryable incomplete-response error and complete
+    /// no tool call.
+    #[cfg(feature = "copilot")]
+    fn assert_incomplete(
+        events: &[Result<meerkat_llm_core::LlmEvent, meerkat_llm_core::LlmError>],
+        case: &str,
+    ) {
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                Ok(meerkat_llm_core::LlmEvent::ToolCallComplete { .. })
+            )),
+            "{case}: no tool call completes"
+        );
+        let Some(Ok(meerkat_llm_core::LlmEvent::Done {
+            outcome: meerkat_llm_core::LlmDoneOutcome::Error { error },
+        })) = events.last()
+        else {
+            panic!(
+                "{case}: the stream ends with an error, not {:?}",
+                events.last()
+            );
+        };
+        assert!(
+            matches!(error, meerkat_llm_core::LlmError::IncompleteResponse { .. })
+                && error.is_retryable(),
+            "{case}: a retryable incomplete response, not {error:?}"
+        );
+    }
+
+    #[cfg(feature = "copilot")]
+    const COPILOT_CHAT_TEXT: &str = r#"{"choices":[{"index":0,"delta":{"content":"Partial"}}]}"#;
+    #[cfg(feature = "copilot")]
+    const COPILOT_CHAT_CALL: &str = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]}}]}"#;
+
+    /// On GitHub Copilot's Chat Completions routes a stream that names no
+    /// finish reason is an incomplete response the agent tries again, never a
+    /// completed turn: cut at the end of the body, or closed by `[DONE]`,
+    /// after text or a tool call. A finish reason completes the turn with or
+    /// without `[DONE]`.
+    #[cfg(feature = "copilot")]
+    #[tokio::test]
+    async fn copilot_chat_stream_without_a_finish_reason_is_incomplete() {
+        let stop = r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+        for (case, data) in [
+            ("text cut at the end of the body", vec![COPILOT_CHAT_TEXT]),
+            ("text closed by [DONE]", vec![COPILOT_CHAT_TEXT, "[DONE]"]),
+            (
+                "a tool call closed by [DONE]",
+                vec![COPILOT_CHAT_CALL, "[DONE]"],
+            ),
+        ] {
+            let (base, server) = spawn_copilot_chat_stub(&data).await;
+            for (route, client) in copilot_chat_clients(&base) {
+                let events = copilot_chat_events(&client).await;
+                assert_incomplete(&events, &format!("{route}, {case}"));
+            }
+            server.abort();
+        }
+
+        let (base, server) = spawn_copilot_chat_stub(&[COPILOT_CHAT_TEXT, stop]).await;
+        for (route, client) in copilot_chat_clients(&base) {
+            let events = copilot_chat_events(&client).await;
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(Ok(meerkat_llm_core::LlmEvent::Done {
+                        outcome: meerkat_llm_core::LlmDoneOutcome::Success { .. }
+                    }))
+                ),
+                "{route}: a finish reason completes the turn without [DONE]: {:?}",
+                events.last()
+            );
+        }
+        server.abort();
+    }
+
+    /// On GitHub Copilot's Chat Completions routes only the first choice is
+    /// read: a stream that carries another choice, before or after the first
+    /// one's finish reason, is refused as an incomplete response, neither
+    /// merged into the answer nor dropped from it.
+    #[cfg(feature = "copilot")]
+    #[tokio::test]
+    async fn copilot_chat_stream_refuses_another_choice() {
+        let second =
+            r#"{"choices":[{"index":1,"delta":{"content":"Alternative"},"finish_reason":"stop"}]}"#;
+        let stop = r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+        for (case, data) in [
+            (
+                "another choice before the finish reason",
+                [COPILOT_CHAT_TEXT, second, stop, "[DONE]"],
+            ),
+            (
+                "another choice after the finish reason",
+                [COPILOT_CHAT_TEXT, stop, second, "[DONE]"],
+            ),
+        ] {
+            let (base, server) = spawn_copilot_chat_stub(&data).await;
+            for (route, client) in copilot_chat_clients(&base) {
+                let events = copilot_chat_events(&client).await;
+                assert_incomplete(&events, &format!("{route}, {case}"));
+            }
+            server.abort();
+        }
+    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32"), feature = "oauth"))]

@@ -291,6 +291,12 @@ legacy write. Do not duplicate the payload at the top level or retry without
 legacy payload is absent. Legacy top-level requests remain compatible but do
 not provide the checked-save concurrency guarantee.
 
+`meta/access/get` also returns `last_edit` once this controller committed an
+edit: `principal` (the console caller who made it; `null` when the edit named
+no one, as the host's own edit does), `at_ms` (milliseconds since the epoch)
+and the `revision` it committed. It is not kept across a restart: the console
+audit log (`meta/console/audit`) records every edit with its author.
+
 Use the error code together with `data.kind`, rather than matching free-form
 server messages:
 

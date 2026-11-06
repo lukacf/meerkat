@@ -528,7 +528,8 @@ pub const MEMORY_QUARANTINE_REVIEW_REFUSED_CODE: i64 = -32043;
 /// (seconds since the epoch) and the earliest `iat` a token of the principal
 /// is accepted with from now on. That is the fence plus the verifier's clock
 /// leeway, so a sign-in within that window after the revocation is refused
-/// too.
+/// too. `revoked_by` is the console caller whose revocation set the fence,
+/// `null` when it named no one.
 pub(crate) fn console_session_fence_json(
     fence: &crate::auth::session_fence::ConsoleSessionFence,
 ) -> Value {
@@ -538,6 +539,7 @@ pub(crate) fn console_session_fence_json(
         "accepts_tokens_issued_from": crate::runtime::session_fence_first_accepted_iat(
             fence.not_before_epoch_seconds,
         ),
+        "revoked_by": fence.revoked_by,
     })
 }
 

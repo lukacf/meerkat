@@ -907,7 +907,7 @@ mod tests {
     #[test]
     fn operator_and_application_tiers_rejected_for_every_author() {
         for author in [
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
             MemoryAuthor::Application,
             MemoryAuthor::Steward {
                 run_id: "d".to_string(),

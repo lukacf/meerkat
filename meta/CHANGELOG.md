@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   answer `409` and `401`. `/console/mcp-apps/call-tool` answers `409`
   `caller_changed`, and a call whose caller's login ended while it ran gets
   the route's `403` `mcp_app_unavailable`.
+- Rust: `MemoryAuthor::Operator` is a struct variant with an optional
+  `principal`: `MemoryAuthor::Operator { principal: None }` is the former
+  value, and a match on it adds `{ .. }`. Its JSON form is unchanged when
+  no principal is named. `ConsoleSessionFence` gains `revoked_by`.
 
 ### Security
 
@@ -111,6 +115,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `realm_document_keys`) and `RecordRetention`. A store outside Meta keeps
   no realm documents unless it implements them, so it has no console audit
   log and keeps gating in memory.
+- Rust: `AgentMemoryProvider` gains provided `remember_by`, `forget_by` and
+  `supersede_by`, which write on behalf of a named author (the default
+  ignores the author and writes as `remember`, `forget` and `supersede`
+  do), and `ConsoleSessionFences` gains `revoke_sessions_by`, which records
+  who revoked.
 
 ### Changed
 
@@ -119,6 +128,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `UnifiedRuntimeBuilder::keep_gating_state(true)` does the same for an
   embedded runtime; a host that persists `gating_state_snapshot` itself
   leaves it off.
+- Memory written from the console names the person who wrote it: its
+  author is the operator with the caller's principal. A quarantine review
+  made in the console names its reviewer on the record it releases.
+- A console session revocation records who revoked (`revoked_by` in the
+  fence record and the answer), and an access edit its author, time and
+  revision (`last_edit` on `meta/access/get`).
 
 ### Fixed
 

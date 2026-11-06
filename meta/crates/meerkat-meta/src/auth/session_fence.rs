@@ -84,6 +84,12 @@ struct PrincipalFence {
     /// Seconds since the epoch: tokens issued before this instant (and up to
     /// the verifier's clock leeway after it) are refused.
     not_before_epoch_seconds: u64,
+    /// The console caller whose revocation set the fence; absent when it
+    /// named no one (the host's own revocation) and in fences an earlier
+    /// release wrote. A binary that predates it keeps it as a field it does
+    /// not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revoked_by: Option<String>,
     #[serde(flatten)]
     other: BTreeMap<String, Value>,
 }
@@ -171,6 +177,11 @@ pub struct ConsoleSessionFence {
     /// Seconds since the epoch: the Console refuses every token of the
     /// principal issued before this instant plus the verifier's clock leeway.
     pub not_before_epoch_seconds: u64,
+    /// The console caller whose revocation set the fence, as the Console
+    /// names its principal; `None` when the revocation named no one (the
+    /// host's own, [`ConsoleSessionFences::revoke_sessions`]) and for a
+    /// fence an earlier release set.
+    pub revoked_by: Option<String>,
 }
 
 /// What the record lists, read without a live Console (the storage doctor).
@@ -314,8 +325,19 @@ impl ConsoleSessionFences {
             .map(|(principal, fence)| ConsoleSessionFence {
                 principal: principal.clone(),
                 not_before_epoch_seconds: fence.not_before_epoch_seconds,
+                revoked_by: fence.revoked_by.clone(),
             })
             .collect()
+    }
+
+    /// [`Self::revoke_sessions_by`], naming no one: the host's own
+    /// revocation.
+    pub fn revoke_sessions(
+        &self,
+        principal: &str,
+        at: SystemTime,
+    ) -> Result<ConsoleSessionFence, ConsoleSessionFencesError> {
+        self.revoke_sessions_by(principal, at, None)
     }
 
     /// Revoke every session of `principal` as of `at`: from then on the
@@ -325,6 +347,10 @@ impl ConsoleSessionFences {
     /// later fence replaces an earlier one; an earlier one never moves a
     /// fence back. The fence is written to the record's file before it
     /// takes effect, and refused when the record has no file.
+    ///
+    /// `revoked_by` is the console caller who revoked. It is recorded with
+    /// the fence this revocation sets; a revocation that leaves a later
+    /// fence in place leaves that fence's revoker too.
     ///
     /// A write that fails before it replaces the file changes nothing
     /// ([`ConsoleSessionFencesError::Io`]). A write that replaced the file
@@ -336,10 +362,11 @@ impl ConsoleSessionFences {
     /// that leaves a fence unchanged, invalidates every evidence observed
     /// under this record ([`Self::observe_current_human`]) before its fence
     /// is visible.
-    pub fn revoke_sessions(
+    pub fn revoke_sessions_by(
         &self,
         principal: &str,
         at: SystemTime,
+        revoked_by: Option<&str>,
     ) -> Result<ConsoleSessionFence, ConsoleSessionFencesError> {
         let principal = principal.trim();
         if principal.is_empty() {
@@ -351,6 +378,10 @@ impl ConsoleSessionFences {
             .as_deref()
             .ok_or(ConsoleSessionFencesError::NotDurable)?;
         let at = at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let revoked_by = revoked_by
+            .map(str::trim)
+            .filter(|revoker| !revoker.is_empty())
+            .map(str::to_string);
         let _writer = self
             .inner
             .writer
@@ -362,10 +393,15 @@ impl ConsoleSessionFences {
             .entry(principal.to_string())
             .or_insert_with(|| PrincipalFence {
                 not_before_epoch_seconds: at,
+                revoked_by: None,
                 other: BTreeMap::new(),
             });
-        fence.not_before_epoch_seconds = fence.not_before_epoch_seconds.max(at);
+        if at >= fence.not_before_epoch_seconds {
+            fence.not_before_epoch_seconds = at;
+            fence.revoked_by = revoked_by;
+        }
         let not_before_epoch_seconds = fence.not_before_epoch_seconds;
+        let revoked_by = fence.revoked_by.clone();
         // Persist first. A write that did not replace the file changed
         // nothing: nothing is published and nothing becomes visible. One
         // that replaced it may be read after a restart, so it takes effect
@@ -395,12 +431,14 @@ impl ConsoleSessionFences {
         tracing::info!(
             principal,
             not_before_epoch_seconds,
+            revoked_by = revoked_by.as_deref(),
             "console sessions revoked"
         );
         match unconfirmed {
             None => Ok(ConsoleSessionFence {
                 principal: principal.to_string(),
                 not_before_epoch_seconds,
+                revoked_by,
             }),
             Some(error) => {
                 tracing::warn!(
@@ -717,6 +755,72 @@ mod tests {
             Some(2_000_000_000)
         );
         assert_eq!(reopened.not_before("bob@example.test"), None);
+    }
+
+    /// A fence names the revocation that set it: an earlier revocation
+    /// leaves the later fence and its revoker, a later one takes both over,
+    /// and a fence stored without a revoker reads as naming no one.
+    #[test]
+    fn a_fence_names_who_set_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(CONSOLE_SESSION_FENCES_FILE);
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"format\":\"{RECORD_FORMAT}\",\"version\":1,\
+                 \"fences\":{{\"bob@example.test\":{{\"not_before_epoch_seconds\":5}}}}}}"
+            ),
+        )
+        .expect("write record");
+        let fences = ConsoleSessionFences::open(&path).expect("open");
+        let set = fences
+            .revoke_sessions_by(
+                "alice@example.test",
+                at(2_000_000_000),
+                Some("root@example.test"),
+            )
+            .expect("revoke");
+        assert_eq!(set.revoked_by.as_deref(), Some("root@example.test"));
+        let kept = fences
+            .revoke_sessions_by(
+                "alice@example.test",
+                at(1_999_999_000),
+                Some("eve@example.test"),
+            )
+            .expect("revoke earlier");
+        assert_eq!(kept.not_before_epoch_seconds, 2_000_000_000);
+        assert_eq!(kept.revoked_by.as_deref(), Some("root@example.test"));
+
+        let reopened = ConsoleSessionFences::open(&path).expect("reopen");
+        let revokers = |fences: &ConsoleSessionFences| {
+            fences
+                .fences()
+                .into_iter()
+                .map(|fence| (fence.principal, fence.revoked_by))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            revokers(&reopened),
+            vec![
+                (
+                    "alice@example.test".to_string(),
+                    Some("root@example.test".to_string())
+                ),
+                ("bob@example.test".to_string(), None),
+            ]
+        );
+        let host = reopened
+            .revoke_sessions("alice@example.test", at(2_000_000_100))
+            .expect("host revoke");
+        assert_eq!(host.revoked_by, None);
+        let stored: Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+        assert!(
+            stored["fences"]["alice@example.test"]
+                .get("revoked_by")
+                .is_none(),
+            "{stored}"
+        );
     }
 
     #[test]

@@ -3157,6 +3157,7 @@ one never moves it back.
 | `principal` | `string` | The principal revoked |
 | `not_before` | `integer` | The fence, in seconds since the epoch |
 | `accepts_tokens_issued_from` | `integer` | The earliest `iat` accepted from now on (`not_before` + 30) |
+| `revoked_by` | `string` or `null` | The console caller whose revocation set the fence, as `meta/console/whoami` names their principal (an earlier revocation leaves the fence and its revoker); `null` when that revocation named no one, as one on the stdio gateway (the host's own) does |
 
 Errors: `-32602` for a missing or empty principal; `-32004` when the runtime
 has no durable session fence record (no persistent state directory), so the

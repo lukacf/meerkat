@@ -399,6 +399,29 @@ mod tests {
         );
     }
 
+    /// MG R4w: an operator grant may name the decision its host made before
+    /// issuing it; the issuer on a record carries it back.
+    #[test]
+    fn grant_params_and_operator_issuers_carry_a_decision_ref() {
+        let value = json!({
+            "subject": {"kind": "identity", "mob_id": "mob-1", "identity": "worker-1"},
+            "target": {"kind": "family", "family": "shell"},
+            "duration_ms": 60_000,
+            "decision_ref": "approval-7",
+        });
+        let params: GrantToolParams =
+            serde_json::from_value(value.clone()).expect("a decision_ref is a known field");
+        assert_eq!(serde_json::to_value(&params).unwrap(), value);
+
+        let issuer = json!({"kind": "operator", "caller": "ops", "decision_ref": "approval-7"});
+        let decoded: WireToolGrantIssuer = serde_json::from_value(issuer.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            issuer,
+            "the issuer keeps its decision_ref"
+        );
+    }
+
     #[test]
     fn unknown_result_kinds_decode_as_unknown() {
         let grant: WireToolGrant = serde_json::from_value(json!({

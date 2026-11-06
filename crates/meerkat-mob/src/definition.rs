@@ -1443,6 +1443,40 @@ model = "claude-sonnet-4-5"
         );
     }
 
+    /// MG P1: `tools.grant_gated` is a key the tools table declares, and a
+    /// typo inside the gate is reported with its location, as a typo under
+    /// `tools` is, instead of silently leaving the gate narrower.
+    #[test]
+    fn parse_toml_reads_the_grant_gate_and_warns_on_its_unknown_keys() {
+        let content = r#"
+[mob]
+id = "gated"
+
+[profiles.worker]
+model = "claude-sonnet-4-5"
+
+[profiles.worker.tools]
+comms = true
+grant_gated = { families = ["shell"], famlies = ["memory"] }
+"#;
+        let parsed = MobDefinition::parse_toml(content).expect("a gate typo warns, not refuses");
+        assert_eq!(
+            parsed.unknown_profile_keys,
+            vec![UnknownProfileKeys {
+                profile: ProfileName::from("worker"),
+                keys: vec!["tools.grant_gated.famlies".to_string()],
+            }]
+        );
+        let worker = parsed.definition.profiles[&ProfileName::from("worker")]
+            .as_inline()
+            .expect("inline profile");
+        assert_eq!(
+            serde_json::to_value(&worker.tools).expect("tools serialize")["grant_gated"],
+            serde_json::json!({"families": ["shell"]}),
+            "the gate's known keys are kept"
+        );
+    }
+
     #[test]
     fn parse_toml_warns_on_unknown_tools_keys_with_the_sub_table_location() {
         // `comm = true` is the exact typo that yields the comms=false wiring

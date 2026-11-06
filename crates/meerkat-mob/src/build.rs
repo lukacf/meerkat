@@ -1226,6 +1226,10 @@ async fn assemble_system_prompt(
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod member_grant_gate_tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::definition::{BackendConfig, MobDefinition, OrchestratorConfig, WiringRules};

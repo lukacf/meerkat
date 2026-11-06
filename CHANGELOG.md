@@ -70,7 +70,9 @@ them.
   (`--config-dir` overrides; an existing `~/.config/rkat-tui` is used with a
   notice until the new directory exists). File tools never write the gate's
   own `.rkat/` state or `.git/` (sealed paths: denied before the classifier
-  and any allow rule). See `crates/meerkat-tui/README.md`.
+  and any allow rule), and `fork_off` is denied to sessions and helpers (a
+  fork child would seat outside the approval gate). See
+  `crates/meerkat-tui/README.md`.
 
 ### Changed
 

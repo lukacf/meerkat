@@ -113,9 +113,20 @@ fn shape(
         spec.external_tools = Some(tools());
     }
     inherit_shell_env(spec, shell_env);
+    deny_ungated_tools(spec);
     spec.additional_instructions
         .get_or_insert_with(Vec::new)
         .push(HELPER_PERSONA.to_string());
+}
+
+/// A helper is a seated member, so the engine would let it `fork_off`; its
+/// fork child would seat without this customizer and so without the gate.
+/// Every helper carries the TUI's tool access policy unless its spec names
+/// one.
+fn deny_ungated_tools(spec: &mut SpawnMemberSpec) {
+    if spec.tool_access_policy.is_none() {
+        spec.tool_access_policy = Some(crate::session::tool_access_policy());
+    }
 }
 
 /// A refused helper, as the mob reports it.
@@ -217,6 +228,27 @@ impl SpawnMemberCustomizer for HelperCustomizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_helper_is_denied_the_ungated_spawn_tools_unless_its_spec_names_a_policy() {
+        let mut spec = SpawnMemberSpec::new("delegate", "worker");
+        deny_ungated_tools(&mut spec);
+        let denied = match &spec.tool_access_policy {
+            Some(meerkat_core::ops::ToolAccessPolicy::DenyList(names)) => {
+                names.0.iter().any(|n| n.as_str() == "fork_off")
+            }
+            _ => false,
+        };
+        assert!(denied, "{:?}", spec.tool_access_policy);
+
+        let mut named = SpawnMemberSpec::new("delegate", "worker");
+        named.tool_access_policy = Some(meerkat_core::ops::ToolAccessPolicy::ReadOnly);
+        deny_ungated_tools(&mut named);
+        assert_eq!(
+            named.tool_access_policy,
+            Some(meerkat_core::ops::ToolAccessPolicy::ReadOnly)
+        );
+    }
 
     #[test]
     fn a_helper_gets_the_confined_shell_environment_unless_it_names_one() {

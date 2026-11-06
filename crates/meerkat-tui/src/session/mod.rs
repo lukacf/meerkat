@@ -92,6 +92,14 @@ const INTERRUPT_REASON: &str = "rkat-tui: interrupted by the user";
 /// diff-reporting file tools, gated by the approval policy).
 pub const TUI_OWNED_BUILTINS: [&str; 2] = ["brain_swap", "apply_patch"];
 
+/// Mob tools every TUI session and helper is denied because their child
+/// would run outside the approval gate: a `fork_off` child seats through
+/// the engine's persisted-fork path, which never consults the TUI's spawn
+/// customizer, so it would get no gate, no persona, no follower and no
+/// curated environment. Denied until the engine lets a host shape fork
+/// seats.
+pub const UNGATED_SPAWN_TOOLS: [&str; 1] = ["fork_off"];
+
 /// The model, provider and auth binding a session runs on, as its
 /// authoritative metadata records them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -658,7 +666,12 @@ fn fresh_instructions(additional: &[String]) -> Vec<String> {
 /// denied.
 #[must_use]
 pub fn tool_access_policy() -> ToolAccessPolicy {
-    ToolAccessPolicy::DenyList(TUI_OWNED_BUILTINS.into_iter().collect::<ToolNameSet>())
+    ToolAccessPolicy::DenyList(
+        TUI_OWNED_BUILTINS
+            .into_iter()
+            .chain(UNGATED_SPAWN_TOOLS)
+            .collect::<ToolNameSet>(),
+    )
 }
 
 /// Build options shared by fresh and resumed sessions: `instructions`, the
@@ -704,9 +717,10 @@ mod tests {
         let ToolAccessPolicy::DenyList(names) = tool_access_policy() else {
             unreachable!("a deny list");
         };
-        for name in TUI_OWNED_BUILTINS {
+        for name in TUI_OWNED_BUILTINS.into_iter().chain(UNGATED_SPAWN_TOOLS) {
             assert!(names.0.iter().any(|n| n.as_str() == name), "{name}");
         }
+        assert!(names.0.iter().any(|n| n.as_str() == "fork_off"));
     }
 
     #[test]

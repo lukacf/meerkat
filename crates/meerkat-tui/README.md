@@ -252,8 +252,11 @@ turn and returns its final text. Its tool calls pass the **delegating
 session's** gate (same rules, counters and Stop; escalations name the
 helper), so delegating never unlocks an action. The transcript nests helper
 activity under `[label · model]`, the status bar counts running helpers, and
-an interrupt cancels them. `fork_off` is not usable from a TUI session (it
-requires the caller to be a durable mob member).
+an interrupt cancels them. `fork_off` is denied to every session and helper
+through the tool access policy: a fork child seats through the engine's
+persisted-fork path, which never consults the TUI's spawn customizer, so it
+would run without the approval gate (and without the persona, the follower
+and the curated environment).
 
 ## Rules
 

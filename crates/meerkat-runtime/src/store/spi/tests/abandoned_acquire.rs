@@ -10,6 +10,11 @@
 //! lease (a live writer) or a batch the writer did not write poisons the
 //! realm. With no timed-out acquire, an unknown holder is another writer at
 //! once (`a_writer_that_stopped_never_resumes_on_a_later_renew`).
+//!
+//! A grant the writer did get is its own as well while its token is not
+//! installed: a re-acquire installs the token only once its listing showed
+//! no batch it did not write, and a listing that fails leaves the store
+//! holding the grant's lease.
 
 use super::*;
 
@@ -201,4 +206,61 @@ async fn a_waited_out_holder_that_committed_poisons_the_realm_at_the_listing() {
         matches!(refused, Err(RuntimeStoreError::RealmRefused { .. })),
         "{refused:?}"
     );
+}
+
+// Unrun until the candidate's validation. A renew stop at 1 s; at 2 s the
+// re-acquire's exclusive acquire answers `Held` with the writer's own token,
+// and the takeover of its own lease is granted (token 2, its lease until
+// 5 s), but the listing that would show no batch the writer did not write
+// fails. The writer stays stopped under token 1. At 3 s the next re-acquire
+// meets token 2 as the holder: the writer's own grant, whose lease it takes
+// over (token 3); the listing passes and the writer resumes. Before, the
+// writer forgot token 2 when the listing failed, met it at 3 s as a holder it
+// did not know, with no timed-out acquire, and poisoned the realm.
+#[tokio::test(start_paused = true)]
+async fn a_grant_whose_listing_failed_is_taken_over_as_the_writers_own() {
+    let host = fast_host();
+    let (realm, store) = open_fast(&host, AcquireMode::Exclusive).await;
+    {
+        let mut faults = host.faults.lock().unwrap();
+        faults.renew_unavailable = 1;
+        faults.list_unavailable = 1;
+    }
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(host.token(), 2, "the re-acquire was granted token 2");
+    assert!(
+        realm.realm_poisoned().is_none(),
+        "{:?}",
+        realm.realm_poisoned()
+    );
+    assert!(
+        !realm.lease_is_live(),
+        "its listing failed: the writer stays stopped"
+    );
+    assert_eq!(
+        realm.fence().get(),
+        1,
+        "the writer commits with no token its listing did not prove"
+    );
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        realm.realm_poisoned().is_none(),
+        "a grant of the writer's own whose listing failed is not another writer: {:?}",
+        realm.realm_poisoned()
+    );
+    assert!(realm.lease_is_live(), "the writer resumed");
+    assert_eq!(
+        realm.fence().get(),
+        3,
+        "on a takeover of its own grant's lease"
+    );
+    assert_eq!(host.token(), 3);
+    store
+        .persist_input_state(
+            &LogicalRuntimeId::new("resumed"),
+            &persistable(StoredInputState::new_accepted(InputId::new())),
+        )
+        .await
+        .expect("writes resume under token 3");
 }

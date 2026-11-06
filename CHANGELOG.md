@@ -149,6 +149,28 @@ them.
   served, so code that builds them literally must set it (`None` keeps the
   previous behaviour).
 
+- `meerkat-mob`: an owned edge's `OwnedIdentityEdge::rule` is an
+  `OwnedEdgeAdmission` (the admitting peer rule's id, `Rule`, or `Adopted`)
+  in place of a `String`, and `OwnedIdentityEdge::new` takes one: build a
+  rule's with `OwnedEdgeAdmission::rule(id)`, which refuses the id
+  `adopted`. The row's stored form is unchanged (`{"peer": .., "rule":
+  ".."}`; the token `adopted` reads as `Adopted`).
+
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`:
+  MobMachine keeps the mob's owned edges (see Added). `MobMachineInput`
+  (meerkat-machine-schema and meerkat-mob) and the kernel `generated::mob`
+  inputs gain `DeclareOwnedIdentityEdge { edge, owner }`,
+  `EndOwnedIdentityEdge { edge, owner, cause }` and
+  `AdmitMemberUnwire { edge }`, `MobMachineSignal` gains
+  `RecoverOwnedIdentityEdge { edge, owner }`, `MobMachineEffect` gains
+  `OwnedIdentityEdgeDeclared`, `OwnedIdentityEdgeEnded` and
+  `MemberUnwireAdmissionResolved`, and the state gains the public field
+  `identity_edge_owners`, so code that builds the state literally must set
+  it. The kernel `generated::mob::TransitionId` gains the new arms, each
+  appended last, so no existing variant's discriminant moves. Every enum
+  named here is exhaustive, so a downstream exhaustive match needs the new
+  arms, or a wildcard arm.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -324,6 +346,28 @@ them.
   `DecisionPresentationRequest` and `WirePresentationRecord`;
   `meerkat-core`: `PresentationRecord::with_link`); the Python and
   TypeScript SDK types carry it too.
+- `meerkat-mob`: owned edges. A store-owned identity's create lists its
+  peers (`CreatedIdentityRequest::with_peers`) and its update adds and
+  removes them (`StoreOwnedIdentityUpdate::with_peers_add`,
+  `with_peers_remove`), each an `OwnedIdentityEdge` to an identity of
+  either custody with how it entered (`OwnedEdgeAdmission`). The edge is
+  owned by the identity whose change declared it, held in its row
+  (`CreatedIdentityRecord::owned_edges`, written in the change's
+  transaction), and wired once both its ends are seated: by the change's
+  own step, or by the later seat of the end that was not. A second
+  declaration of an owned edge gives no custody, and a peer that is no
+  identity of the mob is refused `IdentityChangeRefusal::PeerUnknown`
+  (`peer_unknown`). An archive or an unlisting of an end leaves the edge
+  owned and unwired, and the end's next seat wires it again. An owned edge
+  ends only by its owner's change (another identity's change naming it is
+  refused `invalid_request`), by the host's policy reload that denies it
+  (`MobHandle::end_denied_identity_edge`, naming its owner, answering an
+  `OwnedEdgeEndOutcome`), by the removal of either end (in the removal's own
+  store transaction, with the tombstone, which owns no edge) and by the
+  mob's reset or destroy; a plain unwire of an owned edge is refused
+  `MobError::OwnedIdentityEdge` (`owned_identity_edge`). An edge enables no
+  tool. A start recovers each edge from its owner's row and wires those a
+  crash left unwired.
 
 ### Changed
 
@@ -454,6 +498,10 @@ them.
   decided decision's evidence) does not read under 0.9.10, which refuses the
   record's `link` field: that decision reads as unreadable there. Rows
   without a link read as before.
+- A 0.9.10 build reads a store-owned identity's owned edges in its row and
+  does not act on them: an edge wired before the downgrade stays wired as
+  plain wiring, which a plain unwire ends there, and the next 0.9.11 start
+  owns every edge its owner's row holds again.
 
 ### Known limitations
 

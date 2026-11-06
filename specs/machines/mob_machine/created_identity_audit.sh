@@ -10,7 +10,7 @@
 # identity_entry_audit.sh does for the declared apply, with the VIEW of
 # member_residency_audit that leaves out the two counters no guard reads
 # (model_step_count and topology_epoch); the runner first checks that the
-# model reads neither anywhere else. It checks fourteen runs of
+# model reads neither anywhere else. It checks fifteen runs of
 # created_identity_audit.tla, each over its whole space with TLC coverage, in
 # two parts (every part by default; --part <run>,<run>... checks those runs,
 # as a CI shard does). Its recovery part (--part recovery):
@@ -141,6 +141,20 @@
 #   or seat puts a member under the archived identity
 #   (AuditArchivedNeverSeated), and the boot plan's seal, a stop and a
 #   resume keep its standing and its name (AuditArchivedKeepsItsName).
+# - edges (0.9.11): a roster-owned identity declared, seated and removed
+#   through its retirement; a store-owned identity seated under created
+#   custody, archived through its retirement, unarchived and removed; a
+#   store-owned identity no member holds, archived, unarchived and removed
+#   at once; the declaration, the end for either cause and the boot's
+#   recovery of each edge among them (and of a self edge) by each
+#   store-owned identity, and a plain unwire's admission of each, under the
+#   host's changes hold and either composition authority, in a running and
+#   a stopped mob: exactly one arm answers each (AuditEdgesExactlyOne), an
+#   owned edge ends only by its owner's end or by an end's removal
+#   (AuditOwnedEdgeEndsOnlyByItsOwnerOrAnEnd), it keeps its owner while
+#   owned (AuditOwnedEdgeKeepsItsOwner), and no end naming another identity
+#   than its owner ends it (AuditOnlyTheOwnerEndsItsEdge). Its domains add a
+#   third identity, the run's third end.
 #
 # Every run checks every generated invariant (the created entries' among
 # them: tombstone_is_never_an_entry, entry_custodies_are_disjoint,
@@ -186,7 +200,7 @@ done
 part_of() {
   case "$1" in
     scan|reseat|names|placed) echo recovery ;;
-    admit|commit|update|removal|archive|preparation|prepverdicts|placement|unlist|recovered) echo changes ;;
+    admit|commit|update|removal|archive|preparation|prepverdicts|placement|unlist|recovered|edges) echo changes ;;
     *) return 1 ;;
   esac
 }
@@ -226,6 +240,7 @@ prepverdicts_states=294
 placement_states=105
 unlist_states=336
 recovered_states=180
+edges_states=84720
 
 # Every arm each run must fire. TLC names an arm after the generated
 # operator where it is applied plainly (an audit wrapper that only applies
@@ -597,6 +612,37 @@ recovered_covered_actions=(
   ObserveMemberRetirementArchivedLiveStopped
 )
 
+# The edges run fires every arm of an owned edge's declaration, end, plain
+# unwire's admission and recovery in a running and a stopped mob (their
+# completed and destroyed arms are arm_coverage_not_covered.txt's), and the
+# removal and archive arms that end or keep an edge.
+edges_covered_actions=(
+  DeclareOwnedIdentityEdgeDeclared
+  DeclareOwnedIdentityEdgeAlreadyOwned
+  DeclareOwnedIdentityEdgePeerUnknown
+  DeclareOwnedIdentityEdgeOwnerInvalid
+  DeclareOwnedIdentityEdgeMobNotRunningStopped
+  EndOwnedIdentityEdgeEnded
+  EndOwnedIdentityEdgeNotOwner
+  EndOwnedIdentityEdgeAbsent
+  EndOwnedIdentityEdgeNonAuthoritative
+  EndOwnedIdentityEdgeChangesHeld
+  EndOwnedIdentityEdgeMobNotRunningStopped
+  AdmitMemberUnwireAdmittedRunning
+  AdmitMemberUnwireAdmittedStopped
+  AdmitMemberUnwireOwnedEdgeRunning
+  AdmitMemberUnwireOwnedEdgeStopped
+  RecoverOwnedIdentityEdgeRecoveredRunning
+  RecoverOwnedIdentityEdgeRecoveredStopped
+  RecoverOwnedIdentityEdgeSkippedRunning
+  RecoverOwnedIdentityEdgeSkippedStopped
+  RemoveIdentityEntryRetiring
+  RemoveIdentityEntryRemoved
+  ArchiveIdentityEntryArchiving
+  ArchiveIdentityEntryArchived
+  UnarchiveIdentityEntryRestored
+)
+
 # A covered arm a run fires only through a named wrapper whose conjunct
 # restricts its exploration: TLC's coverage names such an action after the
 # wrapper (an action whose body is a conjunction is named after its
@@ -820,6 +866,15 @@ write_cfg() {
       run_invariants="
   AuditRecoverExactlyOne"
       ;;
+    edges)
+      spec="EdgesSpec"
+      run_properties="
+  AuditOwnedEdgeEndsOnlyByItsOwnerOrAnEnd
+  AuditOwnedEdgeKeepsItsOwner
+  AuditOnlyTheOwnerEndsItsEdge"
+      run_invariants="
+  AuditEdgesExactlyOne"
+      ;;
     *)
       echo "error: unknown audit run '${run}'" >&2
       exit 1
@@ -834,8 +889,13 @@ write_cfg() {
       exit 1
       ;;
   esac
-  # The declared apply's runs' domains (identity_entry_audit.sh).
-  replace_exact_line "  AgentIdentityValues = {}" '  AgentIdentityValues = {"agentidentity_1", "agentidentity_2"}' "${cfg}"
+  # The declared apply's runs' domains (identity_entry_audit.sh); the edges
+  # run adds a third identity, its third end.
+  local identities='{"agentidentity_1", "agentidentity_2"}'
+  if [[ "${run}" == "edges" ]]; then
+    identities='{"agentidentity_1", "agentidentity_2", "agentidentity_3"}'
+  fi
+  replace_exact_line "  AgentIdentityValues = {}" "  AgentIdentityValues = ${identities}" "${cfg}"
   replace_exact_line "  AgentRuntimeIdValues = {}" '  AgentRuntimeIdValues = {"agentruntimeid_1", "agentruntimeid_2", "agentruntimeid_3"}' "${cfg}"
   replace_exact_line "  FenceTokenValues = {1}" "  FenceTokenValues = {1, 2, 3}" "${cfg}"
   replace_exact_line "  GenerationValues = {1}" "  GenerationValues = {0, 1}" "${cfg}"
@@ -968,7 +1028,7 @@ check_space() {
   done
 }
 
-for run in scan reseat names placed admit commit update removal archive preparation prepverdicts placement unlist recovered; do
+for run in scan reseat names placed admit commit update removal archive preparation prepverdicts placement unlist recovered edges; do
   if in_part "${run}"; then
     floor_var="${run}_states"
     arms_var="${run}_covered_actions[@]"
@@ -1021,7 +1081,14 @@ for witness in \
   "unlist:Action property:UnlistMarksSeated" "unlist:Action property:UnlistRemovesUnseated" \
   "unlist:Action property:UnlistDefersLadder" "unlist:Action property:UnlistEndsAtTerminal" \
   "unlist:Action property:UnlistedNameRefused" "unlist:Action property:UnlistLeavesCreated" \
-  "recovered:Action property:RecoveredRemovalEnds" "recovered:Action property:RecoveredArchiveEnds"; do
+  "recovered:Action property:RecoveredRemovalEnds" "recovered:Action property:RecoveredArchiveEnds" \
+  "edges:Action property:EdgeDeclared" "edges:Action property:EdgeToUnseatedDeclared" \
+  "edges:Action property:EdgeSecondDeclaration" "edges:Action property:EdgePeerUnknown" \
+  "edges:Action property:EdgeEndedByOwner" "edges:Action property:EdgeEndedByPolicy" \
+  "edges:Action property:EdgeNotOwner" "edges:Action property:EdgeEndedByPeerRemoval" \
+  "edges:Action property:EdgeEndedByOwnerRemoval" "edges:Action property:EdgeKeptByThirdRemoval" \
+  "edges:Action property:EdgeKeptByArchive" "edges:Action property:EdgeUnwireRefused" \
+  "edges:Action property:EdgeRecovered"; do
   run="${witness%%:*}"
   if ! in_part "${run}"; then
     continue
@@ -1663,6 +1730,46 @@ PY
   mutate_unreached recovered recovered_removal_unmarked RecoveredRemovalEnds <<'PY'
 keep_var("RecoverCreatedIdentityEntryRemovingRunning", "identity_entry_removing")
 keep_var("RecoverCreatedIdentityEntryRemovingStopped", "identity_entry_removing")
+PY
+
+  # An end naming another identity than the edge's owner ends it (its
+  # owned_by_owner guard read as the edge being owned at all).
+  mutate edges edge_removed_by_non_owner "Action property AuditOnlyTheOwnerEndsItsEdge" <<'PY'
+replace_in_arm("EndOwnedIdentityEdgeEnded",
+               '((IF (edge \\in DOMAIN identity_edge_owners) THEN Some((IF edge \\in DOMAIN identity_edge_owners THEN identity_edge_owners[edge] ELSE "None")) ELSE None) = Some(owner))',
+               "(edge \\in DOMAIN identity_edge_owners)")
+PY
+
+  # A removal ends every owned edge, those of identities it is no end of
+  # too: a change of a third identity cascades over their edges.
+  mutate edges cascade_on_third_party_change "Action property AuditOwnedEdgeEndsOnlyByItsOwnerOrAnEnd" <<'PY'
+replace_update("RemoveIdentityEntryRetiring", "identity_edge_owners",
+               "[edge \\in {} |-> agent_identity]")
+PY
+
+  # A removal of an unseated entry keeps its owned edges: an edge keeps the
+  # removed identity as its owner, no entry any more.
+  mutate edges removal_keeps_owned_edges "Invariant owned_edge_owner_is_a_store_owned_end" <<'PY'
+keep_var("RemoveIdentityEntryRemoved", "identity_edge_owners")
+PY
+
+  # A removal of an unseated entry ends only the edges the removed identity
+  # owns: an edge another identity owns joins the tombstone it leaves.
+  mutate edges removal_ends_only_its_own_edges "Invariant owned_edge_joins_no_tombstone" <<'PY'
+replace_update("RemoveIdentityEntryRemoved", "identity_edge_owners",
+               "[edge \\in { e \\in DOMAIN identity_edge_owners : identity_edge_owners[e] # agent_identity } |-> identity_edge_owners[edge]]")
+PY
+
+  # A second declaration takes the edge's custody (the declaration's
+  # edge_not_owned guard dropped).
+  mutate edges second_declaration_takes_custody "Action property AuditOwnedEdgeKeepsItsOwner" <<'PY'
+drop_guard("DeclareOwnedIdentityEdgeDeclared", "identity_edge_owners) = FALSE)")
+PY
+
+  # A plain unwire of an owned edge is admitted (the admission's
+  # edge_not_owned guard dropped): two arms answer it.
+  mutate edges unwire_admits_owned_edge "Invariant AuditEdgesExactlyOne" <<'PY'
+drop_guard("AdmitMemberUnwireAdmittedRunning", "identity_edge_owners) = FALSE)")
 PY
 fi
 echo "created identity audit passed"

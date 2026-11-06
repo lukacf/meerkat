@@ -250,6 +250,9 @@ pub enum MobMachineCatalogInput {
     SettleHostPreparation,
     EndPreparationConstruction,
     UnlistIdentityEntry,
+    DeclareOwnedIdentityEdge,
+    EndOwnedIdentityEdge,
+    AdmitMemberUnwire,
 }
 
 impl MobMachineCatalogInput {
@@ -500,6 +503,9 @@ impl MobMachineCatalogInput {
         Self::SettleHostPreparation,
         Self::EndPreparationConstruction,
         Self::UnlistIdentityEntry,
+        Self::DeclareOwnedIdentityEdge,
+        Self::EndOwnedIdentityEdge,
+        Self::AdmitMemberUnwire,
     ];
 
     #[must_use]
@@ -753,6 +759,9 @@ impl MobMachineCatalogInput {
             Self::SettleHostPreparation => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::SettleHostPreparation,
             Self::EndPreparationConstruction => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::EndPreparationConstruction,
             Self::UnlistIdentityEntry => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::UnlistIdentityEntry,
+            Self::DeclareOwnedIdentityEdge => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::DeclareOwnedIdentityEdge,
+            Self::EndOwnedIdentityEdge => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::EndOwnedIdentityEdge,
+            Self::AdmitMemberUnwire => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AdmitMemberUnwire,
         }
     }
 
@@ -1031,6 +1040,9 @@ impl MobMachineCatalogInput {
             Self::SettleHostPreparation => "SettleHostPreparation",
             Self::EndPreparationConstruction => "EndPreparationConstruction",
             Self::UnlistIdentityEntry => "UnlistIdentityEntry",
+            Self::DeclareOwnedIdentityEdge => "DeclareOwnedIdentityEdge",
+            Self::EndOwnedIdentityEdge => "EndOwnedIdentityEdge",
+            Self::AdmitMemberUnwire => "AdmitMemberUnwire",
         }
     }
 }

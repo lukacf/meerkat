@@ -30,6 +30,7 @@ pub(super) mod member_wake;
 #[cfg(feature = "runtime-adapter")]
 pub(super) mod member_wake_turn;
 mod operator_instructions;
+mod owned_edges;
 mod placed_external_routes;
 pub(super) mod reload_revival;
 mod resume_post_commit;
@@ -49559,6 +49560,11 @@ impl MobActor {
         local: AgentIdentity,
         target: super::handle::PeerTarget,
     ) -> Result<wiring_io::WireHandled, MobError> {
+        // An owned edge takes no plain unwire (0.9.11): MobMachine's
+        // admission refuses it before the unwire touches anything.
+        if let super::handle::PeerTarget::Local(peer) = &target {
+            self.admit_member_unwire(&local, peer)?;
+        }
         match self
             .prepare_member_unwire(local, target, None, false)
             .await?

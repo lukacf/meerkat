@@ -18,6 +18,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `mob_declared_apply_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/declared_apply.rs` — MobMachine declared apply realized by the actor: decide one verdict per declared identity from the declaration and member facts and realize it (a Dormant seat, on the entry's archived session when it has one, a same-session restamp, a rotation, a role hold or a typed refusal), refusing every identity of a candidate composition; seal a complete declared roster, marking every unlisted Declared entry whose member is seated and removing every unseated one, leaving one whose spawn is in flight to a later seal, and retire each marked member with the cause Unlisted, whose start row records the mark for replay; unlist one roster-owned identity alone the same way, reading and changing no other entry, and leave it to a later unlist while a spawn, retirement, removal or held construction of it is in flight; answer a store-owned update of an archived identity, or of one awaiting its host's preparation, record only; let an archived session record go when the session is lost or the host asked for a fresh life; an unseated cause belongs to an entry no member holds, an unlisted mark to a seated Declared entry whose member has no spawn in flight, an archived session record to an identity no member holds, and an entry awaiting its held creation was never created, emitting the identity entry declared, declared roster sealed, identity entry unlisted and archived session forgotten effects
 - `mob_created_identity_entry_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/created_identity.rs` — MobMachine created identity entries realized by the shell at a start: recover each created entry row of the identity store from its presence and the replayed journal after the replay and before the boot plan (a present row of a seated local member records it a Created entry, a present row whose member the journal shows retired records the entry owed its seat with its member's last session as its revival record, a row pending its host's preparation records it unseated for that preparation unless the replay seats the published construction of a `constructed` one, a removed row reserves the name as a tombstone, and an unreadable row, a row the replay contradicts or a member row whose origin token this build does not know reserves the name as unreadable), then seat a created entry owed its seat again, Dormant, on its archived session under created custody, and settle the row of a published construction; no spawn takes a reserved name or the entry of another origin, a tombstoned name is never an entry or a member, and created custody belongs to an open ladder of a Created entry, never beside entry custody
 - `mob_identity_change_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/identity_change.rs` — MobMachine identity changes realized by the store-owned writer: a change's commit step decides its admission on its prepared authority from the facts the shell observed there (the store's receipt of the operation, the consent's form, whether a decision's permit binds the change and admits a commit now, whether the requester is the host operator, whether an agent requester's grant is current through its prepared check at this final sink, and whether a store-owned update's expected spec is its identity's current one), records each new store-owned entry (origin Created, unseated with the cause MobMachine derives from the request's facts: its host preparation pending, hosted on its first use, held for its host's creation or its seat owed) or refuses its name typed (an unlisted roster-owned identity's archived session record holds it), and only then stages the seats and writes the change's one store transaction; a refusal anywhere leaves the prepared authority unapplied and writes nothing; one identity's removal ends a held construction of it in the same step, and its archive is refused while it awaits its host's preparation; and the host holds or releases the mob's changes
+- `mob_owned_identity_edge_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/owned_edges.rs` — MobMachine owned edges realized by the shell: a store-owned identity's change declares the edges its peers list (each owned by the declaring identity, its other end an identity of either custody; an edge an identity owns already gives no second custody) and ends the edges its owner's change removes, in the change's own step, whose store transaction writes the owner's row; the host's policy reload ends an edge its peer rules now deny, naming its owner; the removal of either end ends the identity's edges in the removal's own step, whose store transaction writes the owners' rows with the tombstone; the mob's reset and destroy end every one; an archive or an unlisting of an end leaves the edge declared and unrealized, and a seat realizes it again; a plain unwire of an owned edge is refused; and the boot recovers each owned edge from its owner's row
 - `mob_identity_preparation_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/identity_preparation.rs` — MobMachine host preparation realized by the shell: an identity never seated whose host's rule requires its preparation is unseated for it (a roster-owned one by the declared apply, derived again at each apply, a store-owned one by its create, from its row at a start), and a delivery to it is refused retryable; a settle without a construction commits its receipt and its row and leaves the entry owed its seat, which the shell seats Dormant from its spec or embodies for an owed kickoff, and a `constructed` preparation refuses that settle; a host asks for a held construction of the identity, an attempt the mob owns whose spawn ladder alone may open for the entry, and a settle naming that attempt, decided before its deadline and binding the identity's spec, accepts its activation, journaled by the settle's receipt; from then on no abort, expiry or newer attempt replaces it, and only the membership commit that publishes the construction or its failed publication ends it; an abort, the deadline or a refused construction ends a held attempt with the entry still pending, and an identity holds at most one attempt, emitting the construction resolved, settle resolved and construction ended effects
 - `mob_identity_entry_respawn_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine refuses a fresh-life respawn of an identity entry's member in every phase an entry lives in, realized by the actor: the respawn routes on that verdict, respawning an entry's member on its own session, and the retire-then-spawn admission answers the refusal typed, emitting the respawn refused effect
 - `mob_rotation_target_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/dormant_seat.rs` — MobMachine rotation targets realized by the actor: a same-session successor starts its retirement archive-only on the member's kept binding with its rotation recorded in one step, and its terminal seats the next incarnation Dormant on the same session after the shell released the runtime and kept the session; a restart records a rotation again from its retirement's start row and re-drives it; the intent and its target are recorded together, and a same-session rotation keeps its binding
@@ -5754,6 +5755,87 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveMemberCustodyRestoredUnrecordedDestroyed`
   - anchors: (unclaimed)
   - scenarios: `member-custody-degraded`
+- `DeclareOwnedIdentityEdgeDeclared`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `DeclareOwnedIdentityEdgeAlreadyOwned`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `DeclareOwnedIdentityEdgePeerUnknown`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `DeclareOwnedIdentityEdgeOwnerInvalid`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `DeclareOwnedIdentityEdgeMobNotRunningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeclareOwnedIdentityEdgeMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeclareOwnedIdentityEdgeMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndOwnedIdentityEdgeEnded`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `EndOwnedIdentityEdgeNotOwner`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `EndOwnedIdentityEdgeAbsent`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `EndOwnedIdentityEdgeNonAuthoritative`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `EndOwnedIdentityEdgeChangesHeld`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `EndOwnedIdentityEdgeMobNotRunningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndOwnedIdentityEdgeMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndOwnedIdentityEdgeMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitMemberUnwireAdmittedRunning`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `AdmitMemberUnwireAdmittedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitMemberUnwireAdmittedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitMemberUnwireAdmittedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitMemberUnwireOwnedEdgeRunning`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `AdmitMemberUnwireOwnedEdgeStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitMemberUnwireOwnedEdgeCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitMemberUnwireOwnedEdgeDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOwnedIdentityEdgeRecoveredRunning`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `RecoverOwnedIdentityEdgeRecoveredStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOwnedIdentityEdgeSkippedRunning`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `RecoverOwnedIdentityEdgeSkippedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `HoldMemberRunStarts`
@@ -6332,6 +6414,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `IdentityEntryUnlisted`
   - anchors: `mob_declared_apply_authority`
   - scenarios: (unclaimed)
+- `OwnedIdentityEdgeDeclared`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `OwnedIdentityEdgeEnded`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `MemberUnwireAdmissionResolved`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `stopped_mob_holds_member_run_starts`
@@ -6606,6 +6697,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `tombstone_is_never_an_entry`
   - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `owned_edge_owner_is_a_store_owned_end`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `owned_edge_joins_no_tombstone`
+  - anchors: `mob_owned_identity_edge_authority`
   - scenarios: (unclaimed)
 - `construction_is_held_or_activating`
   - anchors: `mob_identity_preparation_authority`

@@ -4580,6 +4580,34 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "MobNotRunning",
                 ],
             ),
+            // Owned edges (0.9.11): why an owned edge ends, and the verdicts
+            // of a declaration, of an end and of a plain unwire's admission.
+            NamedTypeBinding::string_enum("OwnedEdgeEndCause", &["OwnerChange", "PolicyDenied"]),
+            NamedTypeBinding::string_enum(
+                "OwnedEdgeDeclareVerdict",
+                &[
+                    "Declared",
+                    "AlreadyOwned",
+                    "PeerUnknown",
+                    "OwnerInvalid",
+                    "MobNotRunning",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "OwnedEdgeEndVerdict",
+                &[
+                    "Ended",
+                    "NotOwner",
+                    "Absent",
+                    "NonAuthoritative",
+                    "ChangesHeld",
+                    "MobNotRunning",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberUnwireAdmission",
+                &["Admitted", "OwnedIdentityEdge"],
+            ),
             NamedTypeBinding::string("RuntimeEpochId"),
             NamedTypeBinding::string("ResumeAttemptId"),
             NamedTypeBinding::u64("MobDefinitionEpoch"),
@@ -5253,6 +5281,13 @@ runtime_internal_inputs!(
         // The one-entry unlist of a roster-owned identity, decided in the
         // actor's step for the handle's unlist. Not a surface command.
         UnlistIdentityEntry,
+        // Owned edges (0.9.11): an identity change's declaration and end of
+        // an owned edge, a policy reload's end of one, decided in the
+        // actor's steps, and a plain unwire's admission, decided before the
+        // unwire. None is a surface command.
+        DeclareOwnedIdentityEdge,
+        EndOwnedIdentityEdge,
+        AdmitMemberUnwire,
     ]
 );
 

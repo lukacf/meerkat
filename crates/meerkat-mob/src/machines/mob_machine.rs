@@ -75,6 +75,12 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     EntryPlacementKind, FirstBootRequestKind, HostPreparationCause, IdentityEntryVerdict,
     UnlistEntryVerdict, UnseatedEntryCause,
 };
+// Owned edges (0.9.11): why an owned edge ends, and the verdicts of a
+// declaration, of an end and of a plain unwire's admission. The schema's own
+// types, one definition for both instantiations of the machine.
+pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
+    MemberUnwireAdmission, OwnedEdgeDeclareVerdict, OwnedEdgeEndCause, OwnedEdgeEndVerdict,
+};
 // Operator instructions: a record's slot effect and target kind, why a
 // member's delivery is blocked or deferred, why a write is refused, and the
 // target predicate the machine's helper states. The schema's own types, one
@@ -18047,5 +18053,262 @@ mod tests {
                 "{first:?} then {second:?}: one mark at most"
             );
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Owned edges (0.9.11)
+    // ---------------------------------------------------------------------
+
+    fn owned_edge(a: &AgentIdentity, b: &AgentIdentity) -> WiringEdge {
+        WiringEdge::new(a.clone(), b.clone())
+    }
+
+    /// `owner`'s declaration of `edge`, and its verdict.
+    fn declare_owned(
+        authority: &mut MobMachineAuthority,
+        edge: &WiringEdge,
+        owner: &AgentIdentity,
+    ) -> OwnedEdgeDeclareVerdict {
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::DeclareOwnedIdentityEdge {
+                edge: edge.clone(),
+                owner: owner.clone(),
+            },
+        )
+        .expect("the declaration answers")
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            MobMachineEffect::OwnedIdentityEdgeDeclared { verdict, .. } => Some(*verdict),
+            _ => None,
+        })
+        .expect("the declaration emits its verdict")
+    }
+
+    /// The end of `edge` naming `owner`, for `cause`, and its verdict.
+    fn end_owned(
+        authority: &mut MobMachineAuthority,
+        edge: &WiringEdge,
+        owner: &AgentIdentity,
+        cause: OwnedEdgeEndCause,
+    ) -> OwnedEdgeEndVerdict {
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::EndOwnedIdentityEdge {
+                edge: edge.clone(),
+                owner: owner.clone(),
+                cause,
+            },
+        )
+        .expect("the end answers")
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            MobMachineEffect::OwnedIdentityEdgeEnded { verdict, .. } => Some(*verdict),
+            _ => None,
+        })
+        .expect("the end emits its verdict")
+    }
+
+    /// A plain unwire's admission of `edge`.
+    fn admit_unwire(
+        authority: &mut MobMachineAuthority,
+        edge: &WiringEdge,
+    ) -> MemberUnwireAdmission {
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::AdmitMemberUnwire { edge: edge.clone() },
+        )
+        .expect("the admission answers")
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            MobMachineEffect::MemberUnwireAdmissionResolved { verdict, .. } => Some(*verdict),
+            _ => None,
+        })
+        .expect("the admission emits its verdict")
+    }
+
+    /// A Created entry of each name, owed its seat.
+    fn created_entries(names: &[&str]) -> (MobMachineAuthority, Vec<AgentIdentity>) {
+        let mut authority = MobMachineAuthority::new();
+        let identities = names
+            .iter()
+            .map(|name| AgentIdentity::from(*name))
+            .collect::<Vec<_>>();
+        for identity in &identities {
+            recover_created(&mut authority, identity, RecoveredPresence::Present, None);
+        }
+        (authority, identities)
+    }
+
+    /// An owned edge is declared once, by a store-owned identity at one of
+    /// its ends, to another identity: a second declaration gives no custody,
+    /// only its owner's change or a policy reload naming its owner ends it,
+    /// and a plain unwire is refused while it is owned.
+    ///
+    /// RED: drop the declaration's record of the owner
+    /// (`DeclareOwnedIdentityEdgeDeclared`): the declared edge has none.
+    #[test]
+    fn an_owned_edge_is_declared_once_and_ended_only_by_its_owner() {
+        let (mut authority, identities) = created_entries(&["alpha", "beta"]);
+        let (alpha, beta) = (&identities[0], &identities[1]);
+        let edge = owned_edge(alpha, beta);
+        assert_eq!(
+            declare_owned(&mut authority, &edge, alpha),
+            OwnedEdgeDeclareVerdict::Declared
+        );
+        assert_eq!(
+            authority.state().identity_edge_owners.get(&edge),
+            Some(alpha)
+        );
+        assert_eq!(
+            declare_owned(&mut authority, &edge, beta),
+            OwnedEdgeDeclareVerdict::AlreadyOwned,
+            "a second declaration gives no custody"
+        );
+        assert_eq!(
+            authority.state().identity_edge_owners.get(&edge),
+            Some(alpha)
+        );
+        for cause in [
+            OwnedEdgeEndCause::OwnerChange,
+            OwnedEdgeEndCause::PolicyDenied,
+        ] {
+            assert_eq!(
+                end_owned(&mut authority, &edge, beta, cause),
+                OwnedEdgeEndVerdict::NotOwner,
+                "{cause:?}"
+            );
+        }
+        assert_eq!(
+            admit_unwire(&mut authority, &edge),
+            MemberUnwireAdmission::OwnedIdentityEdge
+        );
+        assert_eq!(
+            end_owned(
+                &mut authority,
+                &edge,
+                alpha,
+                OwnedEdgeEndCause::PolicyDenied
+            ),
+            OwnedEdgeEndVerdict::Ended
+        );
+        assert!(authority.state().identity_edge_owners.is_empty());
+        assert_eq!(
+            admit_unwire(&mut authority, &edge),
+            MemberUnwireAdmission::Admitted
+        );
+        assert_eq!(
+            end_owned(&mut authority, &edge, alpha, OwnedEdgeEndCause::OwnerChange),
+            OwnedEdgeEndVerdict::Absent
+        );
+
+        let nobody = AgentIdentity::from("nobody");
+        assert_eq!(
+            declare_owned(&mut authority, &owned_edge(alpha, &nobody), alpha),
+            OwnedEdgeDeclareVerdict::PeerUnknown
+        );
+        assert_eq!(
+            declare_owned(&mut authority, &owned_edge(alpha, &nobody), &nobody),
+            OwnedEdgeDeclareVerdict::OwnerInvalid,
+            "no entry owns an edge"
+        );
+        assert_eq!(
+            declare_owned(&mut authority, &owned_edge(alpha, alpha), alpha),
+            OwnedEdgeDeclareVerdict::OwnerInvalid,
+            "no identity owns an edge to itself"
+        );
+        assert!(authority.state().identity_edge_owners.is_empty());
+    }
+
+    /// The removal of an end ends the owned edges of that end, whichever end
+    /// owns them, and no other; an archive of an end keeps them.
+    ///
+    /// RED: drop the declaration's record of the owner: no edge is held.
+    #[test]
+    fn a_removal_ends_its_identitys_edges_and_an_archive_keeps_them() {
+        let (mut authority, identities) = created_entries(&["alpha", "beta", "gamma"]);
+        let (alpha, beta, gamma) = (&identities[0], &identities[1], &identities[2]);
+        for (edge, owner) in [
+            (owned_edge(alpha, beta), alpha),
+            (owned_edge(alpha, gamma), alpha),
+            (owned_edge(beta, gamma), beta),
+        ] {
+            assert_eq!(
+                declare_owned(&mut authority, &edge, owner),
+                OwnedEdgeDeclareVerdict::Declared
+            );
+        }
+        assert_eq!(
+            change_entry(&mut authority, gamma, IdentityEntryChangeKind::Archive),
+            IdentityEntryChangeVerdict::Archived
+        );
+        assert_eq!(
+            authority.state().identity_edge_owners.len(),
+            3,
+            "the archive keeps its identity's edges"
+        );
+        assert_eq!(
+            change_entry(&mut authority, beta, IdentityEntryChangeKind::Remove),
+            IdentityEntryChangeVerdict::Removed
+        );
+        assert_eq!(
+            authority
+                .state()
+                .identity_edge_owners
+                .iter()
+                .map(|(edge, owner)| (edge.clone(), owner.clone()))
+                .collect::<Vec<_>>(),
+            vec![(owned_edge(alpha, gamma), alpha.clone())],
+            "beta's removal ends its edges, whichever end owns them, and no other"
+        );
+        assert_eq!(
+            declare_owned(&mut authority, &owned_edge(alpha, beta), alpha),
+            OwnedEdgeDeclareVerdict::PeerUnknown,
+            "a removed identity takes no edge"
+        );
+    }
+
+    /// The boot recovers an owned edge from its owner's row: its other end
+    /// may be no entry now (an unlisted roster-owned identity's), but no end
+    /// is a tombstone, and no other row owns it already.
+    ///
+    /// RED: drop the recovery's record of the owner
+    /// (`RecoverOwnedIdentityEdgeRecovered`): no edge is recovered.
+    #[test]
+    fn the_boot_recovers_an_owned_edge_from_its_owners_row() {
+        let (mut authority, identities) = created_entries(&["alpha", "beta"]);
+        let (alpha, beta) = (&identities[0], &identities[1]);
+        let removed = AgentIdentity::from("removed");
+        recover_created(&mut authority, &removed, RecoveredPresence::Tombstone, None);
+        let unlisted = AgentIdentity::from("unlisted");
+        let recover =
+            |authority: &mut MobMachineAuthority, edge: &WiringEdge, owner: &AgentIdentity| {
+                authority
+                    .apply_signal(MobMachineSignal::RecoverOwnedIdentityEdge {
+                        edge: edge.clone(),
+                        owner: owner.clone(),
+                    })
+                    .expect("the recovery answers every row edge");
+            };
+        recover(&mut authority, &owned_edge(alpha, &unlisted), alpha);
+        recover(&mut authority, &owned_edge(alpha, beta), alpha);
+        recover(&mut authority, &owned_edge(alpha, beta), beta);
+        recover(&mut authority, &owned_edge(alpha, &removed), alpha);
+        recover(&mut authority, &owned_edge(&unlisted, beta), &unlisted);
+        assert_eq!(
+            authority
+                .state()
+                .identity_edge_owners
+                .iter()
+                .map(|(edge, owner)| (edge.clone(), owner.clone()))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+            std::collections::BTreeMap::from([
+                (owned_edge(alpha, &unlisted), alpha.clone()),
+                (owned_edge(alpha, beta), alpha.clone()),
+            ])
+        );
     }
 }

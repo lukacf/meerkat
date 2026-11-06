@@ -984,6 +984,37 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         ]),
                 ),
                 machine_anchor(
+                    "mob_owned_identity_edge_authority",
+                    "MobMachine",
+                    "crates/meerkat-mob/src/runtime/owned_edges.rs",
+                    "MobMachine owned edges realized by the shell: a store-owned identity's change declares the edges its peers list (each owned by the declaring identity, its other end an identity of either custody; an edge an identity owns already gives no second custody) and ends the edges its owner's change removes, in the change's own step, whose store transaction writes the owner's row; the host's policy reload ends an edge its peer rules now deny, naming its owner; the removal of either end ends the identity's edges in the removal's own step, whose store transaction writes the owners' rows with the tombstone; the mob's reset and destroy end every one; an archive or an unlisting of an end leaves the edge declared and unrealized, and a seat realizes it again; a plain unwire of an owned edge is refused; and the boot recovers each owned edge from its owner's row",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "DeclareOwnedIdentityEdgeDeclared",
+                            "DeclareOwnedIdentityEdgeAlreadyOwned",
+                            "DeclareOwnedIdentityEdgePeerUnknown",
+                            "DeclareOwnedIdentityEdgeOwnerInvalid",
+                            "EndOwnedIdentityEdgeEnded",
+                            "EndOwnedIdentityEdgeNotOwner",
+                            "EndOwnedIdentityEdgeAbsent",
+                            "EndOwnedIdentityEdgeNonAuthoritative",
+                            "EndOwnedIdentityEdgeChangesHeld",
+                            "AdmitMemberUnwireAdmittedRunning",
+                            "AdmitMemberUnwireOwnedEdgeRunning",
+                            "RecoverOwnedIdentityEdgeRecoveredRunning",
+                            "RecoverOwnedIdentityEdgeSkippedRunning",
+                        ])
+                        .effects(&[
+                            "OwnedIdentityEdgeDeclared",
+                            "OwnedIdentityEdgeEnded",
+                            "MemberUnwireAdmissionResolved",
+                        ])
+                        .invariants(&[
+                            "owned_edge_owner_is_a_store_owned_end",
+                            "owned_edge_joins_no_tombstone",
+                        ]),
+                ),
+                machine_anchor(
                     "mob_identity_preparation_authority",
                     "MobMachine",
                     "crates/meerkat-mob/src/runtime/identity_preparation.rs",

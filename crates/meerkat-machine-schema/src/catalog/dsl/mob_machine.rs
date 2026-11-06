@@ -815,6 +815,25 @@ macro_rules! mob_catalog_machine_dsl {
             // publication interrupted, its entry still pending.
             identity_entry_constructions_held: Map<AgentIdentity, u64>,
             identity_entry_constructions_activating: Map<AgentIdentity, u64>,
+            // Owned edges (0.9.11): each edge an identity change declared,
+            // with its owner, the identity whose change declared it. The one
+            // edge custody map of the mob: a declared edge of a later custody
+            // records its owner here too. An owner is a store-owned (Created)
+            // entry, whose created entry row persists the edge with how it
+            // entered; the edge's other end is an identity of either custody.
+            // The map is the edge's desired record: the edge is realized
+            // (wiring_edges) while both ends are seated, an archive or an
+            // unlisting of an end leaves it declared and unrealized, and a
+            // seat realizes it again. A plain unwire of an owned edge is
+            // refused (AdmitMemberUnwire). The edge ends only by its owner's
+            // change or a policy reload that denies it
+            // (EndOwnedIdentityEdge), by the removal of either end
+            // (RemoveIdentityEntry, whose store transaction writes the
+            // owners' rows with the removal's tombstone), and by the mob's
+            // reset or destroy, which end every entry. A second declaration
+            // of an owned edge gives no custody. Recovered at a start from
+            // the owners' created entry rows (RecoverOwnedIdentityEdge).
+            identity_edge_owners: Map<WiringEdge, AgentIdentity>,
             // Operator instructions (0.9.9). The mob's desired records, one
             // per slot (the JSON array [namespace, key]): the revision, the
             // effect, the body's digest (empty while Absent) and byte length
@@ -1164,6 +1183,7 @@ macro_rules! mob_catalog_machine_dsl {
             identity_entry_archiving = EmptySet,
             identity_entry_constructions_held = EmptyMap,
             identity_entry_constructions_activating = EmptyMap,
+            identity_edge_owners = EmptyMap,
             operator_instruction_revision = EmptyMap,
             operator_instruction_effect = EmptyMap,
             operator_instruction_digest = EmptyMap,
@@ -2272,6 +2292,17 @@ macro_rules! mob_catalog_machine_dsl {
             // flight leaves it to a later unlist; any other name is left as
             // it is.
             UnlistIdentityEntry { agent_identity: AgentIdentity },
+            // Owned edges (0.9.11). An identity change's step declares an
+            // edge its owner's change lists (a create's or an update's
+            // peers), or ends one its owner's change removes (OwnerChange);
+            // the host's policy reload ends an edge its peer rules now deny
+            // (PolicyDenied), whoever owns it.
+            DeclareOwnedIdentityEdge { edge: WiringEdge, owner: AgentIdentity },
+            EndOwnedIdentityEdge { edge: WiringEdge, owner: AgentIdentity, cause: Enum<OwnedEdgeEndCause> },
+            // A plain unwire's admission (MobHandle::unwire, an agent's
+            // unwire tool), before it touches the edge: a pure verdict,
+            // refused for an owned edge.
+            AdmitMemberUnwire { edge: WiringEdge },
         }
 
         surface_only [
@@ -2444,6 +2475,10 @@ macro_rules! mob_catalog_machine_dsl {
             // The replay of a seat row whose origin this build does not know
             // passes Unreadable too.
             RecoverCreatedIdentityEntry { agent_identity: AgentIdentity, presence: Enum<RecoveredPresence>, last_session: Option<SessionId> },
+            // The boot's recovery of one owned edge from its owner's created
+            // entry row (0.9.11), after the scan of the created entry rows
+            // and before the boot plan is sealed.
+            RecoverOwnedIdentityEdge { edge: WiringEdge, owner: AgentIdentity },
             // Operator instructions (0.9.9): a host's write of one slot (the
             // body's digest and byte length; the target as its kind, the
             // profile name of a Profile target and the member of a Member
@@ -2937,6 +2972,14 @@ macro_rules! mob_catalog_machine_dsl {
             // shell retires a Retiring entry's member with the cause
             // Unlisted.
             IdentityEntryUnlisted { agent_identity: AgentIdentity, verdict: Enum<UnlistEntryVerdict> },
+            // Owned edges (0.9.11): the verdict of a declaration, of an end
+            // (with its cause) and of a plain unwire's admission. The shell
+            // writes the owner's row in the step's store transaction before
+            // the step commits, realizes a declared edge whose ends are both
+            // seated and unwires an ended edge's realization.
+            OwnedIdentityEdgeDeclared { edge: WiringEdge, verdict: Enum<OwnedEdgeDeclareVerdict> },
+            OwnedIdentityEdgeEnded { edge: WiringEdge, cause: Enum<OwnedEdgeEndCause>, verdict: Enum<OwnedEdgeEndVerdict> },
+            MemberUnwireAdmissionResolved { edge: WiringEdge, verdict: Enum<MemberUnwireAdmission> },
         }
 
         // One total, pure classifier over desired authority, lease ownership,
@@ -4375,6 +4418,13 @@ macro_rules! mob_catalog_machine_dsl {
         // The one-entry unlist (0.9.9): its verdict answers the unlist, which
         // retires a marked entry's member.
         disposition IdentityEntryUnlisted => local seam SurfaceResultAlignment,
+        // Owned edges (0.9.11): a declaration's and an end's verdicts answer
+        // the change step that asked, which writes the owner's row and
+        // realizes or unwires the edge; a plain unwire's admission answers
+        // the unwire, which refuses an owned edge.
+        disposition OwnedIdentityEdgeDeclared => local seam SurfaceResultAlignment,
+        disposition OwnedIdentityEdgeEnded => local seam SurfaceResultAlignment,
+        disposition MemberUnwireAdmissionResolved => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Invariants
@@ -5507,6 +5557,22 @@ macro_rules! mob_catalog_machine_dsl {
             for_all(id in self.identity_entry_tombstones,
                 self.identity_entry_origins.contains_key(id) == false
                 && self.identity_to_runtime.contains_key(id) == false)
+        }
+
+        // An owned edge's owner is an end of it and a store-owned entry until
+        // the mob's destroy ends every entry, and no end of an owned edge is
+        // a removed identity's tombstone: a removal ends its identity's edges
+        // in its own step.
+        invariant owned_edge_owner_is_a_store_owned_end {
+            self.destroy_admitted == true
+            || for_all(edge in self.identity_edge_owners.keys(),
+                mob_machine_wiring_edge_contains_identity(edge, self.identity_edge_owners.get_cloned(edge).get("value"))
+                && self.identity_entry_origins.get_cloned(self.identity_edge_owners.get_cloned(edge).get("value")) == Some(IdentityEntryOrigin::Created))
+        }
+        invariant owned_edge_joins_no_tombstone {
+            for_all(edge in self.identity_edge_owners.keys(),
+                self.identity_entry_tombstones.contains(mob_machine_wiring_edge_a(edge)) == false
+                && self.identity_entry_tombstones.contains(mob_machine_wiring_edge_b(edge)) == false)
         }
 
         // An identity holds at most one held construction attempt, held or
@@ -16805,6 +16871,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_entry_archived_sessions = EmptyMap;
                 self.identity_entry_constructions_held = EmptyMap;
                 self.identity_entry_constructions_activating = EmptyMap;
+                self.identity_edge_owners = EmptyMap;
                 self.member_definition_wiring_exempt = EmptySet;
                 self.identity_runtime_generations = EmptyMap;
                 self.identity_generation_highwater = EmptyMap;
@@ -17344,6 +17411,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_entry_archived_sessions = EmptyMap;
                 self.identity_entry_constructions_held = EmptyMap;
                 self.identity_entry_constructions_activating = EmptyMap;
+                // The reset ends every entry's owned edges with the entries.
+                self.identity_edge_owners = EmptyMap;
                 self.spawn_exec_entry_custody = EmptySet;
                 // The reset drops created custody: a spawn ladder still open
                 // acts for no entry any more. The tombstoned and unreadable
@@ -24320,6 +24389,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_entry_archived_sessions = EmptyMap;
                 self.identity_entry_constructions_held = EmptyMap;
                 self.identity_entry_constructions_activating = EmptyMap;
+                self.identity_edge_owners = EmptyMap;
                 // Spawn-exec phase ladder: total teardown, as DestroyMob's. The
                 // forced destroy drops every member, so no ladder survives into
                 // Destroyed: one whose membership committed would name a member
@@ -33192,6 +33262,10 @@ macro_rules! mob_catalog_machine_dsl {
             }
             update {
                 self.identity_entry_removing.insert(agent_identity);
+                // The removal ends the identity's owned edges in its own
+                // step, whichever end owns them: the step's store transaction
+                // writes their owners' rows with the tombstone.
+                self.identity_edge_owners = mob_machine_owned_edges_without_identity(self.identity_edge_owners, agent_identity);
             }
             to Running
             emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::Retiring }
@@ -33230,6 +33304,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_entry_constructions_held.remove(agent_identity);
                 self.members_to_spawn.remove(agent_identity);
                 self.members_to_retire.remove(agent_identity);
+                // Its owned edges end with it, whichever end owns them.
+                self.identity_edge_owners = mob_machine_owned_edges_without_identity(self.identity_edge_owners, agent_identity);
                 // Its role hold ends with it.
                 if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
                     self.member_host_preparation_causes.remove(agent_identity);
@@ -35174,6 +35250,251 @@ macro_rules! mob_catalog_machine_dsl {
             update {}
             to Running
         }
+
+        // =====================================================================
+        // Owned edges (0.9.11): an identity change's declaration of an edge
+        // its owner's change lists and its end of one its owner's change
+        // removes, a policy reload's end of an edge the host's peer rules now
+        // deny, a plain unwire's admission, and the boot's recovery of an
+        // owned edge from its owner's row. Appended after every published
+        // transition.
+        // =====================================================================
+
+        // The owner's change declares the edge: the owner is a store-owned
+        // entry at one end (its removal not retiring it), the edge's other
+        // end an identity of either custody (its removal not retiring it),
+        // and no identity owns the edge yet. The edge is realized once both
+        // ends are seated.
+        transition DeclareOwnedIdentityEdgeDeclared {
+            on input DeclareOwnedIdentityEdge { edge, owner }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "owner_is_a_store_owned_end" {
+                mob_machine_wiring_edge_contains_identity(edge, owner)
+                && mob_machine_wiring_edge_a(edge) != mob_machine_wiring_edge_b(edge)
+                && self.identity_entry_origins.get_cloned(owner) == Some(IdentityEntryOrigin::Created)
+                && self.identity_entry_removing.contains(owner) == false
+            }
+            guard "edge_not_owned" { self.identity_edge_owners.contains_key(edge) == false }
+            guard "peer_is_an_identity" {
+                self.identity_entry_origins.contains_key(mob_machine_wiring_edge_other(edge, owner)) == true
+                && self.identity_entry_removing.contains(mob_machine_wiring_edge_other(edge, owner)) == false
+            }
+            update {
+                // RED: no owner recorded.
+            }
+            to Running
+            emit OwnedIdentityEdgeDeclared { edge: edge, verdict: OwnedEdgeDeclareVerdict::Declared }
+        }
+
+        // An identity owns the edge already, the declaring one or another: a
+        // second declaration gives no custody, and nothing changes.
+        transition DeclareOwnedIdentityEdgeAlreadyOwned {
+            on input DeclareOwnedIdentityEdge { edge, owner }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "owner_is_a_store_owned_end" {
+                mob_machine_wiring_edge_contains_identity(edge, owner)
+                && mob_machine_wiring_edge_a(edge) != mob_machine_wiring_edge_b(edge)
+                && self.identity_entry_origins.get_cloned(owner) == Some(IdentityEntryOrigin::Created)
+                && self.identity_entry_removing.contains(owner) == false
+            }
+            guard "edge_owned" { self.identity_edge_owners.contains_key(edge) == true }
+            update {}
+            to Running
+            emit OwnedIdentityEdgeDeclared { edge: edge, verdict: OwnedEdgeDeclareVerdict::AlreadyOwned }
+        }
+
+        // The edge's other end is no identity of the mob, or one whose
+        // removal is retiring it: nothing changes.
+        transition DeclareOwnedIdentityEdgePeerUnknown {
+            on input DeclareOwnedIdentityEdge { edge, owner }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "owner_is_a_store_owned_end" {
+                mob_machine_wiring_edge_contains_identity(edge, owner)
+                && mob_machine_wiring_edge_a(edge) != mob_machine_wiring_edge_b(edge)
+                && self.identity_entry_origins.get_cloned(owner) == Some(IdentityEntryOrigin::Created)
+                && self.identity_entry_removing.contains(owner) == false
+            }
+            guard "edge_not_owned" { self.identity_edge_owners.contains_key(edge) == false }
+            guard "peer_not_an_identity" {
+                self.identity_entry_origins.contains_key(mob_machine_wiring_edge_other(edge, owner)) == false
+                || self.identity_entry_removing.contains(mob_machine_wiring_edge_other(edge, owner)) == true
+            }
+            update {}
+            to Running
+            emit OwnedIdentityEdgeDeclared { edge: edge, verdict: OwnedEdgeDeclareVerdict::PeerUnknown }
+        }
+
+        // The declaring identity is no end of the edge, the edge joins an
+        // identity to itself, or the declaring identity is no store-owned
+        // entry (or one whose removal is retiring it): nothing changes.
+        transition DeclareOwnedIdentityEdgeOwnerInvalid {
+            on input DeclareOwnedIdentityEdge { edge, owner }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "owner_not_a_store_owned_end" {
+                mob_machine_wiring_edge_contains_identity(edge, owner) == false
+                || mob_machine_wiring_edge_a(edge) == mob_machine_wiring_edge_b(edge)
+                || self.identity_entry_origins.get_cloned(owner) != Some(IdentityEntryOrigin::Created)
+                || self.identity_entry_removing.contains(owner) == true
+            }
+            update {}
+            to Running
+            emit OwnedIdentityEdgeDeclared { edge: edge, verdict: OwnedEdgeDeclareVerdict::OwnerInvalid }
+        }
+
+        // A mob that is not running declares no edge.
+        transition DeclareOwnedIdentityEdgeMobNotRunning {
+            per_phase [Stopped, Completed, Destroyed]
+            on input DeclareOwnedIdentityEdge { edge, owner }
+            update {}
+            to Running
+            emit OwnedIdentityEdgeDeclared { edge: edge, verdict: OwnedEdgeDeclareVerdict::MobNotRunning }
+        }
+
+        // The owner's change, or a policy reload naming the owner, ends the
+        // edge: no identity owns it any more. The shell writes the owner's
+        // row without it in the step's store transaction and unwires the
+        // edge's realization once the step committed.
+        transition EndOwnedIdentityEdgeEnded {
+            on input EndOwnedIdentityEdge { edge, owner, cause }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            guard "changes_not_held" { self.identity_changes_held == false }
+            guard "owned_by_owner" { self.identity_edge_owners.get_cloned(edge) == Some(owner) }
+            update {
+                self.identity_edge_owners.remove(edge);
+            }
+            to Running
+            emit OwnedIdentityEdgeEnded { edge: edge, cause: cause, verdict: OwnedEdgeEndVerdict::Ended }
+        }
+
+        // Another identity owns the edge: only its owner's change, or a
+        // policy reload naming its owner, ends it. Nothing changes.
+        transition EndOwnedIdentityEdgeNotOwner {
+            on input EndOwnedIdentityEdge { edge, owner, cause }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            guard "changes_not_held" { self.identity_changes_held == false }
+            guard "owned_by_another" {
+                self.identity_edge_owners.contains_key(edge) == true
+                && self.identity_edge_owners.get_cloned(edge) != Some(owner)
+            }
+            update {}
+            to Running
+            emit OwnedIdentityEdgeEnded { edge: edge, cause: cause, verdict: OwnedEdgeEndVerdict::NotOwner }
+        }
+
+        // No identity owns the edge: nothing changes.
+        transition EndOwnedIdentityEdgeAbsent {
+            on input EndOwnedIdentityEdge { edge, owner, cause }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            guard "changes_not_held" { self.identity_changes_held == false }
+            guard "edge_not_owned" { self.identity_edge_owners.contains_key(edge) == false }
+            update {}
+            to Running
+            emit OwnedIdentityEdgeEnded { edge: edge, cause: cause, verdict: OwnedEdgeEndVerdict::Absent }
+        }
+
+        // A candidate composition ends no edge.
+        transition EndOwnedIdentityEdgeNonAuthoritative {
+            on input EndOwnedIdentityEdge { edge, owner, cause }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "composition_not_authoritative" { self.composition_authority != CompositionAuthorityKind::Authoritative }
+            update {}
+            to Running
+            emit OwnedIdentityEdgeEnded { edge: edge, cause: cause, verdict: OwnedEdgeEndVerdict::NonAuthoritative }
+        }
+
+        // The host holds the mob's identity changes: nothing changes, and a
+        // retry after the hold decides it.
+        transition EndOwnedIdentityEdgeChangesHeld {
+            on input EndOwnedIdentityEdge { edge, owner, cause }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            guard "changes_held" { self.identity_changes_held == true }
+            update {}
+            to Running
+            emit OwnedIdentityEdgeEnded { edge: edge, cause: cause, verdict: OwnedEdgeEndVerdict::ChangesHeld }
+        }
+
+        // A mob that is not running ends no edge.
+        transition EndOwnedIdentityEdgeMobNotRunning {
+            per_phase [Stopped, Completed, Destroyed]
+            on input EndOwnedIdentityEdge { edge, owner, cause }
+            update {}
+            to Running
+            emit OwnedIdentityEdgeEnded { edge: edge, cause: cause, verdict: OwnedEdgeEndVerdict::MobNotRunning }
+        }
+
+        // A plain unwire of an edge no identity owns is admitted: the
+        // unwire's own arms decide the rest.
+        transition AdmitMemberUnwireAdmitted {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input AdmitMemberUnwire { edge }
+            guard "edge_not_owned" { self.identity_edge_owners.contains_key(edge) == false }
+            update {}
+            to Running
+            emit MemberUnwireAdmissionResolved { edge: edge, verdict: MemberUnwireAdmission::Admitted }
+        }
+
+        // An owned edge takes no plain unwire: only its owner's change, a
+        // policy reload, an end's removal and the mob's destroy end it.
+        transition AdmitMemberUnwireOwnedEdge {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input AdmitMemberUnwire { edge }
+            guard "edge_owned" { self.identity_edge_owners.contains_key(edge) == true }
+            update {}
+            to Running
+            emit MemberUnwireAdmissionResolved { edge: edge, verdict: MemberUnwireAdmission::OwnedIdentityEdge }
+        }
+
+        // The boot recovers an owned edge from its owner's row: the owner is
+        // a store-owned entry at one end, no identity owns the edge yet, and
+        // neither end is a removed identity's tombstone or retiring for its
+        // removal. Its other end may be an identity no entry holds now (an
+        // unlisted roster-owned identity's): the edge waits for its seat.
+        transition RecoverOwnedIdentityEdgeRecovered {
+            per_phase [Running, Stopped]
+            on signal RecoverOwnedIdentityEdge { edge, owner }
+            guard "replay_not_sealed" { self.boot_plan_sealed == false }
+            guard "owner_is_a_store_owned_end" {
+                mob_machine_wiring_edge_contains_identity(edge, owner)
+                && mob_machine_wiring_edge_a(edge) != mob_machine_wiring_edge_b(edge)
+                && self.identity_entry_origins.get_cloned(owner) == Some(IdentityEntryOrigin::Created)
+            }
+            guard "edge_not_owned" { self.identity_edge_owners.contains_key(edge) == false }
+            guard "ends_not_removed" {
+                self.identity_entry_tombstones.contains(mob_machine_wiring_edge_a(edge)) == false
+                && self.identity_entry_tombstones.contains(mob_machine_wiring_edge_b(edge)) == false
+                && self.identity_entry_removing.contains(mob_machine_wiring_edge_a(edge)) == false
+                && self.identity_entry_removing.contains(mob_machine_wiring_edge_b(edge)) == false
+            }
+            update {
+                // RED: no owner recorded.
+            }
+            to Running
+        }
+
+        // Any other row edge (its owner no store-owned entry at one end, an
+        // edge another row owns already, or an end removed or retiring for
+        // its removal) is left as it is.
+        transition RecoverOwnedIdentityEdgeSkipped {
+            per_phase [Running, Stopped]
+            on signal RecoverOwnedIdentityEdge { edge, owner }
+            guard "replay_not_sealed" { self.boot_plan_sealed == false }
+            guard "edge_not_recoverable" {
+                mob_machine_wiring_edge_contains_identity(edge, owner) == false
+                || mob_machine_wiring_edge_a(edge) == mob_machine_wiring_edge_b(edge)
+                || self.identity_entry_origins.get_cloned(owner) != Some(IdentityEntryOrigin::Created)
+                || self.identity_edge_owners.contains_key(edge) == true
+                || self.identity_entry_tombstones.contains(mob_machine_wiring_edge_a(edge)) == true
+                || self.identity_entry_tombstones.contains(mob_machine_wiring_edge_b(edge)) == true
+                || self.identity_entry_removing.contains(mob_machine_wiring_edge_a(edge)) == true
+                || self.identity_entry_removing.contains(mob_machine_wiring_edge_b(edge)) == true
+            }
+            update {}
+            to Running
+        }
     }
         }
 
@@ -35852,6 +36173,32 @@ macro_rules! mob_catalog_machine_dsl {
                 .iter()
                 .filter(|edge| edge.a != *agent_identity && edge.b != *agent_identity)
                 .cloned()
+                .collect()
+        }
+
+        /// The end of `edge` that is not `agent_identity` (its `a` end when
+        /// `agent_identity` is neither).
+        fn mob_machine_wiring_edge_other(
+            edge: &WiringEdge,
+            agent_identity: &AgentIdentity,
+        ) -> AgentIdentity {
+            if edge.a == *agent_identity {
+                edge.b.clone()
+            } else {
+                edge.a.clone()
+            }
+        }
+
+        /// A removal ends every owned edge of its identity, whichever end owns
+        /// it, in its own step.
+        fn mob_machine_owned_edges_without_identity(
+            identity_edge_owners: &std::collections::BTreeMap<WiringEdge, AgentIdentity>,
+            agent_identity: &AgentIdentity,
+        ) -> std::collections::BTreeMap<WiringEdge, AgentIdentity> {
+            identity_edge_owners
+                .iter()
+                .filter(|(edge, _)| edge.a != *agent_identity && edge.b != *agent_identity)
+                .map(|(edge, owner)| (edge.clone(), owner.clone()))
                 .collect()
         }
 
@@ -38711,6 +39058,67 @@ pub enum UnlistEntryVerdict {
     NonAuthoritative,
     /// The mob is not running.
     MobNotRunning,
+}
+
+/// Why an owned edge ends ([`MobMachineInput::EndOwnedIdentityEdge`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OwnedEdgeEndCause {
+    /// Its owner's change removes it.
+    #[default]
+    OwnerChange,
+    /// The host's policy reload ends it: its peer rules now deny it.
+    PolicyDenied,
+}
+
+/// The verdict of an owned edge's declaration
+/// ([`MobMachineInput::DeclareOwnedIdentityEdge`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OwnedEdgeDeclareVerdict {
+    /// The declaring identity owns the edge now.
+    #[default]
+    Declared,
+    /// An identity owns the edge already: a second declaration gives no
+    /// custody.
+    AlreadyOwned,
+    /// The edge's other end is no identity of the mob, or one whose removal
+    /// is retiring it.
+    PeerUnknown,
+    /// The declaring identity is no store-owned entry at one end of the
+    /// edge, or the edge joins an identity to itself.
+    OwnerInvalid,
+    /// The mob is not running.
+    MobNotRunning,
+}
+
+/// The verdict of an owned edge's end
+/// ([`MobMachineInput::EndOwnedIdentityEdge`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OwnedEdgeEndVerdict {
+    /// The edge ended: no identity owns it any more.
+    #[default]
+    Ended,
+    /// Another identity owns the edge.
+    NotOwner,
+    /// No identity owns the edge.
+    Absent,
+    /// A candidate composition ends no edge.
+    NonAuthoritative,
+    /// The host holds the mob's identity changes: retry.
+    ChangesHeld,
+    /// The mob is not running.
+    MobNotRunning,
+}
+
+/// The verdict of a plain unwire's admission
+/// ([`MobMachineInput::AdmitMemberUnwire`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberUnwireAdmission {
+    /// No identity owns the edge: the unwire's own arms decide.
+    #[default]
+    Admitted,
+    /// An identity owns the edge: only its owner's change, a policy reload,
+    /// an end's removal and the mob's destroy end it.
+    OwnedIdentityEdge,
 }
 
 /// Why an identity's host preparation is owed

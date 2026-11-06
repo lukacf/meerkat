@@ -1028,7 +1028,7 @@ fi
 # either. A hand-written audit over the same generated model
 # (created_identity_audit.tla, shards audits-q, audits-r and audits-t
 # through audits-v) checks
-# fourteen runs over their whole reachable space, in two parts. Its
+# fifteen runs over their whole reachable space, in two parts. Its
 # recovery part's scan run
 # replays a seated member with or without its Declared entry's row (before
 # or after the scan of its rows: no replay turns a Created entry Declared;
@@ -1086,7 +1086,11 @@ fi
 # archived session record holds) and the replay of a removal or an archive
 # in flight carried to its terminal, its one row scanned before or after
 # the journal replay (no replay seats a member under an archived entry, and
-# the boot plan's seal keeps an archived identity's standing). They
+# the boot plan's seal keeps an archived identity's standing), and (0.9.11)
+# the owned edges an identity change declares (exactly one arm answering
+# each declaration, end, plain unwire's admission and recovery, an owned
+# edge ending only by its owner's end or an end's removal, keeping its
+# owner while owned, and no end naming another identity ending it). They
 # require every listed arm
 # to fire, a floor of distinct states (the changes part's printed until its
 # first green run sets them) and their witnesses reached, and --mutants
@@ -1100,7 +1104,9 @@ fi
 # tombstoned name seated, a Declared row's replay over a Created entry, a
 # record over an entry's name, a new entry's cause out of precedence, an
 # unlist of a Created entry, a created custody kept local, which leaves the
-# placed witness unreachable).
+# placed witness unreachable, an owned edge ended by another identity, by a
+# third identity's removal or not by its end's removal, a second
+# declaration taking custody, a plain unwire of an owned edge admitted).
 created_identity_audit="${workspace_root}/specs/machines/mob_machine/created_identity_audit.sh"
 if [[ ! -x "${created_identity_audit}" ]]; then
   echo "error: created identity audit runner is missing from workspace runfiles: ${created_identity_audit}" >&2
@@ -1109,7 +1115,7 @@ fi
 # Its runs are split over five shards (sized below): the recovery part's
 # scan and placed runs in audits-q and its reseat and names runs in
 # audits-v; the changes part's admit, commit and update runs in audits-r,
-# its archive, unlist, placement and recovered runs in audits-t, and its
+# its archive, unlist, placement, recovered and edges runs in audits-t, and its
 # removal, preparation and prepverdicts runs in audits-u.
 if run_part audits-q; then
   echo "running bounded created identity scans TLC audit"
@@ -1128,8 +1134,8 @@ if run_part audits-u; then
   TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part removal
 fi
 if run_part audits-t; then
-  echo "running bounded created identity archives and unlists TLC audit"
-  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part archive,unlist,placement,recovered
+  echo "running bounded created identity archives, unlists and owned edges TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part archive,unlist,placement,recovered,edges
 fi
 if run_part audits-u; then
   echo "running bounded created identity preparations TLC audit"

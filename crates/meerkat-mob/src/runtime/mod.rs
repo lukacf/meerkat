@@ -260,6 +260,8 @@ pub use identity_preparation::{
     ConstructionEnd, ConstructionFailure, HeldPreparation, IdentityConstructionRequest,
     IdentityPreparationSettle, IdentityPreparationSettled, PreparationSettlement,
 };
+mod owned_edges;
+pub use owned_edges::OwnedEdgeEndOutcome;
 mod identity_incarnation_custody;
 mod identity_local_services;
 #[cfg(any(test, feature = "test-support"))]

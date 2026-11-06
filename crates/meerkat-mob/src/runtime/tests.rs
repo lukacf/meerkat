@@ -92199,6 +92199,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
             format!("identity_change_refused:{}", refusal.kind())
         }
         MobError::IdentityArchived { .. } => "identity_archived".to_string(),
+        MobError::OwnedIdentityEdge { .. } => "owned_identity_edge".to_string(),
         MobError::SpawnCanceled { .. } => "spawn_canceled".to_string(),
         MobError::ResumeProviderParamsRequireResume { .. } => {
             "resume_provider_params_require_resume".to_string()

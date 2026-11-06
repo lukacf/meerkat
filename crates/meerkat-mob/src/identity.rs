@@ -1643,8 +1643,8 @@ pub use created::{
     IdentityAdoptedFrom, IdentityChangeConsent, IdentityChangeEntryOutcome, IdentityChangeKind,
     IdentityChangeReceipt, IdentityChangeReceiptEntry, IdentityChangeReceiptObservation,
     IdentityChangeRequester, IdentityEntered, IdentityPolicyOutcome, IdentityPreparationMode,
-    IdentityRemovalRecord, IdentitySourceEvidence, OwnedIdentityEdge, PendingRoleMigration,
-    classify_created_identity_row,
+    IdentityRemovalRecord, IdentitySourceEvidence, OwnedEdgeAdmission, OwnedIdentityEdge,
+    PendingRoleMigration, classify_created_identity_row,
 };
 
 /// Caller-chosen idempotency identity for one desired-member mutation.
@@ -3609,7 +3609,7 @@ impl fmt::Display for IdentityIntentError {
 
 impl std::error::Error for IdentityIntentError {}
 
-fn validate_identity(identity: &AgentIdentity) -> Result<(), IdentityIntentError> {
+pub(crate) fn validate_identity(identity: &AgentIdentity) -> Result<(), IdentityIntentError> {
     validate_text("identity", identity.as_str())
 }
 

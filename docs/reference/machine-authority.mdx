@@ -377,6 +377,25 @@ marks one, an entry no member holds ended at once, one whose member step
 is in flight deferred, and nothing else read. Each answers one arm per
 verdict through a pure helper, with a `MobNotRunning` arm per other phase.
 
+`MobMachine` keeps the mob's owned edges too (since 0.9.11): one custody map,
+`identity_edge_owners`, from each edge an identity change declared to its
+owner, the identity whose change declared it. `DeclareOwnedIdentityEdge`
+declares an edge a store-owned identity's change lists, to an identity of
+either custody (`OwnedEdgeDeclareVerdict`: a second declaration of an owned
+edge gives no custody, and a peer that is no identity is `PeerUnknown`);
+`EndOwnedIdentityEdge` ends one by its owner's change or by the host's policy
+reload that denies it (`OwnedEdgeEndCause`), naming its owner
+(`OwnedEdgeEndVerdict`: another identity's end is `NotOwner`); a removal ends
+its identity's edges, whichever end owns them, in its own step
+(`RemoveIdentityEntry`), and the reset and the destroy end them all;
+`AdmitMemberUnwire` refuses a plain unwire of an owned edge
+(`MemberUnwireAdmission`); and the boot recovers each edge from its owner's
+row (`RecoverOwnedIdentityEdge`). The map is the edge's desired record: the
+shell realizes an edge (`wiring_edges`) once both its ends are seated, and an
+archive or an unlisting of an end leaves it owned and unrealized. The
+invariants `owned_edge_owner_is_a_store_owned_end` and
+`owned_edge_joins_no_tombstone` hold these facts.
+
 The host's preparation before an identity's first seat is `MobMachine`'s for
 either custody. `BeginPreparationConstruction` holds an attempt of a
 `constructed` preparation (`identity_entry_constructions_held`);

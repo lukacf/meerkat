@@ -2441,6 +2441,17 @@ impl MobActor {
         {
             state.planned_wiring_targets.push(parent_target);
         }
+        // The member's owned edges whose other end is seated (0.9.11): the
+        // spawn realizes them as a seat does, whatever the definition
+        // declares and whether or not the member is exempt from its rules.
+        for (_, peer) in super::owned_edges::owned_pairs_to_realize(
+            self.dsl_authority.state(),
+            std::slice::from_ref(&agent_identity),
+        ) {
+            if !state.planned_wiring_targets.contains(&peer) {
+                state.planned_wiring_targets.push(peer);
+            }
+        }
         if let Some(plan) = state.restore_wiring.as_ref() {
             state
                 .planned_wiring_targets

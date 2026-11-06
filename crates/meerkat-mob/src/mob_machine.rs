@@ -1499,6 +1499,22 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         input: MobMachineCatalogInput::UnlistIdentityEntry,
         reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
     },
+    // Owned edges (0.9.11): an identity change's declaration and end of an
+    // owned edge and a policy reload's end of one, decided in the actor's
+    // steps, and a plain unwire's admission, decided before the unwire. None
+    // is a surface command.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::DeclareOwnedIdentityEdge,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::EndOwnedIdentityEdge,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AdmitMemberUnwire,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
 ];
 
 #[doc(hidden)]

@@ -326,6 +326,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `identity_entry_archiving`: `Set<AgentIdentity>`
 - `identity_entry_constructions_held`: `Map<AgentIdentity, u64>`
 - `identity_entry_constructions_activating`: `Map<AgentIdentity, u64>`
+- `identity_edge_owners`: `Map<WiringEdge, AgentIdentity>`
 - `operator_instruction_revision`: `Map<String, u64>`
 - `operator_instruction_effect`: `Map<String, InstructionEffect>`
 - `operator_instruction_digest`: `Map<String, String>`
@@ -599,6 +600,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SettleHostPreparation`(agent_identity: AgentIdentity, attempt: Option<u64>, constructed: Bool, before_deadline: Bool, binding_matches: Bool)
 - `EndPreparationConstruction`(agent_identity: AgentIdentity, attempt: u64, end: ConstructionEndKind)
 - `UnlistIdentityEntry`(agent_identity: AgentIdentity)
+- `DeclareOwnedIdentityEdge`(edge: WiringEdge, owner: AgentIdentity)
+- `EndOwnedIdentityEdge`(edge: WiringEdge, owner: AgentIdentity, cause: OwnedEdgeEndCause)
+- `AdmitMemberUnwire`(edge: WiringEdge)
 
 ## Signals
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, runtime_epoch_id: Option<RuntimeEpochId>)
@@ -692,6 +696,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverMemberRotationIntent`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, target: RotationTarget, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint>, profile_name: String)
 - `RecoverIdentityEntryRetiring`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
 - `RecoverCreatedIdentityEntry`(agent_identity: AgentIdentity, presence: RecoveredPresence, last_session: Option<SessionId>)
+- `RecoverOwnedIdentityEdge`(edge: WiringEdge, owner: AgentIdentity)
 - `SetOperatorInstruction`(slot: String, revision: u64, digest: String, body_bytes: u64, target_kind: InstructionTargetKind, target_profile: String, target_member: Option<AgentIdentity>)
 - `RevokeOperatorInstruction`(slot: String, revision: u64)
 - `RecoverOperatorInstruction`(slot: String, revision: u64, effect: InstructionEffect, digest: String, body_bytes: u64, target_kind: InstructionTargetKind, target_profile: String, target_member: Option<AgentIdentity>, generation: u64)
@@ -896,6 +901,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PreparationSettleResolved`(agent_identity: AgentIdentity, verdict: PreparationSettleVerdict, held_attempt: Option<u64>, activating_attempt: Option<u64>)
 - `PreparationConstructionEnded`(agent_identity: AgentIdentity, attempt: u64, verdict: ConstructionEndVerdict)
 - `IdentityEntryUnlisted`(agent_identity: AgentIdentity, verdict: UnlistEntryVerdict)
+- `OwnedIdentityEdgeDeclared`(edge: WiringEdge, verdict: OwnedEdgeDeclareVerdict)
+- `OwnedIdentityEdgeEnded`(edge: WiringEdge, cause: OwnedEdgeEndCause, verdict: OwnedEdgeEndVerdict)
+- `MemberUnwireAdmissionResolved`(edge: WiringEdge, verdict: MemberUnwireAdmission)
 
 ## Helpers
 - `identity_reconcile_decision`(intent: IdentityAuthorityCondition, lease: IdentityLeaseCondition, replacement: IdentityReplacementCondition, external_binding_required: Bool, initial_delivery_required: Bool, session_creation_receipt: IdentityReceiptCondition, retirement_receipt: IdentityReceiptCondition, session: IdentitySessionCondition, runtime: IdentityResourceCondition, member: IdentityResourceCondition, external_binding_receipt: IdentityReceiptCondition, external_trust: IdentityExternalTrustCondition, external_ceremony: IdentityExternalCeremonyCondition, initial_delivery_receipt: IdentityReceiptCondition, initial_delivery: IdentityInitialDeliveryCondition, wiring: IdentityResourceCondition) -> `IdentityReconcileDecision`
@@ -1098,6 +1106,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `archived_entry_is_store_owned`
 - `entry_ending_marks_are_seated_and_disjoint`
 - `tombstone_is_never_an_entry`
+- `owned_edge_owner_is_a_store_owned_end`
+- `owned_edge_joins_no_tombstone`
 - `construction_is_held_or_activating`
 - `entry_custodies_are_disjoint`
 - `entry_custody_ladder_is_open`
@@ -20160,6 +20170,226 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `custody_not_recorded`
 - To: `Destroyed`
 
+### `DeclareOwnedIdentityEdgeDeclared`
+- From: `Running`
+- On: `DeclareOwnedIdentityEdge`(edge, owner)
+- Guards:
+  - `owner_is_a_store_owned_end`
+  - `edge_not_owned`
+  - `peer_is_an_identity`
+- Emits: `OwnedIdentityEdgeDeclared`
+- To: `Running`
+
+### `DeclareOwnedIdentityEdgeAlreadyOwned`
+- From: `Running`
+- On: `DeclareOwnedIdentityEdge`(edge, owner)
+- Guards:
+  - `owner_is_a_store_owned_end`
+  - `edge_owned`
+- Emits: `OwnedIdentityEdgeDeclared`
+- To: `Running`
+
+### `DeclareOwnedIdentityEdgePeerUnknown`
+- From: `Running`
+- On: `DeclareOwnedIdentityEdge`(edge, owner)
+- Guards:
+  - `owner_is_a_store_owned_end`
+  - `edge_not_owned`
+  - `peer_not_an_identity`
+- Emits: `OwnedIdentityEdgeDeclared`
+- To: `Running`
+
+### `DeclareOwnedIdentityEdgeOwnerInvalid`
+- From: `Running`
+- On: `DeclareOwnedIdentityEdge`(edge, owner)
+- Guards:
+  - `owner_not_a_store_owned_end`
+- Emits: `OwnedIdentityEdgeDeclared`
+- To: `Running`
+
+### `DeclareOwnedIdentityEdgeMobNotRunningStopped`
+- From: `Stopped`
+- On: `DeclareOwnedIdentityEdge`(edge, owner)
+- Emits: `OwnedIdentityEdgeDeclared`
+- To: `Stopped`
+
+### `DeclareOwnedIdentityEdgeMobNotRunningCompleted`
+- From: `Completed`
+- On: `DeclareOwnedIdentityEdge`(edge, owner)
+- Emits: `OwnedIdentityEdgeDeclared`
+- To: `Completed`
+
+### `DeclareOwnedIdentityEdgeMobNotRunningDestroyed`
+- From: `Destroyed`
+- On: `DeclareOwnedIdentityEdge`(edge, owner)
+- Emits: `OwnedIdentityEdgeDeclared`
+- To: `Destroyed`
+
+### `EndOwnedIdentityEdgeEnded`
+- From: `Running`
+- On: `EndOwnedIdentityEdge`(edge, owner, cause)
+- Guards:
+  - `composition_authoritative`
+  - `changes_not_held`
+  - `owned_by_owner`
+- Emits: `OwnedIdentityEdgeEnded`
+- To: `Running`
+
+### `EndOwnedIdentityEdgeNotOwner`
+- From: `Running`
+- On: `EndOwnedIdentityEdge`(edge, owner, cause)
+- Guards:
+  - `composition_authoritative`
+  - `changes_not_held`
+  - `owned_by_another`
+- Emits: `OwnedIdentityEdgeEnded`
+- To: `Running`
+
+### `EndOwnedIdentityEdgeAbsent`
+- From: `Running`
+- On: `EndOwnedIdentityEdge`(edge, owner, cause)
+- Guards:
+  - `composition_authoritative`
+  - `changes_not_held`
+  - `edge_not_owned`
+- Emits: `OwnedIdentityEdgeEnded`
+- To: `Running`
+
+### `EndOwnedIdentityEdgeNonAuthoritative`
+- From: `Running`
+- On: `EndOwnedIdentityEdge`(edge, owner, cause)
+- Guards:
+  - `composition_not_authoritative`
+- Emits: `OwnedIdentityEdgeEnded`
+- To: `Running`
+
+### `EndOwnedIdentityEdgeChangesHeld`
+- From: `Running`
+- On: `EndOwnedIdentityEdge`(edge, owner, cause)
+- Guards:
+  - `composition_authoritative`
+  - `changes_held`
+- Emits: `OwnedIdentityEdgeEnded`
+- To: `Running`
+
+### `EndOwnedIdentityEdgeMobNotRunningStopped`
+- From: `Stopped`
+- On: `EndOwnedIdentityEdge`(edge, owner, cause)
+- Emits: `OwnedIdentityEdgeEnded`
+- To: `Stopped`
+
+### `EndOwnedIdentityEdgeMobNotRunningCompleted`
+- From: `Completed`
+- On: `EndOwnedIdentityEdge`(edge, owner, cause)
+- Emits: `OwnedIdentityEdgeEnded`
+- To: `Completed`
+
+### `EndOwnedIdentityEdgeMobNotRunningDestroyed`
+- From: `Destroyed`
+- On: `EndOwnedIdentityEdge`(edge, owner, cause)
+- Emits: `OwnedIdentityEdgeEnded`
+- To: `Destroyed`
+
+### `AdmitMemberUnwireAdmittedRunning`
+- From: `Running`
+- On: `AdmitMemberUnwire`(edge)
+- Guards:
+  - `edge_not_owned`
+- Emits: `MemberUnwireAdmissionResolved`
+- To: `Running`
+
+### `AdmitMemberUnwireAdmittedStopped`
+- From: `Stopped`
+- On: `AdmitMemberUnwire`(edge)
+- Guards:
+  - `edge_not_owned`
+- Emits: `MemberUnwireAdmissionResolved`
+- To: `Stopped`
+
+### `AdmitMemberUnwireAdmittedCompleted`
+- From: `Completed`
+- On: `AdmitMemberUnwire`(edge)
+- Guards:
+  - `edge_not_owned`
+- Emits: `MemberUnwireAdmissionResolved`
+- To: `Completed`
+
+### `AdmitMemberUnwireAdmittedDestroyed`
+- From: `Destroyed`
+- On: `AdmitMemberUnwire`(edge)
+- Guards:
+  - `edge_not_owned`
+- Emits: `MemberUnwireAdmissionResolved`
+- To: `Destroyed`
+
+### `AdmitMemberUnwireOwnedEdgeRunning`
+- From: `Running`
+- On: `AdmitMemberUnwire`(edge)
+- Guards:
+  - `edge_owned`
+- Emits: `MemberUnwireAdmissionResolved`
+- To: `Running`
+
+### `AdmitMemberUnwireOwnedEdgeStopped`
+- From: `Stopped`
+- On: `AdmitMemberUnwire`(edge)
+- Guards:
+  - `edge_owned`
+- Emits: `MemberUnwireAdmissionResolved`
+- To: `Stopped`
+
+### `AdmitMemberUnwireOwnedEdgeCompleted`
+- From: `Completed`
+- On: `AdmitMemberUnwire`(edge)
+- Guards:
+  - `edge_owned`
+- Emits: `MemberUnwireAdmissionResolved`
+- To: `Completed`
+
+### `AdmitMemberUnwireOwnedEdgeDestroyed`
+- From: `Destroyed`
+- On: `AdmitMemberUnwire`(edge)
+- Guards:
+  - `edge_owned`
+- Emits: `MemberUnwireAdmissionResolved`
+- To: `Destroyed`
+
+### `RecoverOwnedIdentityEdgeRecoveredRunning`
+- From: `Running`
+- On: `RecoverOwnedIdentityEdge`(edge, owner)
+- Guards:
+  - `replay_not_sealed`
+  - `owner_is_a_store_owned_end`
+  - `edge_not_owned`
+  - `ends_not_removed`
+- To: `Running`
+
+### `RecoverOwnedIdentityEdgeRecoveredStopped`
+- From: `Stopped`
+- On: `RecoverOwnedIdentityEdge`(edge, owner)
+- Guards:
+  - `replay_not_sealed`
+  - `owner_is_a_store_owned_end`
+  - `edge_not_owned`
+  - `ends_not_removed`
+- To: `Stopped`
+
+### `RecoverOwnedIdentityEdgeSkippedRunning`
+- From: `Running`
+- On: `RecoverOwnedIdentityEdge`(edge, owner)
+- Guards:
+  - `replay_not_sealed`
+  - `edge_not_recoverable`
+- To: `Running`
+
+### `RecoverOwnedIdentityEdgeSkippedStopped`
+- From: `Stopped`
+- On: `RecoverOwnedIdentityEdge`(edge, owner)
+- Guards:
+  - `replay_not_sealed`
+  - `edge_not_recoverable`
+- To: `Stopped`
+
 ## Coverage
 ### Code Anchors
 - `mob_handle_surface` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/handle.rs` — identity-first public MobMachine handle surface for ensure member, reconcile, and member command routing
@@ -20172,6 +20402,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `mob_declared_apply_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/declared_apply.rs` — MobMachine declared apply realized by the actor: decide one verdict per declared identity from the declaration and member facts and realize it (a Dormant seat, on the entry's archived session when it has one, a same-session restamp, a rotation, a role hold or a typed refusal), refusing every identity of a candidate composition; seal a complete declared roster, marking every unlisted Declared entry whose member is seated and removing every unseated one, leaving one whose spawn is in flight to a later seal, and retire each marked member with the cause Unlisted, whose start row records the mark for replay; unlist one roster-owned identity alone the same way, reading and changing no other entry, and leave it to a later unlist while a spawn, retirement, removal or held construction of it is in flight; answer a store-owned update of an archived identity, or of one awaiting its host's preparation, record only; let an archived session record go when the session is lost or the host asked for a fresh life; an unseated cause belongs to an entry no member holds, an unlisted mark to a seated Declared entry whose member has no spawn in flight, an archived session record to an identity no member holds, and an entry awaiting its held creation was never created, emitting the identity entry declared, declared roster sealed, identity entry unlisted and archived session forgotten effects
 - `mob_created_identity_entry_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/created_identity.rs` — MobMachine created identity entries realized by the shell at a start: recover each created entry row of the identity store from its presence and the replayed journal after the replay and before the boot plan (a present row of a seated local member records it a Created entry, a present row whose member the journal shows retired records the entry owed its seat with its member's last session as its revival record, a row pending its host's preparation records it unseated for that preparation unless the replay seats the published construction of a `constructed` one, a removed row reserves the name as a tombstone, and an unreadable row, a row the replay contradicts or a member row whose origin token this build does not know reserves the name as unreadable), then seat a created entry owed its seat again, Dormant, on its archived session under created custody, and settle the row of a published construction; no spawn takes a reserved name or the entry of another origin, a tombstoned name is never an entry or a member, and created custody belongs to an open ladder of a Created entry, never beside entry custody
 - `mob_identity_change_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/identity_change.rs` — MobMachine identity changes realized by the store-owned writer: a change's commit step decides its admission on its prepared authority from the facts the shell observed there (the store's receipt of the operation, the consent's form, whether a decision's permit binds the change and admits a commit now, whether the requester is the host operator, whether an agent requester's grant is current through its prepared check at this final sink, and whether a store-owned update's expected spec is its identity's current one), records each new store-owned entry (origin Created, unseated with the cause MobMachine derives from the request's facts: its host preparation pending, hosted on its first use, held for its host's creation or its seat owed) or refuses its name typed (an unlisted roster-owned identity's archived session record holds it), and only then stages the seats and writes the change's one store transaction; a refusal anywhere leaves the prepared authority unapplied and writes nothing; one identity's removal ends a held construction of it in the same step, and its archive is refused while it awaits its host's preparation; and the host holds or releases the mob's changes
+- `mob_owned_identity_edge_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/owned_edges.rs` — MobMachine owned edges realized by the shell: a store-owned identity's change declares the edges its peers list (each owned by the declaring identity, its other end an identity of either custody; an edge an identity owns already gives no second custody) and ends the edges its owner's change removes, in the change's own step, whose store transaction writes the owner's row; the host's policy reload ends an edge its peer rules now deny, naming its owner; the removal of either end ends the identity's edges in the removal's own step, whose store transaction writes the owners' rows with the tombstone; the mob's reset and destroy end every one; an archive or an unlisting of an end leaves the edge declared and unrealized, and a seat realizes it again; a plain unwire of an owned edge is refused; and the boot recovers each owned edge from its owner's row
 - `mob_identity_preparation_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/identity_preparation.rs` — MobMachine host preparation realized by the shell: an identity never seated whose host's rule requires its preparation is unseated for it (a roster-owned one by the declared apply, derived again at each apply, a store-owned one by its create, from its row at a start), and a delivery to it is refused retryable; a settle without a construction commits its receipt and its row and leaves the entry owed its seat, which the shell seats Dormant from its spec or embodies for an owed kickoff, and a `constructed` preparation refuses that settle; a host asks for a held construction of the identity, an attempt the mob owns whose spawn ladder alone may open for the entry, and a settle naming that attempt, decided before its deadline and binding the identity's spec, accepts its activation, journaled by the settle's receipt; from then on no abort, expiry or newer attempt replaces it, and only the membership commit that publishes the construction or its failed publication ends it; an abort, the deadline or a refused construction ends a held attempt with the entry still pending, and an identity holds at most one attempt, emitting the construction resolved, settle resolved and construction ended effects
 - `mob_identity_entry_respawn_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine refuses a fresh-life respawn of an identity entry's member in every phase an entry lives in, realized by the actor: the respawn routes on that verdict, respawning an entry's member on its own session, and the retire-then-spawn admission answers the refusal typed, emitting the respawn refused effect
 - `mob_rotation_target_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/dormant_seat.rs` — MobMachine rotation targets realized by the actor: a same-session successor starts its retirement archive-only on the member's kept binding with its rotation recorded in one step, and its terminal seats the next incarnation Dormant on the same session after the shell released the runtime and kept the session; a restart records a rotation again from its retirement's start row and re-drives it; the intent and its target are recorded together, and a same-session rotation keeps its binding

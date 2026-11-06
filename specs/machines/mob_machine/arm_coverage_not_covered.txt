@@ -254,6 +254,12 @@ EndPreparationConstructionNotOpenCompleted an attempt's end in a completed mob; 
 EndPreparationConstructionNotOpenDestroyed an attempt's end in a destroyed mob (the destroy clears every attempt); created_identity_audit's prepverdicts run drives its Running and Stopped arms
 EndPreparationConstructionActivationPendingCompleted an attempt's end in a completed mob; created_identity_audit's prepverdicts run drives its Running and Stopped arms
 EndPreparationConstructionActivationPendingDestroyed an attempt's end in a destroyed mob (the destroy clears every attempt); created_identity_audit's prepverdicts run drives its Running and Stopped arms
+DeclareOwnedIdentityEdgeMobNotRunning* an owned edge's declaration in the Completed and Destroyed phases; created_identity_audit's edges run drives the Stopped arm
+EndOwnedIdentityEdgeMobNotRunning* an owned edge's end in the Completed and Destroyed phases; created_identity_audit's edges run drives the Stopped arm
+AdmitMemberUnwireAdmittedCompleted a plain unwire's admission in a completed mob (a pure verdict); created_identity_audit's edges run drives its Running and Stopped arms
+AdmitMemberUnwireAdmittedDestroyed a plain unwire's admission in a destroyed mob (the destroy ends every owned edge); created_identity_audit's edges run drives its Running and Stopped arms
+AdmitMemberUnwireOwnedEdgeCompleted a plain unwire's refusal in a completed mob (a pure verdict); created_identity_audit's edges run drives its Running and Stopped arms
+AdmitMemberUnwireOwnedEdgeDestroyed a plain unwire's refusal in a destroyed mob, which owns no edge; created_identity_audit's edges run drives its Running and Stopped arms
 RecordMemberCustodyUnrestoredSeatedCompleted the custody deferral record in a Completed mob; member_residency_audit drives the Running and Stopped copies across the seat-ending arms, and the Rust rows of crates/meerkat-machine-schema/tests/mob_machine_member_custody_region.rs drive this copy
 RecordMemberCustodyUnrestoredNotSeated* a custody deferral record for an identity the mob does not seat changes nothing; driven by the Rust rows of crates/meerkat-machine-schema/tests/mob_machine_member_custody_region.rs
 RecordMemberCustodyUnrestoredDestroyed a late custody deferral record in a destroyed mob changes nothing; driven by the Rust rows of crates/meerkat-machine-schema/tests/mob_machine_member_custody_region.rs

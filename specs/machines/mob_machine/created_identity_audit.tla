@@ -22,10 +22,10 @@
 \* vacuously.
 \* This module keeps the generated model unchanged, extends
 \* identity_entry_apply_audit for its constants and arm families, and
-\* checks fourteen runs over fixed domains: the four of the recovery part
-\* below, and the ten of the changes part (0.9.9: admit, commit, update,
+\* checks fifteen runs over fixed domains: the four of the recovery part
+\* below, and the eleven of the changes part (0.9.9: admit, commit, update,
 \* removal, archive, preparation, prepverdicts, placement, unlist and
-\* recovered), which its own section describes.
+\* recovered; 0.9.11: edges), which its own section describes.
 \* The recovery part:
 \*
 \*   scan (ScanSpec): member 1 recovered and bound (a seated local member),
@@ -578,8 +578,9 @@ NotAuditWitnessScanContradictedPlaced == [][~AuditWitnessScanContradictedPlaced]
 (* archive and unarchive (archive), the host's preparation and its held    *)
 (* constructions (preparation) and their verdicts (prepverdicts), the      *)
 (* placed and peer-only spawns of a store-owned identity (placement), the  *)
-(* one-entry unlist of a roster-owned identity (unlist) and the replay of  *)
-(* a removal or an archive in flight carried to its terminal (recovered).  *)
+(* one-entry unlist of a roster-owned identity (unlist), the replay of a   *)
+(* removal or an archive in flight carried to its terminal (recovered),    *)
+(* and (0.9.11) the owned edges an identity change declares (edges).       *)
 (***************************************************************************)
 
 Receipts == {"Absent", "Same", "Other"}
@@ -1732,4 +1733,198 @@ AuditWitnessRecoveredArchiveEnds ==
 
 NotAuditWitnessRecoveredRemovalEnds == [][~AuditWitnessRecoveredRemovalEnds]_vars
 NotAuditWitnessRecoveredArchiveEnds == [][~AuditWitnessRecoveredArchiveEnds]_vars
+
+(***************************************************************************)
+(* The edges run (0.9.11).                                                 *)
+(***************************************************************************)
+
+\* Member 3, a store-owned identity no member holds, beside members 1 (a
+\* roster-owned identity) and 2 (a store-owned one): the run's third end, so
+\* that a change of one identity can meet an edge it is no end of.
+Id3 == "agentidentity_3"
+EdgeIds == {Id1, Id2, Id3}
+EdgeOwners == {Id2, Id3}
+Edge12 == [a |-> Id1, b |-> Id2]
+Edge23 == [a |-> Id2, b |-> Id3]
+\* A self edge, which no identity owns.
+Edge22 == [a |-> Id2, b |-> Id2]
+Edges == {Edge12, Edge23, Edge22}
+EdgeCauses == {"OwnerChange", "PolicyDenied"}
+OwnerOf(e) == IF e \in DOMAIN identity_edge_owners THEN Some(identity_edge_owners[e]) ELSE None
+OwnerNext(e) == IF e \in DOMAIN identity_edge_owners' THEN Some(identity_edge_owners'[e]) ELSE None
+
+\* Every arm of an owned edge's declaration, of its end, of a plain unwire's
+\* admission and of an owned edge's recovery, in a running and a stopped mob.
+DeclareEdgeArm(e, owner) ==
+    \/ DeclareOwnedIdentityEdgeDeclared(e, owner)
+    \/ DeclareOwnedIdentityEdgeAlreadyOwned(e, owner)
+    \/ DeclareOwnedIdentityEdgePeerUnknown(e, owner)
+    \/ DeclareOwnedIdentityEdgeOwnerInvalid(e, owner)
+    \/ DeclareOwnedIdentityEdgeMobNotRunningStopped(e, owner)
+DeclareEdgeVerdicts(e, owner) ==
+    << ENABLED DeclareOwnedIdentityEdgeDeclared(e, owner),
+       ENABLED DeclareOwnedIdentityEdgeAlreadyOwned(e, owner),
+       ENABLED DeclareOwnedIdentityEdgePeerUnknown(e, owner),
+       ENABLED DeclareOwnedIdentityEdgeOwnerInvalid(e, owner),
+       ENABLED DeclareOwnedIdentityEdgeMobNotRunningStopped(e, owner) >>
+EndEdgeArm(e, owner, cause) ==
+    \/ EndOwnedIdentityEdgeEnded(e, owner, cause)
+    \/ EndOwnedIdentityEdgeNotOwner(e, owner, cause)
+    \/ EndOwnedIdentityEdgeAbsent(e, owner, cause)
+    \/ EndOwnedIdentityEdgeNonAuthoritative(e, owner, cause)
+    \/ EndOwnedIdentityEdgeChangesHeld(e, owner, cause)
+    \/ EndOwnedIdentityEdgeMobNotRunningStopped(e, owner, cause)
+EndEdgeVerdicts(e, owner, cause) ==
+    << ENABLED EndOwnedIdentityEdgeEnded(e, owner, cause),
+       ENABLED EndOwnedIdentityEdgeNotOwner(e, owner, cause),
+       ENABLED EndOwnedIdentityEdgeAbsent(e, owner, cause),
+       ENABLED EndOwnedIdentityEdgeNonAuthoritative(e, owner, cause),
+       ENABLED EndOwnedIdentityEdgeChangesHeld(e, owner, cause),
+       ENABLED EndOwnedIdentityEdgeMobNotRunningStopped(e, owner, cause) >>
+AdmitUnwireArm(e) ==
+    \/ AdmitMemberUnwireAdmittedRunning(e)
+    \/ AdmitMemberUnwireAdmittedStopped(e)
+    \/ AdmitMemberUnwireOwnedEdgeRunning(e)
+    \/ AdmitMemberUnwireOwnedEdgeStopped(e)
+AdmitUnwireVerdicts(e) ==
+    << ENABLED AdmitMemberUnwireAdmittedRunning(e),
+       ENABLED AdmitMemberUnwireAdmittedStopped(e),
+       ENABLED AdmitMemberUnwireOwnedEdgeRunning(e),
+       ENABLED AdmitMemberUnwireOwnedEdgeStopped(e) >>
+RecoverEdgeArm(e, owner) ==
+    \/ RecoverOwnedIdentityEdgeRecoveredRunning(e, owner)
+    \/ RecoverOwnedIdentityEdgeRecoveredStopped(e, owner)
+    \/ RecoverOwnedIdentityEdgeSkippedRunning(e, owner)
+    \/ RecoverOwnedIdentityEdgeSkippedStopped(e, owner)
+RecoverEdgeVerdicts(e, owner) ==
+    << ENABLED RecoverOwnedIdentityEdgeRecoveredRunning(e, owner),
+       ENABLED RecoverOwnedIdentityEdgeRecoveredStopped(e, owner),
+       ENABLED RecoverOwnedIdentityEdgeSkippedRunning(e, owner),
+       ENABLED RecoverOwnedIdentityEdgeSkippedStopped(e, owner) >>
+
+\* Member 1 a roster-owned identity declared, seated on its first
+\* incarnation and removed through its retirement to its terminal; member 2
+\* a store-owned identity recorded owed its seat, seated under created
+\* custody, archived (through its retirement) and unarchived, or removed;
+\* member 3 a store-owned identity recorded owed its seat, archived and
+\* unarchived, or removed, at once; the declaration, the end for either
+\* cause and the boot's recovery of each edge among them (and of member 2's
+\* self edge) by each store-owned member, a plain unwire's admission of
+\* each, the host's changes hold and the build seed's composition
+\* authority, in a running and a stopped mob. The boot plan is never sealed
+\* here, so the recovery's arms answer throughout, as declarations do.
+EdgesNext ==
+    \/ ASeed
+    \/ HoldArm
+    \/ CStop
+    \/ DeclareCustodyArm(Id1, ApplyShape, FALSE, FALSE)
+    \/ AAuthorize
+    \/ AOpen(AFirst)
+    \/ ASeat(AFirst)
+    \/ ARetire(AFirst)
+    \/ AArchive(AFirst)
+    \/ RecordAs(Id2, "SeatOwed")
+    \/ RecordAs(Id3, "SeatOwed")
+    \/ CRAuthorize(Id2)
+    \/ COpenAt(<<Rid2, 2, 0>>, FALSE, TRUE)
+    \/ CSeatAt(<<Rid2, 2, 0>>, FALSE)
+    \/ CRetireAt(<<Rid2, 2, 0>>)
+    \/ CArchiveAt(<<Rid2, 2, 0>>)
+    \/ \E id \in EdgeOwners : ArchiveArm(id) \/ UnarchiveArm(id)
+    \/ \E id \in EdgeIds : RemoveArm(id)
+    \/ \E e \in Edges, owner \in EdgeOwners : DeclareEdgeArm(e, owner) \/ RecoverEdgeArm(e, owner)
+    \/ \E e \in Edges, owner \in EdgeOwners, cause \in EdgeCauses : EndEdgeArm(e, owner, cause)
+    \/ \E e \in Edges : AdmitUnwireArm(e)
+
+EdgesSpec == Init /\ [][EdgesNext]_vars
+
+\* Exactly one arm answers every declaration, end and plain unwire's
+\* admission in a running and a stopped mob, and every recovery while the
+\* boot plan is not sealed.
+AuditEdgesExactlyOne ==
+    phase \in {"Running", "Stopped"} =>
+        /\ \A e \in Edges, owner \in EdgeOwners :
+              Cardinality({i \in 1..5 : DeclareEdgeVerdicts(e, owner)[i]}) = 1
+        /\ \A e \in Edges, owner \in EdgeOwners, cause \in EdgeCauses :
+              Cardinality({i \in 1..6 : EndEdgeVerdicts(e, owner, cause)[i]}) = 1
+        /\ \A e \in Edges : Cardinality({i \in 1..4 : AdmitUnwireVerdicts(e)[i]}) = 1
+        /\ boot_plan_sealed = FALSE =>
+              \A e \in Edges, owner \in EdgeOwners :
+                  Cardinality({i \in 1..4 : RecoverEdgeVerdicts(e, owner)[i]}) = 1
+
+\* An owned edge leaves the map only by its owner's change or a policy
+\* reload naming its owner (EndOwnedIdentityEdgeEnded), or by the removal of
+\* one of its ends: no change of a third identity, and no archive, unarchive
+\* or retirement of an end, ends it.
+AuditOwnedEdgeEndsOnlyByItsOwnerOrAnEnd ==
+    [][\A e \in DOMAIN identity_edge_owners :
+         e \notin DOMAIN identity_edge_owners' =>
+            \/ \E cause \in EdgeCauses : EndOwnedIdentityEdgeEnded(e, identity_edge_owners[e], cause)
+            \/ \E id \in {e.a, e.b} : RemoveIdentityEntryRetiring(id) \/ RemoveIdentityEntryRemoved(id)
+      ]_vars
+
+\* An owned edge keeps its owner while it is owned: a second declaration
+\* and a recovery give no custody.
+AuditOwnedEdgeKeepsItsOwner ==
+    [][\A e \in DOMAIN identity_edge_owners :
+         e \in DOMAIN identity_edge_owners' => identity_edge_owners'[e] = identity_edge_owners[e]
+      ]_vars
+
+\* No end naming another identity than an edge's owner ends the edge.
+AuditOnlyTheOwnerEndsItsEdge ==
+    [][\A e \in Edges, id \in EdgeOwners, cause \in EdgeCauses :
+         ~(OwnerOf(e) # Some(id) /\ EndOwnedIdentityEdgeEnded(e, id, cause))
+      ]_vars
+
+\* Witnesses of the edges run.
+AuditWitnessEdgeDeclared ==
+    /\ DeclareOwnedIdentityEdgeDeclared(Edge12, Id2)
+    /\ OwnerNext(Edge12) = Some(Id2)
+AuditWitnessEdgeToUnseatedDeclared ==
+    /\ Unseated(Id3) = Some("SeatOwed")
+    /\ DeclareOwnedIdentityEdgeDeclared(Edge23, Id2)
+AuditWitnessEdgeSecondDeclaration ==
+    /\ OwnerOf(Edge23) = Some(Id2)
+    /\ DeclareOwnedIdentityEdgeAlreadyOwned(Edge23, Id3)
+AuditWitnessEdgePeerUnknown ==
+    /\ Id1 \notin DOMAIN identity_entry_origins
+    /\ DeclareOwnedIdentityEdgePeerUnknown(Edge12, Id2)
+AuditWitnessEdgeEndedByOwner == EndOwnedIdentityEdgeEnded(Edge12, Id2, "OwnerChange")
+AuditWitnessEdgeEndedByPolicy == EndOwnedIdentityEdgeEnded(Edge23, Id3, "PolicyDenied")
+AuditWitnessEdgeNotOwner ==
+    /\ OwnerOf(Edge23) = Some(Id2)
+    /\ EndOwnedIdentityEdgeNotOwner(Edge23, Id3, "PolicyDenied")
+AuditWitnessEdgeEndedByPeerRemoval ==
+    /\ OwnerOf(Edge12) = Some(Id2)
+    /\ RemoveIdentityEntryRetiring(Id1)
+    /\ OwnerNext(Edge12) = None
+AuditWitnessEdgeEndedByOwnerRemoval ==
+    /\ OwnerOf(Edge23) = Some(Id3)
+    /\ RemoveIdentityEntryRemoved(Id3)
+    /\ OwnerNext(Edge23) = None
+AuditWitnessEdgeKeptByThirdRemoval ==
+    /\ OwnerOf(Edge23) # None
+    /\ RemoveIdentityEntryRetiring(Id1)
+    /\ OwnerNext(Edge23) = OwnerOf(Edge23)
+AuditWitnessEdgeKeptByArchive ==
+    /\ OwnerOf(Edge12) = Some(Id2)
+    /\ \/ ArchiveIdentityEntryArchiving(Id2)
+       \/ ArchiveIdentityEntryArchived(Id2)
+    /\ OwnerNext(Edge12) = Some(Id2)
+AuditWitnessEdgeUnwireRefused == AdmitMemberUnwireOwnedEdgeRunning(Edge12)
+AuditWitnessEdgeRecovered == RecoverOwnedIdentityEdgeRecoveredRunning(Edge23, Id3)
+
+NotAuditWitnessEdgeDeclared == [][~AuditWitnessEdgeDeclared]_vars
+NotAuditWitnessEdgeToUnseatedDeclared == [][~AuditWitnessEdgeToUnseatedDeclared]_vars
+NotAuditWitnessEdgeSecondDeclaration == [][~AuditWitnessEdgeSecondDeclaration]_vars
+NotAuditWitnessEdgePeerUnknown == [][~AuditWitnessEdgePeerUnknown]_vars
+NotAuditWitnessEdgeEndedByOwner == [][~AuditWitnessEdgeEndedByOwner]_vars
+NotAuditWitnessEdgeEndedByPolicy == [][~AuditWitnessEdgeEndedByPolicy]_vars
+NotAuditWitnessEdgeNotOwner == [][~AuditWitnessEdgeNotOwner]_vars
+NotAuditWitnessEdgeEndedByPeerRemoval == [][~AuditWitnessEdgeEndedByPeerRemoval]_vars
+NotAuditWitnessEdgeEndedByOwnerRemoval == [][~AuditWitnessEdgeEndedByOwnerRemoval]_vars
+NotAuditWitnessEdgeKeptByThirdRemoval == [][~AuditWitnessEdgeKeptByThirdRemoval]_vars
+NotAuditWitnessEdgeKeptByArchive == [][~AuditWitnessEdgeKeptByArchive]_vars
+NotAuditWitnessEdgeUnwireRefused == [][~AuditWitnessEdgeUnwireRefused]_vars
+NotAuditWitnessEdgeRecovered == [][~AuditWitnessEdgeRecovered]_vars
 ====

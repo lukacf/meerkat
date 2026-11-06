@@ -530,22 +530,106 @@ impl PendingRoleMigration {
     }
 }
 
-/// An edge a change of this identity declared: the peer and the rule that
-/// admitted it. The identity owns it.
+/// How an owned edge entered its owner's record: the peer rule that admitted
+/// it, or its owner's adoption into store custody (an adopted member's
+/// current edge to another identity, which no peer rule admitted). It is
+/// recorded, never authority: the host's policy reload re-applies its peer
+/// rules to an adopted edge as to any owned edge, and ends it when they deny
+/// it.
+///
+/// Its stored form is the rule's id as text, and `adopted` for an adoption:
+/// the row's frozen shape, `{"peer": .., "rule": ".."}`. No peer rule takes
+/// the id `adopted` ([`Self::rule`] refuses it).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum OwnedEdgeAdmission {
+    /// The peer rule of this id admitted the edge.
+    Rule(String),
+    /// The edge was the owner's member's current edge when the owner was
+    /// adopted into store custody.
+    Adopted,
+}
+
+/// The stored token of an adopted edge's admission.
+const ADOPTED_EDGE_TOKEN: &str = "adopted";
+
+impl OwnedEdgeAdmission {
+    /// The admission by the peer rule `id`: a valid text other than the
+    /// adoption's reserved token.
+    ///
+    /// # Errors
+    /// [`IdentityIntentError`] for an id that is not a valid text, or that
+    /// is `adopted`.
+    pub fn rule(id: impl Into<String>) -> Result<Self, IdentityIntentError> {
+        let rule = Self::Rule(id.into());
+        rule.validate()?;
+        Ok(rule)
+    }
+
+    /// The admission's stored token: the rule's id, or `adopted`.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Rule(id) => id,
+            Self::Adopted => ADOPTED_EDGE_TOKEN,
+        }
+    }
+
+    /// A peer rule's id is a valid text other than the adoption's token
+    /// (which reads back as [`Self::Adopted`]).
+    pub(crate) fn validate(&self) -> Result<(), IdentityIntentError> {
+        match self {
+            Self::Rule(id) => {
+                validate_text("owned_edge_rule", id)?;
+                if id == ADOPTED_EDGE_TOKEN {
+                    return Err(IdentityIntentError::InvalidCreatedIdentity(format!(
+                        "'{ADOPTED_EDGE_TOKEN}' is reserved for an adopted edge: no peer rule \
+                         takes it"
+                    )));
+                }
+                Ok(())
+            }
+            Self::Adopted => Ok(()),
+        }
+    }
+}
+
+impl Serialize for OwnedEdgeAdmission {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for OwnedEdgeAdmission {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let token = String::deserialize(deserializer)?;
+        Ok(if token == ADOPTED_EDGE_TOKEN {
+            Self::Adopted
+        } else {
+            Self::Rule(token)
+        })
+    }
+}
+
+/// An edge a change of this identity declared: the peer, an identity of
+/// either custody, and how the edge entered (the peer rule that admitted
+/// it, or the identity's adoption). The identity owns it: only its own
+/// change, the host's policy reload that denies it, the removal of either
+/// end and the mob's destroy end it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct OwnedIdentityEdge {
     pub peer: AgentIdentity,
-    pub rule: String,
+    pub rule: OwnedEdgeAdmission,
 }
 
 impl OwnedIdentityEdge {
     #[must_use]
-    pub fn new(peer: impl Into<AgentIdentity>, rule: impl Into<String>) -> Self {
+    pub fn new(peer: impl Into<AgentIdentity>, rule: OwnedEdgeAdmission) -> Self {
         Self {
             peer: peer.into(),
-            rule: rule.into(),
+            rule,
         }
     }
 }
@@ -709,7 +793,12 @@ impl CreatedIdentityRecord {
         self.resealed()
     }
 
-    /// The row with its owned edges set, sealed again.
+    /// The row with its owned edges set, in peer order, sealed again.
+    ///
+    /// # Errors
+    /// [`IdentityIntentError`] for edges the row cannot hold: two to the
+    /// same peer, an edge to the row's own identity or an invalid peer or
+    /// rule, and any edge on a removed identity's row.
     pub fn with_owned_edges(
         mut self,
         mut edges: Vec<OwnedIdentityEdge>,
@@ -779,6 +868,7 @@ impl CreatedIdentityRecord {
         if let Some(removal) = &self.removal {
             removal.validate()?;
         }
+        self.validate_owned_edges()?;
         match (&self.presence, &self.removal) {
             (CreatedIdentityPresence::Removed, _) | (_, None) => {}
             (_, Some(_)) => {
@@ -807,6 +897,34 @@ impl CreatedIdentityRecord {
             .as_ref()
             .map(CreatedIdentitySpec::spec_digest)
             .transpose()
+    }
+
+    /// The row's owned edges hold one edge per peer, in peer order, none to
+    /// the row's own identity, each with a valid peer and admission; a
+    /// removed identity's row holds none (its removal ended them).
+    fn validate_owned_edges(&self) -> Result<(), IdentityIntentError> {
+        if self.presence == CreatedIdentityPresence::Removed && !self.owned_edges.is_empty() {
+            return Err(IdentityIntentError::InvalidCreatedIdentity(
+                "a removed identity's row owns no edge".to_string(),
+            ));
+        }
+        let mut previous: Option<&AgentIdentity> = None;
+        for edge in &self.owned_edges {
+            validate_identity(&edge.peer)?;
+            edge.rule.validate()?;
+            if edge.peer == self.agent_identity {
+                return Err(IdentityIntentError::InvalidCreatedIdentity(
+                    "an identity owns no edge to itself".to_string(),
+                ));
+            }
+            if previous.is_some_and(|previous| *previous >= edge.peer) {
+                return Err(IdentityIntentError::InvalidCreatedIdentity(
+                    "a row's owned edges name each peer once, in peer order".to_string(),
+                ));
+            }
+            previous = Some(&edge.peer);
+        }
+        Ok(())
     }
 
     /// The digest of the row's sealed content: everything but the digest
@@ -1188,7 +1306,12 @@ mod tests {
             provenance,
         )
         .and_then(|row| row.with_pending_role_migration(Some(PendingRoleMigration::new("analyst"))))
-        .and_then(|row| row.with_owned_edges(vec![OwnedIdentityEdge::new("beta", "team-peers")]))
+        .and_then(|row| {
+            row.with_owned_edges(vec![OwnedIdentityEdge::new(
+                "beta",
+                OwnedEdgeAdmission::rule("team-peers")?,
+            )])
+        })
         .expect("a sealed row")
     }
 
@@ -1399,6 +1522,80 @@ mod tests {
         assert_eq!(
             IdentityChangeReceiptObservation::of(None, "sha256:request"),
             IdentityChangeReceiptObservation::Absent
+        );
+    }
+
+    /// An owned edge's admission is a closed, typed value: a peer rule's id,
+    /// or the adoption, whose token `adopted` no rule takes. Its stored form
+    /// is the row's frozen `rule` text.
+    #[test]
+    fn an_owned_edge_admission_is_a_rule_or_the_adoption() {
+        assert!(OwnedEdgeAdmission::rule("adopted").is_err());
+        assert!(OwnedEdgeAdmission::rule("").is_err());
+        let rule = OwnedEdgeAdmission::rule("team-peers").expect("a rule id");
+        for (admission, token) in [
+            (rule, "team-peers"),
+            (OwnedEdgeAdmission::Adopted, "adopted"),
+        ] {
+            let edge = OwnedIdentityEdge::new("beta", admission.clone());
+            let encoded = serde_json::to_value(&edge).expect("encode the edge");
+            assert_eq!(encoded, serde_json::json!({"peer": "beta", "rule": token}));
+            let decoded: OwnedIdentityEdge =
+                serde_json::from_value(encoded).expect("decode the edge");
+            assert_eq!(decoded.rule, admission);
+        }
+    }
+
+    /// A row's owned edges name each peer once and never the row's own
+    /// identity, and a removed identity's row owns none: a row that breaks
+    /// any of them is refused.
+    #[test]
+    fn a_row_owns_one_edge_per_peer_and_none_once_removed() {
+        let rule = || OwnedEdgeAdmission::rule("team-peers").expect("a rule id");
+        assert!(
+            alpha_row()
+                .with_owned_edges(vec![OwnedIdentityEdge::new("alpha", rule())])
+                .is_err(),
+            "no edge to itself"
+        );
+        assert!(
+            alpha_row()
+                .with_owned_edges(vec![
+                    OwnedIdentityEdge::new("beta", rule()),
+                    OwnedIdentityEdge::new("beta", OwnedEdgeAdmission::Adopted),
+                ])
+                .is_err(),
+            "one edge per peer"
+        );
+        assert!(
+            alpha_row()
+                .with_owned_edges(vec![OwnedIdentityEdge::new(
+                    "beta",
+                    OwnedEdgeAdmission::Rule("adopted".to_owned()),
+                )])
+                .is_err(),
+            "no peer rule takes the adoption's token"
+        );
+        let edges = alpha_row()
+            .with_owned_edges(vec![
+                OwnedIdentityEdge::new("gamma", rule()),
+                OwnedIdentityEdge::new("beta", rule()),
+            ])
+            .expect("edges to two peers");
+        assert_eq!(
+            edges
+                .owned_edges
+                .iter()
+                .map(|edge| edge.peer.as_str())
+                .collect::<Vec<_>>(),
+            ["beta", "gamma"],
+            "kept in peer order"
+        );
+        assert!(
+            edges
+                .with_presence(CreatedIdentityPresence::Removed)
+                .is_err(),
+            "a removed identity's row owns no edge"
         );
     }
 }

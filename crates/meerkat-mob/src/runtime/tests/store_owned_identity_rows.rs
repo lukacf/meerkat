@@ -21,6 +21,9 @@ use crate::runtime::{
 use meerkat_core::service::MobToolAuthorityContext;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+// Owned edges (0.9.11): the rows of an identity change's edges.
+mod owned_edges;
+
 const STEP: Duration = Duration::from_mins(1);
 
 fn id(name: &str) -> AgentIdentity {

@@ -2975,8 +2975,11 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
             mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
         }
         // An identity change is not a spawn; its typed refusal is the same
-        // family as the machine refusing the requested transition.
-        MobError::IdentityChangeRefused { .. } | MobError::IdentityArchived { .. } => {
+        // family as the machine refusing the requested transition, and so is
+        // a plain unwire's refusal of an owned edge.
+        MobError::IdentityChangeRefused { .. }
+        | MobError::IdentityArchived { .. }
+        | MobError::OwnedIdentityEdge { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
         }
         MobError::NotExternallyAddressable(_) => {
@@ -17485,6 +17488,7 @@ impl MobHandle {
         {
             MobMachineCommandResult::Unit => {
                 self.reseat_owed_created_entries().await;
+                self.realize_owned_identity_edges().await;
                 Ok(())
             }
             _ => Err(MobError::Internal(

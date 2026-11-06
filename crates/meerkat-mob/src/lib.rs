@@ -191,9 +191,10 @@ pub use identity::{
     IdentityRetirementPlan, IdentitySessionCondition, IdentitySessionObservation,
     IdentitySessionStoreAuthority, IdentitySourceEvidence, IdentityStoredObservation,
     IdentityTargetObservationVersion, MemberToolAccessConstraint, MemberToolAccessDeclaration,
-    MemberToolCommitOutcome, MemberToolDeclaration, MemberToolMutationId, OwnedIdentityEdge,
-    PendingRoleMigration, ResolveIdentityConvergenceBlock, ResolveIdentityConvergenceBlockResult,
-    classify_created_identity_row, classify_identity_reconciliation,
+    MemberToolCommitOutcome, MemberToolDeclaration, MemberToolMutationId, OwnedEdgeAdmission,
+    OwnedIdentityEdge, PendingRoleMigration, ResolveIdentityConvergenceBlock,
+    ResolveIdentityConvergenceBlockResult, classify_created_identity_row,
+    classify_identity_reconciliation,
 };
 pub use ids::{
     AgentIdentity, AgentRuntimeId, BranchId, FenceToken, FlowId, FlowNodeId, FrameId, Generation,
@@ -400,7 +401,8 @@ pub use runtime::{
     IdentityChangeOutcome, IdentityChangeRefusal, IdentityChangeRequesterInput,
     IdentityCreateOutcome, IdentityGrantEntry, IdentityGrantRequest, IdentityNameHolder,
     IdentityOperation, IdentityRemoval, IdentityRosterChange, IdentityUpdateOutcome,
-    MemberGrantMint, MemberGrantMintRequest, StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
+    MemberGrantMint, MemberGrantMintRequest, OwnedEdgeEndOutcome, StoreOwnedIdentityCreate,
+    StoreOwnedIdentityUpdate,
 };
 pub use runtime::{
     DECLARED_APPLY_CHUNK, DeclaredBuild, DeclaredEntry, DeclaredEntryNote, DeclaredEntryOutcome,

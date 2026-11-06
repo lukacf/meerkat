@@ -703,6 +703,20 @@ pub enum MobError {
     #[error("identity '{member_id}' is archived: nothing is delivered to it until its unarchive")]
     IdentityArchived { member_id: AgentIdentity },
 
+    /// The edge between `local` and `peer` is an owned edge (0.9.11): an
+    /// identity's change declared it, `owner`'s, and a plain unwire does not
+    /// end it. Only its owner's change, the host's policy reload that denies
+    /// it, the removal of either end and the mob's destroy end it.
+    #[error(
+        "the edge between '{local}' and '{peer}' is owned by '{owner}': only its owner's change, \
+         a policy reload, the removal of an end or the destroy ends it"
+    )]
+    OwnedIdentityEdge {
+        local: AgentIdentity,
+        peer: AgentIdentity,
+        owner: AgentIdentity,
+    },
+
     /// A spawn that had not reached custody (still preparing, or staged and
     /// provisioning) was canceled by a lifecycle transition (stop, complete,
     /// reset, destroy, shutdown, or retire of the member). Nothing of it was
@@ -3008,6 +3022,13 @@ impl MobError {
             Self::IdentityArchived { member_id } => Some(serde_json::json!({
                 "kind": "identity_archived",
                 "member_id": member_id.as_str(),
+                "retryable": false,
+            })),
+            Self::OwnedIdentityEdge { local, peer, owner } => Some(serde_json::json!({
+                "kind": "owned_identity_edge",
+                "local": local.as_str(),
+                "peer": peer.as_str(),
+                "owner": owner.as_str(),
                 "retryable": false,
             })),
             Self::MemberRegistrationRefused {

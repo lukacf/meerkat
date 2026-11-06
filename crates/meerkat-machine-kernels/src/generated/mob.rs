@@ -5506,6 +5506,56 @@ impl std::fmt::Display for MemberSessionDisposal {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum MemberUnwireAdmission {
+    #[default]
+    #[serde(rename = "Admitted")]
+    Admitted,
+    #[serde(rename = "OwnedIdentityEdge")]
+    OwnedIdentityEdge,
+}
+impl MemberUnwireAdmission {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Admitted => "Admitted",
+            Self::OwnedIdentityEdge => "OwnedIdentityEdge",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberUnwireAdmission {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Admitted" => Ok(Self::Admitted),
+            "OwnedIdentityEdge" => Ok(Self::OwnedIdentityEdge),
+            other => Err(format!("invalid MemberUnwireAdmission value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberUnwireAdmission {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberUnwireAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum MemberWaitClassificationKind {
     #[default]
     #[serde(rename = "RuntimeMaterialPresent")]
@@ -7842,6 +7892,184 @@ impl std::fmt::Display for OperatorInstructionRefusal {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OwnedEdgeDeclareVerdict {
+    #[default]
+    #[serde(rename = "Declared")]
+    Declared,
+    #[serde(rename = "AlreadyOwned")]
+    AlreadyOwned,
+    #[serde(rename = "PeerUnknown")]
+    PeerUnknown,
+    #[serde(rename = "OwnerInvalid")]
+    OwnerInvalid,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+}
+impl OwnedEdgeDeclareVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Declared => "Declared",
+            Self::AlreadyOwned => "AlreadyOwned",
+            Self::PeerUnknown => "PeerUnknown",
+            Self::OwnerInvalid => "OwnerInvalid",
+            Self::MobNotRunning => "MobNotRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OwnedEdgeDeclareVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Declared" => Ok(Self::Declared),
+            "AlreadyOwned" => Ok(Self::AlreadyOwned),
+            "PeerUnknown" => Ok(Self::PeerUnknown),
+            "OwnerInvalid" => Ok(Self::OwnerInvalid),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            other => Err(format!("invalid OwnedEdgeDeclareVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OwnedEdgeDeclareVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OwnedEdgeDeclareVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OwnedEdgeEndCause {
+    #[default]
+    #[serde(rename = "OwnerChange")]
+    OwnerChange,
+    #[serde(rename = "PolicyDenied")]
+    PolicyDenied,
+}
+impl OwnedEdgeEndCause {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::OwnerChange => "OwnerChange",
+            Self::PolicyDenied => "PolicyDenied",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OwnedEdgeEndCause {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "OwnerChange" => Ok(Self::OwnerChange),
+            "PolicyDenied" => Ok(Self::PolicyDenied),
+            other => Err(format!("invalid OwnedEdgeEndCause value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OwnedEdgeEndCause {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OwnedEdgeEndCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OwnedEdgeEndVerdict {
+    #[default]
+    #[serde(rename = "Ended")]
+    Ended,
+    #[serde(rename = "NotOwner")]
+    NotOwner,
+    #[serde(rename = "Absent")]
+    Absent,
+    #[serde(rename = "NonAuthoritative")]
+    NonAuthoritative,
+    #[serde(rename = "ChangesHeld")]
+    ChangesHeld,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+}
+impl OwnedEdgeEndVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ended => "Ended",
+            Self::NotOwner => "NotOwner",
+            Self::Absent => "Absent",
+            Self::NonAuthoritative => "NonAuthoritative",
+            Self::ChangesHeld => "ChangesHeld",
+            Self::MobNotRunning => "MobNotRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OwnedEdgeEndVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Ended" => Ok(Self::Ended),
+            "NotOwner" => Ok(Self::NotOwner),
+            "Absent" => Ok(Self::Absent),
+            "NonAuthoritative" => Ok(Self::NonAuthoritative),
+            "ChangesHeld" => Ok(Self::ChangesHeld),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            other => Err(format!("invalid OwnedEdgeEndVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OwnedEdgeEndVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OwnedEdgeEndVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 pub type PeerAddress = meerkat_machine_schema::catalog::dsl::mob_machine::PeerAddress;
 pub type PeerId = meerkat_machine_schema::catalog::dsl::mob_machine::PeerId;
 #[allow(non_camel_case_types)]
@@ -10122,6 +10350,7 @@ pub struct State {
     pub identity_entry_archiving: std::collections::BTreeSet<AgentIdentity>,
     pub identity_entry_constructions_held: std::collections::BTreeMap<AgentIdentity, u64>,
     pub identity_entry_constructions_activating: std::collections::BTreeMap<AgentIdentity, u64>,
+    pub identity_edge_owners: std::collections::BTreeMap<WiringEdge, AgentIdentity>,
     pub operator_instruction_revision: std::collections::BTreeMap<String, u64>,
     pub operator_instruction_effect: std::collections::BTreeMap<String, InstructionEffect>,
     pub operator_instruction_digest: std::collections::BTreeMap<String, String>,
@@ -11707,6 +11936,21 @@ pub mod inputs {
     pub struct UnlistIdentityEntry {
         pub agent_identity: AgentIdentity,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeclareOwnedIdentityEdge {
+        pub edge: WiringEdge,
+        pub owner: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct EndOwnedIdentityEdge {
+        pub edge: WiringEdge,
+        pub owner: AgentIdentity,
+        pub cause: OwnedEdgeEndCause,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmitMemberUnwire {
+        pub edge: WiringEdge,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -11965,6 +12209,9 @@ pub enum Input {
     SettleHostPreparation(inputs::SettleHostPreparation),
     EndPreparationConstruction(inputs::EndPreparationConstruction),
     UnlistIdentityEntry(inputs::UnlistIdentityEntry),
+    DeclareOwnedIdentityEdge(inputs::DeclareOwnedIdentityEdge),
+    EndOwnedIdentityEdge(inputs::EndOwnedIdentityEdge),
+    AdmitMemberUnwire(inputs::AdmitMemberUnwire),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -12299,6 +12546,9 @@ impl Input {
             Self::SettleHostPreparation(_) => InputKind::SettleHostPreparation,
             Self::EndPreparationConstruction(_) => InputKind::EndPreparationConstruction,
             Self::UnlistIdentityEntry(_) => InputKind::UnlistIdentityEntry,
+            Self::DeclareOwnedIdentityEdge(_) => InputKind::DeclareOwnedIdentityEdge,
+            Self::EndOwnedIdentityEdge(_) => InputKind::EndOwnedIdentityEdge,
+            Self::AdmitMemberUnwire(_) => InputKind::AdmitMemberUnwire,
         }
     }
 }
@@ -12550,6 +12800,9 @@ pub enum InputKind {
     SettleHostPreparation,
     EndPreparationConstruction,
     UnlistIdentityEntry,
+    DeclareOwnedIdentityEdge,
+    EndOwnedIdentityEdge,
+    AdmitMemberUnwire,
 }
 
 pub mod signals {
@@ -13063,6 +13316,11 @@ pub mod signals {
         pub last_session: Option<SessionId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverOwnedIdentityEdge {
+        pub edge: WiringEdge,
+        pub owner: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SetOperatorInstruction {
         pub slot: String,
         pub revision: u64,
@@ -13223,6 +13481,7 @@ pub enum Signal {
     RecoverMemberRotationIntent(signals::RecoverMemberRotationIntent),
     RecoverIdentityEntryRetiring(signals::RecoverIdentityEntryRetiring),
     RecoverCreatedIdentityEntry(signals::RecoverCreatedIdentityEntry),
+    RecoverOwnedIdentityEdge(signals::RecoverOwnedIdentityEdge),
     SetOperatorInstruction(signals::SetOperatorInstruction),
     RevokeOperatorInstruction(signals::RevokeOperatorInstruction),
     RecoverOperatorInstruction(signals::RecoverOperatorInstruction),
@@ -13366,6 +13625,7 @@ impl Signal {
             Self::RecoverMemberRotationIntent(_) => SignalKind::RecoverMemberRotationIntent,
             Self::RecoverIdentityEntryRetiring(_) => SignalKind::RecoverIdentityEntryRetiring,
             Self::RecoverCreatedIdentityEntry(_) => SignalKind::RecoverCreatedIdentityEntry,
+            Self::RecoverOwnedIdentityEdge(_) => SignalKind::RecoverOwnedIdentityEdge,
             Self::SetOperatorInstruction(_) => SignalKind::SetOperatorInstruction,
             Self::RevokeOperatorInstruction(_) => SignalKind::RevokeOperatorInstruction,
             Self::RecoverOperatorInstruction(_) => SignalKind::RecoverOperatorInstruction,
@@ -13476,6 +13736,7 @@ pub enum SignalKind {
     RecoverMemberRotationIntent,
     RecoverIdentityEntryRetiring,
     RecoverCreatedIdentityEntry,
+    RecoverOwnedIdentityEdge,
     SetOperatorInstruction,
     RevokeOperatorInstruction,
     RecoverOperatorInstruction,
@@ -14569,6 +14830,22 @@ pub mod effects {
         pub agent_identity: AgentIdentity,
         pub verdict: UnlistEntryVerdict,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OwnedIdentityEdgeDeclared {
+        pub edge: WiringEdge,
+        pub verdict: OwnedEdgeDeclareVerdict,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OwnedIdentityEdgeEnded {
+        pub edge: WiringEdge,
+        pub cause: OwnedEdgeEndCause,
+        pub verdict: OwnedEdgeEndVerdict,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberUnwireAdmissionResolved {
+        pub edge: WiringEdge,
+        pub verdict: MemberUnwireAdmission,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -14769,6 +15046,9 @@ pub enum Effect {
     PreparationSettleResolved(effects::PreparationSettleResolved),
     PreparationConstructionEnded(effects::PreparationConstructionEnded),
     IdentityEntryUnlisted(effects::IdentityEntryUnlisted),
+    OwnedIdentityEdgeDeclared(effects::OwnedIdentityEdgeDeclared),
+    OwnedIdentityEdgeEnded(effects::OwnedIdentityEdgeEnded),
+    MemberUnwireAdmissionResolved(effects::MemberUnwireAdmissionResolved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -14964,6 +15244,9 @@ pub enum EffectKind {
     PreparationSettleResolved,
     PreparationConstructionEnded,
     IdentityEntryUnlisted,
+    OwnedIdentityEdgeDeclared,
+    OwnedIdentityEdgeEnded,
+    MemberUnwireAdmissionResolved,
 }
 
 pub mod command_capabilities {
@@ -17008,6 +17291,33 @@ pub enum TransitionId {
     UnlistIdentityEntryMobNotRunningDestroyed,
     AdoptLegacyIdentityEntryAdoptedUnlisted,
     AdoptLegacyIdentityEntryRetireUnadopted,
+    DeclareOwnedIdentityEdgeDeclared,
+    DeclareOwnedIdentityEdgeAlreadyOwned,
+    DeclareOwnedIdentityEdgePeerUnknown,
+    DeclareOwnedIdentityEdgeOwnerInvalid,
+    DeclareOwnedIdentityEdgeMobNotRunningStopped,
+    DeclareOwnedIdentityEdgeMobNotRunningCompleted,
+    DeclareOwnedIdentityEdgeMobNotRunningDestroyed,
+    EndOwnedIdentityEdgeEnded,
+    EndOwnedIdentityEdgeNotOwner,
+    EndOwnedIdentityEdgeAbsent,
+    EndOwnedIdentityEdgeNonAuthoritative,
+    EndOwnedIdentityEdgeChangesHeld,
+    EndOwnedIdentityEdgeMobNotRunningStopped,
+    EndOwnedIdentityEdgeMobNotRunningCompleted,
+    EndOwnedIdentityEdgeMobNotRunningDestroyed,
+    AdmitMemberUnwireAdmittedRunning,
+    AdmitMemberUnwireAdmittedStopped,
+    AdmitMemberUnwireAdmittedCompleted,
+    AdmitMemberUnwireAdmittedDestroyed,
+    AdmitMemberUnwireOwnedEdgeRunning,
+    AdmitMemberUnwireOwnedEdgeStopped,
+    AdmitMemberUnwireOwnedEdgeCompleted,
+    AdmitMemberUnwireOwnedEdgeDestroyed,
+    RecoverOwnedIdentityEdgeRecoveredRunning,
+    RecoverOwnedIdentityEdgeRecoveredStopped,
+    RecoverOwnedIdentityEdgeSkippedRunning,
+    RecoverOwnedIdentityEdgeSkippedStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -17400,6 +17710,7 @@ pub fn initial_state() -> State {
         identity_entry_archiving: Default::default(),
         identity_entry_constructions_held: Default::default(),
         identity_entry_constructions_activating: Default::default(),
+        identity_edge_owners: Default::default(),
         operator_instruction_revision: Default::default(),
         operator_instruction_effect: Default::default(),
         operator_instruction_digest: Default::default(),

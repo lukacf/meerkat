@@ -63,6 +63,10 @@ const NATIVE_MACHINE_HELPERS: &[&str] = &[
     "mob_machine_wiring_edge_a",
     "mob_machine_wiring_edge_b",
     "mob_machine_wiring_edge_contains_identity",
+    // MobMachine owned edges (0.9.11): an edge's end other than an
+    // identity, and the owned edge map without an identity's edges.
+    "mob_machine_wiring_edge_other",
+    "mob_machine_owned_edges_without_identity",
     "mob_machine_wiring_contains_pair",
     "mob_machine_wiring_edge_matches_members",
     "mob_machine_wiring_edges_without_identity",

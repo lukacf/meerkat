@@ -375,12 +375,12 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # witnesses violated, and with --mutants each seeded defect's target
 # invariant violated.
 # created_identity_audit.sh (mob_machine) requires a final distinct-state
-# count for each of its fourteen runs (at or above the floor of each
+# count for each of its fifteen runs (at or above the floor of each
 # measured one), a coverage block in which each covered action of every run
 # generated a state (an arm a run fires only through a named wrapper read
 # under the wrapper's name, by the runner's closed alias table: the
 # wrappers print so below, and a check further down drops each wrapper's
-# line in turn), its seventy-one
+# line in turn), its eighty-four
 # step witnesses violated, and with --mutants each seeded defect's generated
 # invariant, audit invariant, totality invariant or action property
 # violated and its created_custody_local_kept, recovered_removal_unmarked
@@ -1007,6 +1007,19 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessUnlistLeavesCreated is violated."' \
   'echo "Error: Action property NotAuditWitnessRecoveredRemovalEnds is violated."' \
   'echo "Error: Action property NotAuditWitnessRecoveredArchiveEnds is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeDeclared is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeToUnseatedDeclared is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeSecondDeclaration is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgePeerUnknown is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeEndedByOwner is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeEndedByPolicy is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeNotOwner is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeEndedByPeerRemoval is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeEndedByOwnerRemoval is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeKeptByThirdRemoval is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeKeptByArchive is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeUnwireRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeRecovered is violated."' \
   'echo "Error: Invariant AuditUpdateExactlyOne is violated."' \
   'echo "Error: Action property AuditRemovalTombstones is violated."' \
   'echo "Error: Action property AuditArchivedKeepsItsName is violated."' \
@@ -1032,6 +1045,12 @@ printf '%s\n' \
   'echo "Error: Invariant archived_entry_is_store_owned is violated."' \
   'echo "Error: Action property AuditStoreUpdateKeepsStanding is violated."' \
   'echo "Error: Action property AuditCreatedEntryNeverDeclared is violated."' \
+  'echo "Error: Invariant AuditEdgesExactlyOne is violated."' \
+  'echo "Error: Action property AuditOnlyTheOwnerEndsItsEdge is violated."' \
+  'echo "Error: Action property AuditOwnedEdgeEndsOnlyByItsOwnerOrAnEnd is violated."' \
+  'echo "Error: Action property AuditOwnedEdgeKeepsItsOwner is violated."' \
+  'echo "Error: Invariant owned_edge_joins_no_tombstone is violated."' \
+  'for action in DeclareOwnedIdentityEdgeDeclared DeclareOwnedIdentityEdgeAlreadyOwned DeclareOwnedIdentityEdgePeerUnknown DeclareOwnedIdentityEdgeOwnerInvalid DeclareOwnedIdentityEdgeMobNotRunningStopped EndOwnedIdentityEdgeEnded EndOwnedIdentityEdgeNotOwner EndOwnedIdentityEdgeAbsent EndOwnedIdentityEdgeNonAuthoritative EndOwnedIdentityEdgeChangesHeld EndOwnedIdentityEdgeMobNotRunningStopped AdmitMemberUnwireAdmittedRunning AdmitMemberUnwireAdmittedStopped AdmitMemberUnwireOwnedEdgeRunning AdmitMemberUnwireOwnedEdgeStopped RecoverOwnedIdentityEdgeRecoveredRunning RecoverOwnedIdentityEdgeRecoveredStopped RecoverOwnedIdentityEdgeSkippedRunning RecoverOwnedIdentityEdgeSkippedStopped; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
   'echo "<C1RecoverInBootOrder line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
   'echo "<ArchiveRetireReleasing line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
   'echo "<RecoveredRetireReleasing line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \

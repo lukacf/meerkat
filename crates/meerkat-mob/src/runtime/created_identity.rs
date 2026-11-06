@@ -11,7 +11,9 @@
 //! to in the replayed journal. A store read that fails fails the start: a
 //! name the store may reserve is never read as free. The replay of a member
 //! row whose origin token this build does not know reserves the name as
-//! unreadable through the same signal.
+//! unreadable through the same signal. Once every row is recovered, the
+//! start recovers each owned edge a row holds (`RecoverOwnedIdentityEdge`,
+//! 0.9.11), and after its seats realizes those whose ends are both seated.
 //!
 //! A created entry owed its seat (a build that predates created entries
 //! retired its member, or a kickoff's spawn after its create failed) is
@@ -124,6 +126,9 @@ pub(super) async fn recover_created_identity_entries(
     }
     let mut last_sessions = None;
     let mut after = None;
+    // The owned edges of the rows read, recovered once every row is: an
+    // edge's other end may be a row read later.
+    let mut owned_edges = Vec::new();
     loop {
         let page = store
             .scan_created_identities_page(
@@ -133,6 +138,11 @@ pub(super) async fn recover_created_identity_entries(
             )
             .await?;
         for (identity, observation) in &page.observations {
+            if let CreatedIdentityObservation::Created(record) = observation {
+                for edge in &record.owned_edges {
+                    owned_edges.push((identity.clone(), edge.peer.clone()));
+                }
+            }
             if let CreatedIdentityObservation::Created(record) = observation
                 && record.presence == CreatedIdentityPresence::Present
                 && let Some(spec) = &record.spec
@@ -181,7 +191,10 @@ pub(super) async fn recover_created_identity_entries(
             )?;
         }
         match page.next {
-            None => return Ok(recovered),
+            None => {
+                recover_owned_edges(authority, &owned_edges)?;
+                return Ok(recovered);
+            }
             Some(next) if after.as_ref().is_none_or(|current| &next > current) => {
                 after = Some(next);
             }
@@ -192,6 +205,32 @@ pub(super) async fn recover_created_identity_entries(
             }
         }
     }
+}
+
+/// Recover each owned edge of the rows a start read
+/// (`RecoverOwnedIdentityEdge`), as (owner, peer), once every created entry
+/// row is recovered. MobMachine keeps an edge whose owner it recovered as a
+/// store-owned entry, whose ends are no tombstone, and which no other row
+/// owns already; it leaves any other.
+fn recover_owned_edges(
+    authority: &mut mob_dsl::MobMachineAuthority,
+    owned_edges: &[(AgentIdentity, AgentIdentity)],
+) -> Result<(), MobError> {
+    for (owner, peer) in owned_edges {
+        let dsl_owner = mob_dsl::AgentIdentity::from_domain(owner);
+        super::builder::apply_seeded_mob_signal(
+            authority,
+            mob_dsl::MobMachineSignal::RecoverOwnedIdentityEdge {
+                edge: mob_dsl::WiringEdge::new(
+                    dsl_owner.clone(),
+                    mob_dsl::AgentIdentity::from_domain(peer),
+                ),
+                owner: dsl_owner,
+            },
+            "recover_owned_identity_edge",
+        )?;
+    }
+    Ok(())
 }
 
 /// Reserve `identity`'s name as unreadable at the replay of a member row
@@ -291,6 +330,8 @@ impl super::MobHandle {
         self.settle_published_construction_rows(pending_constructions)
             .await;
         self.reseat_owed_created_entries().await;
+        // The owned edges a crash left unrealized, once the seats are done.
+        self.realize_owned_identity_edges().await;
         if role_migrations_owed.is_empty() {
             return;
         }

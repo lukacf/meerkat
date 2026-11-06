@@ -95,8 +95,9 @@ const REQUIRED_ARM_FAMILIES: &[&str] = &[
 /// the identity changes (a change's admission, the record of a new
 /// store-owned entry, the host's changes hold, a removal, an archive and an
 /// unarchive), a held construction's start, a settle and an attempt's end,
-/// and the one-entry unlist. They are written one arm per lifecycle phase as
-/// the residency arms are.
+/// the one-entry unlist, and the owned edges (a declaration, an end, a plain
+/// unwire's admission and a recovery). They are written one arm per
+/// lifecycle phase as the residency arms are.
 const IDENTITY_ENTRY_ARM_PREFIXES: &[&str] = &[
     "ProbeMemberAdmission",
     "BeginSpawnExec",
@@ -122,6 +123,10 @@ const IDENTITY_ENTRY_ARM_PREFIXES: &[&str] = &[
     "SettleHostPreparation",
     "EndPreparationConstruction",
     "UnlistIdentityEntry",
+    "DeclareOwnedIdentityEdge",
+    "EndOwnedIdentityEdge",
+    "AdmitMemberUnwire",
+    "RecoverOwnedIdentityEdge",
 ];
 
 /// Identity-entry families that must each name at least one arm.
@@ -155,6 +160,12 @@ const REQUIRED_IDENTITY_ENTRY_ARM_FAMILIES: &[&str] = &[
     "UnarchiveIdentityEntryRestored",
     "RecoverCreatedIdentityEntryRemoving",
     "RecoverCreatedIdentityEntryArchived",
+    "DeclareOwnedIdentityEdgeDeclared",
+    "DeclareOwnedIdentityEdgeMobNotRunning",
+    "EndOwnedIdentityEdgeEnded",
+    "EndOwnedIdentityEdgeMobNotRunning",
+    "AdmitMemberUnwireOwnedEdge",
+    "RecoverOwnedIdentityEdgeRecovered",
 ];
 
 /// Transition-name prefixes of the `MeerkatMachine` arms that serve member

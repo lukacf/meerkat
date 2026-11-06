@@ -24590,7 +24590,8 @@ mob = true
     /// The gateway's own composition over a temporary state root: a
     /// `StdioCallbackAgentBuilder` inside a persistent session service, the
     /// agent mob tools installed the way the gateway installs them, the
-    /// scripted SDK host, and `model` as every member's model.
+    /// scripted SDK host, and `model` as every member's model, for the mob
+    /// `definition` declares.
     struct Composition {
         runtime: crate::MobRuntime,
         sdk_host: Arc<SdkHostLog>,
@@ -24598,7 +24599,10 @@ mob = true
         _state: tempfile::TempDir,
     }
 
-    async fn compose(model: Arc<dyn meerkat_client::LlmClient>) -> Composition {
+    async fn compose(
+        model: Arc<dyn meerkat_client::LlmClient>,
+        definition: MobDefinition,
+    ) -> Composition {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = temp.path();
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
@@ -24652,7 +24656,7 @@ mob = true
         let (mob_storage, provenance) =
             crate::mob_composition_manifest::persistent_mob_storage(state.join("mob.sqlite3"))
                 .expect("mob storage");
-        let spec = MobBootstrapSpec::new(definition(), mob_storage, service)
+        let spec = MobBootstrapSpec::new(definition, mob_storage, service)
             .with_mob_storage_provenance(provenance)
             // The helpers' implicit child mobs live with this process.
             .with_child_mob_storage(crate::ChildMobStorage::ProcessBound)
@@ -24694,7 +24698,7 @@ mob = true
             helper_seen: Arc::default(),
             delegated: Arc::default(),
         };
-        let composition = compose(Arc::new(model.clone())).await;
+        let composition = compose(Arc::new(model.clone()), definition()).await;
         let sdk_host = Arc::clone(&composition.sdk_host);
         let handle = composition.runtime.handle();
         let delegator = meerkat_mob::AgentIdentity::from(DELEGATOR);
@@ -25011,12 +25015,31 @@ mob = true
     /// requester.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn console_run_callback_carries_requester() {
-        let composition = compose(Arc::new(HostToolModel)).await;
+        // A console member: addressable from outside the mob, serving its
+        // inbox, as the console's members are.
+        let definition = MobDefinition::from_toml(&format!(
+            r#"
+[mob]
+id = "callback-requester-{}-{}"
+
+[profiles.assistant]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "autonomous_host"
+
+[profiles.assistant.tools]
+comms = true
+"#,
+            std::process::id(),
+            NEXT_MOB.fetch_add(1, Ordering::SeqCst)
+        ))
+        .expect("mob definition");
+        let composition = compose(Arc::new(HostToolModel), definition).await;
         let handle = composition.runtime.handle();
         let member = meerkat_mob::AgentIdentity::from("person-assistant");
         handle
             .ensure_member(meerkat_mob::SpawnMemberSpec::new(
-                meerkat_mob::ProfileName::from(DELEGATOR),
+                meerkat_mob::ProfileName::from("assistant"),
                 member.clone(),
             ))
             .await

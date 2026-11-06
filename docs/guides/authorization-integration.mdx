@@ -708,9 +708,11 @@ the approval and the decision. The adapter passes it with an
   qualified principal (kind, trust domain and id), its assurance, and
   `authentication_scope_digest`, the digest of the event's authentication
   scope (`HostAuthenticationScope::digest`: `sha256:` and the lowercase hex
-  SHA-256 of its text), never the scope itself. `decision.actor` is the
-  principal's id alone, so read `consent.approver.principal` to tell apart
-  two trust domains that issue the same id.
+  SHA-256 of its text), never the scope itself.
+  `HostAuthenticationScope::digest` is an unsalted SHA-256: name a
+  high-entropy scope that is not itself a credential. `decision.actor` is
+  the principal's id alone, so read `consent.approver.principal` to tell
+  apart two trust domains that issue the same id.
 - The router's runtime must use the approval service the host gave its review
   composition, because only the issuing owner holds the candidate.
 

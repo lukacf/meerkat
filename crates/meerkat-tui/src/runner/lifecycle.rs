@@ -2,10 +2,12 @@
 //! <ref>`, `-c` (the workspace's most recent), `/new` and `/resume`; plus
 //! the transcript and status seeding of a resumed session.
 
-use meerkat_core::{AssistantBlock, Message, Session, SessionMeta, TranscriptUserRole};
+use meerkat_core::{
+    AssistantBlock, Message, Session, SessionId, SessionMeta, TranscriptUserRole,
+};
 
-use super::Runner;
 use super::cost::session_cost;
+use super::{InputKind, Runner, Turn};
 use crate::bootstrap::Runtime;
 use crate::cli::Args;
 use crate::endpoints::EndpointName;
@@ -13,7 +15,7 @@ use crate::error::TuiError;
 use crate::session::{
     SessionHandle, SessionIdentity, SessionOptions, list_sessions, resolve_session_ref,
 };
-use crate::ui::{Block, Msg, NoticeLevel, SessionCost, StatusUpdate, ToolState};
+use crate::ui::{Block, Msg, NoticeLevel, SessionCost, StatusUpdate, ToolState, TurnFailure};
 
 /// The session the TUI starts with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,7 +98,84 @@ pub fn session_messages(
     msgs
 }
 
+/// What the runner sends in place of a prompt that repeats the one a failed
+/// turn already committed to the session.
+pub(super) const RETRY_INPUT: &str = "(retrying the request above)";
+
+/// The prompt of a turn that failed (not interrupted), in the session it
+/// failed in. A failed run keeps its committed user message, so sending the
+/// same text again would put it in the transcript twice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FailedPrompt {
+    session: SessionId,
+    text: String,
+}
+
+impl FailedPrompt {
+    /// The prompt of `turn` when it was the turn's only input and it failed.
+    pub(super) fn of(session: &SessionId, turn: &Turn) -> Option<Self> {
+        let [input] = turn.inputs.as_slice() else {
+            return None;
+        };
+        match (&input.kind, &input.end) {
+            (InputKind::Prompt { text }, Some(Err(TurnFailure::Failed(_))))
+                if !turn.cancelled.contains(&input.input_id) =>
+            {
+                Some(Self {
+                    session: session.clone(),
+                    text: text.clone(),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// `text` repeats this prompt in `session`.
+    fn repeated_by(&self, session: &SessionId, text: &str) -> bool {
+        &self.session == session && self.text.trim() == text.trim()
+    }
+}
+
+/// The session's last conversational message is the user's `text`: nothing
+/// answered it.
+fn ends_with_user_text(session: &Session, text: &str) -> bool {
+    let last = session.messages().iter().rev().find(|message| {
+        !matches!(message, Message::System(_) | Message::SystemNotice(_))
+    });
+    matches!(
+        last,
+        Some(Message::User(user))
+            if user.transcript_role == TranscriptUserRole::Conversational
+                && user.text_content().trim() == text.trim()
+    )
+}
+
 impl Runner {
+    /// The input to send for the prompt `text`: [`RETRY_INPUT`] when `text`
+    /// repeats the prompt of the turn that just failed and that prompt is
+    /// still the session's last message; `None` sends `text` itself. Applies
+    /// once: the failed prompt is forgotten either way.
+    pub(super) async fn retry_input(&mut self, text: &str) -> Option<&'static str> {
+        let failed = self.failed_prompt.take()?;
+        if self.turn.is_active() || !failed.repeated_by(self.session.id(), text) {
+            return None;
+        }
+        match self.session.read().await {
+            Ok(session) if ends_with_user_text(&session, text) => {
+                self.notice(
+                    NoticeLevel::Info,
+                    "your message is already in the transcript from the failed turn; retrying it",
+                );
+                Some(RETRY_INPUT)
+            }
+            Ok(_) => None,
+            Err(err) => {
+                tracing::warn!(error = %err, "cannot read the session to check for a retry");
+                None
+            }
+        }
+    }
+
     /// `/new` (`/clear`): open a fresh session and retire the current one.
     pub(super) async fn new_session(&mut self) {
         if self.refuse_switch_while_busy() {

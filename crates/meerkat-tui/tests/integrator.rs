@@ -389,3 +389,75 @@ async fn the_builtins_the_tui_owns_are_denied_by_the_tool_policy() {
     assert_eq!(meta.model, common::MODEL);
     rig.quit().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_same_prompt_after_a_failed_turn_is_not_added_twice() {
+    let ws = Workspace::new();
+    let llm = ScriptedLlmClient::new(vec![Step::RejectTools, Step::Text("fixed")]);
+    let mut rig = Rig::start(&ws.root, &llm, Start::New).await;
+    rig.send(Effect::StartTurn("fix the build".into()));
+    let outcome = rig.turn_finished().await;
+    assert!(
+        matches!(outcome.result, Err(TurnFailure::Failed(_))),
+        "{:?}",
+        outcome.result
+    );
+    // The failed run committed the prompt.
+    let session = rig.session(&rig.first_session).await;
+    assert_eq!(
+        user_texts(session.messages()),
+        vec!["fix the build".to_string()]
+    );
+
+    // Re-typed (with stray whitespace): a retry, not a second copy.
+    rig.send(Effect::StartTurn("  fix the build\n".into()));
+    rig.wait_for(
+        |msg| matches!(msg, Msg::Notice { text, .. } if text.contains("already in the transcript")),
+    )
+    .await;
+    let outcome = rig.turn_finished().await;
+    assert_eq!(outcome.result.expect("retry succeeds").text, "fixed");
+    let expected = vec![
+        "fix the build".to_string(),
+        "(retrying the request above)".to_string(),
+    ];
+    assert_eq!(user_texts(&llm.requests()[1]), expected);
+    let session = rig.session(&rig.first_session).await;
+    assert_eq!(user_texts(session.messages()), expected);
+    rig.quit().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_different_prompt_after_a_failed_turn_is_sent_as_written() {
+    let ws = Workspace::new();
+    let llm = ScriptedLlmClient::new(vec![
+        Step::RejectTools,
+        Step::Text("first"),
+        Step::Text("second"),
+    ]);
+    let mut rig = Rig::start(&ws.root, &llm, Start::New).await;
+    rig.send(Effect::StartTurn("fix the build".into()));
+    assert!(rig.turn_finished().await.result.is_err());
+
+    rig.send(Effect::StartTurn("run the tests instead".into()));
+    assert_eq!(
+        rig.turn_finished().await.result.expect("turn").text,
+        "first"
+    );
+    // Only right after the failure: a repeat after a success is a message.
+    rig.send(Effect::StartTurn("run the tests instead".into()));
+    assert_eq!(
+        rig.turn_finished().await.result.expect("turn").text,
+        "second"
+    );
+    let session = rig.session(&rig.first_session).await;
+    assert_eq!(
+        user_texts(session.messages()),
+        vec![
+            "fix the build".to_string(),
+            "run the tests instead".to_string(),
+            "run the tests instead".to_string(),
+        ]
+    );
+    rig.quit().await;
+}

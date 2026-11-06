@@ -917,7 +917,13 @@ async fn a_read_satisfies_only_the_reading_sessions_writes() {
                 "{name} as {other:?}: {}",
                 result.text_content()
             );
-            assert!(result.text_content().contains("has not been read"));
+            assert!(
+                result.text_content().contains(
+                    "has not been read since this session started (a restart forgets earlier reads)"
+                ),
+                "{}",
+                result.text_content()
+            );
         }
     }
     assert_eq!(fx.read("shared.txt"), "one\n");

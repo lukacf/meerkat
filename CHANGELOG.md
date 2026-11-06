@@ -80,7 +80,12 @@ them.
   tool runs a helper that starts with the session's conversation, rendered
   as text, as context, behind the same gate. A mouse copy goes out with
   OSC 52 to the clipboard and the primary selection, written after the
-  frame, and its notice says the terminal must support OSC 52. See
+  frame, and its notice says the terminal must support OSC 52. An
+  escalation that arrives over an open model or resume picker parks the
+  picker and restores it once no escalation remains, and a held Enter or
+  Esc never answers, selects or closes a dialog. A prompt re-sent with the
+  same text right after a failed turn (which already committed it) retries
+  that turn instead of adding the message twice. See
   `crates/meerkat-tui/README.md`.
 
 - `meerkat-mob-mcp`: `MobMcpState::with_implicit_mob_customizer` takes an

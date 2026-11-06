@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use meerkat_core::{AgentEvent, EventEnvelope, ScopedAgentEvent};
 use ratatui::crossterm::event::{
-    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Rect;
 use ratatui::text::Line;
@@ -314,7 +314,7 @@ pub enum Msg {
 }
 
 /// Notice shown once `/compact now` rebuilt the session.
-pub const COMPACT_REBUILT: &str = "rebuilt the session so its next model call compacts the context; the compaction notice confirms it";
+pub const COMPACT_REBUILT: &str = "the context will be compacted at the start of your next message (Meerkat has no on-demand compaction; the ✓ compacted notice confirms it)";
 
 /// Side effect requested by [`App::update`], executed by the integrator.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -640,6 +640,9 @@ pub struct App {
     /// Search corpus (newest first, deduplicated), built when a search starts.
     search_corpus: Vec<String>,
     pending_escalations: VecDeque<(EscalationId, EscalationPrompt)>,
+    /// A picker ([`Modal::Model`] or [`Modal::Resume`]) an escalation
+    /// displaced; restored once no escalation remains.
+    parked: Option<Modal>,
     submitted: Vec<String>,
     running: bool,
     run_first_block: usize,
@@ -681,6 +684,7 @@ impl App {
             global_history: Vec::new(),
             search_corpus: Vec::new(),
             pending_escalations: VecDeque::new(),
+            parked: None,
             submitted: Vec::new(),
             running: false,
             run_first_block: 0,
@@ -1204,12 +1208,17 @@ impl App {
                 self.status.apply(update);
             }
             Msg::ShowResumePicker(items) => {
-                if self.modal.is_none() {
-                    self.modal = Some(Modal::Resume(ResumePicker { items, selected: 0 }));
+                let picker = Modal::Resume(ResumePicker { items, selected: 0 });
+                match self.modal {
+                    None => self.modal = Some(picker),
+                    // Shown once the escalations are answered; replaces a
+                    // picker parked earlier.
+                    Some(Modal::Escalation { .. }) => self.parked = Some(picker),
+                    Some(_) => {}
                 }
             }
             Msg::ShowModelPicker(groups) => {
-                if self.modal.is_none() {
+                if self.modal.is_none() && self.parked.is_none() {
                     self.modal = Some(Modal::Model(ModelPicker::new(groups)));
                 } else {
                     for warning in ModelPicker::warnings(&groups) {
@@ -1389,9 +1398,15 @@ impl App {
     fn modal_key(&mut self, key: &KeyEvent, fx: &mut Vec<Effect>) {
         let ctrl_c =
             key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c');
+        // A held key must not answer, select or close: repeats only move,
+        // edit the filter and type.
+        let repeat = key.kind == KeyEventKind::Repeat;
         match &mut self.modal {
             Some(Modal::Escalation { id, .. }) => {
                 let id = *id;
+                if repeat {
+                    return;
+                }
                 if ctrl_c {
                     self.stop_all_escalations(fx);
                     return;
@@ -1407,6 +1422,8 @@ impl App {
                 self.advance_escalation();
             }
             Some(Modal::Resume(picker)) => match key.code {
+                KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') if repeat => {}
+                _ if ctrl_c && repeat => {}
                 _ if ctrl_c => self.modal = None,
                 KeyCode::Up | KeyCode::Char('k') => picker.up(),
                 KeyCode::Down | KeyCode::Char('j') => picker.down(),
@@ -1421,6 +1438,8 @@ impl App {
                 _ => {}
             },
             Some(Modal::Model(picker)) => match key.code {
+                KeyCode::Enter | KeyCode::Esc if repeat => {}
+                _ if ctrl_c && repeat => {}
                 _ if ctrl_c => self.modal = None,
                 KeyCode::Esc => self.modal = None,
                 KeyCode::Up => picker.up(),
@@ -2036,6 +2055,11 @@ impl App {
                 *queued_behind = self.pending_escalations.len();
             }
             _ => {
+                // Escalations are time-limited and shown at once; an open
+                // picker waits until they are answered.
+                if let Some(picker) = self.modal.take() {
+                    self.parked = Some(picker);
+                }
                 self.modal = Some(Modal::Escalation {
                     id,
                     prompt,
@@ -2046,14 +2070,14 @@ impl App {
     }
 
     fn advance_escalation(&mut self) {
-        self.modal = self
-            .pending_escalations
-            .pop_front()
-            .map(|(id, prompt)| Modal::Escalation {
+        self.modal = match self.pending_escalations.pop_front() {
+            Some((id, prompt)) => Some(Modal::Escalation {
                 id,
                 prompt,
                 queued_behind: self.pending_escalations.len(),
-            });
+            }),
+            None => self.parked.take(),
+        };
     }
 
     fn escalation_resolved(&mut self, resolved: EscalationId) {
@@ -2073,6 +2097,9 @@ impl App {
         }
         for (id, _) in self.pending_escalations.drain(..) {
             fx.push(Effect::RespondEscalation(id, EscalationAnswer::Stop));
+        }
+        if self.modal.is_none() {
+            self.modal = self.parked.take();
         }
     }
 }
@@ -3296,6 +3323,140 @@ mod tests {
         app.update(Msg::ShowModelPicker(picker_models()));
         assert!(app.update(key(KeyCode::Esc)).is_empty());
         assert!(app.modal.is_none());
+    }
+
+    fn shell_prompt() -> EscalationPrompt {
+        EscalationPrompt {
+            agent: None,
+            tool: "shell".into(),
+            args_preview: "{}".into(),
+            hint: None,
+        }
+    }
+
+    /// A model picker with a filter typed and the selection moved.
+    fn app_with_moved_model_picker() -> (App, Modal) {
+        let mut app = app_on_sonnet();
+        app.update(Msg::ShowModelPicker(picker_models()));
+        type_str(&mut app, "claude");
+        app.update(key(KeyCode::Down));
+        let picker = app.modal.clone().expect("picker open");
+        (app, picker)
+    }
+
+    #[test]
+    fn escalation_parks_the_model_picker_and_restores_it() {
+        let (mut app, picker) = app_with_moved_model_picker();
+        app.update(Msg::Escalation(shell_prompt(), EscalationId(1)));
+        assert!(matches!(app.modal, Some(Modal::Escalation { .. })));
+        // A parked picker counts as open: a second list only warns.
+        app.update(Msg::ShowModelPicker(picker_models()));
+        assert_eq!(
+            app.update(key(KeyCode::Char('y'))),
+            vec![Effect::RespondEscalation(
+                EscalationId(1),
+                EscalationAnswer::AllowOnce
+            )]
+        );
+        assert_eq!(app.modal.as_ref(), Some(&picker));
+        if let Some(Modal::Model(p)) = &app.modal {
+            assert_eq!(p.filter, "claude");
+        }
+        // Esc in an escalation denies it and still brings the picker back.
+        app.update(Msg::Escalation(shell_prompt(), EscalationId(2)));
+        assert_eq!(
+            app.update(key(KeyCode::Esc)),
+            vec![Effect::RespondEscalation(
+                EscalationId(2),
+                EscalationAnswer::Deny
+            )]
+        );
+        assert_eq!(app.modal.as_ref(), Some(&picker));
+    }
+
+    #[test]
+    fn parked_picker_returns_after_the_last_queued_escalation() {
+        let (mut app, picker) = app_with_moved_model_picker();
+        app.update(Msg::Escalation(shell_prompt(), EscalationId(1)));
+        app.update(Msg::Escalation(shell_prompt(), EscalationId(2)));
+        app.update(key(KeyCode::Char('y')));
+        assert!(matches!(
+            app.modal,
+            Some(Modal::Escalation {
+                id: EscalationId(2),
+                ..
+            })
+        ));
+        app.update(Msg::EscalationResolved(EscalationId(2)));
+        assert_eq!(app.modal.as_ref(), Some(&picker));
+    }
+
+    #[test]
+    fn stopping_all_escalations_restores_the_parked_picker() {
+        let (mut app, picker) = app_with_moved_model_picker();
+        app.update(Msg::Escalation(shell_prompt(), EscalationId(1)));
+        app.update(Msg::Escalation(shell_prompt(), EscalationId(2)));
+        assert_eq!(
+            app.update(ctrl('c')),
+            vec![
+                Effect::RespondEscalation(EscalationId(1), EscalationAnswer::Stop),
+                Effect::RespondEscalation(EscalationId(2), EscalationAnswer::Stop),
+            ]
+        );
+        assert_eq!(app.modal.as_ref(), Some(&picker));
+        assert_eq!(app.pending_escalations(), 0);
+    }
+
+    #[test]
+    fn escalation_parks_the_resume_picker_and_restores_it() {
+        let mut app = App::new(StatusInfo::default());
+        app.update(Msg::ShowResumePicker(vec![
+            ("aaa".into(), "first".into()),
+            ("bbb".into(), "second".into()),
+        ]));
+        app.update(key(KeyCode::Down));
+        app.update(Msg::Escalation(shell_prompt(), EscalationId(1)));
+        app.update(key(KeyCode::Char('n')));
+        assert!(matches!(
+            app.modal,
+            Some(Modal::Resume(ResumePicker { selected: 1, .. }))
+        ));
+        assert_eq!(
+            app.update(key(KeyCode::Enter)),
+            vec![Effect::ResumeSession("bbb".into())]
+        );
+        // A resume list arriving during an escalation waits for it.
+        app.update(Msg::Escalation(shell_prompt(), EscalationId(2)));
+        app.update(Msg::ShowResumePicker(vec![("ccc".into(), "third".into())]));
+        assert!(matches!(app.modal, Some(Modal::Escalation { .. })));
+        app.update(Msg::EscalationResolved(EscalationId(2)));
+        assert!(matches!(app.modal, Some(Modal::Resume(_))));
+    }
+
+    #[test]
+    fn repeated_enter_and_esc_do_not_act_in_modals() {
+        let repeat = |code: KeyCode| {
+            let mut k = KeyEvent::new(code, KeyModifiers::NONE);
+            k.kind = KeyEventKind::Repeat;
+            Msg::Key(k)
+        };
+        let mut app = app_on_sonnet();
+        app.update(Msg::ShowModelPicker(picker_models()));
+        assert!(app.update(repeat(KeyCode::Enter)).is_empty());
+        assert!(app.update(repeat(KeyCode::Esc)).is_empty());
+        assert!(matches!(app.modal, Some(Modal::Model(_))));
+        // Held arrows still move.
+        app.update(repeat(KeyCode::Down));
+        assert_eq!(
+            app.update(key(KeyCode::Enter)),
+            vec![Effect::SetModel("anthropic:claude-opus-4-6".into())]
+        );
+        assert!(app.modal.is_none());
+        // A held answer key does not answer an escalation.
+        app.update(Msg::Escalation(shell_prompt(), EscalationId(1)));
+        assert!(app.update(repeat(KeyCode::Char('y'))).is_empty());
+        assert!(app.update(repeat(KeyCode::Esc)).is_empty());
+        assert!(matches!(app.modal, Some(Modal::Escalation { .. })));
     }
 
     #[test]

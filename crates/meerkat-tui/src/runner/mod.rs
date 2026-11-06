@@ -322,8 +322,9 @@ impl Template {
 /// What a runtime input of the current turn is.
 #[derive(Debug)]
 enum InputKind {
-    /// The prompt that started the turn (or a prompt queued behind it).
-    Prompt,
+    /// The prompt that started the turn (or a prompt queued behind it),
+    /// with the text it was admitted with.
+    Prompt { text: String },
     /// A message steered into the turn.
     Steer {
         id: PendingId,
@@ -576,6 +577,10 @@ pub(crate) struct Runner {
     helper_updates: Option<mpsc::UnboundedReceiver<HelperUpdate>>,
     /// The session runs on `/compact now`'s one-turn trigger.
     compact_now_pending: bool,
+    /// The prompt of the last turn when that turn failed (not interrupted):
+    /// the failed run already committed it to this session, so the same text
+    /// sent right after is a retry, not a new message.
+    failed_prompt: Option<lifecycle::FailedPrompt>,
 }
 
 impl Runner {
@@ -637,6 +642,7 @@ impl Runner {
             price_fetch,
             helper_updates,
             compact_now_pending: false,
+            failed_prompt: None,
         };
         runner.refresh_identity().await;
         runner.push_auto_status();
@@ -786,8 +792,14 @@ impl Runner {
 
     /// [`Effect::StartTurn`]: admit a `Queue` input.
     async fn start_turn(&mut self, text: &str) {
-        match self.session.start_turn(text).await {
-            Ok(admission) => self.track(admission, InputKind::Prompt),
+        let submitted = self.retry_input(text).await.unwrap_or(text);
+        match self.session.start_turn(submitted).await {
+            Ok(admission) => self.track(
+                admission,
+                InputKind::Prompt {
+                    text: text.to_string(),
+                },
+            ),
             Err(err) if self.turn.is_active() => {
                 self.notice(
                     NoticeLevel::Error,
@@ -1003,7 +1015,7 @@ impl Runner {
         let mut msgs = Vec::new();
         let mut undelivered = None;
         let end = match (&mut input.kind, done.outcome) {
-            (InputKind::Prompt, Settled::Done(result)) => {
+            (InputKind::Prompt { .. }, Settled::Done(result)) => {
                 Some(Ok(result.as_deref().map(summary_of).unwrap_or_default()))
             }
             (InputKind::Steer { id, delivered }, Settled::Done(result)) => {
@@ -1015,7 +1027,7 @@ impl Runner {
                 }
                 result.as_deref().map(|r| Ok(summary_of(r)))
             }
-            (InputKind::Prompt, Settled::Ended(end)) => Some(Err(end)),
+            (InputKind::Prompt { .. }, Settled::Ended(end)) => Some(Err(end)),
             (InputKind::Steer { id, .. }, Settled::Ended(end)) => {
                 undelivered = Some(*id);
                 Some(Err(end))
@@ -1076,6 +1088,7 @@ impl Runner {
             }
         }
         let result = turn.result();
+        self.failed_prompt = lifecycle::FailedPrompt::of(self.session.id(), &turn);
         let mut undelivered = turn.undelivered;
         undelivered.sort();
         self.send(Msg::TurnFinished(TurnOutcome {
@@ -1143,7 +1156,9 @@ mod tests {
         Tracked {
             input_id: InputId::new(),
             key: String::new(),
-            kind: InputKind::Prompt,
+            kind: InputKind::Prompt {
+                text: String::new(),
+            },
             done: true,
             end: Some(end),
         }

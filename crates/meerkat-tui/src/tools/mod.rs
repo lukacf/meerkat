@@ -319,7 +319,7 @@ impl Shared {
         match recorded {
             None => {
                 return Err(ToolFailure::recoverable(format!(
-                    "{display} has not been read in this session; read it with read_file before modifying it"
+                    "{display} has not been read since this session started (a restart forgets earlier reads); read it with read_file before modifying it"
                 )));
             }
             Some(seen) if seen != current => {

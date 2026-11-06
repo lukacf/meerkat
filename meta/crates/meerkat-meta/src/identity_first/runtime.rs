@@ -67,6 +67,7 @@ mod records;
 mod roster_pass_tests;
 #[cfg(test)]
 mod seat_tests;
+use build_preparation::{admission_build_preparation_retry_of, build_preparation_retry_of};
 pub(crate) use declare::HostedIdentities;
 pub(crate) use records::host_pending_members_before_build;
 
@@ -3533,12 +3534,16 @@ pub struct IdentityRuntime {
     /// Set whenever an agent customizer exists; the same registry backs the
     /// mob's `CustomizerToolsSpawnCustomizer`.
     customizer_tools: RwLock<Option<Arc<super::customizer_tools::CustomizerToolRegistry>>>,
-    /// Identities whose customizer tools are not published to their member
-    /// yet although Core built it: Core built it held (before the runtime
-    /// was composed, or for an identity the roster does not list), and the
-    /// publication that releases it has not succeeded. Each is published by
-    /// the next composition, or by its member's wake or delivery.
-    customizer_tools_pending: std::sync::RwLock<BTreeMap<AgentIdentity, CustomizerToolsPending>>,
+    /// Why each identity's customizer last failed to publish its tools: the
+    /// host's `customize_build` failed in a member build preparation (Core
+    /// then keeps the member's build preparation retry and refuses its
+    /// wakes, `BuildPreparationRetry`) or in the publication for a member
+    /// Core holds for unpublished tools. Meta's own text, for the identity's
+    /// status and the typed answer to a refused delivery. Which members Core
+    /// holds, and which wakes it refuses, are Core's
+    /// (`SessionBridge::members_holding_run_starts_for_published_tools`, the
+    /// typed wake refusal). A publication that succeeds clears it.
+    customizer_failures: std::sync::RwLock<BTreeMap<AgentIdentity, CustomizerToolsPending>>,
     /// The member ids Meta handed the mob as host-pending before it was
     /// built (`MobBuilder::with_host_pending_members`): Core refuses their
     /// wakes until the declaration that carries each one's first-boot row
@@ -3550,13 +3555,6 @@ pub struct IdentityRuntime {
     /// on its own puts it back exactly.
     bootstrap_warming_replaced:
         StdMutex<BTreeMap<AgentIdentity, (IdentityBootstrapState, Option<String>)>>,
-    /// Identities whose last member build preparation failed: Core did not
-    /// build the member, which stays Dormant, and its next wake's
-    /// preparation publishes its tools. Reported with the pending ones
-    /// ([`Self::customizer_tools_pending_for`]) and answered typed to a
-    /// delivery, but never published from a delivery: the member is not
-    /// built, so the wake's preparation is the one publication.
-    refused_build_preparations: std::sync::RwLock<BTreeMap<AgentIdentity, CustomizerToolsPending>>,
     /// Meta's preparer of Core's member builds, when the mob was built with
     /// one ([`super::build_preparer::IdentityBuildPreparer`]).
     member_build_preparer: StdRwLock<Option<Arc<super::build_preparer::IdentityBuildPreparer>>>,
@@ -4395,8 +4393,7 @@ impl IdentityRuntime {
             raw_member_alias_locks: RwLock::new(RawMemberAliasLockTable::default()),
             customizer: RwLock::new(None),
             customizer_tools: RwLock::new(None),
-            customizer_tools_pending: std::sync::RwLock::new(BTreeMap::new()),
-            refused_build_preparations: std::sync::RwLock::new(BTreeMap::new()),
+            customizer_failures: std::sync::RwLock::new(BTreeMap::new()),
             host_pending_seeded: StdMutex::new(BTreeSet::new()),
             bootstrap_warming_replaced: StdMutex::new(BTreeMap::new()),
             member_build_preparer: StdRwLock::new(None),
@@ -5287,20 +5284,20 @@ impl IdentityRuntime {
     /// Publish one successful `customize_build` result for `identity` and
     /// point the draft at the identity's stable dispatcher, so the spawn (or
     /// the adopted occupant, which already holds it) serves the new tools.
-    /// When the identity's tools were pending, Core holds its live member's
-    /// run starts: the publication releases the hold.
+    /// When Core holds the identity's member for unpublished tools
+    /// ([`Self::core_holds_unpublished_tools`]), the publication releases
+    /// the hold.
     async fn publish_customizer_tools(
         &self,
         identity: &AgentIdentity,
         draft: &mut AgentBuildDraft,
     ) {
-        let was_pending = self
-            .publish_customizer_tools_unreleased(identity, draft)
+        self.publish_customizer_tools_unreleased(identity, draft)
             .await;
         // A candidate launch releases nothing: its members' runs belong to
         // the authoritative launch.
-        if was_pending
-            && !self.is_candidate_launch()
+        if !self.is_candidate_launch()
+            && self.core_holds_unpublished_tools(identity)
             && let Some(bridge) = self.bridge.as_ref()
         {
             let member_id = crate::member_comms_id::mob_member_id(identity.as_str());
@@ -5314,95 +5311,159 @@ impl IdentityRuntime {
                     %reason,
                     "the member stays held: it starts no run until the hold is released"
                 );
-                self.customizer_tools_pending
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(
-                        identity.clone(),
-                        CustomizerToolsPending {
-                            reason,
-                            artifact_refusal: None,
-                        },
-                    );
+                self.record_customizer_failure(
+                    identity,
+                    CustomizerToolsPending {
+                        reason,
+                        artifact_refusal: None,
+                    },
+                );
             }
         }
     }
 
     /// [`Self::publish_customizer_tools`] without the release: for a build
-    /// Core is about to perform, which starts with no hold. Returns whether
-    /// the identity's tools were pending.
+    /// Core is about to perform, which starts with no hold. The publication
+    /// clears the identity's last customizer failure.
     async fn publish_customizer_tools_unreleased(
         &self,
         identity: &AgentIdentity,
         draft: &mut AgentBuildDraft,
-    ) -> bool {
+    ) {
         let Some(registry) = self.customizer_tools.read().await.clone() else {
-            return false;
+            return;
         };
         let entry = registry.publish(identity, draft.local_external_tools.dispatcher());
         draft.local_external_tools = super::types::LocalExternalToolOverlay::new(entry);
-        // A publication supersedes a refused preparation of the identity.
-        self.refused_build_preparations
+        self.customizer_failures
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(identity);
-        self.customizer_tools_pending
+    }
+
+    /// Record why `identity`'s customizer failed to publish its tools, for
+    /// its status and the typed answer to a refused delivery.
+    pub(crate) fn record_customizer_failure(
+        &self,
+        identity: &AgentIdentity,
+        failure: CustomizerToolsPending,
+    ) {
+        self.customizer_failures
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(identity)
-            .is_some()
+            .insert(identity.clone(), failure);
     }
 
-    /// Why `identity`'s customizer tools are not published, if they are
-    /// not: the member Core built held, or the member's refused build
-    /// preparation.
-    pub(crate) fn customizer_tools_pending_for(
+    /// Why `identity`'s customizer last failed to publish its tools, if a
+    /// failure stands.
+    pub(crate) fn customizer_failure(
         &self,
         identity: &AgentIdentity,
     ) -> Option<CustomizerToolsPending> {
-        self.held_customizer_tools_pending(identity).or_else(|| {
-            self.refused_build_preparations
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(identity)
-                .cloned()
-        })
-    }
-
-    /// Why the customizer tools of `identity`'s member, which Core built
-    /// held, are not published yet; `None` when Core holds no such member.
-    fn held_customizer_tools_pending(
-        &self,
-        identity: &AgentIdentity,
-    ) -> Option<CustomizerToolsPending> {
-        self.customizer_tools_pending
+        self.customizer_failures
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(identity)
             .cloned()
     }
 
-    /// Publish the customizer tools of a member Core holds live while they
-    /// are still pending: Core built it held before the runtime was composed,
-    /// and the composition's publication failed. Core holds its run starts
-    /// until they are published, and nothing rebuilds a live member, so no
-    /// build preparation reaches it: the next composition, or its wake or
-    /// delivery here, publishes them. The publication releases the hold.
+    /// The registered identities whose members Core holds for unpublished
+    /// customizer tools: Core's own read
+    /// ([`SessionBridge::members_holding_run_starts_for_published_tools`]),
+    /// each member id taken to the identity it names. A read that fails holds
+    /// none here (logged): the next composition, or the member's wake or
+    /// delivery, reads it again.
+    pub(crate) fn members_core_holds_for_unpublished_tools(&self) -> BTreeSet<AgentIdentity> {
+        let Some(bridge) = self.bridge.as_ref() else {
+            return BTreeSet::new();
+        };
+        match bridge.members_holding_run_starts_for_published_tools() {
+            Ok(members) => members
+                .iter()
+                .filter_map(|member| {
+                    AgentIdentity::parse(
+                        &crate::member_comms_id::durable_identity_for_roster_member(
+                            member.as_str(),
+                        ),
+                    )
+                    .ok()
+                })
+                .collect(),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "Core's members held for unpublished customizer tools did not read"
+                );
+                BTreeSet::new()
+            }
+        }
+    }
+
+    /// Whether Core holds `identity`'s member for unpublished customizer
+    /// tools ([`Self::members_core_holds_for_unpublished_tools`]).
+    pub(crate) fn core_holds_unpublished_tools(&self, identity: &AgentIdentity) -> bool {
+        self.members_core_holds_for_unpublished_tools()
+            .contains(identity)
+    }
+
+    /// Why `identity`'s customizer tools are not published, if they are
+    /// not: the customizer's last failure, or, while Core holds the member
+    /// for unpublished tools, that they are published once the runtime is
+    /// composed. A candidate launch's holds are the authoritative launch's to
+    /// release, never a sign of unpublished tools: its status names only a
+    /// failure.
+    pub(crate) fn customizer_tools_pending_for(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Option<CustomizerToolsPending> {
+        self.customizer_failure(identity).or_else(|| {
+            (!self.is_candidate_launch() && self.core_holds_unpublished_tools(identity)).then(
+                || CustomizerToolsPending {
+                    reason: super::build_preparer::PUBLISHED_ONCE_COMPOSED.to_string(),
+                    artifact_refusal: None,
+                },
+            )
+        })
+    }
+
+    /// Publish the customizer tools of a member Core holds for unpublished
+    /// tools ([`Self::core_holds_unpublished_tools`]): Core built it held
+    /// before the runtime was composed, and no publication has released it
+    /// yet. Core holds its run starts until they are published, and nothing
+    /// rebuilds a live member, so no build preparation reaches it: the next
+    /// composition, its build's report, or its wake or delivery here,
+    /// publishes them. The publication releases the hold.
     ///
     /// While they cannot be published the wake or delivery is refused, so
     /// nothing is admitted behind the hold: a refused build answers
-    /// `ToolArtifactRefused` or `IdentityWakeRetryable` and keeps the
-    /// identity pending with the new reason. The host's build is bounded by
-    /// the runtime's shutdown, like the other wake builds. A member whose
-    /// build preparation was refused is not built, so nothing is published
-    /// for it here: its next wake's preparation publishes.
-    async fn publish_pending_customizer_tools(
+    /// `ToolArtifactRefused` or `IdentityWakeRetryable` and records the new
+    /// reason. The host's build is bounded by the runtime's shutdown, like
+    /// the other wake builds. A member whose build preparation was refused is
+    /// not built, so Core holds none of its run starts and nothing is
+    /// published for it here: its next wake's preparation publishes.
+    pub(crate) async fn publish_pending_customizer_tools(
         &self,
         identity: &AgentIdentity,
         session_id: Option<&SessionId>,
         operation: &'static str,
     ) -> Result<(), IdentityRuntimeError> {
-        if self.held_customizer_tools_pending(identity).is_none() {
+        if !self.core_holds_unpublished_tools(identity) {
+            return Ok(());
+        }
+        // A candidate launch releases no hold, so Core keeps holding a member
+        // whose tools it published: once published in this process, they are
+        // not published again.
+        if self.is_candidate_launch()
+            && self
+                .customizer_tools
+                .read()
+                .await
+                .as_ref()
+                .and_then(|registry| {
+                    registry.for_member(&crate::member_comms_id::mob_member_id(identity.as_str()))
+                })
+                .is_some_and(|tools| tools.generation() > 0)
+        {
             return Ok(());
         }
         let Some(customizer) = self.customizer.read().await.clone() else {
@@ -5476,16 +5537,13 @@ impl IdentityRuntime {
                     "live member's customizer tools are still unpublished; its {operation} is \
                      refused until they are"
                 );
-                self.customizer_tools_pending
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(
-                        identity.clone(),
-                        CustomizerToolsPending {
-                            reason: reason.clone(),
-                            artifact_refusal,
-                        },
-                    );
+                self.record_customizer_failure(
+                    identity,
+                    CustomizerToolsPending {
+                        reason: reason.clone(),
+                        artifact_refusal,
+                    },
+                );
                 if let super::types::CustomizerError::ToolArtifactRefused(refusal) = error {
                     return Err(IdentityRuntimeError::ToolArtifactRefused(refusal));
                 }
@@ -9030,7 +9088,9 @@ impl IdentityRuntime {
     /// - Then Core materializes the member (`ensure_member_live`, Core's
     ///   wake): Core's own restore builds it on its durable session, or
     ///   answers typed (a session Core cannot resume is Broken through its
-    ///   machine; a refused wake keeps its kind). One attempt, no retry loop.
+    ///   machine; a refused wake keeps its kind). One attempt, and the door's
+    ///   one retry of a wake Core refused for the build preparation the host
+    ///   asked to retry, after the door retries the preparation; no loop.
     ///   A member the seat built (its archived session's revival, as after a
     ///   respawn's own retirement, or a declared role migration's restamp) is
     ///   live already: Core answers the wake so, and builds nothing again.
@@ -9127,28 +9187,44 @@ impl IdentityRuntime {
             ));
         }
         // Core's wake (cause Operator): Core materializes the member through
-        // its own restore, or answers typed.
-        let binding = match bridge.ensure_member_live(identity).await {
-            Ok(Some(binding)) => binding,
-            Ok(None) => {
-                return Err(IdentityRuntimeError::IdentityHistoryUnavailable {
-                    identity: identity.clone(),
-                    detail: "Core holds no member for the identity after its seat; nothing was \
-                             materialized"
-                        .to_string(),
-                });
-            }
-            Err(error) => {
-                // The seat names a session only when it bound one. For a
-                // member Core already held (the usual case) it names none, so
-                // the session Core's typed refusal names is read, as a
-                // delivery reads it: a durable resume hold Core keeps on its
-                // Broken verdict then answers held, not retryable.
-                let session_id = seat.session_id.clone().or_else(|| match &error {
-                    BridgeError::ResumeRejected { session_id, .. } => Some(session_id.clone()),
-                    _ => None,
-                });
-                return Err(self.wake_error(identity, session_id.as_ref(), error));
+        // its own restore, or answers typed. A wake refused for the build
+        // preparation the host asked to retry is retried once, after the
+        // door retries the preparation.
+        let mut door_retried = false;
+        let binding = loop {
+            match bridge.ensure_member_live(identity).await {
+                Ok(Some(binding)) => break binding,
+                Ok(None) => {
+                    return Err(IdentityRuntimeError::IdentityHistoryUnavailable {
+                        identity: identity.clone(),
+                        detail: "Core holds no member for the identity after its seat; \
+                                 nothing was materialized"
+                            .to_string(),
+                    });
+                }
+                Err(error) => {
+                    if self
+                        .door_retries_build_preparation(
+                            identity,
+                            &mut door_retried,
+                            build_preparation_retry_of(&error),
+                        )
+                        .await?
+                    {
+                        continue;
+                    }
+                    // The seat names a session only when it bound one. For a
+                    // member Core already held (the usual case) it names
+                    // none, so the session Core's typed refusal names is
+                    // read, as a delivery reads it: a durable resume hold
+                    // Core keeps on its Broken verdict then answers held, not
+                    // retryable.
+                    let session_id = seat.session_id.clone().or_else(|| match &error {
+                        BridgeError::ResumeRejected { session_id, .. } => Some(session_id.clone()),
+                        _ => None,
+                    });
+                    return Err(self.wake_error(identity, session_id.as_ref(), error));
+                }
             }
         };
         self.refuse_unprojected_session(identity, &binding).await?;
@@ -10523,12 +10599,27 @@ impl IdentityRuntime {
         // Core's dispatch would wake a Dormant member only after the bind
         // below, and the wake decides the member's session (a seat's first
         // wake creates it, a missing one moves to its successor): Core wakes
-        // it first, so the binding read below is the woken member's.
+        // it first, so the binding read below is the woken member's. A wake
+        // refused for the build preparation the host asked to retry is
+        // retried once, after the door retries the preparation.
         if let Some(bridge) = self.bridge.as_ref() {
-            bridge
-                .wake_for_governed_input(identity)
-                .await
-                .map_err(|error| self.admission_error(identity, error))?;
+            let mut door_retried = false;
+            loop {
+                let woken = bridge.wake_for_governed_input(identity).await;
+                if let Err(error) = &woken
+                    && self
+                        .door_retries_build_preparation(
+                            identity,
+                            &mut door_retried,
+                            admission_build_preparation_retry_of(error),
+                        )
+                        .await?
+                {
+                    continue;
+                }
+                woken.map_err(|error| self.admission_error(identity, error))?;
+                break;
+            }
         }
         let (live, scope) = self.live_delivery_target(identity, operation).await?;
         let runtime_id = Some(live.agent_runtime_id);
@@ -11430,13 +11521,26 @@ impl IdentityRuntime {
                     delivery.interaction_id = bridge_interaction_id.map(ToString::to_string);
                     // One automatic non-destructive reload on a typed
                     // reload-required refusal, then the typed failure (same
-                    // rule as the other lanes).
+                    // rule as the other lanes); and the door's one retry of a
+                    // build preparation Core refused the delivery's wake for.
                     let mut reload_attempted = false;
+                    let mut door_retried = false;
                     loop {
-                        let attempt = match bridge
+                        let attempt = bridge
                             .begin_delivery_with_output(rid, delivery.clone())
-                            .await
+                            .await;
+                        if let Err(error) = &attempt
+                            && self
+                                .door_retries_build_preparation(
+                                    identity,
+                                    &mut door_retried,
+                                    admission_build_preparation_retry_of(error),
+                                )
+                                .await?
                         {
+                            continue;
+                        }
+                        let attempt = match attempt {
                             Err(BridgeAdmissionError::UnsupportedForMode {
                                 mode, detail, ..
                             }) => {
@@ -11481,8 +11585,10 @@ impl IdentityRuntime {
                     // One automatic non-destructive reload on a typed
                     // reload-required refusal, then the typed failure. Never a
                     // loop: a second refusal after a reload is an operator
-                    // matter.
+                    // matter. The door's one retry of a build preparation
+                    // Core refused the delivery's wake for, likewise.
                     let mut reload_attempted = false;
+                    let mut door_retried = false;
                     loop {
                         let attempt = if local_human {
                             let session = human_session.as_ref().ok_or(
@@ -11521,8 +11627,19 @@ impl IdentityRuntime {
                                     bridge_interaction_id,
                                 )
                                 .await
+                        };
+                        if let Err(error) = &attempt
+                            && self
+                                .door_retries_build_preparation(
+                                    identity,
+                                    &mut door_retried,
+                                    build_preparation_retry_of(error),
+                                )
+                                .await?
+                        {
+                            continue;
                         }
-                        .map_err(|e| self.ingress_error(identity, e));
+                        let attempt = attempt.map_err(|e| self.ingress_error(identity, e));
                         match attempt {
                             Ok(delivered) => {
                                 self.record_delivery_success(identity).await;
@@ -11602,8 +11719,10 @@ impl IdentityRuntime {
                     // ADMITTED. Bounded; still under the lock. One automatic
                     // non-destructive reload on a typed reload-required
                     // refusal, then the typed failure (same rule as the
-                    // ingress lane).
+                    // ingress lane), and the door's one retry of a build
+                    // preparation Core refused the delivery's wake for.
                     let mut reload_attempted = false;
+                    let mut door_retried = false;
                     let receipt = loop {
                         let attempt = bridge
                             .begin_awaiting_commit(
@@ -11614,8 +11733,19 @@ impl IdentityRuntime {
                                 handling_mode,
                                 bridge_interaction_id,
                             )
-                            .await
-                            .map_err(|err| self.admission_error(identity, err));
+                            .await;
+                        if let Err(error) = &attempt
+                            && self
+                                .door_retries_build_preparation(
+                                    identity,
+                                    &mut door_retried,
+                                    admission_build_preparation_retry_of(error),
+                                )
+                                .await?
+                        {
+                            continue;
+                        }
+                        let attempt = attempt.map_err(|err| self.admission_error(identity, err));
                         match attempt {
                             Ok(receipt) => {
                                 self.record_delivery_success(identity).await;
@@ -12608,11 +12738,28 @@ impl IdentityRuntime {
             // meerkat's typed pre-admission refusal of the tracked admission
             // (the member's ACTUAL runtime mode) sends the dispatch down the
             // ingress lane below: nothing was delivered by the refused attempt.
+            // A wake Core refused for the build preparation the host asked to
+            // retry is retried once, after the door retries the preparation.
             let tracked_attempt = if ticketed {
-                match bridge
-                    .begin_delivery_with_output(rid, delivery.clone())
-                    .await
-                {
+                let mut door_retried = false;
+                let attempt = loop {
+                    let attempt = bridge
+                        .begin_delivery_with_output(rid, delivery.clone())
+                        .await;
+                    if let Err(error) = &attempt
+                        && self
+                            .door_retries_build_preparation(
+                                identity,
+                                &mut door_retried,
+                                admission_build_preparation_retry_of(error),
+                            )
+                            .await?
+                    {
+                        continue;
+                    }
+                    break attempt;
+                };
+                match attempt {
                     Err(BridgeAdmissionError::UnsupportedForMode { mode, detail, .. }) => {
                         turn = Some(runtime_refused_tracking(identity, mode, &detail));
                         None
@@ -12677,10 +12824,23 @@ impl IdentityRuntime {
                     }
                 }
             } else {
-                let attempt = bridge
-                    .deliver_admitted(rid, delivery)
-                    .await
-                    .map_err(|error| self.ingress_error(identity, error));
+                let mut door_retried = false;
+                let attempt = loop {
+                    let attempt = bridge.deliver_admitted(rid, delivery.clone()).await;
+                    if let Err(error) = &attempt
+                        && self
+                            .door_retries_build_preparation(
+                                identity,
+                                &mut door_retried,
+                                build_preparation_retry_of(error),
+                            )
+                            .await?
+                    {
+                        continue;
+                    }
+                    break attempt;
+                }
+                .map_err(|error| self.ingress_error(identity, error));
                 match attempt {
                     Ok(delivered) => {
                         self.record_delivery_success(identity).await;
@@ -16207,6 +16367,8 @@ mod reset_reprofile_tests {
     struct RunStartReleaseBridge {
         fail: bool,
         released: std::sync::Mutex<Vec<String>>,
+        /// The members whose run starts Core holds for unpublished tools.
+        held: std::sync::Mutex<BTreeSet<String>>,
     }
 
     impl RunStartReleaseBridge {
@@ -16215,6 +16377,15 @@ mod reset_reprofile_tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
+        }
+
+        /// Core holds `identity`'s member for unpublished tools, as its build
+        /// staged the hold.
+        fn stage_hold(&self, identity: &AgentIdentity) {
+            self.held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(crate::member_comms_id::mob_member_id(identity.as_str()).to_string());
         }
     }
 
@@ -16279,7 +16450,23 @@ mod reset_reprofile_tests {
             if self.fail {
                 return Err(BridgeError::Mob("mob refused the release".to_string()));
             }
+            self.held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(member_id.as_str());
             Ok(())
+        }
+
+        fn members_holding_run_starts_for_published_tools(
+            &self,
+        ) -> Result<Vec<meerkat_mob::AgentIdentity>, BridgeError> {
+            Ok(self
+                .held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .map(|member| meerkat_mob::AgentIdentity::from(member.as_str()))
+                .collect())
         }
 
         async fn apply_declared_roster(
@@ -16295,10 +16482,10 @@ mod reset_reprofile_tests {
 
     /// R111: a member Core built held before the identity runtime was
     /// composed (`HoldUntilReleased`, staged as `ToolsNotPublished`) is
-    /// pending. The publication that clears its pending record releases that
-    /// hold exactly once; publishing for an identity that was not pending
-    /// releases nothing; a failed release keeps the identity pending with the
-    /// error, so a member left held is visible in its status.
+    /// pending while Core holds it. The publication releases that hold
+    /// exactly once; publishing for an identity Core does not hold releases
+    /// nothing; a failed release records the error, so a member left held is
+    /// visible in its status.
     #[tokio::test]
     async fn publishing_a_pending_identitys_tools_releases_its_run_start_hold()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -16323,7 +16510,7 @@ mod reset_reprofile_tests {
                     super::super::customizer_tools::CustomizerToolRegistry::new(),
                 ))
                 .await;
-            runtime.hold_member_build(&identity);
+            bridge.stage_hold(&identity);
             let draft = || AgentBuildDraft {
                 model: None,
                 system_prompt: None,
@@ -16397,7 +16584,7 @@ mod reset_reprofile_tests {
             compaction_curator: Default::default(),
         };
 
-        runtime.hold_member_build(&identity);
+        bridge.stage_hold(&identity);
         runtime
             .publish_customizer_tools(&identity, &mut draft)
             .await;

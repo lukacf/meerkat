@@ -272,7 +272,9 @@ async fn r111_a_build_before_the_runtime_is_bound_is_held_and_pending_on_the_run
         .await;
     assert_eq!(prepared, Ok(MemberBuildPrepared::HoldUntilReleased));
 
+    // Core stages the hold with the build.
     let core = Arc::new(HoldingCore::default());
+    core.stage_hold(&member_of(&alice));
     let (runtime, _registry) = runtime_with(&core, None).await?;
     preparer.bind(&runtime, None).await;
     let pending = runtime
@@ -302,7 +304,7 @@ async fn r111_the_composition_publishes_a_held_member_and_releases_its_hold_once
     let preparer = IdentityBuildPreparer::new(true);
     preparer.bind(&runtime, None).await;
 
-    // Bound, not composed yet: the build is held.
+    // Bound, not composed yet: the build is held, and Core stages the hold.
     let prepared = preparer
         .prepare_identity_member(
             &member_of(&alice),
@@ -312,6 +314,7 @@ async fn r111_the_composition_publishes_a_held_member_and_releases_its_hold_once
         )
         .await;
     assert_eq!(prepared, Ok(MemberBuildPrepared::HoldUntilReleased));
+    core.stage_hold(&member_of(&alice));
     assert_eq!(customizer.builds.load(Ordering::SeqCst), 0);
 
     runtime
@@ -382,9 +385,10 @@ async fn r109_after_the_composition_a_registered_identity_is_prepared_inline_and
 }
 
 /// R112: a preparation whose host build fails is refused retryable (the
-/// member stays dormant), and the identity's pending record keeps the typed
-/// reason: a delivery Core refused `HostPreparationPending` reports the
-/// host's artifact refusal, typed, never a generic retry.
+/// member stays dormant), and the customizer's failure is recorded with its
+/// typed reason: a delivery Core refused for the build preparation's retry
+/// (`BuildPreparationRetry`) reports the host's failure, typed, never a
+/// generic retry.
 #[tokio::test]
 async fn r112_a_failed_preparation_is_refused_retryable_and_a_delivery_reports_it_typed()
 -> TestResult {
@@ -420,8 +424,8 @@ async fn r112_a_failed_preparation_is_refused_retryable_and_a_delivery_reports_i
         &alice,
         BridgeAdmissionError::MemberWakeRefused {
             identity: member_of(&alice),
-            refusal: meerkat_mob::MemberWakeRefusal::HostPreparationPending,
-            detail: "host preparation pending".to_string(),
+            refusal: meerkat_mob::MemberWakeRefusal::BuildPreparationRetry,
+            detail: "build preparation retry".to_string(),
         },
     );
     match refused {
@@ -456,6 +460,7 @@ async fn an_unlisted_identitys_member_is_held_and_a_host_adopted_one_is_prepared
         )
         .await;
     assert_eq!(held, Ok(MemberBuildPrepared::HoldUntilReleased));
+    core.stage_hold(&member_of(&gone));
     let prepared = preparer
         .prepare_identity_member(
             &member_of(&adopted),

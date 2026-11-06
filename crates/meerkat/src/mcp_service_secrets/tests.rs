@@ -1183,4 +1183,329 @@ mod owner_updates {
         assert_eq!(entry.calls(), 1);
         assert_eq!(stored(&persistence, &reviewed).await, None);
     }
+
+    /// The records a host's administration recorder received.
+    #[derive(Default)]
+    struct RecordedAdministrations(std::sync::Mutex<Vec<meerkat_core::AdministrationRecord>>);
+
+    impl RecordedAdministrations {
+        fn take(&self) -> Vec<meerkat_core::AdministrationRecord> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    impl meerkat_core::AdministrationRecorder for RecordedAdministrations {
+        fn record(&self, record: meerkat_core::AdministrationRecord) {
+            self.0.lock().unwrap().push(record);
+        }
+    }
+
+    /// The administrator a host authenticated, in its own trust domain.
+    fn administrator() -> meerkat_core::PrincipalRef {
+        meerkat_core::PrincipalRef::in_domain(
+            meerkat_core::PrincipalKind::Human,
+            "admin-7",
+            meerkat_core::TrustDomainId::new("example-idp").expect("domain"),
+        )
+        .expect("qualified principal")
+    }
+
+    /// A host's entry check that admits its authenticated administrator,
+    /// logged in at `login`, and states them on the admission with the
+    /// host's recorder.
+    struct StatingEntry {
+        recorder: Arc<RecordedAdministrations>,
+        login: &'static str,
+    }
+
+    impl meerkat_core::AdministrationEntry for StatingEntry {
+        fn enter(
+            &self,
+        ) -> Result<meerkat_core::EnteredAdministration, meerkat_core::AdministrationEntryRefusal>
+        {
+            let administrator = meerkat_core::AdministeringPrincipal::new(administrator())
+                .expect("qualified administrator")
+                .with_authentication_scope(
+                    &meerkat_core::approval::consent::HostAuthenticationScope::new(self.login),
+                );
+            Ok(
+                meerkat_core::EnteredAdministration::admitted().administered_by(
+                    administrator,
+                    Arc::clone(&self.recorder) as Arc<dyn meerkat_core::AdministrationRecorder>,
+                ),
+            )
+        }
+    }
+
+    fn stating(
+        recorder: &Arc<RecordedAdministrations>,
+        login: &'static str,
+    ) -> Arc<dyn meerkat_core::AdministrationEntry> {
+        Arc::new(StatingEntry {
+            recorder: Arc::clone(recorder),
+            login,
+        })
+    }
+
+    fn login_digest(login: &str) -> meerkat_core::approval::decision::Sha256Digest {
+        meerkat_core::approval::consent::HostAuthenticationScope::new(login).digest()
+    }
+
+    /// Each update the host admitted with a stated administrator settles
+    /// one typed record to the recorder on its admission: the administrator,
+    /// the digest of their login, the exact slot set or removed, and how it
+    /// ended (committed, or unknown for a write that began and failed). A
+    /// refused update records nothing, and no record carries the value.
+    #[tokio::test]
+    async fn administration_admission_settles_to_the_host_recorder() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(temp.path());
+        let document = document_path(&storage);
+        let reviewed = search(&["--stdio"]);
+        McpRealmPersistTarget::new(&runtime(&document))
+            .add(reviewed.clone(), None)
+            .await
+            .unwrap();
+        let persistence = persistence();
+        let recorder = Arc::new(RecordedAdministrations::default());
+        let slot = reference("team", &reviewed);
+        let set_change = meerkat_core::AdministeredChange::McpServiceSecretSet {
+            realm: realm("team"),
+            server: "search".to_owned(),
+            env: SLOT.to_owned(),
+            meaning: slot.meaning().to_owned(),
+        };
+
+        // An admitted set.
+        set_mcp_service_secret_entered(
+            &storage,
+            &persistence,
+            &reviewed,
+            SLOT,
+            value("secret-value-canary"),
+            stating(&recorder, "login-1"),
+        )
+        .await
+        .expect("admitted set");
+        let records = recorder.take();
+        assert_eq!(records.len(), 1, "one record per admission");
+        let record = &records[0];
+        assert_eq!(record.administrator, administrator());
+        assert_eq!(
+            record.authentication_scope_digest,
+            Some(login_digest("login-1"))
+        );
+        assert_eq!(record.change.as_ref(), Some(&set_change));
+        assert_eq!(
+            record.outcome,
+            meerkat_core::AdministrationOutcome::Committed
+        );
+        assert!(record.admitted_at <= record.settled_at);
+        let rendered = serde_json::to_string(record).expect("encode");
+        assert!(
+            !rendered.contains("secret-value-canary") && !rendered.contains("login-1"),
+            "neither the value nor the login reaches the record: {rendered}"
+        );
+
+        // An admitted removal.
+        remove_mcp_service_secret_entered(
+            &storage,
+            &persistence,
+            &reviewed,
+            SLOT,
+            McpServiceSecretRemoval::Current,
+            stating(&recorder, "login-2"),
+        )
+        .await
+        .expect("admitted removal");
+        let records = recorder.take();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].change,
+            Some(meerkat_core::AdministeredChange::McpServiceSecretRemove {
+                realm: realm("team"),
+                server: "search".to_owned(),
+                env: SLOT.to_owned(),
+                meaning: slot.meaning().to_owned(),
+            })
+        );
+        assert_eq!(
+            records[0].outcome,
+            meerkat_core::AdministrationOutcome::Committed
+        );
+        assert_eq!(
+            records[0].authentication_scope_digest,
+            Some(login_digest("login-2"))
+        );
+
+        // A refused update admitted nothing and records nothing.
+        let refusing = HostEntry::new();
+        refusing.set_admin(false);
+        assert!(matches!(
+            set_mcp_service_secret_entered(
+                &storage,
+                &persistence,
+                &reviewed,
+                SLOT,
+                value("v2"),
+                refusing as Arc<dyn meerkat_core::AdministrationEntry>,
+            )
+            .await,
+            Err(McpServiceSecretUpdateError::NotAdmitted(_))
+        ));
+        assert!(recorder.take().is_empty());
+
+        // A write that began after its admission and failed: recorded, its
+        // outcome unknown.
+        let failing = meerkat_providers::auth_store::ProviderAuthPersistence::new(
+            Arc::new(FailingWrites(
+                meerkat_providers::auth_store::EphemeralTokenStore::new(),
+            )),
+            Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+        );
+        assert!(matches!(
+            set_mcp_service_secret_entered(
+                &storage,
+                &failing,
+                &reviewed,
+                SLOT,
+                value("v3"),
+                stating(&recorder, "login-3"),
+            )
+            .await,
+            Err(McpServiceSecretUpdateError::OutcomeUnknown(_))
+        ));
+        let records = recorder.take();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].change.as_ref(), Some(&set_change));
+        assert_eq!(
+            records[0].outcome,
+            meerkat_core::AdministrationOutcome::Unknown
+        );
+    }
+
+    /// An ephemeral store whose next write signals when it began and then
+    /// waits to be released.
+    struct GatedWrite {
+        inner: meerkat_providers::auth_store::EphemeralTokenStore,
+        began: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl TokenStore for GatedWrite {
+        async fn load(
+            &self,
+            key: &meerkat_core::auth::TokenKey,
+        ) -> Result<Option<meerkat_core::auth::PersistedTokens>, meerkat_core::auth::TokenStoreError>
+        {
+            self.inner.load(key).await
+        }
+        async fn save(
+            &self,
+            key: &meerkat_core::auth::TokenKey,
+            tokens: &meerkat_core::auth::PersistedTokens,
+        ) -> Result<(), meerkat_core::auth::TokenStoreError> {
+            let began = self.began.lock().unwrap().take();
+            if let Some(began) = began {
+                let _ = began.send(());
+            }
+            let release = self.release.lock().unwrap().take();
+            if let Some(release) = release {
+                let _ = release.await;
+            }
+            self.inner.save(key, tokens).await
+        }
+        async fn clear(
+            &self,
+            key: &meerkat_core::auth::TokenKey,
+        ) -> Result<(), meerkat_core::auth::TokenStoreError> {
+            self.inner.clear(key).await
+        }
+        async fn list(
+            &self,
+        ) -> Result<Vec<meerkat_core::auth::TokenKey>, meerkat_core::auth::TokenStoreError>
+        {
+            self.inner.list().await
+        }
+        fn backend_name(&self) -> &'static str {
+            "gated-write"
+        }
+    }
+
+    /// A caller that stops waiting after its update was admitted does not
+    /// lose the record: the credential mutation owner finishes the write,
+    /// and the record arrives when it settles, committed.
+    #[tokio::test]
+    async fn administration_admission_settles_to_the_host_recorder_after_the_caller_stopped_waiting()
+     {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(temp.path());
+        let document = document_path(&storage);
+        let reviewed = search(&["--stdio"]);
+        McpRealmPersistTarget::new(&runtime(&document))
+            .add(reviewed.clone(), None)
+            .await
+            .unwrap();
+        let (began, on_began) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let persistence = meerkat_providers::auth_store::ProviderAuthPersistence::new(
+            Arc::new(GatedWrite {
+                inner: meerkat_providers::auth_store::EphemeralTokenStore::new(),
+                began: std::sync::Mutex::new(Some(began)),
+                release: std::sync::Mutex::new(Some(released)),
+            }),
+            Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+        );
+        let recorder = Arc::new(RecordedAdministrations::default());
+        let caller = tokio::spawn({
+            let (storage, persistence) = (storage.clone(), persistence.clone());
+            let (reviewed, entry) = (reviewed.clone(), stating(&recorder, "login-1"));
+            async move {
+                set_mcp_service_secret_entered(
+                    &storage,
+                    &persistence,
+                    &reviewed,
+                    SLOT,
+                    value("v1"),
+                    entry,
+                )
+                .await
+            }
+        });
+
+        // The admitted write began; its caller stops waiting.
+        on_began.await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(
+            recorder.take().is_empty(),
+            "nothing is recorded before the update settles"
+        );
+
+        // The owner finishes the write, and the record arrives.
+        release.send(()).unwrap();
+        let records = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let records = recorder.take();
+                if !records.is_empty() {
+                    return records;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the settled update is recorded");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].administrator, administrator());
+        assert_eq!(
+            records[0].outcome,
+            meerkat_core::AdministrationOutcome::Committed
+        );
+        assert!(matches!(
+            records[0].change,
+            Some(meerkat_core::AdministeredChange::McpServiceSecretSet { .. })
+        ));
+        assert_eq!(stored(&persistence, &reviewed).await.as_deref(), Some("v1"));
+    }
 }

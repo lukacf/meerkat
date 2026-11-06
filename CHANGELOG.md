@@ -141,6 +141,11 @@ them.
   literals need it): only a catalog for a connection that delivers decision
   notices lists `decision/notice`.
 
+- `meerkat-core`: consent decisions keep the login they were decided in
+  (see Changed). `ApprovalConsentApprover` gains the public field
+  `authentication_scope_digest: Option<Sha256Digest>`, so code that builds
+  it literally must set it (`None` records no login, as before).
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -298,6 +303,29 @@ them.
   does not know reads as `unknown`) and `WireDecisionNoticePresentation`,
   and the `decision/notice` entry of the RPC notification catalog.
 
+- Credential and configuration administration admissions settle a typed
+  record to a recorder the host supplies. A host's `AdministrationEntry`
+  can state, on the admission it grants, the administrator it
+  authenticated (`EnteredAdministration::administered_by`, with an
+  `AdministeringPrincipal`: a qualified principal and optionally the digest
+  of their login) and its `AdministrationRecorder`. When the update
+  settles, its owner hands the recorder one `AdministrationRecord`, also
+  after the caller stopped waiting: the administrator, the login digest,
+  what changed (`AdministeredChange`: an MCP service secret set or removed,
+  an MCP OAuth client profile installed, replaced or removed, or a realm
+  configuration patch and the generation it published), whether it
+  committed or its outcome is unknown (`AdministrationOutcome`), and when.
+  The `_entered` forms record this way: `set_mcp_service_secret_entered`,
+  `remove_mcp_service_secret_entered`, the `_client_profile_entered`
+  updates, `ConfigRuntime::patch_entered` and
+  `McpRealmPersistTarget::add_entered`. No record carries a value or
+  secret: a client profile's record names its slot by the server name, the
+  realm and the credential binding, never by the server URL, which can
+  carry credentials. Core keeps no copy: the host keeps the record in its
+  own audit. An admission that states no administrator records nothing.
+  `HostAuthenticationScope::digest` is the one login digest form (`sha256:`
+  and the lowercase hex SHA-256 of the scope's text).
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
@@ -315,6 +343,13 @@ them.
   and asks for its claim again, and the loop takes the kind over once that
   executor ends. `DecisionExecutorLoop::start` refuses a candidate launch
   whatever kinds it registers. See Breaking for the change to `start`.
+
+- Consent decisions record a digest of the login they were decided in:
+  `consent.approver.authentication_scope_digest`, the digest of the decision
+  event's `HostAuthenticationScope`, never the scope itself. The qualified
+  decider stays in `consent.approver.principal`, which tells apart two trust
+  domains that issue the same id; `decision.actor` stays the bare id. A row
+  decided earlier reads with no digest (see Upgrade notes).
 
 ### Deprecated
 
@@ -422,6 +457,14 @@ them.
   states `[governance.decisions]`: 0.9.10 refuses a `[governance]` section
   with a `decisions` key, so a 0.9.10 process on the realm fails to load
   the realm's configuration document as a whole.
+
+- Consent rows and a rollback: a Core that predates
+  `consent.approver.authentication_scope_digest` still opens the approval
+  store and reads every row (it ignores the field, and the decision's actor
+  is still the approver's id, which it checks at load), but the rows it
+  writes lack the field, and `FileApprovalStore` rewrites every row on each
+  write, so its first write drops the login digests recorded until then.
+  Nothing else changes for it.
 
 ### Known limitations
 

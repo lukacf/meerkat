@@ -142,6 +142,7 @@ pub(super) async fn dispatch(
                 crate::rpc::workgraph_methods::WorkgraphSurface::Console {
                     authenticated_principal: None,
                     person: None,
+                    access: None,
                 },
                 method,
                 &params,

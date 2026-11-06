@@ -287,6 +287,17 @@ test("console contract documents the person-only quarantine review, goal confirm
   assert.equal(refusal?.data?.kind, "person_authentication_required");
 });
 
+test("console contract documents a login that ended before a decision was taken up as -32056", () => {
+  const schema = JSON.parse(
+    readFileSync(resolve(process.cwd(), "../docs/rct/console-rest-sse-contract-v0.5.0.json"), "utf8"),
+  ) as { surfaces: { rpc: { methods: Record<string, { errors?: Array<{ codes?: number[] }> }> } } };
+  for (const name of ["meta/gating/decide", "meta/memory/quarantine/decide", "meta/workgraph/goal/confirm"]) {
+    const codes = (schema.surfaces.rpc.methods[name]?.errors || []).flatMap((entry) => entry.codes || []);
+    assert.equal(codes.includes(-32057), true, name);
+    assert.equal(codes.includes(-32056), true, name);
+  }
+});
+
 test("console contract route and method names stay synchronized with Rust http console source", () => {
   const schema = JSON.parse(
     readFileSync(resolve(process.cwd(), "../docs/rct/console-rest-sse-contract-v0.5.0.json"), "utf8"),

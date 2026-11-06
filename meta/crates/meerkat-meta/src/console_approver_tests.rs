@@ -7,9 +7,10 @@
 //! approver.
 //!
 //! The same rule holds for a memory quarantine review and a WorkGraph goal
-//! confirmation. A WorkGraph claim is owned by its caller: only the claim's
-//! owner releases it, and an open Console's caller without a token claims
-//! nothing.
+//! confirmation, which also re-read the caller's grants right before they
+//! are applied. A WorkGraph claim is owned by its caller: only the claim's
+//! owner, or an access admin, releases it, and an open Console's caller
+//! without a token claims nothing.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -337,8 +338,8 @@ async fn shared_account_token_cannot_decide() {
 
 /// Row 4. A decide checks its person again after its last await, right
 /// before the decision is applied: once the person's Console sessions were
-/// revoked while the decide waited for the gating owner, it is refused and
-/// the entry stays pending.
+/// revoked while the decide held the gating owner, it is refused and the
+/// entry stays pending.
 #[tokio::test]
 async fn decide_rechecks_human_after_last_await() {
     let state_dir = tempfile::tempdir().expect("state directory");
@@ -845,8 +846,9 @@ async fn claim_owner_is_caller() {
     assert!(accepted["error"].is_null(), "{accepted}");
 }
 
-/// Row 9. Only a claim's owner releases it from the Console: another caller
-/// is refused and the claim stays; the owner releases it.
+/// Row 9. A claim's owner releases it from the Console: a caller who is
+/// neither its owner nor an access admin is refused and the claim stays; the
+/// owner releases it.
 #[tokio::test]
 async fn release_by_non_owner_refused() {
     let console =
@@ -923,4 +925,840 @@ async fn anonymous_claim_refused() {
         "{answer}"
     );
     assert_eq!(owner, Value::Null, "{answer}");
+}
+
+// What the console offers to whom, the grants re-read after the last await,
+// the access admin's release, and pins for what already holds.
+
+/// Another signed-in person, and an access admin.
+const CAROL: &str = "carol@example.test";
+const ROOT: &str = "root@example.test";
+
+/// The enforced Console's decisions, also admitting `subjects` (the
+/// fixture admits BOB and `svc:robot` only).
+fn enforced_admitting(subjects: &[&str]) -> RuntimeDecisionState {
+    let mut decisions = enforced();
+    decisions
+        .auth
+        .email_allowlist
+        .extend(subjects.iter().map(|subject| (*subject).to_string()));
+    decisions
+}
+
+/// A person's verified token for `email`, with a subject of its own.
+fn person_token_for(email: &str) -> String {
+    token(
+        json!({ "sub": format!("oidc-sub-{email}"), "email": email, "provider": "google_oauth" }),
+        Some(now_seconds() + 3600),
+    )
+}
+
+/// An enforcing access configuration: `admins` administer access, and every
+/// caller may read and manage the work graph.
+fn workgraph_access_config(admins: &[&str]) -> crate::access::AccessControlConfig {
+    crate::access::AccessControlConfig {
+        enabled: true,
+        admins: admins.iter().map(|admin| (*admin).to_string()).collect(),
+        rules: vec![crate::access::AccessRule {
+            id: "workgraph".to_string(),
+            actions: vec![
+                crate::access::ACTION_WORKGRAPH_VIEW.to_string(),
+                crate::access::ACTION_WORKGRAPH_MANAGE.to_string(),
+            ],
+            ..crate::access::AccessRule::default()
+        }],
+        ..crate::access::AccessControlConfig::default()
+    }
+}
+
+fn workgraph_access(admins: &[&str]) -> AccessController {
+    AccessController::new(workgraph_access_config(admins)).expect("access controller")
+}
+
+/// An access controller that enforces nothing: an open Console verifies a
+/// volunteered token only with one.
+fn non_enforcing_access() -> AccessController {
+    AccessController::new(crate::access::AccessControlConfig::default()).expect("access controller")
+}
+
+impl ApprovalConsole {
+    /// Claim `id` at `revision` with `bearer`: the claimed revision.
+    async fn claim_as(&self, bearer: &str, id: &str, revision: u64) -> u64 {
+        let claimed = console_rpc_as(
+            &self.app,
+            Some(bearer),
+            CLAIM,
+            json!({ "id": id, "expected_revision": revision }),
+        )
+        .await;
+        claimed["result"]["item"]["revision"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("the claim: {claimed}"))
+    }
+
+    /// The work item `id` as the work graph holds it.
+    async fn work_item(&self, id: &str) -> Value {
+        let id: meerkat::WorkItemId = serde_json::from_value(json!(id)).expect("item id");
+        let item = self.workgraph.get(None, None, id).await.expect("work item");
+        serde_json::to_value(item).expect("item json")
+    }
+
+    /// The break-glass record of the last release of `id` the work graph's
+    /// events hold, if one names it.
+    async fn release_audit(&self, id: &str) -> Option<Value> {
+        let events = self
+            .workgraph
+            .events(meerkat::WorkGraphEventFilter::default())
+            .await
+            .expect("work graph events");
+        events
+            .into_iter()
+            .rev()
+            .find(|event| {
+                event.kind == meerkat::WorkGraphEventKind::Released
+                    && event
+                        .item_id
+                        .as_ref()
+                        .is_some_and(|item| item.to_string() == id)
+            })
+            .map(|event| event.payload["break_glass"].clone())
+            .filter(|record| !record.is_null())
+    }
+}
+
+/// Pin. A login that expires (by `exp`, not by a
+/// revocation) while the decide holds the gating owner is refused like a
+/// revoked one, and the entry stays pending.
+#[tokio::test]
+async fn login_expiring_while_waiting_is_refused() {
+    let console = ApprovalConsole::start("approvers-expiry", enforced(), detached(), None).await;
+    let pending_id = console.pending(None).await;
+    // The verifier accepts a token through second `exp + 30` and refuses it
+    // from `exp + 31`: this one has ten seconds left.
+    let expiry = now_seconds() - 20;
+    let mut claims = human_claims();
+    claims["sid"] = json!("login-expiring");
+    let bearer = token(claims, Some(expiry));
+    let hold = super::console_decide_holds::ConsoleDecideHold::install(&pending_id);
+    let decide = tokio::spawn({
+        let app = console.app.clone();
+        let pending_id = pending_id.clone();
+        async move {
+            console_rpc_as(
+                &app,
+                Some(&bearer),
+                DECIDE,
+                json!({ "pending_id": pending_id, "decision": "approve" }),
+            )
+            .await
+        }
+    });
+    let reached = tokio::time::timeout(Duration::from_secs(30), hold.reached()).await;
+    while now_seconds() < expiry + 32 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    hold.release();
+    let answer = tokio::time::timeout(Duration::from_secs(30), decide).await;
+    let pending = console.still_pending(&pending_id).await;
+    console.stop().await;
+
+    reached.expect("the decide reached the gating owner");
+    let answer = answer
+        .expect("the decide answered")
+        .expect("the decide task");
+    assert_eq!(
+        refusal_kind(&answer),
+        &json!("approver_unauthenticated"),
+        "{answer}"
+    );
+    assert!(pending, "{answer}");
+}
+
+/// Pin. An `oidc` issuer's tokens name persons
+/// unless its configuration declares `accounts: "shared"`: the default and
+/// `"personal"` decide, `"shared"` decides nothing. The issuer's key is made
+/// for the row.
+#[tokio::test]
+async fn oidc_accounts_decide_by_kind() {
+    use base64::Engine as _;
+    use ring::signature::KeyPair as _;
+    const ISSUER: &str = "https://oidc.approvers.example";
+    const AUDIENCE: &str = "approvers-console";
+    const KID: &str = "ec-approvers";
+    let rng = ring::rand::SystemRandom::new();
+    let algorithm = &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING;
+    let pkcs8 = ring::signature::EcdsaKeyPair::generate_pkcs8(algorithm, &rng).expect("P-256 key");
+    let pair = ring::signature::EcdsaKeyPair::from_pkcs8(algorithm, pkcs8.as_ref(), &rng)
+        .expect("P-256 key pair");
+    // The public key is an uncompressed point: 0x04, then x and y.
+    let point = pair.public_key().as_ref();
+    let coordinate = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let jwks = json!({ "keys": [{
+        "kid": KID, "kty": "EC", "alg": "ES256", "crv": "P-256",
+        "x": coordinate(&point[1..33]), "y": coordinate(&point[33..65]),
+    }] });
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+    header.kid = Some(KID.to_string());
+    let bearer = jsonwebtoken::encode(
+        &header,
+        &json!({
+            "sub": "sub-alice",
+            "email": "alice@example.com",
+            "email_verified": true,
+            "iss": ISSUER,
+            "aud": AUDIENCE,
+            "sid": "login-oidc",
+            "exp": now_seconds() + 3600,
+        }),
+        &jsonwebtoken::EncodingKey::from_ec_der(pkcs8.as_ref()),
+    )
+    .expect("ES256 token");
+    let decisions = |accounts: Option<&str>| {
+        let mut config = json!({
+            "provider": "oidc",
+            "issuer": ISSUER,
+            "audience": AUDIENCE,
+            "jwks_json": jwks.clone(),
+            "email_allowlist": ["alice@example.com"],
+        });
+        if let Some(accounts) = accounts {
+            config["accounts"] = json!(accounts);
+        }
+        crate::console_auth_config::parse_console_auth_config(&config).expect("oidc auth config")
+    };
+    let mut outcomes = Vec::new();
+    for (name, accounts, decides) in [
+        ("approvers-oidc-default", None, true),
+        ("approvers-oidc-personal", Some("personal"), true),
+        ("approvers-oidc-shared", Some("shared"), false),
+    ] {
+        let console = ApprovalConsole::start(name, decisions(accounts), detached(), None).await;
+        let pending_id = console.pending(None).await;
+        let answer = console.approve(Some(&bearer), &pending_id).await;
+        let pending = console.still_pending(&pending_id).await;
+        console.stop().await;
+        outcomes.push((name, decides, answer, pending));
+    }
+
+    for (name, decides, answer, pending) in outcomes {
+        if decides {
+            assert!(answer["error"].is_null(), "{name}: {answer}");
+            assert!(!pending, "{name}: {answer}");
+        } else {
+            assert_eq!(
+                refusal_kind(&answer),
+                &json!("approver_unauthenticated"),
+                "{name}: {answer}"
+            );
+            assert!(pending, "{name}: {answer}");
+        }
+    }
+}
+
+/// Pin. A service token that carries a subject
+/// (`actor_type: "service"`) is no person: it decides nothing.
+#[tokio::test]
+async fn service_token_with_subject_cannot_decide() {
+    let console =
+        ApprovalConsole::start("approvers-service-subject", enforced(), detached(), None).await;
+    let pending_id = console.pending(None).await;
+    let bearer = token(
+        json!({ "sub": "svc:robot", "email": "svc:robot", "actor_type": "service" }),
+        Some(now_seconds() + 3600),
+    );
+    let answer = console.approve(Some(&bearer), &pending_id).await;
+    let pending = console.still_pending(&pending_id).await;
+    console.stop().await;
+
+    assert_eq!(
+        refusal_kind(&answer),
+        &json!("approver_unauthenticated"),
+        "{answer}"
+    );
+    assert!(pending, "{answer}");
+}
+
+/// Pin. An open Console with an access controller
+/// verifies a volunteered token: a person's decides as the person, and a
+/// shared-account token, like no token, decides nothing.
+#[tokio::test]
+async fn open_console_volunteered_tokens_decide_by_kind() {
+    let console = ApprovalConsole::start(
+        "approvers-open-volunteered",
+        open(),
+        detached(),
+        Some(non_enforcing_access()),
+    )
+    .await;
+    let anonymous_pending = console.pending(None).await;
+    let anonymous = console.approve(None, &anonymous_pending).await;
+    let anonymous_still = console.still_pending(&anonymous_pending).await;
+    let person_pending = console.pending(None).await;
+    let person = console
+        .approve(Some(&person_token()), &person_pending)
+        .await;
+    let person_still = console.still_pending(&person_pending).await;
+    let audit = console.decision_audit(&person_pending).await;
+    console.stop().await;
+
+    let issuer = "http://127.0.0.1/meta-gateway";
+    let secret = "shared-front-secret";
+    let mut shared_decisions = crate::console_auth_config::parse_console_auth_config(&json!({
+        "provider": "jwt",
+        "shared_secret": secret,
+        "issuer": issuer,
+        "audience": "shared-front",
+        "email_allowlist": ["owner@example.test"],
+    }))
+    .expect("auth config");
+    shared_decisions.console.require_app_auth = false;
+    let shared_token = jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+        &json!({
+            "iss": issuer,
+            "aud": "shared-front",
+            "sub": "owner@example.test",
+            "email": "owner@example.test",
+            "email_verified": true,
+            "sid": "login-1",
+            "exp": now_seconds() + 3600,
+        }),
+        &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
+    )
+    .expect("signed fixture JWT");
+    let shared_console = ApprovalConsole::start(
+        "approvers-open-shared",
+        shared_decisions,
+        detached(),
+        Some(non_enforcing_access()),
+    )
+    .await;
+    let shared_pending = shared_console.pending(None).await;
+    let shared = shared_console
+        .approve(Some(&shared_token), &shared_pending)
+        .await;
+    let shared_still = shared_console.still_pending(&shared_pending).await;
+    shared_console.stop().await;
+
+    assert_eq!(
+        refusal_kind(&anonymous),
+        &json!("approver_unauthenticated"),
+        "{anonymous}"
+    );
+    assert!(anonymous_still, "{anonymous}");
+    assert!(person["error"].is_null(), "{person}");
+    assert!(!person_still, "{person}");
+    let audit = audit.unwrap_or_else(|| panic!("the decision's audit entry: {person}"));
+    assert_eq!(audit.detail["deciding_principal"], json!(BOB), "{audit:?}");
+    assert_eq!(
+        audit.detail["deciding_assurance"],
+        json!("person_authenticated"),
+        "{audit:?}"
+    );
+    assert_eq!(
+        refusal_kind(&shared),
+        &json!("approver_unauthenticated"),
+        "{shared}"
+    );
+    assert!(shared_still, "{shared}");
+}
+
+/// `meta/capabilities` lists a
+/// decision (a gate, a quarantine review, a goal confirmation) only to a
+/// person, and a claim and its release only to a caller with a principal:
+/// nobody else could ever use them.
+#[tokio::test]
+async fn capabilities_offer_decisions_only_to_a_person() {
+    let listed = |answer: Value| -> BTreeSet<String> {
+        answer["result"]["methods"]
+            .as_array()
+            .unwrap_or_else(|| panic!("the capabilities: {answer}"))
+            .iter()
+            .filter_map(Value::as_str)
+            .map(ToString::to_string)
+            .collect()
+    };
+    let memory = tempfile::tempdir().expect("memory directory");
+    let (store, _, _) = quarantined_record(memory.path()).await;
+    let console = ApprovalConsole::start_with_memory(
+        "approvers-capabilities",
+        enforced(),
+        detached(),
+        None,
+        Some(store),
+    )
+    .await;
+    let expiry = now_seconds() + 3600;
+    let mut callers = Vec::new();
+    for (label, bearer) in [
+        ("person", person_token()),
+        (
+            "service",
+            token(json!({ "email": "svc:robot" }), Some(expiry)),
+        ),
+        (
+            "no subject",
+            token(
+                json!({ "email": BOB, "provider": "google_oauth" }),
+                Some(expiry),
+            ),
+        ),
+    ] {
+        let answer =
+            console_rpc_as(&console.app, Some(&bearer), "meta/capabilities", json!({})).await;
+        callers.push((label, listed(answer)));
+    }
+    console.stop().await;
+    let open_memory = tempfile::tempdir().expect("memory directory");
+    let (open_store, _, _) = quarantined_record(open_memory.path()).await;
+    let open_console = ApprovalConsole::start_with_memory(
+        "approvers-capabilities-open",
+        open(),
+        detached(),
+        None,
+        Some(open_store),
+    )
+    .await;
+    let anonymous = console_rpc_as(&open_console.app, None, "meta/capabilities", json!({})).await;
+    callers.push(("anonymous", listed(anonymous)));
+    open_console.stop().await;
+
+    for (label, methods) in &callers {
+        let person = *label == "person";
+        let identified = *label != "anonymous";
+        for method in [DECIDE, QUARANTINE_DECIDE, CONFIRM] {
+            assert_eq!(
+                methods.contains(method),
+                person,
+                "{label}: {method}: {methods:?}"
+            );
+        }
+        for method in [CLAIM, RELEASE] {
+            assert_eq!(
+                methods.contains(method),
+                identified,
+                "{label}: {method}: {methods:?}"
+            );
+        }
+    }
+}
+
+/// A goal confirmation re-reads the caller's grants
+/// after its last await: once `workgraph.manage` was withdrawn while the
+/// confirmation waited on its evidence read, it is refused (`-32030`) and
+/// the goal stays as it was.
+#[tokio::test]
+async fn goal_confirm_grant_removed_while_waiting_is_refused() {
+    let access = workgraph_access(&[ROOT]);
+    let console = ApprovalConsole::start(
+        "approvers-confirm-grant",
+        enforced(),
+        detached(),
+        Some(access.clone()),
+    )
+    .await;
+    let (binding_id, revision) = console.goal().await;
+    let hold = super::console_decide_holds::ConsoleDecideHold::install(&binding_id);
+    let confirm = tokio::spawn({
+        let app = console.app.clone();
+        let bearer = person_token();
+        let binding_id = binding_id.clone();
+        async move {
+            console_rpc_as(
+                &app,
+                Some(&bearer),
+                CONFIRM,
+                json!({ "binding_id": binding_id, "expected_revision": revision }),
+            )
+            .await
+        }
+    });
+    let reached = tokio::time::timeout(Duration::from_secs(30), hold.reached()).await;
+    let withdrawn = access.upsert_rule(crate::access::AccessRule {
+        id: "workgraph".to_string(),
+        actions: vec![crate::access::ACTION_WORKGRAPH_VIEW.to_string()],
+        ..crate::access::AccessRule::default()
+    });
+    hold.release();
+    let answer = tokio::time::timeout(Duration::from_secs(30), confirm).await;
+    let after = console.goal_revision(&binding_id).await;
+    console.stop().await;
+
+    reached.expect("the confirmation reached its last await");
+    withdrawn.expect("withdraw workgraph.manage");
+    let answer = answer
+        .expect("the confirmation answered")
+        .expect("the confirmation task");
+    assert_eq!(answer["error"]["code"], json!(-32030), "{answer}");
+    assert_eq!(after, revision, "{answer}");
+}
+
+/// A quarantine review re-reads the caller's grants
+/// right before it is handed to the store: once the reviewer grant was
+/// withdrawn while the review waited, it is refused (`-32030`) and the
+/// record stays quarantined.
+#[tokio::test]
+async fn quarantine_grant_removed_while_waiting_is_refused() {
+    use crate::access::{
+        ACTION_AGENT_MEMORY_READ, ACTION_AGENT_MEMORY_WRITE, ACTION_AGENT_VIEW,
+        ACTION_MEMORY_QUARANTINE_REVIEW,
+    };
+    let reviewer = |actions: &[&str]| crate::access::AccessRule {
+        id: "reviewer".to_string(),
+        actions: actions.iter().map(|action| (*action).to_string()).collect(),
+        ..crate::access::AccessRule::default()
+    };
+    let access = AccessController::new(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec![ROOT.to_string()],
+        rules: vec![reviewer(&[
+            ACTION_MEMORY_QUARANTINE_REVIEW,
+            ACTION_AGENT_VIEW,
+            ACTION_AGENT_MEMORY_READ,
+            ACTION_AGENT_MEMORY_WRITE,
+        ])],
+        ..crate::access::AccessControlConfig::default()
+    })
+    .expect("access controller");
+    let memory = tempfile::tempdir().expect("memory directory");
+    let (store, memory_id, hash) = quarantined_record(memory.path()).await;
+    let console = ApprovalConsole::start_with_memory(
+        "approvers-quarantine-grant",
+        enforced(),
+        detached(),
+        Some(access.clone()),
+        Some(store.clone()),
+    )
+    .await;
+    let hold = super::console_decide_holds::ConsoleDecideHold::install(&memory_id);
+    let decide = tokio::spawn({
+        let app = console.app.clone();
+        let bearer = person_token();
+        let release = quarantine_release(&memory_id, &hash);
+        async move { console_rpc_as(&app, Some(&bearer), QUARANTINE_DECIDE, release).await }
+    });
+    let reached = tokio::time::timeout(Duration::from_secs(30), hold.reached()).await;
+    let withdrawn = access.upsert_rule(reviewer(&[
+        ACTION_AGENT_VIEW,
+        ACTION_AGENT_MEMORY_READ,
+        ACTION_AGENT_MEMORY_WRITE,
+    ]));
+    hold.release();
+    let answer = tokio::time::timeout(Duration::from_secs(30), decide).await;
+    let record = store
+        .record_by_id("default", &memory_id)
+        .await
+        .expect("record read")
+        .expect("the record");
+    console.stop().await;
+
+    reached.expect("the review reached its last step");
+    withdrawn.expect("withdraw the reviewer grant");
+    let answer = answer
+        .expect("the review answered")
+        .expect("the review task");
+    assert_eq!(answer["error"]["code"], json!(-32030), "{answer}");
+    assert_eq!(record.status.kind_str(), "quarantined", "{answer}");
+}
+
+/// An access admin releases someone else's claim from
+/// the Console: the item returns to the pool (open, unclaimed), and the work
+/// graph's Released event records the admin and the claim it released.
+#[tokio::test]
+async fn admin_releases_someone_elses_claim() {
+    let console = ApprovalConsole::start(
+        "approvers-admin-release",
+        enforced_admitting(&[ROOT]),
+        detached(),
+        Some(workgraph_access(&[ROOT])),
+    )
+    .await;
+    let (id, revision) = console.item().await;
+    let claimed = console.claim_as(&person_token(), &id, revision).await;
+    let released = console_rpc_as(
+        &console.app,
+        Some(&person_token_for(ROOT)),
+        RELEASE,
+        json!({ "id": id, "expected_revision": claimed }),
+    )
+    .await;
+    let item = console.work_item(&id).await;
+    let audit = console.release_audit(&id).await;
+    console.stop().await;
+
+    assert!(released["error"].is_null(), "{released}");
+    assert_eq!(item["status"], json!("open"), "{item}");
+    assert_eq!(item["claim"], Value::Null, "{item}");
+    let audit = audit.unwrap_or_else(|| panic!("the release's break-glass record: {released}"));
+    assert_eq!(audit["principal"], json!(ROOT), "{audit}");
+    assert_eq!(
+        audit["released_claim"]["owner"]["key"],
+        json!({ "kind": "principal", "id": BOB }),
+        "{audit}"
+    );
+}
+
+/// A claim an earlier Console made for its default
+/// owner (`console-ops-lead`, which nobody signs in as) is released by an
+/// access admin, and the Released event names that owner.
+#[tokio::test]
+async fn admin_releases_a_legacy_claim() {
+    let console = ApprovalConsole::start(
+        "approvers-admin-legacy",
+        enforced_admitting(&[ROOT]),
+        detached(),
+        Some(workgraph_access(&[ROOT])),
+    )
+    .await;
+    let (id, revision) = console.item().await;
+    let legacy: meerkat::ClaimWorkItemRequest = serde_json::from_value(json!({
+        "id": id,
+        "expected_revision": revision,
+        "owner": { "key": { "kind": "principal", "id": "console-ops-lead" } },
+    }))
+    .expect("claim request");
+    let claimed = console
+        .workgraph
+        .claim(legacy)
+        .await
+        .expect("legacy claim")
+        .revision;
+    let released = console_rpc_as(
+        &console.app,
+        Some(&person_token_for(ROOT)),
+        RELEASE,
+        json!({ "id": id, "expected_revision": claimed }),
+    )
+    .await;
+    let item = console.work_item(&id).await;
+    let audit = console.release_audit(&id).await;
+    console.stop().await;
+
+    assert!(released["error"].is_null(), "{released}");
+    assert_eq!(item["status"], json!("open"), "{item}");
+    assert_eq!(item["claim"], Value::Null, "{item}");
+    let audit = audit.unwrap_or_else(|| panic!("the release's break-glass record: {released}"));
+    assert_eq!(audit["principal"], json!(ROOT), "{audit}");
+    assert_eq!(
+        audit["released_claim"]["owner"]["key"],
+        json!({ "kind": "principal", "id": "console-ops-lead" }),
+        "{audit}"
+    );
+}
+
+/// Pin. A signed-in person who is no access admin does
+/// not release someone else's claim (`-32030`), and the claim stays.
+#[tokio::test]
+async fn non_admin_release_of_someone_elses_claim_is_refused() {
+    let console = ApprovalConsole::start(
+        "approvers-non-admin-release",
+        enforced_admitting(&[CAROL, ROOT]),
+        detached(),
+        Some(workgraph_access(&[ROOT])),
+    )
+    .await;
+    let (id, revision) = console.item().await;
+    let claimed = console.claim_as(&person_token(), &id, revision).await;
+    let refused = console_rpc_as(
+        &console.app,
+        Some(&person_token_for(CAROL)),
+        RELEASE,
+        json!({ "id": id, "expected_revision": claimed }),
+    )
+    .await;
+    let owner = console.claim_owner(&id).await;
+    console.stop().await;
+
+    assert_eq!(refused["error"]["code"], json!(-32030), "{refused}");
+    assert_eq!(
+        owner,
+        json!({ "kind": "principal", "id": BOB }),
+        "{refused}"
+    );
+}
+
+/// The admin check reads the access configuration
+/// committed after the release's last await: an admin whose administration
+/// passed to someone else while the release waited on its item read is
+/// refused (`-32030`), and the claim stays.
+#[tokio::test]
+async fn admin_release_rechecks_admin_after_last_await() {
+    let access = workgraph_access(&[ROOT]);
+    let console = ApprovalConsole::start(
+        "approvers-admin-recheck",
+        enforced_admitting(&[CAROL, ROOT]),
+        detached(),
+        Some(access.clone()),
+    )
+    .await;
+    let (id, revision) = console.item().await;
+    let claimed = console.claim_as(&person_token(), &id, revision).await;
+    let hold = super::console_decide_holds::ConsoleDecideHold::install(&id);
+    let release = tokio::spawn({
+        let app = console.app.clone();
+        let bearer = person_token_for(ROOT);
+        let id = id.clone();
+        async move {
+            console_rpc_as(
+                &app,
+                Some(&bearer),
+                RELEASE,
+                json!({ "id": id, "expected_revision": claimed }),
+            )
+            .await
+        }
+    });
+    let reached = tokio::time::timeout(Duration::from_secs(30), hold.reached()).await;
+    // An enforcing configuration keeps an admin: administration passes on.
+    let handed_over = access.replace_config(workgraph_access_config(&[CAROL]));
+    hold.release();
+    let answer = tokio::time::timeout(Duration::from_secs(30), release).await;
+    let owner = console.claim_owner(&id).await;
+    console.stop().await;
+
+    reached.expect("the release read its item");
+    handed_over.expect("hand administration over");
+    let answer = answer
+        .expect("the release answered")
+        .expect("the release task");
+    assert_eq!(answer["error"]["code"], json!(-32030), "{answer}");
+    assert_eq!(owner, json!({ "kind": "principal", "id": BOB }), "{answer}");
+}
+
+/// Pin. An owner that names the caller but carries
+/// a display name is refused (`-32602`): a free name could misattribute the
+/// claim.
+#[tokio::test]
+async fn claim_owner_with_display_name_is_refused() {
+    let console =
+        ApprovalConsole::start("approvers-claim-display-name", enforced(), detached(), None).await;
+    let (id, revision) = console.item().await;
+    let refused = console_rpc_as(
+        &console.app,
+        Some(&person_token()),
+        CLAIM,
+        json!({
+            "id": id,
+            "expected_revision": revision,
+            "owner": { "kind": "principal", "id": BOB, "display_name": "Bob" },
+        }),
+    )
+    .await;
+    let owner = console.claim_owner(&id).await;
+    console.stop().await;
+
+    assert_eq!(refused["error"]["code"], json!(-32602), "{refused}");
+    assert_eq!(owner, Value::Null, "{refused}");
+}
+
+/// Pin. Any identified caller claims as itself: a
+/// service token's claim is owned by the service's principal.
+#[tokio::test]
+async fn service_token_claims_as_itself() {
+    let console =
+        ApprovalConsole::start("approvers-claim-service", enforced(), detached(), None).await;
+    let (id, revision) = console.item().await;
+    let service = token(json!({ "email": "svc:robot" }), Some(now_seconds() + 3600));
+    let claimed = console_rpc_as(
+        &console.app,
+        Some(&service),
+        CLAIM,
+        json!({ "id": id, "expected_revision": revision }),
+    )
+    .await;
+    let owner = console.claim_owner(&id).await;
+    console.stop().await;
+
+    assert!(claimed["error"].is_null(), "{claimed}");
+    assert_eq!(
+        owner,
+        json!({ "kind": "principal", "id": "svc:robot" }),
+        "{claimed}"
+    );
+}
+
+/// Pin. An open Console's caller without a token
+/// releases nothing (`person_authentication_required`), and the claim stays.
+#[tokio::test]
+async fn anonymous_release_refused() {
+    let console = ApprovalConsole::start(
+        "approvers-release-anonymous",
+        open(),
+        detached(),
+        Some(non_enforcing_access()),
+    )
+    .await;
+    let (id, revision) = console.item().await;
+    let claimed = console.claim_as(&person_token(), &id, revision).await;
+    let refused = console_rpc_as(
+        &console.app,
+        None,
+        RELEASE,
+        json!({ "id": id, "expected_revision": claimed }),
+    )
+    .await;
+    let owner = console.claim_owner(&id).await;
+    console.stop().await;
+
+    assert_eq!(
+        refusal_kind(&refused),
+        &json!("person_authentication_required"),
+        "{refused}"
+    );
+    assert_eq!(
+        owner,
+        json!({ "kind": "principal", "id": BOB }),
+        "{refused}"
+    );
+}
+
+/// Pin. A release is bound to the revision it
+/// names: after the owner released and someone else claimed the item, a
+/// release at the old revision is a stale-revision conflict, and the new
+/// claim stays.
+#[tokio::test]
+async fn release_is_bound_to_its_revision() {
+    let console = ApprovalConsole::start(
+        "approvers-release-revision",
+        enforced_admitting(&[CAROL]),
+        detached(),
+        None,
+    )
+    .await;
+    let (id, revision) = console.item().await;
+    let bob = person_token();
+    let first = console.claim_as(&bob, &id, revision).await;
+    let released = console_rpc_as(
+        &console.app,
+        Some(&bob),
+        RELEASE,
+        json!({ "id": id, "expected_revision": first }),
+    )
+    .await;
+    let released_revision = released["result"]["item"]["revision"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the release: {released}"));
+    console
+        .claim_as(&person_token_for(CAROL), &id, released_revision)
+        .await;
+    let stale = console_rpc_as(
+        &console.app,
+        Some(&bob),
+        RELEASE,
+        json!({ "id": id, "expected_revision": first }),
+    )
+    .await;
+    let owner = console.claim_owner(&id).await;
+    console.stop().await;
+
+    assert_eq!(
+        refusal_kind(&stale),
+        &json!("workgraph_conflict"),
+        "{stale}"
+    );
+    assert_eq!(
+        owner,
+        json!({ "kind": "principal", "id": CAROL }),
+        "{stale}"
+    );
 }

@@ -407,16 +407,20 @@ The stock console decides as the signed-in person: its decisions name no
 approver, and the console takes the approver from the connection (see
 [Gating](/concepts/gating)). When `meta/console/whoami` reports a caller that is
 not a person (no token on an open console, a service token, a token that names
-no human, or a shared-account token), the inbox shows requests read-only: such
-a caller can read them but not decide them. A request pinned to an approver id
-is decided by a person who holds that id through the access configuration's
-`approvers` bindings.
+no human, or a shared-account token), the inbox shows requests read-only and
+says to sign in as yourself to decide: such a caller can read them but not
+decide them. A request pinned to an approver id is decided by a person who
+holds that id through the access configuration's `approvers` bindings.
 
 The same holds for memory quarantine reviews and WorkGraph goal confirmations:
 the console offers them only to a signed-in person. A WorkGraph claim is owned
 by the caller who makes it, so the WorkGraph panel offers Claim only to a
-caller with a token and Release only on the caller's own claims. Release
-someone else's claim from the host's RPC gateway, or let its lease end.
+caller with a token, and Release on the caller's own claims and, to an access
+admin, on anyone's: the work graph records an admin's release with the admin
+and the claim released. Claims the stock console makes carry no lease, so
+someone else's claim ends when an access admin releases it, when the host
+releases it on its stdio RPC gateway (`rpc_gateway`; `meta_gateway` serves
+none), or when its item is closed.
 
 Configure action tiers through the host's gating configuration. For SDK-launched
 stdio gateways, see [`gating_config_path`](/reference/configuration#sdk-and-gateway-runtime-options).

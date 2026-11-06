@@ -116,12 +116,25 @@ export interface WorkGraphClaimedItem {
 }
 
 /// Whether `principal` owns the claim on `item`. The gateway owns a console
-/// claim by its caller's principal and releases it only for that owner;
-/// no principal owns nothing.
+/// claim by its caller's principal; no principal owns nothing.
 export function workGraphClaimOwnedBy(
   item: WorkGraphClaimedItem,
   principal: string | undefined,
 ): boolean {
   const key = item.claim?.owner?.key;
   return Boolean(principal) && key?.kind === "principal" && key.id === principal;
+}
+
+/// Whether the caller may release the claim on `item` from the console: the
+/// claim's owner may, and so may an access admin (a caller with a principal
+/// whom `whoami` reports as able to administer access), whose release the
+/// gateway records with the claim it released. Nobody releases an item
+/// without a claim.
+export function workGraphMayRelease(
+  item: WorkGraphClaimedItem,
+  caller: { principal?: string; canAdminister?: boolean },
+): boolean {
+  if (!item.claim) return false;
+  return workGraphClaimOwnedBy(item, caller.principal)
+    || (Boolean(caller.principal) && caller.canAdminister === true);
 }

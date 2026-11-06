@@ -1318,12 +1318,13 @@ impl ToolkitOriginalOwner {
         input: &Input,
     ) -> Result<toolkit_store::Transition, OriginalWriterError> {
         self.try_prepare_helper_custody_enrollment(store, admitted, source, saved, session, input)?
-            .ok_or(OriginalWriterError::Unavailable)
+            .map_err(|_| OriginalWriterError::Unavailable)
     }
 
     /// [`Self::prepare_helper_custody_enrollment`] where the caller must not
-    /// wait: `Ok(None)` when the source collection is held by another owner's
-    /// short section and nothing was prepared.
+    /// wait: `Ok(Err(held))` when its source checks could not decide (a held
+    /// collection, a contributor or the source still settling) and nothing
+    /// was prepared.
     fn try_prepare_helper_custody_enrollment(
         self: &Arc<Self>,
         store: &dyn ToolkitStore,
@@ -1332,12 +1333,13 @@ impl ToolkitOriginalOwner {
         saved: &StoredRecord,
         session: &meerkat_core::SessionId,
         input: &Input,
-    ) -> Result<Option<toolkit_store::Transition>, OriginalWriterError> {
+    ) -> Result<HeldOr<toolkit_store::Transition>, OriginalWriterError> {
         self.check_canonical_source(store, &admitted.source_scope)?;
-        if !self.try_check_admitted_helper(admitted)?
-            || !self.try_check_bound_source(&source.original)?
-        {
-            return Ok(None);
+        if !self.try_check_admitted_helper(admitted)? {
+            return Ok(Err(SourceHeld::Contributors));
+        }
+        if let Some(held) = self.try_bound_source(&source.original)? {
+            return Ok(Err(held));
         }
         if input.header().idempotency_key.as_ref() != Some(&source.event_key) {
             return Err(OriginalWriterError::Conflict);
@@ -1374,17 +1376,19 @@ impl ToolkitOriginalOwner {
         record.custody_attempt = Some(next);
         record.bound_input = Some(retained);
         transition.data = record.encode()?;
-        Ok(Some(transition))
+        Ok(Ok(transition))
     }
 
     /// Persist under the actual tracked helper binder before Candidate. Native
     /// retains the entered write; this method does not own a second task.
     ///
     /// The binder runs inside Core's governed bind and must not wait there:
-    /// `Ok(false)` when a source check, before or after the write, met the
-    /// source collection held by another owner's short section. The write is
-    /// made only when the record changes: a later bind of the same
-    /// submission finds the equal pending attempt and writes nothing.
+    /// `Ok(Some(held))` when the source writer was held by another writer, or
+    /// a source check, before or after the write, could not decide (a held
+    /// collection, a contributor or the source still settling); `Ok(None)`
+    /// once persisted and checked. The write is made only when the record
+    /// changes: a later bind of the same submission finds the equal pending
+    /// attempt and writes nothing.
     pub(crate) async fn try_persist_helper_custody_attempt(
         self: &Arc<Self>,
         store: &dyn ToolkitStore,
@@ -1392,7 +1396,7 @@ impl ToolkitOriginalOwner {
         source: &RetainedHelperSource,
         session: &meerkat_core::SessionId,
         input: &Input,
-    ) -> Result<bool, OriginalWriterError> {
+    ) -> Result<Option<SourceHeld>, OriginalWriterError> {
         self.check_canonical_source(store, &admitted.source_scope)?;
         #[cfg(any(test, feature = "test-support"))]
         if let Some(hold) = crate::source_hold_probe::observe(
@@ -1401,7 +1405,12 @@ impl ToolkitOriginalOwner {
         ) {
             crate::source_hold_probe::retain(self.hold_writer_for_test(hold.duration));
         }
-        let _writer = self.source_writer().await;
+        // A native binder never waits for the source writer
+        // (`try_source_writer`): another writer holds it across its durable
+        // write, and the submission waits for that outside the bind.
+        let Ok(_writer) = self.try_source_writer() else {
+            return Ok(Some(SourceHeld::Writer));
+        };
         let stored = store
             .get(&source.source_record.key)
             .await
@@ -1420,11 +1429,11 @@ impl ToolkitOriginalOwner {
                 self.hold_sources_for_test(hold.owner_change, hold.duration),
             );
         }
-        let Some(transition) = self.try_prepare_helper_custody_enrollment(
+        let transition = match self.try_prepare_helper_custody_enrollment(
             store, admitted, source, &stored, session, input,
-        )?
-        else {
-            return Ok(false);
+        )? {
+            Ok(transition) => transition,
+            Err(held) => return Ok(Some(held)),
         };
         if transition.data != stored.data {
             store
@@ -1443,8 +1452,10 @@ impl ToolkitOriginalOwner {
                 self.hold_sources_for_test(hold.owner_change, hold.duration),
             );
         }
-        Ok(self.try_check_admitted_helper(admitted)?
-            && self.try_check_bound_source(&source.original)?)
+        if !self.try_check_admitted_helper(admitted)? {
+            return Ok(Some(SourceHeld::Contributors));
+        }
+        self.try_bound_source(&source.original)
     }
 
     pub(crate) fn helper_custody_attempt(
@@ -1660,15 +1671,19 @@ impl ToolkitOriginalOwner {
 
     /// [`Self::check_admitted_helper`] for a caller that must not wait where
     /// it runs (a native binder inside Core's governed bind): `Ok(false)` when
-    /// the source collection is held by another owner's short section and
-    /// nothing was checked, `Ok(true)` when the check passed, and the check's
-    /// own refusal otherwise.
+    /// the check could not decide now (the source collection held by another
+    /// owner's short section, or a contributor whose admission or whose
+    /// cancellation is still settling) and nothing was decided, `Ok(true)`
+    /// when the check passed, and the check's own refusal otherwise. A caller
+    /// waits for an undecided check with [`Self::wait_admitted_helper`].
     pub(crate) fn try_check_admitted_helper(
         self: &Arc<Self>,
         admitted: &AdmittedHelperWork,
     ) -> Result<bool, OriginalWriterError> {
         match self.admitted_helper_settlement(admitted)? {
-            HelperSourceSettlement::Contended => Ok(false),
+            HelperSourceSettlement::Contended
+            | HelperSourceSettlement::Candidate
+            | HelperSourceSettlement::CancellationPending => Ok(false),
             settlement => helper_settlement_result(settlement).map(|()| true),
         }
     }
@@ -2305,6 +2320,63 @@ mod tests {
             .unwrap();
         assert!(matches!(
             owner.record_candidate(&child),
+            Err(OriginalWriterError::Conflict)
+        ));
+    }
+
+    /// A helper-bound original `label` naming `ancestor` as its contributor.
+    fn child_of(
+        owner: &Arc<ToolkitOriginalOwner>,
+        base: &GrantLineageRef,
+        label: &str,
+        ancestor: &Arc<RetainedToolkitOriginal>,
+    ) -> Arc<RetainedToolkitOriginal> {
+        let mut candidate = claims(label, base).candidate().clone();
+        candidate.requester = principal("user");
+        candidate.contributing_work = vec![ancestor.association.candidate().original_work.clone()];
+        let association = InputAuthorityAssociation::new(candidate).unwrap();
+        owner
+            .publish_binding(
+                association.clone(),
+                source(&association),
+                OriginalGrantBinding::Helper,
+                super::CanonicalBindingObservation::Unretained,
+            )
+            .unwrap()
+    }
+
+    // The binder's non-waiting staging: a contributor still a candidate is
+    // settling (`Contributors`), a held collection is held, and nothing is
+    // staged either way; a withdrawn contributor, or another requester's,
+    // stays the conflict it was.
+    #[test]
+    fn the_binders_staging_answers_settling_and_held_and_keeps_conflicts() {
+        let (_directory, owner, base) = fixture();
+        let unstaged =
+            |_: bool| -> Arc<crate::private_originals::custody_recovery::CustodyHandoff> {
+                panic!("nothing is staged on this answer")
+            };
+        let (ancestor, ancestor_pending) = pending_source(&owner, &base, "settling", "user", &[]);
+        let child = child_of(&owner, &base, "child", &ancestor);
+        assert!(matches!(
+            owner.try_record_enrolled_candidate(&child, None, unstaged),
+            Ok(Err(SourceHeld::Contributors))
+        ));
+        let holder = owner.hold_sources_for_test(false, std::time::Duration::from_millis(300));
+        assert!(matches!(
+            owner.try_record_enrolled_candidate(&child, None, unstaged),
+            Ok(Err(SourceHeld::Collection))
+        ));
+        holder.join().unwrap();
+        drop(ancestor_pending);
+        assert!(matches!(
+            owner.try_record_enrolled_candidate(&child, None, unstaged),
+            Err(OriginalWriterError::Conflict)
+        ));
+        let foreign = retained(&owner, &base, "foreign", "someone-else", &[]);
+        let child = child_of(&owner, &base, "foreign-child", &foreign);
+        assert!(matches!(
+            owner.try_record_enrolled_candidate(&child, None, unstaged),
             Err(OriginalWriterError::Conflict)
         ));
     }

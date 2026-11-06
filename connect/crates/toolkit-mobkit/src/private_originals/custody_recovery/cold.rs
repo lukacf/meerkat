@@ -153,15 +153,27 @@ impl PrivateOriginals {
     ) -> impl std::future::Future<Output = Result<(), PrivateOriginalError>> + 'a {
         // Ordinary callers select no observation. Return the same single
         // restoration future directly; no wrapper await or second path.
-        self.restore_promoted_custody_observed(key, original, None)
+        self.restore_promoted_custody_observed(key, original, None, None)
     }
 
+    /// With `held` (the helper submission's binder only), a step that met a
+    /// held owner resource or a settling source records what it met there
+    /// and refuses with nothing changed; every other caller passes `None`,
+    /// and its answers are unchanged.
     pub(crate) async fn restore_promoted_custody_observed(
         &self,
         key: &StoreKey,
         original: &Arc<RetainedToolkitOriginal>,
         observation: Option<&std::sync::atomic::AtomicU16>,
+        held: Option<&std::sync::Mutex<Option<super::HeldAt>>>,
     ) -> Result<(), PrivateOriginalError> {
+        let mark = |at: super::HeldAt| {
+            if let Some(slot) = held {
+                *slot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(at);
+            }
+        };
         // The only supplied observation belongs to the test-support binder.
         // Record fixed stages only; output belongs after its governed await.
         macro_rules! observe {
@@ -175,12 +187,27 @@ impl PrivateOriginals {
         #[cfg(not(feature = "test-support"))]
         let _ = observation;
         observe!(1);
-        if original.first_binding_for(key)
-            || self
+        if original.first_binding_for(key) {
+            return Ok(());
+        }
+        let admitted_source = if held.is_some() {
+            match self
                 .owner
+                .try_has_admitted_source(original.association())
+                .map_err(cold_service_admission::writer_error)?
+            {
+                Ok(admitted) => admitted,
+                Err(source) => {
+                    mark(super::HeldAt::Source(source));
+                    return Err(PrivateOriginalError::Unavailable);
+                }
+            }
+        } else {
+            self.owner
                 .has_admitted_source(original.association())
                 .map_err(cold_service_admission::writer_error)?
-        {
+        };
+        if admitted_source {
             return Ok(());
         }
         observe!(2);
@@ -188,11 +215,15 @@ impl PrivateOriginals {
             .check_canonical_source(self.store.as_ref(), &self.scope)
             .map_err(cold_service_admission::writer_error)?;
         observe!(3);
-        let (_, stamp) = self
-            .owner
-            .publication()
-            .observe(|| ())
-            .map_err(|_| PrivateOriginalError::Unavailable)?;
+        let (_, stamp) = self.owner.publication().observe(|| ()).map_err(|error| {
+            // An owner change met: a stale read, observed again after it.
+            if error == meerkat_authorization::publication::PublicationError::Changed {
+                mark(super::HeldAt::Source(
+                    crate::original_ingress::SourceHeld::Publication,
+                ));
+            }
+            PrivateOriginalError::Unavailable
+        })?;
         observe!(4);
         let row = self
             .store
@@ -276,30 +307,66 @@ impl PrivateOriginals {
                 &input,
                 |admitted| {
                     observe!(17);
-                    let _control = self
-                        .custody_recovery
-                        .control
-                        .state
-                        .lock()
-                        .map_err(|_| PrivateOriginalError::Unavailable)?;
+                    let _control = if held.is_some() {
+                        match self.custody_recovery.control.state.try_lock() {
+                            Ok(control) => control,
+                            Err(std::sync::TryLockError::WouldBlock) => {
+                                mark(super::HeldAt::RecoveryControl);
+                                return Err(PrivateOriginalError::Unavailable);
+                            }
+                            Err(std::sync::TryLockError::Poisoned(_)) => {
+                                return Err(PrivateOriginalError::Unavailable);
+                            }
+                        }
+                    } else {
+                        self.custody_recovery
+                            .control
+                            .state
+                            .lock()
+                            .map_err(|_| PrivateOriginalError::Unavailable)?
+                    };
                     observe!(18);
                     let readiness = self.custody_recovery.control.readiness();
                     if !readiness.selected() || readiness.stopped() {
                         return Err(PrivateOriginalError::Unavailable);
                     }
                     observe!(19);
-                    let _writer = self
-                        .owner
-                        .try_source_writer()
-                        .map_err(cold_service_admission::writer_error)?;
+                    let _writer = self.owner.try_source_writer().map_err(|error| {
+                        mark(super::HeldAt::Source(
+                            crate::original_ingress::SourceHeld::Writer,
+                        ));
+                        cold_service_admission::writer_error(error)
+                    })?;
                     observe!(20);
-                    stamp
-                        .check_current()
-                        .map_err(|_| PrivateOriginalError::Unavailable)?;
+                    // Changed: the publication moved since the stamp, a
+                    // change settled or still held; a stale read either way,
+                    // restored again after it. Unavailable stays a refusal.
+                    stamp.check_current().map_err(|error| {
+                        if error == meerkat_authorization::publication::PublicationError::Changed {
+                            mark(super::HeldAt::Source(
+                                crate::original_ingress::SourceHeld::Publication,
+                            ));
+                        }
+                        PrivateOriginalError::Unavailable
+                    })?;
                     observe!(21);
-                    self.owner
-                        .recover_retained_custody(original, admitted)
-                        .map_err(cold_service_admission::writer_error)
+                    if held.is_some() {
+                        match self
+                            .owner
+                            .try_recover_retained_custody(original, admitted)
+                            .map_err(cold_service_admission::writer_error)?
+                        {
+                            Ok(()) => Ok(()),
+                            Err(source) => {
+                                mark(super::HeldAt::Source(source));
+                                Err(PrivateOriginalError::Unavailable)
+                            }
+                        }
+                    } else {
+                        self.owner
+                            .recover_retained_custody(original, admitted)
+                            .map_err(cold_service_admission::writer_error)
+                    }
                 },
             )
             .await;

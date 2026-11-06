@@ -81,6 +81,29 @@ async fn binder_check_answers_a_candidate_contributor_undecided() {
     ));
 }
 
+// A contributor still a candidate is recognized as settling (undecided),
+// and when it settles into a genuine refusal (withdrawn) the binder's wait
+// outside the bind ends promptly with that refusal, not at its deadline.
+#[tokio::test]
+async fn a_settling_contributor_withdrawn_ends_the_wait_promptly_with_the_refusal() {
+    let (_directory, owner, _original, pending, admitted) = pending().await;
+    assert!(matches!(
+        owner.try_check_admitted_helper(&admitted),
+        Ok(false)
+    ));
+    let started = Instant::now();
+    let wait = owner.wait_admitted_helper(&admitted, started + Duration::from_secs(2));
+    tokio::pin!(wait);
+    assert!(wait.as_mut().now_or_never().is_none());
+    drop(pending);
+    assert!(matches!(wait.await, Err(OriginalWriterError::WrongOwner)));
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "the wait ended once the candidate was withdrawn: {:?}",
+        started.elapsed()
+    );
+}
+
 // Control: a withdrawn candidate is a genuine refusal, never undecided.
 #[tokio::test]
 async fn binder_check_refuses_a_withdrawn_candidate_contributor() {

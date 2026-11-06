@@ -142,6 +142,11 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     //     https://platform.claude.com/docs/en/build-with-claude/compaction
     //   - Structured outputs:
     //     https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+    //   - Forced tool use ("Claude Opus 5.5, Claude Sonnet 5.5, Claude Fable
+    //     5.1, and Claude Mythos 5.1 don't support forced tool use": a
+    //     `tool_choice` of `any` or a named tool returns 400):
+    //     https://platform.claude.com/docs/en/api/errors
+    //     https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools
     //
     // ASSUMED from the claude-fable-5 row (family-conservative defaults):
     //   - image_tool_results
@@ -187,7 +192,10 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         beta_headers: PRESERVED_THINKING_BETAS,
         call_timeout_secs: Some(300),
         stream_inactivity_timeout_secs: None,
-        supports_forced_tool_choice: true,
+        // Forced `tool_choice` (`any`/`tool`) returns 400 on Fable 5.1 (see
+        // the forced tool use sources above); refuse it locally, as for
+        // claude-opus-5-5 and claude-sonnet-5-5.
+        supports_forced_tool_choice: false,
     },
     // Claude Fable 5
     //

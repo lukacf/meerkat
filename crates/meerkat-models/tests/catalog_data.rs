@@ -611,6 +611,38 @@ fn thinking_binding_rows_are_the_prefix_checked_models_that_think_by_default() {
     }
 }
 
+/// Forced tool choice (`tool_choice` `any` or a named tool) per Anthropic
+/// row. Anthropic answers 400 to it on Claude Opus 5.5, Sonnet 5.5, Fable 5.1
+/// and Mythos 5.1: "Forced tool use not supported"
+/// (https://platform.claude.com/docs/en/api/errors) and the "Forcing tool
+/// use" table (https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools).
+/// The rows that refuse it locally are exactly the catalogued ones among
+/// them (Mythos 5.1 is not a catalog row); every other row sends it, and
+/// Anthropic's own refusal maps to the same typed error.
+#[test]
+fn forced_tool_choice_refusals_are_the_documented_models() {
+    use std::collections::BTreeSet;
+    const DOCUMENTED_REFUSALS: &[&str] = &[
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-fable-5-1",
+        "claude-mythos-5-1",
+    ];
+    let refusing: BTreeSet<&str> = all_capabilities()
+        .filter(|caps| caps.provider == Provider::Anthropic && !caps.supports_forced_tool_choice)
+        .map(|caps| caps.id)
+        .collect();
+    let documented: BTreeSet<&str> = DOCUMENTED_REFUSALS
+        .iter()
+        .copied()
+        .filter(|id| capabilities_for(Provider::Anthropic, id).is_some())
+        .collect();
+    assert_eq!(
+        refusing, documented,
+        "the catalogued rows refusing a forced tool choice are the documented ones"
+    );
+}
+
 /// Provider inference is an exact catalog match by design: an uncatalogued
 /// `claude-*` id fails loudly instead of resolving by family or prefix, and
 /// the Sonnet 5 row does not make neighbouring ids resolve.

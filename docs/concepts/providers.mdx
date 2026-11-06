@@ -372,7 +372,10 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
     `{"type": "adaptive"}`, when thinking is omitted, since these models
     think by default. It is never sent beside `between_tools` or `disabled`,
     and only on the Anthropic API, Vertex and Foundry: Amazon Bedrock and
-    the Copilot route do not send it. The model answers that turn without
+    the Copilot route do not send it. A request that forces a tool call with
+    thinking omitted is sent as before, without the control: Meerkat refuses
+    a forced tool call beside explicit thinking, and a forced call skips
+    thinking on the models that accept one. The model answers that turn without
     the dropped reasoning and the prompt cache restarts at the first dropped
     block; Meerkat logs a warning naming each dropped block.
 

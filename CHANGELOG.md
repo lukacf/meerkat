@@ -168,7 +168,11 @@ them.
   thinking block whose system prompt, tools or earlier messages changed is
   now dropped by the API (and logged) instead of reaching the model, since
   requests to Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 carry
-  the `drop_block` control on every account (see Fixed).
+  the `drop_block` control on every account (see Fixed). A request that
+  forces a tool call with thinking omitted keeps its previous shape, with no
+  thinking and no control: the client refuses a forced tool call beside
+  explicit thinking, and a forced call skips thinking on the models that
+  accept one.
 
 ### Fixed
 
@@ -269,6 +273,15 @@ them.
   let through) is logged as a warning that names each block and its reason:
   the model answered without that reasoning, and the prompt cache restarts
   at the first dropped block.
+
+- `meerkat-models`, `meerkat-anthropic`: the Claude Fable 5.1 row no longer
+  claims forced tool choice support. Anthropic answers 400 to `tool_choice`
+  `any` or a named tool on Claude Fable 5.1, as on Opus 5.5 and Sonnet 5.5
+  ("Forced tool use not supported" in Anthropic's API errors reference). A
+  forced tool choice on Fable 5.1 is now refused locally with the typed
+  `ToolChoiceUnsupported` refusal (`ModelDoesNotSupportForcedToolChoice`)
+  before any request is sent, instead of being sent and answered with that
+  400, which mapped to the same typed refusal.
 
 ### Known limitations
 

@@ -28,7 +28,8 @@ use axum::routing::post;
 use futures::StreamExt;
 use meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig;
 use meerkat_core::{
-    AssistantBlock, BlockAssistantMessage, Message, ProviderMeta, StopReason, ToolDef, UserMessage,
+    AssistantBlock, BlockAssistantMessage, Message, ProviderMeta, StopReason, ToolChoice, ToolDef,
+    UserMessage,
 };
 use meerkat_llm_core::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
 use serde_json::{Value, json};
@@ -574,6 +575,30 @@ async fn between_tools_never_carries_the_binding() {
         assert!(!sent.carries_binding_beta(), "{model}: {:?}", sent.betas);
     }
     server.abort();
+}
+
+/// A request that forces a tool call with thinking omitted keeps its shape:
+/// no thinking and no binding beta. This client refuses a forced call beside
+/// explicit thinking, so it does not name the model's default thinking there
+/// either; a forced call skips thinking on every model that accepts one
+/// (Claude Haiku 5.5 among the binding models).
+/// <https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools>
+#[tokio::test]
+async fn forced_tool_call_with_thinking_omitted_sends_no_thinking_and_no_beta() {
+    let (account, client, server) = spawn_account().await;
+    let turn = run(
+        &client,
+        &LlmRequest::new("claude-haiku-5-5", vec![first_question()])
+            .with_tools(tools_before())
+            .with_tool_choice(ToolChoice::Required),
+    )
+    .await;
+    let sent = account.last();
+    server.abort();
+    assert!(turn.succeeded(), "{turn:?}");
+    assert!(sent.body.get("thinking").is_none(), "{}", sent.body);
+    assert!(!sent.carries_binding_beta(), "{:?}", sent.betas);
+    assert_eq!(sent.body["tool_choice"], json!({"type": "any"}));
 }
 
 /// Collects the events logged on this thread.

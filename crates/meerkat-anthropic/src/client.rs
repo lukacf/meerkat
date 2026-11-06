@@ -8002,8 +8002,7 @@ mod tests {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod thinking_binding_unit_tests {
     use super::*;
-    use meerkat_core::{ToolChoice, ToolDef, UserMessage};
-    use std::sync::Arc;
+    use meerkat_core::UserMessage;
 
     const BINDING_ROWS: [&str; 4] = [
         "claude-fable-5-1",
@@ -8084,25 +8083,6 @@ mod thinking_binding_unit_tests {
                 other => panic!("{model}: expected the local refusal, got {other:?}"),
             }
         }
-    }
-
-    /// A request that forces a tool call (Claude Haiku 5.5 accepts one) keeps
-    /// an omitted thinking omitted, as before.
-    #[test]
-    fn a_forced_tool_call_keeps_omitted_thinking_omitted() {
-        let client = AnthropicClient::new("test-key".to_string()).unwrap();
-        let request = hello("claude-haiku-5-5")
-            .with_tools(vec![Arc::new(ToolDef {
-                audience: Default::default(),
-                name: "lookup".into(),
-                description: "lookup tool".into(),
-                input_schema: serde_json::json!({"type": "object", "properties": {}}),
-                provenance: None,
-            })])
-            .with_tool_choice(ToolChoice::Required);
-        let body = client.build_request_body(&request).unwrap();
-        assert!(body.get("thinking").is_none(), "{body}");
-        assert_eq!(body["tool_choice"], serde_json::json!({"type": "any"}));
     }
 
     /// A client whose backend does not document the controls sends none, and

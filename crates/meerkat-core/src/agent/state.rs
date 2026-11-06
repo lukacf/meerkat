@@ -24119,6 +24119,96 @@ mod tests {
         );
     }
 
+    /// The agent reads its grants in the run it serves: each model-request
+    /// boundary passes its run to the grant gate, and the end of each run
+    /// ends that run's run-scoped grants through the gate, once.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn the_agent_passes_its_run_to_the_grant_gate_and_ends_it_at_the_run_terminal() {
+        /// A session's grants that record the runs they are asked about.
+        #[derive(Default)]
+        struct RecordingGrants {
+            boundary_runs: Mutex<Vec<Option<crate::RunId>>>,
+            ended_runs: Mutex<Vec<crate::RunId>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for RecordingGrants {
+            async fn open_names(
+                &self,
+                _gated: &crate::tool_grant::GatedToolTable,
+                run_id: Option<&crate::RunId>,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                self.boundary_runs.lock().unwrap().push(run_id.cloned());
+                Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn admit_call(
+                &self,
+                _gated: &crate::tool_grant::GatedToolTable,
+                _call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Err(crate::tool_grant::ToolGrantRefusal::Required)
+            }
+
+            async fn end_run(
+                &self,
+                run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                self.ended_runs.lock().unwrap().push(run_id.clone());
+                Ok(())
+            }
+        }
+
+        let grants = Arc::new(RecordingGrants::default());
+        let gate = crate::tool_grant::ToolGrantGate::new(
+            grants.clone() as Arc<dyn crate::tool_grant::SessionToolGrants>,
+            crate::tool_grant::GatedToolTable::new(
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeSet::from([crate::types::ToolName::from("deploy")]),
+            ),
+        );
+        let dispatcher = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                Arc::new(NoTools),
+                crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_tool_grant_gate(gate.clone()),
+        );
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_tool_grant_gate(gate)
+            .build_standalone(Arc::new(StaticLlmClient), dispatcher, Arc::new(NoopStore))
+            .await;
+        agent
+            .run("the first run".to_string().into())
+            .await
+            .expect("the first run completes");
+        agent
+            .run("the second run".to_string().into())
+            .await
+            .expect("the second run completes");
+
+        let boundary_runs = grants.boundary_runs.lock().unwrap().clone();
+        let ended_runs = grants.ended_runs.lock().unwrap().clone();
+        assert_eq!(
+            ended_runs.len(),
+            2,
+            "each run's end is signalled once: {ended_runs:?}"
+        );
+        assert_ne!(ended_runs[0], ended_runs[1], "two runs, two ends");
+        assert!(!boundary_runs.is_empty(), "every run reads its grants");
+        for run_id in &boundary_runs {
+            let run_id = run_id.as_ref().expect("every boundary is inside a run");
+            assert!(
+                ended_runs.contains(run_id),
+                "the boundary's run {run_id:?} is a run that ended"
+            );
+        }
+    }
+
     /// A model call naming a gated tool that its closed gate hides passes the
     /// visibility precheck to the dispatch gate, the gated name's one refusal
     /// site. The grants are adjudicated exactly once, and that adjudication

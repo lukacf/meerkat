@@ -7705,6 +7705,132 @@ mod tests {
             assert_eq!(listed(&router, &session_id, false).await.len(), 1);
         }
 
+        /// A `current_run` grant takes the run the session is running when
+        /// it is issued, names it, and ends when that run ends; the session's
+        /// next run sees it ended.
+        #[tokio::test]
+        async fn a_current_run_grant_takes_the_running_turn_and_ends_with_it() {
+            // Bounds a failure only; the passing path never waits for it.
+            const FAILURE_BOUND: Duration = Duration::from_secs(30);
+            let calls = Arc::new(tokio::sync::watch::channel(0usize).0);
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            let (router, _rx) = test_router_with_llm(Arc::new(GatedLlmClient {
+                calls: Arc::clone(&calls),
+                release: Arc::clone(&release),
+                requests: Arc::new(StdMutex::new(Vec::new())),
+            }))
+            .await;
+            let created = call(
+                &router,
+                "session/create",
+                serde_json::json!({
+                    "prompt": "seed",
+                    "initial_turn": "deferred",
+                    "grant_gated_tools": {"families": ["shell"]},
+                }),
+            )
+            .await;
+            let session_id = result_value(&created)["session_id"]
+                .as_str()
+                .expect("session id")
+                .to_string();
+            let turn = {
+                let router = router.clone();
+                let session_id = session_id.clone();
+                tokio::spawn(async move {
+                    router
+                        .dispatch(make_request(
+                            "turn/start",
+                            serde_json::json!({"session_id": session_id, "prompt": "first"}),
+                        ))
+                        .await
+                        .expect("turn/start response")
+                })
+            };
+            let mut seen = calls.subscribe();
+            tokio::time::timeout(FAILURE_BOUND, seen.wait_for(|calls| *calls >= 1))
+                .await
+                .expect("the turn reaches the provider")
+                .expect("call counter stays open");
+
+            let granted = call(
+                &router,
+                "tool_grants/grant",
+                serde_json::json!({
+                    "subject": session_subject(&session_id),
+                    "target": {"kind": "family", "family": "shell"},
+                    "duration_ms": 60_000,
+                    "scope": {"kind": "current_run"},
+                }),
+            )
+            .await;
+            let grant = result_value(&granted)["grant"].clone();
+            assert_eq!(grant["status"], "active", "{grant}");
+            assert_eq!(grant["scope"]["kind"], "current_run", "{grant}");
+            let run_id = grant["scope"]["run_id"]
+                .as_str()
+                .expect("a current_run grant names its run")
+                .to_string();
+            assert!(!run_id.is_empty());
+
+            release.add_permits(1);
+            let finished = tokio::time::timeout(FAILURE_BOUND, turn)
+                .await
+                .expect("the turn finishes once released")
+                .expect("turn task");
+            assert!(finished.error.is_none(), "turn: {:?}", finished.error);
+
+            assert!(
+                listed(&router, &session_id, false).await.is_empty(),
+                "the grant ended with its run"
+            );
+            let all = listed(&router, &session_id, true).await;
+            assert_eq!(all.len(), 1, "{all:?}");
+            assert_eq!(all[0]["status"], "run_ended", "{all:?}");
+            assert_eq!(all[0]["scope"]["run_id"], run_id.as_str(), "{all:?}");
+        }
+
+        /// A `current_run` grant needs a run: an idle session refuses it
+        /// with the typed `run_not_active`, and nothing is issued. A
+        /// `window` scope is the plain window grant.
+        #[tokio::test]
+        async fn a_current_run_grant_of_an_idle_session_is_refused_run_not_active() {
+            let (router, _rx) = test_router().await;
+            let session_id = shell_gated_session(&router).await;
+
+            let refused = call(
+                &router,
+                "tool_grants/grant",
+                serde_json::json!({
+                    "subject": session_subject(&session_id),
+                    "target": {"kind": "family", "family": "shell"},
+                    "duration_ms": 60_000,
+                    "scope": {"kind": "current_run"},
+                }),
+            )
+            .await;
+            let failure = refused.error.as_ref().expect("an idle session has no run");
+            assert_eq!(failure.code, error::INVALID_PARAMS, "{failure:?}");
+            let data = failure.data.as_ref().expect("typed refusal data");
+            assert_eq!(data["kind"], "run_not_active", "{data}");
+            assert!(listed(&router, &session_id, true).await.is_empty());
+
+            let window = call(
+                &router,
+                "tool_grants/grant",
+                serde_json::json!({
+                    "subject": session_subject(&session_id),
+                    "target": {"kind": "family", "family": "shell"},
+                    "duration_ms": 60_000,
+                    "scope": {"kind": "window"},
+                }),
+            )
+            .await;
+            let grant = result_value(&window)["grant"].clone();
+            assert_eq!(grant["status"], "active", "{grant}");
+            assert_eq!(grant["scope"], serde_json::json!({"kind": "window"}));
+        }
+
         #[tokio::test]
         async fn session_create_refuses_a_gate_no_grant_could_honour_with_typed_data() {
             let (router, _rx) = test_router().await;

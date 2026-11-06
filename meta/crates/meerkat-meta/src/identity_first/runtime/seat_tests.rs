@@ -3724,11 +3724,17 @@ async fn a_reset_of_an_identity_its_host_holds_answers_core_s_held_creation_verd
     let alice = identity("personal:alice");
     let core = Arc::new(SeatCore::default());
     let runtime = runtime_over(None, &core);
-    register_all(&runtime, &[spec(&alice)]).await;
+    // The host holds alice before her registration declares her, as a
+    // held pass's roster or a held add holds an identity first.
     runtime
         .mark_held_completion_owed(std::slice::from_ref(&alice))
         .await
         .expect("the host holds alice");
+    register_all(&runtime, &[spec(&alice)]).await;
+    assert!(
+        core.session_of(&alice).is_none(),
+        "her registration seated nothing: she awaits her held creation"
+    );
     let applied = core.apply_calls.load(Ordering::SeqCst);
 
     let refused = runtime.reset(&alice).await;
@@ -3779,24 +3785,29 @@ async fn held_creation_follows_the_host_s_hold_across_a_restart_in_every_composi
             runtime.set_held_completion_state_dir(durable.then(|| state_dir.path().to_path_buf()));
             runtime
         };
-        // The first process: a held pass marks alice and never publishes her.
+        // The first process: a held pass marks alice before it declares
+        // her, and never publishes her.
         {
             let runtime = compose(&core);
-            register_all(&runtime, &[spec(&alice)]).await;
             runtime
                 .mark_held_completion_owed(std::slice::from_ref(&alice))
                 .await
                 .expect("the host holds alice");
+            register_all(&runtime, &[spec(&alice)]).await;
+            assert!(
+                core.session_of(&alice).is_none(),
+                "durable={durable}: her declaration seated nothing"
+            );
         }
         // A restart whose host holds alice again: she awaits her held
         // creation, and a door is refused typed.
         {
             let runtime = compose(&core);
-            register_all(&runtime, &[spec(&alice)]).await;
             runtime
                 .mark_held_completion_owed(std::slice::from_ref(&alice))
                 .await
                 .expect("the host holds alice again");
+            register_all(&runtime, &[spec(&alice)]).await;
             let refused = runtime.materialize(&alice).await;
             assert!(
                 matches!(

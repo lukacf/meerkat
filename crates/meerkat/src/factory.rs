@@ -9473,6 +9473,8 @@ impl AgentFactory {
             let mob_args = meerkat_core::service::MobToolsBuildArgs {
                 session_id: session.id().clone(),
                 model: model.clone(),
+                provider: resolved_llm_identity.provider,
+                self_hosted_server_id: resolved_llm_identity.self_hosted_server_id.clone(),
                 authority_context: build_config.mob_tool_authority_context.clone(),
                 effective_authority: mob_authority_handle.clone(),
                 comms_name: mob_comms_name,

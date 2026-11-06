@@ -7963,11 +7963,20 @@ impl MobMcpState {
             .is_empty()
     }
 
+    /// Whether `mob_id` is `bridge_session_id`'s implicit mob with its
+    /// `delegate` profile on `model` and, when the caller names one, on the
+    /// provider route `provider` and `self_hosted_server_id`. A profile that
+    /// names no provider (created before implicit mobs named one) is on the
+    /// route the registry resolves for its model, the same route a session on
+    /// that model resolves, so it matches any provider; its self-hosted server
+    /// must still match.
     async fn implicit_mob_matches_session_model(
         &self,
         mob_id: &MobId,
         bridge_session_id: &str,
         model: &str,
+        provider: Option<meerkat_core::Provider>,
+        self_hosted_server_id: Option<&str>,
     ) -> bool {
         let delegate_profile = ProfileName::from("delegate");
         let bridge_session_id = match SessionId::parse(bridge_session_id) {
@@ -7986,7 +7995,14 @@ impl MobMcpState {
                 })
                 && definition
                     .resolve_inline_profile(&delegate_profile)
-                    .is_some_and(|profile| profile.model == model)
+                    .is_some_and(|profile| {
+                        profile.model == model
+                            && provider.is_none_or(|provider| {
+                                profile.provider.is_none_or(|named| named == provider)
+                                    && profile.self_hosted_server_id.as_deref()
+                                        == self_hosted_server_id
+                            })
+                    })
         })
     }
 
@@ -7995,7 +8011,9 @@ impl MobMcpState {
     ///
     /// This is the sole owner of implicit-mob model reconciliation. Tool
     /// surfaces may provide a cached mob-id hint for the fast path, but they
-    /// must not destroy or recreate mobs themselves.
+    /// must not destroy or recreate mobs themselves. The definition names
+    /// `model` alone, so it validates only for a catalogued model; the
+    /// agent's `delegate` tool also names its session's resolved provider.
     #[doc(hidden)]
     pub async fn ensure_implicit_mob_for_model(
         &self,
@@ -8003,9 +8021,34 @@ impl MobMcpState {
         model: &str,
         cached_mob_id: Option<&MobId>,
     ) -> Result<(MobId, bool), MobError> {
+        self.ensure_implicit_mob_on_route(bridge_session_id, model, None, None, cached_mob_id)
+            .await
+    }
+
+    /// [`Self::ensure_implicit_mob_for_model`] whose definition's `delegate`
+    /// profile also names `provider` and `self_hosted_server_id`, the route
+    /// the owner session's build resolved for `model`
+    /// ([`MobDefinition::implicit_with_provider`]). An existing implicit mob
+    /// of the session is reused while its `delegate` profile runs on `model`
+    /// over that route (see `implicit_mob_matches_session_model`), and
+    /// replaced otherwise.
+    pub(crate) async fn ensure_implicit_mob_on_route(
+        &self,
+        bridge_session_id: &str,
+        model: &str,
+        provider: Option<meerkat_core::Provider>,
+        self_hosted_server_id: Option<&str>,
+        cached_mob_id: Option<&MobId>,
+    ) -> Result<(MobId, bool), MobError> {
         if let Some(cached_mob_id) = cached_mob_id
             && self
-                .implicit_mob_matches_session_model(cached_mob_id, bridge_session_id, model)
+                .implicit_mob_matches_session_model(
+                    cached_mob_id,
+                    bridge_session_id,
+                    model,
+                    provider,
+                    self_hosted_server_id,
+                )
                 .await
         {
             return Ok((cached_mob_id.clone(), false));
@@ -8026,7 +8069,13 @@ impl MobMcpState {
             .await
         {
             if self
-                .implicit_mob_matches_session_model(&mob_id, bridge_session_id, model)
+                .implicit_mob_matches_session_model(
+                    &mob_id,
+                    bridge_session_id,
+                    model,
+                    provider,
+                    self_hosted_server_id,
+                )
                 .await
             {
                 return Ok((mob_id, false));
@@ -8043,7 +8092,12 @@ impl MobMcpState {
         })?;
         let mob_id = self
             .mob_create_definition_with_owner_bridge_session(
-                MobDefinition::implicit(bridge_session_id, model),
+                MobDefinition::implicit_with_provider(
+                    bridge_session_id,
+                    model,
+                    provider,
+                    self_hosted_server_id.map(str::to_owned),
+                ),
                 owner_bridge_session_id,
                 true,
                 true,
@@ -16408,6 +16462,131 @@ mod tests {
                 .model,
             "gpt-5.4"
         );
+    }
+
+    /// The delegate's implicit mob for a model outside the catalog names the
+    /// owner session's resolved provider, so its definition validates. The
+    /// provider-less form still refuses such a model, and creates nothing.
+    #[tokio::test]
+    async fn an_implicit_mob_on_an_uncatalogued_model_names_the_owners_provider() {
+        let state = MobMcpState::new_in_memory();
+        let model = "realm-gateway-model";
+        let refused = SessionId::new().to_string();
+        let error = state
+            .ensure_implicit_mob_for_model(&refused, model, None)
+            .await
+            .expect_err("a model outside the catalog does not validate without its provider");
+        assert!(error.to_string().contains(model), "{error}");
+        assert!(
+            state
+                .find_implicit_mob_for_bridge_session(&refused)
+                .await
+                .is_none()
+        );
+
+        let sid = SessionId::new().to_string();
+        let (mob_id, created) = state
+            .ensure_implicit_mob_on_route(
+                &sid,
+                model,
+                Some(meerkat_core::Provider::OpenAI),
+                None,
+                None,
+            )
+            .await
+            .expect("the owner's provider makes the definition validate");
+        assert!(created);
+        let handle = state
+            .handle_for(&mob_id)
+            .await
+            .expect("implicit mob handle");
+        assert_eq!(
+            *handle.definition(),
+            MobDefinition::implicit_with_provider(
+                &sid,
+                model,
+                Some(meerkat_core::Provider::OpenAI),
+                None
+            )
+        );
+    }
+
+    /// An implicit mob is reused while its `delegate` profile runs the
+    /// requested model over the requested provider route, and replaced when
+    /// the route changes. A mob whose profile names no provider, as every
+    /// implicit mob did before they named one, runs on the provider its
+    /// model resolves to and is reused.
+    #[tokio::test]
+    async fn an_implicit_mob_is_reused_on_its_route_and_replaced_when_the_route_changes() {
+        use meerkat_core::Provider;
+
+        let state = MobMcpState::new_in_memory();
+        let delegate = ProfileName::from("delegate");
+
+        let earlier = SessionId::new().to_string();
+        let (provider_less, created) = state
+            .ensure_implicit_mob_for_model(&earlier, "claude-sonnet-4-5", None)
+            .await
+            .expect("a provider-less implicit mob");
+        assert!(created);
+        let before = state
+            .handle_for(&provider_less)
+            .await
+            .expect("handle")
+            .incarnation();
+        let (reused, created) = state
+            .ensure_implicit_mob_on_route(
+                &earlier,
+                "claude-sonnet-4-5",
+                Some(Provider::Anthropic),
+                None,
+                Some(&provider_less),
+            )
+            .await
+            .expect("reuse the provider-less mob");
+        assert_eq!(reused, provider_less);
+        assert!(!created, "a provider-less mob is not replaced");
+        assert_eq!(
+            state
+                .handle_for(&reused)
+                .await
+                .expect("handle")
+                .incarnation(),
+            before
+        );
+
+        let sid = SessionId::new().to_string();
+        let model = "realm-gateway-model";
+        let mut previous = None;
+        for (provider, server, replaced) in [
+            (Provider::OpenAI, None, true),
+            (Provider::OpenAI, None, false),
+            (Provider::Anthropic, None, true),
+            (Provider::SelfHosted, Some("local"), true),
+            (Provider::SelfHosted, Some("local"), false),
+            (Provider::SelfHosted, Some("other"), true),
+        ] {
+            let (mob_id, created) = state
+                .ensure_implicit_mob_on_route(&sid, model, Some(provider), server, None)
+                .await
+                .expect("ensure the implicit mob on the route");
+            assert_eq!(created, replaced, "{provider:?} {server:?}");
+            let handle = state.handle_for(&mob_id).await.expect("handle");
+            let profile = handle
+                .definition()
+                .resolve_inline_profile(&delegate)
+                .cloned()
+                .expect("delegate profile");
+            assert_eq!(
+                (profile.provider, profile.self_hosted_server_id.as_deref()),
+                (Some(provider), server)
+            );
+            let incarnation = handle.incarnation();
+            if let Some(previous) = previous {
+                assert_eq!(incarnation != previous, replaced, "{provider:?} {server:?}");
+            }
+            previous = Some(incarnation);
+        }
     }
 
     #[tokio::test]

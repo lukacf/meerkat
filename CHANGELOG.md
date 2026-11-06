@@ -101,6 +101,13 @@ them.
   enum named here is exhaustive, so a downstream exhaustive match needs the
   new arms, or a wildcard arm.
 
+- `meerkat-core`: `service::MobToolsBuildArgs`, the arguments
+  `MobToolsFactory::build_mob_tools` receives, gains the public fields
+  `provider: Provider` and `self_hosted_server_id: Option<String>`: the
+  provider route the owning agent's build resolved for its `model` (see
+  Fixed). Code that builds it literally must set them; a factory that only
+  receives it is unaffected.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -221,6 +228,16 @@ them.
   reconfigure had applied, and the switch stayed pending. The switch now
   finishes in a stopped or retired session as well. Affects 0.6.0 through
   0.9.10.
+
+- `meerkat-mob-mcp`: `delegate` from a session on a model the catalog does
+  not list, a realm `[models.<id>]` entry or a self-hosted model, runs its
+  helper. The session's implicit delegation mob named the session's model
+  without its provider, so its definition did not validate and every such
+  call failed with `unknown_model`, on every surface. The mob's `delegate`
+  profile now names the provider, and the self-hosted server, that the
+  session's build resolved for the model, so the helper runs on the
+  session's own route. An implicit mob created before this fix is reused.
+  Affects 0.7.0 through 0.9.10.
 
 ## [0.9.10] - 2026-11-04
 

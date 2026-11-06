@@ -93,6 +93,11 @@ rkat run --tools full "Ask one helper to inspect the test failure, then summariz
 A delegate helper is ephemeral: it is retired after its one task, and also when
 the calling turn stops waiting for it first.
 
+Unless its `tooling` supplies a profile, a helper runs on the calling session's
+model and on the provider route the session's build resolved for it (the
+self-hosted server included), so a session on a model outside the catalog, a
+`[models.<id>]` entry or a self-hosted model, delegates like any other.
+
 For recurring teams, use explicit mobs instead of a chain of ad hoc delegates.
 
 A mob member can also fork itself with `fork_off`. The child starts from the

@@ -21,7 +21,13 @@
 //!
 //! # Fencing
 //!
-//! The realm keeps the writer rules of [`meerkat_core::host_store`]:
+//! The realm keeps the writer rules of [`meerkat_core::host_store`]. Their
+//! lifecycle facts (the writer's phase, the token it commits with, the grant
+//! it has not installed, the acquires it gave up on, the holder it waits out,
+//! and why it stopped or lost the realm) belong to the realm's
+//! `HostStoreWriterFenceMachine` ([`super::writer_fence`]): the realm reports
+//! each store answer and each fact of its clock as an input, and does what
+//! the machine decides.
 //!
 //! - Open acquires with [`AcquireMode::Exclusive`] by default: a live holder
 //!   answers [`SpiError::Held`] with what remains of its lease. After an
@@ -51,6 +57,10 @@
 //!   only a live writer renews: that poisons the realm, as a foreign batch in
 //!   the listing does. With no timed-out acquire, an unknown holder poisons
 //!   at once.
+//! - **Token order:** a re-acquire's grant must answer a token above the one
+//!   the writer holds, as every grant must answer a token above every earlier
+//!   one. A grant at or below it breaks the store's token order: the realm is
+//!   poisoned with a cause that names the store, not another writer.
 //! - **Self-fence on the local clock:** a mutation runs only while the last
 //!   renew did not fail and the last successful acquire or renew *started*
 //!   less than the lease minus the host-declared margin ago
@@ -109,16 +119,22 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use meerkat_core::host_store::{
-    AcquireMode, CommitBatch, CommitId, FenceTiming, FenceToken, HostStore, HostStoreError,
-    MAX_BATCH_BYTES, MAX_ROW_BYTES, Row, RowIndex, ScopeKind, ScopeName, ScopeRef, ScopeUpdate,
-    ScopeVersion, SelfFence, SelfFenceWindow,
+    AcquireMode, CommitBatch, CommitId, FenceGrant, FenceTiming, FenceToken, HostStore,
+    HostStoreError, MAX_BATCH_BYTES, MAX_ROW_BYTES, Row, RowIndex, ScopeKind, ScopeName, ScopeRef,
+    ScopeUpdate, ScopeVersion, SelfFence, SelfFenceWindow,
 };
-use std::sync::atomic::AtomicBool;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use super::SpiError;
 use super::codec::{
     self, CHUNK_TAG, ChunkHeadV1, ChunkRef, FORMAT_V1, PinnedV1, RowOp, ScopeHeadV1, WindowV1,
+};
+use super::writer_fence::{
+    HostStoreWriterFenceEffect as FenceEffect, HostStoreWriterFenceInput as FenceInput,
+    HostStoreWriterFenceMachineAuthority, HostStoreWriterFenceMachineMutator,
+    HostStoreWriterFencePhase as FencePhase, WriterFenceAcquireOutcome, WriterFenceAcquireStep,
+    WriterFenceListingOutcome, WriterFenceLostCause, WriterFenceRefusal, WriterFenceRenewOutcome,
+    WriterFenceStopCause,
 };
 
 /// A row entry value larger than this goes to a chunk scope.
@@ -595,20 +611,70 @@ impl ScopePlan {
     }
 }
 
-/// The acquires this writer gave up on at its acquire timeout since its last
-/// grant ([`SpiRealm::reacquire_serialized`]). A store may still grant such
-/// an acquire after the realm dropped the call, so while one exists a holder
-/// the writer does not know may be its own late grant.
-#[derive(Debug, Default)]
-struct UnansweredAcquires {
-    /// How many acquires timed out since the last grant.
-    timed_out: u32,
-    /// The holder a re-acquire met while acquires had timed out, and the
-    /// instant its recorded lease ends unless it is renewed: when the
-    /// answer arrived plus what the store said remained of it, so never
-    /// before the store's own end. No acquire is made before that instant,
-    /// and the same holder met after it renewed its lease.
-    waiting_out: Option<(FenceToken, Instant)>,
+/// The realm's writer fence: the state of its `HostStoreWriterFenceMachine`
+/// (the writer's phase, the token it commits with, the grant it has not
+/// installed, the acquires it gave up on and the holder it waits out), and
+/// what the machine leaves to the realm: the text of the realm's loss and
+/// the instant the waited-out holder's recorded lease ends.
+struct WriterFence {
+    machine: HostStoreWriterFenceMachineAuthority,
+    /// Why the realm was lost, in words, recorded with the machine's loss.
+    lost: Option<String>,
+    /// The waited-out holder and the instant its recorded lease ends unless
+    /// it is renewed: when the answer arrived plus what the store said
+    /// remained of it, so never before the store's own end.
+    waited_until: Option<(FenceToken, Instant)>,
+}
+
+impl WriterFence {
+    /// The writer fence of a realm the open granted `token`.
+    fn opened(token: FenceToken) -> Self {
+        let mut fence = Self {
+            machine: HostStoreWriterFenceMachineAuthority::new(),
+            lost: None,
+            waited_until: None,
+        };
+        fence.apply(FenceInput::Open { token: token.get() }, |_| String::new());
+        fence
+    }
+
+    fn phase(&self) -> FencePhase {
+        self.machine.state().lifecycle_phase
+    }
+
+    /// Apply `input` to the machine. When the input loses the realm, `loss`
+    /// describes the loss from the machine's cause; the description is kept
+    /// with the machine's state and logged.
+    fn apply(
+        &mut self,
+        input: FenceInput,
+        loss: impl FnOnce(WriterFenceLostCause) -> String,
+    ) -> Vec<FenceEffect> {
+        let effects = match HostStoreWriterFenceMachineMutator::apply(&mut self.machine, input) {
+            Ok(transition) => transition.effects().to_vec(),
+            Err(error) => {
+                // Every (phase, input) pair has an arm; a refusal from the
+                // kernel is a broken rule of the machine, and changes
+                // nothing.
+                tracing::error!(?error, "host store writer fence refused an input");
+                return Vec::new();
+            }
+        };
+        let mut loss = Some(loss);
+        for effect in &effects {
+            if let FenceEffect::RealmLost { cause } = effect
+                && let Some(loss) = loss.take()
+            {
+                let text = loss(*cause);
+                tracing::error!(
+                    cause = %text,
+                    "host store realm poisoned; every call refuses until it is reopened"
+                );
+                self.lost = Some(text);
+            }
+        }
+        effects
+    }
 }
 
 /// The shared realm handle. See the module documentation.
@@ -619,16 +685,17 @@ pub struct SpiRealm {
     /// How long after the start of the last successful acquire or renew
     /// this writer may write (the lease minus the self-fence margin).
     self_fence_window: Duration,
-    /// The token this writer commits with; a re-acquire replaces it.
-    fence: AtomicU64,
+    /// The writer fence: its machine decides when the writer stops,
+    /// re-acquires, resumes or loses the realm, and the token it commits
+    /// with.
+    writer_fence: StdMutex<WriterFence>,
     /// What the open waited out of a superseded holder's lease.
     superseded_lease: Duration,
     writer: String,
     counter: AtomicU64,
+    /// The start of the last successful acquire or renew: the self-fence
+    /// window counts from it.
     lease_start: StdMutex<Instant>,
-    /// Set when a renew failed or the window was seen closed; cleared only
-    /// by a fresh fenced acquire, never by a renew.
-    stopped: AtomicBool,
     /// Commits hold it shared; a re-acquire holds it exclusive, so no batch
     /// carrying the old token is in flight when the token changes.
     fence_gate: tokio::sync::RwLock<()>,
@@ -641,15 +708,6 @@ pub struct SpiRealm {
     /// attempt, so waits that give up during an outage leave one attempt
     /// behind them, not one each.
     reacquire_in_flight: StdMutex<Option<SharedReacquire>>,
-    /// The acquires this writer gave up on since its last grant, and the
-    /// holder it waits out meanwhile.
-    unanswered: StdMutex<UnansweredAcquires>,
-    /// The token of the last grant while it is not installed: a re-acquire
-    /// installs it only once a listing showed no batch this writer did not
-    /// write. A listing that fails leaves the store holding the grant's
-    /// lease, so the next re-acquire meets it as the holder and takes it
-    /// over as this writer's own lease, as it does the installed token's.
-    unproven_grant: StdMutex<Option<FenceToken>>,
     /// The version of every visible scope as this writer last saw or wrote
     /// it: a re-acquire compares a fresh listing with it to prove no other
     /// writer committed while this one was stopped.
@@ -659,7 +717,6 @@ pub struct SpiRealm {
     /// landed. A re-acquire accepts any of them; a later landed batch
     /// on the scope settles it.
     uncertain: StdMutex<HashMap<(ScopeKind, String), Vec<Option<ScopeVersion>>>>,
-    realm_poison: StdMutex<Option<String>>,
     /// Every poisoned scope, with its cause: a scope enters once, when it is
     /// poisoned, and stays until the realm is reopened. A read across many
     /// scopes checks only the families it reads
@@ -695,7 +752,7 @@ impl SelfFence for SpiRealm {
         SelfFenceWindow {
             elapsed: self.lease_started().elapsed(),
             window: self.self_fence_window,
-            renew_failed: self.stopped.load(Ordering::Acquire),
+            renew_failed: lock(&self.writer_fence).machine.state().writer_stopped,
         }
     }
 
@@ -764,10 +821,11 @@ impl SelfFence for SpiRealm {
     }
 
     /// The realm lost its fence: it is poisoned (another writer's holder or
-    /// batch, a fenced-out renew or commit, or a break of the writer's own
-    /// rules), and this writer never resumes.
+    /// batch, a fenced-out renew or commit, a store that broke its token
+    /// order, or a break of the writer's own rules), and this writer never
+    /// resumes.
     fn lost(&self) -> bool {
-        self.realm_poisoned().is_some()
+        lock(&self.writer_fence).phase() == FencePhase::Lost
     }
 }
 
@@ -848,6 +906,20 @@ impl Drop for ClearReacquireInFlight {
     }
 }
 
+/// What a re-acquire does after an acquire answered, as its writer fence
+/// decided.
+enum AcquireNext {
+    /// Take the writer's own recorded lease over.
+    Takeover,
+    /// Prove the grant with a fresh listing.
+    Prove(FenceGrant),
+}
+
+/// Log that the writer stopped, and why.
+fn writer_stopped(cause: &str) {
+    tracing::warn!(%cause, "host store writer stopped; it resumes only on a fresh acquire");
+}
+
 fn lock<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
@@ -894,21 +966,17 @@ impl SpiRealm {
             host,
             timing,
             self_fence_window,
-            fence: AtomicU64::new(grant.token.get()),
+            writer_fence: StdMutex::new(WriterFence::opened(grant.token)),
             superseded_lease: grant.superseded_lease,
             writer: uuid::Uuid::now_v7().simple().to_string(),
             counter: AtomicU64::new(0),
             lease_start: StdMutex::new(started),
-            stopped: AtomicBool::new(false),
             fence_gate: tokio::sync::RwLock::new(()),
             slow_settles: tokio::sync::watch::Sender::new(0),
             renew_gate: Mutex::new(()),
             reacquire_in_flight: StdMutex::new(None),
-            unanswered: StdMutex::new(UnansweredAcquires::default()),
-            unproven_grant: StdMutex::new(None),
             known_heads: StdMutex::new(HashMap::new()),
             uncertain: StdMutex::new(HashMap::new()),
-            realm_poison: StdMutex::new(None),
             poisoned: StdMutex::new(BTreeMap::new()),
             cells: StdMutex::new(HashMap::new()),
             listed: StdMutex::new(HashMap::new()),
@@ -934,7 +1002,7 @@ impl SpiRealm {
     /// The fence token this realm commits with now.
     #[must_use]
     pub fn fence(&self) -> FenceToken {
-        FenceToken::new(self.fence.load(Ordering::Acquire))
+        FenceToken::new(lock(&self.writer_fence).machine.state().token)
     }
 
     /// The options this realm was opened with.
@@ -977,7 +1045,8 @@ impl SpiRealm {
     /// The realm poison cause, when the fence was lost.
     #[must_use]
     pub fn realm_poisoned(&self) -> Option<String> {
-        lock(&self.realm_poison).clone()
+        let fence = lock(&self.writer_fence);
+        (fence.phase() == FencePhase::Lost).then(|| fence.lost.clone().unwrap_or_default())
     }
 
     /// Whether any scope is poisoned.
@@ -1100,30 +1169,84 @@ impl SpiRealm {
         *lock(&self.lease_start)
     }
 
-    /// A renew that started at `started` succeeded. It extends the window
-    /// only while the writer has not stopped: a stopped writer resumes on a
-    /// fresh acquire alone.
-    fn renewed(&self, started: Instant) {
-        if self.stopped.load(Ordering::Acquire) {
-            return;
-        }
-        let mut slot = lock(&self.lease_start);
-        if started.duration_since(*slot) >= self.self_fence_window {
-            // The window closed before this renew started: an acquire made
-            // meanwhile may have missed the last renew. Stop instead.
-            drop(slot);
-            self.stop("the self-fence window closed before a renew");
-            return;
-        }
-        if started > *slot {
-            *slot = started;
+    /// Apply `input` to the writer fence; see [`WriterFence::apply`].
+    fn apply_fence(
+        &self,
+        input: FenceInput,
+        loss: impl FnOnce(WriterFenceLostCause) -> String,
+    ) -> Vec<FenceEffect> {
+        lock(&self.writer_fence).apply(input, loss)
+    }
+
+    /// The refusal of a call once the realm is lost: its recorded cause.
+    fn lost_realm(&self) -> SpiError {
+        SpiError::RealmPoisoned(self.realm_poisoned().unwrap_or_default())
+    }
+
+    /// The writer saw its self-fence window closed: a live writer stops, and
+    /// one that is not live writes nothing already.
+    fn window_closed(&self) {
+        let effects = self.apply_fence(FenceInput::WindowClosed, |_| String::new());
+        if effects
+            .iter()
+            .any(|effect| matches!(effect, FenceEffect::WriterStopped { .. }))
+        {
+            writer_stopped("the self-fence window closed");
         }
     }
 
-    fn stop(&self, cause: &str) {
-        if !self.stopped.swap(true, Ordering::AcqRel) {
-            tracing::warn!(%cause, "host store writer stopped; it resumes only on a fresh acquire");
+    /// The renew of `token` that started at `started` answered `answer`.
+    /// A renew that succeeded counts the window from its start; a stopped
+    /// writer resumes on a fresh acquire alone, never on a renew. Returns
+    /// whether the realm is lost, which ends the renewal.
+    fn renew_answered(
+        &self,
+        token: FenceToken,
+        started: Instant,
+        answer: Result<Result<(), HostStoreError>, tokio::time::error::Elapsed>,
+    ) -> bool {
+        let (outcome, current, failure) = match answer {
+            Ok(Ok(())) => (WriterFenceRenewOutcome::Renewed, token, None),
+            Ok(Err(HostStoreError::FencedOut { current })) => {
+                (WriterFenceRenewOutcome::FencedOut, current, None)
+            }
+            Ok(Err(error)) => (WriterFenceRenewOutcome::Failed, token, Some(error)),
+            Err(_) => (WriterFenceRenewOutcome::TimedOut, token, None),
+        };
+        // A renew that started once the window had closed may have missed an
+        // acquire made meanwhile: it stops the writer instead.
+        let in_window = started.duration_since(self.lease_started()) < self.self_fence_window;
+        let effects = self.apply_fence(
+            FenceInput::RenewAnswered {
+                outcome,
+                renewed: token.get(),
+                current: current.get(),
+                in_window,
+            },
+            |_| format!("fenced out: token {current} superseded token {token}"),
+        );
+        let mut lost = false;
+        for effect in effects {
+            match effect {
+                FenceEffect::WindowAnchored { .. } => {
+                    let mut slot = lock(&self.lease_start);
+                    if started > *slot {
+                        *slot = started;
+                    }
+                }
+                FenceEffect::WriterStopped { cause } => match (cause, &failure) {
+                    (WriterFenceStopCause::WindowClosedBeforeRenew, _) => {
+                        writer_stopped("the self-fence window closed before a renew");
+                    }
+                    (WriterFenceStopCause::RenewTimedOut, _) => writer_stopped("a renew timed out"),
+                    (_, Some(error)) => writer_stopped(&format!("a renew failed: {error}")),
+                    (_, None) => writer_stopped("a renew failed"),
+                },
+                FenceEffect::RealmLost { .. } => lost = true,
+                _ => {}
+            }
         }
+        lost
     }
 
     /// Whether this writer may write: it has not stopped (no failed renew
@@ -1152,7 +1275,7 @@ impl SpiRealm {
         if self.lease_is_live() {
             return Ok(());
         }
-        self.stop("the self-fence window closed");
+        self.window_closed();
         self.shared_reacquire()?.await
     }
 
@@ -1194,7 +1317,9 @@ impl SpiRealm {
     /// acquire, shows every batch committed before it) must match every
     /// version this writer last saw or wrote. A holder this writer does not
     /// know is waited out while an acquire of its own timed out since its
-    /// last grant (see the module documentation).
+    /// last grant (see the module documentation). The writer fence machine
+    /// decides each step; this sends the calls it asks for and reports their
+    /// answers.
     async fn reacquire(&self) -> Result<(), SpiError> {
         let _serial = self.renew_gate.lock().await;
         self.reacquire_serialized().await
@@ -1206,166 +1331,278 @@ impl SpiRealm {
         if self.lease_is_live() {
             return Ok(());
         }
+        // A live writer whose window closed stops before it re-acquires.
+        self.window_closed();
         // An exclusive acquire cannot supersede a holder before its
         // recorded lease ends: make none until then.
-        if let Some(waiting) = self.waiting_out_holder(Instant::now()) {
+        if let Some(waiting) = self.wait_out_holder(Instant::now()) {
             return Err(waiting);
         }
         // No batch with the old token may be in flight.
         let _no_commits = self.fence_gate.write().await;
-        let previous = self.fence();
         let started = Instant::now();
-        let acquired = tokio::time::timeout(
-            self.config.renew_timeout,
-            self.host.acquire_fence(AcquireMode::Exclusive),
-        )
-        .await;
-        let grant = match acquired {
-            Ok(Ok(grant)) => grant,
-            Ok(Err(HostStoreError::Held { holder, .. })) if self.is_own(holder, previous) => {
-                // This writer's own lease is still recorded (its installed
-                // token, or a grant whose listing failed) and nobody
-                // acquired since: supersede it, with nothing to wait out.
-                match tokio::time::timeout(
-                    self.config.renew_timeout,
-                    self.host.acquire_fence(AcquireMode::Takeover),
-                )
-                .await
-                {
-                    Ok(Ok(grant)) => grant,
-                    Ok(Err(error)) => {
-                        return Err(SpiError::LeaseLapsed(format!(
-                            "the writer stopped and a re-acquire failed: {error}"
-                        )));
-                    }
-                    Err(_) => return Err(self.acquire_timed_out()),
-                }
-            }
-            Ok(Err(HostStoreError::Held { holder, remaining })) => {
-                return Err(self.unknown_holder(holder, remaining));
-            }
-            Ok(Err(error)) => {
-                return Err(SpiError::LeaseLapsed(format!(
-                    "the writer stopped and a re-acquire failed: {error}"
-                )));
-            }
-            Err(_) => return Err(self.acquire_timed_out()),
+        let Some(mut step) = self.begin_reacquire()? else {
+            return Ok(());
         };
-        // The grant's token is above every token acquired before it, a late
-        // grant of an acquire this writer gave up on included. It is this
-        // writer's own until the listing proves it, or fails to.
-        *lock(&self.unanswered) = UnansweredAcquires::default();
-        *lock(&self.unproven_grant) = Some(grant.token);
-        let listed = self.list_versions().await?;
-        if !self.listing_matches(&listed) {
-            return Err(self.poison_realm(
-                "another writer committed while this one was stopped; reopen the realm".into(),
-            ));
+        let grant = loop {
+            let mode = match step {
+                WriterFenceAcquireStep::Exclusive => AcquireMode::Exclusive,
+                WriterFenceAcquireStep::TakeoverOwn => AcquireMode::Takeover,
+            };
+            let acquired =
+                tokio::time::timeout(self.config.renew_timeout, self.host.acquire_fence(mode))
+                    .await;
+            match self.acquire_answered(acquired)? {
+                AcquireNext::Takeover => step = WriterFenceAcquireStep::TakeoverOwn,
+                AcquireNext::Prove(grant) => break grant,
+            }
+        };
+        let listed = match self.list_versions().await {
+            Ok(listed) => listed,
+            Err(error) => {
+                // The grant stays this writer's own: the next re-acquire takes
+                // its lease over.
+                self.apply_fence(
+                    FenceInput::ListingChecked {
+                        outcome: WriterFenceListingOutcome::Failed,
+                        token: grant.token.get(),
+                    },
+                    |_| String::new(),
+                );
+                return Err(error);
+            }
+        };
+        let outcome = if self.listing_matches(&listed) {
+            WriterFenceListingOutcome::Clean
+        } else {
+            WriterFenceListingOutcome::ForeignBatch
+        };
+        let effects = self.apply_fence(
+            FenceInput::ListingChecked {
+                outcome,
+                token: grant.token.get(),
+            },
+            |_| "another writer committed while this one was stopped; reopen the realm".into(),
+        );
+        if !effects
+            .iter()
+            .any(|effect| matches!(effect, FenceEffect::TokenInstalled { .. }))
+        {
+            return Err(self.lost_realm());
         }
-        self.fence.store(grant.token.get(), Ordering::Release);
-        *lock(&self.unproven_grant) = None;
         *lock(&self.known_heads) = listed;
         lock(&self.uncertain).clear();
         // The listing may have outlasted the window counted from the
-        // acquire: renew once with the new token and count the window
-        // from that renew's start.
+        // acquire: renew once with the new token and count the window from
+        // that renew's start.
         let renew_started = Instant::now();
-        match tokio::time::timeout(self.renew_timeout, self.host.renew_fence(grant.token)).await {
-            Ok(Ok(())) => {}
+        let renewed =
+            tokio::time::timeout(self.renew_timeout, self.host.renew_fence(grant.token)).await;
+        let (outcome, current, failure) = match renewed {
+            Ok(Ok(())) => {
+                // The window counts from this renew before the writer
+                // resumes, so no reader sees it live under the old anchor.
+                *lock(&self.lease_start) = renew_started.max(started);
+                (WriterFenceRenewOutcome::Renewed, grant.token, None)
+            }
             Ok(Err(HostStoreError::FencedOut { current })) => {
-                return Err(self.poison_realm(format!(
+                (WriterFenceRenewOutcome::FencedOut, current, None)
+            }
+            Ok(Err(error)) => (WriterFenceRenewOutcome::Failed, grant.token, Some(error)),
+            Err(_) => (WriterFenceRenewOutcome::TimedOut, grant.token, None),
+        };
+        let effects = self.apply_fence(
+            FenceInput::RenewAnswered {
+                outcome,
+                renewed: grant.token.get(),
+                current: current.get(),
+                in_window: true,
+            },
+            |_| {
+                format!(
                     "fenced out right after a re-acquire: token {current} superseded token {}",
                     grant.token
-                )));
-            }
-            Ok(Err(error)) => {
-                return Err(SpiError::LeaseLapsed(format!(
-                    "the renew after a re-acquire failed: {error}"
-                )));
-            }
-            Err(_) => {
-                return Err(SpiError::LeaseLapsed(
-                    "the renew after a re-acquire timed out".into(),
-                ));
+                )
+            },
+        );
+        for effect in effects {
+            match effect {
+                FenceEffect::WriterResumed { .. } => {
+                    tracing::info!(
+                        token = %grant.token,
+                        "host store writer re-acquired the fence and resumes"
+                    );
+                    return Ok(());
+                }
+                FenceEffect::WriterStopped {
+                    cause: WriterFenceStopCause::ResumeRenewTimedOut,
+                } => {
+                    return Err(SpiError::LeaseLapsed(
+                        "the renew after a re-acquire timed out".into(),
+                    ));
+                }
+                FenceEffect::WriterStopped { .. } => {
+                    let error = failure
+                        .as_ref()
+                        .map_or_else(String::new, ToString::to_string);
+                    return Err(SpiError::LeaseLapsed(format!(
+                        "the renew after a re-acquire failed: {error}"
+                    )));
+                }
+                _ => {}
             }
         }
-        *lock(&self.lease_start) = renew_started.max(started);
-        self.stopped.store(false, Ordering::Release);
-        tracing::info!(token = %grant.token, "host store writer re-acquired the fence and resumes");
-        Ok(())
+        Err(self.lost_realm())
     }
 
-    /// Whether `holder` is this writer's own lease: its installed token
-    /// (`installed`), or the last grant, whose listing failed before its
-    /// token was installed.
-    fn is_own(&self, holder: FenceToken, installed: FenceToken) -> bool {
-        holder == installed || *lock(&self.unproven_grant) == Some(holder)
+    /// Ask the writer fence for a re-acquire of a stopped writer: the
+    /// acquire to send first, or `None` when the writer is live again.
+    fn begin_reacquire(&self) -> Result<Option<WriterFenceAcquireStep>, SpiError> {
+        for effect in self.apply_fence(FenceInput::BeginReacquire, |_| String::new()) {
+            match effect {
+                FenceEffect::AcquireRequested { step } => return Ok(Some(step)),
+                FenceEffect::RequestRefused {
+                    reason: WriterFenceRefusal::AlreadyLive,
+                } => return Ok(None),
+                _ => {}
+            }
+        }
+        match self.check_realm() {
+            Err(lost) => Err(lost),
+            Ok(()) => Err(SpiError::LeaseLapsed(
+                "the writer stopped and its re-acquire could not start".into(),
+            )),
+        }
+    }
+
+    /// Report the answer of an acquire of the re-acquire to the writer fence,
+    /// and say what comes next.
+    fn acquire_answered(
+        &self,
+        acquired: Result<Result<FenceGrant, HostStoreError>, tokio::time::error::Elapsed>,
+    ) -> Result<AcquireNext, SpiError> {
+        let installed = self.fence();
+        let (outcome, token, remaining, failure, grant) = match acquired {
+            Ok(Ok(grant)) => (
+                WriterFenceAcquireOutcome::Granted,
+                grant.token,
+                Duration::ZERO,
+                None,
+                Some(grant),
+            ),
+            Ok(Err(HostStoreError::Held { holder, remaining })) => (
+                WriterFenceAcquireOutcome::Held,
+                holder,
+                remaining,
+                Some(HostStoreError::Held { holder, remaining }),
+                None,
+            ),
+            Ok(Err(error)) => (
+                WriterFenceAcquireOutcome::Failed,
+                FenceToken::new(0),
+                Duration::ZERO,
+                Some(error),
+                None,
+            ),
+            Err(_) => (
+                WriterFenceAcquireOutcome::TimedOut,
+                FenceToken::new(0),
+                Duration::ZERO,
+                None,
+                None,
+            ),
+        };
+        let effects = self.apply_fence(
+            FenceInput::AcquireAnswered {
+                outcome,
+                token: token.get(),
+            },
+            |cause| match cause {
+                WriterFenceLostCause::HeldByAnother => {
+                    format!("fenced out while stopped: token {token} holds the realm")
+                }
+                WriterFenceLostCause::HolderRenewed => format!(
+                    "fenced out while stopped: token {token} renewed its lease after this writer \
+                     waited it out, so another writer holds the realm"
+                ),
+                WriterFenceLostCause::TokenOrder => format!(
+                    "the host store broke its token order: it granted token {token}, not above \
+                     the installed token {installed}, though every grant must answer a token \
+                     above every earlier one; reopen the realm"
+                ),
+                other => format!("the re-acquire lost the realm: {other:?}"),
+            },
+        );
+        for effect in effects {
+            match effect {
+                FenceEffect::AcquireRequested {
+                    step: WriterFenceAcquireStep::TakeoverOwn,
+                } => return Ok(AcquireNext::Takeover),
+                FenceEffect::GrantReceived { .. } => {
+                    if let Some(grant) = grant {
+                        return Ok(AcquireNext::Prove(grant));
+                    }
+                }
+                FenceEffect::HolderWaitedOut { .. } => {
+                    let timed_out = {
+                        let mut fence = lock(&self.writer_fence);
+                        fence.waited_until = Some((token, Instant::now() + remaining));
+                        fence.machine.state().timed_out
+                    };
+                    tracing::warn!(
+                        token = %token,
+                        ?remaining,
+                        timed_out,
+                        "host store fence is held by a token this writer does not know while \
+                         acquires of its own timed out; it may be one of them, granted late, so \
+                         the writer waits out its recorded lease and acquires again"
+                    );
+                    return Err(SpiError::LeaseLapsed(format!(
+                        "token {token} holds the fence for {remaining:?} more; it may be an \
+                         acquire of this writer that timed out, granted late, so the writer \
+                         waits it out"
+                    )));
+                }
+                FenceEffect::WriterStopped {
+                    cause: WriterFenceStopCause::ReacquireTimedOut,
+                } => {
+                    return Err(SpiError::LeaseLapsed(
+                        "the writer stopped and a re-acquire timed out".into(),
+                    ));
+                }
+                FenceEffect::WriterStopped { .. } => {
+                    let error = failure
+                        .as_ref()
+                        .map_or_else(String::new, ToString::to_string);
+                    return Err(SpiError::LeaseLapsed(format!(
+                        "the writer stopped and a re-acquire failed: {error}"
+                    )));
+                }
+                _ => {}
+            }
+        }
+        Err(self.lost_realm())
     }
 
     /// The refusal of a re-acquire made before the recorded lease of the
-    /// holder this writer waits out ends, as of `now`; `None` once it ended,
-    /// or when the writer waits out no holder.
-    fn waiting_out_holder(&self, now: Instant) -> Option<SpiError> {
-        let (holder, until) = lock(&self.unanswered).waiting_out?;
-        (now < until).then(|| {
-            SpiError::LeaseLapsed(format!(
+    /// holder this writer waits out ends, as of `now`; `None` once it ended
+    /// (the writer fence hears so), or when the writer waits out no holder.
+    fn wait_out_holder(&self, now: Instant) -> Option<SpiError> {
+        let mut fence = lock(&self.writer_fence);
+        if fence.phase() != FencePhase::WaitingOut {
+            return None;
+        }
+        if let Some((holder, until)) = fence.waited_until
+            && now < until
+        {
+            return Some(SpiError::LeaseLapsed(format!(
                 "the writer waits out the recorded lease of token {holder} ({:?} more): it may \
                  be an acquire of this writer that timed out, granted late",
                 until - now
-            ))
-        })
-    }
-
-    /// An acquire of the re-acquire timed out: the realm dropped it, and a
-    /// store may still grant it. The refusal the re-acquire answers.
-    fn acquire_timed_out(&self) -> SpiError {
-        let mut unanswered = lock(&self.unanswered);
-        unanswered.timed_out = unanswered.timed_out.saturating_add(1);
-        SpiError::LeaseLapsed("the writer stopped and a re-acquire timed out".into())
-    }
-
-    /// An exclusive acquire met `holder`, a token this writer does not hold,
-    /// whose recorded lease lasts `remaining` more. Another writer holds the
-    /// realm, unless an acquire of this writer timed out since its last
-    /// grant: the holder may then be that acquire, granted late, which
-    /// nobody renews. The writer waits out its recorded lease and acquires
-    /// again. The same holder met once that lease ended renewed it, and only
-    /// a live writer renews.
-    fn unknown_holder(&self, holder: FenceToken, remaining: Duration) -> SpiError {
-        let mut unanswered = lock(&self.unanswered);
-        if unanswered.timed_out == 0 {
-            drop(unanswered);
-            return self.poison_realm(format!(
-                "fenced out while stopped: token {holder} holds the realm"
-            ));
+            )));
         }
-        if unanswered
-            .waiting_out
-            .is_some_and(|(waited, _)| waited == holder)
-        {
-            // Met only once its recorded lease ended: the re-acquire makes
-            // no acquire before that (`waiting_out_holder`).
-            drop(unanswered);
-            return self.poison_realm(format!(
-                "fenced out while stopped: token {holder} renewed its lease after this writer \
-                 waited it out, so another writer holds the realm"
-            ));
-        }
-        let timed_out = unanswered.timed_out;
-        unanswered.waiting_out = Some((holder, Instant::now() + remaining));
-        drop(unanswered);
-        tracing::warn!(
-            token = %holder,
-            ?remaining,
-            timed_out,
-            "host store fence is held by a token this writer does not know while acquires of its \
-             own timed out; it may be one of them, granted late, so the writer waits out its \
-             recorded lease and acquires again"
-        );
-        SpiError::LeaseLapsed(format!(
-            "token {holder} holds the fence for {remaining:?} more; it may be an acquire of this \
-             writer that timed out, granted late, so the writer waits it out"
-        ))
+        fence.apply(FenceInput::LeaseEnded, |_| String::new());
+        None
     }
 
     /// Whether a fresh listing shows only batches this writer wrote: every
@@ -1460,11 +1697,12 @@ impl SpiRealm {
         }
     }
 
-    fn poison_realm(&self, cause: String) -> SpiError {
-        let mut slot = lock(&self.realm_poison);
-        let cause = slot.get_or_insert(cause).clone();
-        tracing::error!(%cause, "host store realm poisoned; every call refuses until it is reopened");
-        SpiError::RealmPoisoned(cause)
+    /// Lose the realm to `cause`, in words `text`: every call refuses until
+    /// it is reopened. A realm already lost keeps its first cause, and the
+    /// refusal names it.
+    fn poison_realm(&self, cause: WriterFenceLostCause, text: String) -> SpiError {
+        self.apply_fence(FenceInput::Poison { cause }, |_| text);
+        self.lost_realm()
     }
 
     /// Poison one scope: it refuses every call until the realm reopens.
@@ -1476,7 +1714,7 @@ impl SpiRealm {
     /// Poison the whole realm (an adapter rule was broken and the affected
     /// scope could not be singled out).
     pub fn poison_all(&self, cause: String) -> SpiError {
-        self.poison_realm(cause)
+        self.poison_realm(WriterFenceLostCause::AdapterRule, cause)
     }
 
     fn poison_scope(&self, state: &mut ScopeState, cause: &str) {
@@ -1508,8 +1746,8 @@ impl SpiRealm {
                 // Renews and re-acquires never overlap: a renew still in
                 // flight with an old token cannot meet the new one.
                 let _serial = realm.renew_gate.lock().await;
-                if realm.stopped.load(Ordering::Acquire) || !realm.lease_is_live() {
-                    realm.stop("the self-fence window closed");
+                if !realm.lease_is_live() {
+                    realm.window_closed();
                     if let Err(error) = realm.reacquire_serialized().await {
                         tracing::warn!(%error, "host store re-acquire failed; writes stay stopped");
                     }
@@ -1517,27 +1755,10 @@ impl SpiRealm {
                 }
                 let started = Instant::now();
                 let token = realm.fence();
-                match tokio::time::timeout(realm.renew_timeout, realm.host.renew_fence(token)).await
-                {
-                    Ok(Ok(())) => realm.renewed(started),
-                    Ok(Err(HostStoreError::FencedOut { current }))
-                        if current != token && current == realm.fence() =>
-                    {
-                        // A stale renew of this writer's own superseded
-                        // token: the current token is ours.
-                    }
-                    Ok(Err(HostStoreError::FencedOut { current })) => {
-                        realm.poison_realm(format!(
-                            "fenced out: token {current} superseded token {token}"
-                        ));
-                        return;
-                    }
-                    Ok(Err(error)) => {
-                        realm.stop(&format!("a renew failed: {error}"));
-                    }
-                    Err(_) => {
-                        realm.stop("a renew timed out");
-                    }
+                let answer =
+                    tokio::time::timeout(realm.renew_timeout, realm.host.renew_fence(token)).await;
+                if realm.renew_answered(token, started, answer) {
+                    return;
                 }
             }
         });
@@ -2060,7 +2281,7 @@ impl SpiRealm {
                     self.poison_scope(&mut *scopes[plan.index], &cause);
                 }
                 if matches!(error, SpiError::Host(HostStoreError::FencedOut { .. })) {
-                    return Err(self.poison_realm(cause));
+                    return Err(self.poison_realm(WriterFenceLostCause::FencedOutCommit, cause));
                 }
                 Err(error)
             }

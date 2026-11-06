@@ -92,6 +92,29 @@ them.
   same release, keeps its closed vocabulary. `mob_check_member` gives such a
   member a note of its own (see Fixed).
 
+- `meerkat-runtime`: `store::spi::writer_fence`, the production module of
+  `HostStoreWriterFenceMachine`, a new canonical machine that owns the writer
+  fence of a host store realm: the writer's phase (live, stopped, acquiring,
+  proving a grant, resuming, waiting out a holder, or lost), the token it
+  commits with, the grant it has not installed, the acquires it gave up on,
+  the holder it waits out, and why it stopped or lost the realm. The realm
+  drives it; the rules it keeps are unchanged except the token order (see
+  Changed).
+
+- `meerkat-store-conformance`: the host store chapter's token order row:
+  every grant must answer a token above every earlier grant of the realm, a
+  takeover of the holder's own lease through the handle that holds it
+  included.
+
+### Changed
+
+- `meerkat-runtime`: a store that answers a grant at or below the installed
+  token now loses the realm (fail closed). A re-acquire's grant must answer a
+  token above the one the writer holds; one that does not breaks the store's
+  token order, and the realm is poisoned with a cause that names the store,
+  not another writer. Before, the writer installed the token again and
+  resumed, so two writers could carry one token.
+
 ### Fixed
 
 - `meerkat-runtime`: a host store commit no longer sends its batch past its
@@ -154,6 +177,13 @@ them.
   `SpiRealmConfig::renew_timeout` to the renew interval first, then lengthen
   the timing as the host store SPI reference describes (Core's Timeouts And
   The Safety Condition).
+
+- Host store implementers: every grant must answer a token above every
+  earlier grant of the realm, in either acquire mode and to any caller, a
+  takeover of the caller's own recorded lease included. From this release a
+  grant at or below the token Core holds loses the realm. Run the
+  conformance chapter (its new token order row) against your store before
+  you upgrade.
 
 ### Known limitations
 

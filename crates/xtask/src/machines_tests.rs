@@ -61,6 +61,10 @@ fn owner_tests_are_registered_only_for_remaining_canonical_surfaces() {
     let mob = owner_test_specs_for_machine("mob_machine");
     assert_eq!(mob.len(), 1);
     assert!(mob.iter().all(|spec| spec.package == "meerkat-mob"));
+    // meerkat-mob's test features: its lib test stops on the test-feature
+    // canary without them, and meerkat-integration-tests declares none.
+    assert!(mob.iter().all(|spec| spec.features == ["test-support"]));
+    assert!(meerkat.iter().all(|spec| spec.features.is_empty()));
 }
 
 #[cfg(feature = "machine-authority")]

@@ -232,6 +232,13 @@ pub struct MemberRespawn {
     /// ([`super::MobHandle::ensure_member_live`]); otherwise it stays Dormant
     /// until its next delivery or owed kickoff wakes it.
     pub wake: bool,
+    /// The build inputs the next incarnation's builds apply on the kept
+    /// session (a declared role migration's composed build): its
+    /// `MemberSpawned` row journals them, and each build of that
+    /// incarnation sets them on its request before the host's spawn
+    /// customizer is asked, as a seat's first build does with what the seat
+    /// carries. `None` keeps what the session's own builds recorded.
+    pub(crate) build_inputs: Option<super::SeatBuildInputs>,
 }
 
 impl MemberRespawn {
@@ -275,6 +282,13 @@ impl MemberRespawn {
     #[must_use]
     pub fn with_wake(mut self, wake: bool) -> Self {
         self.wake = wake;
+        self
+    }
+
+    /// Carry `inputs` to the next incarnation's builds on the kept session.
+    #[must_use]
+    pub(crate) fn with_build_inputs(mut self, inputs: super::SeatBuildInputs) -> Self {
+        self.build_inputs = Some(inputs);
         self
     }
 }

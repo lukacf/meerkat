@@ -19091,6 +19091,10 @@ pub mod inputs {
     pub struct ApplyToolGrantOpenSet {
         pub open: std::collections::BTreeSet<ToolName>,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AbortUntilChangedSwitchTurnReconfigure {
+        pub request_id: String,
+    }
     #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BindInputRequesterBatchKey {
         pub input_id: String,
@@ -19537,6 +19541,7 @@ pub enum Input {
     ReleaseInputController(inputs::ReleaseInputController),
     ReplaceToolGrantGate(inputs::ReplaceToolGrantGate),
     ApplyToolGrantOpenSet(inputs::ApplyToolGrantOpenSet),
+    AbortUntilChangedSwitchTurnReconfigure(inputs::AbortUntilChangedSwitchTurnReconfigure),
     BindInputRequesterBatchKey(inputs::BindInputRequesterBatchKey),
 }
 impl Input {
@@ -20135,6 +20140,9 @@ impl Input {
             Self::ReleaseInputController(_) => InputKind::ReleaseInputController,
             Self::ReplaceToolGrantGate(_) => InputKind::ReplaceToolGrantGate,
             Self::ApplyToolGrantOpenSet(_) => InputKind::ApplyToolGrantOpenSet,
+            Self::AbortUntilChangedSwitchTurnReconfigure(_) => {
+                InputKind::AbortUntilChangedSwitchTurnReconfigure
+            }
             Self::BindInputRequesterBatchKey(_) => InputKind::BindInputRequesterBatchKey,
         }
     }
@@ -20558,6 +20566,7 @@ pub enum InputKind {
     ReleaseInputController,
     ReplaceToolGrantGate,
     ApplyToolGrantOpenSet,
+    AbortUntilChangedSwitchTurnReconfigure,
     BindInputRequesterBatchKey,
 }
 
@@ -26092,6 +26101,16 @@ pub enum TransitionId {
     SuspendRunForStopFenceGapRunningToAttached,
     StopCurrentRunForRunResumableIdle,
     StopCurrentRunForRunResumableAttached,
+    AbortUntilChangedSwitchTurnReconfigureIdle,
+    AbortUntilChangedSwitchTurnReconfigureAttached,
+    AbortUntilChangedSwitchTurnReconfigureRunning,
+    AbortUntilChangedSwitchTurnReconfigureRetired,
+    AbortUntilChangedSwitchTurnReconfigureStopped,
+    RequestUntilChangedSwitchTurnPendingConflictIdle,
+    RequestUntilChangedSwitchTurnPendingConflictAttached,
+    RequestUntilChangedSwitchTurnPendingConflictRunning,
+    CompleteUntilChangedSwitchTurnReconfigureRetired,
+    CompleteUntilChangedSwitchTurnReconfigureStopped,
     BindInputRequesterBatchKeyIdle,
     BindInputRequesterBatchKeyAttached,
     BindInputRequesterBatchKeyRunning,

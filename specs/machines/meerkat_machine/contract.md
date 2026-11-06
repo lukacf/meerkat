@@ -915,6 +915,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ReleaseInputController`(input_id: String)
 - `ReplaceToolGrantGate`(gated: Set<ToolName>)
 - `ApplyToolGrantOpenSet`(open: Set<ToolName>)
+- `AbortUntilChangedSwitchTurnReconfigure`(request_id: String)
 - `BindInputRequesterBatchKey`(input_id: String, authority_batch_key: String)
 
 ## Signals
@@ -2923,6 +2924,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
   - `transcript_not_carried`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Idle`
 
@@ -2931,6 +2933,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
   - `transcript_not_carried`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Attached`
 
@@ -2939,6 +2942,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
   - `transcript_not_carried`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Running`
 
@@ -2947,6 +2951,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
   - `transcript_not_carried`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Idle`
 
@@ -2955,6 +2960,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
   - `transcript_not_carried`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Attached`
 
@@ -2963,6 +2969,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
   - `transcript_not_carried`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Running`
 
@@ -2973,6 +2980,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `baseline_known`
   - `approval_unavailable`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Idle`
 
@@ -2983,6 +2991,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `baseline_known`
   - `approval_unavailable`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Attached`
 
@@ -2993,6 +3002,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `baseline_known`
   - `approval_unavailable`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Running`
 
@@ -3003,6 +3013,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `approval_denied`
   - `approval_reason_present`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
 - To: `Idle`
 
@@ -3013,6 +3024,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `approval_denied`
   - `approval_reason_present`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
 - To: `Attached`
 
@@ -3023,6 +3035,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `approval_denied`
   - `approval_reason_present`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
 - To: `Running`
 
@@ -3032,6 +3045,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `transcript_carried`
   - `scoped_conflict`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Idle`
 
@@ -3041,6 +3055,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `transcript_carried`
   - `scoped_conflict`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Attached`
 
@@ -3050,6 +3065,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `transcript_carried`
   - `scoped_conflict`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Running`
 
@@ -3062,6 +3078,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `positive_turns`
   - `approval_satisfied`
   - `no_scoped_conflict`
+  - `request_not_denied`
 - To: `Idle`
 
 ### `RequestFiniteSwitchTurnAcceptedAttached`
@@ -3073,6 +3090,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `positive_turns`
   - `approval_satisfied`
   - `no_scoped_conflict`
+  - `request_not_denied`
 - To: `Attached`
 
 ### `RequestFiniteSwitchTurnAcceptedRunning`
@@ -3084,6 +3102,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `positive_turns`
   - `approval_satisfied`
   - `no_scoped_conflict`
+  - `request_not_denied`
 - To: `Running`
 
 ### `RequestUntilChangedSwitchTurnAcceptedIdle`
@@ -3093,6 +3112,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `baseline_known`
   - `approval_satisfied`
+  - `no_other_pending_switch`
+  - `request_not_denied`
 - Emits: `SwitchTurnPersistentReconfigureRequested`
 - To: `Idle`
 
@@ -3103,6 +3124,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `baseline_known`
   - `approval_satisfied`
+  - `no_other_pending_switch`
+  - `request_not_denied`
 - Emits: `SwitchTurnPersistentReconfigureRequested`
 - To: `Attached`
 
@@ -3113,6 +3136,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `baseline_known`
   - `approval_satisfied`
+  - `no_other_pending_switch`
+  - `request_not_denied`
 - Emits: `SwitchTurnPersistentReconfigureRequested`
 - To: `Running`
 
@@ -3123,6 +3148,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `baseline_known`
   - `approval_unavailable`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Idle`
 
@@ -3133,6 +3159,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `baseline_known`
   - `approval_unavailable`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Attached`
 
@@ -3143,6 +3170,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `baseline_known`
   - `approval_unavailable`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Running`
 
@@ -3153,6 +3181,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `approval_denied`
   - `approval_reason_present`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
 - To: `Idle`
 
@@ -3163,6 +3192,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `approval_denied`
   - `approval_reason_present`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
 - To: `Attached`
 
@@ -3173,7 +3203,38 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `approval_denied`
   - `approval_reason_present`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
+- To: `Running`
+
+### `RequestUntilChangedSwitchTurnPendingConflictIdle`
+- From: `Idle`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- Guards:
+  - `transcript_carried`
+  - `approval_satisfied`
+  - `pending_switch_conflict`
+- Emits: `SwitchTurnDenied`
+- To: `Idle`
+
+### `RequestUntilChangedSwitchTurnPendingConflictAttached`
+- From: `Attached`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- Guards:
+  - `transcript_carried`
+  - `approval_satisfied`
+  - `pending_switch_conflict`
+- Emits: `SwitchTurnDenied`
+- To: `Attached`
+
+### `RequestUntilChangedSwitchTurnPendingConflictRunning`
+- From: `Running`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- Guards:
+  - `transcript_carried`
+  - `approval_satisfied`
+  - `pending_switch_conflict`
+- Emits: `SwitchTurnDenied`
 - To: `Running`
 
 ### `CompleteUntilChangedSwitchTurnReconfigureIdle`
@@ -3199,6 +3260,57 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `pending_until_changed_reconfigure`
 - Emits: `ModelRoutingStatusChanged`
 - To: `Running`
+
+### `CompleteUntilChangedSwitchTurnReconfigureRetired`
+- From: `Retired`
+- On: `CompleteUntilChangedSwitchTurnReconfigure`(request_id)
+- Guards:
+  - `pending_until_changed_reconfigure`
+- Emits: `ModelRoutingStatusChanged`
+- To: `Retired`
+
+### `CompleteUntilChangedSwitchTurnReconfigureStopped`
+- From: `Stopped`
+- On: `CompleteUntilChangedSwitchTurnReconfigure`(request_id)
+- Guards:
+  - `pending_until_changed_reconfigure`
+- Emits: `ModelRoutingStatusChanged`
+- To: `Stopped`
+
+### `AbortUntilChangedSwitchTurnReconfigureIdle`
+- From: `Idle`
+- On: `AbortUntilChangedSwitchTurnReconfigure`(request_id)
+- Guards:
+  - `pending_until_changed_reconfigure`
+- To: `Idle`
+
+### `AbortUntilChangedSwitchTurnReconfigureAttached`
+- From: `Attached`
+- On: `AbortUntilChangedSwitchTurnReconfigure`(request_id)
+- Guards:
+  - `pending_until_changed_reconfigure`
+- To: `Attached`
+
+### `AbortUntilChangedSwitchTurnReconfigureRunning`
+- From: `Running`
+- On: `AbortUntilChangedSwitchTurnReconfigure`(request_id)
+- Guards:
+  - `pending_until_changed_reconfigure`
+- To: `Running`
+
+### `AbortUntilChangedSwitchTurnReconfigureRetired`
+- From: `Retired`
+- On: `AbortUntilChangedSwitchTurnReconfigure`(request_id)
+- Guards:
+  - `pending_until_changed_reconfigure`
+- To: `Retired`
+
+### `AbortUntilChangedSwitchTurnReconfigureStopped`
+- From: `Stopped`
+- On: `AbortUntilChangedSwitchTurnReconfigure`(request_id)
+- Guards:
+  - `pending_until_changed_reconfigure`
+- To: `Stopped`
 
 ### `ImportCommittedModelRoutingHandoffFirstIdle`
 - From: `Idle`

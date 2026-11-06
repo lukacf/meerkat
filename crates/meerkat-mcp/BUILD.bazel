@@ -269,7 +269,6 @@ rust_test(
         "//crates/meerkat-capabilities:meerkat_capabilities",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
-        "//crates/meerkat-mcp:meerkat_mcp_test_support",
         "//crates/meerkat-runtime:meerkat_runtime_test_support",
         "//crates/meerkat-sandbox:meerkat_sandbox",
         "//crates/meerkat-skills:meerkat_skills",

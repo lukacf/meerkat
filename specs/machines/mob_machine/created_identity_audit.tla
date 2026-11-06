@@ -444,17 +444,20 @@ DeclareOneArmAll(id, s) ==
             ENABLED DeclareIdentityEntryRefusedNameTombstoned(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE),
             ENABLED DeclareIdentityEntryRefusedNameUnreadable(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE) >>)[i]}) = 1
 
-\* Every arm of the legacy adoption, every phase of the run.
-NamesAdoptVerdicts(id, observed) ==
-    << ENABLED AdoptLegacyIdentityEntryAdopted(id, 0, observed),
-       ENABLED AdoptLegacyIdentityEntryNameHeldByWorker(id, 0, observed),
-       ENABLED AdoptLegacyIdentityEntryNotAdoptable(id, 0, observed),
-       ENABLED AdoptLegacyIdentityEntryStaleObservation(id, 0, observed),
-       ENABLED AdoptLegacyIdentityEntryNotSeated(id, 0, observed),
-       ENABLED AdoptLegacyIdentityEntryAlreadyAnEntry(id, 0, observed),
-       ENABLED AdoptLegacyIdentityEntryOtherCustody(id, 0, observed),
-       ENABLED AdoptLegacyIdentityEntryNonAuthoritative(id, 0, observed),
-       ENABLED AdoptLegacyIdentityEntryMobNotRunningStopped(id, 0, observed) >>
+\* Every arm of the legacy adoption, every phase of the run, for each of the
+\* sixteen combinations of the shell's raw observations (AdoptArm).
+NamesAdoptVerdicts(id, m, l, li, i) ==
+    << ENABLED AdoptLegacyIdentityEntryAdopted(id, 0, m, l, li, i),
+       ENABLED AdoptLegacyIdentityEntryAdoptedUnlisted(id, 0, m, l, li, i),
+       ENABLED AdoptLegacyIdentityEntryNameHeldByWorker(id, 0, m, l, li, i),
+       ENABLED AdoptLegacyIdentityEntryRetireUnadopted(id, 0, m, l, li, i),
+       ENABLED AdoptLegacyIdentityEntryNotAdoptable(id, 0, m, l, li, i),
+       ENABLED AdoptLegacyIdentityEntryStaleObservation(id, 0, m, l, li, i),
+       ENABLED AdoptLegacyIdentityEntryNotSeated(id, 0, m, l, li, i),
+       ENABLED AdoptLegacyIdentityEntryAlreadyAnEntry(id, 0, m, l, li, i),
+       ENABLED AdoptLegacyIdentityEntryOtherCustody(id, 0, m, l, li, i),
+       ENABLED AdoptLegacyIdentityEntryNonAuthoritative(id, 0, m, l, li, i),
+       ENABLED AdoptLegacyIdentityEntryMobNotRunningStopped(id, 0, m, l, li, i) >>
 
 \* Every arm of the agent lane's member admission, every phase of the run.
 NamesLaneVerdicts(id) ==
@@ -485,7 +488,7 @@ NamesNext ==
     \/ CStop
     \/ \E id \in CreatedIds : DeclareArmAll(id, NamesShape)
     \/ \E d \in SUBSET CreatedIds : SealArm(d)
-    \/ \E id \in CreatedIds, observed \in BOOLEAN : AdoptArm(id, 0, observed)
+    \/ \E id \in CreatedIds, m, l, li, i \in BOOLEAN : AdoptArm(id, 0, m, l, li, i)
     \/ \E id \in CreatedIds : NamesLaneArm(id)
     \/ \E id \in CreatedIds, ec \in BOOLEAN, cc \in BOOLEAN : ProbeArm(id, ec, cc)
 
@@ -494,8 +497,8 @@ NamesSpec == Init /\ [][NamesNext]_vars
 AuditNamesDeclareExactlyOne == \A id \in CreatedIds : DeclareOneArmAll(id, NamesShape)
 AuditNamesAdoptionExactlyOne ==
     phase \in {"Running", "Stopped"} =>
-        \A id \in CreatedIds, observed \in BOOLEAN :
-            Cardinality({i \in 1..9 : NamesAdoptVerdicts(id, observed)[i]}) = 1
+        \A id \in CreatedIds, m, l, li, i \in BOOLEAN :
+            Cardinality({k \in 1..11 : NamesAdoptVerdicts(id, m, l, li, i)[k]}) = 1
 AuditNamesLaneExactlyOne ==
     phase \in {"Running", "Stopped"} =>
         \A id \in CreatedIds : Cardinality({i \in 1..6 : NamesLaneVerdicts(id)[i]}) = 1

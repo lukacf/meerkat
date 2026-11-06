@@ -2095,6 +2095,16 @@ impl MeerkatMachine {
                 .await?,
         );
         let request_key = switch_request_key(request.request_id);
+        // A denied request stays denied: generated authority stages nothing
+        // under an id that holds a denial, so a retry is answered with the
+        // recorded denial and applies nothing. A pending switch's id never
+        // holds a denial, so the retry that finishes a pending switch goes on.
+        let recorded = self.session_dsl_state(session_id).await?;
+        if let Some(denied) =
+            recorded_switch_turn_denial(&recorded, &request_key, request.request_id)?
+        {
+            return Ok(denied);
+        }
         match &request.intent.duration {
             meerkat_core::image_generation::SwitchTurnDuration::Finite { duration } => {
                 self.apply_session_dsl_input(
@@ -2128,35 +2138,34 @@ impl MeerkatMachine {
                 .map_err(RuntimeControlPlaneError::Internal)?;
             }
             meerkat_core::image_generation::SwitchTurnDuration::UntilChanged => {
-                let previous_dsl_state = self
-                    .stage_session_dsl_input(
-                        session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::RequestUntilChangedSwitchTurn {
-                            request_id: request_key.clone(),
-                            target_model: request.intent.target_model.to_string(),
-                            target_realtime_capable: request.target_realtime.target_realtime_capable,
-                            requires_approval: !matches!(
-                                request.approval,
-                                crate::meerkat_machine_types::ModelRoutingApprovalDisposition::NotRequired
-                            ),
-                            approval_available: !matches!(
-                                request.approval,
-                                crate::meerkat_machine_types::ModelRoutingApprovalDisposition::RequiredButUnavailable
-                            ),
-                            approval_denied: matches!(
-                                request.approval,
-                                crate::meerkat_machine_types::ModelRoutingApprovalDisposition::DeniedByUser
-                            ),
-                            approval_reason: request
-                                .approval_reason
-                                .map(routing_switch_approval_reason),
-                            realtime_detach_allowed: request.target_realtime.allow_realtime_detach,
-                            target_carries_transcript,
-                        },
-                        "RequestSwitchTurn",
-                    )
-                    .await
-                    .map_err(RuntimeControlPlaneError::Internal)?;
+                self.apply_session_dsl_input(
+                    session_id,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::RequestUntilChangedSwitchTurn {
+                        request_id: request_key.clone(),
+                        target_model: request.intent.target_model.to_string(),
+                        target_realtime_capable: request.target_realtime.target_realtime_capable,
+                        requires_approval: !matches!(
+                            request.approval,
+                            crate::meerkat_machine_types::ModelRoutingApprovalDisposition::NotRequired
+                        ),
+                        approval_available: !matches!(
+                            request.approval,
+                            crate::meerkat_machine_types::ModelRoutingApprovalDisposition::RequiredButUnavailable
+                        ),
+                        approval_denied: matches!(
+                            request.approval,
+                            crate::meerkat_machine_types::ModelRoutingApprovalDisposition::DeniedByUser
+                        ),
+                        approval_reason: request
+                            .approval_reason
+                            .map(routing_switch_approval_reason),
+                        realtime_detach_allowed: request.target_realtime.allow_realtime_detach,
+                        target_carries_transcript,
+                    },
+                    "RequestSwitchTurn",
+                )
+                .await
+                .map_err(RuntimeControlPlaneError::Internal)?;
                 let status_state = self.session_dsl_state(session_id).await?;
                 if !status_state
                     .model_routing_switch_denials
@@ -2177,35 +2186,69 @@ impl MeerkatMachine {
                     {
                         Ok(command) => command,
                         Err(err) => {
-                            self.restore_session_dsl_state(session_id, previous_dsl_state)
+                            self.withdraw_failed_until_changed_switch(session_id, &request_key)
                                 .await;
                             return Err(RuntimeControlPlaneError::Internal(err.to_string()));
                         }
                     };
+                    // The reconfigure command takes the session mutation gate
+                    // itself, so it is released here. Inputs other callers
+                    // commit meanwhile are theirs: a failed reconfigure
+                    // withdraws only this request.
                     drop(_mutation_guard.take());
+                    #[cfg(test)]
+                    {
+                        let hold = self
+                            .test_switch_turn_reconfigure_gap_hold
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take();
+                        if let Some((entered, release)) = hold {
+                            let _ = entered.send(());
+                            let _ = release.await;
+                        }
+                    }
                     let reconfigure_result =
                         Box::pin(self.execute_meerkat_machine_session_command(reconfigure)).await;
-                    _mutation_guard = Some(
-                        self.lock_current_control_durability_ready_session_mutation_gate(
-                            session_id,
-                        )
-                        .await?,
-                    );
+                    #[cfg(test)]
+                    {
+                        let hold = self
+                            .test_switch_turn_post_reconfigure_hold
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take();
+                        if let Some((entered, release)) = hold {
+                            let _ = entered.send(());
+                            let _ = release.await;
+                        }
+                    }
+                    let relocked = self
+                        .lock_current_control_durability_ready_session_mutation_gate(session_id)
+                        .await;
                     if let Err(err) = reconfigure_result {
-                        self.restore_session_dsl_state(session_id, previous_dsl_state)
-                            .await;
+                        // The caller gets the reconfigure's own error. A gate
+                        // refusal means the session is gone or no longer
+                        // durability-ready: nothing is withdrawn then, and the
+                        // refusal does not replace that error.
+                        match relocked {
+                            Ok(guard) => {
+                                _mutation_guard = Some(guard);
+                                self.withdraw_failed_until_changed_switch(session_id, &request_key)
+                                    .await;
+                            }
+                            Err(refusal) => tracing::debug!(
+                                session_id = %session_id,
+                                request_id = %request_key,
+                                reason = %refusal,
+                                "no session gate after a failed switch-turn; nothing withdrawn"
+                            ),
+                        }
                         return Err(RuntimeControlPlaneError::Internal(err.to_string()));
                     }
-                    self.apply_session_dsl_input(
-                        session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::SetModelRoutingBaseline {
-                            baseline_model: request.intent.target_model.to_string(),
-                            realtime_capable: request.target_realtime.target_realtime_capable,
-                        },
-                        "SetModelRoutingBaseline",
-                    )
-                    .await
-                    .map_err(RuntimeControlPlaneError::Internal)?;
+                    _mutation_guard = Some(relocked?);
+                    // The completion records the applied target as the
+                    // routing baseline, in every phase the session can reach
+                    // in the gap (a stop or a retirement included).
                     self.apply_session_dsl_input(
                         session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::CompleteUntilChangedSwitchTurnReconfigure {
@@ -2220,21 +2263,10 @@ impl MeerkatMachine {
         }
 
         let status_state = self.session_dsl_state(session_id).await?;
-        if let Some(reason) = status_state.model_routing_switch_denials.get(&request_key) {
-            let reason = switch_denial_from_routing(
-                *reason,
-                status_state
-                    .model_routing_switch_approval_reasons
-                    .get(&request_key)
-                    .copied(),
-            )
-            .map_err(RuntimeControlPlaneError::Internal)?;
-            return Ok(
-                meerkat_core::image_generation::SwitchTurnControlResult::Denied {
-                    request_id: request.request_id,
-                    reason,
-                },
-            );
+        if let Some(denied) =
+            recorded_switch_turn_denial(&status_state, &request_key, request.request_id)?
+        {
+            return Ok(denied);
         }
 
         Ok(
@@ -2244,6 +2276,43 @@ impl MeerkatMachine {
                 duration: request.intent.duration,
             },
         )
+    }
+
+    /// Withdraw an until-changed switch-turn whose reconfigure failed.
+    ///
+    /// The switch-turn releases the session mutation gate while its
+    /// reconfigure runs, so generated state may hold facts other callers
+    /// committed meanwhile (an admitted input, a run, a lifecycle change).
+    /// Restoring the state read before the request would erase them, so the
+    /// machine's abort arm withdraws only what the accepted request staged.
+    /// A stop or a retirement in the gap keeps the staged request, and the
+    /// arm withdraws it in those phases too. A refusal means the session is
+    /// gone or the request is no longer the pending switch (a concurrent
+    /// call with the same id settled it): there is nothing of this request
+    /// to withdraw. The refusal is not retried and does not replace the
+    /// reconfigure's own error, which the caller reports.
+    async fn withdraw_failed_until_changed_switch(
+        &self,
+        session_id: &SessionId,
+        request_key: &str,
+    ) {
+        if let Err(reason) = self
+            .apply_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::AbortUntilChangedSwitchTurnReconfigure {
+                    request_id: request_key.to_owned(),
+                },
+                "AbortUntilChangedSwitchTurnReconfigure",
+            )
+            .await
+        {
+            tracing::debug!(
+                session_id = %session_id,
+                request_id = %request_key,
+                reason = %reason,
+                "a failed until-changed switch-turn has nothing to withdraw"
+            );
+        }
     }
 
     /// Whether the exact originating run left a committed boundary receipt.
@@ -3036,6 +3105,30 @@ fn switch_denial_from_routing(
             Ok(SwitchTurnDenialReason::CapabilityPolicy)
         }
     }
+}
+
+/// The answer to a switch-turn request whose id holds a denial in generated
+/// state: the recorded denial, with the approval reason recorded beside it.
+fn recorded_switch_turn_denial(
+    state: &super::dsl::MeerkatMachineState,
+    request_key: &str,
+    request_id: meerkat_core::image_generation::SwitchTurnRequestId,
+) -> Result<Option<meerkat_core::image_generation::SwitchTurnControlResult>, RuntimeControlPlaneError>
+{
+    let Some(reason) = state.model_routing_switch_denials.get(request_key) else {
+        return Ok(None);
+    };
+    let reason = switch_denial_from_routing(
+        *reason,
+        state
+            .model_routing_switch_approval_reasons
+            .get(request_key)
+            .copied(),
+    )
+    .map_err(RuntimeControlPlaneError::Internal)?;
+    Ok(Some(
+        meerkat_core::image_generation::SwitchTurnControlResult::Denied { request_id, reason },
+    ))
 }
 
 fn image_denial_from_routing(

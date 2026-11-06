@@ -925,11 +925,23 @@ async fn core_realizes_an_adopted_member_as_a_durable_identity_member() {
 
 /// Adopt an existing member's declaration through Core's identity intent
 /// rows, as a host does. The intent row is committed when this returns.
-async fn adopt_existing_member(
+pub(super) async fn adopt_existing_member(
     handle: &MobHandle,
     member: &AgentIdentity,
     session: &SessionId,
     profile: &str,
+) {
+    adopt_existing_labelled_member(handle, member, session, profile, None).await;
+}
+
+/// [`adopt_existing_member`] of a member spawned with `labels`: an adoption
+/// states the member's exact baseline, its labels included.
+pub(super) async fn adopt_existing_labelled_member(
+    handle: &MobHandle,
+    member: &AgentIdentity,
+    session: &SessionId,
+    profile: &str,
+    labels: Option<BTreeMap<String, String>>,
 ) {
     let adoption = crate::identity::AdoptMemberIdentityDeclaration {
         mob_id: handle.mob_id().clone(),
@@ -952,7 +964,7 @@ async fn adopt_existing_member(
             model_override: None,
             external_addressable_override: None,
             context: None,
-            labels: None,
+            labels,
             additional_instructions: None,
             system_prompt_override: None,
             tool_access_policy: None,
@@ -980,7 +992,7 @@ async fn adopt_existing_member(
 }
 
 /// Wait until Core converges the adopted identity's first intent revision.
-async fn await_adoption_convergence(handle: &MobHandle, member: &AgentIdentity) {
+pub(super) async fn await_adoption_convergence(handle: &MobHandle, member: &AgentIdentity) {
     let converged = tokio::time::timeout(WAIT, async {
         loop {
             if matches!(

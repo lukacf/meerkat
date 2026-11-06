@@ -1709,7 +1709,7 @@ fn build_commands_for_mode(
                 "--ignored",
                 "--nocapture",
             ]);
-            command.into_iter().map(str::to_string).collect()
+            with_package_test_features(command.into_iter().map(str::to_string).collect())
         }
         (
             _,
@@ -1740,7 +1740,14 @@ fn build_commands_for_mode(
             test_name.to_string(),
             test_file.to_string(),
         ],
-        (_, CommandSpec::Raw { argv, .. }) => argv.iter().map(|part| (*part).to_string()).collect(),
+        (_, CommandSpec::Raw { argv, .. }) => {
+            let command = argv.iter().map(|part| (*part).to_string()).collect();
+            if parse_cargo_test_requirement(argv).is_some() {
+                with_package_test_features(command)
+            } else {
+                command
+            }
+        }
     };
 
     let pre_commands = spec
@@ -1758,6 +1765,106 @@ fn build_commands_for_mode(
         command,
         output_policy,
     })
+}
+
+/// The test features of every workspace package that declares any: the
+/// features its `[package.metadata.meerkat.standalone-tests]` lists, then
+/// `workspace-tests` when it declares that feature (the definition is
+/// scripts/ci-products.mjs testFeaturesOf). No dev-dependency turns them on,
+/// so a Cargo-mode `cargo test -p PACKAGE` here passes them, as every test
+/// command in the repository does: without them the tests they gate compile
+/// out, and code that uses an item they gate does not compile. The
+/// `package_test_features_match_cargo_metadata` test keeps this table equal
+/// to cargo metadata.
+const PACKAGE_TEST_FEATURES: &[(&str, &[&str])] = &[
+    (
+        "meerkat",
+        &[
+            "local-authorization",
+            "session-store",
+            "session-compaction",
+            "jsonl-store",
+            "memory-store",
+            "memory-store-session",
+            "comms",
+            "mcp",
+            "skills",
+            "schedule",
+            "workgraph",
+            "atif",
+            "workspace-tests",
+        ],
+    ),
+    ("meerkat-auth-core", &["workspace-tests"]),
+    ("meerkat-authorization", &["workspace-tests"]),
+    ("meerkat-comms", &["workspace-tests"]),
+    ("meerkat-core", &["workspace-tests"]),
+    ("meerkat-llm-core", &["workspace-tests"]),
+    ("meerkat-mcp", &["workspace-tests"]),
+    ("meerkat-mob", &["test-support"]),
+    ("meerkat-openai", &["workspace-tests"]),
+    ("meerkat-rpc", &["workspace-tests"]),
+    (
+        "meerkat-runtime",
+        &[
+            "test-support",
+            "sqlite-store",
+            "live",
+            "local-authorization",
+        ],
+    ),
+];
+
+fn package_test_features(package: &str) -> &'static [&'static str] {
+    PACKAGE_TEST_FEATURES
+        .iter()
+        .find_map(|(name, features)| (*name == package).then_some(*features))
+        .unwrap_or(&[])
+}
+
+/// A `cargo test -p PACKAGE ...` command with the package's test features
+/// added to its `--features` (or after the package when it names none).
+fn with_package_test_features(mut command: Vec<String>) -> Vec<String> {
+    let cargo_end = command
+        .iter()
+        .position(|part| part == "--")
+        .unwrap_or(command.len());
+    let Some(at) = command[..cargo_end]
+        .iter()
+        .position(|part| part == "-p" || part == "--package")
+    else {
+        return command;
+    };
+    let Some(package) = command.get(at + 1).cloned() else {
+        return command;
+    };
+    let test_features = package_test_features(&package);
+    if test_features.is_empty() {
+        return command;
+    }
+    match command[..cargo_end]
+        .iter()
+        .position(|part| part == "--features")
+    {
+        Some(features_at) if features_at + 1 < cargo_end => {
+            let mut features = split_features(&command[features_at + 1])
+                .into_iter()
+                .collect::<Vec<_>>();
+            for feature in test_features {
+                if !features.iter().any(|existing| existing == feature) {
+                    features.push((*feature).to_string());
+                }
+            }
+            command[features_at + 1] = features.join(",");
+        }
+        _ => {
+            command.splice(
+                at + 2..at + 2,
+                ["--features".to_string(), test_features.join(",")],
+            );
+        }
+    }
+    command
 }
 
 fn prebuilt_raw_cargo_test_command(
@@ -2838,7 +2945,15 @@ fn materialize_rust_test(requirement: &RustTestRequirement) -> Result<PathBuf, S
         requirement.test_target.clone(),
         "--no-run".to_string(),
     ];
-    push_feature_args(&mut args, &requirement.features, requirement.all_features);
+    // A test build passes the package's test features, as the Cargo-mode
+    // command does (PACKAGE_TEST_FEATURES).
+    let mut features = requirement.features.clone();
+    features.extend(
+        package_test_features(&requirement.package)
+            .iter()
+            .map(|feature| (*feature).to_string()),
+    );
+    push_feature_args(&mut args, &features, requirement.all_features);
     args.push("--message-format=json".to_string());
     let messages = run_repo_cargo_json(&args)?;
     executable_from_cargo_messages(&messages, &requirement.test_target, "test")?.ok_or_else(|| {
@@ -6601,15 +6716,16 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
 mod tests {
     use super::{
         ArtifactManifest, ArtifactRequirement, CommandLockMode, CommandSpec, E2ePlan, E2eSelection,
-        ExecutionMode, Lane, NodeSetup, OutputPolicy, RustTestRequirement, SMOKE_ENTRIES,
-        SmokeRuntimeClass, SmokeScheduler, bazel_build_event_provenance, build_commands_for_mode,
-        inherited_cargo_build_context, normalize_command_with_env, order_smoke_specs_for_runtime,
-        parse_cargo_build_requirement, parse_cargo_test_requirement, plan_for_selection,
-        pre_command_lock_mode, repo_cargo, require_built_by_recorded_invocation, run_command,
-        sanitize_artifact_key, scenario_env, scenario_spec, smoke_runtime_class,
-        smoke_test_filter_for_selection, source_revision_key, suite_spec, workspace_root,
+        ExecutionMode, Lane, NodeSetup, OutputPolicy, PACKAGE_TEST_FEATURES, RustTestRequirement,
+        SMOKE_ENTRIES, SmokeRuntimeClass, SmokeScheduler, bazel_build_event_provenance,
+        build_commands_for_mode, inherited_cargo_build_context, normalize_command_with_env,
+        order_smoke_specs_for_runtime, package_test_features, parse_cargo_build_requirement,
+        parse_cargo_test_requirement, plan_for_selection, pre_command_lock_mode, repo_cargo,
+        require_built_by_recorded_invocation, run_command, sanitize_artifact_key, scenario_env,
+        scenario_spec, smoke_runtime_class, smoke_test_filter_for_selection, source_revision_key,
+        suite_spec, workspace_root,
     };
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
     use std::sync::Arc;
     use tokio::sync::Semaphore;
@@ -6815,6 +6931,76 @@ mod tests {
         );
     }
 
+    /// PACKAGE_TEST_FEATURES equals every workspace package's test features as
+    /// cargo metadata gives them: the features its
+    /// `[package.metadata.meerkat.standalone-tests]` lists, then
+    /// `workspace-tests` when it declares that feature.
+    #[test]
+    fn package_test_features_match_cargo_metadata() {
+        let cargo = repo_cargo();
+        if !cargo.exists() {
+            // The Bazel unit target's runfiles do not carry scripts/; the
+            // Cargo unit lane runs this drift gate on every CI push.
+            eprintln!(
+                "skipping the test-feature table check: {} not present in this sandbox",
+                cargo.display()
+            );
+            return;
+        }
+        let output = std::process::Command::new(cargo)
+            .args(["metadata", "--format-version=1", "--no-deps"])
+            .current_dir(workspace_root())
+            .output()
+            .expect("run cargo metadata");
+        assert!(
+            output.status.success(),
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("cargo metadata prints JSON");
+        let mut expected = BTreeMap::new();
+        for package in metadata["packages"].as_array().expect("packages") {
+            let mut features: Vec<String> = Vec::new();
+            for feature in package["metadata"]["meerkat"]["standalone-tests"]["features"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+            {
+                if !features.iter().any(|existing| existing == feature) {
+                    features.push(feature.to_string());
+                }
+            }
+            if package["features"].get("workspace-tests").is_some() {
+                features.push("workspace-tests".to_string());
+            }
+            if !features.is_empty() {
+                let name = package["name"].as_str().expect("package name");
+                expected.insert(name.to_string(), features);
+            }
+        }
+        let table: BTreeMap<String, Vec<String>> = PACKAGE_TEST_FEATURES
+            .iter()
+            .map(|(name, features)| {
+                (
+                    (*name).to_string(),
+                    features
+                        .iter()
+                        .map(|feature| (*feature).to_string())
+                        .collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            table, expected,
+            "PACKAGE_TEST_FEATURES is out of step with the packages' test features"
+        );
+        for (package, features) in PACKAGE_TEST_FEATURES {
+            assert_eq!(package_test_features(package), *features);
+        }
+    }
+
     /// The e2e-system lane prebuilds (scripts/run-build-backend-lane,
     /// `prebuild_e2e_system_rkat_tests` and `prebuild_e2e_system_other_tests`)
     /// the test target of every cargo-test suite in tests/e2e_system_lane.rs,
@@ -6855,12 +7041,15 @@ mod tests {
                 ..
             } = spec.command
             {
-                needed.insert(RustTestRequirement::new(
-                    package,
-                    test_target,
-                    features,
-                    all_features,
-                ));
+                // The nested command adds the package's test features.
+                let mut requirement =
+                    RustTestRequirement::new(package, test_target, features, all_features);
+                requirement.features.extend(
+                    package_test_features(package)
+                        .iter()
+                        .map(|feature| (*feature).to_string()),
+                );
+                needed.insert(requirement);
             }
         }
         assert!(
@@ -7989,6 +8178,8 @@ mod tests {
                 "test",
                 "-p",
                 "meerkat-authorization",
+                "--features",
+                "workspace-tests",
                 "--test",
                 "native_governed_loop",
                 INNER,

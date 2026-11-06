@@ -15,11 +15,16 @@
 //! A grant may be scoped to one run of its subject session: it then admits
 //! uses of that run only, and ends with it ([`ToolGrantService::end_run`],
 //! or the first use of a later run).
+//!
+//! A grant a person approved through a `tool_grant.issue` decision is
+//! issued under the id its decision derives, with the decision as its
+//! issuer ([`ToolGrantService::issued_for`]; see [`super::request`]).
 
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Duration;
 
 use meerkat_core::RunId;
+use meerkat_core::approval::decision::DecisionId;
 use meerkat_core::tool_grant::{
     GatedToolTable, ToolGrantCall, ToolGrantId, ToolGrantIssuer, ToolGrantRecord, ToolGrantRefusal,
     ToolGrantSubject, ToolGrantSubjectKey, ToolGrantTarget,
@@ -36,6 +41,7 @@ use super::dsl::{
     ToolGrantLifecycleMachineAuthority, ToolGrantLifecycleMachineMutator,
     ToolGrantLifecycleMachineState, ToolGrantPhase, ToolGrantRunId, ToolGrantUseRefusal,
 };
+use super::request::ToolGrantIssueBody;
 use super::{HostToolGrantClock, ToolGrantClock, ToolGrantPolicy};
 use crate::store::{RuntimeStore, RuntimeStoreError};
 
@@ -589,6 +595,84 @@ impl ToolGrantService {
             return Err(ToolGrantServiceError::EmptyTarget);
         }
         let now_ms = self.now_ms()?;
+        self.issue(request, ToolGrantId::mint(), now_ms).await
+    }
+
+    /// The grant the approved `tool_grant.issue` decision `decision_id`
+    /// issued: the row under the id the decision derives
+    /// ([`ToolGrantId::approved`]), when that decision issued it.
+    ///
+    /// # Errors
+    /// Store failures, and a row under that id this binary cannot read.
+    pub async fn issued_for(
+        &self,
+        decision_id: &DecisionId,
+    ) -> Result<Option<StoredToolGrant>, ToolGrantServiceError> {
+        let grant_id = ToolGrantId::approved(decision_id).to_string();
+        let Some(bytes) = self.store.load_tool_grant(&grant_id).await? else {
+            return Ok(None);
+        };
+        let row = StoredToolGrant::decode(&grant_id, &bytes)?;
+        let issued_here = matches!(
+            &row.record.issuer,
+            ToolGrantIssuer::Approval { approval_id } if approval_id == decision_id.as_str()
+        );
+        Ok(issued_here.then_some(row))
+    }
+
+    /// Issue the grant the approved `tool_grant.issue` decision `decision_id`
+    /// holds (`body`), at the clock reading `now_ms`: under the id the
+    /// decision derives, issuer [`ToolGrantIssuer::Approval`] with the
+    /// decision's id, for `[now_ms, now_ms + duration)`, scoped as the
+    /// request asked. The grant the decision already issued is answered as it
+    /// stands, so a replayed execution meets it.
+    ///
+    /// # Errors
+    /// As [`Self::grant`]; [`ToolGrantServiceError::Conflict`] when another
+    /// grant holds the id the decision derives.
+    pub(crate) async fn issue_approved_at(
+        &self,
+        decision_id: &DecisionId,
+        body: &ToolGrantIssueBody,
+        now_ms: u64,
+    ) -> Result<StoredToolGrant, ToolGrantServiceError> {
+        if body.target.names().next().is_none()
+            || body.target.names().any(|name| name.as_str().is_empty())
+        {
+            return Err(ToolGrantServiceError::EmptyTarget);
+        }
+        let grant_id = ToolGrantId::approved(decision_id);
+        let request = ToolGrantRequest {
+            subject: body.subject.clone(),
+            target: body.target.clone(),
+            issuer: ToolGrantIssuer::Approval {
+                approval_id: decision_id.to_string(),
+            },
+            reason: body.reason.clone(),
+            window: ToolGrantWindow::For(Duration::from_millis(body.duration_ms)),
+            run_scope: body.run_scope.clone(),
+        };
+        match self.issue(request, grant_id.clone(), now_ms).await {
+            Err(ToolGrantServiceError::Conflict { .. }) => self
+                .issued_for(decision_id)
+                .await?
+                .ok_or(ToolGrantServiceError::Conflict {
+                    grant_id: grant_id.to_string(),
+                }),
+            issued => issued,
+        }
+    }
+
+    /// Issue `request` as the grant `grant_id`, at the clock reading
+    /// `now_ms`: the machine's `Issue`, then one store write of the row and
+    /// its `granted` audit row. A row already stored under the id is a
+    /// [`ToolGrantServiceError::Conflict`].
+    async fn issue(
+        &self,
+        request: ToolGrantRequest,
+        grant_id: ToolGrantId,
+        now_ms: u64,
+    ) -> Result<StoredToolGrant, ToolGrantServiceError> {
         let expires_at_ms = match request.window {
             ToolGrantWindow::For(lifetime) => {
                 now_ms.saturating_add(u64::try_from(lifetime.as_millis()).unwrap_or(u64::MAX))
@@ -596,7 +680,6 @@ impl ToolGrantService {
             ToolGrantWindow::Until { expires_at_ms } => expires_at_ms,
         };
         let max_lifetime_ms = self.policy().max_lifetime_ms();
-        let grant_id = ToolGrantId::mint();
         let mut authority = ToolGrantLifecycleMachineAuthority::new();
         let effects = ToolGrantLifecycleMachineMutator::apply(
             &mut authority,

@@ -9,12 +9,14 @@ use meerkat_contracts::{
     WireUnreadableToolGrantAuditRow,
 };
 use meerkat_core::RunId;
-use meerkat_core::tool_grant::{ToolGrantIssuer, ToolGrantSubject, ToolGrantTarget};
+use meerkat_core::approval::decision::{DecisionPhase, StoredDecision};
+use meerkat_core::tool_grant::{ToolGrantId, ToolGrantIssuer, ToolGrantSubject, ToolGrantTarget};
 
 use super::audit::{
     ToolGrantAuditEvent, ToolGrantAuditRecord, ToolGrantExpiryDriver, ToolGrantRefusalKind,
     UnreadableToolGrantAuditRow,
 };
+use super::request::ToolGrantIssueBody;
 use super::service::{StoredToolGrant, ToolGrantStatus, UnreadableToolGrant};
 
 /// One grant as its row stands.
@@ -31,6 +33,45 @@ pub fn wire_tool_grant(grant: &StoredToolGrant) -> WireToolGrant {
         expires_at_ms: grant.expires_at_ms,
         ended_at_ms: grant.ended_at_ms,
         scope: wire_tool_grant_scope(grant.run_scope.as_ref()),
+    }
+}
+
+/// A grant request as a list shows it: `requested` while its decision is
+/// open or approved, `declined` once it was rejected, expired, withdrawn or
+/// refused. Its `grant_id` is the id its grant gets when it is issued, its
+/// issuer the approval (the decision's id), `issued_at_ms` when it was asked,
+/// `expires_at_ms` its decision's deadline, and `ended_at_ms` when it was
+/// declined.
+#[must_use]
+pub fn wire_tool_grant_request(
+    decision: &StoredDecision,
+    body: &ToolGrantIssueBody,
+) -> WireToolGrant {
+    let declined = !matches!(
+        decision.state.phase,
+        DecisionPhase::Open | DecisionPhase::Approved
+    );
+    WireToolGrant {
+        grant_id: ToolGrantId::approved(&decision.decision_id).to_string(),
+        subject: wire_tool_grant_subject(&body.subject),
+        target: wire_tool_grant_target(&body.target),
+        issuer: WireToolGrantIssuer::Approval {
+            approval_id: decision.decision_id.to_string(),
+        },
+        reason: body.reason.clone(),
+        status: if declined {
+            WireToolGrantStatus::Declined
+        } else {
+            WireToolGrantStatus::Requested
+        },
+        issued_at_ms: decision.descriptor.created_at_ms,
+        expires_at_ms: decision.descriptor.deadline_at_ms,
+        ended_at_ms: if declined {
+            decision.state.ended_at_ms
+        } else {
+            None
+        },
+        scope: wire_tool_grant_scope(body.run_scope.as_ref()),
     }
 }
 

@@ -164,10 +164,17 @@ impl GatedToolTable {
     }
 }
 
-/// One scoped tool grant's id: a UUID v4 the grant service mints.
+/// One scoped tool grant's id: a UUID v4 the grant service mints, or the
+/// UUID v5 an approved request derives from its decision
+/// ([`ToolGrantId::approved`]).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ToolGrantId(uuid::Uuid);
+
+/// The namespace of the grant ids approved requests derive
+/// ([`ToolGrantId::approved`]).
+const APPROVED_GRANT_ID_NAMESPACE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x6f1c_2b8e_4d3a_4f5b_9c27_8e1d_0a6b_3c59);
 
 impl ToolGrantId {
     /// A fresh id.
@@ -176,15 +183,27 @@ impl ToolGrantId {
         Self(uuid::Uuid::new_v4())
     }
 
-    /// Parse a UUID v4 id.
+    /// The id of the grant an approved request issues: a UUID v5 over the
+    /// approving decision's id. A request knows its grant's id before it is
+    /// decided, and a replayed execution meets the grant it issued.
+    #[must_use]
+    pub fn approved(decision_id: &crate::approval::decision::DecisionId) -> Self {
+        Self(uuid::Uuid::new_v5(
+            &APPROVED_GRANT_ID_NAMESPACE,
+            decision_id.as_str().as_bytes(),
+        ))
+    }
+
+    /// Parse a grant id: a version 4 UUID the grant service minted, or a
+    /// version 5 UUID an approved request derived.
     ///
     /// # Errors
-    /// [`ToolGrantIdError`] when `value` is not a version 4 UUID.
+    /// [`ToolGrantIdError`] when `value` is neither.
     pub fn parse(value: &str) -> Result<Self, ToolGrantIdError> {
         let uuid = uuid::Uuid::parse_str(value).map_err(|_| ToolGrantIdError {
             value: value.to_string(),
         })?;
-        if uuid.get_version_num() != 4 {
+        if !matches!(uuid.get_version_num(), 4 | 5) {
             return Err(ToolGrantIdError {
                 value: value.to_string(),
             });
@@ -219,9 +238,10 @@ impl From<ToolGrantId> for String {
     }
 }
 
-/// A tool grant id that is not a version 4 UUID.
+/// A string that is not a tool grant id: neither a version 4 nor a version 5
+/// UUID.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("tool grant id {value:?} is not a version 4 UUID")]
+#[error("tool grant id {value:?} is not a version 4 or version 5 UUID")]
 pub struct ToolGrantIdError {
     pub value: String,
 }

@@ -382,6 +382,12 @@
       "result_type": "GrantToolResult"
     },
     {
+      "description": "Ask for a grant of a session's grant-gated tool name or family, which a person approves through a durable decision",
+      "name": "tool_grants/request",
+      "params_type": "RequestToolGrantParams",
+      "result_type": "RequestToolGrantResult"
+    },
+    {
       "description": "Revoke a scoped tool grant; idempotent, the result says whether this revoke ended it",
       "name": "tool_grants/revoke",
       "params_type": "RevokeToolGrantParams",

@@ -250,6 +250,8 @@ from .types import (
     ReadSessionTranscriptRevisionParams,
     ReadyWorkFilter,
     RealmIdParams,
+    RequestToolGrantParams,
+    RequestToolGrantResult,
     RestoreSessionTranscriptRevisionParams,
     RevokeToolGrantParams,
     RevokeToolGrantResult,
@@ -836,6 +838,14 @@ class RpcRequest(Protocol):
         params: GrantToolParams,
         /,
     ) -> Awaitable[GrantToolResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["tool_grants/request"],
+        params: RequestToolGrantParams,
+        /,
+    ) -> Awaitable[RequestToolGrantResult]: ...
 
     @overload
     def __call__(

@@ -156,6 +156,7 @@ of this full catalog.
 | `approval/get` | Approval | `ApprovalGetParams` | `ApprovalRecord` | Get one approval audit record |
 | `approval/decide` | Approval | `ApprovalDecideParams` | `ApprovalRecord` | Record an approval audit decision |
 | `tool_grants/grant` | Tool grants | `GrantToolParams` | `GrantToolResult` | Grant a session's grant-gated tool name or built-in tool family for a bounded window |
+| `tool_grants/request` | Tool grants | `RequestToolGrantParams` | `RequestToolGrantResult` | Ask for a grant of a session's grant-gated tool name or family, which a person approves through a durable decision |
 | `tool_grants/revoke` | Tool grants | `RevokeToolGrantParams` | `RevokeToolGrantResult` | Revoke a scoped tool grant; idempotent, the result says whether this revoke ended it |
 | `tool_grants/list` | Tool grants | `ListToolGrantsParams` | `ListToolGrantsResult` | List a session's scoped tool grants, each due grant settled as expired first |
 | `tool_grants/audit` | Tool grants | `ToolGrantAuditParams` | `ToolGrantAuditResult` | Read a page of the audit log of a session's scoped tool grants |
@@ -2067,8 +2068,9 @@ A session created with `grant_gated_tools` mounts its gated tool families and
 names hidden: the model is not shown them and every call is refused until a
 live grant opens them (see [scoped tool grants](/concepts/tools#scoped-tool-grants)).
 `tool_grants/grant`, `tool_grants/revoke`, `tool_grants/list` and
-`tool_grants/audit` manage a session's grants. They read and write grant rows
-only: no method loads, registers or wakes the session.
+`tool_grants/audit` manage a session's grants, and `tool_grants/request` asks
+for a grant a person approves. They read and write grant rows (and a request
+its decision) only: no method loads, registers or wakes the session.
 
 ```json Request
 {
@@ -2127,6 +2129,11 @@ only: no method loads, registers or wakes the session.
   `expired` first. Ended grants (`expired`, `revoked`, `run_ended`) are listed
   only with `include_ended`; `unreadable` names any stored grant this server
   cannot read (written by a newer version, or damaged), which opens nothing.
+  On a server that keeps durable decisions the session's grant requests follow
+  its grants: each open or approved one as `requested`, and with
+  `include_ended` each rejected, expired, withdrawn or refused one as
+  `declined` (its `ended_at_ms` when it ended). A request whose grant was
+  issued is listed as that grant only.
 - **`tool_grants/audit`** answers a page of the session's audit log, `granted`
   (with the grant's `scope`), `expired` (with the `driver` that observed it:
   `timer`, `boundary`, `dispatch`, `read`, `revoke`, or `run` and `recovery`
@@ -2138,13 +2145,36 @@ only: no method loads, registers or wakes the session.
   caps at 1000; a full page carries `next_sequence`, the next page's
   `after_sequence`. A row this server cannot read is named in `unreadable`
   with its `sequence`, and the rest of the page is served.
+- **`tool_grants/request`** asks for a grant a person approves. It names the
+  `subject`, `target` and `scope` as a grant does, `duration_ms` (the grant's
+  window from its issuance, at most the host's maximum lifetime) and an
+  optional `reason`, and holds a durable decision of kind `tool_grant.issue`
+  for the approver id `operator`, which expires after an hour undecided. This
+  server is its requester (the runtime host `rkat-rpc` of the realm); the
+  stdio operator can grant directly, so approving a request this server made
+  adds an approval record, not authority. Nothing
+  is issued: the result is the request as a list shows it (status
+  `requested`, the `grant_id` its grant gets, its `issuer` `{"kind":
+  "approval", "approval_id": ...}` naming the decision) and the `decision`.
+  Once a person approves the decision (see
+  [durable decisions](#durable-decisions)), this server issues the grant under
+  that id, its window starting then, while the realm still lists the
+  approver id for the operator; a request rejected, withdrawn or left
+  undecided past its deadline issues nothing. A `current_run` request names
+  the run its session is running when it is asked, and is refused when the
+  session runs another run by its approval. When the request ends, its
+  session receives a `tool_grant_request` external event, like any input:
+  the `decision_id`, the `outcome` (`granted` with the `grant_id`,
+  `rejected`, `expired`, `withdrawn`, or `refused` with a `reason`) and the
+  `target`. A server whose persistence keeps no durable decisions answers
+  capability unavailable (`data.kind = "no_decision_store"`).
 
 List and audit read the session's grant rows without checking that the
 session exists: an archived session's grants stay listable and auditable, and
 a session id with no grants, or one no session has, answers empty.
 
-A grant's `status` is `active`, `expired`, `revoked` or `run_ended`;
-`requested` and `declined` are reserved for grant requests. A request's
+A grant's `status` is `active`, `expired`, `revoked` or `run_ended`; a grant
+request's is `requested` or `declined`. A request's
 `subject`, `target` and `scope` refuse a kind or a field this server does not
 know (invalid params), so a request is never read as wider than it asked.
 Every vocabulary a result carries (subject, target and scope kind, status,
@@ -2160,8 +2190,10 @@ grant id, and a `current_run` grant to a session that runs no turn (with
 session that does not
 exist or is archived; `SESSION_BUSY` when concurrent writers changed the grant
 under a grant or revoke twice, which a retry resolves; capability unavailable
-for an `identity` subject (this server grants to sessions only) or a store
-without grant support.
+for an `identity` subject (this server grants to sessions only), a store
+without grant support, or a request to a server that keeps no durable
+decisions. A request's decision is held as any decision is: its errors are
+the [durable decision errors](#durable-decisions).
 
 The stock governed stdio pipe serves a fixed method set: it does not serve the
 `tool_grants/*` methods, and its `session/create` refuses `grant_gated_tools`
@@ -2169,8 +2201,9 @@ as an unsupported parameter.
 
 <Warning>
 `rkat-rpc` does not authenticate the caller of these methods: a grant's issuer
-is recorded as an operator without a caller. Authorize grant administration in
-the trusted host or an authenticated proxy before forwarding the call.
+is recorded as an operator without a caller, and a request's requester is the
+server itself. Authorize grant administration in the trusted host or an
+authenticated proxy before forwarding the call.
 </Warning>
 
 ## Durable decisions

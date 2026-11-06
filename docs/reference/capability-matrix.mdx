@@ -315,7 +315,9 @@ names grant-gated (`grant_gated_tools` on `SessionBuildOptions`,
 `AgentBuildConfig` or `session/create`), and `MeerkatMachine::grant_tool`,
 `revoke_tool_grant`, `list_tool_grants` and `read_tool_grant_audit` manage the
 grants that open them, as `tool_grants/grant`, `tool_grants/revoke`,
-`tool_grants/list` and `tool_grants/audit` do for sessions over JSON-RPC
+`tool_grants/list` and `tool_grants/audit` do for sessions over JSON-RPC;
+`MeerkatMachine::request_tool_grant` and `tool_grants/request` ask for a grant
+a person approves through a durable decision
 (the Python and TypeScript SDKs wrap them; the stock governed stdio pipe
 serves neither the methods nor the create field). See
 [Scoped tool grants](/concepts/tools#scoped-tool-grants). Grants persist with

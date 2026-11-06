@@ -218,6 +218,16 @@ and confinement still applies to a call it opens.
   any run (`tool_grant_required`); it ends (`run_ended`) when the run
   completes, fails or is cancelled, when durable-tail recovery closes it, or
   at the first boundary or call of a later run.
+- A host can ask for a grant a person approves instead (0.9.11):
+  `MeerkatMachine::request_tool_grant`, or `tool_grants/request` (Python
+  `request_tool_grant`, TypeScript `requestToolGrant`; `subject`, `target`,
+  `duration_ms`, optional `scope` and `reason`), holds a durable decision of
+  kind `tool_grant.issue` for the approver id `operator` and issues nothing.
+  Once a person approved it, the kind's executor (`ToolGrantIssueExecutor`,
+  run by `rkat-rpc`) issues the grant under `ToolGrantId::approved(decision
+  id)` with issuer `approval`; the session receives a `tool_grant_request`
+  input when the request ends. `tool_grants/list` shows open requests as
+  `requested` and, with `include_ended`, ended ones as `declined`.
 - `ToolGrantLifecycleMachine` owns each grant (issued, then expired, revoked
   or ended with its run, all terminal). Grants and their audit rows live in the runtime
   store: on SQLite the `runtime-tool-grants` schema domain, created by the

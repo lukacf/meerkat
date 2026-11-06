@@ -276,6 +276,8 @@ import type {
   ReadSessionParams as RpcReadSessionParams,
   ReadSessionTranscriptRevisionParams as RpcReadSessionTranscriptRevisionParams,
   RealmIdParams as RpcRealmIdParams,
+  RequestToolGrantParams as RpcRequestToolGrantParams,
+  RequestToolGrantResult as RpcRequestToolGrantResult,
   RestoreSessionTranscriptRevisionParams as RpcRestoreSessionTranscriptRevisionParams,
   RevokeToolGrantParams as RpcRevokeToolGrantParams,
   RevokeToolGrantResult as RpcRevokeToolGrantResult,
@@ -2263,6 +2265,50 @@ export class MeerkatClient {
   }
 
   /**
+   * Ask for a grant of a session's grant-gated tool name or tool family that
+   * a person approves. `target` names exactly one of `tool` and `family`, as
+   * for `grantTool`; `durationMs` bounds the grant from its issuance, at most
+   * the server's maximum lifetime; `options.scope` `"current_run"` also
+   * scopes it to the run the session is running now. The server holds a
+   * durable decision of kind `tool_grant.issue` and issues nothing: once a
+   * person approves the decision, the server issues the grant under the id
+   * the result names. The result is the request as a list shows it (status
+   * `requested`) and its decision. A server whose persistence keeps no
+   * durable decisions answers capability unavailable. Needs a Meerkat 0.9.11
+   * or newer server: an older one answers method not found (`-32601`),
+   * raised as an error that names the method.
+   * Throws `INVALID_ARGS` unless the target names exactly one of `tool` and
+   * `family`.
+   */
+  async requestToolGrant(
+    sessionId: string,
+    target: { tool: string; family?: never } | { family: string; tool?: never },
+    durationMs: number,
+    options?: { reason?: string; scope?: "window" | "current_run" },
+  ): Promise<RpcRequestToolGrantResult> {
+    const { tool, family } = target as { tool?: string; family?: string };
+    if ((tool === undefined) === (family === undefined)) {
+      throw new MeerkatError(
+        "INVALID_ARGS",
+        "requestToolGrant needs exactly one of target.tool and target.family",
+      );
+    }
+    const params: RpcRequestToolGrantParams = {
+      subject: { kind: "session", session_id: sessionId },
+      target:
+        tool !== undefined
+          ? { kind: "tool", name: tool }
+          : { kind: "family", family: family as string },
+      duration_ms: durationMs,
+    };
+    if (options?.scope !== undefined) params.scope = { kind: options.scope };
+    if (options?.reason !== undefined) params.reason = options.reason;
+    return this.request("tool_grants/request", params).catch(
+      MeerkatClient.decisionMethodServed("tool_grants/request"),
+    );
+  }
+
+  /**
    * Revoke a scoped tool grant before its deadline. Idempotent: revoking a
    * grant that already ended answers it as it stands, with `changed` false.
    */
@@ -2279,7 +2325,10 @@ export class MeerkatClient {
    * List a session's scoped tool grants, each due grant settled as expired
    * first. Ended (expired, revoked or run-ended) grants are listed only with
    * `includeEnded`; `unreadable` names any stored grant the server cannot
-   * read.
+   * read. On a 0.9.11 or newer server that keeps durable decisions, the
+   * session's grant requests (`requestToolGrant`) follow its grants: open
+   * and approved ones as `requested` and, with `includeEnded`, declined ones
+   * as `declined`.
    */
   async listToolGrants(
     sessionId: string,

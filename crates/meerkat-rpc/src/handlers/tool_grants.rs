@@ -7,30 +7,43 @@
 //! target the session does not gate. A `current_run` grant takes the run the
 //! runtime records for the session now; a session that runs none (idle, or
 //! not served here) refuses it as `run_not_active`.
+//!
+//! `tool_grants/request` checks its subject, target and scope the same way
+//! and holds a durable decision of kind `tool_grant.issue` (this host is its
+//! requester) instead of issuing anything: the runtime's executor of the kind
+//! issues the grant once a person approved it. `tool_grants/list` lists the
+//! subject's open and approved requests beside its grants, as `requested`,
+//! and with `include_ended` its declined ones too.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use meerkat_contracts::{
     GrantToolParams, GrantToolResult, ListToolGrantsParams, ListToolGrantsResult,
-    RevokeToolGrantParams, RevokeToolGrantResult, ToolGrantAuditParams, ToolGrantAuditResult,
-    ToolGrantScopeRequest, ToolGrantSubjectRequest, ToolGrantTargetRequest, WireToolGrantErrorData,
+    RequestToolGrantParams, RequestToolGrantResult, RevokeToolGrantParams, RevokeToolGrantResult,
+    ToolGrantAuditParams, ToolGrantAuditResult, ToolGrantScopeRequest, ToolGrantSubjectRequest,
+    ToolGrantTargetRequest, WireToolGrantErrorData,
 };
-use meerkat_core::SessionId;
 use meerkat_core::tool_grant::{
     GrantGatedTools, ToolGrantId, ToolGrantIssuer, ToolGrantSubject, ToolGrantTarget,
 };
 use meerkat_core::types::ToolName;
+use meerkat_core::{RunId, SessionId};
 use meerkat_runtime::RuntimeStoreError;
+use meerkat_runtime::decision::wire::wire_decision;
 use meerkat_runtime::tool_grant::wire::{
-    wire_tool_grant, wire_tool_grant_audit_row, wire_unreadable_tool_grant,
-    wire_unreadable_tool_grant_audit_row,
+    wire_tool_grant, wire_tool_grant_audit_row, wire_tool_grant_request,
+    wire_unreadable_tool_grant, wire_unreadable_tool_grant_audit_row,
 };
 use meerkat_runtime::tool_grant::{
-    ToolGrantRequest, ToolGrantRevocation, ToolGrantServiceError, ToolGrantStatus, ToolGrantWindow,
+    ToolGrantIssueRequest, ToolGrantRequest, ToolGrantRequestError, ToolGrantRequestOrigin,
+    ToolGrantRequestPolicy, ToolGrantRevocation, ToolGrantServiceError, ToolGrantStatus,
+    ToolGrantWindow, tool_grant_requests_of,
 };
 
 use crate::error;
+use crate::handlers::decision::{decision_error_to_response, decision_owner};
 use crate::handlers::{RpcResponseExt, parse_params, parse_session_id_for_runtime};
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
@@ -137,6 +150,53 @@ fn resolve_target(
     }
 }
 
+/// The gate `session_id` records, or the session's absence.
+#[allow(clippy::result_large_err)]
+async fn session_gate(
+    id: Option<RpcId>,
+    session_id: &SessionId,
+    runtime: &SessionRuntime,
+) -> Result<GrantGatedTools, RpcResponse> {
+    match runtime.session_grant_gate(session_id).await {
+        Ok(Some(gate)) => Ok(gate),
+        Ok(None) => Err(RpcResponse::error(
+            id,
+            error::SESSION_NOT_FOUND,
+            format!("Session not found: {session_id}"),
+        )),
+        Err(error_value) => Err(RpcResponse::from_error(id, error_value)),
+    }
+}
+
+/// The run a requested scope binds: none for a window, and for
+/// `current_run` the run the runtime records for `session_id` now, which a
+/// session that runs none refuses as `run_not_active`.
+#[allow(clippy::result_large_err)]
+async fn run_scope_of(
+    id: Option<RpcId>,
+    scope: Option<ToolGrantScopeRequest>,
+    session_id: &SessionId,
+    runtime: &SessionRuntime,
+) -> Result<Option<RunId>, RpcResponse> {
+    match scope {
+        None | Some(ToolGrantScopeRequest::Window {}) => Ok(None),
+        Some(ToolGrantScopeRequest::CurrentRun {}) => {
+            match runtime.runtime_adapter().current_run(session_id).await {
+                Some(run_id) => Ok(Some(run_id)),
+                None => Err(refusal_with_data(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!(
+                        "the session {session_id} runs no turn now: a current_run grant needs \
+                         a run"
+                    ),
+                    WireToolGrantErrorData::RunNotActive,
+                )),
+            }
+        }
+    }
+}
+
 /// Handle `tool_grants/grant`.
 pub async fn handle_grant(
     id: Option<RpcId>,
@@ -162,39 +222,17 @@ pub async fn handle_grant(
         Ok(session_id) => session_id,
         Err(response) => return response,
     };
-    let gate = match runtime.session_grant_gate(&session_id).await {
-        Ok(Some(gate)) => gate,
-        Ok(None) => {
-            return RpcResponse::error(
-                id,
-                error::SESSION_NOT_FOUND,
-                format!("Session not found: {session_id}"),
-            );
-        }
-        Err(error_value) => return RpcResponse::from_error(id, error_value),
+    let gate = match session_gate(id.clone(), &session_id, &runtime).await {
+        Ok(gate) => gate,
+        Err(response) => return response,
     };
     let target = match resolve_target(params.target, &gate) {
         Ok(target) => target,
         Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
     };
-    let run_scope = match params.scope {
-        None | Some(ToolGrantScopeRequest::Window {}) => None,
-        Some(ToolGrantScopeRequest::CurrentRun {}) => {
-            match runtime.runtime_adapter().current_run(&session_id).await {
-                Some(run_id) => Some(run_id),
-                None => {
-                    return refusal_with_data(
-                        id,
-                        error::INVALID_PARAMS,
-                        format!(
-                            "the session {session_id} runs no turn now: a current_run grant \
-                             needs a run"
-                        ),
-                        WireToolGrantErrorData::RunNotActive,
-                    );
-                }
-            }
-        }
+    let run_scope = match run_scope_of(id.clone(), params.scope, &session_id, &runtime).await {
+        Ok(run_scope) => run_scope,
+        Err(response) => return response,
     };
     let request = ToolGrantRequest {
         subject: ToolGrantSubject::session(session_id),
@@ -212,6 +250,83 @@ pub async fn handle_grant(
             },
         ),
         Err(error_value) => grant_error_to_response(id, error_value),
+    }
+}
+
+/// Handle `tool_grants/request`: hold a durable decision of kind
+/// `tool_grant.issue` for a grant a person approves. The subject, target and
+/// scope are checked as `tool_grants/grant` checks them, and the duration
+/// against the host's maximum lifetime. This host is the requester, and the
+/// decision is held for the approver id `operator` until the request's
+/// deadline. Nothing is issued here: the runtime's executor of the kind
+/// issues the grant, under the id the answer names, once a person approved
+/// it.
+pub async fn handle_request(
+    id: Option<RpcId>,
+    params: Option<&serde_json::value::RawValue>,
+    runtime: Arc<SessionRuntime>,
+) -> RpcResponse {
+    let params: RequestToolGrantParams = match parse_params(params) {
+        Ok(params) => params,
+        Err(response) => return response.with_id(id),
+    };
+    let decisions = match decision_owner(id.clone(), &runtime) {
+        Ok(decisions) => decisions,
+        Err(response) => return response,
+    };
+    let session_id = match subject_session(id.clone(), &params.subject, &runtime) {
+        Ok(session_id) => session_id,
+        Err(response) => return response,
+    };
+    let gate = match session_gate(id.clone(), &session_id, &runtime).await {
+        Ok(gate) => gate,
+        Err(response) => return response,
+    };
+    let target = match resolve_target(params.target, &gate) {
+        Ok(target) => target,
+        Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
+    };
+    let run_scope = match run_scope_of(id.clone(), params.scope, &session_id, &runtime).await {
+        Ok(run_scope) => run_scope,
+        Err(response) => return response,
+    };
+    let requester = match runtime.tool_grant_host_requester() {
+        Ok(requester) => requester,
+        Err(message) => return RpcResponse::error(id, error::INTERNAL_ERROR, message),
+    };
+    let request = ToolGrantIssueRequest {
+        subject: ToolGrantSubject::session(session_id),
+        target,
+        duration: Duration::from_millis(params.duration_ms),
+        run_scope,
+        reason: params.reason,
+        origin: ToolGrantRequestOrigin::Host {
+            request_id: uuid::Uuid::new_v4().to_string(),
+        },
+        requester,
+    };
+    match runtime.runtime_adapter().request_tool_grant(
+        &decisions,
+        &ToolGrantRequestPolicy::default(),
+        request,
+    ) {
+        Ok((decision, body)) => RpcResponse::success(
+            id,
+            RequestToolGrantResult {
+                grant: wire_tool_grant_request(&decision, &body),
+                decision: wire_decision(&decision, false),
+            },
+        ),
+        Err(ToolGrantRequestError::Decision(error_value)) => {
+            decision_error_to_response(id, error_value)
+        }
+        // The clock, or a held body this binary cannot read back: the
+        // server's fault.
+        Err(
+            error_value @ (ToolGrantRequestError::Clock(_)
+            | ToolGrantRequestError::UnreadableRequest(_)),
+        ) => RpcResponse::error(id, error::INTERNAL_ERROR, error_value.to_string()),
+        Err(error_value) => RpcResponse::error(id, error::INVALID_PARAMS, error_value.to_string()),
     }
 }
 
@@ -254,7 +369,11 @@ pub async fn handle_revoke(
 
 /// Handle `tool_grants/list`. Each due grant is settled as expired first;
 /// ended grants (expired, revoked, or ended with their run) are listed only
-/// when the request asks for them.
+/// when the request asks for them. On a runtime that keeps durable
+/// decisions the subject's grant requests follow its grants: the open and
+/// approved ones as `requested` and, when ended ones are asked for, the
+/// rejected, expired, withdrawn and refused ones as `declined`. A request
+/// whose grant was issued is listed as that grant only.
 pub async fn handle_list(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
@@ -268,31 +387,48 @@ pub async fn handle_list(
         Ok(session_id) => session_id,
         Err(response) => return response,
     };
-    match runtime
-        .runtime_adapter()
-        .list_tool_grants(&ToolGrantSubject::session(session_id))
-        .await
-    {
-        Ok(listing) => RpcResponse::success(
-            id,
-            ListToolGrantsResult {
-                grants: listing
-                    .grants
-                    .iter()
-                    .filter(|grant| {
-                        params.include_ended || matches!(grant.status, ToolGrantStatus::Active)
-                    })
-                    .map(wire_tool_grant)
-                    .collect(),
-                unreadable: listing
-                    .unreadable
-                    .iter()
-                    .map(wire_unreadable_tool_grant)
-                    .collect(),
-            },
-        ),
-        Err(error_value) => grant_error_to_response(id, error_value),
+    let subject = ToolGrantSubject::session(session_id);
+    let listing = match runtime.runtime_adapter().list_tool_grants(&subject).await {
+        Ok(listing) => listing,
+        Err(error_value) => return grant_error_to_response(id, error_value),
+    };
+    let mut grants: Vec<_> = listing
+        .grants
+        .iter()
+        .filter(|grant| params.include_ended || matches!(grant.status, ToolGrantStatus::Active))
+        .map(wire_tool_grant)
+        .collect();
+    let decisions = runtime.decision_service();
+    if decisions.is_available() {
+        let requests = match tool_grant_requests_of(&decisions, &subject, params.include_ended) {
+            Ok(requests) => requests,
+            Err(error_value) => return decision_error_to_response(id, error_value),
+        };
+        let issued: HashSet<&ToolGrantId> = listing
+            .grants
+            .iter()
+            .map(|grant| &grant.record.grant_id)
+            .collect();
+        grants.extend(
+            requests
+                .iter()
+                .filter(|(decision, _)| {
+                    !issued.contains(&ToolGrantId::approved(&decision.decision_id))
+                })
+                .map(|(decision, body)| wire_tool_grant_request(decision, body)),
+        );
     }
+    RpcResponse::success(
+        id,
+        ListToolGrantsResult {
+            grants,
+            unreadable: listing
+                .unreadable
+                .iter()
+                .map(wire_unreadable_tool_grant)
+                .collect(),
+        },
+    )
 }
 
 /// Handle `tool_grants/audit`: one page of the subject's audit log, in

@@ -197,6 +197,12 @@ them.
   `WireToolGrantExpiryDriver::Unknown` move, and an exhaustive match needs
   the new arms; a 0.9.10 client decodes each of them as `unknown`.
 
+- `meerkat-core`: approval-carried tool grants (see Added).
+  `ToolGrantId::parse` (and a grant id's deserialization) also accepts a
+  version 5 UUID, the id an approved request's grant derives from its
+  decision (`ToolGrantId::approved`), and `ToolGrantIdError`'s message names
+  both versions. A 0.9.10 binary reads such a grant's row as unreadable.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -388,6 +394,48 @@ them.
   `run_id`), as does its `granted` audit row. Python `grant_tool` takes
   `scope="current_run"` and TypeScript `grantTool` takes
   `{ scope: "current_run" }`.
+
+- `meerkat-core`, `meerkat-runtime`: approval-carried tool grants. A grant
+  request holds a durable decision of kind `tool_grant.issue`
+  (`tool_grant::hold_tool_grant_request`, or
+  `MeerkatMachine::request_tool_grant`; the held body `tool_grant.issue.v1`,
+  `ToolGrantIssueBody`, carries the subject, target, duration, run scope,
+  reason and origin; the subject key is the subject, the target and a request
+  key, so a replayed agent request answers its decision; renderer
+  `tool_grant.render-v1`) for the approver id of the host's
+  `ToolGrantRequestPolicy` (`operator`, with a one hour deadline, by
+  default), and issues nothing. `ToolGrantIssueExecutor`, a
+  `DecisionExecutor`, issues an approved request's grant under
+  `ToolGrantId::approved(decision id)` with the issuer
+  `ToolGrantIssuer::Approval`, for `[now, now + duration)`; a replayed
+  execution meets the grant it issued (`ToolGrantService::issued_for`) and
+  settles executed. It refuses a decision no person decided
+  (`not_a_human_decision`), a run-scoped request whose run is over
+  (`run_ended`) and a body this version cannot read (`unreadable_request`),
+  and hands each ended request's notice (`ToolGrantRequestNotice`) to the
+  host's `ToolGrantRequestNotices`; the host's `ToolGrantRunObserver`
+  answers a session's current run. `tool_grant_requests_of` reads a
+  subject's requests, and `wire::wire_tool_grant_request` shows one as a
+  `requested` or `declined` grant.
+
+- `meerkat-rpc`, `meerkat-contracts`, Python and TypeScript SDKs:
+  `tool_grants/request` (`RequestToolGrantParams`, closed, and
+  `RequestToolGrantResult`): a host asks for a grant of a session's gated
+  tool name or family that a person approves; `rkat-rpc` is the requester
+  and `operator` the approver id. `rkat-rpc` runs the executor of
+  `tool_grant.issue` decisions (`SessionRuntime::start_tool_grant_request_executor`,
+  started with the router and stopped with the runtime): a decide or
+  withdraw on the server asks it for a pass at once, and it passes every 30
+  seconds for deadlines. The deciding party stays current while the realm
+  lists the decision's approver id for the operator
+  (`[governance.decisions] operator_approver_ids`). Each ended request's
+  session receives a `tool_grant_request` external event, like any input,
+  with the decision, the outcome (`granted` with the grant id, `rejected`,
+  `expired`, `withdrawn`, or `refused` with a reason) and the target.
+  `tool_grants/list` lists open and approved requests as `requested` and,
+  with `include_ended`, rejected, expired, withdrawn and refused ones as
+  `declined`, the wire statuses reserved since 0.9.9. Python
+  `request_tool_grant`, TypeScript `requestToolGrant`.
 
 ### Changed
 

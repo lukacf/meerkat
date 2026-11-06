@@ -1968,6 +1968,19 @@ export interface WireDecisionNotice {
   requester: string;
 }
 
+export interface RequestToolGrantParams {
+  duration_ms: number;
+  reason?: string | null;
+  scope?: ToolGrantScopeRequest | null;
+  subject: ToolGrantSubjectRequest;
+  target: ToolGrantTargetRequest;
+}
+
+export interface RequestToolGrantResult {
+  decision: WireDecision;
+  grant: WireToolGrant;
+}
+
 export interface CallbackToolExecutionFast {
   mode: "fast";
 }

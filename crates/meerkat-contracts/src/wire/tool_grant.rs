@@ -243,6 +243,35 @@ pub struct GrantToolResult {
     pub grant: WireToolGrant,
 }
 
+/// `tool_grants/request` parameters: ask for a grant a person approves
+/// through a durable decision of kind `tool_grant.issue`. `duration_ms`
+/// bounds the grant from its issuance, at most the host's maximum lifetime;
+/// a `current_run` scope also scopes it to the run its session is running
+/// when it is asked. Closed, as `tool_grants/grant`'s parameters: a request
+/// names no approver (the host's policy does).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RequestToolGrantParams {
+    pub subject: ToolGrantSubjectRequest,
+    pub target: ToolGrantTargetRequest,
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ToolGrantScopeRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// `tool_grants/request` result: the request as a list shows it (status
+/// `requested`, the id its grant gets when it is issued, the approval as its
+/// issuer) and the decision that holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RequestToolGrantResult {
+    pub grant: WireToolGrant,
+    pub decision: crate::wire::WireDecision,
+}
+
 /// The typed `data` of a `tool_grants/*` refusal. Closed, like the refusals
 /// it names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

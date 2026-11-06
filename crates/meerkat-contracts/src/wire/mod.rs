@@ -340,12 +340,12 @@ pub use supervisor_bridge::{
 };
 pub use tool_grant::{
     GrantToolParams, GrantToolResult, ListToolGrantsParams, ListToolGrantsResult,
-    RevokeToolGrantParams, RevokeToolGrantResult, ToolGrantAuditParams, ToolGrantAuditResult,
-    ToolGrantScopeRequest, ToolGrantSubjectRequest, ToolGrantTargetRequest, WireGrantGatedTools,
-    WireToolGrant, WireToolGrantAuditEvent, WireToolGrantAuditRow, WireToolGrantErrorData,
-    WireToolGrantExpiryDriver, WireToolGrantIssuer, WireToolGrantRefusalKind, WireToolGrantScope,
-    WireToolGrantStatus, WireToolGrantSubject, WireToolGrantTarget, WireUnreadableToolGrant,
-    WireUnreadableToolGrantAuditRow,
+    RequestToolGrantParams, RequestToolGrantResult, RevokeToolGrantParams, RevokeToolGrantResult,
+    ToolGrantAuditParams, ToolGrantAuditResult, ToolGrantScopeRequest, ToolGrantSubjectRequest,
+    ToolGrantTargetRequest, WireGrantGatedTools, WireToolGrant, WireToolGrantAuditEvent,
+    WireToolGrantAuditRow, WireToolGrantErrorData, WireToolGrantExpiryDriver, WireToolGrantIssuer,
+    WireToolGrantRefusalKind, WireToolGrantScope, WireToolGrantStatus, WireToolGrantSubject,
+    WireToolGrantTarget, WireUnreadableToolGrant, WireUnreadableToolGrantAuditRow,
 };
 pub use usage::{WireTurnUsage, WireUsage};
 pub use workgraph::{WorkEventsResult, WorkItemsResult};

@@ -2689,6 +2689,53 @@ class MeerkatClient:
             params["scope"] = {"kind": scope}
         return await self._request("tool_grants/grant", params)
 
+    async def request_tool_grant(
+        self,
+        session_id: str,
+        *,
+        tool: str | None = None,
+        family: str | None = None,
+        duration_ms: int,
+        scope: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Ask for a grant of a session's grant-gated tool name or tool family
+        that a person approves.
+
+        Name exactly one of ``tool`` and ``family``, as for :meth:`grant_tool`.
+        ``duration_ms`` bounds the grant from its issuance, at most the
+        server's maximum lifetime; ``scope="current_run"`` also scopes it to
+        the run the session is running now. The server holds a durable
+        decision of kind ``tool_grant.issue`` and issues nothing: once a
+        person approves the decision, the server issues the grant under the
+        id the result names. Returns ``{"grant": {...}, "decision": {...}}``:
+        the request as a list shows it (status ``requested``) and its
+        decision. A server whose persistence keeps no durable decisions
+        answers capability unavailable. Needs a Meerkat 0.9.11 or newer
+        server: an older one answers method not found (``-32601``), raised
+        as a :class:`MeerkatError` that names the method.
+        """
+        if (tool is None) == (family is None):
+            raise ValueError("exactly one of tool or family must be provided")
+        if scope is not None and scope not in ("window", "current_run"):
+            raise ValueError('scope must be "window" or "current_run"')
+        target: dict[str, Any] = (
+            {"kind": "tool", "name": tool}
+            if tool is not None
+            else {"kind": "family", "family": family}
+        )
+        params: dict[str, Any] = {
+            "subject": {"kind": "session", "session_id": session_id},
+            "target": target,
+            "duration_ms": duration_ms,
+        }
+        if scope is not None:
+            params["scope"] = {"kind": scope}
+        if reason is not None:
+            params["reason"] = reason
+        with _decision_method_served("tool_grants/request"):
+            return await self._request("tool_grants/request", params)
+
     async def revoke_tool_grant(
         self, grant_id: str, *, reason: str | None = None
     ) -> dict[str, Any]:
@@ -2709,8 +2756,12 @@ class MeerkatClient:
         """List a session's scoped tool grants, each due one read as expired.
 
         Ended (expired, revoked or run-ended) grants are listed only with
-        ``include_ended``. Returns ``{"grants": [...]}``, with an
-        ``"unreadable"`` list naming any stored grant the server cannot read.
+        ``include_ended``. On a 0.9.11 or newer server that keeps durable
+        decisions, the session's grant requests (:meth:`request_tool_grant`)
+        follow its grants: open and approved ones as ``requested`` and, with
+        ``include_ended``, declined ones as ``declined``. Returns
+        ``{"grants": [...]}``, with an ``"unreadable"`` list naming any stored
+        grant the server cannot read.
         """
         params: dict[str, Any] = {
             "subject": {"kind": "session", "session_id": session_id},

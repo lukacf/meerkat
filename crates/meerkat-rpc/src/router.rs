@@ -1755,6 +1755,9 @@ impl MethodRouter {
                 tracing::warn!("failed to start RPC schedule host: {error}");
             }
         });
+        if let Err(error) = runtime.start_tool_grant_request_executor() {
+            tracing::warn!(%error, "failed to start the tool grant request executor");
+        }
         // Ensure the runtime's notification sink is up-to-date so that
         // executors created lazily read the current sink at apply time.
         runtime.set_notification_sink(notification_sink.clone());
@@ -2336,6 +2339,9 @@ impl MethodRouter {
                 tracing::warn!("failed to start RPC schedule host: {error}");
             }
         });
+        if let Err(error) = runtime.start_tool_grant_request_executor() {
+            tracing::warn!(%error, "failed to start the tool grant request executor");
+        }
         // Ensure the runtime's notification sink is up-to-date so that
         // executors created lazily read the current sink at apply time.
         runtime.set_notification_sink(notification_sink.clone());
@@ -3477,6 +3483,12 @@ impl MethodRouter {
             "tool_grants/list" => {
                 routed_arm(|| handlers::tool_grants::handle_list(id, params, self.runtime.clone()))
                     .await
+            }
+            "tool_grants/request" => {
+                routed_arm(|| {
+                    handlers::tool_grants::handle_request(id, params, self.runtime.clone())
+                })
+                .await
             }
             "tool_grants/audit" => {
                 routed_arm(|| handlers::tool_grants::handle_audit(id, params, self.runtime.clone()))

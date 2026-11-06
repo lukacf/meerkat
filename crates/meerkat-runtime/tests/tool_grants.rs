@@ -1929,12 +1929,12 @@ async fn a_rejected_or_expired_request_issues_nothing_and_lists_declined() {
             .into_iter()
             .map(|(decision, _)| (decision.decision_id, decision.state.phase))
             .collect::<Vec<_>>();
-        declined.sort();
+        declined.sort_by(|left, right| left.0.cmp(&right.0));
         let mut expected = vec![
             (rejected.decision_id.clone(), DecisionPhase::Rejected),
             (expiring.decision_id.clone(), DecisionPhase::Expired),
         ];
-        expected.sort();
+        expected.sort_by(|left, right| left.0.cmp(&right.0));
         assert_eq!(declined, expected, "{backend:?}");
         let mut notices = rig.notices.outcomes();
         notices.sort_by(|left, right| left.0.cmp(&right.0));

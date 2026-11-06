@@ -1,0 +1,629 @@
+//! Approval-carried tool grants: a grant request holds a durable decision of
+//! kind `tool_grant.issue`, and the decision's executor issues the grant once
+//! a person approved it.
+//!
+//! - [`hold_tool_grant_request`] holds the decision for one request: its
+//!   body `tool_grant.issue.v1` ([`ToolGrantIssueBody`]: subject, target,
+//!   duration, run scope, reason and who asked), its subject key
+//!   `{subject key}/{target}/{request id}` (an agent's request id is its run
+//!   and tool call, so a replayed call answers the same decision; a host's is
+//!   fresh for each call), the approver id of the host's
+//!   [`ToolGrantRequestPolicy`], the requester the host names, and the
+//!   policy's deadline. It issues nothing.
+//! - [`ToolGrantIssueExecutor`] executes an approved decision: it issues the
+//!   grant under the id derived from the decision
+//!   ([`ToolGrantId::approved`]), issuer
+//!   [`ToolGrantIssuer::Approval`](meerkat_core::tool_grant::ToolGrantIssuer::Approval)
+//!   with the decision's id, for `[now, now + duration)`. A replayed execution
+//!   meets the grant it issued and settles executed. It refuses a decision no
+//!   person decided (`not_a_human_decision`), a run-scoped request whose run
+//!   is over (`run_ended`), and a body this version cannot read
+//!   (`unreadable_request`).
+//! - A request's end owes its requester a notice, which the executor hands
+//!   to the host's [`ToolGrantRequestNotices`]: the subject's session reads
+//!   that its request was approved or declined.
+//! - [`tool_grant_requests_of`] reads a subject's requests, which a list
+//!   projects: open and approved ones as `requested`, rejected, expired,
+//!   withdrawn and refused ones as `declined`.
+//!
+//! The decision's machine owns a request's lifecycle, and the grant's own
+//! machine owns the grant from its issuance: no grant machine state stands
+//! for a request.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use meerkat_core::RunId;
+use meerkat_core::approval::ApprovalConsentDeliveryState;
+use meerkat_core::approval::decision::{
+    ApproverId, ConsentProvenance, DECISION_PAGE_MAX, DecisionContractError, DecisionHoldRequest,
+    DecisionId, DecisionKind, DecisionListFilter, DecisionOperationId, DecisionPhase,
+    DecisionPrincipalKey, DecisionReference, DecisionRenderer, DecisionRendering,
+    DecisionRequestBody, DecisionSubjectKey, DecisionTier, Sha256Digest, StoredDecision,
+};
+use meerkat_core::tool_grant::{ToolGrantId, ToolGrantSubject, ToolGrantTarget};
+use meerkat_core::types::SessionId;
+use serde::{Deserialize, Serialize};
+
+use super::service::{ToolGrantService, ToolGrantServiceError};
+use crate::decision::{
+    DecisionError, DecisionExecution, DecisionExecutionPermit, DecisionExecutor,
+    DecisionExecutorRecordUnavailable, DurableDecisionService,
+};
+
+/// The decision kind of a tool grant request.
+pub const TOOL_GRANT_ISSUE_KIND: &str = "tool_grant.issue";
+
+/// The version of a tool grant request's held body.
+pub const TOOL_GRANT_ISSUE_BODY: &str = "tool_grant.issue.v1";
+
+/// The renderer of a tool grant request's rendering.
+pub const TOOL_GRANT_ISSUE_RENDERER: &str = "tool_grant.render-v1";
+
+/// The decision kind of a tool grant request, [`TOOL_GRANT_ISSUE_KIND`].
+///
+/// # Errors
+/// Never in practice: the kind is a valid token.
+pub fn tool_grant_issue_kind() -> Result<DecisionKind, DecisionContractError> {
+    DecisionKind::new(TOOL_GRANT_ISSUE_KIND)
+}
+
+/// Who asked for a grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolGrantRequestOrigin {
+    /// A host asked (`tool_grants/request`); `request_id` names this ask.
+    Host { request_id: String },
+    /// The subject's agent asked from one tool call of one of its runs.
+    Agent { run_id: RunId, call_id: String },
+}
+
+impl ToolGrantRequestOrigin {
+    /// The request id a decision's subject key ends with.
+    fn request_key(&self) -> String {
+        match self {
+            Self::Host { request_id } => format!("host:{request_id}"),
+            Self::Agent { run_id, call_id } => format!("run:{run_id}:call:{call_id}"),
+        }
+    }
+}
+
+/// The held body of a tool grant request, `tool_grant.issue.v1`. A body
+/// field this version does not know makes the body unreadable here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolGrantIssueBody {
+    /// [`TOOL_GRANT_ISSUE_BODY`].
+    pub body: String,
+    pub subject: ToolGrantSubject,
+    pub target: ToolGrantTarget,
+    /// How long the grant lasts from its issuance, in milliseconds.
+    pub duration_ms: u64,
+    /// The run of the subject session the grant is scoped to, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_scope: Option<RunId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub origin: ToolGrantRequestOrigin,
+}
+
+impl ToolGrantIssueBody {
+    /// The body `decision` holds, when it is a tool grant request this
+    /// version reads.
+    ///
+    /// # Errors
+    /// [`ToolGrantRequestError::UnreadableRequest`] for another kind, another
+    /// body version, or a body that does not parse.
+    pub fn of(decision: &StoredDecision) -> Result<Self, ToolGrantRequestError> {
+        if decision.descriptor.kind.as_str() != TOOL_GRANT_ISSUE_KIND {
+            return Err(ToolGrantRequestError::UnreadableRequest(format!(
+                "decision {} is of kind {}",
+                decision.decision_id, decision.descriptor.kind
+            )));
+        }
+        let body: Self =
+            serde_json::from_str(decision.descriptor.request.get()).map_err(|error| {
+                ToolGrantRequestError::UnreadableRequest(format!(
+                    "decision {}: {error}",
+                    decision.decision_id
+                ))
+            })?;
+        if body.body != TOOL_GRANT_ISSUE_BODY {
+            return Err(ToolGrantRequestError::UnreadableRequest(format!(
+                "decision {} holds the body {}",
+                decision.decision_id, body.body
+            )));
+        }
+        Ok(body)
+    }
+}
+
+/// The host's policy for the grant requests it holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolGrantRequestPolicy {
+    /// The approver id every request's decision is held for: the host maps
+    /// it to the people who may approve.
+    pub approver_id: String,
+    /// How long a request waits for its decision.
+    pub request_ttl: Duration,
+}
+
+impl ToolGrantRequestPolicy {
+    /// The default approver id: `operator`.
+    pub const DEFAULT_APPROVER_ID: &'static str = "operator";
+    /// The default time a request waits for its decision: one hour.
+    pub const DEFAULT_REQUEST_TTL: Duration = Duration::from_hours(1);
+
+    /// The approver id a request for `subject` is held for.
+    #[must_use]
+    pub fn approver_for(&self, subject: &ToolGrantSubject) -> &str {
+        let _ = subject;
+        &self.approver_id
+    }
+}
+
+impl Default for ToolGrantRequestPolicy {
+    fn default() -> Self {
+        Self {
+            approver_id: Self::DEFAULT_APPROVER_ID.to_owned(),
+            request_ttl: Self::DEFAULT_REQUEST_TTL,
+        }
+    }
+}
+
+/// One grant request, as a host or an agent asks for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolGrantIssueRequest {
+    pub subject: ToolGrantSubject,
+    pub target: ToolGrantTarget,
+    /// How long the grant lasts from its issuance.
+    pub duration: Duration,
+    /// The run of the subject session the grant is scoped to, if any.
+    pub run_scope: Option<RunId>,
+    pub reason: Option<String>,
+    pub origin: ToolGrantRequestOrigin,
+    /// Who asks: the host's principal for a host's request, the agent's for
+    /// an agent's.
+    pub requester: DecisionPrincipalKey,
+}
+
+/// A grant request was refused, or its decision could not be held.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ToolGrantRequestError {
+    /// The target names no tool.
+    #[error("a tool grant request names no tool")]
+    EmptyTarget,
+    /// The duration is empty or longer than the host's maximum lifetime.
+    #[error(
+        "a tool grant request lasts {duration_ms} ms, which must be at least 1 and at most {max_lifetime_ms}"
+    )]
+    InvalidDuration {
+        duration_ms: u64,
+        max_lifetime_ms: u64,
+    },
+    /// The request cannot be held: a key, the body, the rendering or the
+    /// host's approver id is not one a decision takes.
+    #[error("the tool grant request cannot be held: {0}")]
+    Invalid(String),
+    /// The decision's owner refused or failed the hold.
+    #[error(transparent)]
+    Decision(#[from] DecisionError),
+    /// The held body is not a tool grant request this version reads.
+    #[error("unreadable tool grant request: {0}")]
+    UnreadableRequest(String),
+    /// The host clock could not be read.
+    #[error("the host clock could not be read: {0}")]
+    Clock(String),
+}
+
+impl From<DecisionContractError> for ToolGrantRequestError {
+    fn from(error: DecisionContractError) -> Self {
+        Self::Invalid(error.to_string())
+    }
+}
+
+/// The key of a target in a request's subject key.
+fn target_key(target: &ToolGrantTarget) -> String {
+    match target {
+        ToolGrantTarget::Tool { name } => format!("tool:{name}"),
+        ToolGrantTarget::Family { family, .. } => format!("family:{family}"),
+    }
+}
+
+/// The text a person reads for a request.
+fn rendering_text(body: &ToolGrantIssueBody) -> String {
+    let subject = match &body.subject {
+        ToolGrantSubject::Session { session_id } => format!("the session {session_id}"),
+        ToolGrantSubject::Identity {
+            mob_id, identity, ..
+        } => format!("the member {identity} of the mob {mob_id}"),
+    };
+    let target = match &body.target {
+        ToolGrantTarget::Tool { name } => format!("the tool {name}"),
+        ToolGrantTarget::Family { family, names } => {
+            let names = names
+                .iter()
+                .map(|name| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("the tool family {family} ({names})")
+        }
+    };
+    let window = render_duration(body.duration_ms);
+    let scope = match &body.run_scope {
+        Some(run_id) => format!(", and only in its run {run_id}"),
+        None => String::new(),
+    };
+    let asked_by = match &body.origin {
+        ToolGrantRequestOrigin::Host { .. } => "a host",
+        ToolGrantRequestOrigin::Agent { .. } => "the session's agent",
+    };
+    let mut text = format!(
+        "Grant {subject} {target} for {window} from the approval{scope}. Asked by {asked_by}."
+    );
+    if let Some(reason) = body.reason.as_deref().filter(|reason| !reason.is_empty()) {
+        text.push_str("\nReason: ");
+        text.push_str(reason);
+    }
+    text
+}
+
+/// A duration in milliseconds as a person reads it.
+fn render_duration(duration_ms: u64) -> String {
+    const SECOND: u64 = 1_000;
+    const MINUTE: u64 = 60 * SECOND;
+    const HOUR: u64 = 60 * MINUTE;
+    if duration_ms % HOUR == 0 {
+        format!("{} h", duration_ms / HOUR)
+    } else if duration_ms % MINUTE == 0 {
+        format!("{} min", duration_ms / MINUTE)
+    } else if duration_ms % SECOND == 0 {
+        format!("{} s", duration_ms / SECOND)
+    } else {
+        format!("{duration_ms} ms")
+    }
+}
+
+/// Hold the decision of one grant request: see the module documentation.
+/// A replay of the same agent request (its run and tool call) answers the
+/// decision it held, as it stands.
+///
+/// # Errors
+/// [`ToolGrantRequestError::EmptyTarget`],
+/// [`ToolGrantRequestError::InvalidDuration`] (against `max_lifetime_ms`),
+/// [`ToolGrantRequestError::Invalid`], and the decision owner's refusals and
+/// failures ([`ToolGrantRequestError::Decision`]).
+pub fn hold_tool_grant_request(
+    decisions: &DurableDecisionService,
+    policy: &ToolGrantRequestPolicy,
+    max_lifetime_ms: u64,
+    now_ms: u64,
+    request: ToolGrantIssueRequest,
+) -> Result<StoredDecision, ToolGrantRequestError> {
+    if request.target.names().next().is_none()
+        || request.target.names().any(|name| name.as_str().is_empty())
+    {
+        return Err(ToolGrantRequestError::EmptyTarget);
+    }
+    let duration_ms = u64::try_from(request.duration.as_millis()).unwrap_or(u64::MAX);
+    if duration_ms == 0 || duration_ms > max_lifetime_ms {
+        return Err(ToolGrantRequestError::InvalidDuration {
+            duration_ms,
+            max_lifetime_ms,
+        });
+    }
+    let kind = tool_grant_issue_kind()?;
+    let subject_key = DecisionSubjectKey::new(format!(
+        "{}/{}/{}",
+        request.subject.key(),
+        target_key(&request.target),
+        request.origin.request_key()
+    ))?;
+    let decision_id = DecisionId::derive(&kind, &subject_key);
+    let grant_id = ToolGrantId::approved(&decision_id);
+    let approver_id = ApproverId::new(policy.approver_for(&request.subject))?;
+    let body = ToolGrantIssueBody {
+        body: TOOL_GRANT_ISSUE_BODY.to_owned(),
+        subject: request.subject,
+        target: request.target,
+        duration_ms,
+        run_scope: request.run_scope,
+        reason: request.reason,
+        origin: request.origin,
+    };
+    let text = serde_json::to_string(&body)
+        .map_err(|error| ToolGrantRequestError::Invalid(error.to_string()))?;
+    let raw = serde_json::value::RawValue::from_string(text.clone())
+        .map_err(|error| ToolGrantRequestError::Invalid(error.to_string()))?;
+    let ttl_ms = u64::try_from(policy.request_ttl.as_millis()).unwrap_or(u64::MAX);
+    let hold = DecisionHoldRequest::new(
+        kind,
+        subject_key,
+        DecisionOperationId::new(format!("tool_grant:{grant_id}"))?,
+        Sha256Digest::of(text.as_bytes()),
+        DecisionRequestBody::new(raw)?,
+        request.requester,
+        approver_id,
+        now_ms.saturating_add(ttl_ms),
+        DecisionRendering::new(rendering_text(&body))?,
+        DecisionRenderer::new(TOOL_GRANT_ISSUE_RENDERER)?,
+    );
+    Ok(decisions.hold(hold, true)?)
+}
+
+/// The tool grant requests held for `subject`, newest last per phase: the
+/// open and approved ones, and with `include_ended` also the rejected,
+/// expired, withdrawn and refused ones. An executed request is its grant,
+/// which the grant store lists. The decision store files decisions by kind
+/// and phase, not by subject, so this pages the kind's decisions of each
+/// phase and keeps the subject's.
+///
+/// # Errors
+/// The decision owner's read failures.
+pub fn tool_grant_requests_of(
+    decisions: &DurableDecisionService,
+    subject: &ToolGrantSubject,
+    include_ended: bool,
+) -> Result<Vec<(StoredDecision, ToolGrantIssueBody)>, DecisionError> {
+    let mut phases = vec![DecisionPhase::Open, DecisionPhase::Approved];
+    if include_ended {
+        phases.extend([
+            DecisionPhase::Rejected,
+            DecisionPhase::Expired,
+            DecisionPhase::Withdrawn,
+            DecisionPhase::ExecutionRefused,
+        ]);
+    }
+    let kind = tool_grant_issue_kind()?;
+    let mut requests = Vec::new();
+    for phase in phases {
+        let filter = DecisionListFilter::default()
+            .with_kind(kind.clone())
+            .with_phase(phase);
+        let mut after: Option<String> = None;
+        loop {
+            let listing = decisions.list(&filter, after.as_deref(), DECISION_PAGE_MAX)?;
+            for decision in listing.decisions {
+                if let Ok(body) = ToolGrantIssueBody::of(&decision)
+                    && body.subject == *subject
+                {
+                    requests.push((decision, body));
+                }
+            }
+            match listing.next_after {
+                Some(next) if after.as_deref() != Some(next.as_str()) => after = Some(next),
+                _ => break,
+            }
+        }
+    }
+    Ok(requests)
+}
+
+/// How a request ended, as its notice says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ToolGrantRequestOutcome {
+    /// Approved, and the grant was issued.
+    Granted { grant_id: ToolGrantId },
+    /// A person rejected it.
+    Rejected,
+    /// Nobody decided it before its deadline, or it was approved too late.
+    Expired,
+    /// Its requester or the host withdrew it.
+    Withdrawn,
+    /// Approved, and the grant service refused to issue it: the reference
+    /// names why (`run_ended`, `not_a_human_decision`, ...).
+    Refused { reason: String },
+}
+
+impl ToolGrantRequestOutcome {
+    /// The outcome's token in a notice: `granted`, `rejected`, `expired`,
+    /// `withdrawn` or `refused`.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Granted { .. } => "granted",
+            Self::Rejected => "rejected",
+            Self::Expired => "expired",
+            Self::Withdrawn => "withdrawn",
+            Self::Refused { .. } => "refused",
+        }
+    }
+}
+
+/// The notice an ended request owes its subject's session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolGrantRequestNotice {
+    pub decision_id: DecisionId,
+    pub subject: ToolGrantSubject,
+    pub target: ToolGrantTarget,
+    pub outcome: ToolGrantRequestOutcome,
+}
+
+impl ToolGrantRequestNotice {
+    /// The notice `decision` owes, when it ended.
+    #[must_use]
+    pub fn of(decision: &StoredDecision, body: &ToolGrantIssueBody) -> Option<Self> {
+        let outcome = match decision.state.phase {
+            DecisionPhase::Executed => ToolGrantRequestOutcome::Granted {
+                grant_id: ToolGrantId::approved(&decision.decision_id),
+            },
+            DecisionPhase::Rejected => ToolGrantRequestOutcome::Rejected,
+            DecisionPhase::Expired => ToolGrantRequestOutcome::Expired,
+            DecisionPhase::Withdrawn => ToolGrantRequestOutcome::Withdrawn,
+            DecisionPhase::ExecutionRefused => ToolGrantRequestOutcome::Refused {
+                reason: decision
+                    .execution_refusal
+                    .as_ref()
+                    .map_or_else(|| "refused".to_owned(), ToString::to_string),
+            },
+            DecisionPhase::Open | DecisionPhase::Approved => return None,
+        };
+        Some(Self {
+            decision_id: decision.decision_id.clone(),
+            subject: body.subject.clone(),
+            target: body.target.clone(),
+            outcome,
+        })
+    }
+}
+
+/// Where a host delivers the notices of ended grant requests.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait ToolGrantRequestNotices: Send + Sync {
+    /// Deliver `notice` to its subject's session: the receipt (admitted, or
+    /// failed terminally), or `None` when it cannot be delivered now (the
+    /// session cannot take the input now), so a later pass asks again. A
+    /// delivery whose receipt was not recorded is asked again too: deliver
+    /// idempotently per decision.
+    async fn deliver(
+        &self,
+        notice: &ToolGrantRequestNotice,
+    ) -> Option<ApprovalConsentDeliveryState>;
+}
+
+/// Which run a session runs now, as the host that serves it sees it.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait ToolGrantRunObserver: Send + Sync {
+    /// The run `session_id` runs now: `None` when it runs none, or when this
+    /// host does not serve it.
+    async fn current_run(&self, session_id: &SessionId) -> Option<RunId>;
+}
+
+/// The executor of `tool_grant.issue` decisions: see the module
+/// documentation.
+pub struct ToolGrantIssueExecutor {
+    kind: DecisionKind,
+    grants: Arc<ToolGrantService>,
+    runs: Arc<dyn ToolGrantRunObserver>,
+    notices: Arc<dyn ToolGrantRequestNotices>,
+}
+
+impl std::fmt::Debug for ToolGrantIssueExecutor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolGrantIssueExecutor")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ToolGrantIssueExecutor {
+    /// The executor that issues approved requests through `grants`, asks
+    /// `runs` whether a run-scoped request's run still runs, and hands
+    /// notices to `notices`.
+    ///
+    /// # Errors
+    /// Never in practice: the decision kind is a valid token.
+    pub fn new(
+        grants: Arc<ToolGrantService>,
+        runs: Arc<dyn ToolGrantRunObserver>,
+        notices: Arc<dyn ToolGrantRequestNotices>,
+    ) -> Result<Self, DecisionContractError> {
+        Ok(Self {
+            kind: tool_grant_issue_kind()?,
+            grants,
+            runs,
+            notices,
+        })
+    }
+
+    fn refused(reason: &str) -> DecisionExecution {
+        match DecisionReference::new(reason) {
+            Ok(reference) => DecisionExecution::Refused(reference),
+            // Every reason this executor names is a valid reference.
+            Err(_) => DecisionExecution::Released,
+        }
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl DecisionExecutor for ToolGrantIssueExecutor {
+    fn kind(&self) -> &DecisionKind {
+        &self.kind
+    }
+
+    async fn execute(
+        &self,
+        decision: &StoredDecision,
+        permit: &DecisionExecutionPermit,
+    ) -> DecisionExecution {
+        let descriptor = &decision.descriptor;
+        if !permit.binds(&descriptor.operation_id, &descriptor.request_digest) {
+            return DecisionExecution::Released;
+        }
+        // Decided by people only: a reviewer's allow never issues a grant.
+        if !matches!(
+            permit.consent(),
+            ConsentProvenance::Decided {
+                tier: DecisionTier::Human,
+                ..
+            }
+        ) {
+            return Self::refused("not_a_human_decision");
+        }
+        let body = match ToolGrantIssueBody::of(decision) {
+            Ok(body) => body,
+            Err(_) => return Self::refused("unreadable_request"),
+        };
+        if let Some(run_id) = &body.run_scope {
+            let ToolGrantSubject::Session { session_id } = &body.subject else {
+                return Self::refused("run_ended");
+            };
+            if self.runs.current_run(session_id).await.as_ref() != Some(run_id) {
+                return Self::refused("run_ended");
+            }
+        }
+        // The window starts at the clock reading the commit is admitted at.
+        let Ok(now_ms) = self.grants.now_ms() else {
+            return DecisionExecution::Released;
+        };
+        if !permit.admits_commit_at(now_ms) {
+            return DecisionExecution::Released;
+        }
+        match self
+            .grants
+            .issue_approved_at(&decision.decision_id, &body, now_ms)
+            .await
+        {
+            Ok(_) => DecisionExecution::Committed,
+            Err(ToolGrantServiceError::InvalidWindow { .. }) => Self::refused("invalid_window"),
+            Err(ToolGrantServiceError::EmptyTarget) => Self::refused("empty_target"),
+            Err(ToolGrantServiceError::Conflict { .. }) => Self::refused("grant_id_taken"),
+            // Past the permit's deadline, or a store or clock failure:
+            // nothing was committed.
+            Err(_) => DecisionExecution::Released,
+        }
+    }
+
+    async fn committed(
+        &self,
+        decision: &StoredDecision,
+    ) -> Result<bool, DecisionExecutorRecordUnavailable> {
+        self.grants
+            .issued_for(&decision.decision_id)
+            .await
+            .map(|row| row.is_some())
+            .map_err(|error| DecisionExecutorRecordUnavailable(error.to_string()))
+    }
+
+    async fn deliver_notice(
+        &self,
+        decision: &StoredDecision,
+    ) -> Option<ApprovalConsentDeliveryState> {
+        let body = match ToolGrantIssueBody::of(decision) {
+            Ok(body) => body,
+            Err(error) => {
+                return Some(ApprovalConsentDeliveryState::Failed {
+                    reason: error.to_string(),
+                });
+            }
+        };
+        let notice = ToolGrantRequestNotice::of(decision, &body)?;
+        self.notices.deliver(&notice).await
+    }
+}

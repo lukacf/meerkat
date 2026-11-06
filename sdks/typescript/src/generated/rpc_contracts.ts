@@ -242,6 +242,8 @@ import type {
   ReadSessionTranscriptRevisionParams,
   ReadyWorkFilter,
   RealmIdParams,
+  RequestToolGrantParams,
+  RequestToolGrantResult,
   RestoreSessionTranscriptRevisionParams,
   RevokeToolGrantParams,
   RevokeToolGrantResult,
@@ -567,6 +569,10 @@ export interface RpcMethodContracts {
   "tool_grants/grant": {
     params: GrantToolParams;
     result: (GrantToolResult) & Record<string, unknown>;
+  };
+  "tool_grants/request": {
+    params: RequestToolGrantParams;
+    result: (RequestToolGrantResult) & Record<string, unknown>;
   };
   "tool_grants/revoke": {
     params: RevokeToolGrantParams;

@@ -42190,6 +42190,168 @@
     "title": "RealmIdParams",
     "type": "object"
   },
+  "RequestToolGrantParams": {
+    "$defs": {
+      "ToolGrantScopeRequest": {
+        "description": "How long a grant request asks a grant to last beyond its window. Closed: a\nkind or a field this version does not know is refused, never read as a\nwindow. The kinds are empty structs, so a field is refused as unknown.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The grant lasts for its window.",
+            "properties": {
+              "kind": {
+                "const": "window",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The grant also ends with the run its subject session is running when\nit is issued. Refused `run_not_active` when the session runs none.",
+            "properties": {
+              "kind": {
+                "const": "current_run",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolGrantSubjectRequest": {
+        "description": "The subject a request names: whose grants it writes or reads. Closed: a\nkind or a field this version does not know is refused, never ignored.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "One session's grants.",
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "One mob member identity's grants. Refused by servers that do not\nsupport identity subjects.",
+            "properties": {
+              "identity": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "identity",
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "mob_id",
+              "identity"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolGrantTargetRequest": {
+        "description": "The target a grant request names: one tool name, or a built-in tool\nfamily, whose names the server takes at grant time. Closed: a kind or a\nfield this version does not know is refused, never ignored, so a request\nis never read as wider than it asked.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "One tool name.",
+            "properties": {
+              "kind": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A built-in tool family.",
+            "properties": {
+              "family": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "family",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "family"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "`tool_grants/request` parameters: ask for a grant a person approves\nthrough a durable decision of kind `tool_grant.issue`. `duration_ms`\nbounds the grant from its issuance, at most the host's maximum lifetime;\na `current_run` scope also scopes it to the run its session is running\nwhen it is asked. Closed, as `tool_grants/grant`'s parameters: a request\nnames no approver (the host's policy does).",
+    "properties": {
+      "duration_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "reason": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "scope": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ToolGrantScopeRequest"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "subject": {
+        "$ref": "#/$defs/ToolGrantSubjectRequest"
+      },
+      "target": {
+        "$ref": "#/$defs/ToolGrantTargetRequest"
+      }
+    },
+    "required": [
+      "subject",
+      "target",
+      "duration_ms"
+    ],
+    "title": "RequestToolGrantParams",
+    "type": "object"
+  },
   "RestoreSessionTranscriptRevisionParams": {
     "$defs": {
       "TranscriptEditRunningBehavior": {

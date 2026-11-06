@@ -401,6 +401,8 @@ pub use wire::{
     RealtimeTextChunk,
     RealtimeTurningMode,
     RealtimeVideoChunk,
+    RequestToolGrantParams,
+    RequestToolGrantResult,
     RestoreSessionTranscriptRevisionParams,
     RevisionId,
     RevisionSelector,

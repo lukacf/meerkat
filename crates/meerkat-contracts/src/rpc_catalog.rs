@@ -493,6 +493,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "GrantToolResult",
             ),
             RpcMethodDescriptor::typed(
+                "tool_grants/request",
+                "Ask for a grant of a session's grant-gated tool name or family, which a person approves through a durable decision",
+                "RequestToolGrantParams",
+                "RequestToolGrantResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "tool_grants/revoke",
                 "Revoke a scoped tool grant; idempotent, the result says whether this revoke ended it",
                 "RevokeToolGrantParams",

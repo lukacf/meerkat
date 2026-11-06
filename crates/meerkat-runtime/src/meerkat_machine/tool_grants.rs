@@ -8,14 +8,19 @@
 
 use std::sync::Arc;
 
+use meerkat_core::approval::decision::{DecisionContractError, StoredDecision};
 use meerkat_core::tool_grant::{SessionToolGrants, ToolGrantId, ToolGrantSubject};
 use meerkat_core::types::SessionId;
 
 use super::MeerkatMachine;
+use crate::decision::DurableDecisionService;
 use crate::tool_grant::{
     RevokedToolGrant, RuntimeSessionToolGrants, StoredToolGrant, ToolGrantAuditPage,
-    ToolGrantClock, ToolGrantDeadlines, ToolGrantExpiryDriver, ToolGrantListing, ToolGrantPolicy,
-    ToolGrantRequest, ToolGrantRevocation, ToolGrantService, ToolGrantServiceError,
+    ToolGrantClock, ToolGrantDeadlines, ToolGrantExpiryDriver, ToolGrantIssueBody,
+    ToolGrantIssueExecutor, ToolGrantIssueRequest, ToolGrantListing, ToolGrantPolicy,
+    ToolGrantRequest, ToolGrantRequestError, ToolGrantRequestNotices, ToolGrantRequestPolicy,
+    ToolGrantRevocation, ToolGrantRunObserver, ToolGrantService, ToolGrantServiceError,
+    hold_tool_grant_request,
 };
 
 impl MeerkatMachine {
@@ -110,6 +115,48 @@ impl MeerkatMachine {
         limit: usize,
     ) -> Result<ToolGrantAuditPage, ToolGrantServiceError> {
         self.tool_grant_service.audit(subject, after, limit).await
+    }
+
+    /// Hold the decision of one grant request over `decisions`
+    /// ([`hold_tool_grant_request`]), at this runtime's grant clock and
+    /// maximum lifetime: the decision, and the body it holds. Nothing is
+    /// issued.
+    ///
+    /// # Errors
+    /// The request's refusal, the clock's failure, or the decision owner's.
+    pub fn request_tool_grant(
+        &self,
+        decisions: &DurableDecisionService,
+        policy: &ToolGrantRequestPolicy,
+        request: ToolGrantIssueRequest,
+    ) -> Result<(StoredDecision, ToolGrantIssueBody), ToolGrantRequestError> {
+        let now_ms = self
+            .tool_grant_service
+            .now_ms()
+            .map_err(|error| ToolGrantRequestError::Clock(error.to_string()))?;
+        let decision = hold_tool_grant_request(
+            decisions,
+            policy,
+            self.tool_grant_service.policy().max_lifetime_ms(),
+            now_ms,
+            request,
+        )?;
+        let body = ToolGrantIssueBody::of(&decision)?;
+        Ok((decision, body))
+    }
+
+    /// The executor of `tool_grant.issue` decisions over this runtime's grant
+    /// service, asking `runs` for a session's current run and handing each
+    /// ended request's notice to `notices`.
+    ///
+    /// # Errors
+    /// Never in practice: the decision kind is a valid token.
+    pub fn tool_grant_issue_executor(
+        &self,
+        runs: Arc<dyn ToolGrantRunObserver>,
+        notices: Arc<dyn ToolGrantRequestNotices>,
+    ) -> Result<ToolGrantIssueExecutor, DecisionContractError> {
+        ToolGrantIssueExecutor::new(Arc::clone(&self.tool_grant_service), runs, notices)
     }
 
     /// `session_id`'s scoped tool grant seam, carried on its runtime

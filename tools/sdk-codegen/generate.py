@@ -497,6 +497,10 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     # presentation precedes it.
     "WireDecisionNoticePresentation",
     "WireDecisionNotice",
+    # `tool_grants/request`: its result carries the decision that holds the
+    # request, so it follows the decision records.
+    "RequestToolGrantParams",
+    "RequestToolGrantResult",
 ]
 
 PUBLIC_RPC_CATALOG_ALIAS_TYPES = [

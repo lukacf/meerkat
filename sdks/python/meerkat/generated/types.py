@@ -2471,6 +2471,30 @@ answers the list. A notice grants nothing: the operator decides with
     presentation: Optional[WireDecisionNoticePresentation] = None
 
 
+@dataclass
+class RequestToolGrantParams:
+    """`tool_grants/request` parameters: ask for a grant a person approves
+through a durable decision of kind `tool_grant.issue`. `duration_ms`
+bounds the grant from its issuance, at most the host's maximum lifetime;
+a `current_run` scope also scopes it to the run its session is running
+when it is asked. Closed, as `tool_grants/grant`'s parameters: a request
+names no approver (the host's policy does)."""
+    duration_ms: int
+    subject: ToolGrantSubjectRequest
+    target: ToolGrantTargetRequest
+    reason: Optional[str] = None
+    scope: Optional[ToolGrantScopeRequest] = None
+
+
+@dataclass
+class RequestToolGrantResult:
+    """`tool_grants/request` result: the request as a list shows it (status
+`requested`, the id its grant gets when it is issued, the approval as its
+issuer) and the decision that holds it."""
+    decision: WireDecision
+    grant: WireToolGrant
+
+
 # Private host/gateway execution declaration for a callback tool.
 class CallbackToolExecutionFast(TypedDict, total=False):
     mode: Required[Literal['fast']]

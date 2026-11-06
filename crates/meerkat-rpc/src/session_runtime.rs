@@ -13,6 +13,9 @@
 #[path = "session_runtime/schedule_host.rs"]
 mod schedule_host;
 
+#[path = "session_runtime/tool_grant_requests.rs"]
+mod tool_grant_requests;
+
 #[cfg(feature = "local-authorization")]
 #[path = "session_runtime/governed.rs"]
 mod governed;
@@ -3280,6 +3283,9 @@ pub struct SessionRuntime {
     approval_service: meerkat_core::ApprovalService,
     /// The persistence's durable decision owner, beside its approval issuer.
     decision_service: meerkat_runtime::decision::DurableDecisionService,
+    /// The executor of the decision store's `tool_grant.issue` decisions:
+    /// its nudge, and its task while it runs (see `tool_grant_requests`).
+    tool_grant_executor: tool_grant_requests::ToolGrantExecutorSlot,
     /// P1#5: live adapter host, attached when the surface wires
     /// `with_live_ws`. Held as an interior-mutable slot so it can be set
     /// after the runtime is wrapped in `Arc` (matches the
@@ -4364,6 +4370,7 @@ impl SessionRuntime {
             builder_agent_llm_client_decorator_slot,
             approval_service,
             decision_service,
+            tool_grant_executor: tool_grant_requests::ToolGrantExecutorSlot::default(),
             live_adapter_host,
             inner,
         })
@@ -4544,6 +4551,7 @@ impl SessionRuntime {
             builder_agent_llm_client_decorator_slot,
             approval_service,
             decision_service,
+            tool_grant_executor: tool_grant_requests::ToolGrantExecutorSlot::default(),
             live_adapter_host,
             inner,
         })
@@ -14016,6 +14024,10 @@ impl SessionRuntime {
         self.pending_session_event_streams.lock().await.clear();
 
         self.shutdown_schedule_host().await;
+
+        // Stop the tool grant request executor before the registration
+        // teardown: its passes deliver notices into sessions.
+        self.shutdown_tool_grant_request_executor().await;
 
         // Retire the delivery owner and join its task before registration
         // teardown takes its final snapshot, so no delivery pass admits work

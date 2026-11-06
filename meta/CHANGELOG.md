@@ -87,12 +87,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - a probe that asks `/healthz` for JSON by a pod or service name now gets
     403; the plain `/healthz` answer is unchanged.
 
-- Forge: an application built with one shared console account keeps it.
-  To approve in its console, declare named accounts
-  (`{"authentication":"local-accounts"}`, the same two private fields,
-  which stay the installation's own account), build it again, and add an
-  account for each further person with `.venv/bin/python setup.py` on the
-  deployment computer.
+- Forge: an installation built with one shared console account moves to
+  named accounts on its next update. That update changes only
+  `application/console.json` (`local-password` to `local-accounts`); the
+  private fields, the installation's own account and password, and the
+  operator stay as they are. Add an account for each further person with
+  `.venv/bin/python setup.py` on the deployment computer.
+- Forge: an application on the legacy ordinary route keeps one shared
+  console account, which decides nothing in its console. To approve there,
+  build the application again on the product route.
 
 ### Added
 
@@ -119,6 +122,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`/host/toolkit/consent/read` and `/decide`) under the setup routes'
   rules, so people decide native consent in the console as themselves.
 
+### Changed
+
+- Forge builds new applications with named console accounts
+  (`local-accounts`). The operator signs in as before, with an empty account
+  name, and now signs in as a person.
+
 ### Fixed
 
 - Forge: the controller review is open to every console administrator and
@@ -127,6 +136,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   installation's own account. Forge keeps managing an installation after
   the console's Access panel rewrites that file, as long as access stays
   enabled and the installation's own account stays an admin.
+
+### Known limitations
+
+- Forge: an application on the legacy ordinary route keeps one shared
+  console account, which decides nothing in its console: no frontend
+  changes, controller review or setup answers. Use the product route.
 
 ## [0.9.10] - 2026-11-04
 

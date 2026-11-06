@@ -88,6 +88,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   from `meta/console/whoami`), and a change made for another caller is
   refused with `caller_changed`.
 
+- A console side chat records who opened it: `meta/fork_member` writes the
+  caller's console principal (the one `meta/console/whoami` reports) into
+  the side chat's `side_chat_creator` label and answers it as `creator`
+  (`null` for an anonymous caller of an open console). The label counts
+  only on a side chat Meerkat's roster verifies; a `side_chat_creator`
+  label set any other way, or copied from the forked agent, is dropped on
+  every surface. It records the creator and grants nothing.
+
 ## [0.9.10] - 2026-11-04
 
 Meta 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10 and Connect

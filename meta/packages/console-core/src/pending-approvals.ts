@@ -138,6 +138,7 @@ const REFUSAL_WORDS: Readonly<Record<string, string>> = {
   approver_mismatch: "This request is waiting for another approver.",
   unknown_pending_id: "This request was already decided or has expired.",
   empty_principal: "Sign in to decide approvals.",
+  approver_unauthenticated: "Only a signed-in person can decide approvals. Sign in as yourself; nothing was decided.",
   gating_ids_unavailable: "The decision couldn't be recorded right now. Nothing changed; try again.",
 };
 export function approvalRefusal(error: unknown): ApprovalRefusal | null {

@@ -4437,11 +4437,14 @@ pub(crate) const CONSOLE_CALLER_REFUSED_CODE: i64 = -32056;
 /// is not a verified, current person: an open Console's caller without a
 /// token, a service token, a token that names no human, a shared-account
 /// token, or a person whose login ended before the decision was applied.
-pub(crate) const CONSOLE_APPROVER_UNAUTHENTICATED_CODE: i64 = -32057;
+pub const CONSOLE_APPROVER_UNAUTHENTICATED_CODE: i64 = -32057;
 
 /// `data.kind` of [`CONSOLE_APPROVER_UNAUTHENTICATED_CODE`], shared by every
-/// console approval decision.
-pub(crate) const CONSOLE_APPROVER_UNAUTHENTICATED_KIND: &str = "approver_unauthenticated";
+/// console approval decision. A host route served beside the Console that
+/// takes an approval answer (a setup prompt's answer, for example) refuses
+/// such a caller with the same kind, so every surface names the refusal
+/// alike.
+pub const CONSOLE_APPROVER_UNAUTHENTICATED_KIND: &str = "approver_unauthenticated";
 
 /// The refusal of a console approval decision whose caller is not a
 /// verified, current person. Nothing was decided.

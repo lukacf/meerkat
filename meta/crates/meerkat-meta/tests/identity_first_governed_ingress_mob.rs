@@ -1241,6 +1241,243 @@ async fn a_row_change_waits_behind_an_admission_checked_against_the_old_row() {
     assert!(completed_with_answer(&outcome), "{outcome:?}");
 }
 
+/// How long a lifecycle operation of the same identity may take while a
+/// governed send's bind is not ready: it must not wait for that bind.
+const NOT_READY_PROGRESS: Duration = Duration::from_secs(3);
+
+/// While a governed send's bind cannot answer yet, the identity's other
+/// lifecycle operations run: a row change completes while the send waits,
+/// and the send's next bind is handed the new row, which refuses the input
+/// authored from the old one with nothing admitted.
+///
+/// RED on the base at the row change: the bind waits inside the identity's
+/// lifecycle lock, so the row change parks behind it until the hold ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn another_lifecycle_operation_completes_while_a_governed_bind_is_not_ready() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, identity) = governed_runtime(&fixture, None).await;
+    let row_a = runtime
+        .registered_spec(&identity)
+        .await
+        .expect("registered row")
+        .spec;
+    let row_b = with_instructions(&row_a, "Answer in one sentence.");
+
+    // The bind for an input authored from row A cannot answer until
+    // `release`.
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let binder = FixtureBinder::held(&fixture, row_a.clone(), &entered, &release);
+    let send = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        let identity = identity.clone();
+        let binder = binder.clone();
+        async move {
+            runtime
+                .send_governed_with_turn_ticket(&identity, None, raw_prompt(), binder)
+                .await
+        }
+    });
+    tokio::time::timeout(WAIT, entered.notified())
+        .await
+        .expect("the bind is entered");
+
+    let changed =
+        tokio::time::timeout(NOT_READY_PROGRESS, runtime.update_spec(row_b.clone())).await;
+    release.notify_one();
+    assert!(
+        matches!(changed, Ok(Ok(()))),
+        "the row change completes while the bind is not ready, never behind it: {changed:?}"
+    );
+
+    // The send binds again, handed the new row: the input authored from row
+    // A is refused and nothing is admitted.
+    let sent = tokio::time::timeout(WAIT, send)
+        .await
+        .expect("the send completes")
+        .expect("the send task does not panic");
+    assert!(
+        sent.is_err(),
+        "the input authored from row A is refused: {sent:?}"
+    );
+    assert_eq!(binder.rows(), vec![row_a, row_b]);
+    assert!(binder.admitted().is_empty(), "nothing is admitted");
+}
+
+/// A governed send whose bind cannot answer yet while the member's session
+/// is replaced (a reset rotates the member onto a fresh session) is never
+/// admitted onto the old session: its next bind is handed the new session.
+///
+/// RED on the base: the reset parks behind the bind, which then admits the
+/// input onto the old session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_replaced_while_a_governed_bind_is_not_ready_never_takes_the_input() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, identity) = governed_runtime(&fixture, None).await;
+    let row = runtime
+        .registered_spec(&identity)
+        .await
+        .expect("registered row")
+        .spec;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let binder = FixtureBinder::held(&fixture, row, &entered, &release);
+    let send = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        let identity = identity.clone();
+        let binder = binder.clone();
+        async move {
+            runtime
+                .send_governed_with_turn_ticket(&identity, None, raw_prompt(), binder)
+                .await
+        }
+    });
+    tokio::time::timeout(WAIT, entered.notified())
+        .await
+        .expect("the bind is entered");
+
+    // The member's session is replaced while the bind is not ready.
+    let reset = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        let identity = identity.clone();
+        async move { runtime.reset(&identity).await }
+    });
+    let mut reset = std::pin::pin!(reset);
+    let reset_during_hold = tokio::time::timeout(NOT_READY_PROGRESS, reset.as_mut()).await;
+    release.notify_one();
+    let sent = tokio::time::timeout(WAIT, send)
+        .await
+        .expect("the send completes")
+        .expect("the send task does not panic");
+    let reset = match reset_during_hold {
+        Ok(reset) => reset,
+        Err(_) => tokio::time::timeout(WAIT, reset)
+            .await
+            .expect("the reset completes"),
+    }
+    .expect("the reset task does not panic");
+
+    // Never admitted onto the session the first bind was handed.
+    assert!(
+        !matches!(&sent, Ok(outcome) if outcome.admission.session_id == fixture.session_id),
+        "the input is never admitted onto the replaced session: {sent:?}"
+    );
+    let fresh = reset.expect("the reset rotates the member");
+    let sessions: Vec<SessionId> = binder
+        .contexts
+        .lock()
+        .expect("contexts")
+        .iter()
+        .map(|(session, _)| session.clone())
+        .collect();
+    assert_eq!(
+        sessions.first(),
+        Some(&fixture.session_id),
+        "the first bind was handed the member's session"
+    );
+    assert_eq!(
+        sessions.get(1),
+        fresh.session_id(),
+        "the next bind is handed the member's new session"
+    );
+}
+
+/// The fixture binder's wait budget for its "not now" answers.
+const HOLD_BUDGET: Duration = Duration::from_millis(300);
+
+/// A governed send whose every bind is not ready until its door's budget
+/// ends answers a retryable, typed hold: nothing is submitted, no custody
+/// existed to withdraw, the structured data names the hold, and replaying
+/// the same input later binds again and admits it once.
+///
+/// RED on the base: the bind waits inside the identity's lifecycle lock
+/// until it is released, so the send answers nothing within the budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_send_held_past_its_budget_answers_a_retryable_hold_and_its_replay_admits_once() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, identity) = governed_runtime(&fixture, None).await;
+    let row = runtime
+        .registered_spec(&identity)
+        .await
+        .expect("registered row")
+        .spec;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let binder = FixtureBinder::held(&fixture, row.clone(), &entered, &release);
+    let input = raw_prompt();
+
+    let sent = tokio::time::timeout(
+        HOLD_BUDGET + NOT_READY_PROGRESS,
+        runtime.send_governed_with_turn_ticket(&identity, None, input.clone(), binder.clone()),
+    )
+    .await;
+    release.notify_one();
+    let error = match sent {
+        Ok(Err(error)) => error,
+        other => panic!("the held send answers a hold within its budget: {other:?}"),
+    };
+    let data = error.structured_data().expect("the hold's structured data");
+    assert_eq!(data["kind"], "governed_input_held", "{data}");
+    assert_eq!(data["retryable"], true, "{data}");
+    assert_eq!(data["submitted"], false, "{data}");
+    assert_eq!(data["input_id"], input.id().to_string(), "{data}");
+    assert!(binder.admitted().is_empty(), "nothing was submitted");
+    assert_eq!(binder.withdrawn(), 0, "no settlement existed to withdraw");
+    assert_eq!(
+        fixture.adapter.gate.entered(),
+        0,
+        "native admission was never entered"
+    );
+
+    let replay = FixtureBinder::authored_from(&fixture, row);
+    let admitted = runtime
+        .send_governed_with_turn_ticket(&identity, None, input, replay.clone())
+        .await
+        .expect("the replay of the held input is admitted");
+    assert_eq!(replay.admitted(), vec![admitted.admission.clone()]);
+    assert!(
+        !admitted.admission.deduplicated,
+        "admitted once, as new work"
+    );
+}
+
+/// A binder's refusal ends the send at once, typed: one bind, nothing
+/// submitted, never waited out or bound again, and the structured data names
+/// the refusal's kind.
+///
+/// RED on the base at the typed kind: the base answers an untyped bind error
+/// with no structured data.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_bind_ends_the_send_typed_and_is_never_bound_again() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, identity) = governed_runtime(&fixture, None).await;
+    let row_a = runtime
+        .registered_spec(&identity)
+        .await
+        .expect("registered row")
+        .spec;
+    let row_b = with_instructions(&row_a, "Answer in one sentence.");
+    runtime
+        .update_spec(row_b.clone())
+        .await
+        .expect("the row change commits");
+
+    let binder = FixtureBinder::authored_from(&fixture, row_a);
+    let error = runtime
+        .send_governed_with_turn_ticket(&identity, None, raw_prompt(), binder.clone())
+        .await
+        .expect_err("the input authored from the old row is refused");
+    assert_eq!(binder.rows(), vec![row_b], "one bind, never bound again");
+    assert!(binder.admitted().is_empty(), "nothing was submitted");
+    let data = error
+        .structured_data()
+        .expect("the refusal's structured data");
+    assert_eq!(data["kind"], "governed_input_refused", "{data}");
+    assert_eq!(data["refusal"], "denied", "{data}");
+    assert_eq!(data["submitted"], false, "{data}");
+    assert_eq!(data["retryable"], false, "{data}");
+}
+
 /// A host's retained entry owner (for example one Console login): it admits
 /// uses while open, refuses with its typed cause once closed, and a close
 /// waits for the uses already inside it, collecting their outcomes.

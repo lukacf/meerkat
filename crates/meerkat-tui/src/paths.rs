@@ -89,6 +89,19 @@ fn protected_set() -> &'static ProtectedSet {
     SET.get_or_init(|| ProtectedSet::build(PROTECTED_PATTERNS))
 }
 
+/// Root-relative glob patterns a file tool never writes, whatever the
+/// classifier or an allow rule would say: the approval gate's own state
+/// and configuration (`.rkat/`: the realm's `config.toml` with its endpoint
+/// URLs, the rules, the MCP servers, the sessions) and the repository's VCS
+/// internals (`.git`, hooks included). Each is also protected
+/// ([`PROTECTED_PATTERNS`]); a shell command is judged by the classifier.
+pub const SEALED_PATTERNS: &[&str] = &[".rkat/**", ".git", ".git/**", "**/.git", "**/.git/**"];
+
+fn sealed_set() -> &'static ProtectedSet {
+    static SET: OnceLock<ProtectedSet> = OnceLock::new();
+    SET.get_or_init(|| ProtectedSet::build(SEALED_PATTERNS))
+}
+
 /// Whether `name` is an environment file that typically holds secrets:
 /// `.env`, `.env.<anything>` or `.envrc`. The approval classifier's
 /// read-only tools never read such files, nor anything below a directory of
@@ -177,10 +190,14 @@ impl ProjectRoot {
         let protected = relative
             .as_deref()
             .is_some_and(|rel| protected_set().is_match(rel));
+        let sealed = relative
+            .as_deref()
+            .is_some_and(|rel| sealed_set().is_match(rel));
         Ok(ResolvedPath {
             abs,
             relative,
-            protected,
+            protected: protected || sealed,
+            sealed,
         })
     }
 
@@ -204,6 +221,9 @@ pub struct ResolvedPath {
     pub relative: Option<PathBuf>,
     /// Whether the path matches [`PROTECTED_PATTERNS`] (always `false` outside the root).
     pub protected: bool,
+    /// Whether the path matches [`SEALED_PATTERNS`]: a file tool never
+    /// writes it (always `false` outside the root; implies `protected`).
+    pub sealed: bool,
 }
 
 impl ResolvedPath {
@@ -489,6 +509,28 @@ mod tests {
         let abs = dir.path().join("src/main.rs");
         let r = root.resolve(abs.to_str().unwrap()).unwrap();
         assert!(r.inside());
+    }
+
+    #[test]
+    fn sealed_paths_are_the_gate_state_and_vcs_internals_and_imply_protected() {
+        let (_dir, root) = root();
+        for p in [
+            ".rkat/config.toml",
+            ".rkat/tui/tui.toml",
+            ".git",
+            ".git/hooks/pre-commit",
+            "vendor/.git/HEAD",
+        ] {
+            let r = root.resolve(p).unwrap();
+            assert!(r.sealed, "{p}");
+            assert!(r.protected, "{p}");
+        }
+        for p in [".env", "build.rs", "AGENTS.md", "src/main.rs"] {
+            assert!(!root.resolve(p).unwrap().sealed, "{p}");
+        }
+        for pattern in SEALED_PATTERNS {
+            assert!(PROTECTED_PATTERNS.contains(pattern), "{pattern}");
+        }
     }
 
     #[test]

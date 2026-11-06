@@ -703,6 +703,12 @@ impl ApprovalEngine {
                     reason: DenyReason::UserRule { id, rule },
                 })
             }
+            Tier::Sealed => Some(Verdict::Deny {
+                tier: Tier::Sealed,
+                reason: DenyReason::Sealed {
+                    detail: decision.detail,
+                },
+            }),
             Tier::AlwaysAllow | Tier::InProjectEdit => Some(Verdict::Allow {
                 tier: decision.tier,
                 by: Decider::Policy,

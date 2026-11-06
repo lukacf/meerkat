@@ -66,7 +66,7 @@ resumed sessions and helpers carry it too. First match wins:
 
 | Tier | What | Review |
 |---|---|---|
-| 0 | A user **deny** rule matches | denied |
+| 0 | A user **deny** rule matches, or `write_file` / `edit_file` targets a **sealed** path: the gate's own `.rkat/` state (the realm's `config.toml`, rules, MCP servers, sessions) or `.git/`. Neither the classifier nor an allow rule opens a sealed path; a shell command that writes there is still judged by the classifier | denied |
 | 1 | Read-only tools (`read_file`, `glob`, `grep` inside the project, task tools, `memory_search`, `note_list`/`note_read`, `blob_inspect`, skill browsing, `shell_jobs`, read-only `mob_*` queries, `delegate`), read-only shell commands (`cat`, `ls`, `rg`, `git status/diff/log`, `cargo check/test` when builds are trusted, …), narrow user **allow** rules | allowed |
 | 2 | `write_file` / `edit_file` where every target is inside the project and not protected (`.rkat/`, `.git/` and any `.git` file, `.env*`, …); workspace notes | allowed |
 | 3 | Everything else: other shell commands, MCP tools, web search, comms sends, mutating mob tools, out-of-project paths, protected paths, user-level notes | classifier |

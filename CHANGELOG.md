@@ -68,7 +68,9 @@ them.
   TLS roots, proxies and a few tool directories; provider API keys stay
   outside). User-global files live in `~/.rkat/tui`
   (`--config-dir` overrides; an existing `~/.config/rkat-tui` is used with a
-  notice until the new directory exists). See `crates/meerkat-tui/README.md`.
+  notice until the new directory exists). File tools never write the gate's
+  own `.rkat/` state or `.git/` (sealed paths: denied before the classifier
+  and any allow rule). See `crates/meerkat-tui/README.md`.
 
 ### Changed
 

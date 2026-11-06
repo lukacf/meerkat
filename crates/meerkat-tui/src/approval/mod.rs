@@ -111,6 +111,12 @@ pub enum DenyReason {
         /// The rule as written (`shell git push*`).
         rule: String,
     },
+    /// A file tool targeted a sealed path: the gate's own `.rkat/` state or
+    /// `.git/`. Neither the classifier nor an allow rule can open it.
+    Sealed {
+        /// Which path, and why it is sealed.
+        detail: String,
+    },
     /// The classifier blocked the action.
     Classifier {
         /// Block-rule id, if named.
@@ -139,6 +145,7 @@ impl DenyReason {
     pub fn decider(&self) -> Decider {
         match self {
             Self::UserRule { .. }
+            | Self::Sealed { .. }
             | Self::AutoDisabled
             | Self::ClassifierUnavailable(_)
             | Self::LedgerUnavailable(_) => Decider::Policy,
@@ -162,6 +169,7 @@ impl fmt::Display for DenyReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UserRule { id, rule } => write!(f, "the user's deny rule {id} ({rule}) matches"),
+            Self::Sealed { detail } => f.write_str(detail),
             Self::Classifier {
                 rule: Some(rule),
                 explanation,

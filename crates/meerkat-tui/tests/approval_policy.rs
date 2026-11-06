@@ -166,12 +166,67 @@ fn in_project_edit_is_tier_two() {
 #[test]
 fn protected_path_edit_goes_to_classifier() {
     let h = harness(Options::default());
+    for path in [".env", ".env.local", "build.rs", "AGENTS.md"] {
+        assert_eq!(
+            h.tier(
+                "edit_file",
+                json!({"path": path, "old_string": "", "new_string": "x"}),
+            ),
+            Tier::Classifier,
+            "{path}"
+        );
+    }
+}
+
+/// The gate's own state and the VCS internals are sealed: a file tool
+/// write there is denied before the classifier, and an allow rule for the
+/// tool does not open it (the classifier flipped on a protected `.env`
+/// write between two dogfood runs; the realm's `config.toml` carries the
+/// endpoint URLs the API key is sent to).
+#[test]
+fn sealed_paths_are_denied_before_rules_and_classifier() {
+    let sealed = [
+        ".rkat/config.toml",
+        ".rkat/tui/tui.toml",
+        ".rkat/mcp.toml",
+        ".git/config",
+        ".git/hooks/pre-commit",
+        "vendor/.git/HEAD",
+    ];
+    let plain = harness(Options::default());
+    let allowed = harness(Options {
+        rules: allow_rule("write_file", "*"),
+        ..Options::default()
+    });
+    for path in sealed {
+        for (name, h) in [("plain", &plain), ("allow rule", &allowed)] {
+            assert_eq!(
+                h.tier("write_file", json!({"path": path, "content": "x"})),
+                Tier::Sealed,
+                "{path} ({name})"
+            );
+            assert_eq!(
+                h.tier(
+                    "edit_file",
+                    json!({"path": path, "old_string": "", "new_string": "x"}),
+                ),
+                Tier::Sealed,
+                "{path} ({name})"
+            );
+        }
+    }
+    // A sealed target seals the whole patch.
     assert_eq!(
-        h.tier(
-            "edit_file",
-            json!({"path": ".rkat/config.toml", "old_string": "", "new_string": "x"}),
+        plain.tier(
+            "apply_patch",
+            json!({"patch": "*** Begin Patch\n*** Add File: a.txt\n+x\n*** Update File: .rkat/config.toml\n@@\n-a\n+b\n*** End Patch"}),
         ),
-        Tier::Classifier
+        Tier::Sealed
+    );
+    // Reads of sealed paths are not affected.
+    assert_eq!(
+        plain.tier("read_file", json!({"path": ".git/config"})),
+        Tier::AlwaysAllow
     );
 }
 
@@ -275,12 +330,12 @@ fn allow_rule_makes_user_note_save_tier_one() {
 }
 
 #[test]
-fn indented_patch_header_reaches_classifier() {
+fn indented_patch_header_is_a_sealed_target() {
     let h = harness(Options::default());
     let patch = "*** Begin Patch\n*** Add File: src/ok.rs\n+x\n  *** Add File: .git/config\n+[core]\n*** End Patch";
     assert_eq!(
         h.tier("apply_patch", json!({ "patch": patch })),
-        Tier::Classifier
+        Tier::Sealed
     );
 }
 

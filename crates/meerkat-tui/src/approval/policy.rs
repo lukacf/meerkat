@@ -48,6 +48,9 @@ use std::fmt;
 pub enum Tier {
     /// Tier 0: a user deny rule matched.
     UserDeny,
+    /// Tier 0: a file tool targets a sealed path (the gate's own `.rkat/`
+    /// state or `.git/`); denied before any rule or classifier.
+    Sealed,
     /// Tier 1: read-only builtin, in-project read, allowlisted shell, or narrow allow rule.
     AlwaysAllow,
     /// Tier 2: write/edit/patch where every target is inside the project and unprotected.
@@ -60,6 +63,7 @@ impl fmt::Display for Tier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::UserDeny => "user deny rule",
+            Self::Sealed => "sealed path",
             Self::AlwaysAllow => "always allow",
             Self::InProjectEdit => "in-project edit",
             Self::Classifier => "classifier",
@@ -528,6 +532,14 @@ fn builtin_tier(action: &Action<'_>, ctx: &PolicyContext<'_>) -> Result<TierDeci
                 if !resolved.inside() {
                     return Err(format!("`{path}` is outside the project"));
                 }
+                if resolved.sealed {
+                    return Ok(TierDecision::new(
+                        Tier::Sealed,
+                        format!(
+                            "`{path}` is sealed: file tools never write the gate's own `.rkat/` state or `.git/`"
+                        ),
+                    ));
+                }
                 if resolved.protected {
                     return Err(format!("`{path}` is a protected path"));
                 }
@@ -660,7 +672,7 @@ mod tests {
         );
         assert_eq!(
             tier(&root, &RuleSet::default(), false, "apply_patch", &args),
-            Tier::Classifier
+            Tier::Sealed
         );
     }
 
@@ -847,13 +859,13 @@ mod tests {
                 "edit_file",
                 json!({"path": ".rkat/config.toml"}),
                 true,
-                Tier::Classifier,
+                Tier::Sealed,
             ),
             (
                 "write_file",
                 json!({"path": ".git/hooks/pre-commit"}),
                 true,
-                Tier::Classifier,
+                Tier::Sealed,
             ),
             (
                 "write_file",

@@ -728,11 +728,15 @@ impl CallbackToolDispatcher {
 
     /// Send one `tool/execute` request to the route that registers the
     /// tool and await its result. The request carries `dedupe_key`, the
-    /// call's dedupe key, when there is one, and omits the field otherwise.
+    /// call's dedupe key, when there is one, and `requester`, the original
+    /// requester of the run the call serves, when the run has one; it omits
+    /// either field otherwise. The requester comes from the run's dispatch
+    /// context only, never from the call's arguments.
     async fn send_tool_execute(
         &self,
         call: ToolCallView<'_>,
         dedupe_key: Option<meerkat_core::ToolCallDedupeKey>,
+        requester: Option<&meerkat_core::TurnRequester>,
     ) -> Result<ToolDispatchOutcome, ToolError> {
         if !self.is_known(call.name) {
             if let CallbackRouteSource::MobSlot(slot) = &self.route
@@ -782,6 +786,8 @@ impl CallbackToolDispatcher {
             arguments: &'a RawValue,
             #[serde(skip_serializing_if = "Option::is_none")]
             dedupe_key: Option<meerkat_core::ToolCallDedupeKey>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            requester: Option<&'a meerkat_core::TurnRequester>,
         }
 
         let route = self.call_route(call.name)?;
@@ -791,6 +797,7 @@ impl CallbackToolDispatcher {
             name: call.name,
             arguments: call.args,
             dedupe_key,
+            requester,
         };
         let (params_raw, outbound_permit) = RpcOutboundAdmission::production()
             .admit_json(
@@ -1414,18 +1421,23 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
-        self.send_tool_execute(call, None).await
+        self.send_tool_execute(call, None, None).await
     }
 
     /// A `tool/execute` request that carries the call's dedupe key when an
-    /// agent-loop round dispatched it.
+    /// agent-loop round dispatched it, and the requester of the run it
+    /// serves when the run has one.
     async fn dispatch_with_context(
         &self,
         call: ToolCallView<'_>,
         context: &meerkat_core::ToolDispatchContext,
     ) -> Result<ToolDispatchOutcome, ToolError> {
-        self.send_tool_execute(call, context.tool_call_dedupe_key(call))
-            .await
+        self.send_tool_execute(
+            call,
+            context.tool_call_dedupe_key(call),
+            context.requester(),
+        )
+        .await
     }
 
     async fn dispatch_resolved_with_context(
@@ -1781,7 +1793,10 @@ fn detached_callback_job_spec(
     .with_credential_context_refs(match plan.credential_context_refs() {
         meerkat_core::ToolExecutionApplicability::Applicable(references) => references.clone(),
         meerkat_core::ToolExecutionApplicability::NotApplicable => Vec::new(),
-    });
+    })
+    // The submitting run's requester, from its dispatch context: every
+    // attempt of the job names it to the host.
+    .with_requester(context.requester().cloned());
     Ok((spec, arguments))
 }
 
@@ -2122,7 +2137,7 @@ async fn start_detached_callback_attempt(
         arguments,
         credential_scopes,
         resume_checkpoint: claim.resume_checkpoint.as_ref().map(ToString::to_string),
-        requester: None,
+        requester: stored.spec.requester.clone(),
     };
     let result: meerkat_contracts::CallbackJobStartResult =
         match send_callback_request(callback_tx, id_counter, "callback/job/start", &params).await {
@@ -2355,7 +2370,7 @@ mod tests {
                 name: "search",
                 args: &args,
             };
-            dispatcher.send_tool_execute(call, Some(key)).await
+            dispatcher.send_tool_execute(call, Some(key), None).await
         });
 
         let (request, response_tx, _outbound_permit) =

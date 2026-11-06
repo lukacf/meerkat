@@ -449,6 +449,7 @@ impl JobSpec {
             && self.restart_class == other.restart_class
             && self.canonical_arguments_hash == other.canonical_arguments_hash
             && self.credential_context_refs == other.credential_context_refs
+            && self.requester == other.requester
     }
 
     /// [`Self::equivalent_submission`] plus the admission-time facts that are

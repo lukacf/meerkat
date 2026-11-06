@@ -121,9 +121,6 @@ const MAX_PROPOSALS_PER_DREAM: usize = 32;
 const MAX_QUARANTINE_PER_DREAM: usize = 16;
 const MAX_HARVESTS_PER_DREAM: usize = 4;
 const MAX_TOMBSTONES_RENDERED: usize = 32;
-/// §7.2 P4: operator-fact candidates rendered per dream while operator
-/// routing is active.
-const MAX_OPERATOR_CANDIDATES_RENDERED: usize = 16;
 const MAX_DISTILLATES_RENDERED: usize = 8;
 
 /// Usage audit bounds (§9.2).
@@ -1097,8 +1094,8 @@ pub struct StewardEngine {
     realm: String,
     /// §7.2 P4: operator-scope routing is active (`operator_scope =
     /// "provisional"`). Deterministic law, not prompt guidance: with this
-    /// off, operator-targeted ops drop and operator-scope proposal accepts
-    /// downgrade to holds (the un-hold re-dream path).
+    /// off, operator-scope proposal accepts downgrade to holds (the un-hold
+    /// re-dream path). On or off, a dream op never names an operator key.
     operator_routing: bool,
     /// Sessions completed since the last dream (event-gate signal).
     signals: AtomicU64,
@@ -1172,10 +1169,10 @@ impl StewardEngine {
     }
 
     /// Activate §7.2 operator-scope routing (P4, `operator_scope =
-    /// "provisional"`): the op mapper accepts operator-scope creates, and
-    /// held operator-scope proposals become acceptable on this and every
-    /// later dream (the §7.2 un-hold — held verdicts re-enter each dream's
-    /// signals by construction).
+    /// "provisional"`): held operator-scope proposals become acceptable on
+    /// this and every later dream (the §7.2 un-hold: held verdicts re-enter
+    /// each dream's signals by construction), each into the operator scope
+    /// it was proposed for. The op mapper never routes an operator key.
     pub fn with_operator_routing(mut self, active: bool) -> Self {
         self.operator_routing = active;
         self
@@ -1976,31 +1973,13 @@ impl StewardEngine {
             .map(|scope| scope.scope.clone())
             .collect();
         let manifest = self.store.manifest(&scopes, ManifestTier::Full).await?;
-        // Promotion review + operator routing are realm-level review work:
-        // owned by the whole-realm / remainder runs, never a single mob's.
+        // Promotion review is realm-level review work: owned by the
+        // whole-realm / remainder runs, never a single mob's.
         let pending_promotions = if partition.covers_operator_review() {
             self.store.pending_promotions(&self.realm).await?
         } else {
             Vec::new()
         };
-        let operator_candidates: Vec<MemoryRecord> =
-            if self.operator_routing && partition.covers_operator_review() {
-                recent
-                    .iter()
-                    .filter(|record| {
-                        matches!(record.scope, MemoryScope::Identity { .. })
-                            && record.status == RecordStatus::Active
-                            && record
-                                .tags
-                                .iter()
-                                .any(|tag| tag == "epistemic:operator_said")
-                    })
-                    .take(MAX_OPERATOR_CANDIDATES_RENDERED)
-                    .cloned()
-                    .collect()
-            } else {
-                Vec::new()
-            };
         Ok(SignalPacket {
             proposals,
             quarantine,
@@ -2009,7 +1988,6 @@ impl StewardEngine {
             distillates,
             tombstones,
             manifest,
-            operator_candidates,
             pending_promotions,
         })
     }
@@ -2155,34 +2133,16 @@ impl StewardEngine {
         // accept-verdict gate enforce it regardless of what the model does.
         if self.operator_routing {
             out.push_str(
-                "\nOPERATOR SCOPE: active (provisional keying). Operator-scope proposals may \
-                 be accepted; operator-fact records held at identity scope may be re-dreamed \
-                 into operator scope when a concrete operator key is in evidence (for example \
-                 a held operator-scope proposal names one) — create the operator-scope record \
-                 with derived_from citing the identity-scope source, and tombstone the source \
-                 only if it should move rather than copy.\n",
+                "\nOPERATOR SCOPE: active. Each operator scope belongs to one person. An \
+                 operator-scope proposal may be accepted: it commits into the operator scope it \
+                 was proposed for, the person who said it. Never create an operator-scope record \
+                 yourself and never name an operator key: the shell drops such ops.\n",
             );
-            out.push_str(
-                "Operator-fact candidates (identity scope, tagged epistemic:operator_said):\n",
-            );
-            if signals.operator_candidates.is_empty() {
-                out.push_str("(none)\n");
-            }
-            for record in &signals.operator_candidates {
-                out.push_str(&format!(
-                    "- {} [{}] (identity '{}') {}\n",
-                    record.id,
-                    record.kind.as_str(),
-                    record.scope.key(),
-                    compact_whitespace(&record.title),
-                ));
-            }
         } else {
             out.push_str(
-                "\nOPERATOR SCOPE: inactive. Do not create operator-scope records or accept \
-                 operator-scope proposals (the shell holds them); keep operator facts at \
-                 identity scope tagged epistemic:operator_said — they re-dream into operator \
-                 scope when it activates.\n",
+                "\nOPERATOR SCOPE: inactive. Do not accept operator-scope proposals (the shell \
+                 holds them) and never create operator-scope records (the shell drops them); \
+                 keep operator facts at identity scope tagged epistemic:operator_said.\n",
             );
         }
         out
@@ -2691,9 +2651,34 @@ fn map_consolidate_ops_impl<S: std::hash::BuildHasher>(
                 let derived_from: Vec<String> =
                     raw.derived_from.iter().map(|id| resolve(id)).collect();
                 if raw.op == "create" {
-                    let Some(scope) = raw.scope.as_ref().and_then(|scope| {
-                        scope_for_realm(realm, &scope.kind, &scope.key, allow_operator)
-                    }) else {
+                    // Operator memory enters only through the proposal made
+                    // for the person who said the fact: an operator key the
+                    // model names is never used.
+                    if raw
+                        .scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.kind == "operator")
+                    {
+                        drop_op(
+                            if allow_operator {
+                                "create op names an operator key, dropped: operator memory \
+                                 enters only through the proposal made for the person who \
+                                 said it"
+                                    .to_string()
+                            } else {
+                                "create op targets operator scope while operator_scope is off, \
+                                 dropped"
+                                    .to_string()
+                            },
+                            run,
+                        );
+                        continue;
+                    }
+                    let Some(scope) = raw
+                        .scope
+                        .as_ref()
+                        .and_then(|scope| scope_for_realm(realm, &scope.kind, &scope.key))
+                    else {
                         drop_op(
                             "create op with missing/unknown scope, dropped".to_string(),
                             run,
@@ -3866,10 +3851,6 @@ struct SignalPacket {
     distillates: Vec<MemoryRecord>,
     tombstones: Vec<crate::memory::distiller::TombstoneMeta>,
     manifest: Vec<RecordMeta>,
-    /// §7.2 P4 re-dream surface: identity-scope operator-fact records
-    /// (tagged `epistemic:operator_said`), gathered only while operator
-    /// routing is active.
-    operator_candidates: Vec<MemoryRecord>,
     /// §10.2 in-flight operator gates: proposals/quarantined records with a
     /// still-pending gated promotion. Rendered as in-flight and shielded
     /// from re-verdicting so successive dreams cannot mint duplicate gates
@@ -3962,12 +3943,7 @@ fn skip_secret_blocked(
     run.verdicts.quarantine_release_blocked += 1;
 }
 
-fn scope_for_realm(
-    realm: &str,
-    kind: &str,
-    key: &str,
-    allow_operator: bool,
-) -> Option<MemoryScope> {
+fn scope_for_realm(realm: &str, kind: &str, key: &str) -> Option<MemoryScope> {
     match kind {
         "identity" => Some(MemoryScope::Identity {
             realm: realm.to_string(),
@@ -3977,15 +3953,9 @@ fn scope_for_realm(
             realm: realm.to_string(),
             mob: key.to_string(),
         }),
-        // §7.2 P4: operator-scope routing activates with
-        // `agent_memory.operator_scope = "provisional"`; before activation
-        // operator-targeted ops stay held — the dream may not create
-        // operator-scope records at all. The scope is keyed with the batch
-        // realm by construction (realm confinement stays validator law).
-        "operator" if allow_operator && !key.trim().is_empty() => Some(MemoryScope::Operator {
-            realm: realm.to_string(),
-            operator: key.to_string(),
-        }),
+        // §7.2: a dream never names an operator key. Operator memory enters
+        // only through the proposal made for the person who said the fact,
+        // which an accept commits into its own scope.
         _ => None,
     }
 }
@@ -6637,7 +6607,6 @@ mod tests {
             distillates: Vec::new(),
             tombstones: Vec::new(),
             manifest: Vec::new(),
-            operator_candidates: Vec::new(),
             pending_promotions: Vec::new(),
         };
         let verdicts: Vec<QuarantineVerdict> = serde_json::from_value(verdicts).expect("verdicts");
@@ -7637,58 +7606,14 @@ mod tests {
         fixture
     }
 
+    /// A dream op never maps an operator key: only identity and mob scopes
+    /// route, whatever the key.
     #[test]
-    fn scope_for_realm_gates_operator_routing() {
-        assert_eq!(scope_for_realm(REALM, "operator", "op:luka", false), None);
-        assert_eq!(
-            scope_for_realm(REALM, "operator", "op:luka", true),
-            Some(operator_scope())
-        );
-        // Empty keys never route; identity/mob are unaffected by the flag.
-        assert_eq!(scope_for_realm(REALM, "operator", "  ", true), None);
-        assert!(scope_for_realm(REALM, "identity", "identity:a", false).is_some());
-        assert!(scope_for_realm(REALM, "mob", "mob:main", false).is_some());
-    }
-
-    #[test]
-    fn consolidate_op_mapper_holds_operator_creates_until_activation() {
-        let raw = || {
-            vec![RawStewardOp {
-                op: "create".to_string(),
-                id: Some("op-fact".to_string()),
-                prior: None,
-                scope: Some(RawScope {
-                    kind: "operator".to_string(),
-                    key: "op:luka".to_string(),
-                }),
-                kind: Some("preference".to_string()),
-                title: "Operator prefers terse updates".to_string(),
-                description: "Matters when reporting to the operator.".to_string(),
-                body: "Keep updates short.".to_string(),
-                tags: Vec::new(),
-                trust: None,
-                derived_from: Vec::new(),
-                rationale: None,
-            }]
-        };
-        let known = HashSet::new();
-        let mut run = DreamRun::default();
-        let (ops, _) = map_consolidate_ops_impl(REALM, raw(), &known, "run-1", &mut run, false);
-        assert!(ops.is_empty(), "inactive routing must drop the op");
-        assert!(
-            run.skips
-                .iter()
-                .any(|skip| skip.contains("missing/unknown scope")),
-            "{:?}",
-            run.skips
-        );
-        let mut run = DreamRun::default();
-        let (ops, _) = map_consolidate_ops_impl(REALM, raw(), &known, "run-1", &mut run, true);
-        assert_eq!(ops.len(), 1, "{:?}", run.skips);
-        assert!(matches!(
-            &ops[0],
-            StagedOp::Create { scope, .. } if *scope == operator_scope()
-        ));
+    fn scope_for_realm_never_maps_an_operator_key() {
+        assert_eq!(scope_for_realm(REALM, "operator", "op:luka"), None);
+        assert_eq!(scope_for_realm(REALM, "operator", "  "), None);
+        assert!(scope_for_realm(REALM, "identity", "identity:a").is_some());
+        assert!(scope_for_realm(REALM, "mob", "mob:main").is_some());
     }
 
     /// §7.2 un-hold: an operator-scope proposal accepted by the dream while
@@ -7903,11 +7828,11 @@ mod tests {
         assert_eq!(own_records.len(), 1, "the accept commits into its own key");
     }
 
-    /// The prompt renders the activation fact as data, and operator-fact
-    /// candidates (identity scope, tagged epistemic:operator_said) surface
-    /// only while routing is active.
+    /// The prompt renders the activation fact as data and never offers
+    /// identity-scope operator facts for a re-dream into an operator key:
+    /// operator memory enters only through a person's own proposal.
     #[tokio::test]
-    async fn operator_candidates_render_only_when_active() {
+    async fn operator_scope_renders_without_re_dream_candidates() {
         let seed_tagged = |store: Arc<SqliteAgentMemoryStore>| async move {
             let mut record = new_record("Operator wants EU clusters", "operator said: eu-west");
             record.tags = vec!["epistemic:operator_said".to_string()];
@@ -7939,9 +7864,9 @@ mod tests {
         let prompts = fixture.llm.prompts();
         let consolidate_prompt = prompts.last().expect("consolidate prompt");
         assert!(consolidate_prompt.contains("OPERATOR SCOPE: active"));
-        assert!(consolidate_prompt.contains("Operator-fact candidates"));
+        assert!(consolidate_prompt.contains("never name an operator key"));
         assert!(
-            consolidate_prompt.contains("- mem-opfact [fact]"),
+            !consolidate_prompt.contains("Operator-fact candidates"),
             "{consolidate_prompt}"
         );
 
@@ -7954,10 +7879,7 @@ mod tests {
         let prompts = fixture.llm.prompts();
         let consolidate_prompt = prompts.last().expect("consolidate prompt");
         assert!(consolidate_prompt.contains("OPERATOR SCOPE: inactive"));
-        // The record still shows in the store overview/manifest (it IS an
-        // active record); only the candidates re-dream section is absent.
         assert!(!consolidate_prompt.contains("Operator-fact candidates"));
-        assert!(!consolidate_prompt.contains("- mem-opfact [fact]"));
     }
 
     #[test]

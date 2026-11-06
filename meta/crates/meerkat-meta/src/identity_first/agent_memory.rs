@@ -1267,16 +1267,68 @@ impl MemoryRecorder {
         }
     }
 
-    async fn handle(&self, args: MemoryToolArgs) -> Result<String, String> {
+    /// An `operator_said` fact is also proposed to the operator memory of
+    /// the person who said it: the run's direct requester
+    /// (`operator_requester`), keyed by their caller scope, never a key an
+    /// argument names. A run without one proposes none, and so does a
+    /// deployment with the operator scope off or a provider without
+    /// proposals. Returns the line the tool result adds, if any.
+    async fn propose_operator_fact(
+        &self,
+        args: &MemoryToolArgs,
+        record: &NewMemoryRecord,
+        operator_requester: Option<&meerkat_core::PrincipalRef>,
+    ) -> Option<String> {
+        if args.epistemic.as_deref() != Some("operator_said")
+            || self.config.operator_scope != AgentMemoryOperatorScope::Provisional
+            || !self.provider.supports_propose()
+        {
+            return None;
+        }
+        let operator = operator_requester.and_then(crate::http_console::person_caller_scope)?;
+        let scope = MemoryScope::Operator {
+            realm: self.config.realm.clone(),
+            operator,
+        };
+        Some(
+            match self
+                .provider
+                .propose(&scope, record.clone(), self.author())
+                .await
+            {
+                Ok(proposal_id) => format!(
+                    " Proposed to the operator memory of the person who said it as \
+                     {proposal_id}; a steward or operator reviews it."
+                ),
+                Err(err) => format!(
+                    " The proposal to the operator memory of the person who said it failed: \
+                     {err}"
+                ),
+            },
+        )
+    }
+
+    async fn handle(
+        &self,
+        args: MemoryToolArgs,
+        operator_requester: Option<&meerkat_core::PrincipalRef>,
+    ) -> Result<String, String> {
         match args.action.as_str() {
             "remember" => {
                 let record = self.new_record(&args, "remember")?;
                 let receipt = self
                     .provider
-                    .remember_authored(&self.identity_scope(), record, self.author())
+                    .remember_authored(&self.identity_scope(), record.clone(), self.author())
                     .await
                     .map_err(|err| err.to_string())?;
-                Ok(self.describe_receipt("Stored", &receipt))
+                let mut message = self.describe_receipt("Stored", &receipt);
+                if let Some(proposed) = self
+                    .propose_operator_fact(&args, &record, operator_requester)
+                    .await
+                {
+                    message.push_str(&proposed);
+                }
+                Ok(message)
             }
             "update" => {
                 let prior = args
@@ -1288,7 +1340,12 @@ impl MemoryRecorder {
                 let record = self.new_record(&args, "update")?;
                 let receipt = self
                     .provider
-                    .supersede_authored(&self.identity_scope(), prior, record, self.author())
+                    .supersede_authored(
+                        &self.identity_scope(),
+                        prior,
+                        record.clone(),
+                        self.author(),
+                    )
                     .await
                     .map_err(|err| err.to_string())?;
                 let mut message = self.describe_receipt("Updated: new record", &receipt);
@@ -1297,6 +1354,12 @@ impl MemoryRecorder {
                     crate::memory::records::RecordStatus::Quarantined { .. }
                 ) {
                     message.push_str(" The prior record remains active until review.");
+                }
+                if let Some(proposed) = self
+                    .propose_operator_fact(&args, &record, operator_requester)
+                    .await
+                {
+                    message.push_str(&proposed);
                 }
                 Ok(message)
             }
@@ -1766,7 +1829,15 @@ impl meerkat_core::agent::AgentToolDispatcher for RecorderToolDispatcher {
                 .operation_target(&args.action)
                 .map_err(|reason| meerkat_core::ToolError::invalid_arguments(call.name, reason))
         })?;
-        let (text, is_error) = match self.recorder.handle(args).await {
+        // The person an `operator_said` fact is proposed for: the run's
+        // direct requester, and only for ungoverned work (a governed
+        // dispatch is authorized for the call's own memory operation alone).
+        let operator_requester = if context.work_authorization().is_some() {
+            None
+        } else {
+            context.direct_requester()
+        };
+        let (text, is_error) = match self.recorder.handle(args, operator_requester).await {
             Ok(text) => (text, false),
             Err(text) => (text, true),
         };

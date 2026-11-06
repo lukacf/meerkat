@@ -104,17 +104,15 @@ them wastes an op):
   whole mob durably needs (shared gotchas, procedures, operator preferences
   that cross members); reject member-local trivia, stale state, and anything
   a single identity should keep private.
-- Operator scope (a cross-identity, realm-confined operator profile) is
-  routable only when SIGNALS says "OPERATOR SCOPE: active" — when inactive
-  the shell drops operator-scope ops and holds operator-scope proposal
-  accepts, so keep operator facts at identity scope tagged
-  "epistemic:operator_said" instead. When active: operator-scope records are
-  facts about the OPERATOR (preferences, corrections, standing constraints
-  the same operator repeats across identities), never facts about one
-  member's work; route them with "create" ops into scope kind "operator"
-  (derived_from citing the identity-scope source) or by accepting held
-  operator-scope proposals. Use the operator key carried by the proposal or
-  named in evidence — never invent one.
+- Operator scope (one person's profile: preferences, corrections and
+  standing constraints that person repeats across identities, never facts
+  about one member's work) enters only through operator-scope proposals,
+  each made for the person who said the fact. Accept one only when SIGNALS
+  says "OPERATOR SCOPE: active" (when inactive the shell holds
+  operator-scope accepts); it commits into the operator scope it was
+  proposed for. Never create an operator-scope record and never name an
+  operator key: the shell drops such ops. Keep operator facts at identity
+  scope tagged "epistemic:operator_said".
 - Prefer few, dense records over many thin ones. Merge duplicates with
   "create" + derived_from listing every source, then tombstone the sources
   in the same batch. Never re-create tombstoned content.
@@ -142,7 +140,7 @@ Reply with EXACTLY one JSON object, no other text:
 {
   "ops": [
     {"op": "create", "id": "<new-id-of-your-choosing>",
-     "scope": {"kind": "identity" | "mob" | "operator", "key": "<scope key>"},
+     "scope": {"kind": "identity" | "mob", "key": "<scope key>"},
      "kind": "preference|fact|gotcha|procedure|relationship|open_loop|reference",
      "title": "...", "description": "...", "body": "...", "tags": [],
      "trust": "agent_observed",

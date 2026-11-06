@@ -1307,6 +1307,7 @@ impl ToolkitOriginalOwner {
 
     /// First enrollment requires the same canonical Bound helper and actual
     /// prepared native input. No source read, write or custody is published here.
+    #[cfg(test)]
     pub(crate) fn prepare_helper_custody_enrollment(
         self: &Arc<Self>,
         store: &dyn ToolkitStore,
@@ -1316,9 +1317,28 @@ impl ToolkitOriginalOwner {
         session: &meerkat_core::SessionId,
         input: &Input,
     ) -> Result<toolkit_store::Transition, OriginalWriterError> {
+        self.try_prepare_helper_custody_enrollment(store, admitted, source, saved, session, input)?
+            .ok_or(OriginalWriterError::Unavailable)
+    }
+
+    /// [`Self::prepare_helper_custody_enrollment`] where the caller must not
+    /// wait: `Ok(None)` when the source collection is held by another owner's
+    /// short section and nothing was prepared.
+    fn try_prepare_helper_custody_enrollment(
+        self: &Arc<Self>,
+        store: &dyn ToolkitStore,
+        admitted: &AdmittedHelperWork,
+        source: &RetainedHelperSource,
+        saved: &StoredRecord,
+        session: &meerkat_core::SessionId,
+        input: &Input,
+    ) -> Result<Option<toolkit_store::Transition>, OriginalWriterError> {
         self.check_canonical_source(store, &admitted.source_scope)?;
-        self.check_admitted_helper(admitted)?;
-        self.check_bound_source(&source.original)?;
+        if !self.try_check_admitted_helper(admitted)?
+            || !self.try_check_bound_source(&source.original)?
+        {
+            return Ok(None);
+        }
         if input.header().idempotency_key.as_ref() != Some(&source.event_key) {
             return Err(OriginalWriterError::Conflict);
         }
@@ -1354,19 +1374,25 @@ impl ToolkitOriginalOwner {
         record.custody_attempt = Some(next);
         record.bound_input = Some(retained);
         transition.data = record.encode()?;
-        Ok(transition)
+        Ok(Some(transition))
     }
 
     /// Persist under the actual tracked helper binder before Candidate. Native
     /// retains the entered write; this method does not own a second task.
-    pub(crate) async fn persist_helper_custody_attempt(
+    ///
+    /// The binder runs inside Core's governed bind and must not wait there:
+    /// `Ok(false)` when a source check, before or after the write, met the
+    /// source collection held by another owner's short section. The write is
+    /// made only when the record changes: a later bind of the same
+    /// submission finds the equal pending attempt and writes nothing.
+    pub(crate) async fn try_persist_helper_custody_attempt(
         self: &Arc<Self>,
         store: &dyn ToolkitStore,
         admitted: &AdmittedHelperWork,
         source: &RetainedHelperSource,
         session: &meerkat_core::SessionId,
         input: &Input,
-    ) -> Result<(), OriginalWriterError> {
+    ) -> Result<bool, OriginalWriterError> {
         self.check_canonical_source(store, &admitted.source_scope)?;
         let _writer = self.source_writer().await;
         let stored = store
@@ -1387,8 +1413,12 @@ impl ToolkitOriginalOwner {
                 self.hold_sources_for_test(hold.owner_change, hold.duration),
             );
         }
-        let transition = self
-            .prepare_helper_custody_enrollment(store, admitted, source, &stored, session, input)?;
+        let Some(transition) = self.try_prepare_helper_custody_enrollment(
+            store, admitted, source, &stored, session, input,
+        )?
+        else {
+            return Ok(false);
+        };
         if transition.data != stored.data {
             store
                 .compare_and_swap(transition)
@@ -1406,8 +1436,8 @@ impl ToolkitOriginalOwner {
                 self.hold_sources_for_test(hold.owner_change, hold.duration),
             );
         }
-        self.check_admitted_helper(admitted)?;
-        self.check_bound_source(&source.original)
+        Ok(self.try_check_admitted_helper(admitted)?
+            && self.try_check_bound_source(&source.original)?)
     }
 
     pub(crate) fn helper_custody_attempt(

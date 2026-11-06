@@ -1689,7 +1689,6 @@ impl ToolkitOriginalOwner {
         association: &InputAuthorityAssociation,
         access: CollectionAccess,
     ) -> Result<(), OriginalWriterError> {
-        let c = association.candidate();
         let originals = self.source_collection(access).inspect_err(|_| {
             shared_entry_diagnostics::parent_refusal(if self.originals.is_poisoned() {
                 shared_entry_diagnostics::ParentCause::OriginalsPoisoned
@@ -1697,6 +1696,34 @@ impl ToolkitOriginalOwner {
                 shared_entry_diagnostics::ParentCause::OriginalsWouldBlock
             });
         })?;
+        Self::refuse_cancelled_binding_in(&originals, association)
+    }
+
+    /// [`Self::refuse_cancelled_binding`] where the caller must not wait:
+    /// `Ok(false)` when the source collection is held by another owner's
+    /// short section and nothing was checked.
+    fn try_refuse_cancelled_binding(
+        &self,
+        association: &InputAuthorityAssociation,
+    ) -> Result<bool, OriginalWriterError> {
+        let originals = match self.originals.try_lock() {
+            Ok(originals) => originals,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                shared_entry_diagnostics::parent_refusal(
+                    shared_entry_diagnostics::ParentCause::OriginalsPoisoned,
+                );
+                return Err(OriginalWriterError::Unavailable);
+            }
+        };
+        Self::refuse_cancelled_binding_in(&originals, association).map(|()| true)
+    }
+
+    fn refuse_cancelled_binding_in(
+        originals: &[OriginalRecord],
+        association: &InputAuthorityAssociation,
+    ) -> Result<(), OriginalWriterError> {
+        let c = association.candidate();
         if let Some(record) = originals
             .iter()
             .find(|entry| entry.names(&c.ingress_namespace.realm, &c.original_work))
@@ -2632,10 +2659,40 @@ impl ToolkitOriginalOwner {
         transport_authentication: HistoricalEvidenceRef,
         controller: ControllerModelClient,
     ) -> Result<PreparedToolkitOriginal, RuntimeDriverError> {
-        self.require_retained(original)
-            .map_err(|_| RuntimeDriverError::ValidationFailed {
+        self.try_prepare_authenticated_input(
+            original,
+            selected_session,
+            input,
+            event_key,
+            transport_authentication,
+            controller,
+        )?
+        .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+            reason: "Toolkit original is not retained by this source owner".into(),
+        })
+    }
+
+    /// [`Self::prepare_authenticated_input`] for a native binder inside
+    /// Core's governed bind, which must not wait: `Ok(None)` when the source
+    /// collection is held by another owner's short section and nothing was
+    /// prepared.
+    pub(crate) fn try_prepare_authenticated_input(
+        self: &Arc<Self>,
+        original: &Arc<RetainedToolkitOriginal>,
+        selected_session: &meerkat_core::SessionId,
+        input: Input,
+        event_key: IdempotencyKey,
+        transport_authentication: HistoricalEvidenceRef,
+        controller: ControllerModelClient,
+    ) -> Result<Option<PreparedToolkitOriginal>, RuntimeDriverError> {
+        let retained = self.try_require_retained(original).map_err(|_| {
+            RuntimeDriverError::ValidationFailed {
                 reason: "Toolkit original is not retained by this source owner".into(),
-            })?;
+            }
+        })?;
+        if !retained {
+            return Ok(None);
+        }
         let claims = original.association.candidate();
         if claims.target.logical_runtime.as_str()
             != meerkat_runtime::LogicalRuntimeId::for_session(selected_session).to_string()
@@ -2654,12 +2711,12 @@ impl ToolkitOriginalOwner {
             transport_authentication,
             controller.clone(),
         )?;
-        Ok(PreparedToolkitOriginal {
+        Ok(Some(PreparedToolkitOriginal {
             owner: self.clone(),
             original: original.clone(),
             input: bound,
             controller,
-        })
+        }))
     }
 
     #[cfg(test)]
@@ -2910,16 +2967,33 @@ impl ToolkitOriginalOwner {
         &self,
         original: &Arc<RetainedToolkitOriginal>,
     ) -> Result<(), OriginalWriterError> {
-        let originals = self
-            .originals
-            .try_lock()
-            .map_err(|_| OriginalWriterError::Unavailable)?;
+        if self.try_require_retained(original)? {
+            Ok(())
+        } else {
+            Err(OriginalWriterError::Unavailable)
+        }
+    }
+
+    /// [`Self::require_retained`] where the caller must not wait: `Ok(false)`
+    /// when the source collection is held by another owner's short section
+    /// and nothing was checked.
+    fn try_require_retained(
+        &self,
+        original: &Arc<RetainedToolkitOriginal>,
+    ) -> Result<bool, OriginalWriterError> {
+        let originals = match self.originals.try_lock() {
+            Ok(originals) => originals,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(OriginalWriterError::Unavailable);
+            }
+        };
         if originals
             .iter()
             .filter_map(OriginalRecord::bound)
             .any(|current| Arc::ptr_eq(&current.retained, original))
         {
-            Ok(())
+            Ok(true)
         } else {
             Err(OriginalWriterError::WrongOwner)
         }

@@ -225,6 +225,18 @@ impl ToolkitOriginalOwner {
         self.refuse_cancelled_binding(original.association())
     }
 
+    /// [`Self::check_bound_source`] where the caller must not wait (a native
+    /// binder inside Core's governed bind): `Ok(false)` when the source
+    /// collection is held by another owner's short section and nothing was
+    /// decided.
+    pub(crate) fn try_check_bound_source(
+        &self,
+        original: &Arc<RetainedToolkitOriginal>,
+    ) -> Result<bool, OriginalWriterError> {
+        Ok(self.try_require_retained(original)?
+            && self.try_refuse_cancelled_binding(original.association())?)
+    }
+
     /// Called only after the canonical approved B decision or selected setup A
     /// child binding was joined under this owner's writer. Native supplies the
     /// actual admitted association/controller, never a decoded input capability.

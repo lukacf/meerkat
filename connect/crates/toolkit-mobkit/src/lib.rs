@@ -929,49 +929,6 @@ pub mod source_hold_probe {
         /// acquisition original, a result source), just before it takes the
         /// collection; keyed by the contributor's original work.
         BasisRead,
-        /// A helper submission's binder, inside Core's governed bind, before
-        /// its first source check; keyed by work item.
-        SubmitBind,
-        /// A helper submission's binder, on a later bind of the same
-        /// submission, before it binds the exact first input again; keyed by
-        /// work item.
-        SubmitRebind,
-        /// A helper submission's custody attempt, its write just done, before
-        /// its source checks; keyed by work item.
-        SubmitPersisted,
-        /// A helper submission's custody attempt before its source checks
-        /// and its write; keyed by work item.
-        SubmitPersist,
-        /// A helper submission's binder before its final source check, the
-        /// custody attempt done; keyed by work item.
-        SubmitFinalCheck,
-        /// A helper submission whose dispatch just returned, before its
-        /// answer is read; a hold here delays the submission itself, as a
-        /// task descheduled there would be; keyed by work item.
-        SubmitReturned,
-        /// A helper submission's binder, inside its recovery enrollment,
-        /// just before it stages the helper's source as a candidate; keyed
-        /// by work item.
-        SubmitStage,
-        /// A helper submission's custody attempt just before it takes the
-        /// owner's source writer; the hold is of the source writer itself,
-        /// not the collection; keyed by work item.
-        SubmitPersistWriter,
-        /// A helper submission's binder just before its recovery enrollment
-        /// takes the custody recovery's control; the hold is of that
-        /// control, not the collection; keyed by work item.
-        SubmitRecoveryControl,
-        /// A helper submission's binder just before it reads the helper
-        /// source's admitted custody; keyed by work item.
-        SubmitAdmitted,
-        /// A helper submission's binder, on a later bind after a definite
-        /// refusal, just before it rebinds its retained first candidate;
-        /// keyed by work item.
-        SubmitPriorRebind,
-        /// A Find's helper submission just answered, before its answer is
-        /// read: a control records when (no hold is made here); keyed by the
-        /// Find's call ID.
-        SubmitAnswered,
     }
     /// A control's answer at a site, given its key.
     pub type Probe = Arc<dyn Fn(Site, &str) -> Option<Hold> + Send + Sync>;

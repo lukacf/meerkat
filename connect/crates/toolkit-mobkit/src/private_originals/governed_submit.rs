@@ -1201,47 +1201,6 @@ pub(super) enum SourcePublication {
 }
 
 impl SourcePublication {
-    /// [`Self::rebind_candidate`] for a native binder inside Core's governed
-    /// bind, which must not wait, with `settlement`, the candidate's next
-    /// handoff, enrolled in the same owner change. A held or settling answer
-    /// leaves this guard as it was.
-    pub(super) fn try_rebind_enrolled(
-        &mut self,
-        prepared: crate::original_ingress::PreparedToolkitOriginal,
-        expected: &Input,
-        settlement: &Arc<super::custody_recovery::CustodyHandoff>,
-    ) -> Result<
-        crate::original_ingress::HeldOr<(Input, PendingToolkitOriginal)>,
-        PrivateOriginalError,
-    > {
-        if serde_json::to_value(prepared.input()).map_err(|_| PrivateOriginalError::Conflict)?
-            != serde_json::to_value(expected).map_err(|_| PrivateOriginalError::Conflict)?
-        {
-            return Err(PrivateOriginalError::Conflict);
-        }
-        let Self::Pending(pending) = self else {
-            return Err(PrivateOriginalError::Unavailable);
-        };
-        let input = match prepared
-            .try_rebind_enrolled(pending, settlement)
-            .map_err(cold_service_admission::writer_error)?
-        {
-            Ok(input) => input,
-            Err(held) => return Ok(Err(held)),
-        };
-        let prior = std::mem::replace(
-            self,
-            Self::Settled {
-                source_acknowledged: false,
-                result: Err("The same source candidate moved to its exact native reprepare".into()),
-            },
-        );
-        let Self::Pending(pending) = prior else {
-            unreachable!()
-        };
-        Ok(Ok((input, pending)))
-    }
-
     pub(super) fn rebind_candidate(
         &mut self,
         prepared: crate::original_ingress::PreparedToolkitOriginal,

@@ -124,93 +124,6 @@ enum SourceCustody {
     Admitted,
 }
 
-/// What a non-waiting owner step met and refused, with nothing changed:
-/// held by another actor, or a source still settling. A caller that must not
-/// wait where it runs (a native binder inside Core's governed bind) waits
-/// for exactly that outside, holding nothing, and makes the step again.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SourceHeld {
-    /// The helper's contributors' source check could not decide: the
-    /// collection held, or a contributor's own record still a candidate or
-    /// its operation's cancellation still pending.
-    Contributors,
-    /// The originals collection, held by another owner's short section.
-    Collection,
-    /// The source's own record, its operation's cancellation still pending.
-    SourceSettling,
-    /// The shared publication's writer reserved by another owner change or
-    /// exclusion, or an observation that met an owner change.
-    Publication,
-    /// The source writer, held across another writer's durable write.
-    Writer,
-}
-
-/// A non-waiting step's answer: its value, or what it met held or settling.
-pub(crate) type HeldOr<T> = Result<T, SourceHeld>;
-
-/// [`ToolkitOriginalOwner::try_admitted_guard`]'s answer.
-enum TryAdmitted {
-    Admitted(PendingToolkitOriginal),
-    NotAdmitted,
-    Held(SourceHeld),
-}
-
-/// [`PreparedToolkitOriginal::try_stage_enrolled`]'s staged answer: the bound
-/// input, its custody guard and the handoff enrolled on that guard's
-/// candidate when the handoff is enrolled.
-pub(crate) type StagedInput = (
-    Input,
-    PendingToolkitOriginal,
-    Arc<crate::private_originals::custody_recovery::CustodyHandoff>,
-);
-
-/// Whether every contributor named by `contributing` is admitted (and open,
-/// where `open` is required) in `originals`, for the requester and
-/// namespace given: `Ok(None)` when every one is. A contributor whose own
-/// record (the one that names it, for the same requester) is observed still
-/// a candidate, or with its operation's cancellation still pending, is
-/// settling (`Contributors`). Anything else (no such record, another
-/// requester's, no custody, an unknown restoration, a settled cancellation)
-/// is the conflict it was.
-fn contributors_settled(
-    originals: &[OriginalRecord],
-    namespace: &QualifiedIngressNamespace,
-    contributing: &[OriginalWorkRef],
-    requester: &PrincipalRef,
-    open: bool,
-) -> Result<Option<SourceHeld>, OriginalWriterError> {
-    let mut settling = false;
-    for contributor in contributing {
-        let matching = || {
-            originals
-                .iter()
-                .filter_map(OriginalRecord::bound)
-                .filter(|held| {
-                    held.names(namespace, contributor)
-                        && held.association.candidate().requester == *requester
-                })
-        };
-        if matching().any(|held| {
-            held.source_custody == Some(SourceCustody::Admitted)
-                && (!open || held.operation == OriginalOperationDisposition::Open)
-        }) {
-            continue;
-        }
-        if matching().any(|held| {
-            !matches!(
-                held.operation,
-                OriginalOperationDisposition::Cancelled { .. }
-            ) && (held.source_custody == Some(SourceCustody::Candidate)
-                || held.operation == OriginalOperationDisposition::CancellationPending)
-        }) {
-            settling = true;
-            continue;
-        }
-        return Err(OriginalWriterError::Conflict);
-    }
-    Ok(settling.then_some(SourceHeld::Contributors))
-}
-
 /// Canonical callback observation made under the existing source writer.
 /// Historical enrollment is uncertainty, never native admission or a new
 /// pending owner. The association and attempt are validated before publication.
@@ -430,111 +343,6 @@ impl PreparedToolkitOriginal {
                 reason: "Toolkit original candidate is unavailable".into(),
             })?;
         Ok((self.input, pending))
-    }
-
-    /// [`Self::admitted`] for a native binder inside Core's governed bind,
-    /// which must not wait: `Ok(Err(held))` when the collection was held or
-    /// the observation met an owner change, and nothing was observed.
-    pub(crate) fn try_admitted(
-        &self,
-    ) -> Result<HeldOr<Option<(Input, PendingToolkitOriginal)>>, RuntimeDriverError> {
-        match self.owner.try_admitted_guard(&self.original) {
-            Ok(TryAdmitted::Admitted(pending)) => Ok(Ok(Some((self.input.clone(), pending)))),
-            Ok(TryAdmitted::NotAdmitted) => Ok(Ok(None)),
-            Ok(TryAdmitted::Held(held)) => Ok(Err(held)),
-            Err(_) => Err(RuntimeDriverError::ValidationFailed {
-                reason: "Toolkit admitted original is unavailable".into(),
-            }),
-        }
-    }
-
-    /// [`Self::stage`] for a native binder inside Core's governed bind,
-    /// which must not wait, with the new candidate's custody settlement
-    /// enrolled in the same owner change (which
-    /// [`PendingToolkitOriginal::enroll_settlement`] would take afterwards,
-    /// blocking): the shared publication's writer and the originals
-    /// collection are only tried. `settlement` runs once, with both held,
-    /// given whether a new candidate is staged; the handoff it returns is
-    /// enrolled on that candidate when it is enrolled. A held or settling
-    /// answer staged nothing.
-    pub(crate) fn try_stage_enrolled(
-        self,
-        settlement: impl FnOnce(bool) -> Arc<crate::private_originals::custody_recovery::CustodyHandoff>,
-    ) -> Result<HeldOr<StagedInput>, RuntimeDriverError> {
-        let Self {
-            owner,
-            original,
-            input,
-            controller,
-        } = self;
-        match owner.try_record_enrolled_candidate(&original, Some(controller), settlement) {
-            Ok(Ok((pending, handoff))) => Ok(Ok((input, pending, handoff))),
-            Ok(Err(held)) => Ok(Err(held)),
-            Err(_) => Err(RuntimeDriverError::ValidationFailed {
-                reason: "Toolkit original candidate is unavailable".into(),
-            }),
-        }
-    }
-
-    /// [`Self::rebind_candidate`] for a native binder inside Core's governed
-    /// bind, which must not wait, with `settlement`, the candidate's next
-    /// handoff, enrolled on it in the same owner change: the bound source's
-    /// checks, the shared publication's writer and the originals collection
-    /// are only tried. A held or settling answer changed nothing.
-    pub(crate) fn try_rebind_enrolled(
-        self,
-        pending: &PendingToolkitOriginal,
-        settlement: &Arc<crate::private_originals::custody_recovery::CustodyHandoff>,
-    ) -> Result<HeldOr<Input>, OriginalWriterError> {
-        if !pending.pending
-            || !Arc::ptr_eq(&self.owner, &pending.owner)
-            || !Arc::ptr_eq(&self.original, &pending.original)
-        {
-            return Err(OriginalWriterError::WrongOwner);
-        }
-        if let Some(held) = self.owner.try_bound_source(&self.original)? {
-            return Ok(Err(held));
-        }
-        let Some(_publication) = self.owner.try_owner_change()? else {
-            return Ok(Err(SourceHeld::Publication));
-        };
-        let mut originals = match self.owner.originals.try_lock() {
-            Ok(originals) => originals,
-            // The change ends with no fact changed: dropping its guard only
-            // invalidates observations.
-            Err(std::sync::TryLockError::WouldBlock) => return Ok(Err(SourceHeld::Collection)),
-            Err(std::sync::TryLockError::Poisoned(_)) => {
-                return Err(OriginalWriterError::Unavailable);
-            }
-        };
-        let claims = self.original.association().candidate();
-        if let Some(settling) = contributors_settled(
-            &originals,
-            &claims.ingress_namespace,
-            &claims.contributing_work,
-            &claims.requester,
-            true,
-        )? {
-            return Ok(Err(settling));
-        }
-        let held = originals
-            .iter_mut()
-            .filter_map(OriginalRecord::bound_mut)
-            .find(|held| Arc::ptr_eq(&held.retained, &self.original))
-            .ok_or(OriginalWriterError::WrongOwner)?;
-        if held.operation == OriginalOperationDisposition::CancellationPending {
-            return Ok(Err(SourceHeld::SourceSettling));
-        }
-        if held.operation != OriginalOperationDisposition::Open
-            || held.source_custody != Some(SourceCustody::Candidate)
-        {
-            return Err(OriginalWriterError::Conflict);
-        }
-        held.controller = Some(self.controller);
-        if settlement.enrolled() {
-            held.custody_settlement = Some(Arc::downgrade(settlement));
-        }
-        Ok(Ok(self.input))
     }
 
     /// Rebind the same still-owned candidate after a proven native refusal.
@@ -1881,6 +1689,7 @@ impl ToolkitOriginalOwner {
         association: &InputAuthorityAssociation,
         access: CollectionAccess,
     ) -> Result<(), OriginalWriterError> {
+        let c = association.candidate();
         let originals = self.source_collection(access).inspect_err(|_| {
             shared_entry_diagnostics::parent_refusal(if self.originals.is_poisoned() {
                 shared_entry_diagnostics::ParentCause::OriginalsPoisoned
@@ -1888,59 +1697,6 @@ impl ToolkitOriginalOwner {
                 shared_entry_diagnostics::ParentCause::OriginalsWouldBlock
             });
         })?;
-        Self::refuse_cancelled_binding_in(&originals, association)
-    }
-
-    /// [`Self::refuse_cancelled_binding`] for a caller that must not wait
-    /// (a native binder inside Core's governed bind): `Ok(None)` when no
-    /// cancellation refuses the binding; the held collection, or the
-    /// binding's own cancellation still pending, as what to wait for; a
-    /// settled cancellation or a conflicting first binding refused as before.
-    fn try_cancelled_binding(
-        &self,
-        association: &InputAuthorityAssociation,
-    ) -> Result<Option<SourceHeld>, OriginalWriterError> {
-        let originals = match self.originals.try_lock() {
-            Ok(originals) => originals,
-            Err(std::sync::TryLockError::WouldBlock) => return Ok(Some(SourceHeld::Collection)),
-            Err(std::sync::TryLockError::Poisoned(_)) => {
-                shared_entry_diagnostics::parent_refusal(
-                    shared_entry_diagnostics::ParentCause::OriginalsPoisoned,
-                );
-                return Err(OriginalWriterError::Unavailable);
-            }
-        };
-        let c = association.candidate();
-        let pending = originals
-            .iter()
-            .find(|entry| entry.names(&c.ingress_namespace.realm, &c.original_work))
-            .is_some_and(|record| {
-                let (operation, conflicting) = match record {
-                    OriginalRecord::Bound(held) => (&held.operation, false),
-                    OriginalRecord::UnboundCancellation {
-                        operation,
-                        first_binding,
-                        ..
-                    } => (
-                        operation,
-                        first_binding
-                            .as_ref()
-                            .is_some_and(|first| first != association),
-                    ),
-                };
-                !conflicting && *operation == OriginalOperationDisposition::CancellationPending
-            });
-        if pending {
-            return Ok(Some(SourceHeld::SourceSettling));
-        }
-        Self::refuse_cancelled_binding_in(&originals, association).map(|()| None)
-    }
-
-    fn refuse_cancelled_binding_in(
-        originals: &[OriginalRecord],
-        association: &InputAuthorityAssociation,
-    ) -> Result<(), OriginalWriterError> {
-        let c = association.candidate();
         if let Some(record) = originals
             .iter()
             .find(|entry| entry.names(&c.ingress_namespace.realm, &c.original_work))
@@ -2876,40 +2632,10 @@ impl ToolkitOriginalOwner {
         transport_authentication: HistoricalEvidenceRef,
         controller: ControllerModelClient,
     ) -> Result<PreparedToolkitOriginal, RuntimeDriverError> {
-        self.try_prepare_authenticated_input(
-            original,
-            selected_session,
-            input,
-            event_key,
-            transport_authentication,
-            controller,
-        )?
-        .ok_or_else(|| RuntimeDriverError::ValidationFailed {
-            reason: "Toolkit original is not retained by this source owner".into(),
-        })
-    }
-
-    /// [`Self::prepare_authenticated_input`] for a native binder inside
-    /// Core's governed bind, which must not wait: `Ok(None)` when the source
-    /// collection is held by another owner's short section and nothing was
-    /// prepared.
-    pub(crate) fn try_prepare_authenticated_input(
-        self: &Arc<Self>,
-        original: &Arc<RetainedToolkitOriginal>,
-        selected_session: &meerkat_core::SessionId,
-        input: Input,
-        event_key: IdempotencyKey,
-        transport_authentication: HistoricalEvidenceRef,
-        controller: ControllerModelClient,
-    ) -> Result<Option<PreparedToolkitOriginal>, RuntimeDriverError> {
-        let retained = self.try_require_retained(original).map_err(|_| {
-            RuntimeDriverError::ValidationFailed {
+        self.require_retained(original)
+            .map_err(|_| RuntimeDriverError::ValidationFailed {
                 reason: "Toolkit original is not retained by this source owner".into(),
-            }
-        })?;
-        if !retained {
-            return Ok(None);
-        }
+            })?;
         let claims = original.association.candidate();
         if claims.target.logical_runtime.as_str()
             != meerkat_runtime::LogicalRuntimeId::for_session(selected_session).to_string()
@@ -2928,12 +2654,12 @@ impl ToolkitOriginalOwner {
             transport_authentication,
             controller.clone(),
         )?;
-        Ok(Some(PreparedToolkitOriginal {
+        Ok(PreparedToolkitOriginal {
             owner: self.clone(),
             original: original.clone(),
             input: bound,
             controller,
-        }))
+        })
     }
 
     #[cfg(test)]
@@ -3113,194 +2839,6 @@ impl ToolkitOriginalOwner {
         })
     }
 
-    /// A new owner change of the shared publication, only tried: `None` when
-    /// another owner change, reservation or exclusion holds its writer. A
-    /// poisoned or exhausted publication stays unavailable.
-    fn try_owner_change(
-        &self,
-    ) -> Result<
-        Option<meerkat_authorization::publication::LocalPublicationGuard<'_>>,
-        OriginalWriterError,
-    > {
-        match self.publication.try_begin_owner_change() {
-            Ok(guard) => Ok(Some(guard)),
-            // Contention and poison answer alike here; a poisoned or
-            // exhausted publication observes unavailable, which stays a
-            // refusal.
-            Err(_) => match self.publication.observe(|| ()) {
-                Err(PublicationError::Unavailable) => Err(OriginalWriterError::Unavailable),
-                Ok(_) | Err(PublicationError::Changed) => Ok(None),
-            },
-        }
-    }
-
-    /// [`Self::admitted_guard`] for a native binder inside Core's governed
-    /// bind, which must not wait: the collection is only tried, and an owner
-    /// change met by the observation is the held publication, waited for
-    /// outside the bind and observed again, never rechecked here under an
-    /// owner change of this step's own.
-    fn try_admitted_guard(
-        self: &Arc<Self>,
-        original: &Arc<RetainedToolkitOriginal>,
-    ) -> Result<TryAdmitted, OriginalWriterError> {
-        // Whether the observation's try of the collection read it.
-        let mut read = Ok(());
-        let admitted = self
-            .publication
-            .observe(|| match self.originals.try_lock() {
-                Ok(originals) => originals
-                    .iter()
-                    .filter_map(OriginalRecord::bound)
-                    .any(|held| {
-                        Arc::ptr_eq(&held.retained, original)
-                            && held.operation == OriginalOperationDisposition::Open
-                            && held.source_custody == Some(SourceCustody::Admitted)
-                    }),
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    read = Err(Some(SourceHeld::Collection));
-                    false
-                }
-                Err(std::sync::TryLockError::Poisoned(_)) => {
-                    read = Err(None);
-                    false
-                }
-            });
-        match read {
-            Err(Some(held)) => return Ok(TryAdmitted::Held(held)),
-            Err(None) => return Err(OriginalWriterError::Unavailable),
-            Ok(()) => {}
-        }
-        match admitted {
-            Ok((true, _)) => Ok(TryAdmitted::Admitted(PendingToolkitOriginal {
-                owner: self.clone(),
-                original: original.clone(),
-                pending: false,
-            })),
-            Ok((false, _)) => Ok(TryAdmitted::NotAdmitted),
-            Err(PublicationError::Changed) => Ok(TryAdmitted::Held(SourceHeld::Publication)),
-            Err(PublicationError::Unavailable) => Err(OriginalWriterError::Unavailable),
-        }
-    }
-
-    /// [`Self::record_candidate_with_controller`] for a native binder inside
-    /// Core's governed bind, which must not wait, with the new candidate's
-    /// settlement enrolled in the same owner change: the collection and the
-    /// shared publication's writer are only tried, and an owner change met
-    /// is not waited for here. Held, or with a contributor or this source
-    /// still settling, nothing is staged and the answer names what to wait
-    /// for. `settlement` runs once, after every fallible check, given whether
-    /// a new candidate is staged. Every other answer is
-    /// [`Self::record_candidate_with_controller`]'s.
-    fn try_record_enrolled_candidate(
-        self: &Arc<Self>,
-        original: &Arc<RetainedToolkitOriginal>,
-        controller: Option<ControllerModelClient>,
-        settlement: impl FnOnce(bool) -> Arc<crate::private_originals::custody_recovery::CustodyHandoff>,
-    ) -> Result<
-        HeldOr<(
-            PendingToolkitOriginal,
-            Arc<crate::private_originals::custody_recovery::CustodyHandoff>,
-        )>,
-        OriginalWriterError,
-    > {
-        match self.try_admitted_guard(original)? {
-            TryAdmitted::Admitted(pending) => return Ok(Ok((pending, settlement(false)))),
-            TryAdmitted::Held(held) => return Ok(Err(held)),
-            TryAdmitted::NotAdmitted => {}
-        }
-        let Some(_publication) = self.try_owner_change()? else {
-            return Ok(Err(SourceHeld::Publication));
-        };
-        let mut originals = match self.originals.try_lock() {
-            Ok(originals) => originals,
-            // The change ends with no fact changed: dropping its guard only
-            // invalidates observations.
-            Err(std::sync::TryLockError::WouldBlock) => return Ok(Err(SourceHeld::Collection)),
-            Err(std::sync::TryLockError::Poisoned(_)) => {
-                return Err(OriginalWriterError::Unavailable);
-            }
-        };
-        let index = originals
-            .iter()
-            .position(|entry| {
-                entry
-                    .bound()
-                    .is_some_and(|held| Arc::ptr_eq(&held.retained, original))
-            })
-            .ok_or(OriginalWriterError::WrongOwner)?;
-        let held = originals[index]
-            .bound()
-            .ok_or(OriginalWriterError::WrongOwner)?;
-        match &held.operation {
-            OriginalOperationDisposition::CancellationPending => {
-                return Ok(Err(SourceHeld::SourceSettling));
-            }
-            OriginalOperationDisposition::Cancelled { .. } => {
-                return Err(OriginalWriterError::OperationCancelled);
-            }
-            OriginalOperationDisposition::Open => {}
-        }
-        match held.source_custody {
-            Some(SourceCustody::Admitted) => {
-                // Admitted since the observation: nothing is staged.
-                return Ok(Ok((
-                    PendingToolkitOriginal {
-                        owner: self.clone(),
-                        original: original.clone(),
-                        pending: false,
-                    },
-                    settlement(false),
-                )));
-            }
-            Some(SourceCustody::Candidate) => return Err(OriginalWriterError::Conflict),
-            Some(SourceCustody::RestorationUnknown) => {
-                return Err(OriginalWriterError::Unavailable);
-            }
-            None => {}
-        }
-        let claims = original.association.candidate();
-        let namespace = &claims.ingress_namespace;
-        if let Some(settling) = contributors_settled(
-            &originals,
-            namespace,
-            &claims.contributing_work,
-            &claims.requester,
-            false,
-        )? {
-            return Ok(Err(settling));
-        }
-        // At most one candidate may authenticate an occurrence. A helper
-        // source's occurrence is its own work, so no other helper's record
-        // shares it; this stays the conflict it was.
-        if originals
-            .iter()
-            .filter_map(OriginalRecord::bound)
-            .any(|entry| {
-                entry.source_custody == Some(SourceCustody::Candidate)
-                    && entry.association.candidate().ingress_namespace == *namespace
-            })
-        {
-            return Err(OriginalWriterError::Conflict);
-        }
-        // Every fallible check passed: stage and enroll in this one change.
-        let handoff = settlement(true);
-        let held = originals[index]
-            .bound_mut()
-            .ok_or(OriginalWriterError::WrongOwner)?;
-        held.source_custody = Some(SourceCustody::Candidate);
-        held.custody_settlement = handoff.enrolled().then(|| Arc::downgrade(&handoff));
-        held.controller = controller;
-        held.service_set_admission = None;
-        Ok(Ok((
-            PendingToolkitOriginal {
-                owner: self.clone(),
-                original: original.clone(),
-                pending: true,
-            },
-            handoff,
-        )))
-    }
-
     /// Release only current admitted source custody under the shared publication.
     /// Durable evidence and native grants remain intact. Reacquiring source
     /// custody requires exact native admission observation or submission
@@ -3372,33 +2910,16 @@ impl ToolkitOriginalOwner {
         &self,
         original: &Arc<RetainedToolkitOriginal>,
     ) -> Result<(), OriginalWriterError> {
-        if self.try_require_retained(original)? {
-            Ok(())
-        } else {
-            Err(OriginalWriterError::Unavailable)
-        }
-    }
-
-    /// [`Self::require_retained`] where the caller must not wait: `Ok(false)`
-    /// when the source collection is held by another owner's short section
-    /// and nothing was checked.
-    fn try_require_retained(
-        &self,
-        original: &Arc<RetainedToolkitOriginal>,
-    ) -> Result<bool, OriginalWriterError> {
-        let originals = match self.originals.try_lock() {
-            Ok(originals) => originals,
-            Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
-            Err(std::sync::TryLockError::Poisoned(_)) => {
-                return Err(OriginalWriterError::Unavailable);
-            }
-        };
+        let originals = self
+            .originals
+            .try_lock()
+            .map_err(|_| OriginalWriterError::Unavailable)?;
         if originals
             .iter()
             .filter_map(OriginalRecord::bound)
             .any(|current| Arc::ptr_eq(&current.retained, original))
         {
-            Ok(true)
+            Ok(())
         } else {
             Err(OriginalWriterError::WrongOwner)
         }
@@ -3767,61 +3288,6 @@ impl ToolkitOriginalOwner {
         )
         .await
         .map_err(|_| OriginalWriterError::Unavailable)
-    }
-
-    /// Wait, outside any bind and holding nothing, until what a binder's
-    /// non-waiting step met (`held`, about `original`) settled or `deadline`
-    /// passed: one async loop of pauses of at most 1 ms that checks the
-    /// deadline on every iteration. True once it settled; the step is made
-    /// again, afresh, and decides. The contributors' check waits with
-    /// [`Self::wait_admitted_helper`] instead, which observes them.
-    pub(crate) async fn wait_out_held(
-        &self,
-        held: SourceHeld,
-        original: &Arc<RetainedToolkitOriginal>,
-        deadline: tokio::time::Instant,
-    ) -> bool {
-        if held == SourceHeld::Writer {
-            // Taken and released at once: only its holder's end is awaited.
-            return tokio::time::timeout_at(deadline, self.source_writer())
-                .await
-                .is_ok();
-        }
-        loop {
-            let settled = match held {
-                SourceHeld::Collection | SourceHeld::Contributors => !matches!(
-                    self.originals.try_lock(),
-                    Err(std::sync::TryLockError::WouldBlock)
-                ),
-                SourceHeld::SourceSettling => match self.originals.try_lock() {
-                    Ok(originals) => {
-                        !originals
-                            .iter()
-                            .filter_map(OriginalRecord::bound)
-                            .any(|entry| {
-                                Arc::ptr_eq(&entry.retained, original)
-                                    && entry.operation
-                                        == OriginalOperationDisposition::CancellationPending
-                            })
-                    }
-                    Err(std::sync::TryLockError::WouldBlock) => false,
-                    Err(std::sync::TryLockError::Poisoned(_)) => true,
-                },
-                SourceHeld::Publication => self.grants.owner_change_in_progress().is_none(),
-                SourceHeld::Writer => true,
-            };
-            if settled {
-                return true;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return false;
-            }
-            tokio::time::sleep_until(std::cmp::min(
-                deadline,
-                tokio::time::Instant::now() + std::time::Duration::from_millis(1),
-            ))
-            .await;
-        }
     }
 
     pub(crate) fn admitted_original_basis(

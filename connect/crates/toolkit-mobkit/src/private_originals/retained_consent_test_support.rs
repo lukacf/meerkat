@@ -220,12 +220,7 @@ impl GovernedInputBinder for RestoreOnlyBinder {
         }
         self.stage.store(4, Ordering::Relaxed);
         self.source
-            .restore_promoted_custody_observed(
-                &self.before.key,
-                &held.original,
-                Some(&self.cold),
-                None,
-            )
+            .restore_promoted_custody_observed(&self.before.key, &held.original, Some(&self.cold))
             .await
             .map_err(|e| {
                 self.refusal

@@ -13033,6 +13033,331 @@ async fn held_members_open_run_resumes_on_release(
     let _ = handle.shutdown().await;
 }
 
+/// A second process start over a graceful stop's kept run whose host holds
+/// member `w-1` for its recovery (`HostRecovery`, staged before the start, as
+/// a host's Recover flow stages it): the start materializes `w-1` (it holds
+/// recovery work), its runtime loop parks on the hold, and no model request
+/// is made.
+#[cfg(feature = "test-support")]
+struct HeldForRecovery {
+    handle: MobHandle,
+    runtime: Arc<meerkat_runtime::MeerkatMachine>,
+    client: Arc<HoldingToolLoopClient>,
+    worker: AgentIdentity,
+}
+
+#[cfg(feature = "test-support")]
+async fn start_held_for_recovery(
+    paths: &Paths,
+    runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
+    run: &RequeuedMemberRun,
+) -> HeldForRecovery {
+    let client = Arc::new(HoldingToolLoopClient::new(0));
+    let service = requeue_service(paths, runtime_store, true, client.clone());
+    let runtime = service
+        .canonical_runtime_adapter()
+        .expect("the session service's runtime owner");
+    // The host finds the member that holds work without waking anything: a
+    // cold read of its session, before any start registers it.
+    let cold = runtime
+        .session_work_state(&run.w1_sid)
+        .await
+        .expect("the cold read answers");
+    assert!(
+        matches!(
+            cold,
+            meerkat_runtime::SessionWorkState::HoldsWork(work)
+                if work.recovery_work && !work.pending_deliveries
+        ),
+        "the cold read finds the kept run: {cold:?}"
+    );
+    assert!(
+        runtime
+            .current_session_registration_witness(&run.w1_sid)
+            .await
+            .is_none(),
+        "the cold read registers nothing"
+    );
+    let mut parks = runtime.run_start_held_parks();
+    let worker = AgentIdentity::from("w-1");
+    let handle = MobBuilder::for_resume(
+        MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage"),
+    )
+    .with_session_service(service.clone())
+    .with_default_llm_client(client.clone())
+    .notify_orchestrator_on_resume(false)
+    .hold_restored_member_run_starts(
+        meerkat_mob::HostRunStartHoldReason::HostRecovery,
+        [worker.clone()],
+    )
+    .resume()
+    .await
+    .unwrap_or_else(|error| panic!("the start restores the held member: {error}"));
+    handle.resume().await.expect("the mob resumes");
+    tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
+        .await
+        .expect("the held member's runtime loop parks on the host's hold")
+        .expect("the park counter stays open");
+    assert_eq!(
+        client
+            .loop_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no model request while the host holds the member"
+    );
+    HeldForRecovery {
+        handle,
+        runtime,
+        client,
+        worker,
+    }
+}
+
+/// A host's Recover flow over a member whose run a graceful stop kept. The
+/// host holds the restored member for its recovery, and settles the kept run
+/// with one call: the run is settled without resuming (its input ends
+/// cancelled, its provisional tail is closed), and no model request is made
+/// before the settle, at it, or after the host releases its hold. The
+/// host's recovery hold is the host's alone: the member is listed under
+/// `HostRecovery` and not under the tools hold. RED before: no host verb
+/// settled a member's kept run, and the host's only holds had other owners.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_recover_settles_a_held_members_kept_run_without_a_model_request() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let run = stop_gracefully_over_an_open_member_run(&paths, runtime_store.clone(), true).await;
+    let held = start_held_for_recovery(&paths, runtime_store.clone(), &run).await;
+
+    assert_eq!(
+        held.handle
+            .members_holding_run_starts(meerkat_mob::HostRunStartHoldReason::HostRecovery)
+            .expect("the hold read answers"),
+        vec![held.worker.clone()],
+        "the host holds the member for its recovery"
+    );
+    assert!(
+        held.handle
+            .members_holding_run_starts(meerkat_mob::HostRunStartHoldReason::ToolsNotPublished)
+            .expect("the hold read answers")
+            .is_empty(),
+        "the host's recovery hold is not the tools hold"
+    );
+
+    let settled = tokio::time::timeout(
+        Duration::from_secs(30),
+        held.handle.settle_member_retained_run(&held.worker),
+    )
+    .await
+    .expect("the settle answers once the run's input has ended")
+    .expect("the settle is accepted");
+    let meerkat_runtime::RetainedRunSettlement::Settled { run_id, inputs } = settled else {
+        panic!("the member's kept run is settled, not {settled:?}");
+    };
+    assert_eq!(run_id, run.run_id, "the settle names the kept run");
+    assert_eq!(inputs.len(), 1, "the kept run's one input: {inputs:?}");
+    assert_eq!(
+        inputs[0].terminal,
+        Some(
+            meerkat_runtime::input_state::InputTerminalOutcome::Abandoned {
+                reason: meerkat_runtime::input_state::InputAbandonReason::Cancelled,
+            }
+        ),
+        "the kept run's input ends cancelled"
+    );
+    assert_eq!(
+        provisional_tail_run(runtime_store.as_ref(), &run.w1_sid, true).await,
+        None,
+        "the kept run's provisional tail is closed"
+    );
+    assert_eq!(
+        held.client
+            .loop_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no model request at the settle"
+    );
+
+    held.handle
+        .release_member_run_starts(
+            &held.worker,
+            meerkat_mob::HostRunStartHoldReason::HostRecovery,
+        )
+        .await
+        .expect("the host releases its hold");
+    sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        held.client
+            .loop_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no model request after the host's release: the settled run never resumes"
+    );
+    let _ = held.handle.shutdown().await;
+}
+
+/// The settle's typed refusals, and the cold read of a dormant member. A
+/// member the mob does not hold is refused `MemberNotFound`. A member the
+/// start left dormant (the lead: it holds no work) is refused
+/// `MemberSessionNotLive`, and the settle wakes nothing: the lead stays
+/// unmaterialized, its session unregistered, and no model request is made.
+/// The cold read of the dormant lead reads idle, and wakes nothing either.
+/// RED before: no such verb, and no per-session cold read.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_settle_of_a_dormant_member_is_refused_and_wakes_nothing() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let run = stop_gracefully_over_an_open_member_run(&paths, runtime_store.clone(), true).await;
+    let held = start_held_for_recovery(&paths, runtime_store.clone(), &run).await;
+
+    let nobody = AgentIdentity::from("nobody");
+    let refused = held.handle.settle_member_retained_run(&nobody).await;
+    assert!(
+        matches!(&refused, Err(meerkat_mob::MobError::MemberNotFound(identity)) if identity == &nobody),
+        "a member the mob does not hold is refused typed: {refused:?}"
+    );
+
+    let lead = AgentIdentity::from("lead-1");
+    let lead_sid = held
+        .handle
+        .resolve_bridge_session_id(&lead)
+        .await
+        .expect("the lead's session");
+    assert!(
+        held.handle.member_unmaterialized(&lead),
+        "the start leaves the lead, which holds no work, dormant"
+    );
+    let refused = held.handle.settle_member_retained_run(&lead).await;
+    assert!(
+        matches!(
+            &refused,
+            Err(meerkat_mob::MobError::MemberSessionNotLive { agent_identity, session_id })
+                if agent_identity == &lead && session_id == &lead_sid
+        ),
+        "a dormant member is refused typed: {refused:?}"
+    );
+    assert_eq!(
+        held.runtime
+            .session_work_state(&lead_sid)
+            .await
+            .expect("the cold read answers"),
+        meerkat_runtime::SessionWorkState::Idle,
+        "the dormant lead holds no durable work"
+    );
+    sleep(Duration::from_millis(500)).await;
+    assert!(
+        held.handle.member_unmaterialized(&lead),
+        "neither the settle nor the cold read wakes the lead"
+    );
+    assert!(
+        held.runtime
+            .current_session_registration_witness(&lead_sid)
+            .await
+            .is_none(),
+        "nothing registers the lead's session"
+    );
+    assert_eq!(
+        held.client
+            .loop_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no model request"
+    );
+    let _ = held.handle.shutdown().await;
+}
+
+/// A host's settle whose reply is lost, then a retry: the settle went
+/// through (the kept run's tail is closed), and the retry finds nothing
+/// retained. Its proof is the kept run's input, whose receipt reads
+/// cancelled through the existing receipt read. No model request is made.
+/// RED before: no such verb.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_settle_retried_after_a_lost_reply_answers_not_retained() {
+    use meerkat_runtime::terminal_status::{InputTerminalReceiptRead, InteractionSelector};
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let run = stop_gracefully_over_an_open_member_run(&paths, runtime_store.clone(), true).await;
+    let held = start_held_for_recovery(&paths, runtime_store.clone(), &run).await;
+    let kept_input = held
+        .runtime
+        .session_input_states(&run.w1_sid)
+        .await
+        .expect("the member's inputs read")
+        .report
+        .into_iter()
+        .find(|row| row.seed.last_run_id.as_ref() == Some(&run.run_id))
+        .expect("the kept run's input")
+        .state
+        .input_id;
+
+    // The host's settle, whose reply the host never reads.
+    let pending = tokio::spawn({
+        let handle = held.handle.clone();
+        let worker = held.worker.clone();
+        async move { handle.settle_member_retained_run(&worker).await }
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while provisional_tail_run(runtime_store.as_ref(), &run.w1_sid, true)
+        .await
+        .is_some()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the settle closes the kept run's tail"
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
+    pending.abort();
+    let _ = pending.await;
+
+    let retry = held
+        .handle
+        .settle_member_retained_run(&held.worker)
+        .await
+        .expect("the retry is decided");
+    assert_eq!(
+        retry,
+        meerkat_runtime::RetainedRunSettlement::NotRetained,
+        "a retry after the settle finds nothing retained"
+    );
+    let read = held
+        .runtime
+        .input_terminal_receipt(&run.w1_sid, InteractionSelector::InputId(kept_input))
+        .await
+        .expect("the kept input's receipt reads")
+        .expect("the kept input has a receipt");
+    let InputTerminalReceiptRead::Finalized(receipt) = read.report else {
+        panic!(
+            "the kept input's receipt is finalized, not {:?}",
+            read.report
+        );
+    };
+    assert_eq!(
+        receipt.terminal(),
+        &meerkat_runtime::input_state::InputTerminalOutcome::Abandoned {
+            reason: meerkat_runtime::input_state::InputAbandonReason::Cancelled,
+        },
+        "the retry's proof: the kept run's input ended cancelled"
+    );
+    assert_eq!(
+        held.client
+            .loop_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no model request"
+    );
+    let _ = held.handle.shutdown().await;
+}
+
 /// A host's graceful shutdown with a requeue bound suspends a member's run
 /// at its last round commit, and the next start comes after the bound has
 /// passed. The start settles the kept run as expired instead of resuming it

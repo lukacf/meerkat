@@ -5034,6 +5034,16 @@ pub(crate) mod tests {
         scan_contract::assert_lists_exactly(&store, &fixture).await;
     }
 
+    /// The per-runtime read answers each runtime as the scan lists it.
+    /// RED before: no per-runtime read.
+    #[tokio::test]
+    async fn boot_obligation_scan_memory_store_answers_each_runtime_as_the_scan() {
+        use crate::store::recovery_obligation::scan_contract;
+        let store = InMemoryRuntimeStore::new();
+        let fixture = scan_contract::seed(&store).await;
+        scan_contract::assert_answers_each_runtime(&store, &fixture).await;
+    }
+
     fn make_receipt(run_id: RunId, seq: u64) -> RunBoundaryReceipt {
         RunBoundaryReceipt {
             run_id,

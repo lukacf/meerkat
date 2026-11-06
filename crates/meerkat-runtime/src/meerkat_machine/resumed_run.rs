@@ -192,6 +192,21 @@ impl MeerkatMachine {
         driver.lock().await.resumable_run_id()
     }
 
+    /// Settle the run `session_id`'s registration retained, without resuming
+    /// it and without a model request: the run a restart left open,
+    /// which the registration marked resumable and which has not begun again.
+    ///
+    /// RED stub: answers `Busy` with no run for every session.
+    pub async fn settle_retained_run(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<crate::retained_run::RetainedRunSettlement, RuntimeDriverError> {
+        let _ = session_id;
+        Ok(crate::retained_run::RetainedRunSettlement::Busy {
+            current_run_id: None,
+        })
+    }
+
     /// Release the run `session_id`'s registration marked resumable to
     /// ordinary requeue: its provisional tail is discarded first, by its
     /// exact authority, and then its bound inputs go back to their lanes,

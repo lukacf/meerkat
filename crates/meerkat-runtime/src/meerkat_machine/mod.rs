@@ -1218,7 +1218,8 @@ pub use scoped_retained_resume::{
 mod agent_mandate;
 mod boot_obligations;
 pub use boot_obligations::{
-    RuntimeBootObligations, RuntimeRecoveryWork, RuntimeRecoveryWorkUnobserved,
+    RuntimeBootObligations, RuntimeRecoveryWork, RuntimeRecoveryWorkUnobserved, SessionDurableWork,
+    SessionWorkState,
 };
 pub mod composition;
 mod dispatch_control;
@@ -2493,6 +2494,12 @@ pub enum RunStartHoldReason {
     /// A mob member whose host preparation is owed (a role move its mob
     /// holds) starts no run until its mob releases it.
     HostPreparation,
+    /// The session's host holds it while it recovers it (for example while
+    /// it settles a run a crash left open, with
+    /// [`MeerkatMachine::settle_retained_run`]): it starts no run until its
+    /// host releases this hold. No mob or Meta code stages or releases this
+    /// reason; only the host that staged it does.
+    HostRecovery,
 }
 
 impl RunStartHoldReason {
@@ -2501,6 +2508,8 @@ impl RunStartHoldReason {
             Self::MobStop => dsl::RunStartHoldReason::MobStop,
             Self::ToolsNotPublished => dsl::RunStartHoldReason::ToolsNotPublished,
             Self::HostPreparation => dsl::RunStartHoldReason::HostPreparation,
+            // RED stub: the host's hold shares the tools hold's reason.
+            Self::HostRecovery => dsl::RunStartHoldReason::ToolsNotPublished,
         }
     }
 }

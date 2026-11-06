@@ -21552,6 +21552,23 @@ ORDER BY runtime_id";
             scan_contract::assert_lists_exactly(&reopened, &fixture).await;
         }
 
+        /// The per-runtime read answers each runtime as the scan lists it,
+        /// from the durable rows: a reopened store answers the same. RED
+        /// before: no per-runtime read.
+        #[tokio::test]
+        async fn boot_obligation_scan_sqlite_store_answers_each_runtime_as_the_scan() {
+            use crate::store::recovery_obligation::scan_contract;
+
+            let tempdir = tempfile::TempDir::new().unwrap();
+            let path = tempdir.path().join("runtime.sqlite3");
+            let store = SqliteRuntimeStore::new(path.clone()).unwrap();
+            let fixture = scan_contract::seed(&store).await;
+            scan_contract::assert_answers_each_runtime(&store, &fixture).await;
+            drop(store);
+            let reopened = SqliteRuntimeStore::new(path).unwrap();
+            scan_contract::assert_answers_each_runtime(&reopened, &fixture).await;
+        }
+
         /// A runtime retired as 0.9.x retires one (the machine retires it,
         /// its unregister keeps the ops lifecycle snapshot, and its session
         /// body is never rewritten) is archived by its lifecycle record, so

@@ -11214,6 +11214,20 @@ impl MobHandle {
             .await?
     }
 
+    /// Settle the run `identity`'s runtime retained, without resuming it and
+    /// without a model request.
+    ///
+    /// RED stub: answers `Busy` with no run for every member.
+    pub async fn settle_member_retained_run(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<meerkat_runtime::RetainedRunSettlement, MobError> {
+        let _ = identity;
+        Ok(meerkat_runtime::RetainedRunSettlement::Busy {
+            current_run_id: None,
+        })
+    }
+
     /// Placement-switched member transcript read (phase 6, DEC-P6E-21):
     /// `ReadHistory`-scoped at chokepoint (a); local and remote pages share
     /// ONE wire projection. RPC/REST/MCP exposure is phase 7 (the DTOs

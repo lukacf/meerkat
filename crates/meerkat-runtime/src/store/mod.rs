@@ -10268,6 +10268,18 @@ pub trait RuntimeStore: Send + Sync {
         ))
     }
 
+    /// Whether one runtime's durable state holds recovery work, by
+    /// the predicate [`Self::list_runtimes_with_recovery_work`] applies.
+    ///
+    /// RED stub: answers `false` for every runtime.
+    async fn runtime_holds_recovery_work(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<bool, RuntimeStoreError> {
+        let _ = runtime_id;
+        Ok(false)
+    }
+
     /// The store's durable delivery generation (#1813): incremented in the
     /// same transaction as every delivery-authority commit, so another
     /// process that sees the store change learns, from one read, whether a

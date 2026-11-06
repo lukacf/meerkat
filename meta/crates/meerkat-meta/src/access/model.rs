@@ -91,11 +91,13 @@ pub const ACTION_ACCESS_ADMIN: &str = "access.admin";
 /// (its spawners, a side chat's source), carry a non-blank value is visible
 /// to that person and to the access admins (`admins`) only, for every agent
 /// action, whether or not an access configuration is installed or enabled.
-/// Every other caller is answered as for an unknown member. Meta writes it
-/// on a side chat at fork, and only there: member creation refuses it as a
-/// label, and the console projects it into a member's labels only where
-/// Meerkat's roster verifies the side chat
-/// (`crate::side_chat::project_side_chat_lineage`).
+/// Every other caller is answered as for an unknown member. Only Meta writes
+/// it on a roster: on a side chat at fork, and on every member a private
+/// member's own turn spawns or a fork of it seats, which gets its owner; or
+/// the host declares it. Every caller label path refuses it
+/// (`crate::member_comms_id::RESERVED_AUTHORITY_LABELS`), so the label on a
+/// member's own roster row is its owner, after the member that passed it
+/// on retired too.
 pub const PRIVATE_TO_LABEL: &str = "console.private_to";
 
 /// The private-owner key `labels` name: the non-blank [`PRIVATE_TO_LABEL`].

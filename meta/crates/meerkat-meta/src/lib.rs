@@ -73,6 +73,7 @@ pub mod mobpack;
 pub mod mocks;
 pub(crate) mod native_realm;
 pub mod native_startup;
+pub(crate) mod private_owners;
 pub mod process;
 pub mod protocol;
 pub mod public_live_config;

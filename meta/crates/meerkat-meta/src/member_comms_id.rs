@@ -92,20 +92,49 @@ pub(crate) fn validate_raw_identity_labels(
     Ok(())
 }
 
+/// The member labels only Meta writes: a side chat's source, source session
+/// and creator, which only the console's side chat fork records, and the
+/// private owner ([`crate::access::PRIVATE_TO_LABEL`]), which only that fork
+/// and a spawn or fork by a member private to a person record. No caller
+/// supplies one on any label path: member creation refuses them
+/// ([`validate_member_creation_labels`]) and so do the agent spawn tools.
+pub(crate) const RESERVED_AUTHORITY_LABELS: [&str; 4] = [
+    crate::side_chat::SIDE_CHAT_OF_LABEL,
+    crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL,
+    crate::side_chat::SIDE_CHAT_CREATOR_LABEL,
+    crate::access::PRIVATE_TO_LABEL,
+];
+
+/// The first of `keys` that is a [`RESERVED_AUTHORITY_LABELS`] entry.
+pub(crate) fn reserved_authority_label<'a>(
+    keys: impl IntoIterator<Item = &'a String>,
+) -> Option<&'static str> {
+    keys.into_iter().find_map(|key| {
+        RESERVED_AUTHORITY_LABELS
+            .into_iter()
+            .find(|reserved| *reserved == key.as_str())
+    })
+}
+
+/// The refusal of a caller-supplied [`RESERVED_AUTHORITY_LABELS`] entry,
+/// naming it.
+pub(crate) fn reserved_authority_label_refusal(key: &str) -> String {
+    format!(
+        "labels.{key} is reserved: only Meta writes it (a console side chat fork, or a spawn or fork by a member private to a person); a caller may not supply it"
+    )
+}
+
 /// Validate the labels a member-creation request may supply: those
-/// [`validate_raw_identity_labels`] accepts, without a private owner
-/// ([`crate::access::PRIVATE_TO_LABEL`]), which only Meta's console side chat
-/// fork records.
+/// [`validate_raw_identity_labels`] accepts, and none of the
+/// [`RESERVED_AUTHORITY_LABELS`]. The refusal names the label.
 pub(crate) fn validate_member_creation_labels(
     labels: &std::collections::BTreeMap<String, String>,
-) -> Result<(), &'static str> {
-    validate_raw_identity_labels(labels)?;
-    if labels.contains_key(crate::access::PRIVATE_TO_LABEL) {
-        return Err(
-            "labels.console.private_to names a private owner, which only a console side chat fork records; member creation may not supply it",
-        );
+) -> Result<(), String> {
+    validate_raw_identity_labels(labels).map_err(str::to_string)?;
+    match reserved_authority_label(labels.keys()) {
+        Some(key) => Err(reserved_authority_label_refusal(key)),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// True when `s` is a valid meerkat 0.7 comms-name component

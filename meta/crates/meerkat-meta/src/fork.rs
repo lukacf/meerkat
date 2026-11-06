@@ -186,6 +186,27 @@ async fn reserve_and_fork(
     Ok((alias, fork))
 }
 
+/// The side chat lineage labels of a fork's source that its child would
+/// inherit: each one the source carries, and the child's own spec does not
+/// set, gets a blank value of the child's own, which names nothing.
+fn blank_inherited_side_chat_lineage(
+    source_labels: &std::collections::BTreeMap<String, String>,
+    spec: &mut SpawnMemberSpec,
+) {
+    for key in [
+        crate::side_chat::SIDE_CHAT_OF_LABEL,
+        crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL,
+        crate::side_chat::SIDE_CHAT_CREATOR_LABEL,
+    ] {
+        if source_labels.contains_key(key) {
+            spec.labels
+                .get_or_insert_with(Default::default)
+                .entry(key.to_string())
+                .or_default();
+        }
+    }
+}
+
 /// Meta-side preflight over the child spec.
 ///
 /// Split out so the refusals are testable without a live runtime.
@@ -326,7 +347,7 @@ pub(crate) async fn fork_member_on_runtime(
     mob_runtime: &crate::mob_handle_runtime::MobRuntime,
     identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
     source_member_alias: &str,
-    spec: SpawnMemberSpec,
+    mut spec: SpawnMemberSpec,
     message_count: Option<usize>,
     retention: ForkChildRetention,
     on_seat_failure: Option<&(dyn Fn(ErrorEvent) + Send + Sync)>,
@@ -366,6 +387,15 @@ pub(crate) async fn fork_member_on_runtime(
     // Pin the SOURCE alias to a current identity first.
     let (source_target, source_identity) =
         resolve_fork_source(identity_runtime, source_alias.as_str()).await?;
+    // The child inherits its source's labels, but no side chat lineage: a
+    // side chat's source, source session and creator name that side chat
+    // alone, and only the console's side chat fork writes them, into its own
+    // spec. A blank value of the child's own wins over each one the source
+    // carries. The source's private owner stays: a fork holds the private
+    // conversation.
+    if let Ok(Some(source)) = mob_runtime.handle().get_member(&source_identity).await {
+        blank_inherited_side_chat_lineage(&source.labels, &mut spec);
+    }
     let (member_alias, fork) = if let Some(source_target) = source_target {
         // The tracked wrapper acquires the source alias's lifecycle lock
         // before the operation body runs, so a stale or mid-lifecycle

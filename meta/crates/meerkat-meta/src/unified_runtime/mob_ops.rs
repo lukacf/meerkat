@@ -175,7 +175,7 @@ impl UnifiedRuntime {
     pub async fn spawn(&self, mut spec: SpawnMemberSpec) -> Result<SpawnResult, MobRuntimeError> {
         if let Some(labels) = spec.labels.as_ref() {
             crate::member_comms_id::validate_member_creation_labels(labels)
-                .map_err(|message| MobRuntimeError::InvalidConfig(message.to_string()))?;
+                .map_err(MobRuntimeError::InvalidConfig)?;
         }
         let raw_reservation = crate::member_comms_id::reserve_raw_member_target(
             self.identity_runtime_ref(),
@@ -218,7 +218,7 @@ impl UnifiedRuntime {
         for spec in &specs {
             if let Some(labels) = spec.labels.as_ref() {
                 crate::member_comms_id::validate_member_creation_labels(labels)
-                    .map_err(|message| MobRuntimeError::InvalidConfig(message.to_string()))?;
+                    .map_err(MobRuntimeError::InvalidConfig)?;
             }
         }
         let raw_reservation = if specs.is_empty() {

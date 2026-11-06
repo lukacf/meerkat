@@ -2345,6 +2345,17 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
                     ),
                 ));
             }
+            // Only Meta writes a side chat's lineage and creator labels and a
+            // private owner: an agent's spawn naming one is refused, as member
+            // creation refuses it.
+            if crate::console_spawn::is_console_spawn_tool(call.name)
+                && let Some(key) = crate::console_spawn::reserved_label_in_spawn_args(&args)
+            {
+                return Err(meerkat_core::ToolError::invalid_arguments(
+                    call.name,
+                    crate::member_comms_id::reserved_authority_label_refusal(key),
+                ));
+            }
             let identity_runtime = self
                 .identity_runtime
                 .read()
@@ -6929,6 +6940,11 @@ pub struct MobBootstrapSpec {
     /// identity (`crate::memory::side_chat_memory`); see
     /// [`Self::side_chat_memory_slot`].
     pub(crate) side_chat_memory_slot: crate::memory::side_chat_memory::SideChatMemorySlot,
+    /// Who each member is private to, as the base session-service wrapper
+    /// records it on every member build; the mob's spawn customizer hands a
+    /// private member's owner to the members it asks for
+    /// ([`crate::private_owners::PrivateOwners`]).
+    pub(crate) private_owners: crate::private_owners::PrivateOwners,
     /// The host's fork instruction policy for this mob's member forks
     /// ([`Self::with_fork_instruction_policy`]). The mob does not persist
     /// it, so bootstrap applies it on create and on resume.
@@ -7014,12 +7030,13 @@ impl MobBootstrapSpec {
         // member create passes it exactly once, and later `with_*` re-wraps
         // never double-decorate. Its hook also binds a side chat's `memory`
         // tool to the side chat's own identity, after every hook of the
-        // layers around it.
+        // layers around it, and records who each member is private to.
         let dispatch_taint_slot = crate::memory::dispatch_taint::DispatchTaintSlot::default();
         let side_chat_memory_slot = crate::memory::side_chat_memory::SideChatMemorySlot::default();
+        let private_owners = crate::private_owners::PrivateOwners::default();
         let session_service = Arc::new(PreBuildMobSessionService {
             inner: session_service,
-            hook: side_chat_memory_slot.after_hook(hook),
+            hook: private_owners.after_hook(side_chat_memory_slot.after_hook(hook)),
             dispatch_taint: Some(dispatch_taint_slot.clone()),
             after_create_hook: None,
             runtime_adapter_override: None,
@@ -7097,6 +7114,7 @@ impl MobBootstrapSpec {
             controller_pin_source: None,
             dispatch_taint_slot,
             side_chat_memory_slot,
+            private_owners,
             fork_instruction_policy: meerkat_core::ForkInstructionPolicy::default(),
             #[cfg(test)]
             member_provider_auth_persistence: None,
@@ -10025,6 +10043,9 @@ pub struct MobRuntime {
     /// has read, shared by every clone (see
     /// [`crate::side_chat::SideChatLineageCache`]).
     side_chat_lineages: Arc<crate::side_chat::SideChatLineageCache>,
+    /// Who each member of this runtime's mob is private to, shared by every
+    /// clone (see [`crate::private_owners::PrivateOwners`]).
+    private_owners: crate::private_owners::PrivateOwners,
     /// The schedule service the Console's schedule editor writes, once the
     /// gateway's schedule host attached it, shared by every clone (see
     /// [`crate::console_schedules::ConsoleSchedules`]).
@@ -10664,13 +10685,17 @@ impl MobRuntime {
             .with_fork_instruction_policy(spec.fork_instruction_policy);
 
         // Every mob this runtime builds refuses runtime-plane member
-        // identities, after the spec's own customizers have run.
-        if let Some(customizer) = crate::member_comms_id::runtime_plane_guarded_customizer(
-            &mob_id,
-            spec.spawn_member_customizer.clone(),
-        ) {
-            builder = builder.with_spawn_member_customizer(customizer);
-        }
+        // identities, after the spec's own customizers have run, and last
+        // gives each member a private member asks for that member's owner.
+        builder = builder.with_spawn_member_customizer(
+            crate::identity_first::ComposedSpawnMemberCustomizer::over(
+                crate::member_comms_id::runtime_plane_guarded_customizer(
+                    &mob_id,
+                    spec.spawn_member_customizer.clone(),
+                ),
+                spec.private_owners.spawn_customizer(),
+            ),
+        );
         if let Some(hook) = spec.member_runtime_registration_hook.clone() {
             builder = builder.with_member_runtime_registration_hook(hook);
         }
@@ -10977,6 +11002,7 @@ impl MobRuntime {
                 #[cfg(not(target_arch = "wasm32"))]
                 member_mcp_custody: spec.member_mcp_custody,
                 side_chat_lineages: Arc::default(),
+                private_owners: spec.private_owners,
                 console_schedules: crate::console_schedules::ConsoleSchedules::default(),
             },
             pending_activation,
@@ -11031,6 +11057,7 @@ impl MobRuntime {
             #[cfg(not(target_arch = "wasm32"))]
             member_mcp_custody: None,
             side_chat_lineages: Arc::default(),
+            private_owners: crate::private_owners::PrivateOwners::default(),
             console_schedules: crate::console_schedules::ConsoleSchedules::default(),
         }
     }
@@ -11046,6 +11073,21 @@ impl MobRuntime {
     /// [`crate::side_chat::SideChatLineageCache`]).
     pub(crate) fn side_chat_lineages(&self) -> &crate::side_chat::SideChatLineageCache {
         &self.side_chat_lineages
+    }
+
+    /// Who each member of this runtime's mob is private to (see
+    /// [`crate::private_owners::PrivateOwners`]), once the mob's event log
+    /// has been read for the members this process did not build.
+    pub(crate) async fn private_owners(&self) -> &crate::private_owners::PrivateOwners {
+        self.private_owners.seeded(&self.handle).await
+    }
+
+    /// The Steward's source of the members of this runtime's mob private to
+    /// a person, whose memory no dream covers.
+    pub(crate) fn private_member_source(
+        &self,
+    ) -> Arc<dyn crate::memory::steward::PrivateMemberSource> {
+        self.private_owners.steward_source(&self.handle)
     }
 
     /// Where this runtime's console schedules live: the schedule service the

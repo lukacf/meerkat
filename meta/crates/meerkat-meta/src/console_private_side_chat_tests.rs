@@ -450,10 +450,11 @@ async fn legacy_side_chat_keeps_source_audience() -> TestResult {
     Ok(())
 }
 
-/// The private-owner label is Meta's to write at a side chat fork. Console
-/// member creation refuses it as a label, and a member that carries it from
-/// anywhere else has no private owner: the label is not projected and hides
-/// the member from nobody.
+/// The private-owner label is Meta's to write (a side chat fork, a spawn or
+/// fork by a private member) or the host's to declare. Console member
+/// creation refuses it as a label, so no caller makes a member private to
+/// anyone; a member the host seats with it is private to the person it
+/// names, as a side chat is.
 #[tokio::test]
 async fn private_to_label_cannot_be_set_by_label_edits() -> TestResult {
     let (_temp_dir, runtime) = runtime("private-side-chat-label-edits").await?;
@@ -487,28 +488,33 @@ async fn private_to_label_cannot_be_set_by_label_edits() -> TestResult {
     );
 
     Box::pin(runtime.handle().spawn_spec(
-        SpawnMemberSpec::new("worker", AgentIdentity::from("forger")).with_labels(BTreeMap::from(
+        SpawnMemberSpec::new("worker", AgentIdentity::from("hosted")).with_labels(BTreeMap::from(
             [(PRIVATE_TO.to_string(), alice_scope.clone())],
         )),
     ))
     .await?;
-    let bob_rows = sidebar(&app, Some(&bearer(bob_claims()))).await;
-    let forger = row(&bob_rows, "forger").expect("a forged label hides nothing");
     assert!(
-        forger["labels"].get(PRIVATE_TO).is_none(),
-        "a member no side chat fork made has no private owner: {forger:#}"
+        row(&sidebar(&app, Some(&bearer(bob_claims()))).await, "hosted").is_none(),
+        "a member the host made private to Alice is on no other person's sidebar"
+    );
+    let alice_rows = sidebar(&app, Some(&alice)).await;
+    let hosted = row(&alice_rows, "hosted").expect("its owner sees it");
+    assert_eq!(
+        hosted["labels"][PRIVATE_TO],
+        json!(alice_scope),
+        "{hosted:#}"
     );
     Ok(())
 }
 
-/// The private-owner label of a side chat binds every agent check of the
-/// console, whichever surface asks: the member rows, every route's access
-/// priming, stream events and timeline frames. A caller other than its owner
-/// and the admins is refused; a member that carries the label without a side
-/// chat fork is refused to nobody.
+/// The private-owner label binds every agent check of the console,
+/// whichever surface asks: the member rows, every route's access priming,
+/// stream events and timeline frames. A caller other than its owner and the
+/// admins is refused, for a side chat and for a member the host seated with
+/// the label alike: the label on a member's own roster row is its owner,
+/// since only Meta and the host write it there.
 #[tokio::test]
-async fn a_private_owner_label_hides_a_side_chat_on_every_surface_and_a_forged_label_hides_nothing()
--> TestResult {
+async fn a_private_owner_label_hides_a_member_on_every_surface() -> TestResult {
     use crate::console_aggregator::{
         ConsoleFrameSource, ConsoleFrameSourceKind, ConsoleFrameStatus, MetaConsoleAggregator,
         NewConsoleFrame,
@@ -539,13 +545,13 @@ async fn a_private_owner_label_hides_a_side_chat_on_every_surface_and_a_forged_l
     )
     .await?;
     Box::pin(runtime.handle().spawn_spec(
-        SpawnMemberSpec::new("worker", AgentIdentity::from("forger")).with_labels(BTreeMap::from(
+        SpawnMemberSpec::new("worker", AgentIdentity::from("hosted")).with_labels(BTreeMap::from(
             [(PRIVATE_TO.to_string(), alice_scope.clone())],
         )),
     ))
     .await?;
 
-    // The console's member rows carry the owner of the side chat only.
+    // The console's member rows carry each member's own private owner.
     let (snapshot, _) = Box::pin(build_live_snapshot(
         &runtime,
         &[],
@@ -569,9 +575,9 @@ async fn a_private_owner_label_hides_a_side_chat_on_every_surface_and_a_forged_l
         "a side chat fork's owner is projected"
     );
     assert_eq!(
-        row_labels("forger").get(PRIVATE_TO),
-        None,
-        "a label no side chat fork wrote is not"
+        row_labels("hosted").get(PRIVATE_TO),
+        Some(&alice_scope),
+        "so is the owner the host seated a member with"
     );
 
     // Every route's access priming.
@@ -596,7 +602,8 @@ async fn a_private_owner_label_hides_a_side_chat_on_every_surface_and_a_forged_l
     for action in [ACTION_AGENT_SEND, ACTION_AGENT_RETIRE, ACTION_AGENT_SPAWN] {
         assert!(!bob.allows_agent(action, "alpha-side"), "{action}");
     }
-    assert!(bob.can_view_agent("forger"), "a forged label hides nothing");
+    assert!(alice.can_view_agent("hosted"));
+    assert!(!bob.can_view_agent("hosted"));
 
     // Stream events, by the exact authority of the incarnation that emits
     // them.
@@ -689,7 +696,7 @@ async fn a_private_owner_label_hides_a_side_chat_on_every_surface_and_a_forged_l
         )
         .is_none()
     );
-    assert!(row(&sidebar(&app, Some(&bearer(bob_claims()))).await, "forger").is_some());
+    assert!(row(&sidebar(&app, Some(&bearer(bob_claims()))).await, "hosted").is_none());
     Ok(())
 }
 
@@ -753,17 +760,30 @@ async fn reserved_side_chat_labels_refused_from_callers() -> TestResult {
     Ok(())
 }
 
-/// The labels the build of the member that ran session `session_id`
-/// recorded.
-async fn session_labels(
+/// The labels the mob's durable event log records for the last spawn of
+/// member `alias`, which outlives the member.
+async fn spawned_labels(
     runtime: &MobRuntime,
-    session_id: &str,
+    alias: &str,
 ) -> Result<BTreeMap<String, String>, Box<dyn std::error::Error + Send + Sync>> {
-    let service = runtime
-        .session_service()
-        .ok_or("the runtime has a session service")?;
-    let session_id = meerkat_core::types::SessionId::parse(session_id)?;
-    Ok(service.read(&session_id).await?.state.labels)
+    let member = crate::member_comms_id::mob_member_id(alias);
+    let mut labels = None;
+    let mut cursor = 0;
+    loop {
+        let events = runtime.handle().poll_events(cursor, 512).await?;
+        let Some(last) = events.last() else {
+            break;
+        };
+        cursor = last.cursor;
+        for event in events {
+            if let meerkat_mob::MobEventKind::MemberSpawned(spawned) = event.kind
+                && spawned.agent_identity == member
+            {
+                labels = Some(spawned.labels);
+            }
+        }
+    }
+    Ok(labels.ok_or("the mob's event log records the member's spawn")?)
 }
 
 /// A helper forked from a side chat (`meta/fork_helper`, the prompt-context
@@ -798,10 +818,7 @@ async fn fork_helper_child_inherits_no_side_chat_labels() -> TestResult {
     )
     .await;
     assert!(helped["error"].is_null(), "{helped:#}");
-    let session_id = helped["result"]["session_id"]
-        .as_str()
-        .ok_or("the helper's session")?;
-    let labels = session_labels(&runtime, session_id).await?;
+    let labels = spawned_labels(&runtime, "alpha-side-helper").await?;
     for key in [
         crate::side_chat::SIDE_CHAT_OF_LABEL,
         crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL,

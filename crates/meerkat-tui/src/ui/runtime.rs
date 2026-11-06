@@ -26,8 +26,8 @@ use ratatui::crossterm::terminal::{
 use tokio::sync::mpsc;
 
 use super::render::draw;
-use super::selection::osc52;
-use super::{App, Effect, History, Msg};
+use super::selection::{copy_notice, osc52};
+use super::{App, Effect, History, Msg, QueuedCopy};
 
 /// Render tick interval (~30 fps).
 pub const TICK: Duration = Duration::from_millis(33);
@@ -182,6 +182,11 @@ pub async fn run_ui(
         Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
 
+    let tmux = std::env::var_os("TMUX").is_some();
+    // Copies queued by the last batch: written after the next frame, on the
+    // handle ratatui renders to, so the OSC 52 sequence cannot interleave
+    // with a frame.
+    let mut copies: Vec<QueuedCopy> = Vec::new();
     let mut events = crossterm::event::EventStream::new();
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -189,6 +194,15 @@ pub async fn run_ui(
     loop {
         if app.take_dirty() {
             terminal.draw(|frame| draw(frame, &mut app))?;
+        }
+        for copy in copies.drain(..) {
+            let (level, text) = copy_notice(
+                copy.text.chars().count(),
+                copy.truncated,
+                write_clipboard(&copy.text, tmux, terminal.backend_mut()).as_ref(),
+            );
+            // A notice produces no effects.
+            let _ = app.update(Msg::Notice { level, text });
         }
         // Agent events first: integrator messages refer to events sent
         // before them (see `after_buffered_events`).
@@ -211,35 +225,34 @@ pub async fn run_ui(
             _ = tick.tick() => vec![Msg::Tick],
         };
         for msg in batch {
-            if apply(&mut app, msg, &effects, &mut histories)? {
+            if apply(&mut app, msg, &effects, &mut histories, &mut copies)? {
                 return Ok(());
             }
         }
     }
 }
 
-/// Put `text` on the system clipboard with OSC 52 (wrapped for tmux when
-/// `TMUX` is set). Failures are logged: copying must never end the UI.
-fn write_clipboard(text: &str) {
-    let seq = osc52(text, std::env::var_os("TMUX").is_some());
-    let mut out = io::stdout().lock();
-    if let Err(err) = out.write_all(seq.as_bytes()).and_then(|()| out.flush()) {
-        tracing::warn!(error = %err, "could not write the clipboard sequence");
-    }
+/// Write `text` to `out` (the terminal backend, after a frame) as an OSC 52
+/// sequence for the clipboard and the primary selection (wrapped for tmux),
+/// and flush it.
+fn write_clipboard(text: &str, tmux: bool, out: &mut impl Write) -> io::Result<()> {
+    let seq = osc52(text, tmux);
+    out.write_all(seq.as_bytes())?;
+    out.flush()
 }
 
-/// Apply one message, record submitted lines and forward the effects.
+/// Apply one message, queue its copy, record submitted lines and forward
+/// the effects.
 /// Returns whether the user quit.
 fn apply(
     app: &mut App,
     msg: Msg,
     effects: &mpsc::UnboundedSender<Effect>,
     histories: &mut [History],
+    copies: &mut Vec<QueuedCopy>,
 ) -> Result<bool, UiError> {
     let effects_now = app.update(msg);
-    if let Some(text) = app.take_clipboard_text() {
-        write_clipboard(&text);
-    }
+    copies.extend(app.take_clipboard());
     for entry in app.take_submitted() {
         for history in histories.iter_mut() {
             if let Err(err) = history.append(&entry) {

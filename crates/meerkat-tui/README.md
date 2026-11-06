@@ -518,9 +518,18 @@ the editor is empty.
 
 The mouse is captured by default: the wheel scrolls and a click expands or
 collapses a tool call's output (Ctrl-T for the latest). Dragging selects text
-and copies it with OSC 52 on release (double click: a word, triple click: a
-line; Ctrl-Y copies again or copies the last answer). Hold Shift for native
+and copies it on release (double click: a word, triple click: a line;
+Ctrl-Y copies again or copies the last answer). Hold Shift for native
 selection, or start with `--no-mouse`.
+
+Copying uses OSC 52 only, so the terminal must support it: kitty, foot,
+WezTerm, Alacritty, iTerm2 and xterm (with `allowWindowOps`) do; GNOME
+Terminal and other VTE-based terminals do not. The sequence sets both the
+clipboard and the primary selection (middle-click paste), where the
+terminal supports each. Inside
+tmux it is passed through, and tmux needs `set -g set-clipboard on`. The
+notice says `copied N chars (terminal must support OSC 52)` once the
+sequence is written, or `copy failed: <error>` when it could not be.
 
 ## Where things live
 

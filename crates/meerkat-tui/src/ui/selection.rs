@@ -8,9 +8,13 @@
 //! Copying uses OSC 52 ([`osc52`]), which most modern terminals honour (kitty,
 //! WezTerm, foot, Alacritty, iTerm2, Windows Terminal, recent xterm with
 //! `allowWindowOps`); inside tmux the sequence is wrapped in a DCS passthrough
-//! and tmux needs `set -g set-clipboard on`.
+//! and tmux needs `set -g set-clipboard on`. VTE-based terminals (GNOME
+//! Terminal and others) ignore it. Whether the terminal applied the sequence
+//! cannot be observed, so the copy notice ([`copy_notice`]) says so.
 
 use ratatui::style::{Modifier, Style};
+
+use super::transcript::NoticeLevel;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthChar;
 
@@ -320,14 +324,36 @@ pub fn cap_clipboard(text: &str) -> (&str, bool) {
 }
 
 /// The OSC 52 "set clipboard" sequence for `text` (callers cap it first with
-/// [`cap_clipboard`]). With `tmux`, wrapped in a DCS passthrough (every ESC
-/// doubled) so tmux forwards it to the outer terminal.
+/// [`cap_clipboard`]), for the clipboard and the primary selection (`cp`:
+/// terminals ignore selection letters they do not support). With `tmux`,
+/// wrapped in a DCS passthrough (every ESC doubled) so tmux forwards it to
+/// the outer terminal.
 pub fn osc52(text: &str, tmux: bool) -> String {
-    let seq = format!("\x1b]52;c;{}\x07", base64_encode(text.as_bytes()));
+    let seq = format!("\x1b]52;cp;{}\x07", base64_encode(text.as_bytes()));
     if tmux {
         format!("\x1bPtmux;{}\x1b\\", seq.replace('\x1b', "\x1b\x1b"))
     } else {
         seq
+    }
+}
+
+/// The notice for a copy of `chars` characters (`truncated`: cut to the
+/// clipboard cap) whose OSC 52 write had `written` as its result.
+pub fn copy_notice(
+    chars: usize,
+    truncated: bool,
+    written: Result<&(), &std::io::Error>,
+) -> (NoticeLevel, String) {
+    match written {
+        Ok(()) if truncated => (
+            NoticeLevel::Info,
+            format!("copied {chars} chars (truncated to 100 KiB; terminal must support OSC 52)"),
+        ),
+        Ok(()) => (
+            NoticeLevel::Info,
+            format!("copied {chars} chars (terminal must support OSC 52)"),
+        ),
+        Err(err) => (NoticeLevel::Warn, format!("copy failed: {err}")),
     }
 }
 
@@ -459,9 +485,32 @@ mod tests {
     }
 
     #[test]
+    fn copy_notice_wording() {
+        assert_eq!(
+            copy_notice(21, false, Ok(&())),
+            (
+                NoticeLevel::Info,
+                "copied 21 chars (terminal must support OSC 52)".into()
+            )
+        );
+        assert_eq!(
+            copy_notice(21, true, Ok(&())),
+            (
+                NoticeLevel::Info,
+                "copied 21 chars (truncated to 100 KiB; terminal must support OSC 52)".into()
+            )
+        );
+        let err = std::io::Error::other("broken pipe");
+        assert_eq!(
+            copy_notice(21, false, Err(&err)),
+            (NoticeLevel::Warn, "copy failed: broken pipe".into())
+        );
+    }
+
+    #[test]
     fn osc52_plain_and_tmux() {
-        assert_eq!(osc52("hi", false), "\x1b]52;c;aGk=\x07");
-        assert_eq!(osc52("hi", true), "\x1bPtmux;\x1b\x1b]52;c;aGk=\x07\x1b\\");
+        assert_eq!(osc52("hi", false), "\x1b]52;cp;aGk=\x07");
+        assert_eq!(osc52("hi", true), "\x1bPtmux;\x1b\x1b]52;cp;aGk=\x07\x1b\\");
     }
 
     #[test]

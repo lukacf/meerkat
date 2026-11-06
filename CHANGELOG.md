@@ -78,7 +78,9 @@ them.
   to sessions and helpers (a fork child would seat outside the approval
   gate); the session's own `fork`
   tool runs a helper that starts with the session's conversation, rendered
-  as text, as context, behind the same gate. See
+  as text, as context, behind the same gate. A mouse copy goes out with
+  OSC 52 to the clipboard and the primary selection, written after the
+  frame, and its notice says the terminal must support OSC 52. See
   `crates/meerkat-tui/README.md`.
 
 - `meerkat-mob-mcp`: `MobMcpState::with_implicit_mob_customizer` takes an

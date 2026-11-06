@@ -217,6 +217,15 @@ pub enum StatusUpdate {
     Prices(Arc<crate::pricing::PriceTable>),
 }
 
+/// Text queued for the system clipboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedCopy {
+    /// The text, capped to the clipboard limit.
+    pub text: String,
+    /// Whether the cap cut it.
+    pub truncated: bool,
+}
+
 /// Input to [`App::update`].
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -646,7 +655,7 @@ pub struct App {
     press: Option<Press>,
     last_down: Option<LastDown>,
     /// Text to put on the system clipboard (drained by the runtime).
-    clipboard: Option<String>,
+    clipboard: Option<QueuedCopy>,
     dirty: bool,
 }
 
@@ -803,10 +812,16 @@ impl App {
         self.selection.as_ref()
     }
 
-    /// Text queued for the system clipboard since the last call (the runtime
-    /// writes it with OSC 52).
-    pub fn take_clipboard_text(&mut self) -> Option<String> {
+    /// The copy queued since the last call. The runtime writes it with OSC 52
+    /// after the next frame and reports the outcome as a notice
+    /// ([`selection::copy_notice`]).
+    pub fn take_clipboard(&mut self) -> Option<QueuedCopy> {
         self.clipboard.take()
+    }
+
+    /// The text of [`Self::take_clipboard`].
+    pub fn take_clipboard_text(&mut self) -> Option<String> {
+        self.take_clipboard().map(|copy| copy.text)
     }
 
     /// Bring the layout up to date at the last drawn width (so logical line
@@ -970,7 +985,8 @@ impl App {
         self.copy_text(last.as_deref().unwrap_or(""));
     }
 
-    /// Queue `text` (capped) for the clipboard and say so in a notice.
+    /// Queue `text` (capped) for the clipboard; the runtime reports how the
+    /// copy went.
     fn copy_text(&mut self, text: &str) {
         if text.trim().is_empty() {
             self.transcript
@@ -978,14 +994,10 @@ impl App {
             return;
         }
         let (capped, truncated) = selection::cap_clipboard(text);
-        let n = capped.chars().count();
-        let note = if truncated {
-            format!("copied {n} chars (truncated to 100 KiB)")
-        } else {
-            format!("copied {n} chars")
-        };
-        self.clipboard = Some(capped.to_string());
-        self.transcript.push_notice(NoticeLevel::Info, note);
+        self.clipboard = Some(QueuedCopy {
+            text: capped.to_string(),
+            truncated,
+        });
     }
 
     /// Clear the selection and any press in progress.
@@ -2363,13 +2375,14 @@ mod tests {
         assert_eq!(app.take_clipboard_text(), None);
         app.update(up(3, 7));
         assert_eq!(
-            app.take_clipboard_text().as_deref(),
-            Some("hello world\n\n› second")
+            app.take_clipboard(),
+            Some(QueuedCopy {
+                text: "hello world\n\n› second".into(),
+                truncated: false,
+            })
         );
-        assert_eq!(
-            last_notice(&app),
-            Some((NoticeLevel::Info, "copied 21 chars".into()))
-        );
+        // The runtime reports how the copy went; the app only queues it.
+        assert_eq!(last_notice(&app), None);
         // The selection stays visible after copying.
         assert!(app.selection().is_some());
     }

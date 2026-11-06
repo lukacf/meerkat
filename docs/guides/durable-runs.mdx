@@ -463,7 +463,11 @@ fence:
   for it; if another process took the fence or committed meanwhile, the
   realm stops until it is opened again. A later renew never restores it.
   A renew answered `FencedOut` means another process holds the fence, and
-  the realm stops until it is opened again.
+  the realm stops until it is opened again. When an acquire of its own
+  timed out and the store may still have granted it, a token the holder
+  does not know may be its own: it waits out that token's lease and
+  acquires again, and stops the realm only if that token is renewed (a live
+  process holds it) or a batch it did not write shows up.
 - **A stop is a pause.** A run that reaches a model call or a tool call
   while the holder is stopped (a renew failed or timed out, or its window
   closed) waits for that new acquire, for at most one self-fence window
@@ -482,7 +486,11 @@ fence:
   yet. The gap may last any number of waits. A round commit that meets
   the stopped holder waits and suspends the run the same way (the commit
   is written again, once, when the acquire succeeds within the wait); the
-  round it was writing is done again on resume, as after a crash. A
+  round it was writing is done again on resume, as after a crash. A commit
+  whose batch was already sent and is still unsettled when the holder's
+  window closes stops there instead: it fails typed, its scopes are
+  poisoned, and writing them again is refused until the realm is opened
+  again (see Failures below). A
   closing save (the write after the run's final answer) waits and is
   written again the same way, but it cannot suspend the run, whose turn
   has already ended: a closing save still refused after its one wait keeps
@@ -566,6 +574,13 @@ lists every read and the re-base rule.
 - **Unknown outcome.** A commit whose outcome is unknown is settled before
   the scope's next version: Core retries the same batch, with the same commit
   id, or reads the head's commit id.
+- **Unsettled at the fence window.** Core sends a commit's batch only while
+  the holder's self-fence window for the fence token it carries is open: the
+  store's lease for that token may end soon after. A commit still unsettled
+  when that window closes stops there, typed
+  (`RuntimeStoreError::UnsettledAtFenceWindow`), and poisons its scopes like
+  a failed batch; the realm keeps its fence. While renews fail, the retry
+  budget is cut at the window.
 - **Failed batch.** A batch the store refuses, or whose outcome stays unknown
   past the retry budget, poisons every scope it touched. Those scopes refuse
   every later call that needs them, with a typed refusal, until the realm is

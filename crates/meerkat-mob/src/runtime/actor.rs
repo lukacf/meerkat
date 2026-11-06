@@ -54347,26 +54347,31 @@ impl MobActor {
         self.edge_locks.prune(ctx.agent_identity.as_str()).await;
     }
 
-    /// Drop the `MobStop` a Stop staged for a member whose session is
-    /// disposed for good, by a retire or a destroy (#1500), so a later
-    /// registration of the same session is not held for it. The runtime's
+    /// Drop the run-start holds staged for a member whose session is disposed
+    /// for good, by a retire or a destroy (#1500), so a later registration
+    /// of the same session is not held for them: the `MobStop` a Stop staged,
+    /// and a host's `HostRecovery`, which the host can no longer release
+    /// through the mob once the member left the roster. The runtime's
     /// unregister keeps staged reasons on purpose: a reload unregisters and
     /// registers the same session again while the mob is Stopped. A failure
     /// is logged only: the member is gone either way.
-    async fn unstage_departed_member_mob_stop(&self, entry: &RosterEntry) {
-        if let Err(error) = self
-            .provisioner
-            .unstage_member_registration_run_start_hold(
-                &entry.member_ref,
-                meerkat_runtime::RunStartHoldReason::MobStop,
-            )
-            .await
-        {
-            tracing::warn!(
-                agent_identity = %entry.agent_identity,
-                error = %error,
-                "dropping the staged MobStop of a departed member failed"
-            );
+    async fn unstage_departed_member_run_start_holds(&self, entry: &RosterEntry) {
+        for reason in [
+            meerkat_runtime::RunStartHoldReason::MobStop,
+            meerkat_runtime::RunStartHoldReason::HostRecovery,
+        ] {
+            if let Err(error) = self
+                .provisioner
+                .unstage_member_registration_run_start_hold(&entry.member_ref, reason)
+                .await
+            {
+                tracing::warn!(
+                    agent_identity = %entry.agent_identity,
+                    reason = ?reason,
+                    error = %error,
+                    "dropping a run-start hold staged for a departed member failed"
+                );
+            }
         }
     }
 
@@ -55761,7 +55766,7 @@ impl MobActor {
                 });
             }
         }
-        self.unstage_departed_member_mob_stop(&entry).await;
+        self.unstage_departed_member_run_start_holds(&entry).await;
         if let Err(error) = boxed_arm_future(|| {
             self.release_forked_participant_attachments_for_member(&entry.agent_identity)
         })

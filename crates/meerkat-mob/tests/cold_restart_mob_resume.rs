@@ -13301,11 +13301,9 @@ async fn a_host_recover_settles_a_held_members_kept_run_without_a_model_request(
     assert_eq!(inputs.len(), 1, "the kept run's one input: {inputs:?}");
     assert_eq!(
         inputs[0].terminal,
-        Some(
-            meerkat_runtime::input_state::InputTerminalOutcome::Abandoned {
-                reason: meerkat_runtime::input_state::InputAbandonReason::Cancelled,
-            }
-        ),
+        meerkat_runtime::input_state::InputTerminalOutcome::Abandoned {
+            reason: meerkat_runtime::input_state::InputAbandonReason::Cancelled,
+        },
         "the kept run's input ends cancelled"
     );
     assert_eq!(

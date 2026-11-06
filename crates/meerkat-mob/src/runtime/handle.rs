@@ -11223,33 +11223,40 @@ impl MobHandle {
     /// [`crate::MobBuilder::hold_restored_member_run_starts`]), wake it
     /// ([`Self::ensure_member_live`]; the hold keeps the run from
     /// continuing), settle it with this call, then release the hold
-    /// ([`Self::release_member_run_starts`]).
+    /// ([`Self::release_member_run_starts`]) on every answer that leaves no
+    /// open run.
     ///
     /// The member runtime's machine decides
     /// ([`meerkat_runtime::MeerkatMachine::settle_retained_run`]): the
-    /// answer is [`meerkat_runtime::RetainedRunSettlement::Settled`] once
-    /// every input bound to the run has ended (`Abandoned { Cancelled }`),
-    /// its provisional tail closed as an interrupted run;
+    /// answer is [`meerkat_runtime::RetainedRunSettlement::Settled`] once the
+    /// settlement committed (the registration no longer keeps the run, every
+    /// input bound to it ended `Abandoned { Cancelled }`, its provisional tail
+    /// closed as an interrupted run);
     /// [`meerkat_runtime::RetainedRunSettlement::NotRetained`] when the
     /// member's runtime keeps no run; and
     /// [`meerkat_runtime::RetainedRunSettlement::Busy`] when a run is current
     /// (it resumed before the hold, or another run started: this verb never
-    /// stops a running run, [`Self::stop_member_run`] does) or the member's
-    /// registration cannot settle the run now. Idempotent per run: a settle
-    /// that arrives while the run's settlement is pending joins it, and a
-    /// retry after the settlement (a lost reply) answers `NotRetained`; the
-    /// run's inputs then read `Abandoned { Cancelled }` through
+    /// stops a running run, [`Self::stop_member_run`] does) or, with no
+    /// current run, when the member's registration cannot settle the run now
+    /// (the run may still be open: keep the hold and settle again).
+    /// Idempotent per run: a settle that arrives while the run's settlement
+    /// is pending joins it, and a retry after the settlement (a lost reply)
+    /// answers `NotRetained`; the run's inputs then read
+    /// `Abandoned { Cancelled }` through
     /// [`meerkat_runtime::MeerkatMachine::input_terminal_receipt`].
     ///
     /// The verb never wakes a member. A member the mob does not hold is
     /// [`MobError::MemberNotFound`]; one not materialized in this process
-    /// (dormant, or waking) is [`MobError::MemberSessionNotLive`]: wake it
+    /// (dormant, or waking), or whose registration is gone or leaving
+    /// through its unregister, is [`MobError::MemberSessionNotLive`]: wake it
     /// under the host's hold first, or read its stored work cold with
-    /// [`meerkat_runtime::MeerkatMachine::session_work_state`]. A placed
-    /// member is refused with [`MobError::UnsupportedForMode`], and a member
-    /// whose runtime needs a durability reload with
-    /// [`MobError::MemberReloadRequired`]. `Cancel`-scoped at chokepoint
-    /// (a).
+    /// [`meerkat_runtime::MeerkatMachine::session_work_state`]. A member
+    /// whose runtime needs a durability reload, also when the settlement's
+    /// own write failed and the reload loses the settle, is refused with
+    /// [`MobError::MemberReloadRequired`]: reload it
+    /// ([`Self::reload_member_registration`]) under the hold and settle
+    /// again. A placed member is refused with
+    /// [`MobError::UnsupportedForMode`]. `Cancel`-scoped at chokepoint (a).
     pub async fn settle_member_retained_run(
         &self,
         identity: &AgentIdentity,

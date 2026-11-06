@@ -15194,6 +15194,16 @@ pub(crate) mod provision_finish_test_hooks {
 /// ([`MobProvisioner::settle_member_retained_run`]). `unregister_owed` is
 /// the runtime's [`MeerkatMachine::unregister_owed`] for the member's
 /// session, read after the refusal.
+///
+/// - The member's registration is gone from this process, drains for its
+///   unregister, or owes one (the unregister's staged final transition, or
+///   the teardown-only anchor a failed finalization leaves): the member's
+///   session has no live runtime here, `MemberSessionNotLive`. Nothing wakes
+///   it.
+/// - The registration needs a durability reload (a settlement whose write
+///   failed, which the reload loses): `MemberReloadRequired`. The host keeps
+///   its hold, reloads the member and settles again.
+/// - Anything else stays internal.
 #[cfg(feature = "runtime-adapter")]
 fn retained_run_settle_refusal(
     error: meerkat_runtime::RuntimeDriverError,
@@ -15201,15 +15211,30 @@ fn retained_run_settle_refusal(
     session_id: SessionId,
     unregister_owed: bool,
 ) -> MobError {
-    // RED stub: only the absent registration is typed.
-    let _ = unregister_owed;
+    use meerkat_runtime::RuntimeDriverError;
     match error {
-        meerkat_runtime::RuntimeDriverError::NotReady {
+        RuntimeDriverError::NotReady {
             state: meerkat_runtime::RuntimeState::Destroyed,
-        } => MobError::MemberSessionNotLive {
-            agent_identity: member_identity.clone(),
-            session_id,
-        },
+        }
+        | RuntimeDriverError::UnregisterInProgress { .. }
+        | RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { .. } => {
+            MobError::MemberSessionNotLive {
+                agent_identity: member_identity.clone(),
+                session_id,
+            }
+        }
+        RuntimeDriverError::ValidationFailed { .. } if unregister_owed => {
+            MobError::MemberSessionNotLive {
+                agent_identity: member_identity.clone(),
+                session_id,
+            }
+        }
+        RuntimeDriverError::RecoveryRepairBlocked { reason, .. } => {
+            MobError::MemberReloadRequired {
+                member_id: member_identity.clone(),
+                reason,
+            }
+        }
         error => MobError::Internal(format!(
             "settling the retained run of '{session_id}' failed: {error}"
         )),

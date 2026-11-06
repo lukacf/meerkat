@@ -188,7 +188,9 @@ pub enum HostRunStartHoldReason {
     /// until its host releases this hold. No mob or Meta code stages or
     /// releases this reason; only the host does, with
     /// [`crate::MobBuilder::hold_restored_member_run_starts`] and
-    /// [`crate::MobHandle::release_member_run_starts`].
+    /// [`crate::MobHandle::release_member_run_starts`]. A retire or destroy of
+    /// the member drops what the host staged for it, since the host can no
+    /// longer release it through the mob.
     HostRecovery,
 }
 

@@ -1510,19 +1510,26 @@ fn summary_target(target: &Value) -> Map<String, Value> {
 }
 
 /// The trigger a schedule summary carries: whole up to
-/// `SUMMARY_TRIGGER_BYTES` serialized bytes, else its `type` and `timezone`
-/// with `trigger_chars`, the length of its serialized form (a calendar's
-/// value lists are not bounded). `meerkat_schedule_get` returns it whole.
+/// `SUMMARY_TRIGGER_BYTES` serialized bytes, else its `type` and its
+/// `timezone` (cut to `SUMMARY_ID_CHARS` characters) with `trigger_chars`,
+/// the length of its serialized form (a calendar's value lists are not
+/// bounded). `meerkat_schedule_get` returns it whole.
 fn summary_trigger(trigger: Value) -> Value {
     let serialized = trigger.to_string();
     if serialized.len() <= SUMMARY_TRIGGER_BYTES {
         return trigger;
     }
     let mut named = Map::new();
-    for key in ["type", "timezone"] {
-        if let Some(value) = trigger.get(key) {
-            named.insert(key.to_string(), value.clone());
-        }
+    if let Some(kind) = trigger.get("type") {
+        named.insert("type".to_string(), kind.clone());
+    }
+    // A timezone is validated only when occurrences are planned, so a
+    // stored one is cut like an id: one line, never the whole string.
+    if let Some(timezone) = trigger.get("timezone").and_then(Value::as_str) {
+        named.insert(
+            "timezone".to_string(),
+            Value::String(bounded_head(timezone, SUMMARY_ID_CHARS)),
+        );
     }
     named.insert(
         "trigger_chars".to_string(),
@@ -5051,7 +5058,8 @@ mod tests {
             let service = service.clone();
             let keep = &keep;
             async move {
-                let raw = RawValue::from_string(args.to_string()).map_err(|e| e.to_string())?;
+                let raw = RawValue::from_string(args.to_string())
+                    .map_err(|error| ToolError::execution_failed(error.to_string()))?;
                 let outcome = dispatch_schedule_list_where(
                     &service,
                     ToolCallView {
@@ -5061,10 +5069,9 @@ mod tests {
                     },
                     keep,
                 )
-                .await
-                .map_err(|error| error.to_string())?;
+                .await?;
                 serde_json::from_str::<Value>(&outcome.result.text_content())
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| ToolError::execution_failed(error.to_string()))
             }
         };
 
@@ -5082,12 +5089,14 @@ mod tests {
         let mut rows = Vec::new();
         let mut sizes = Vec::new();
         let mut cursor: Option<String> = None;
-        loop {
+        // Bounded: a cursor that never ends the walk fails here, not by timeout.
+        let mut finished = false;
+        for _ in 0..10 {
             let mut args = json!({ "limit": 7 });
             if let Some(cursor) = &cursor {
                 args["cursor"] = json!(cursor);
             }
-            let page = list(args).await?;
+            let page = list(args).await.map_err(|error| error.to_string())?;
             let ids = listed_ids(&page)?;
             sizes.push(ids.len());
             paged.extend(ids);
@@ -5099,19 +5108,18 @@ mod tests {
                 }
                 None => {
                     assert_eq!(page["page"]["has_more"].as_bool(), Some(false), "{page}");
+                    finished = true;
                     break;
                 }
             }
         }
+        assert!(finished, "the page walk ends within 10 pages: {sizes:?}");
         assert_eq!(sizes, vec![7, 7, 6], "full pages over admitted schedules");
         assert_eq!(paged, expected, "each admitted schedule once, in order");
         assert_eq!(rows, core_rows, "the rows are the tool's own summaries");
 
-        assert_eq!(
-            listed_ids(&list(json!({})).await?)?.len(),
-            20,
-            "default page"
-        );
+        let default_page = list(json!({})).await.map_err(|error| error.to_string())?;
+        assert_eq!(listed_ids(&default_page)?.len(), 20, "default page");
         for args in [
             json!({ "limit": 0 }),
             json!({ "limit": -1 }),
@@ -5119,8 +5127,8 @@ mod tests {
         ] {
             let refused = list(args.clone()).await.expect_err("refused");
             assert!(
-                refused.to_lowercase().contains("invalid"),
-                "{args}: {refused}"
+                matches!(refused, ToolError::InvalidArguments { .. }),
+                "{args}: {refused:?}"
             );
         }
         Ok(())
@@ -5132,15 +5140,26 @@ mod tests {
     /// name and an action head of at most `SUMMARY_NAME_CHARS` and
     /// `ACTION_HEAD_CHARS` characters plus "...", each character at most 6
     /// bytes once JSON-escaped (a control character is `\u00XX`); a trigger
-    /// of at most `SUMMARY_TRIGGER_BYTES`; and every `SUMMARY_TARGET_KEYS` key
-    /// with an id of at most `SUMMARY_ID_CHARS` characters plus "...".
+    /// of at most `SUMMARY_TRIGGER_BYTES`, or the named fallback (its type,
+    /// `trigger_chars` and a timezone cut like an id), whichever is larger;
+    /// and every `SUMMARY_TARGET_KEYS` key with an id of at most
+    /// `SUMMARY_ID_CHARS` characters plus "...".
     const SUMMARY_ROW_MAX_BYTES: usize = 512
         + 6 * (SUMMARY_NAME_CHARS + 3)
         + 6 * (ACTION_HEAD_CHARS + 3)
-        + SUMMARY_TRIGGER_BYTES
+        + NAMED_TRIGGER_MAX_BYTES
         + SUMMARY_TARGET_KEYS.len() * (24 + 6 * (SUMMARY_ID_CHARS + 3));
-    // The bound is at most 16 KiB a row.
-    const _: () = assert!(SUMMARY_ROW_MAX_BYTES <= 16 * 1024);
+    /// The trigger term of the bound.
+    const NAMED_TRIGGER_MAX_BYTES: usize = {
+        let named = 96 + 6 * (SUMMARY_ID_CHARS + 3);
+        if named > SUMMARY_TRIGGER_BYTES {
+            named
+        } else {
+            SUMMARY_TRIGGER_BYTES
+        }
+    };
+    // The bound is at most 17 KiB a row.
+    const _: () = assert!(SUMMARY_ROW_MAX_BYTES <= 17 * 1024);
 
     /// Every summary row stays within `SUMMARY_ROW_MAX_BYTES` whatever its
     /// schedule carries: a long name and a 40 KB prompt of characters JSON
@@ -5186,11 +5205,24 @@ mod tests {
             .create(bounded_read_request(interval_trigger(60), 1))
             .await
             .map_err(|error| error.to_string())?;
+        // A paused schedule's timezone is not validated: 50,000 characters.
+        let long_timezone = TriggerSpec::Calendar(crate::CalendarTriggerSpec {
+            timezone: "\u{1}".repeat(50_000),
+            minute: crate::CalendarFieldSpec::Any,
+            hour: crate::CalendarFieldSpec::Any,
+            day_of_month: crate::CalendarFieldSpec::Any,
+            month: crate::CalendarFieldSpec::Any,
+            day_of_week: crate::CalendarFieldSpec::Any,
+            year: None,
+        });
         schedule.config.name = Some(worst.clone());
-        schedule.trigger = trigger;
         schedule.superseded_ack_ids = (0..1_000).map(|_| OccurrenceId::new()).collect();
-        for target in targets {
-            schedule.target = target;
+        for (target, trigger) in targets
+            .iter()
+            .flat_map(|target| [(target, &trigger), (target, &long_timezone)])
+        {
+            schedule.target = target.clone();
+            schedule.trigger = trigger.clone();
             let row = schedule_summary(&schedule).map_err(|error| error.message)?;
             let bytes = row.to_string().len();
             assert!(
@@ -5201,6 +5233,38 @@ mod tests {
             assert!(row.get("superseded_ack_ids").is_none());
             assert!(row.get("machine_state").is_none());
         }
+        Ok(())
+    }
+
+    /// A stored timezone is validated only when occurrences are planned, so
+    /// a paused schedule can hold a 50,000-character one. Its summary cuts
+    /// the timezone like an id: the row stays small.
+    #[tokio::test]
+    async fn an_oversized_trigger_summary_cuts_its_timezone() -> Result<(), String> {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let mut schedule = service
+            .create(bounded_read_request(interval_trigger(60), 1))
+            .await
+            .map_err(|error| error.to_string())?;
+        schedule.trigger = TriggerSpec::Calendar(crate::CalendarTriggerSpec {
+            timezone: "z".repeat(50_000),
+            minute: crate::CalendarFieldSpec::Any,
+            hour: crate::CalendarFieldSpec::Any,
+            day_of_month: crate::CalendarFieldSpec::Any,
+            month: crate::CalendarFieldSpec::Any,
+            day_of_week: crate::CalendarFieldSpec::Any,
+            year: None,
+        });
+        let row = schedule_summary(&schedule).map_err(|error| error.message)?;
+        let timezone = row["trigger"]["timezone"].as_str().ok_or("timezone")?;
+        assert!(
+            timezone.starts_with("zzz") && timezone.chars().count() <= SUMMARY_ID_CHARS + 3,
+            "{} characters",
+            timezone.chars().count()
+        );
+        assert_eq!(row["trigger"]["type"], "calendar", "{row}");
+        let bytes = row.to_string().len();
+        assert!(bytes < 2_048, "the row is {bytes} bytes");
         Ok(())
     }
 }

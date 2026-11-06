@@ -37,11 +37,20 @@ them.
 
 ### Added
 
-- `meerkat_schedule::dispatch_schedule_list_where`: the `meerkat_schedule_list`
-  tool's own listing over only the schedules a predicate admits, for a host
-  that hides some of a realm's schedules from its agents. The predicate is
-  applied before the creation order, the cursor and the page cut, so pages
-  stay full and every row is the tool's bounded summary.
+- `meerkat-schedule`: `dispatch_schedule_list_where`, the
+  `meerkat_schedule_list` tool's own listing over only the schedules a
+  predicate admits, for a host that hides some of a realm's schedules from
+  its agents. The predicate is applied before the creation order, the cursor
+  and the page cut, so pages stay full and every row is the tool's bounded
+  summary. The `meerkat` facade re-exports it.
+
+### Fixed
+
+- `meerkat-schedule`: a `meerkat_schedule_list` row for a schedule whose
+  trigger is too large to keep whole cuts the trigger's timezone to 200
+  characters like an id. A stored timezone is validated only when
+  occurrences are planned, so a paused schedule could hold a very long one,
+  and every listing carried it whole.
 
 ## [0.9.10] - 2026-11-04
 

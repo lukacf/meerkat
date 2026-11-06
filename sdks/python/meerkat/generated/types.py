@@ -1124,7 +1124,8 @@ class ToolGrantTargetFamily(TypedDict, total=False):
 ToolGrantTargetRequest = ToolGrantTargetTool | ToolGrantTargetFamily
 
 # How long a grant request asks a grant to last beyond its window. Closed: a
-# kind this version does not know is refused, never read as a window.
+# kind or a field this version does not know is refused, never read as a
+# window. The kinds are empty structs, so a field is refused as unknown.
 class ToolGrantScopeWindow(TypedDict, total=False):
     kind: Required[Literal['window']]
 

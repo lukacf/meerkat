@@ -69,16 +69,17 @@ pub enum ToolGrantTargetRequest {
 }
 
 /// How long a grant request asks a grant to last beyond its window. Closed: a
-/// kind this version does not know is refused, never read as a window.
+/// kind or a field this version does not know is refused, never read as a
+/// window. The kinds are empty structs, so a field is refused as unknown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolGrantScopeRequest {
     /// The grant lasts for its window.
-    Window,
+    Window {},
     /// The grant also ends with the run its subject session is running when
     /// it is issued. Refused `run_not_active` when the session runs none.
-    CurrentRun,
+    CurrentRun {},
 }
 
 /// Whose grant a record names: a session, or (in a later version) a mob
@@ -480,7 +481,10 @@ mod tests {
             "scope": {"kind": "current_run"},
         }))
         .unwrap();
-        assert_eq!(current_run.scope, Some(ToolGrantScopeRequest::CurrentRun));
+        assert_eq!(
+            current_run.scope,
+            Some(ToolGrantScopeRequest::CurrentRun {})
+        );
         for refused in [
             json!({"kind": "current_run", "run_id": "run-1"}),
             json!({"kind": "turn"}),

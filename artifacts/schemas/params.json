@@ -26294,7 +26294,7 @@
   "GrantToolParams": {
     "$defs": {
       "ToolGrantScopeRequest": {
-        "description": "How long a grant request asks a grant to last beyond its window. Closed: a\nkind this version does not know is refused, never read as a window.",
+        "description": "How long a grant request asks a grant to last beyond its window. Closed: a\nkind or a field this version does not know is refused, never read as a\nwindow. The kinds are empty structs, so a field is refused as unknown.",
         "oneOf": [
           {
             "additionalProperties": false,
@@ -46216,7 +46216,7 @@
   },
   "ToolGrantScopeRequest": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "How long a grant request asks a grant to last beyond its window. Closed: a\nkind this version does not know is refused, never read as a window.",
+    "description": "How long a grant request asks a grant to last beyond its window. Closed: a\nkind or a field this version does not know is refused, never read as a\nwindow. The kinds are empty structs, so a field is refused as unknown.",
     "oneOf": [
       {
         "additionalProperties": false,

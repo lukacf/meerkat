@@ -178,8 +178,8 @@ pub async fn handle_grant(
         Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
     };
     let run_scope = match params.scope {
-        None | Some(ToolGrantScopeRequest::Window) => None,
-        Some(ToolGrantScopeRequest::CurrentRun) => {
+        None | Some(ToolGrantScopeRequest::Window {}) => None,
+        Some(ToolGrantScopeRequest::CurrentRun {}) => {
             match runtime.runtime_adapter().current_run(&session_id).await {
                 Some(run_id) => Some(run_id),
                 None => {

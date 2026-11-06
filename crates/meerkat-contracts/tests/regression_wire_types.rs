@@ -1801,7 +1801,7 @@ fn a_0910_reader_reads_run_scope_and_run_ended_as_unknown() {
         expires_at_ms: None,
         duration_ms: Some(60_000),
         reason: None,
-        scope: Some(ToolGrantScopeRequest::CurrentRun),
+        scope: Some(ToolGrantScopeRequest::CurrentRun {}),
     })
     .expect("serialize");
     assert_eq!(

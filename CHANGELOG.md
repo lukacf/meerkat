@@ -77,15 +77,17 @@ them.
   as text, as context, behind the same gate. See
   `crates/meerkat-tui/README.md`.
 
-- `meerkat-mob-mcp`: `MobMcpState::with_implicit_mob_definition_customizer`
-  takes an `ImplicitMobDefinitionCustomizer`, asked with an
-  `ImplicitMobContext` (owner bridge session, model) for the definition of
-  every implicit delegation mob before it is created and validated. A host
-  whose sessions run on models outside the static catalog sets the
-  `delegate` profile's `provider` or adds a `models[<id>]` entry, so
-  `delegate` works on them. A customizer that changes the mob id or the `delegate`
-  profile's model refuses the create. Opt-in: without one the definition is
-  `MobDefinition::implicit` as before.
+- `meerkat-mob-mcp`: `MobMcpState::with_implicit_mob_customizer` takes an
+  `ImplicitMobCustomizer`, asked once with an `ImplicitMobContext` (owner
+  bridge session, model) before a session's implicit delegation mob is
+  created, for the `delegate` profile's provider. A host whose sessions run
+  on models outside the static catalog (profiled under its own
+  `[models.<id>]`) answers the provider, the engine sets
+  `profiles.delegate.provider`, and `delegate` works on them; nothing else of
+  the definition is open to the host. Opt-in: without one, or on a `None`
+  answer, the definition is `MobDefinition::implicit` as before; an error
+  refuses the create. `ensure_implicit_mob_for_model` is now documented
+  public API for host surfaces that run helpers in a session's implicit mob.
 
 ### Changed
 
@@ -93,7 +95,14 @@ them.
   link to a regular file (its parent directories still real, not links), and
   the confined process sees the target read-only at the link's own path, so a
   systemd-resolved host's `/etc/resolv.conf` can be granted and DNS works
-  inside the sandbox; `rkat-tui` grants it this way.
+  inside the sandbox; `rkat-tui` grants it this way. The link is accepted
+  only when no less-trusted party can retarget it: the link and every
+  directory from `/` down to its parent are owned by root or the effective
+  uid, and none of those directories is writable by group or others unless
+  it is sticky; any other link is refused as before. macOS (Seatbelt) still
+  refuses every such link. The new `meerkat_sandbox::literal_file_grantable`
+  answers whether this host's backend accepts a path as a read-only literal
+  file grant.
 
 ## [0.9.10] - 2026-11-04
 

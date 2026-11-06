@@ -640,24 +640,17 @@ fn overlaps(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
 
-/// `path` when it exists as a directory (`dir`) or a regular file, and is
-/// absolute and canonical: no symbolic link on the way. On Linux a file may
-/// itself be a symbolic link to a regular file (under canonical
-/// directories): the backend binds the target at the link's path.
+/// `path` when it exists as a directory (`dir`), absolute and canonical (no
+/// symbolic link on the way), or as a file the sandbox backend accepts as a
+/// read-only file grant ([`meerkat_sandbox::literal_file_grantable`]: on
+/// Linux that includes a final symbolic link to a regular file that only
+/// root or this user can retarget, bound at the link's path).
 fn canonical(path: &Path, dir: bool) -> Option<PathBuf> {
-    let resolved = std::fs::canonicalize(path).ok()?;
     if dir {
+        let resolved = std::fs::canonicalize(path).ok()?;
         return (path.is_absolute() && resolved == path && resolved.is_dir()).then_some(resolved);
     }
-    let in_place = resolved == path
-        || (cfg!(target_os = "linux")
-            && std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
-            && path
-                .parent()
-                .zip(path.file_name())
-                .and_then(|(parent, name)| Some(std::fs::canonicalize(parent).ok()?.join(name)))
-                .is_some_and(|named| named == path));
-    (path.is_absolute() && in_place && resolved.is_file()).then(|| path.to_path_buf())
+    meerkat_sandbox::literal_file_grantable(path).then(|| path.to_path_buf())
 }
 
 /// What the TUI installs for the shell, and what to tell the user.
@@ -1252,6 +1245,15 @@ mod tests {
         let run = root.join("run");
         std::fs::create_dir_all(&etc).unwrap();
         std::fs::create_dir_all(&run).unwrap();
+        // The backend grants a link only where no other user can retarget
+        // it, so the link's directories must not be group-writable whatever
+        // the umask made them.
+        let set_mode = |path: &Path, mode: u32| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        set_mode(&root, 0o700);
+        set_mode(&etc, 0o755);
         let target = run.join("stub-resolv.conf");
         std::fs::write(&target, "nameserver 127.0.0.53\n").unwrap();
         let link = etc.join("resolv.conf");
@@ -1263,6 +1265,11 @@ mod tests {
         let linux = cfg!(target_os = "linux");
 
         assert_eq!(canonical(&link, false), linux.then(|| link.clone()));
+        // A link another user could retarget (a group-writable directory) is
+        // dropped, as the backend would refuse it.
+        set_mode(&etc, 0o775);
+        assert_eq!(canonical(&link, false), None);
+        set_mode(&etc, 0o755);
         // A regular file stays grantable; a link to a directory, a file
         // reached through a symlinked directory, and a dangling link are
         // refused.

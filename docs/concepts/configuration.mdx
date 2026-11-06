@@ -635,7 +635,10 @@ macOS uses Seatbelt. Linux uses namespaces and seccomp: it needs unprivileged
 user namespaces, and it refuses deny lists, Unix socket grants, nested grants,
 and granted paths that do not exist or pass through a symbolic link; a
 read-only file grant may itself be a symbolic link to a regular file, whose
-target is then visible at the link's path. Other
+target is then visible at the link's path, when the link and every directory
+above it are owned by root or the current user and none is writable by
+others (a sticky directory excepted), so no less-trusted party can retarget
+it; macOS refuses such a link. Other
 platforms refuse every confined launch. A confined process finds its program,
 libraries and data only inside its granted subtrees and the platform
 baseline; grant anything else it needs with `read`. A confined command hook,

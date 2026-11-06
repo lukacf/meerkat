@@ -166,7 +166,7 @@ impl Helpers {
         .with_workgraph_service(Some(workgraph))
         .with_default_llm_client(llm_override)
         .with_child_spawn_member_customizer(Arc::new(customizer))
-        .with_implicit_mob_definition_customizer(Arc::new(endpoint_models::EndpointModels::new(
+        .with_implicit_mob_customizer(Arc::new(endpoint_models::EndpointModels::new(
             profiles,
         )))
         .into_shared();

@@ -1029,6 +1029,15 @@ async fn linux_file_grant_through_a_final_symlink_binds_its_target_at_the_link()
     let run = root.join("run");
     std::fs::create_dir(&etc).unwrap();
     std::fs::create_dir(&run).unwrap();
+    // The link's directories must not be group-writable whatever the umask:
+    // the backend refuses a link a less-trusted party could retarget.
+    for (directory, mode) in [(root, 0o700), (etc.as_path(), 0o755)] {
+        std::fs::set_permissions(
+            directory,
+            std::os::unix::fs::PermissionsExt::from_mode(mode),
+        )
+        .unwrap();
+    }
     let target = run.join("stub-resolv.conf");
     std::fs::write(&target, "nameserver 127.0.0.53\n").unwrap();
     std::fs::write(run.join("sibling"), "private sibling\n").unwrap();

@@ -1,5 +1,20 @@
 //! OS lowering and exact native spawn. Authorization and process-group
 //! containment remain with their existing runtime owners.
+//!
+//! # Granted paths
+//!
+//! The backends differ on one shape of read-only file grant. Linux
+//! (namespaces and seccomp) grants a [`PathAccess::Literal`] file whose final
+//! component is a symbolic link to a regular file, binding the target
+//! read-only at the link's path, but only when no less-trusted party can
+//! retarget the link: the link and every directory from `/` down to its parent
+//! are owned by root or the effective uid, and none of those directories is
+//! writable by group or others unless it is sticky. macOS (Seatbelt) refuses
+//! such a link like any other mutable symbolic link. Every other granted path
+//! is canonical on both. [`literal_file_grantable`] answers whether this
+//! host's backend accepts a path as such a grant.
+//!
+//! [`PathAccess::Literal`]: meerkat_core::confinement::PathAccess::Literal
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -110,6 +125,37 @@ impl ProcessLaunchSpec {
 impl std::fmt::Debug for ProcessLaunchSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ProcessLaunchSpec([REDACTED])")
+    }
+}
+
+/// Whether this host's backend accepts `path` as a read-only
+/// [`PathAccess::Literal`] file grant, judged on the path alone.
+///
+/// - Linux: exactly the backend's acceptance of the grant: an absolute path
+///   to a regular file with one link, off `/proc`, `/sys`, `/dev` and special
+///   filesystems, named canonically or through a final-component symbolic
+///   link that only root or the effective uid can retarget (the link and
+///   every directory from `/` down to its parent owned by one of them, none
+///   of those directories group- or other-writable unless sticky).
+/// - Other targets: an absolute, canonical regular file (Seatbelt refuses a
+///   final symbolic link; targets without a backend refuse every confined
+///   launch).
+///
+/// A `true` answer does not compile the requirement: it can still be refused
+/// for reasons beyond this path (overlapping grants, an unavailable backend).
+///
+/// [`PathAccess::Literal`]: meerkat_core::confinement::PathAccess::Literal
+#[must_use]
+pub fn literal_file_grantable(path: &std::path::Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::literal_file_grantable(path)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        path.is_absolute()
+            && std::fs::canonicalize(path)
+                .is_ok_and(|resolved| resolved == path && resolved.is_file())
     }
 }
 

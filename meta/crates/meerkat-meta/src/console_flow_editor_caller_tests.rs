@@ -331,3 +331,40 @@ async fn flow_editor_deploy_rechecks_caller_before_it_runs() {
     assert!(!marker.exists(), "rkat never ran");
     assert!(!deploy_dir.exists(), "no archive was written");
 }
+
+/// The Flow Editor's capabilities on the Console's listener name the caller
+/// the request resolved to, the scope `meta/console/whoami` reports to the
+/// same caller; the standalone server has no caller and names none. A field
+/// that is not a string is invalid params.
+#[tokio::test]
+async fn flow_editor_capabilities_name_the_caller() {
+    let (_dir, fences) = durable_fences();
+    let app = flow_editor(fences);
+    let bob = bob_token();
+    let (status, capabilities) = flow_editor_rpc(&app, &bob, "meta/capabilities", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{capabilities}");
+    assert_eq!(
+        capabilities["result"]["auth"]["caller_scope"],
+        caller_scope(&bob).await,
+        "{capabilities}"
+    );
+
+    let standalone = crate::http_flow_editor::flow_editor_router();
+    let (status, capabilities) =
+        flow_editor_rpc(&standalone, &bob, "meta/capabilities", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{capabilities}");
+    assert!(
+        capabilities["result"]["auth"].get("caller_scope").is_none(),
+        "{capabilities}"
+    );
+
+    let (status, refused) = flow_editor_rpc(
+        &app,
+        &bob,
+        "meta/mobpacks/list",
+        json!({ "expected_caller_scope": 7 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{refused}");
+    assert_eq!(refused["error"]["code"], json!(-32602), "{refused}");
+}

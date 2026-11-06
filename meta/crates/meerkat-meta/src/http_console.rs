@@ -2926,20 +2926,9 @@ impl ConsoleSendGovernance {
     }
 
     /// Refuse a change whose caller's login ended since the request was
-    /// accepted: the token must still pass the Console's acceptance now,
-    /// its principal's session fence included. The open Console's caller
-    /// without a token has no login to end.
+    /// accepted, by the rule of [`refuse_unless_current`].
     pub(crate) fn refuse_unless_caller_current(&self) -> Result<(), ConsoleCallerRefusal> {
-        match &self.verification {
-            Some(verification)
-                if verification
-                    .current_at(std::time::SystemTime::now())
-                    .is_none() =>
-            {
-                Err(ConsoleCallerRefusal::NotCurrent)
-            }
-            _ => Ok(()),
-        }
+        refuse_unless_current(self.verification.as_ref())
     }
 
     /// Whether a send to `identity` must be governed: the runtime's canonical
@@ -4496,7 +4485,7 @@ impl ConsoleCallerRefusal {
 /// Take the `expected_caller_scope` field out of a console RPC's params, so
 /// no method's own params see it. A field that is not a string is invalid
 /// params.
-fn take_expected_caller_scope(params: &mut Value) -> Result<Option<String>, String> {
+pub(crate) fn take_expected_caller_scope(params: &mut Value) -> Result<Option<String>, String> {
     let Some(object) = params.as_object_mut() else {
         return Ok(None);
     };
@@ -8334,6 +8323,96 @@ fn console_write_auth_context(
 /// too.
 pub(crate) fn token_only_in_query(headers: &HeaderMap, uri: &Uri) -> bool {
     header_bearer_token(headers).is_none() && query_auth_token(uri).is_some()
+}
+
+/// The caller of a change on the Console's listener that a route outside
+/// the console's own router serves (the Flow Editor RPC), resolved as a
+/// console write's caller is ([`console_write_auth_context`]): the same
+/// decisions, session fence record and access controller, and a token only
+/// in the query string refused.
+pub(crate) struct ConsoleChangeCaller {
+    auth: ConsoleHttpAuthContext,
+}
+
+impl ConsoleChangeCaller {
+    /// The request's caller; `None` when the Console refuses the request as
+    /// unauthenticated (answered 401).
+    pub(crate) fn resolve(
+        decisions: &RuntimeDecisionState,
+        fences: &crate::auth::session_fence::ConsoleSessionFences,
+        access: Option<&AccessController>,
+        headers: &HeaderMap,
+        uri: &Uri,
+    ) -> Option<Self> {
+        if token_only_in_query(headers, uri) {
+            return None;
+        }
+        console_request_auth_context_for(decisions, fences, access, headers, uri)
+            .map(|auth| Self { auth })
+    }
+
+    /// The caller's access snapshot, when an access controller is
+    /// installed (an anonymous view on an open Console).
+    pub(crate) fn access_view(&self) -> Option<&AccessView> {
+        self.auth.access_view.as_ref()
+    }
+
+    /// The opaque caller scope `meta/console/whoami` reports for this
+    /// caller.
+    pub(crate) fn caller_scope(&self) -> String {
+        self.auth.caller_scope()
+    }
+
+    /// Refuse a change made for another caller: `expected` is the
+    /// request's `expected_caller_scope`, if any.
+    pub(crate) fn refuse_other_caller(
+        &self,
+        expected: Option<&str>,
+    ) -> Result<(), ConsoleCallerRefusal> {
+        self.auth.refuse_other_caller(expected)
+    }
+
+    /// The check this caller passes again right before its change is made,
+    /// after the change's awaits and reads, wherever it runs.
+    pub(crate) fn current_check(&self) -> ConsoleCallerCurrentCheck {
+        ConsoleCallerCurrentCheck {
+            verification: self.auth.verification.clone(),
+        }
+    }
+}
+
+/// Whether a console caller is still current, checked right before its
+/// change is made ([`ConsoleChangeCaller::current_check`]).
+#[derive(Clone)]
+pub(crate) struct ConsoleCallerCurrentCheck {
+    verification: Option<crate::runtime::ConsoleCallerVerification>,
+}
+
+impl ConsoleCallerCurrentCheck {
+    /// Refuse when the caller's login ended since the request was accepted,
+    /// by the rule of [`refuse_unless_current`].
+    pub(crate) fn refuse_unless_current(&self) -> Result<(), ConsoleCallerRefusal> {
+        refuse_unless_current(self.verification.as_ref())
+    }
+}
+
+/// Refuse a change whose caller's login ended since the request was
+/// accepted: the token must still pass the Console's acceptance now, its
+/// principal's and its login's session fences included. The open Console's
+/// caller without a token (no `verification`) has no login to end.
+fn refuse_unless_current(
+    verification: Option<&crate::runtime::ConsoleCallerVerification>,
+) -> Result<(), ConsoleCallerRefusal> {
+    match verification {
+        Some(verification)
+            if verification
+                .current_at(std::time::SystemTime::now())
+                .is_none() =>
+        {
+            Err(ConsoleCallerRefusal::NotCurrent)
+        }
+        _ => Ok(()),
+    }
 }
 
 #[derive(Debug)]

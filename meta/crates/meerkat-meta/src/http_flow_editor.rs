@@ -10,7 +10,6 @@ use tower::limit::GlobalConcurrencyLimitLayer;
 
 use crate::access::{ACTION_MOBPACK_AUTHOR, ACTION_MOBPACK_DEPLOY, AccessController, AccessView};
 use crate::http_console::ACCESS_DENIED_RPC_CODE;
-use crate::http_sse::sse_access_context;
 use crate::mobpack::MobpackRuntimeCatalogState;
 use crate::rpc::{JSONRPC_VERSION, JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use crate::runtime::RuntimeDecisionState;
@@ -272,7 +271,7 @@ async fn flow_editor_rpc_handler_with_policy(
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(store_path.to_string());
     }
-    let parsed_request = match serde_json::from_value::<JsonRpcRequest>(request) {
+    let mut parsed_request = match serde_json::from_value::<JsonRpcRequest>(request) {
         Ok(req) => req,
         Err(_) => {
             return (
@@ -285,6 +284,11 @@ async fn flow_editor_rpc_handler_with_policy(
             );
         }
     };
+    // The standalone server has no caller, so a change names none: the
+    // field the Console's Flow Editor takes is no method's param here either.
+    if let Err(response) = take_expected_caller_scope(&mut parsed_request) {
+        return (StatusCode::OK, Json::<Value>(response));
+    }
     let response_id = parsed_request.id.clone().unwrap_or(Value::Null);
     let response = dispatch_flow_editor_rpc_blocking(
         parsed_request,
@@ -306,6 +310,7 @@ async fn flow_editor_rpc_handler_with_policy(
         },
         None,
         response_id,
+        None,
     )
     .await;
     (StatusCode::OK, Json::<Value>(response))
@@ -318,14 +323,38 @@ async fn flow_editor_rpc_handler_with_policy(
 /// execution timeout; parking that wait on a tokio worker thread would
 /// starve the async runtime, so every HTTP entry point routes through
 /// `spawn_blocking` here.
+///
+/// With `caller` (the Console's Flow Editor), each change the request makes
+/// is admitted only while that caller is still current, checked right
+/// before the change is made (after the draft store's reads, and before a
+/// deploy or a validation writes its archive and runs `rkat`); a refused
+/// change answers `caller_not_current` and nothing of it was written or
+/// run.
 async fn dispatch_flow_editor_rpc_blocking(
     request: JsonRpcRequest,
     auth: FlowEditorAuthReport,
     runtime_catalog: Option<MobpackRuntimeCatalogState>,
     response_id: Value,
+    caller: Option<crate::http_console::ConsoleCallerCurrentCheck>,
 ) -> Value {
-    match tokio::task::spawn_blocking(move || {
-        handle_flow_editor_rpc_with_auth(request, auth, runtime_catalog.as_ref())
+    let refused_id = response_id.clone();
+    match tokio::task::spawn_blocking(move || match caller {
+        None => handle_flow_editor_rpc_with_auth(request, auth, runtime_catalog.as_ref()),
+        Some(caller) => {
+            let (response, refused) = crate::mobpack::with_change_admission(
+                move || caller.refuse_unless_current().is_ok(),
+                || handle_flow_editor_rpc_with_auth(request, auth, runtime_catalog.as_ref()),
+            );
+            if refused {
+                response_value(
+                    refused_id,
+                    None,
+                    Some(crate::http_console::ConsoleCallerRefusal::NotCurrent.json_rpc_error()),
+                )
+            } else {
+                response
+            }
+        }
     })
     .await
     {
@@ -389,7 +418,7 @@ async fn protected_flow_editor_rpc_handler(
     uri: Uri,
     Json(request): Json<Value>,
 ) -> impl IntoResponse {
-    let parsed_request = match serde_json::from_value::<JsonRpcRequest>(request) {
+    let mut parsed_request = match serde_json::from_value::<JsonRpcRequest>(request) {
         Ok(req) => req,
         Err(_) => {
             return (
@@ -402,37 +431,52 @@ async fn protected_flow_editor_rpc_handler(
             );
         }
     };
-    // A write on the Console's listener takes its token only from the
-    // `Authorization` header: a request whose only token is in the query
-    // string is refused before its caller is resolved, on an open Console
-    // too.
-    let caller = if crate::http_console::token_only_in_query(&headers, &uri) {
-        Err(())
-    } else {
-        sse_access_context(
-            Some(&state.decisions),
-            &state.session_fences,
-            state.access.as_ref(),
-            &headers,
-            &uri,
-        )
+    // The caller is resolved as the Console resolves a write's: a write on
+    // the Console's listener takes its token only from the `Authorization`
+    // header, so a request whose only token is in the query string is
+    // refused before its caller is resolved, on an open Console too.
+    let Some(caller) = crate::http_console::ConsoleChangeCaller::resolve(
+        &state.decisions,
+        &state.session_fences,
+        state.access.as_ref(),
+        &headers,
+        &uri,
+    ) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json::<Value>(serde_json::json!({
+                "jsonrpc": JSONRPC_VERSION,
+                "id": parsed_request.id.unwrap_or(Value::Null),
+                "error": {
+                    "code": -32600,
+                    "message": "unauthorized: flow editor rpc requires a valid auth token",
+                }
+            })),
+        );
     };
-    let access_view = match caller {
-        Ok(caller) => caller.access_view,
-        Err(()) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json::<Value>(serde_json::json!({
-                    "jsonrpc": JSONRPC_VERSION,
-                    "id": parsed_request.id.unwrap_or(Value::Null),
-                    "error": {
-                        "code": -32600,
-                        "message": "unauthorized: flow editor rpc requires a valid auth token",
-                    }
-                })),
-            );
-        }
+    // A change names the caller it was made for (`expected_caller_scope`,
+    // the `caller_scope` this route's `meta/capabilities` reports): one made
+    // for another caller than the request's token is refused before
+    // anything is read or written. A read ignores the field.
+    let expected_caller_scope = match take_expected_caller_scope(&mut parsed_request) {
+        Ok(scope) => scope,
+        Err(response) => return (StatusCode::OK, Json::<Value>(response)),
     };
+    if crate::rpc::is_mobpack_authoring_change(
+        parsed_request.method.as_str(),
+        &parsed_request.params,
+    ) && let Err(refusal) = caller.refuse_other_caller(expected_caller_scope.as_deref())
+    {
+        return (
+            StatusCode::OK,
+            Json::<Value>(response_value(
+                parsed_request.id.unwrap_or(Value::Null),
+                None,
+                Some(refusal.json_rpc_error()),
+            )),
+        );
+    }
+    let access_view = caller.access_view().cloned();
     if let Some(error) = flow_editor_rpc_access_violation(access_view.as_ref(), &parsed_request) {
         return (
             StatusCode::OK,
@@ -498,6 +542,7 @@ async fn protected_flow_editor_rpc_handler(
             ),
         };
     let response_id = parsed_request.id.clone().unwrap_or(Value::Null);
+    let capabilities = parsed_request.method == "meta/capabilities";
     let response = dispatch_flow_editor_rpc_blocking(
         parsed_request,
         FlowEditorAuthReport {
@@ -512,9 +557,49 @@ async fn protected_flow_editor_rpc_handler(
         },
         state.runtime_catalog.clone(),
         response_id,
+        Some(caller.current_check()),
     )
     .await;
+    let response = if capabilities {
+        with_caller_scope(response, caller.caller_scope())
+    } else {
+        response
+    };
     (StatusCode::OK, Json::<Value>(response))
+}
+
+/// Take the `expected_caller_scope` field out of a Flow Editor request's
+/// params, as the Console does
+/// ([`take_expected_caller_scope`](crate::http_console::take_expected_caller_scope)):
+/// no method's params see it. A field that is not a string is answered
+/// invalid params.
+fn take_expected_caller_scope(request: &mut JsonRpcRequest) -> Result<Option<String>, Value> {
+    crate::http_console::take_expected_caller_scope(&mut request.params).map_err(|message| {
+        response_value(
+            request.id.clone().unwrap_or(Value::Null),
+            None,
+            Some(JsonRpcError {
+                code: -32602,
+                message,
+                data: Some(serde_json::json!({ "param": "expected_caller_scope" })),
+            }),
+        )
+    })
+}
+
+/// The Flow Editor's `meta/capabilities` on the Console's listener, naming
+/// the caller the request resolved to (`auth.caller_scope`, the scope
+/// `meta/console/whoami` reports to the same caller): the editor sends it
+/// back with each change as `expected_caller_scope`.
+fn with_caller_scope(mut response: Value, caller_scope: String) -> Value {
+    if let Some(auth) = response
+        .get_mut("result")
+        .and_then(|result| result.get_mut("auth"))
+        .and_then(Value::as_object_mut)
+    {
+        auth.insert("caller_scope".to_string(), Value::String(caller_scope));
+    }
+    response
 }
 
 /// Map a flow-editor RPC method to the ABAC action it requires. Mirrors the

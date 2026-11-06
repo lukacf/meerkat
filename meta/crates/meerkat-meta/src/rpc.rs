@@ -2161,6 +2161,17 @@ fn candidate_launch_refuses_draft_store_write(
         )
 }
 
+/// Whether a mobpack authoring request changes anything: a draft store
+/// write ([`MOBPACK_DRAFT_STORE_WRITE_METHODS`]), or a deploy with
+/// `execute` or a validation with `rkat_validate`, each of which writes an
+/// archive and runs `rkat` on the host. Every other authoring method only
+/// reads and renders.
+pub(crate) fn is_mobpack_authoring_change(method: &str, params: &Value) -> bool {
+    MOBPACK_DRAFT_STORE_WRITE_METHODS.contains(&method)
+        || (matches!(method, "meta/mobpacks/deploy" | "meta/mobpacks/validate")
+            && candidate_launch_refuses_host_execution(method, params))
+}
+
 /// Whether a draft write with `params` reaches a store the authoritative
 /// launch reads: the store a write names no file for (`env_store`, the one
 /// `META_FLOW_EDITOR_DRAFT_STORE` names, or else the gateway home's), the

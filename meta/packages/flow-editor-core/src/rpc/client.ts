@@ -20,6 +20,12 @@ import { RPC_METHODS, SCHEMA_COMMAND_KEYS } from "../shared/constants";
 const controllerConfig = {
   rpcUrl: "/flow-editor/rpc",
   rpcMethods: { ...RPC_METHODS },
+  // The caller this editor acts for, as its Meta surface's capabilities
+  // named it (`auth.caller_scope`). Every request carries it as
+  // `expected_caller_scope`, so Meta refuses a change made after another
+  // caller signed in to this browser. Empty until the capabilities load,
+  // and on a surface that names no caller.
+  callerScope: "",
 };
 
 export function configure(options) {
@@ -27,6 +33,13 @@ export function configure(options) {
   if (rpcUrl) {
     controllerConfig.rpcUrl = rpcUrl;
   }
+}
+
+// Keep the caller scope a `meta/capabilities` answer names, or none.
+export function configureCallerScope(capabilities) {
+  const scope = capabilities?.auth?.caller_scope;
+  controllerConfig.callerScope = typeof scope === "string" ? scope.trim() : "";
+  return controllerConfig.callerScope;
 }
 
 export function rpcPath() {
@@ -204,6 +217,13 @@ export function configureAuthoringMethodsFromSchema(schema) {
 
 let requestId = 0;
 export async function callRpc(method, params, options = {}) {
+  const requestParams = params || {};
+  const scopedParams = controllerConfig.callerScope
+    && typeof requestParams === "object"
+    && !Array.isArray(requestParams)
+    && requestParams.expected_caller_scope === undefined
+    ? { ...requestParams, expected_caller_scope: controllerConfig.callerScope }
+    : requestParams;
   const response = await fetch(rpcPath(), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -212,7 +232,7 @@ export async function callRpc(method, params, options = {}) {
       jsonrpc: "2.0",
       id: ++requestId,
       method,
-      params: params || {},
+      params: scopedParams,
     }),
   });
   if (!response.ok) {

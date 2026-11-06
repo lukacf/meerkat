@@ -38,6 +38,9 @@ pub struct ConsoleUiConfig {
     pub actions: ConsoleActionsUiConfig,
     #[serde(default, skip_serializing_if = "ConsoleAttentionUiConfig::is_default")]
     pub attention: ConsoleAttentionUiConfig,
+    /// The host's sign-out, which the console's identity chip offers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_out: Option<ConsoleSignOutConfig>,
 }
 
 impl ConsoleUiConfig {
@@ -97,8 +100,42 @@ impl ConsoleUiConfig {
         self.agent_list = self.agent_list.normalized();
         self.actions = self.actions.normalized();
         self.attention = self.attention.normalized();
+        self.sign_out = self.sign_out.and_then(ConsoleSignOutConfig::normalized);
         self
     }
+}
+
+/// The host's sign-out. The console only takes the person there: the host's
+/// front (an auth proxy or a login app) ends the login.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsoleSignOutConfig {
+    /// A same-origin path (the operator panel path rules), used as written.
+    /// Any other value drops the sign-out.
+    pub href: String,
+    /// How the console reaches `href`.
+    #[serde(default)]
+    pub method: ConsoleSignOutMethod,
+}
+
+impl ConsoleSignOutConfig {
+    fn normalized(self) -> Option<Self> {
+        if valid_operator_panel_path(&self.href) {
+            return Some(self);
+        }
+        tracing::warn!("console sign_out dropped: its href must be a same-origin path");
+        None
+    }
+}
+
+/// How the console reaches the host's sign-out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsoleSignOutMethod {
+    /// A link.
+    #[default]
+    Get,
+    /// A form post, for a front whose sign-out refuses a `GET`.
+    Post,
 }
 
 /// Host-provided attention items for the "Needs you" list.
@@ -615,6 +652,8 @@ struct ConsoleUiConfigPatch {
     #[serde(default)]
     attention: Option<ConsoleAttentionUiConfig>,
     #[serde(default)]
+    sign_out: Option<ConsoleSignOutConfig>,
+    #[serde(default)]
     realms: BTreeMap<String, ConsoleUiConfigPatch>,
 }
 
@@ -656,6 +695,11 @@ impl ConsoleUiConfigPatch {
         if let Some(attention) = &self.attention {
             // The configured list replaces the inherited one.
             config.attention = attention.clone().normalized();
+        }
+        if let Some(sign_out) = &self.sign_out {
+            // The configured sign-out replaces the inherited one, an invalid
+            // one included (normalization then drops it).
+            config.sign_out = Some(sign_out.clone());
         }
     }
 }

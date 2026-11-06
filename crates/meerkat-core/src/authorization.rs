@@ -699,6 +699,7 @@ struct WorkAuthorizationContextInner {
     consent_scope: Option<crate::approval::ApprovalConsentScope>,
     consent_hosting: Option<crate::session_hosting::HostingClaim>,
     resumed_inputs: Vec<crate::retained_work::ResumedInput>,
+    governed_send_origin: Option<crate::interaction::GovernedSendOrigin>,
 }
 
 /// Process-local authorization context for one admitted work association.
@@ -731,6 +732,7 @@ impl WorkAuthorizationContext {
             consent_scope: None,
             consent_hosting: None,
             resumed_inputs: Vec::new(),
+            governed_send_origin: None,
         }))
     }
 
@@ -760,6 +762,7 @@ impl WorkAuthorizationContext {
             consent_scope: self.0.consent_scope.clone(),
             consent_hosting: self.0.consent_hosting.clone(),
             resumed_inputs: self.0.resumed_inputs.clone(),
+            governed_send_origin: self.0.governed_send_origin.clone(),
         })))
     }
 
@@ -776,6 +779,7 @@ impl WorkAuthorizationContext {
             consent_scope: self.0.consent_scope.clone(),
             consent_hosting: self.0.consent_hosting.clone(),
             resumed_inputs: self.0.resumed_inputs.clone(),
+            governed_send_origin: self.0.governed_send_origin.clone(),
         }))
     }
 
@@ -802,6 +806,7 @@ impl WorkAuthorizationContext {
             consent_scope: Some(scope),
             consent_hosting,
             resumed_inputs: self.0.resumed_inputs.clone(),
+            governed_send_origin: self.0.governed_send_origin.clone(),
         }))
     }
 
@@ -820,12 +825,39 @@ impl WorkAuthorizationContext {
             consent_scope: self.0.consent_scope.clone(),
             consent_hosting: self.0.consent_hosting.clone(),
             resumed_inputs: inputs,
+            governed_send_origin: self.0.governed_send_origin.clone(),
         }))
     }
 
     /// The staged inputs of this run that resume retained work.
     pub fn resumed_inputs(&self) -> &[crate::retained_work::ResumedInput] {
         &self.0.resumed_inputs
+    }
+
+    /// Set the governed origin of the staged run this context authorizes:
+    /// the work its comms tools' in-process deliveries were sent under
+    /// ([`crate::GovernedSendOrigin`]). The native runtime sets it on every
+    /// run it stages, from the batch it staged, replacing whatever the host's
+    /// context held (`None` for a run with no single origin). Identity data
+    /// only, never a permission, and never built from a tool's arguments.
+    #[must_use]
+    pub fn with_governed_send_origin(self, origin: Option<crate::GovernedSendOrigin>) -> Self {
+        Self(Arc::new(WorkAuthorizationContextInner {
+            authorization: Arc::clone(&self.0.authorization),
+            execution_scope: self.0.execution_scope.clone(),
+            controller_client: self.0.controller_client.clone(),
+            retained_work: self.0.retained_work.clone(),
+            consent_scope: self.0.consent_scope.clone(),
+            consent_hosting: self.0.consent_hosting.clone(),
+            resumed_inputs: self.0.resumed_inputs.clone(),
+            governed_send_origin: origin,
+        }))
+    }
+
+    /// The governed origin the native runtime attached for the staged run,
+    /// when it attached one.
+    pub fn governed_send_origin(&self) -> Option<&crate::GovernedSendOrigin> {
+        self.0.governed_send_origin.as_ref()
     }
 
     /// The hosting domain and session of the staged run, when the native
@@ -856,6 +888,7 @@ impl WorkAuthorizationContext {
             consent_scope: Some(scope),
             consent_hosting: Some(claim),
             resumed_inputs: self.0.resumed_inputs.clone(),
+            governed_send_origin: self.0.governed_send_origin.clone(),
         }))
     }
 
@@ -1167,6 +1200,50 @@ mod tests {
                 usage: SourceAuthorizationUse::Read,
             }),
         })
+    }
+
+    /// The governed origin the native runtime attaches to a run's work
+    /// authorization stays the same carrier through every other attachment
+    /// a context takes, so a comms tool always reads the run's own origin.
+    #[test]
+    fn a_work_context_keeps_its_governed_send_origin_through_every_attachment() {
+        struct NoWork;
+        impl WorkAuthorization for NoWork {
+            fn prepare(
+                &self,
+                _binding: &PreparedAuthorizationBinding,
+            ) -> Result<Arc<dyn PreparedOperationAuthorization>, OperationAuthorizationError>
+            {
+                Err(OperationAuthorizationError::Unavailable)
+            }
+        }
+        let work = WorkAuthorizationContext::new(Arc::new(NoWork), OperationExecutionScope::Domain);
+        assert!(work.governed_send_origin().is_none(), "none until attached");
+        let origin =
+            crate::GovernedSendOrigin::__from_runtime_facts(Arc::new("the staged run's facts"));
+        let same = |context: &WorkAuthorizationContext| {
+            context
+                .governed_send_origin()
+                .is_some_and(|kept| Arc::ptr_eq(kept.__runtime_facts(), origin.__runtime_facts()))
+        };
+        let work = work.with_governed_send_origin(Some(origin.clone()));
+        assert!(same(&work));
+        let identity = crate::retained_work::RetainedWorkIdentity::new(
+            "runtime",
+            RunId::new(),
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+            None,
+        );
+        let work = work.with_retained_work(identity);
+        assert!(same(&work), "kept with the retained work identity");
+        let work = work.with_resumed_inputs(Vec::new());
+        assert!(same(&work), "kept with the resumed inputs");
+        let work = work.with_governed_send_origin(None);
+        assert!(
+            work.governed_send_origin().is_none(),
+            "a run with no single origin replaces the one held before"
+        );
     }
 
     /// Consent owner loss (3): a work context records the consent scope its

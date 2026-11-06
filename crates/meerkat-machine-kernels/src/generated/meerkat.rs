@@ -19091,6 +19091,10 @@ pub mod inputs {
     pub struct ApplyToolGrantOpenSet {
         pub open: std::collections::BTreeSet<ToolName>,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AbortUntilChangedSwitchTurnReconfigure {
+        pub request_id: String,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -19524,6 +19528,7 @@ pub enum Input {
     ReleaseInputController(inputs::ReleaseInputController),
     ReplaceToolGrantGate(inputs::ReplaceToolGrantGate),
     ApplyToolGrantOpenSet(inputs::ApplyToolGrantOpenSet),
+    AbortUntilChangedSwitchTurnReconfigure(inputs::AbortUntilChangedSwitchTurnReconfigure),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -20121,6 +20126,9 @@ impl Input {
             Self::ReleaseInputController(_) => InputKind::ReleaseInputController,
             Self::ReplaceToolGrantGate(_) => InputKind::ReplaceToolGrantGate,
             Self::ApplyToolGrantOpenSet(_) => InputKind::ApplyToolGrantOpenSet,
+            Self::AbortUntilChangedSwitchTurnReconfigure(_) => {
+                InputKind::AbortUntilChangedSwitchTurnReconfigure
+            }
         }
     }
 }
@@ -20543,6 +20551,7 @@ pub enum InputKind {
     ReleaseInputController,
     ReplaceToolGrantGate,
     ApplyToolGrantOpenSet,
+    AbortUntilChangedSwitchTurnReconfigure,
 }
 
 pub mod signals {
@@ -26076,6 +26085,16 @@ pub enum TransitionId {
     SuspendRunForStopFenceGapRunningToAttached,
     StopCurrentRunForRunResumableIdle,
     StopCurrentRunForRunResumableAttached,
+    AbortUntilChangedSwitchTurnReconfigureIdle,
+    AbortUntilChangedSwitchTurnReconfigureAttached,
+    AbortUntilChangedSwitchTurnReconfigureRunning,
+    AbortUntilChangedSwitchTurnReconfigureRetired,
+    AbortUntilChangedSwitchTurnReconfigureStopped,
+    RequestUntilChangedSwitchTurnPendingConflictIdle,
+    RequestUntilChangedSwitchTurnPendingConflictAttached,
+    RequestUntilChangedSwitchTurnPendingConflictRunning,
+    CompleteUntilChangedSwitchTurnReconfigureRetired,
+    CompleteUntilChangedSwitchTurnReconfigureStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

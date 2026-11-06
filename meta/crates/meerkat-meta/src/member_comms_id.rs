@@ -27,6 +27,13 @@
 //!   namespace: user-chosen member names must not start with it (encode
 //!   re-encodes such names so the round-trip still holds).
 //!
+//! The encoding is Core's one encoding of a name into a member id
+//! ([`meerkat_mob::ids::member_id_for_name`], inverted by
+//! [`meerkat_mob::ids::name_for_member_id`]); this module applies it at its
+//! boundaries. Core reads a member's `agent_identity` label in the same
+//! encoding, so a label naming an identity names the member Meta seated
+//! under the identity's encoded id.
+//!
 //! This is a **public stability surface**: consumers that talk to raw
 //! `MobHandle` APIs (which speak the encoded roster-id space on meerkat 0.7+)
 //! must encode aliases on the way in and decode roster ids on the way out
@@ -101,11 +108,9 @@ pub(crate) fn validate_member_creation_labels(
     Ok(())
 }
 
-/// Reserved marker prefix for encoded member ids.
-const MARKER: &str = "mk--";
-
 /// True when `s` is a valid meerkat 0.7 comms-name component
 /// (mirrors `meerkat_core::connection::validate_member_comms_name_component`).
+#[cfg(test)]
 fn is_valid_comms_component(s: &str) -> bool {
     let mut chars = s.chars();
     let Some(first) = chars.next() else {
@@ -117,61 +122,12 @@ fn is_valid_comms_component(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-fn escape_body(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 8);
-    for c in s.chars() {
-        match c {
-            '_' => out.push_str("__"),
-            ':' => out.push_str("_c"),
-            c if c.is_ascii_alphanumeric() || c == '-' => out.push(c),
-            c => {
-                out.push_str("_x");
-                out.push_str(&format!("{:x}", c as u32));
-                out.push('_');
-            }
-        }
-    }
-    out
-}
-
-/// Decode an escaped body; `None` when the body is not a well-formed escape
-/// production (such an id cannot have come from [`mob_member_id_str`]).
-fn unescape_body(s: &str) -> Option<String> {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c != '_' {
-            out.push(c);
-            continue;
-        }
-        match chars.next()? {
-            '_' => out.push('_'),
-            'c' => out.push(':'),
-            'x' => {
-                let mut hex = String::new();
-                loop {
-                    match chars.next()? {
-                        '_' => break,
-                        h => hex.push(h),
-                    }
-                }
-                let code = u32::from_str_radix(&hex, 16).ok()?;
-                out.push(char::from_u32(code)?);
-            }
-            _ => return None,
-        }
-    }
-    Some(out)
-}
-
 /// Map a public member alias (identity-first runtime id, durable identity, or
-/// plain member name) to the comms-safe mob roster member id string.
+/// plain member name) to the comms-safe mob roster member id string, in
+/// Core's one encoding of a name into a member id
+/// ([`meerkat_mob::ids::member_id_for_name`]).
 pub fn mob_member_id_str(alias: &str) -> Cow<'_, str> {
-    if is_valid_comms_component(alias) && !alias.starts_with(MARKER) {
-        Cow::Borrowed(alias)
-    } else {
-        Cow::Owned(format!("{MARKER}{}", escape_body(alias)))
-    }
+    meerkat_mob::ids::member_id_for_name(alias)
 }
 
 /// Map a public member alias to a typed mob roster member id.
@@ -190,17 +146,12 @@ pub fn mob_member_id(alias: &str) -> meerkat_mob::ids::AgentIdentity {
     meerkat_mob::ids::AgentIdentity::from(mob_member_id_str(alias).as_ref())
 }
 
-/// Map a mob roster member id back to the public member alias. Identity on
-/// ids that were never encoded.
+/// Map a mob roster member id back to the public member alias
+/// ([`meerkat_mob::ids::name_for_member_id`]). Identity on ids that were
+/// never encoded, and on a marked id that is no encode production (a
+/// literal member id).
 pub fn runtime_alias_str(member_id: &str) -> Cow<'_, str> {
-    match member_id.strip_prefix(MARKER) {
-        Some(body) => match unescape_body(body) {
-            Some(alias) => Cow::Owned(alias),
-            // Not an encode production; treat as a literal member id.
-            None => Cow::Borrowed(member_id),
-        },
-        None => Cow::Borrowed(member_id),
-    }
+    meerkat_mob::ids::name_for_member_id(member_id)
 }
 
 /// Whether an input names Meta's reserved generated-runtime namespace.
@@ -440,7 +391,9 @@ pub(crate) fn live_binding_matches_identity(
 /// spelling at a raw lower-plane creation boundary can collide with the
 /// projection of the corresponding decoded alias.
 pub(crate) fn uses_reserved_roster_marker(member_id: &str) -> bool {
-    member_id.trim().starts_with(MARKER)
+    member_id
+        .trim()
+        .starts_with(meerkat_mob::ids::ENCODED_MEMBER_ID_MARKER)
 }
 
 /// Validate one caller-supplied member/identity target at a public ingress.

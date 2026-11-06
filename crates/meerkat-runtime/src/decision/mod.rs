@@ -18,6 +18,7 @@
 //!   execute one approved decision's held request.
 //! - [`executor`]: [`DecisionExecutorLoop`], the one executor of a store's
 //!   registered decision kinds, which keeps the permit's obligations.
+//! - [`wire`]: the projection of decisions onto their wire contracts.
 //!
 //! Nothing caches a decision, nothing is read at open, and nothing scans
 //! every row: a call touches one row or one index page.
@@ -40,6 +41,7 @@ pub mod service;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod service_tests;
+pub mod wire;
 
 pub use executor::{
     DecisionApproverCurrentness, DecisionDeferral, DecisionExecution, DecisionExecutor,

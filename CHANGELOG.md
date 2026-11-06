@@ -108,6 +108,16 @@ them.
   already. The member stays as it is, its own retirement ends it, and the
   next complete apply decides it again if it is still there.
 
+### Changed
+
+- `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
+  sign-in is refused (`AttachmentRefused`), because it is governed and the
+  router holds no control that covers it, or because it was signed out
+  ungoverned and its name has been governed since, is reported as a failed
+  add once, at the first boundary after its release settles, where every
+  later boundary reported it again. It stays listed as awaiting sign-in, and
+  a later sign-in gets the typed refusal from `McpRouter::retry_authorized`.
+
 ### Fixed
 
 - `meerkat-mob`: a declared role migration (`MobHandle::apply_declared_roster`
@@ -129,6 +139,11 @@ them.
   durable-identity marker, a member labelled with an identity no member id
   can spell, refused it `NameHeldByWorker`, and a host that labelled a raw
   member of that name could not have it adopted.
+
+- `meerkat-mcp`: retained attachment controls are released when the
+  router's close begins (`McpRouterAdapter::begin_close`), so a router whose
+  shutdown never runs no longer keeps the controls it retains for a re-add
+  after a sign-in, and what they hold, alive after its close.
 
 ## [0.9.10] - 2026-11-04
 

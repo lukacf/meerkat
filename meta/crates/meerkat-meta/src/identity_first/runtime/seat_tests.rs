@@ -1077,12 +1077,14 @@ async fn x3_r15_a_compile_seats_every_unheld_identity_in_one_core_call_and_wakes
 /// A roster pass over identities Core already holds seats nothing again:
 /// Core keeps every member, nothing is seated, rotated or woken, and the
 /// pass reads Core's member history two times at most, as a pass that
-/// seats does: no read per identity.
+/// seats does: no read per identity. The roster lists three identities, one
+/// more than the bound, so a pass that read once per identity would read
+/// three times.
 #[tokio::test]
 async fn r15_a_compile_over_seated_identities_seats_nothing_again() {
     let core = Arc::new(SeatCore::default());
     let runtime = runtime_over(None, &core);
-    let specs = ["personal:alice", "personal:bob"]
+    let specs = ["personal:alice", "personal:bob", "personal:carol"]
         .map(|name| spec(&identity(name)))
         .to_vec();
     roster_pass(&runtime, &specs, None).await;
@@ -1102,7 +1104,8 @@ async fn r15_a_compile_over_seated_identities_seats_nothing_again() {
     let pass_reads = core.history_reads.load(Ordering::SeqCst) - history_reads;
     assert!(
         pass_reads <= 2,
-        "two reads of Core's member history at most for the pass: {pass_reads}"
+        "two reads of Core's member history at most for the pass of three identities: \
+         {pass_reads}"
     );
 }
 

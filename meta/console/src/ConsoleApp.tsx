@@ -45,6 +45,7 @@ import type {
   TopologyOperationReceipt,
   HostAttentionSnapshot,
   HostAttentionSourceConfig,
+  ApprovalViewer,
 } from "@console-core";
 import {
   collectConsoleDockPanelIds,
@@ -274,7 +275,7 @@ import { consoleNavControls } from "./lib/nav-controls";
 import { ConsoleNavigationProvider, PanelPreferencesProvider } from "@console-components";
 import { NavigationFocusProvider, buildConsoleNavigation, useNavigationFocusSource, type ConsoleNavigationHost } from "./lib/console-navigation";
 import { QuoteContextChips } from "../../packages/console-components/src/conversation/context-chips";
-import { HostDecideSourcesProvider } from "../../packages/console-components/src/conversation/approval-card";
+import { ApprovalViewerProvider, HostDecideSourcesProvider } from "../../packages/console-components/src/conversation/approval-card";
 import { editConsoleContextQuote } from "../../packages/console-core/src/context-edit";
 import type { ConsoleQuoteSelection } from "../../packages/console-components/src/conversation/context-selection";
 import { consoleSendStorageKey, loadConsoleSendAttempts, saveConsoleSendAttempts, readLegacyConsoleQueue, readPredecessorConsoleQueue, consoleLegacyQueueImported, consoleComposerTabId, loadConsoleComposerDraft, saveConsoleComposerDraft, legacyConsoleQueueKey, purgeConsoleSendScope, removeOlderConsoleQueues } from "./lib/send-attempt-storage";
@@ -3088,6 +3089,12 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   // whoami named a caller who is no signed-in person: only signing in as
   // themselves lets them decide.
   const signInToDecide = Boolean(caller) && caller?.actorKind !== "person";
+  // Who looks at the approvals: the cards say whether a request waits for
+  // them and "Needs you" counts only those. Unknown without a whoami answer.
+  const approvalViewer = React.useMemo<ApprovalViewer | undefined>(
+    () => (caller ? { decides: caller.actorKind === "person", approverIds: caller.approverIds } : undefined),
+    [caller],
+  );
   const workGraphClaimant = caller && caller.actorKind !== "anonymous" ? caller.principal : undefined;
   const workGraphAdmin = caller?.canAdminister === true;
   // Signing out: this browser forgets what this user queued and drafted
@@ -3118,6 +3125,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       decide: async (pendingId, decision, signal) => (await consoleController.commands.execute({
         command: CONSOLE_COMMAND_NAMES.decideGating, target, signal,
         params: { pending_id: pendingId, decision, reason: `console_${decision}` },
+      })).result,
+      // Who decided a request that left the list elsewhere: the gating audit.
+      loadDecisions: async (signal) => (await consoleController.commands.execute({
+        command: CONSOLE_COMMAND_NAMES.listGatingAudit, target, signal, params: { limit: GATING_AUDIT_LIMIT },
       })).result,
     });
     approvalResourceRef.current = resource;
@@ -6578,6 +6589,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     <NavigationFocusProvider value={navigationFocus.value}>
     <PanelPreferencesProvider scope={sidebarPreferenceScope}>
     <HostDecideSourcesProvider value={hostAttentionSources}>
+    <ApprovalViewerProvider value={approvalViewer}>
     <div
       className={`cc-theme-scope meta-shell${display.settings.motion === "reduced" ? " reduced-motion" : ""}`}
       data-cc-theme={theme}
@@ -6715,6 +6727,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         ) : null}
       </div>
     </div>
+    </ApprovalViewerProvider>
     </HostDecideSourcesProvider>
     </PanelPreferencesProvider>
     </NavigationFocusProvider>

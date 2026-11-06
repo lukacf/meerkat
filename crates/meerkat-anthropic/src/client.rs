@@ -5299,7 +5299,12 @@ mod tests {
         let url = client.messages_endpoint();
         let mut betas = Vec::new();
         let (builder, _) = client
-            .apply_authorization(reqwest::Client::new().post(&url), &url, false, &mut betas)
+            .apply_authorization(
+                reqwest::Client::new().post(&url),
+                &url,
+                meerkat_core::HttpAuthorizationContent::default(),
+                &mut betas,
+            )
             .await
             .expect("the authorizer signs the request");
         let request = builder.build().expect("the request builds");
@@ -5333,7 +5338,12 @@ mod tests {
         let url = client.messages_endpoint();
         let mut betas = Vec::new();
         let (builder, _) = client
-            .apply_authorization(reqwest::Client::new().post(&url), &url, false, &mut betas)
+            .apply_authorization(
+                reqwest::Client::new().post(&url),
+                &url,
+                meerkat_core::HttpAuthorizationContent::default(),
+                &mut betas,
+            )
             .await
             .expect("the key signs the request");
         let request = builder.build().expect("the request builds");

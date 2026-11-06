@@ -101,6 +101,18 @@ them.
   enum named here is exhaustive, so a downstream exhaustive match needs the
   new arms, or a wildcard arm.
 
+- Behaviour-only (not measured by the gate): `meerkat-runtime`: Core checks
+  the binding of an in-process peer delivery that governed work sent against
+  that work's origin. When `PeerIngressCommsOrigin::governed_origin` is set,
+  an installed `PeerIngressBinder`'s binding must keep the origin's
+  requester, name the sending agent as its ingress actor and name every work
+  of the sending work (`GovernedPeerOrigin::sender_work`) as a contributor.
+  Core refuses any other binding as malformed (`check_bound_original` with
+  the new `BoundOriginalPin::GovernedDelivery`), and the delivery ends
+  rejected. Previously such a binding was admitted under whatever requester
+  the binder named. A delivery over a network, from an ungoverned sender or
+  from a supervisor is checked as before. See Upgrade notes.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -133,6 +145,46 @@ them.
   neither adopted nor retired, because the member's retirement started
   already. The member stays as it is, its own retirement ends it, and the
   next complete apply decides it again if it is still there.
+
+- Peers keep the original requester in process. A governed agent's comms
+  send in process carries the origin of the governed work it was sent
+  under: its requester, the sending agent, and every work it names. Core's
+  `OriginalRequesterPeerBinder` binds the receiving work under that
+  requester, with the sending agent as ingress actor and every work of the
+  sending work as a contributor. The receiving work is bound in the sending
+  work's realm and ingress domain, so each of its operations is narrowed by
+  the requester's current grant at every hop. The host supplies only the
+  receiving agent's own side through `PeerServiceBasis`: its basis for
+  serving peers, its destination, its controller, and first-writer-wins
+  custody of what Core binds. The binder refuses, typed
+  (`PeerIngressBindRefusal::Refused` with `PeerIngressBindDenial`):
+  - a delivery with no origin, such as a network delivery
+    (`origin_unverifiable`);
+  - a sending work whose original narrows nothing, such as a host-policy or
+    service-mandate basis (`sender_basis_unbounded`);
+  - a sending work past the contributor bound (`contributor_bound_exceeded`);
+  - a receiver the host holds no basis for (`no_peer_service_basis`);
+  - a delivery whose original the host already holds enrolled differently
+    (`enrollment_conflict`).
+
+- `meerkat-core`: `GovernedSendOrigin`;
+  `WorkAuthorizationContext::with_governed_send_origin` and
+  `governed_send_origin`; `PeerIngressQueueClaim::governed_send_origin`;
+  `CommsRuntime::send_with_governed_origin` (the default sends without the
+  origin).
+
+- `meerkat-comms`: `RuntimeCommsCommandHandle::send_with_governed_origin`.
+
+- `meerkat-runtime`:
+  - `GovernedPeerOrigin`, `PeerIngressCommsOrigin::governed_origin`,
+    `PeerIngressBindRefusal::Refused`, `PeerIngressBindDenial` and
+    `BoundOriginalPin::GovernedDelivery`;
+  - `OriginalRequesterPeerBinder` (`new`, `with_supervisor_binder`,
+    `with_custody_retention`) and `DEFAULT_PEER_CUSTODY_RETENTION`;
+  - `PeerServiceBasis`, `PeerServiceRequest`, `PeerServiceGrant`
+    (`#[non_exhaustive]`, built with `PeerServiceGrant::new` and
+    `with_represented_subject`), `PeerServiceRefusal` and
+    `PeerServiceFuture`.
 
 ### Changed
 
@@ -221,6 +273,41 @@ them.
   reconfigure had applied, and the switch stayed pending. The switch now
   finishes in a stopped or retired session as well. Affects 0.6.0 through
   0.9.10.
+
+### Upgrade notes
+
+- A host binder of in-process deliveries from governed work binds them
+  under the origin's requester (`GovernedPeerOrigin::requester`). It names
+  the sending agent (`GovernedPeerOrigin::sender_executor`) as ingress actor
+  and every `GovernedPeerOrigin::sender_work` entry as a contributor, and it
+  binds the receiving work in `GovernedPeerOrigin::namespace()`, as Core's
+  binder does: the contributors resolve only there, so a work bound in
+  another namespace is refused at admission or denied every operation.
+  Alternatively, install `OriginalRequesterPeerBinder` over the host's
+  `PeerServiceBasis`, keeping the host's own binder for supervisor
+  deliveries (`with_supervisor_binder`).
+
+- A `CommsRuntime` wrapper that overrides `send` should also forward
+  `send_with_governed_origin`. Otherwise its governed in-process sends carry
+  no origin, and Core's binder refuses them (`origin_unverifiable`).
+
+### Known limitations
+
+- Peers keep the original requester in process only. A delivery over a
+  network carries no origin, and Core's binder refuses it
+  (`origin_unverifiable`).
+
+- A runtime with `OriginalRequesterPeerBinder` installed refuses every
+  comms delivery that carries no governed origin (`origin_unverifiable`).
+  That includes in-process deliveries from an ungoverned sender, such as a
+  kickoff from an orchestrator that sends with no governed work. Only
+  supervisor-bridge deliveries have a fallback
+  (`with_supervisor_binder`).
+
+- The receiving work is bound in the sending work's ingress domain. A
+  receiver whose composition installs another ingress domain, such as a
+  peer under another composition or realm in the same process, refuses the
+  work at admission.
 
 ## [0.9.10] - 2026-11-04
 

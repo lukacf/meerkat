@@ -1432,7 +1432,7 @@ impl AnthropicClient {
         &self,
         mut request: reqwest::RequestBuilder,
         url: &str,
-        has_images: bool,
+        content: meerkat_core::HttpAuthorizationContent,
         request_betas: &mut Vec<String>,
     ) -> Result<
         (
@@ -1449,10 +1449,7 @@ impl AnthropicClient {
         };
         let mut extra = Vec::new();
         authorizer
-            .append_content_headers(
-                meerkat_core::HttpAuthorizationContent { has_images },
-                &mut extra,
-            )
+            .append_content_headers(content, &mut extra)
             .map_err(|error| LlmError::AuthenticationFailed {
                 message: error.to_string(),
             })?;
@@ -1487,7 +1484,7 @@ impl AnthropicClient {
         url: &str,
         body: &Value,
         betas: &[String],
-        has_images: bool,
+        content: meerkat_core::HttpAuthorizationContent,
         prepared: Option<&meerkat_llm_core::PreparedLlmRequest>,
         diagnostics: &mut Vec<LlmEvent>,
     ) -> Result<(reqwest::Response, meerkat_core::HttpAuthorizationReceipt), LlmError> {
@@ -1555,7 +1552,7 @@ impl AnthropicClient {
         #[cfg(target_arch = "wasm32")]
         let http = self.http()?;
         #[cfg(target_arch = "wasm32")]
-        let _ = has_images;
+        let _ = content;
         #[cfg(not(target_arch = "wasm32"))]
         let mut request_betas = betas.to_vec();
         #[cfg(target_arch = "wasm32")]
@@ -1566,7 +1563,7 @@ impl AnthropicClient {
             .header("Content-Type", "application/json");
         #[cfg(not(target_arch = "wasm32"))]
         let (mut request, receipt) = self
-            .apply_authorization(request, url, has_images, &mut request_betas)
+            .apply_authorization(request, url, content, &mut request_betas)
             .await?;
         #[cfg(target_arch = "wasm32")]
         let mut request = request
@@ -1813,10 +1810,13 @@ impl AnthropicClient {
             }
 
             let url = self.messages_endpoint();
-            let has_images = request.has_images();
+            let content = meerkat_core::HttpAuthorizationContent {
+                has_images: request.has_images(),
+                ..Default::default()
+            };
             let mut diagnostics = Vec::new();
             let response_with_receipt =
-                self.send_messages_request(&url, &body, &betas, has_images, prepared, &mut diagnostics).await;
+                self.send_messages_request(&url, &body, &betas, content, prepared, &mut diagnostics).await;
             for diagnostic in diagnostics.drain(..) { yield diagnostic; }
             let response_with_receipt = response_with_receipt?;
             #[cfg(not(target_arch = "wasm32"))]
@@ -1846,7 +1846,7 @@ impl AnthropicClient {
                     == meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
             {
                 let retried = self
-                    .send_messages_request(&url, &body, &betas, has_images, prepared, &mut diagnostics)
+                    .send_messages_request(&url, &body, &betas, content, prepared, &mut diagnostics)
                     .await;
                 for diagnostic in diagnostics.drain(..) { yield diagnostic; }
                 let retried = retried?;

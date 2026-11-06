@@ -1558,7 +1558,7 @@ impl OpenAiClient {
         &self,
         endpoint: &str,
         body: &Value,
-        has_images: bool,
+        content: meerkat_core::HttpAuthorizationContent,
         prepared: Option<&PreparedLlmRequest>,
         diagnostics: &mut Vec<LlmEvent>,
     ) -> Result<(reqwest::Response, meerkat_core::HttpAuthorizationReceipt), LlmError> {
@@ -1588,10 +1588,7 @@ impl OpenAiClient {
         if let Some(authorizer) = &self.authorizer {
             let mut content_headers = Vec::new();
             authorizer
-                .append_content_headers(
-                    meerkat_core::HttpAuthorizationContent { has_images },
-                    &mut content_headers,
-                )
+                .append_content_headers(content, &mut content_headers)
                 .map_err(|error| LlmError::AuthenticationFailed {
                     message: error.to_string(),
                 })?;
@@ -1633,7 +1630,7 @@ impl OpenAiClient {
         endpoint: &str,
         body: &Value,
         fallback_body: Option<Value>,
-        has_images: bool,
+        content: meerkat_core::HttpAuthorizationContent,
         prepared: Option<&PreparedLlmRequest>,
         diagnostics: &mut Vec<LlmEvent>,
     ) -> Result<reqwest::Response, LlmError> {
@@ -1642,7 +1639,7 @@ impl OpenAiClient {
         let mut refreshed_authorization = false;
         loop {
             let (response, receipt) = self
-                .send_responses_request(endpoint, current_body, has_images, prepared, diagnostics)
+                .send_responses_request(endpoint, current_body, content, prepared, diagnostics)
                 .await?;
             let status = response.status().as_u16();
             if (200..=299).contains(&status) {
@@ -2807,9 +2804,13 @@ impl OpenAiClient {
             let endpoint = self.responses_endpoint();
             let copilot_item_identity = self.copilot_responses_item_identity;
             let mut diagnostics = Vec::new();
+            let content = meerkat_core::HttpAuthorizationContent {
+                has_images: request.has_images(),
+                ..Default::default()
+            };
             let response = self
                 .responses_response_with_fallback(
-                    &endpoint, &body, fallback_body, request.has_images(), prepared, &mut diagnostics,
+                    &endpoint, &body, fallback_body, content, prepared, &mut diagnostics,
                 )
                 .await;
             for diagnostic in diagnostics { yield diagnostic; }
@@ -4843,7 +4844,7 @@ mod tests {
                 &endpoint,
                 &serde_json::json!({"stream": true}),
                 None,
-                false,
+                meerkat_core::HttpAuthorizationContent::default(),
                 None,
                 &mut Vec::new(),
             )
@@ -4875,7 +4876,7 @@ mod tests {
                 &endpoint,
                 &serde_json::json!({"stream": true}),
                 None,
-                false,
+                meerkat_core::HttpAuthorizationContent::default(),
                 None,
                 &mut Vec::new(),
             )
@@ -4929,7 +4930,7 @@ mod tests {
                     &client.responses_endpoint(),
                     &serde_json::json!({"previous_response_id":"resp_blocked"}),
                     Some(serde_json::json!({"input":[]})),
-                    false,
+                    meerkat_core::HttpAuthorizationContent::default(),
                     None,
                     &mut Vec::new(),
                 )

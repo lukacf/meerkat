@@ -141,6 +141,40 @@ them.
   literals need it): only a catalog for a connection that delivers decision
   notices lists `decision/notice`.
 
+- `meerkat-core`, `meerkat-runtime`: an admitted input can carry its original
+  requester (see Added), so three public structs gain a public field, and
+  code that builds them literally must set it (`None` keeps the previous
+  behaviour): `types::TranscriptMessageIdentity.requester:
+  Option<TurnRequester>`, `service::StartTurnRuntimeSemantics.requester:
+  Option<PrincipalRef>` (meerkat-core) and `input::InputHeader.requester:
+  Option<PrincipalRef>` (meerkat-runtime).
+
+- `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-runtime`: the
+  MeerkatMachine gains the input `BindInputRequesterBatchKey`.
+  `MeerkatMachineInput` (meerkat-machine-schema
+  `catalog::dsl::meerkat_machine` and meerkat-runtime `meerkat_machine::dsl`)
+  gains the variant `BindInputRequesterBatchKey`, the kernel
+  `generated::meerkat::Input` and `InputKind` gain `BindInputRequesterBatchKey`
+  (with the struct `inputs::BindInputRequesterBatchKey`), and the kernel
+  `generated::meerkat::TransitionId` gains `BindInputRequesterBatchKeyIdle`,
+  `BindInputRequesterBatchKeyAttached`, `BindInputRequesterBatchKeyRunning`,
+  `BindInputRequesterBatchKeyRetired` and `BindInputRequesterBatchKeyStopped`,
+  all appended last, so an exhaustive match needs their arms.
+
+- Behaviour-only (not measured by the gate): `meerkat-runtime`: a steer from
+  another requester no longer joins a running turn; it waits for a turn of
+  its own (see Changed). An input is refused when its host-supplied
+  requester is not a qualified principal or differs from its governed
+  association's requester, a keyed retry for another requester than the
+  input it would replay is an `InputIdempotencyConflict`, and an input whose
+  supersession key names a queued input of another requester is refused, as
+  one of another governed binding already is.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`: work that
+  carries a requester (`WorkSpec::with_requester`) is refused with
+  `MobError::UnsupportedForMode` unless it is host human input to a local
+  runtime-backed member, so the requester is never dropped on the way.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -298,6 +332,22 @@ them.
   does not know reads as `unknown`) and `WireDecisionNoticePresentation`,
   and the `decision/notice` entry of the RPC notification catalog.
 
+- `meerkat-core`, `meerkat-runtime`, `meerkat-mob`: an admitted input can
+  carry its original requester, an opaque, qualified principal that the host
+  supplies from the caller it authenticated, never from a request body, a
+  tool argument or model output. Core never interprets it. A host sets it
+  with `StartTurnRuntimeSemantics::with_requester` or `InputHeader.requester`
+  (for a mob member's host human input, `WorkSpec::with_requester`). It is
+  stored with the admitted input and returned on the input's receipt
+  (`InputState::requester`, after a restart too, and after the input's
+  payload retired), on the turn's transcript rows
+  (`TranscriptMessageIdentity.requester`, a `TurnRequester` that is direct
+  or carried) and to tool dispatch (`ToolDispatchContext::requester`, and
+  `ToolDispatchContext::direct_requester` for a requester that asked
+  directly, never one carried across a peer hop). `Input::requester` is the
+  one accessor: a governed input's requester is its work association's, any
+  other input's is the one its host supplied.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
@@ -315,6 +365,17 @@ them.
   and asks for its claim again, and the loop takes the kind over once that
   executor ends. `DecisionExecutorLoop::start` refuses a candidate launch
   whatever kinds it registers. See Breaking for the change to `start`.
+
+- `meerkat-runtime`: inputs of different requesters never share a run. The
+  requester joins the batch key the MeerkatMachine keeps for each input: an
+  ungoverned input with a requester is keyed by it (a governed input keeps
+  its binding's key, which already names its requester), so coalescing and
+  staging keep one requester per run, and a live-boundary join takes an
+  input only of the key its run staged. A steer from another requester, or
+  without a requester while the run has one (or the reverse), takes the
+  queued fallback and runs in a turn of its own. A recovered row keeps its
+  requester's key. The TLC lane runs a new audit of the rule
+  (`specs/machines/meerkat_machine/requester_batch_audit.sh`).
 
 ### Deprecated
 
@@ -422,6 +483,11 @@ them.
   states `[governance.decisions]`: 0.9.10 refuses a `[governance]` section
   with a `decisions` key, so a 0.9.10 process on the realm fails to load
   the realm's configuration document as a whole.
+
+- Stored input rows and transcript rows write the requester as one more
+  optional field. An older Core that reads them drops it, which leaves the
+  input and its turn without a requester, so nothing then acts for that
+  person.
 
 ### Known limitations
 

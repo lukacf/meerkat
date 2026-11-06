@@ -354,9 +354,11 @@ count. Reading it wakes no agent.
 The browser keeps these preferences in local storage, per signed-in user and
 console: the manual order, the Group and Sort choices and the pins follow the
 user and are kept when the `[agent_list]` configuration changes. The order of
-categories and subgroups and which of them are collapsed belong to that
-configuration and start over when it changes. Pins an earlier console kept
-carry over once.
+categories and subgroups and which of them are collapsed are kept per user too,
+for that configuration, and start over when it changes. Pins set in two tabs
+are both kept, and every tab shows them. Pins, and the category order and
+collapse an earlier console kept for every user of the runtime, carry over
+once.
 
 Non-addressable agents (e.g., Gate, Health Monitor) appear dimmed and cannot be messaged.
 
@@ -1270,6 +1272,25 @@ again in another tab, or coming back to the tab, brings the console back.
 Console requests do not follow redirects, so a front's redirect to its sign-in
 page reads as "sign in", never as an unknown outcome: a send it stopped reads
 **Not sent**. Messages already queued stay saved in this browser.
+
+### What this browser keeps
+
+The browser keeps each signed-in user's console data apart. Queued messages
+(in local storage) and unsent drafts (in each tab's session storage) are kept
+under the user's storage scope, the `storage_scope` of `/console/experience`;
+a host that passes `storageNamespace` gets it combined with that scope. The
+display settings, the sidebar's and the activity rail's collapse and the agent
+list's arrangement are kept per user too, and each tab saves the panel layout
+only when it changes it, so a tab left open does not undo what another tab
+arranged.
+
+**Sign out** removes the user's queued messages and drafts from this browser,
+in every tab of the console; preferences stay. A queue an earlier console kept
+for everyone using the browser (one that named no user, or a host namespace
+alone) is offered once as **Older queued messages**: importing it moves it to
+the user who imported it and removes the earlier copy, so no other user of
+the browser is offered it. A preference an earlier console kept for everyone
+is read once in the same way, by the first user who loads the console.
 
 ## Build system
 

@@ -118,6 +118,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the console. Release any other from the stdio RPC gateway, or let its
   lease end.
 
+- Hosts that pass `storageNamespace` to the stock console: messages queued
+  under the namespace alone are offered once, as **Older queued messages**,
+  to the first user who loads the console after the upgrade; drafts kept
+  under it start empty.
+
 ### Added
 
 - `meta/console/whoami` reports who the console acts as: the actor
@@ -159,6 +164,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Console requests do not follow redirects (`redirect: "manual"`), and a
   queued message the stock console sends on its own (when its agent becomes
   idle) waits for a fresh read of the console experience first.
+- The stock console keeps a host's `storageNamespace` combined with the
+  server's `storage_scope` instead of in its place, so users of one browser
+  never share queued messages or drafts. Its display settings, the sidebar's
+  and the activity rail's collapse, and the agent list's category order and
+  collapse are kept per signed-in user; a value an earlier console kept for
+  everyone using the browser is read once, by the first user who loads it.
+- Importing **Older queued messages** removes the earlier copy (the first
+  console's unscoped queue, the predecessor console's queue, or a queue kept
+  under a host namespace alone), so no other user of the browser is offered
+  it. **Sign out** removes the user's queued messages and drafts from the
+  browser, in every tab of the console; preferences stay.
 
 ### Fixed
 
@@ -175,6 +191,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A console send that a front redirected to its sign-in page reads
   **Not sent** (the request never reached the gateway). Before, it read as
   an unknown outcome that no check could settle.
+- Two tabs of the stock console on a plain-HTTP origin (no Web Locks) no
+  longer lose queued-message updates: the storage lock's IndexedDB fallback
+  waits until the other tab's queue write is visible before it changes the
+  queue.
+- Pins set in two tabs of the stock console are both kept, and every tab
+  follows them. A tab left open no longer rewrites the panel layout another
+  tab arranged each time it reloads the console experience.
 
 ## [0.9.10] - 2026-11-04
 

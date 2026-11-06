@@ -43,6 +43,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   token, or a login that ended before the decision was applied) is refused
   with the new refusal code `-32057`, kind `approver_unauthenticated`;
   nothing is decided. The stdio RPC gateway still takes `approver_id`.
+- Console memory quarantine reviews (`meta/memory/quarantine/decide`) and
+  WorkGraph goal confirmations (`meta/workgraph/goal/confirm`) follow the
+  same rule: a caller that is not a verified, current person is refused
+  with `-32057` `approver_unauthenticated`, and the reviewer recorded on a
+  quarantine decision is always the person.
+- A console WorkGraph claim (`meta/workgraph/claim`) is owned by its
+  caller: the console sets the owner from the connection, an `owner` that
+  names anyone else or carries a `display_name` is refused (`-32602`), and
+  an open console's caller without a token is refused with `-32057`, kind
+  `person_authentication_required`. Only the claim's owner releases it
+  from the console (`meta/workgraph/release`; anyone else gets `-32030`
+  `access_denied`). The stdio RPC gateway is unchanged.
 
 ### Security
 
@@ -64,6 +76,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   person on the connection, checked again right before the decision is
   applied. Before, an open console decided as whatever approver a request
   named.
+- Memory quarantine reviews and WorkGraph goal confirmations on the console
+  take their reviewer from the signed-in person too, and a WorkGraph claim
+  takes its owner from its caller. Before, an open console recorded a
+  review with no reviewer and a claim with whatever owner a request named,
+  and anyone who could manage the WorkGraph released anyone's claim.
 
 ### Upgrade
 
@@ -90,6 +107,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   People who decide approvals in the console sign in as themselves (an OIDC
   issuer, or an `auth_config` with `"accounts": "personal"`); a host that
   decides for someone else uses the stdio RPC gateway.
+- Console clients send WorkGraph claims without an `owner`. A claim made
+  through an earlier console carries the owner that request named (the
+  stock console named the signed-in subject, or `console-ops-lead`
+  without sign-in): only a caller with that principal releases it from
+  the console. Release any other from the stdio RPC gateway, or let its
+  lease end.
 
 ### Added
 
@@ -113,6 +136,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A console approval decision's audit entry records the assurance the
   console established (`deciding_assurance`) and a digest of the login it
   was made in (`login_scope_digest`), never the token or the login itself.
+- The stock console offers memory quarantine decisions and WorkGraph goal
+  confirmations only to a signed-in person, claims WorkGraph items as the
+  signed-in caller (an open console's caller without a token gets no
+  Claim) and offers Release only on the caller's own claims.
 
 ## [0.9.10] - 2026-11-04
 

@@ -885,7 +885,7 @@ impl MetaRuntimeHandle {
         &mut self,
         request: GatingDecideRequest,
     ) -> Result<GatingDecisionResult, GatingDecideError> {
-        let result = self.decide_gating_action_as(request, None);
+        let result = self.decide_gating_action_as(request, None, None);
         self.flush_gating_notices();
         result
     }
@@ -900,7 +900,7 @@ impl MetaRuntimeHandle {
         request: GatingDecideRequest,
         decider: &GatingDecider,
     ) -> Result<GatingDecisionResult, GatingDecideError> {
-        let result = self.decide_gating_action_as(request, Some(decider));
+        let result = self.decide_gating_action_as(request, Some(decider), None);
         self.flush_gating_notices();
         result
     }
@@ -922,10 +922,37 @@ impl MetaRuntimeHandle {
         Result<Result<GatingDecisionResult, GatingDecideError>, E>,
         GatingNoticeBatch,
     ) {
+        self.decide_gating_action_fenced(request, None, authorize)
+    }
+
+    /// [`Self::decide_gating_action_authorized`] for a decider whose
+    /// authentication the caller attests: the decision's audit entry records
+    /// `evidence` beside the deciding principal.
+    pub(crate) fn decide_gating_action_attested<E>(
+        &mut self,
+        request: GatingDecideRequest,
+        evidence: &GatingDecisionEvidence,
+        authorize: impl FnOnce(Option<&GatingPendingEntry>) -> Result<GatingDecider, E>,
+    ) -> (
+        Result<Result<GatingDecisionResult, GatingDecideError>, E>,
+        GatingNoticeBatch,
+    ) {
+        self.decide_gating_action_fenced(request, Some(evidence), authorize)
+    }
+
+    fn decide_gating_action_fenced<E>(
+        &mut self,
+        request: GatingDecideRequest,
+        evidence: Option<&GatingDecisionEvidence>,
+        authorize: impl FnOnce(Option<&GatingPendingEntry>) -> Result<GatingDecider, E>,
+    ) -> (
+        Result<Result<GatingDecisionResult, GatingDecideError>, E>,
+        GatingNoticeBatch,
+    ) {
         self.refresh_gating_timeouts();
         let pending = self.gating_pending.get(request.pending_id.trim()).cloned();
         let result = authorize(pending.as_ref())
-            .map(|decider| self.decide_gating_action_as(request, Some(&decider)));
+            .map(|decider| self.decide_gating_action_as(request, Some(&decider), evidence));
         (result, self.take_gating_notices())
     }
 
@@ -945,6 +972,7 @@ impl MetaRuntimeHandle {
         &mut self,
         request: GatingDecideRequest,
         decider: Option<&GatingDecider>,
+        evidence: Option<&GatingDecisionEvidence>,
     ) -> Result<GatingDecisionResult, GatingDecideError> {
         let now_ms = current_time_ms();
         self.refresh_gating_timeouts_at(now_ms);
@@ -1071,6 +1099,21 @@ impl MetaRuntimeHandle {
             }
         };
         let decided_at_ms = now_ms;
+        let mut detail = serde_json::json!({
+            "approver_id": approver_id,
+            "deciding_principal": decider.map(|decider| decider.principal.clone()),
+            "approver_binding": approver_binding,
+            "decision": decision,
+            "reason": reason,
+            "approval_route_id": pending_entry.approval_route_id,
+            "approval_delivery_id": pending_entry.approval_delivery_id,
+            "next_pending_id": next_pending_id,
+            "origin": pending_entry.origin,
+        });
+        if let Some(evidence) = evidence {
+            detail["deciding_assurance"] = serde_json::json!(evidence.assurance);
+            detail["login_scope_digest"] = serde_json::json!(evidence.login_scope_digest);
+        }
         self.append_gating_audit(GatingAuditEntry {
             audit_id: String::new(),
             timestamp_ms: 0,
@@ -1080,17 +1123,7 @@ impl MetaRuntimeHandle {
             actor_id: pending_entry.actor_id.clone(),
             risk_tier: pending_entry.risk_tier.clone(),
             outcome: outcome.clone(),
-            detail: serde_json::json!({
-                "approver_id": approver_id,
-                "deciding_principal": decider.map(|decider| decider.principal.clone()),
-                "approver_binding": approver_binding,
-                "decision": decision,
-                "reason": reason,
-                "approval_route_id": pending_entry.approval_route_id,
-                "approval_delivery_id": pending_entry.approval_delivery_id,
-                "next_pending_id": next_pending_id,
-                "origin": pending_entry.origin,
-            }),
+            detail,
         })
         .map_err(GatingDecideError::IdsUnavailable)?;
         self.gating_notice_queue.push(GatingResolutionNotice {

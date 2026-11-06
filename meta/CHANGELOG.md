@@ -52,6 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   so a page that rebinds its own name to the console's address cannot
   drive it.
 
+- A Flow Editor change on the console's listener re-checks, right before it
+  writes the draft store or writes a deploy's or a validation's archive and
+  runs `rkat`, that its caller's login is still current, and is refused with
+  `caller_not_current` otherwise; nothing is written or run.
+
 ### Upgrade
 
 - A front that mints one token per person with a shared secret adds
@@ -99,6 +104,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   ends the streams and voice sessions they opened; the caller's other logins
   and its schedules are untouched. Revoking a principal still ends every
   login of that principal.
+
+- The Flow Editor RPC on the console's listener takes
+  `expected_caller_scope` on its changes (draft writes, deploys with
+  `execute`, validations with `rkat_validate`) and refuses a change made for
+  another caller with `caller_changed`. Its `meta/capabilities` reports the
+  caller's scope as `auth.caller_scope`, and the stock Flow Editor sends it
+  back with every request.
 
 ## [0.9.10] - 2026-11-04
 

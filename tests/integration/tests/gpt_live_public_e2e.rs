@@ -11055,26 +11055,44 @@ fn s101_heard_responses(timeline: &[TimelineEntry]) -> Vec<(Option<u64>, &str, u
         .map(|entry| entry.detail_u64("t_ms").unwrap_or(entry.t_ms))
         .collect();
     let mut heard = Vec::new();
-    for response in timeline
+    for (position, response) in timeline
         .iter()
-        .filter(|entry| entry.kind == TimelineKind::ResponseEnd)
+        .enumerate()
+        .filter(|(_, entry)| entry.kind == TimelineKind::ResponseEnd)
     {
         let text = response.detail_str("text").unwrap_or_default();
         if s101_compact(text).is_empty() {
             continue;
         }
         let index = response.detail_u64("index");
-        // The response began at its first audio, or at its end when no
-        // audio was detected; an input final before that preceded it.
-        let started_ms = timeline
-            .iter()
-            .find(|entry| {
-                entry.kind == TimelineKind::AssistantAudioStart
-                    && index.is_some()
-                    && entry.detail_u64("response") == index
-            })
-            .map_or(response.t_ms, |entry| entry.t_ms.min(response.t_ms));
-        let after_inputs = input_finals.iter().filter(|t| **t < started_ms).count();
+        let audio_start = timeline.iter().find(|entry| {
+            entry.kind == TimelineKind::AssistantAudioStart
+                && index.is_some()
+                && entry.detail_u64("response") == index
+        });
+        let after_inputs = match audio_start {
+            // The response began at its first audio; an input final before
+            // that preceded it.
+            Some(start) => {
+                let started_ms = start.t_ms.min(response.t_ms);
+                input_finals.iter().filter(|t| **t < started_ms).count()
+            }
+            // No audio was detected (the playback duck muted the whole
+            // response, or it stayed under the energy threshold), so no
+            // start time orders it. Its end time does not either: the peer
+            // pushes `response_end` when the next user transcript delta
+            // arrives, right after stamping that delta, so a one-delta
+            // utterance after the response can carry the earlier stamp.
+            // The input finals already on the timeline then are the
+            // utterances heard before the response: its first output delta
+            // closed any open one, and the first user delta after it ended
+            // the response.
+            None => timeline
+                .iter()
+                .take(position)
+                .filter(|entry| entry.kind == TimelineKind::InputFinal)
+                .count(),
+        };
         heard.push((index, text, after_inputs));
     }
     heard

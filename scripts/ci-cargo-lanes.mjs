@@ -280,7 +280,15 @@ import {
   profileFilter,
 } from "./ci-hook-coverage.mjs";
 import { loadNonRustReaders, readerPackagesFor, readerSelectionsFor, WHOLE_CHECKOUT } from "./ci-non-rust-readers.mjs";
-import { CORE, PRODUCTS_PATH, defaultMembersProblem, loadProducts, productOfPath, productRootPrefixes } from "./ci-products.mjs";
+import {
+  CORE,
+  PRODUCTS_PATH,
+  defaultMembersProblem,
+  loadProducts,
+  productOfPath,
+  productRootPrefixes,
+  testFeaturesOf,
+} from "./ci-products.mjs";
 import {
   REUSE_CLASSIFIER,
   RELEASE_PROJECTION_MODE,
@@ -1685,12 +1693,66 @@ function shortName(name) {
 
 // A feature suite's package flags: its package with its features, or, for a
 // suite built `with` other packages, all of them and its features named by
-// package (`--features <package>/<feature>`).
-export function featureSuiteFlags(suite) {
+// package (`--features <package>/<feature>`); then each selected member's
+// test features (withTestFeatures). `byName` maps package names to cargo
+// metadata packages (by default the workspace's own).
+export function featureSuiteFlags(suite, byName = workspaceByName()) {
   const companions = suite.with ?? [];
-  if (companions.length === 0) return `-p ${suite.package} --features ${suite.features.join(",")}`;
+  if (companions.length === 0) return withTestFeatures(`-p ${suite.package} --features ${suite.features.join(",")}`, byName);
   const packages = [suite.package, ...companions].map((name) => `-p ${name}`).join(" ");
-  return `${packages} --features ${suite.features.map((feature) => `${suite.package}/${feature}`).join(",")}`;
+  return withTestFeatures(
+    `${packages} --features ${suite.features.map((feature) => `${suite.package}/${feature}`).join(",")}`,
+    byName,
+  );
+}
+
+// The workspace's packages by name, from cargo metadata, read once.
+let workspaceByNameCache = null;
+function workspaceByName() {
+  workspaceByNameCache ??= new Map(workspacePackages(readMetadata()).map((pkg) => [pkg.name, pkg]));
+  return workspaceByNameCache;
+}
+
+// A test row's package flags (`-p NAME ...`, an optional
+// `--no-default-features` and `--features LIST`) with each selected
+// member's test features (scripts/ci-products.mjs testFeaturesOf: its
+// [package.metadata.meerkat.standalone-tests] features and `workspace-tests`
+// when it declares that feature), which no dev-dependency turns on. They join
+// the row's own list: bare beside a single `-p` whose list is bare, named by
+// package otherwise (a bare name would reach every selected member that
+// declares it). A row whose members have none is returned unchanged.
+// Whole-workspace rows take the lane selection's test flags instead
+// (ci-hook-coverage.mjs laneSelections).
+export function withTestFeatures(flags, byName) {
+  const tokens = flags.split(/\s+/).filter(Boolean);
+  const names = [];
+  let at = -1;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if ((token === "-p" || token === "--package") && tokens[index + 1]) {
+      names.push(tokens[++index]);
+    } else if ((token === "--features" || token === "-F") && tokens[index + 1] && at < 0) {
+      at = ++index;
+    } else if (token !== "--no-default-features") {
+      throw new Error(`test row flags hold ${token}, which withTestFeatures does not read: ${JSON.stringify(flags)}`);
+    }
+  }
+  if (names.length === 0) throw new Error(`test row flags select no package: ${JSON.stringify(flags)}`);
+  const list = at < 0 ? [] : tokens[at].split(",").filter(Boolean);
+  const bare = names.length === 1 && list.every((feature) => !feature.includes("/"));
+  const merged = [...list];
+  for (const name of names) {
+    const pkg = byName.get(name);
+    if (!pkg) throw new Error(`test row selects unknown package ${name}`);
+    for (const feature of testFeaturesOf(pkg)) {
+      const spelled = bare ? feature : `${name}/${feature}`;
+      if (!merged.includes(spelled)) merged.push(spelled);
+    }
+  }
+  if (merged.length === list.length) return flags;
+  if (at < 0) return [...tokens, "--features", merged.join(",")].join(" ");
+  tokens[at] = merged.join(",");
+  return tokens.join(" ");
 }
 
 // A feature suite's nextest filters: a suite built `with` other packages runs
@@ -1875,7 +1937,10 @@ export function readerRows({ selections, result, byName, heavyChain, deferToPush
     rows.push({
       name: `reader ${label}`,
       packages: [selection.package],
-      package_flags: `-p ${selection.package}${selection.features.length ? ` --features ${selection.features.join(",")}` : ""}`,
+      package_flags: withTestFeatures(
+        `-p ${selection.package}${selection.features.length ? ` --features ${selection.features.join(",")}` : ""}`,
+        byName,
+      ),
       test_flags: [...targets, ...filter].join(" "),
       targets,
       filtered: filter.length > 0,
@@ -2020,10 +2085,12 @@ function countCanaryTests(source, prefix) {
 // its own product's selection; `selections` the selections' flags.
 function hookParityRows({ scope, byName, laneFeatures, selections, model, maxTestRows, nextestText, hook, libRowRunner, productOf = () => "core", productStack = () => null, excluded = new Set(), excludedTests = [] }) {
   const rows = [];
+  // A row's selection: its product's lane selection with that selection's
+  // test features (the members' test features, which every test build passes).
   const flagsOf = (product) => {
     const selection = selections.selections.get(product);
     if (!selection) throw new Error(`no lane selection for product ${product}`);
-    return selection.flags;
+    return selection.testFlags;
   };
   const testTargets = (name) =>
     byName.get(name).targets.filter((target) => target.kind.length === 1 && target.kind[0] === "test");
@@ -2584,7 +2651,7 @@ function plan(args) {
       name: `${shortName(suite.package)}[${suite.id}]`,
       packages: [suite.package],
       features: [...suite.features],
-      package_flags: featureSuiteFlags(suite),
+      package_flags: featureSuiteFlags(suite, byName),
       estimated_minutes: estimatedMinutes(weights.get(suite.package)),
       pull_request: suite.pullRequest !== false,
       ...(suite.rustMinStack ? { rust_min_stack: suite.rustMinStack } : {}),
@@ -2852,7 +2919,7 @@ function plan(args) {
             .map((shard) => withProduct(shard, product)),
       ),
     ];
-    const archived = result.core_changed ? archivedLanes(archivedPackages, featureSuites) : { builds: [], runs: [] };
+    const archived = result.core_changed ? archivedLanes(archivedPackages, featureSuites, byName) : { builds: [], runs: [] };
     result.main_archive_builds = archived.builds;
     result.main_archive_runs = archived.runs;
     // Feature-gated suites: all of them on main (an archived package's
@@ -2950,7 +3017,10 @@ function plan(args) {
   ).map((suite) => ({
     name: suite.name ?? shortName(suite.package),
     packages: [suite.package],
-    package_flags: `-p ${suite.package}${suite.features?.length ? ` --features ${suite.features.join(",")}` : ""}`,
+    package_flags: withTestFeatures(
+      `-p ${suite.package}${suite.features?.length ? ` --features ${suite.features.join(",")}` : ""}`,
+      byName,
+    ),
     ...(suite.tests?.length ? { test_flags: suite.tests.map((test) => `--test ${test}`).join(" ") } : {}),
   }));
   result.integration_suites = selectedSuites.filter((suite) => !deferToPush || !heavyChain.has(suite.packages[0]));
@@ -3162,12 +3232,13 @@ function plan(args) {
   // The targets each unit-lane row runs: its packages' lib and bin targets.
   // Cargo refuses --lib when no package of a run has a library (rkat and
   // surface-build-fixtures are binaries only), so a row names only the
-  // kinds its packages have.
+  // kinds its packages have. Its package flags carry its members' test
+  // features (a feature suite's already do).
   for (const key of ["unit_shards", "unit_feature_shards", "main_unit_shards", "main_feature_unit_shards"]) {
     result[key] = result[key].map((row) => {
       const flags = targetFlags(row.packages.map((name) => byName.get(name)), { tests: false });
       if (flags.length === 0) throw new Error(`unit row ${row.name} has no lib or bin target`);
-      return { ...row, targets: flags.join(" ") };
+      return { ...row, package_flags: withTestFeatures(row.package_flags, byName), targets: flags.join(" ") };
     });
   }
   // Long rows first (see the header).
@@ -3280,7 +3351,7 @@ function releaseProjectionPlan(args, changed, pathReason) {
 // default-feature lane and per feature suite of that package, and
 // `partitions` run rows per archive that execute it with
 // `--partition hash:k/n`.
-function archivedLanes(archivedPackages, featureSuites) {
+function archivedLanes(archivedPackages, featureSuites, byName) {
   const builds = [];
   const runs = [];
   const add = (archive, name, packageFlags, partitions, rustMinStack) => {
@@ -3301,7 +3372,7 @@ function archivedLanes(archivedPackages, featureSuites) {
     }
   };
   for (const [pkg, lane] of [...archivedPackages].sort(([a], [b]) => a.localeCompare(b))) {
-    add(shortName(pkg), shortName(pkg), `-p ${pkg}`, lane.partitions, null);
+    add(shortName(pkg), shortName(pkg), withTestFeatures(`-p ${pkg}`, byName), lane.partitions, null);
     for (const suite of featureSuites.filter((candidate) => candidate.packages[0] === pkg)) {
       add(
         suite.name.replaceAll(/[^A-Za-z0-9_-]+/g, "-").replace(/-+$/, ""),

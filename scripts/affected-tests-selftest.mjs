@@ -33,7 +33,7 @@ import {
 } from "./affected-tests.mjs";
 import { INTEGRATION_SUITES, LIVE_ONLY_FEATURES } from "./ci-cargo-lanes.mjs";
 import { parseNonRustReaders } from "./ci-non-rust-readers.mjs";
-import { loadProducts } from "./ci-products.mjs";
+import { loadProducts, testFeaturesOf } from "./ci-products.mjs";
 import { packageDir, readMetadata, workspacePackages } from "./rust-test-selector.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -398,7 +398,10 @@ check("a library change runs its package and reverse dependencies, per product",
   const metaRow = tests.find((line) => line.includes("-p meerkat-meta --profile"));
   assert.ok(metaRow?.startsWith(`RUST_MIN_STACK=${META_STACK} `), "Meta's row runs on Meta's stack, apart from Core's");
   assert.match(metaRow, /-E 'not \(binary_id\(meerkat-meta::idle_cpu_gate\)\)'/, "CI's hosted-runner exclusion is applied");
-  assert.ok(tests.some((line) => line.includes("-p meerkat-auth-core --features aws-sigv4,gcp-auth,azure-ad --lib --profile ci-pr")), "the feature suites of the tested packages run");
+  assert.ok(
+    tests.some((line) => line.includes("-p meerkat-auth-core --features aws-sigv4,gcp-auth,azure-ad,workspace-tests --lib --profile ci-pr")),
+    "the feature suites of the tested packages run, with the package's test features",
+  );
   assert.ok(tests.some((line) => line.includes("--workspace --exclude meerkat-meta --test e2e_fast_lane --profile ci-unit -E 'binary(e2e_fast_lane)' --no-tests=fail")), "the plan's e2e-fast row runs");
   assert.ok(!tests.some((line) => line.includes("--test runtime_contracts")), "a plain closure-tests row is covered by the package run");
   assert.ok(tests.some((line) => line.includes("-p xtask --profile ci-integration")), "the whole-checkout reader of a package outside the closure runs");
@@ -533,6 +536,61 @@ check("a feature-bearing suite keeps its features for a narrowed target it holds
   assert.ok(
     lines(oracle, "tests").includes(nextest(`-p meerkat-machine-kernels --features test-oracle --test kernel_round_trip --profile ${ROW_PROFILE} --no-tests=fail`)),
     lines(oracle, "tests").join("\n"),
+  );
+});
+
+// The fixture context with test features on some packages: name ->
+// { declared: [standalone-tests features], workspaceTests: boolean }, read
+// by scripts/ci-products.mjs testFeaturesOf as in a cargo metadata package.
+function withDeclaredTestFeatures(ctx, declarations) {
+  const packages = new Map(
+    [...ctx.packages].map(([name, pkg]) => {
+      const declaration = declarations[name];
+      if (!declaration) return [name, pkg];
+      const declared = declaration.declared ?? [];
+      const features = Object.fromEntries([...declared, ...(declaration.workspaceTests ? ["workspace-tests"] : [])].map((feature) => [feature, []]));
+      return [name, { ...pkg, features, metadata: declared.length > 0 ? { meerkat: { "standalone-tests": { features: declared } } } : null }];
+    }),
+  );
+  return { ...ctx, packages };
+}
+
+check("every test run passes its packages' test features", () => {
+  const ctx = withDeclaredTestFeatures(fixtureContext(), {
+    "meerkat-runtime": { declared: ["test-support", "sqlite-store"] },
+    "meerkat-integration-tests": {},
+    "meerkat-sqlite": { workspaceTests: true },
+  });
+  const runtimeChange = (suiteFeatures) =>
+    pushPlan({
+      mode: "packages",
+      rust_changed: true,
+      packages: ["meerkat-runtime"],
+      closure: ["meerkat-integration-tests", "meerkat-meta", "meerkat-runtime"],
+      integration_suites: [{ name: "runtime", packages: ["meerkat-runtime"], package_flags: `-p meerkat-runtime --features ${suiteFeatures}` }],
+    });
+  // The closure run names each package's test features by package.
+  const plain = lines(selectCommands({ paths: ["crates/meerkat-runtime/src/lib.rs"], push: runtimeChange("test-support,sqlite-store"), pr: NO_PR, ctx }), "tests");
+  assert.ok(
+    plain.some((line) =>
+      line.includes(`-p meerkat-integration-tests -p meerkat-runtime --features meerkat-runtime/test-support,meerkat-runtime/sqlite-store --profile ${TEST_PROFILE} --no-tests=pass`),
+    ),
+    plain.join("\n"),
+  );
+  // A suite of only those features runs nothing the closure run does not;
+  // one that adds a feature still runs.
+  assert.ok(!plain.some((line) => line.includes("--test '*'")), plain.join("\n"));
+  const live = lines(selectCommands({ paths: ["crates/meerkat-runtime/src/lib.rs"], push: runtimeChange("test-support,sqlite-store,live"), pr: NO_PR, ctx }), "tests");
+  assert.ok(live.includes(nextest(`-p meerkat-runtime --features test-support,sqlite-store,live --test '*' --profile ${ROW_PROFILE} --no-tests=fail`)), live.join("\n"));
+  // A narrowed run adds them to its targets' own features.
+  const sqlite = pushPlan({ mode: "packages", rust_changed: true, packages: ["meerkat-sqlite"], closure: ["meerkat-sqlite"], shards: [] });
+  const narrowed = lines(selectCommands({ paths: ["crates/meerkat-sqlite/tests/feature_only.rs"], push: sqlite, pr: NO_PR, ctx }), "tests");
+  assert.ok(narrowed.includes(nextest(`-p meerkat-sqlite --features slow-tests,workspace-tests --test feature_only --profile ${TEST_PROFILE} --no-tests=fail`)), narrowed.join("\n"));
+  // So does a reader run.
+  const readers = lines(selectCommands({ paths: ["docs/guide.md"], push: pushPlan(), pr: NO_PR, ctx }), "tests");
+  assert.ok(
+    readers.includes(nextest(`-p meerkat-sqlite --features workspace-tests --test lock_sources --profile ${ROW_PROFILE} -E 'test(/(^|::)(every_host_is_listed)$/)' --no-tests=fail`)),
+    readers.join("\n"),
   );
 });
 
@@ -712,6 +770,17 @@ check("end to end: a test-only edit of cold_restart_resume keeps the store-resta
   const out = cli("--", "crates/meerkat/tests/cold_restart_resume.rs");
   assert.equal(out.status, 0, out.stderr);
   assert.ok(runsWithFeatures(out.stdout, "meerkat", "cold_restart_resume", suiteNamed("meerkat-store-restart").features), out.stdout.join("\n"));
+});
+
+check("end to end: a narrowed target carries its package's test features", () => {
+  // meerkat-runtime's test features are more than the target's crate-level
+  // gate (sqlite-store): every one of them is passed.
+  const out = cli("--", "crates/meerkat-runtime/tests/pre_ledger_realm_bridge.rs");
+  assert.equal(out.status, 0, out.stderr);
+  const runtime = workspacePackages(readMetadata()).find((pkg) => pkg.name === "meerkat-runtime");
+  const features = testFeaturesOf(runtime);
+  assert.ok(features.length > 1, "meerkat-runtime declares test features");
+  assert.ok(runsWithFeatures(out.stdout, "meerkat-runtime", "pre_ledger_realm_bridge", features), out.stdout.join("\n"));
 });
 
 check("end to end: every feature-bearing integration suite keeps its features for a narrowed target", () => {

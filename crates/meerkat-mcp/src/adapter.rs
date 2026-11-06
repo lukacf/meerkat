@@ -738,7 +738,9 @@ impl McpRouterAdapter {
     /// every staging entry refuse before taking a router guard, a connect
     /// attempt stops and spawns or connects nothing more, each held stdio
     /// server's client is closed and then its process under its own
-    /// bounds, and each remote connection's client is closed. A close
+    /// bounds, and each remote connection's client is closed. The governed
+    /// attachment controls the router retains for a re-add after a sign-in
+    /// are released, even if the router is never shut down. A close
     /// already running is joined. A later call returns a ticket over the
     /// same closes, and [`Self::shutdown_with_report`] joins them for the
     /// same outcomes. Call it within a Tokio runtime.

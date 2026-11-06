@@ -85,6 +85,7 @@ fn trusted_oidc() -> TrustedOidcRuntimeConfig {
         jwks_json: r#"{"keys":[{"kid":"kid-current","kty":"oct","alg":"HS256","k":"cGhhc2U3LXRydXN0ZWQtY3VycmVudC1zZWNyZXQ"},{"kid":"kid-next","kty":"oct","alg":"HS256","k":"cGhhc2U3LXRydXN0ZWQtbmV4dC1zZWNyZXQ"}]}"#.to_string(),
         audience: "meerkat-console".to_string(),
         require_verified_email: false,
+        shared_account_tokens: false,
     }
 }
 
@@ -472,6 +473,7 @@ fn phase7_config_flow_trusted_oidc_values_control_auth_outcome() {
         jwks_json: r#"{"keys":[{"kid":"strict-kid","kty":"oct","alg":"HS256","k":"c3RyaWN0LXNlY3JldA"}]}"#.to_string(),
         audience: "strict-aud".to_string(),
         require_verified_email: false,
+        shared_account_tokens: false,
     };
     let strict_token = sign_hs256(
         json!({

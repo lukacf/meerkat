@@ -468,7 +468,8 @@ class ConsoleScenario:
         config.console_read_only, config.console_require_app_auth = False, True
         config.http_listen, config.http_public_base_url = "127.0.0.1:" + str(self.port), self.origin
         config.auth_config = {"provider": "jwt", "shared_secret": KEY.decode(),
-            "issuer": ISSUER, "audience": AUDIENCE, "email_allowlist": [EMAIL]}
+            "issuer": ISSUER, "audience": AUDIENCE, "email_allowlist": [EMAIL],
+            "accounts": "personal"}
         access = directory / "console-access.toml"
         access.write_text('enabled = true\nadmins = ' + json.dumps(self.native_admin_subjects()) + '\n\n[[rules]]\n'
             'id = "controlled-console-original"\nsubjects = ["' + EMAIL + '"]\n'

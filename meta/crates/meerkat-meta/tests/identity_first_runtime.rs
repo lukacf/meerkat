@@ -912,9 +912,51 @@ struct CountingBridge {
     /// Set while the declared apply unlists: each retirement it starts is
     /// journaled for that cause, as Core's seal journals it.
     sealing: AtomicBool,
+    /// The runtime mode Core runs an identity's member in
+    /// ([`Self::run_member_in`]); Core's default mode otherwise.
+    core_runtime_modes: Mutex<BTreeMap<AgentIdentity, meerkat_mob::MobRuntimeMode>>,
 }
 
 impl CountingBridge {
+    /// Core runs `identity`'s member in `mode` from now on, whatever the
+    /// roster declares for it (a restamp Core has not carried out yet).
+    fn run_member_in(&self, identity: &AgentIdentity, mode: meerkat_mob::MobRuntimeMode) {
+        self.core_runtime_modes
+            .lock()
+            .unwrap()
+            .insert(identity.clone(), mode);
+    }
+
+    /// Core's entry read of `identity`, from the members Core holds: an
+    /// identity entry when Core holds it declared, its live member in the
+    /// runtime mode Core runs it in.
+    fn core_identity_entry(
+        &self,
+        identity: &AgentIdentity,
+    ) -> meerkat_meta::identity_first::CoreIdentityEntry {
+        let mut read = if self.declared.contains(identity) {
+            meerkat_meta::identity_first::CoreIdentityEntry::entry()
+        } else {
+            meerkat_meta::identity_first::CoreIdentityEntry::not_an_entry()
+        };
+        if let Some(member) = self.core.live(identity) {
+            let mode = self
+                .core_runtime_modes
+                .lock()
+                .unwrap()
+                .get(identity)
+                .copied()
+                .unwrap_or_default();
+            read = read.with_member(meerkat_meta::identity_first::CoreMember::seated(
+                member.generation,
+                member.session_id,
+                member.profile,
+                mode,
+            ));
+        }
+        read
+    }
+
     /// Each seat request Core received so far, in order.
     fn seats(&self) -> Vec<(AgentIdentity, Option<meerkat_core::types::SessionId>)> {
         self.seats.lock().unwrap().clone()
@@ -1396,6 +1438,13 @@ impl SessionBridge for CountingBridge {
         identity: &AgentIdentity,
     ) -> Result<meerkat_meta::identity_first::MemberStanding, BridgeError> {
         Ok(self.core.standing(identity))
+    }
+
+    async fn identity_entry(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<meerkat_meta::identity_first::CoreIdentityEntry, BridgeError> {
+        Ok(self.core_identity_entry(identity))
     }
 
     async fn durable_identity_members(
@@ -4435,6 +4484,80 @@ async fn internal_dispatch_on_autonomous_host_skips_injection_typed() {
                 && matches!(entry.surface, meerkat_meta::memory::InjectionSurface::Turn)
         }),
         "no surface=Turn row may exist for an autonomous-host member: {log:?}"
+    );
+}
+
+/// Agent memory decides recall from the runtime mode Core runs the member
+/// in, never from the roster's declaration of it. The roster moved the
+/// identity to turn-driven on the same profile while Core still runs its
+/// member autonomous-host (the restamp waits for the member to go idle), so
+/// the delivery carries no injected context, which Core refuses on an
+/// autonomous-host member.
+///
+/// RED before memory injection read Core's runtime mode: the identity
+/// runtime read the declared mode (turn-driven) and injected recall, and
+/// Core refused the whole delivery (`InjectedContextUndeliverable`).
+#[tokio::test]
+async fn memory_injection_follows_core_runtime_mode_after_a_mode_change() {
+    let memory_dir = tempfile::tempdir().unwrap();
+    let memory_store =
+        Arc::new(meerkat_meta::SqliteAgentMemoryStore::open(memory_dir.path()).unwrap());
+    let provider: Arc<dyn meerkat_meta::AgentMemoryProvider> = memory_store.clone();
+    let id = make_identity("triage:moved");
+    provider
+        .remember(
+            "default",
+            &id,
+            meerkat_meta::NewAgentMemory {
+                title: "Deploy policy".to_string(),
+                body: "Deploys are frozen on Fridays.".to_string(),
+                tags: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    let injector = AgentMemoryRuntimeInjector::new(
+        provider,
+        meerkat_meta::AgentMemoryConfig {
+            selection: AgentMemorySelection::Always,
+            ..meerkat_meta::AgentMemoryConfig::default()
+        },
+    );
+
+    let store = Arc::new(LocalContinuityStore::in_memory().unwrap());
+    let lease_prov = Arc::new(LocalLeaseProvider::new());
+    let bridge = Arc::new(CountingBridge::default());
+    let runtime = make_runtime_with_bridge(store, lease_prov, bridge.clone());
+    runtime.set_agent_memory(Some(injector)).await;
+
+    // The roster declares the identity turn-driven; Core still runs its
+    // member autonomous-host.
+    let mut moved = make_spec("triage:moved");
+    moved.runtime_mode_override = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+    bridge.run_member_in(&id, meerkat_mob::MobRuntimeMode::AutonomousHost);
+    let result = restore_flow(&runtime, &[moved], None, None).await.unwrap();
+    assert!(
+        !matches!(
+            result.outcomes.get(&id).unwrap(),
+            RestoreOutcome::Refused(_)
+        ),
+        "restore must succeed for the dispatch to reach the bridge"
+    );
+
+    let input = DispatchInput {
+        content: meerkat_core::ContentInput::Text("what is the deploy policy?".to_string()),
+        origin: DispatchOrigin::Scheduler,
+        correlation_id: None,
+        idempotency_key: None,
+    };
+    runtime.dispatch(&id, &input).await.unwrap();
+
+    let contexts = bridge.delivered_injected_context.lock().await.clone();
+    assert_eq!(contexts.len(), 1, "exactly one delivery expected");
+    assert!(
+        contexts[0].is_empty(),
+        "a member Core runs autonomous-host receives no injected context, whatever the roster \
+         declares: {contexts:?}"
     );
 }
 

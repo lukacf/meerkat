@@ -8100,4 +8100,84 @@ schedule = true
         }
         Ok(())
     }
+
+    /// A schedule fire's refusal class comes from Core's entry of the
+    /// identity, read for the fire, never from a read that stood in for it.
+    /// While Core's member history cannot be read and Core holds the member
+    /// Broken, Core's final refusal of the member's wake ends the fire as a
+    /// member that cannot be materialized; and while Core's entry of the
+    /// identity cannot be read either, the fire stays reclaimable (retried),
+    /// never rejected.
+    ///
+    /// RED before the class read Core's entry: it read the identity's whole
+    /// status, took a read that failed for "not Broken", and rejected the
+    /// fire (`RuntimeRejected`) of a member Core holds Broken.
+    #[tokio::test]
+    async fn schedule_fire_refusal_class_comes_from_core_not_a_defaulted_read()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::identity_first::IdentityRuntimeError as Refusal;
+        use crate::identity_first::core_test_bridge::CoreReadsBridge;
+
+        let bridge = Arc::new(CoreReadsBridge::default());
+        let runtime = crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()?
+                ),
+                lease_provider: Arc::new(crate::identity_first::LocalLeaseProvider::new()),
+                runtime_instance_id: "schedule-fire-refusal-class".to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(bridge.clone()),
+                default_timeout: None,
+            },
+        );
+        let alice = crate::identity_first::AgentIdentity::parse("personal:alice")?;
+        crate::identity_first::core_test_bridge::register_live(
+            &runtime,
+            &bridge.core,
+            crate::identity_first::DurableAgentSpec {
+                identity: alice.clone(),
+                profile: meerkat_mob::ProfileName::from("personal"),
+                addressability: crate::identity_first::AgentAddressability::Addressable,
+                display_name: None,
+                labels: BTreeMap::new(),
+                context: None,
+                additional_instructions: Vec::new(),
+                initial_message: None,
+                runtime_mode_override: None,
+                backend: None,
+                binding: None,
+                placement: None,
+            },
+            1,
+            SessionId::new(),
+        )
+        .await?;
+        bridge.core.mark_broken(
+            &alice,
+            crate::identity_first::CoreBrokenMember::new("the member's restore failed"),
+        );
+        // Core's final refusal of the wake of a member it holds Broken, as
+        // the identity runtime answers it.
+        let refusal = Refusal::AdmissionFailed {
+            identity: alice.clone(),
+            detail: "Core holds the member Broken: its restore failed".to_string(),
+        };
+
+        bridge.fail_history_reads(0, u64::MAX);
+        assert_eq!(
+            classify_identity_fire_refusal(&runtime, &alice, &refusal).await,
+            IdentityFireRefusal::Final(meerkat::DeliveryFailureReason::TargetMaterializationFailed),
+            "Core's entry says the member is Broken: the fire ends typed"
+        );
+
+        bridge.fail_entry_reads(0, u64::MAX);
+        assert_eq!(
+            classify_identity_fire_refusal(&runtime, &alice, &refusal).await,
+            IdentityFireRefusal::Retry,
+            "an entry read Core could not serve leaves the fire reclaimable"
+        );
+        Ok(())
+    }
 }

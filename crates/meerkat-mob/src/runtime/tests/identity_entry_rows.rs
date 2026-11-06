@@ -428,6 +428,81 @@ async fn agent_lane_retire_of_an_entry_is_refused_identity_member() {
     );
 }
 
+/// A turn-driven spec of the externally addressable `lead` profile.
+fn addressable_spec(name: &str) -> SpawnMemberSpec {
+    let mut spec = SpawnMemberSpec::new("lead", id(name));
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    spec
+}
+
+/// External work (what a mob's external surfaces submit: a member send from
+/// outside the mob) does not reach an identity entry. Core refuses it
+/// `MobError::IdentityMember` before any delivery, whatever the member's
+/// addressability: the entry's host reaches it through its own door, as
+/// internal work. External work still reaches an externally addressable
+/// worker.
+///
+/// RED: drop the `not_an_identity_entry` guard of MobMachine's
+/// `SubmitWorkRunningExternal` (with its rejection arm): the external send
+/// reaches the entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_work_to_an_identity_entry_is_refused_identity_member() {
+    let mob = EntryMob::new("entry-external-work").await;
+    mob.handle
+        .spawn_spec(addressable_spec("door-entry").with_entry_custody(true))
+        .await
+        .expect("the host declares its entry");
+    mob.handle
+        .spawn_spec(addressable_spec("door-worker"))
+        .await
+        .expect("an externally addressable worker");
+
+    let error = mob
+        .handle
+        .member(&id("door-entry"))
+        .await
+        .expect("the entry's member")
+        .send(
+            "hello from outside the mob".to_string(),
+            meerkat_core::types::HandlingMode::Queue,
+        )
+        .await
+        .expect_err("external work does not reach an identity entry");
+    assert!(is_identity_member(&error, "door-entry"), "{error:?}");
+
+    mob.handle
+        .member(&id("door-worker"))
+        .await
+        .expect("the worker")
+        .send(
+            "hello from outside the mob".to_string(),
+            meerkat_core::types::HandlingMode::Queue,
+        )
+        .await
+        .expect("external work reaches an externally addressable worker");
+
+    let entry = mob
+        .handle
+        .get_member(&id("door-entry"))
+        .await
+        .expect("the roster read")
+        .expect("the entry's member");
+    mob.handle
+        .submit_work_with_mode(
+            entry.agent_runtime_id,
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new(
+                "hello from the entry's host".to_string(),
+                WorkOrigin::Internal,
+            ),
+            meerkat_core::types::HandlingMode::Queue,
+        )
+        .await
+        .expect("the entry's host reaches it as internal work");
+    assert_eq!(mob.entry("door-entry"), Some(IdentityEntryOrigin::Declared));
+}
+
 /// An entry's origin rides on its seat's or spawn's `MemberSpawned` row, so
 /// a restart restores the entry from the journal alone, and the restored
 /// entry keeps its name reserved. The entries page in identity order.

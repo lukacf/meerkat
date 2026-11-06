@@ -4121,3 +4121,61 @@ async fn a_door_wake_of_an_unseated_entry_revives_its_archived_session() {
     );
     boot.stop().await;
 }
+
+/// An identity the roster declares internal only, on a profile whose members
+/// Core's mob makes externally addressable: a send through the raw member
+/// door (the mob's external work) is refused by Core, typed
+/// (`identity_member`), and nothing reaches the member. Only the identity's
+/// own door reaches it, and that door keeps its addressability policy.
+///
+/// RED before Core refused external work to an identity entry: Core admitted
+/// it, as the member's profile is externally addressable, so the raw door
+/// reached the identity's member past its addressability.
+#[tokio::test(flavor = "multi_thread")]
+async fn raw_door_send_to_an_internal_only_identity_is_refused_by_core() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let mob_id = unique_mob_id("raw-door-internal-only");
+    let mut quiet = spec("quiet");
+    quiet.addressability = AgentAddressability::InternalOnly;
+    let roster = vec![quiet];
+    let boot = Boot::start(&state, &mob_id, &roster).await;
+    boot.compile(&roster).await;
+    let requests = boot.capture.count();
+
+    let sent = meerkat_meta::mob_handle_runtime::send_message_on_mob(
+        &boot.unified.mob_handle(),
+        "quiet",
+        "hello from outside the mob",
+    )
+    .await;
+    match sent {
+        Err(meerkat_meta::MobRuntimeError::Mob(meerkat_mob::MobError::IdentityMember {
+            member_id,
+        })) => assert_eq!(
+            member_id,
+            meerkat_meta::member_comms_id::roster_member_id_for_identity("quiet")
+        ),
+        other => panic!(
+            "Core refuses external work to an identity entry, typed identity_member: {other:?}"
+        ),
+    }
+    let refused = boot
+        .runtime()
+        .send(
+            &id("quiet"),
+            &meerkat_core::ContentInput::Text("hello through the identity door".to_string()),
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(IdentityRuntimeError::NotAddressable(_))),
+        "the identity's own door keeps its addressability: {refused:?}"
+    );
+    sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        boot.capture.count(),
+        requests,
+        "no turn of the internal-only identity reached the LLM"
+    );
+    boot.stop().await;
+}

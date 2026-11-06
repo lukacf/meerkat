@@ -5382,6 +5382,116 @@ comms = true
         Ok(())
     }
 
+    /// A send to a name Core holds as an identity entry, before this
+    /// process's first roster pass registered the identity, goes through the
+    /// identity door, never the raw member door that skips the identity's
+    /// guards. The identity door refuses it typed and retryable until the
+    /// pass registers the identity, and nothing is delivered.
+    ///
+    /// RED before the door was chosen from Core's entry: Meta chose it from
+    /// its own registrations, which are empty until the first roster pass,
+    /// so the send took the raw member door.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_before_the_first_roster_pass_goes_through_the_identity_door() -> Result<(), String>
+    {
+        let definition = meerkat_mob::MobDefinition::from_toml(
+            r#"
+[mob]
+id = "send-before-the-first-roster-pass-test"
+
+[profiles.worker]
+model = "gpt-5.5"
+external_addressable = true
+"#,
+        )
+        .map_err(|err| format!("definition parses: {err:?}"))?;
+        let runtime = crate::UnifiedRuntime::builder()
+            .definition(definition)
+            .default_llm_client(std::sync::Arc::new(
+                meerkat_client::TestClient::for_provider(meerkat_core::Provider::OpenAI),
+            ))
+            .build()
+            .await
+            .map_err(|err| format!("runtime builds: {err:?}"))?;
+        let bridge = std::sync::Arc::new(
+            crate::identity_first::core_test_bridge::CoreReadsBridge::default(),
+        );
+        let alice = crate::identity_first::AgentIdentity::parse("door-alice")
+            .map_err(|err| format!("a valid identity: {err:?}"))?;
+        // An earlier process's roster pass declared the identity: Core holds
+        // it as an entry, its member seated.
+        crate::identity_first::core_test_bridge::bind_live(
+            &bridge.core,
+            &alice,
+            &meerkat_mob::ProfileName::from("worker"),
+            1,
+            Some(meerkat_core::types::SessionId::new()),
+        )
+        .map_err(|err| format!("Core's member: {err:?}"))?;
+        bridge.hold_declared(&alice);
+        // This process has run no roster pass: it registered nothing.
+        let identity_rt = std::sync::Arc::new(crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: std::sync::Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()
+                        .map_err(|err| format!("in-memory continuity store: {err:?}"))?,
+                ),
+                lease_provider: std::sync::Arc::new(
+                    crate::identity_first::LocalLeaseProvider::new(),
+                ),
+                runtime_instance_id: "send-before-the-first-roster-pass".to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(bridge.clone()),
+                default_timeout: None,
+            },
+        ));
+
+        match resolve_send_message_target(&runtime, Some(&identity_rt), "door-alice").await {
+            Ok(SendMessageTarget::Identity { identity, .. }) if identity == alice => {}
+            Ok(SendMessageTarget::Identity { identity, .. }) => {
+                return Err(format!("the send must name {alice}, not {identity}"));
+            }
+            Ok(SendMessageTarget::MobMember) => {
+                return Err(
+                    "a name Core holds as an identity entry must never take the raw member door"
+                        .to_string(),
+                );
+            }
+            Ok(SendMessageTarget::AuthorityUnavailable { alias }) => {
+                return Err(format!(
+                    "a plain identity takes the identity door, not the reserved-alias refusal \
+                     ({alias})"
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Core's entry reads, so the door is chosen: {error}"
+                ));
+            }
+        }
+        let refused = identity_rt
+            .send(
+                &alice,
+                &meerkat_core::ContentInput::Text("hello".to_string()),
+            )
+            .await;
+        match refused {
+            Err(error) if error.clears_on_its_own() => {}
+            other => {
+                return Err(format!(
+                    "the identity door refuses an identity its roster pass has not registered \
+                     yet, typed and retryable: {other:?}"
+                ));
+            }
+        }
+        if !bridge.delivered().is_empty() {
+            return Err("nothing reaches the member before its registration".to_string());
+        }
+        let _ = runtime.mob_handle().stop().await;
+        Ok(())
+    }
+
     /// `meta/run_flow` resolves every `role_targets` member id by the
     /// member-id alias rule before anything runs. Under identity authority a
     /// generated alias that is not the current incarnation is refused with

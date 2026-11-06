@@ -60,6 +60,8 @@ use crate::memory::records::{
 };
 
 mod build_preparation;
+#[cfg(test)]
+mod core_views_tests;
 mod declare;
 mod lifecycle_projection;
 mod records;

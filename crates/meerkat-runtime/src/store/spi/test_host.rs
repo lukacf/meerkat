@@ -89,6 +89,9 @@ pub(crate) struct Faults {
     /// call arrives, and the answer reaches the caller this much later, as
     /// over a slow network.
     pub(crate) acquire_delay: Option<Duration>,
+    /// Grants that answer the token they superseded, which holds the fence
+    /// again, instead of a new one: a store that broke its token order.
+    pub(crate) grant_reuses_token: u32,
     /// Head loads that answer `Unavailable`.
     pub(crate) load_head_unavailable: u32,
     /// Retries of a batch that already landed that answer `Unavailable`
@@ -288,6 +291,21 @@ impl TestHost {
     fn decide_acquire(&self, mode: AcquireMode) -> Result<FenceGrant, HostStoreError> {
         decide_acquire(&self.state, self.timing, mode)
     }
+
+    /// [`Self::decide_acquire`], except that a grant answers the token it
+    /// superseded, which holds the fence again with a fresh lease.
+    fn decide_acquire_reusing_token(
+        &self,
+        mode: AcquireMode,
+    ) -> Result<FenceGrant, HostStoreError> {
+        let grant = self.decide_acquire(mode)?;
+        let mut state = self.state();
+        state.token -= 1;
+        Ok(FenceGrant {
+            token: FenceToken::new(state.token),
+            ..grant
+        })
+    }
 }
 
 /// An acquire's answer, decided now: a live holder answers an exclusive
@@ -359,7 +377,15 @@ impl HostStore for TestHost {
         if hang {
             std::future::pending::<()>().await;
         }
-        let answer = self.decide_acquire(mode);
+        let reuse = self.faults().grant_reuses_token > 0;
+        let answer = if reuse {
+            self.decide_acquire_reusing_token(mode)
+        } else {
+            self.decide_acquire(mode)
+        };
+        if reuse && answer.is_ok() {
+            self.faults().grant_reuses_token -= 1;
+        }
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }

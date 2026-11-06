@@ -3979,3 +3979,7 @@ mod abandoned_acquire;
 
 /// A commit sends nothing past its token's self-fence deadline (#1550).
 mod settle_deadline;
+
+/// A grant at or below the token the writer holds breaks the store's token
+/// order.
+mod token_order;

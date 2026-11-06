@@ -1137,6 +1137,11 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
         self.sync_client().output_token_limit()
     }
 
+    /// The current route's account prompt limit.
+    fn prompt_token_limit(&self) -> Option<u32> {
+        self.sync_client().prompt_token_limit()
+    }
+
     async fn prepare_controller_credential(&self) -> Result<(), AuthError> {
         self.connection
             .resolved_authorizer()
@@ -1432,6 +1437,10 @@ impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
             .limits
             .max_output_tokens
             .or_else(|| self.inner.output_token_limit())
+    }
+
+    fn prompt_token_limit(&self) -> Option<u32> {
+        self.inner.prompt_token_limit()
     }
 
     fn project_replay_messages(

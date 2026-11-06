@@ -631,13 +631,49 @@ pub struct CopilotModelSupports {
     pub min_thinking_budget: Option<u32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// The state of the account's policy for a model, as `/models` states it.
+/// Only `enabled` lets the account's routes serve the model; any other state
+/// is kept as stated, so a refusal can name it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
 pub enum CopilotModelPolicyState {
     Enabled,
     Disabled,
-    #[serde(other)]
-    Unknown,
+    /// Any other state, as stated (for example `unconfigured`).
+    Other(String),
+}
+
+impl CopilotModelPolicyState {
+    /// The state as `/models` states it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+            Self::Other(state) => state,
+        }
+    }
+}
+
+impl From<String> for CopilotModelPolicyState {
+    fn from(state: String) -> Self {
+        match state.as_str() {
+            "enabled" => Self::Enabled,
+            "disabled" => Self::Disabled,
+            _ => Self::Other(state),
+        }
+    }
+}
+
+impl From<CopilotModelPolicyState> for String {
+    fn from(state: CopilotModelPolicyState) -> Self {
+        match state {
+            CopilotModelPolicyState::Other(state) => state,
+            known @ (CopilotModelPolicyState::Enabled | CopilotModelPolicyState::Disabled) => {
+                known.as_str().to_string()
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -2756,6 +2756,7 @@ fn model_aware_compaction_config(
     provider: Provider,
     model: &str,
     build_threshold_override: Option<std::num::NonZeroU64>,
+    _account_prompt_token_limit: Option<u32>,
 ) -> meerkat_core::CompactionConfig {
     let mut compaction: meerkat_core::CompactionConfig = config.compaction.clone().into();
     // Keep only an explicit host cap here. Built-in clients attach the current
@@ -10253,6 +10254,7 @@ impl AgentFactory {
                     provider,
                     &model,
                     build_config.auto_compact_threshold_override,
+                    None,
                 ),
             ));
             builder = builder.compactor(compactor);
@@ -12606,8 +12608,14 @@ mod tests {
             .model_registry(meerkat_models::canonical())
             .expect("registry");
 
-        let compaction =
-            model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5", None);
+        let compaction = model_aware_compaction_config(
+            &config,
+            &registry,
+            Provider::OpenAI,
+            "gpt-5.5",
+            None,
+            None,
+        );
 
         assert_eq!(compaction.auto_compact_threshold, 840_000);
     }
@@ -12624,6 +12632,7 @@ mod tests {
             Provider::OpenAI,
             "gpt-6-astra",
             None,
+            None,
         );
         assert_eq!(compaction.auto_compact_threshold, 737_600);
         assert_eq!(
@@ -12639,6 +12648,7 @@ mod tests {
             Provider::OpenAI,
             "gpt-6-astra",
             None,
+            None,
         );
         assert_eq!(explicit.auto_compact_threshold, 42_000);
         let build_override = model_aware_compaction_config(
@@ -12647,6 +12657,7 @@ mod tests {
             Provider::OpenAI,
             "gpt-6-astra",
             std::num::NonZeroU64::new(9_000),
+            None,
         );
         assert_eq!(build_override.auto_compact_threshold, 9_000);
     }
@@ -12707,6 +12718,7 @@ mod tests {
             Provider::Anthropic,
             "claude-fable-5",
             None,
+            None,
         );
         assert_eq!(compaction.max_request_bytes, None);
 
@@ -12716,6 +12728,7 @@ mod tests {
             Provider::Anthropic,
             "claude-fable-5",
             Some(std::num::NonZeroU64::new(1_234).expect("non-zero")),
+            None,
         );
         assert_eq!(overridden.auto_compact_threshold, 1_234);
         assert_eq!(overridden.max_request_bytes, None);
@@ -12757,6 +12770,7 @@ mod tests {
             &registry,
             Provider::Anthropic,
             "claude-fable-5",
+            None,
             None,
         );
 
@@ -13242,8 +13256,14 @@ mod tests {
             .model_registry(meerkat_models::canonical())
             .expect("registry");
 
-        let compaction =
-            model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5", None);
+        let compaction = model_aware_compaction_config(
+            &config,
+            &registry,
+            Provider::OpenAI,
+            "gpt-5.5",
+            None,
+            None,
+        );
 
         assert_eq!(compaction.auto_compact_threshold, 42_000);
     }
@@ -13257,8 +13277,14 @@ mod tests {
             .model_registry(meerkat_models::canonical())
             .expect("registry");
 
-        let compaction =
-            model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5", None);
+        let compaction = model_aware_compaction_config(
+            &config,
+            &registry,
+            Provider::OpenAI,
+            "gpt-5.5",
+            None,
+            None,
+        );
 
         assert_eq!(compaction.auto_compact_threshold, 100_000);
     }
@@ -23608,6 +23634,7 @@ mod tests {
             Provider::OpenAI,
             "gpt-5.5",
             std::num::NonZeroU64::new(9_000),
+            None,
         );
 
         assert_eq!(

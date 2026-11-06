@@ -1885,6 +1885,10 @@ label = "Host"
 url = "/host/attention"
 decide_href = "/host/decide?decision={decision_id}"
 
+[sign_out]
+href = "/logout"
+method = "post"
+
 [actions]
 inspect_label = "Profile"
 chat_label = "Open chat"
@@ -1912,6 +1916,7 @@ subgroup_by = ["labels.org"]
 | `agent_list` | Grouping selectors, section order, default pins, badges, and empty states. |
 | `actions` | Operator-facing action labels and visibility toggles. |
 | `attention` | Host-provided attention items for **Needs you** (see below). |
+| `sign_out` | The host's sign-out, offered from the top bar's identity chip (see below). |
 | `realms.<id>` | Partial overlay applied when the gateway is launched for a realm. |
 
 Agent grouping selectors and badge fields support `labels.<key>`, `label:<key>`, raw label keys, and direct fields such as `group`, `subgroup`, `role`, `kind`, `identity`, `member_id`, and `agent_id`.
@@ -1936,6 +1941,12 @@ The console reads every source with the operator's session (`credentials: "same-
 **Needs you** counts the sources' items with the pending gating approvals. The inbox lists them after the approvals as cards with one **Open** link (named after the item's title), which loads `href` top-level; a single pending approval is still opened directly. A console without a gating surface (an aggregate console) shows only the host items there. The console never approves, rejects or changes an item: the host page decides. A source that fails (network error, non-2xx answer, malformed body) is named in the inbox as `Could not read: <label>` and hides nothing else. Gating approvals do not depend on any source.
 
 A source may also name `decide_href`, a same-origin path where the host decides an approval that this console session cannot (a read-only session). On such a session each pending approval card, in the **Approvals** inbox and in an agent's chat, shows one **Decide in** link per source that names `decide_href`, named after the source label and loaded top-level, instead of the disabled decision buttons. A settled or expired card shows no link. `{decision_id}` in `decide_href` is replaced by the request's id, URL-encoded once, so `decide_href = "/host/decide?decision={decision_id}"` opens that request on the host page; without the placeholder the link is the host's page in general. A `decide_href` that is not a same-origin path, before or after the id is filled in, is dropped and the source's items stay. A read-only session with no usable link keeps the disabled buttons.
+
+### Sign-out
+
+The console signs nobody in or out itself: the front that signs people in owns both. `[sign_out]` names that front's sign-out so the top bar's identity chip, which shows who the console acts as (`meta/console/whoami`), can offer **Sign out**. `href` is a same-origin path (the operator panel path rules above); `method` is `"get"` (the default: a link to `href`) or `"post"` (a form posted to `href`, for a sign-out that takes a POST, such as the Forge front's `/logout`). Any other `method` fails the console configuration; an `href` that is not a same-origin path drops the sign-out. A realm overlay's `sign_out` replaces the default one.
+
+Before the browser leaves for `href`, **Sign out** tells this browser's other tabs of the console, which leave their views at once. Without `[sign_out]` the chip still names the caller and offers no sign-out.
 
 <Note>
 `ConsoleUiConfig` is intentionally view-level. It controls presentation, ordering, labels, default pins, and links; it does not decide runtime authorization, routing, or whether an agent exists.

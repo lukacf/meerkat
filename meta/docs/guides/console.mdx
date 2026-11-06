@@ -1239,6 +1239,38 @@ or another browser-ambient credential, that host must add origin and CSRF
 protection before exposing mutation routes such as `/console/rpc`,
 `/console/rpc/multipart`, or `/console/send`.
 
+### Who the console acts as
+
+The top bar names the caller the console acts as, from
+`meta/console/whoami`: the signed-in person, a shared account (a token that
+names no person), a service, or **Not signed in** on an open console. Its menu
+offers **Sign out** when the console configuration names `[sign_out]` (see
+[sign-out](/reference/configuration#sign-out)).
+
+The stock console names that caller on every console request
+(`expected_caller_scope`, and `expectedCallerScope` on an MCP Apps tool call):
+the `caller_scope` its `whoami` read reported. Its first change waits for that
+read. The gateway refuses a change made for another caller (`caller_changed`),
+so a message queued by one person is never sent as another.
+
+When someone else signs in to the same browser, every tab of the console
+notices at once: a tab that learns its caller tells this browser's other tabs
+of the console, and a tab whose caller differs, or whose request was refused
+with `caller_changed`, drops what it shows (transcripts, approvals, host items,
+the previous caller's queued messages and drafts), stops its streams and loads
+again as the new caller. A queued message the console sends on its own (an
+agent became idle) waits for a fresh read of the console experience first, so
+it is never sent under a login that changed meanwhile.
+
+A login that ends puts the console in one sign-in state: a 401,
+`caller_not_current`, or a front that redirects a console request to its
+sign-in page. No view of the ended login stays on screen. **Sign in** reloads
+the console page so the front can sign the browser in again, and signing in
+again in another tab, or coming back to the tab, brings the console back.
+Console requests do not follow redirects, so a front's redirect to its sign-in
+page reads as "sign in", never as an unknown outcome: a send it stopped reads
+**Not sent**. Messages already queued stay saved in this browser.
+
 ## Build system
 
 The console has two build modes:

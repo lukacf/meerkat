@@ -56,6 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   from the console (`meta/workgraph/release`; anyone else gets `-32030`
   `access_denied`). The stdio RPC gateway is unchanged.
 
+- Rust: `ConsoleUiConfig` gains `sign_out` (`Option<ConsoleSignOutConfig>`,
+  `#[serde(default)]`). A host that builds the struct literally adds
+  `sign_out: None` to keep today's behaviour.
+
 ### Security
 
 - Tokens minted with an `auth_config` shared secret no longer count as a
@@ -129,6 +133,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   from `meta/console/whoami`), and a change made for another caller is
   refused with `caller_changed`.
 
+- The stock console's top bar names who the console acts as (the signed-in
+  person, a shared account, a service, or nobody on an open console), with
+  **Sign out** when the console configuration names `[sign_out]`: `href`, a
+  same-origin path, and `method`, `"get"` (a link, the default) or `"post"`
+  (a form, for a front whose sign-out takes a POST).
+
 ### Changed
 
 - The stock console sends no approver with a decision and shows approvals
@@ -140,6 +150,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   confirmations only to a signed-in person, claims WorkGraph items as the
   signed-in caller (an open console's caller without a token gets no
   Claim) and offers Release only on the caller's own claims.
+
+- The stock console names its caller (`expected_caller_scope`, the
+  `caller_scope` of its `meta/console/whoami` read) on every console
+  request, voice and MCP Apps tool calls included; its first change waits
+  for that read. A send refused with `caller_changed` reads **Not sent**, and
+  the console loads again as the caller the gateway now serves.
+- Console requests do not follow redirects (`redirect: "manual"`), and a
+  queued message the stock console sends on its own (when its agent becomes
+  idle) waits for a fresh read of the console experience first.
+
+### Fixed
+
+- Switching the signed-in user in one tab of the stock console clears the
+  previous user's views, approvals, host items and queued messages at once,
+  in every tab of that console in the browser. Before, other tabs noticed
+  at their next 15-second experience read, and could send the previous
+  user's queued message under the new login.
+- An ended login (a 401, `caller_not_current`, or a front that redirects a
+  console request to its sign-in page) shows one sign-in state instead of
+  stale data. Approvals are no longer marked denied for good and the
+  timeline stream no longer stops without a word; signing in again in
+  another tab, or coming back to the tab, brings the console back.
+- A console send that a front redirected to its sign-in page reads
+  **Not sent** (the request never reached the gateway). Before, it read as
+  an unknown outcome that no check could settle.
 
 ## [0.9.10] - 2026-11-04
 

@@ -2498,7 +2498,9 @@ pub enum RunStartHoldReason {
     /// it settles a run a crash left open, with
     /// [`MeerkatMachine::settle_retained_run`]): it starts no run until its
     /// host releases this hold. No mob or Meta code stages or releases this
-    /// reason; only the host that staged it does.
+    /// reason; only the host that staged it does. A mob that retires or
+    /// destroys the member drops what the host staged for the member's
+    /// session.
     HostRecovery,
 }
 

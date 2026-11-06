@@ -18,11 +18,10 @@ use crate::input_state::InputTerminalOutcome;
 pub struct RetainedRunSettledInput {
     /// The input's id.
     pub input_id: InputId,
-    /// The committed input terminal: `Abandoned { reason: Cancelled }` for
-    /// an input the settle ended. Read from the live ledger, then the
-    /// durable row of an archived input; `None` only when neither retains
-    /// the row (an ephemeral runtime that already released it).
-    pub terminal: Option<InputTerminalOutcome>,
+    /// The input's committed terminal, `Abandoned { reason: Cancelled }`:
+    /// read from the live ledger, then the durable row of an archived input,
+    /// under the session's mutation gate once the settlement committed.
+    pub terminal: InputTerminalOutcome,
 }
 
 /// What [`crate::MeerkatMachine::settle_retained_run`] found and did.
@@ -31,10 +30,16 @@ pub struct RetainedRunSettledInput {
 pub enum RetainedRunSettlement {
     /// `run_id` was the run the session retained (marked resumable by its
     /// registration and not begun again), and it was settled without
-    /// resuming: every input bound to it ended `Abandoned { reason:
-    /// Cancelled }`, its provisional tail was closed as an interrupted run
-    /// (every committed round kept, open calls answered as outcome-unknown,
-    /// the interrupted notice appended), and no model request was made.
+    /// resuming: read under the session's mutation gate once the settlement
+    /// committed, the registration no longer marks the run, every input
+    /// bound to it ended `Abandoned { reason: Cancelled }`, its provisional
+    /// tail was closed as an interrupted run (every committed round kept,
+    /// open calls answered as outcome-unknown, the interrupted notice
+    /// appended), and no model request was made. A settlement that did not
+    /// commit (its write failed, another writer took the session store's
+    /// fence, or an unregister ended the run first, its inputs then ending
+    /// `Abandoned { reason: Stopped }`) is never answered `Settled`: the call
+    /// answers the registration's refusal instead.
     Settled {
         run_id: RunId,
         inputs: Vec<RetainedRunSettledInput>,
@@ -42,10 +47,12 @@ pub enum RetainedRunSettlement {
     /// No run is current and none is retained: there is nothing to settle,
     /// and nothing changed.
     NotRetained,
-    /// The session is busy, and nothing changed: a run is current
-    /// (`current_run_id`: the retained run resumed, or another run started),
-    /// or the registration cannot settle the run it retained now (it is
-    /// initializing, retiring, stopped, or draining for its unregister,
-    /// whose next registration finds the run open again).
+    /// The session is busy, and nothing changed. With `current_run_id`, a
+    /// run is current (the retained run resumed, or another run started),
+    /// and it is never stopped here. Without one, the registration cannot
+    /// settle the run it retained now: it is initializing, retiring, stopped,
+    /// or draining for its unregister, whose next registration finds the run
+    /// open again. The run may still be open: a host keeps its hold and
+    /// settles again.
     Busy { current_run_id: Option<RunId> },
 }

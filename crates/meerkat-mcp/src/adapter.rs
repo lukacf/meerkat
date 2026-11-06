@@ -2951,7 +2951,99 @@ mod tests {
                 .expect("plan")
                 .with_owner_witness(stale)
                 .expect("stale witness");
-            assert!(!adapter.operation_target_matches(router, "echo", &stale_plan));
+            assert!(!adapter.operation_target_matches(router, call, &stale_plan));
+        }
+        adapter.shutdown().await;
+    }
+
+    /// The router states, with each resolved call's MCP operation, the digest
+    /// of the call's exact request: SHA-256 of the RFC 8785 canonical JSON of
+    /// its server, raw operation and arguments. Two calls whose arguments are
+    /// equal as JSON values (members in another order, numbers in another
+    /// form) have one digest, any other change another, and a plan resolved
+    /// for one call's arguments is not the live router's for another's.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn the_mcp_router_digest_is_canonical_over_server_tool_and_arguments() {
+        let server_path = mcp_test_server::fixture_binary();
+        let mut router = generated_surface_router();
+        router
+            .stage_add(test_server_config("srv", &server_path))
+            .expect("stage add");
+        router.apply_staged().await.expect("apply staged");
+        let adapter = McpRouterAdapter::new(router);
+        adapter
+            .wait_until_ready(async_connect_test_timeout())
+            .await
+            .expect("the server connects");
+        let resolve = |args: &serde_json::value::RawValue| {
+            AgentToolDispatcher::resolve_execution_plan(
+                &adapter,
+                ToolCallView {
+                    id: "call-1",
+                    name: "echo",
+                    args,
+                },
+                &meerkat_core::ToolDispatchContext::default(),
+                &meerkat_core::ToolExecutionResolutionContext::new(
+                    meerkat_core::ToolDeadlineChain::new(vec![
+                        meerkat_core::ToolDeadlineContributor::finite(
+                            meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                            Duration::from_mins(10),
+                        ),
+                    ])
+                    .expect("deadline chain"),
+                ),
+            )
+            .expect("a resolved plan")
+        };
+        let digest_of = |plan: &meerkat_core::ResolvedToolExecutionPlan| {
+            plan.owner_witness(&adapter.execution_authority_key())
+                .and_then(meerkat_core::ToolExecutionOwnerWitness::request_digest)
+                .cloned()
+        };
+        let raw = |text: &str| {
+            serde_json::value::RawValue::from_string(text.to_string()).expect("arguments")
+        };
+        let first_args = raw(r#"{"message": "hi", "repeat": 2.0, "tags": ["a", "b"]}"#);
+        let first = resolve(&first_args);
+        let canonical = r#"{"arguments":{"message":"hi","repeat":2,"tags":["a","b"]},"server":"srv","tool":"echo"}"#;
+        assert_eq!(
+            digest_of(&first),
+            Some(meerkat_core::approval::decision::Sha256Digest::of(
+                canonical.as_bytes()
+            )),
+            "the digest is SHA-256 of the canonical JSON of the server, the raw operation \
+             and the arguments"
+        );
+        assert_eq!(
+            digest_of(&first),
+            meerkat_core::mcp_request_digest(
+                "srv",
+                "echo",
+                &serde_json::json!({"tags": ["a", "b"], "repeat": 2, "message": "hi"})
+            )
+        );
+        let reordered_args = raw(r#"{"tags":["a","b"],"repeat":2,"message":"hi"}"#);
+        assert_eq!(digest_of(&resolve(&reordered_args)), digest_of(&first));
+        let other_args = raw(r#"{"message": "hi", "repeat": 3, "tags": ["a", "b"]}"#);
+        assert_ne!(digest_of(&resolve(&other_args)), digest_of(&first));
+        // Arguments with no canonical form state no digest.
+        let unrepresentable_args = raw(r#"{"message": "hi", "repeat": 9007199254740993}"#);
+        assert_eq!(digest_of(&resolve(&unrepresentable_args)), None);
+        {
+            let guard = adapter.router.read().await;
+            let router = guard.as_ref().expect("router");
+            let call = |args| ToolCallView {
+                id: "call-1",
+                name: "echo",
+                args,
+            };
+            assert!(adapter.operation_target_matches(router, call(&reordered_args), &first));
+            assert!(
+                !adapter.operation_target_matches(router, call(&other_args), &first),
+                "a plan resolved for one request is not dispatched for another"
+            );
         }
         adapter.shutdown().await;
     }

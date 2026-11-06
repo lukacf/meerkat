@@ -3,6 +3,7 @@
 //! correlated access relation; they are not production ingress implementations.
 #![allow(clippy::expect_used)]
 
+mod approval_operation;
 mod audit;
 mod connector_approval;
 mod delegated_search;

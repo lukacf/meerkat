@@ -376,6 +376,14 @@ them.
   queued fallback and runs in a turn of its own. A recovered row keeps its
   requester's key. The TLC lane runs a new audit of the rule
   (`specs/machines/meerkat_machine/requester_batch_audit.sh`).
+  So content from another party never enters a person's run: a
+  requester-less input (a peer message, request or response, a flow step,
+  an external event, a runtime continuation such as a detached job's
+  completion) that arrives while a person's run is going is handled in a
+  follow-up run of its own. The transcript keeps it, so the model still
+  sees it in context; only the per-person mechanics are absent in that run.
+  Operation inputs, which carry no content and are consumed on admission,
+  are unchanged.
 
 ### Deprecated
 
@@ -506,6 +514,11 @@ them.
   receiver whose composition installs another ingress domain, such as a
   peer under another composition or realm in the same process, refuses the
   work at admission.
+
+- The original requester does not cross the supervisor bridge: a console
+  send to a member hosted on another runtime acts for no person there (its
+  runs have no requester). The mob refuses a requester on any delivery that
+  cannot carry it, so none is dropped silently.
 
 ## [0.9.10] - 2026-11-04
 

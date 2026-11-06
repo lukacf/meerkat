@@ -653,6 +653,36 @@ class ConsoleFront:
                 lambda task: task.exception() if not task.cancelled() else None)
         return login.retirement_task
 
+    async def _console_sign_out(self, login):
+        """End one login in the Meta console (`meta/console/sign_out`).
+
+        The request carries a fresh token of that login (its `sid`), so the
+        console refuses every token of the login issued before it. True once
+        the console confirms it, or when it predates sign-out (method not
+        found: this front's own logout is all there is). A 401 confirms
+        nothing: a console that did not verify the token fenced nothing.
+        """
+        if self._runtime_namespace != "meta" or self.client is None or self._closing:
+            return True
+        import httpx
+        token = _token(self.key, login.principal, login_scope_id=login.login_scope_id)
+        try:
+            outgoing = self.client.build_request("POST", self.native_url + "/console/rpc",
+                json={"jsonrpc": "2.0", "id": "forge-logout", "method": "meta/console/sign_out", "params": {}},
+                headers={"Authorization": "Bearer " + token}, timeout=httpx.Timeout(15, connect=5))
+            outgoing.headers.pop("cookie", None)
+            response = await self.client.send(outgoing)
+            value = response.json() if response.status_code == 200 else None
+        except Exception:
+            return False
+        if not isinstance(value, dict):
+            return False
+        if "error" in value:
+            error = value["error"]
+            return isinstance(error, dict) and error.get("code") == -32601
+        result = value.get("result")
+        return isinstance(result, dict) and result.get("login") == "session"
+
     async def _finish_login(self, login, reason):
         fences = [asyncio.create_task(owner.retire(reason))
                   for owner in (login.connect, login.controller_review) if owner is not None]
@@ -1079,11 +1109,18 @@ class ConsoleFront:
                             headers=availability_headers)
         if path == "/logout" and request.method == "POST":
             retirement = self._retire_login(login.session, "logout")
+            # This front revoked the login first; the console then ends it too,
+            # so a token this front already issued for it stops working there.
+            signed_out = await self._console_sign_out(login)
             if retirement is not None:
                 try:
                     await asyncio.shield(retirement)
                 except Exception:
                     return Response("Console access was revoked but cleanup is unconfirmed.", status_code=503)
+            if not signed_out:
+                return Response("You are signed out here, but the Console did not confirm ending this login. "
+                                "Tokens it already holds for this login expire within two minutes.",
+                                status_code=503, headers=_console_public_headers())
             response = RedirectResponse("/login", status_code=303)
             response.delete_cookie(self.cookie, secure=self._secure_cookie, httponly=True,
                                    samesite="strict", path="/")

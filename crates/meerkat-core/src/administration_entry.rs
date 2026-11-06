@@ -244,7 +244,9 @@ impl AdministeringPrincipal {
 /// on the owner's task while the owner still holds the mutation's custody,
 /// so it returns promptly and never waits for that owner (a host that
 /// persists the record queues it). Nothing reads the record back to decide
-/// anything.
+/// anything. Records may arrive in any order:
+/// [`AdministrationRecord::admitted_at`] (and a config patch's
+/// `generation`) orders the mutations of one object.
 pub trait AdministrationRecorder: Send + Sync {
     /// Record one admitted administrative mutation.
     fn record(&self, record: AdministrationRecord);
@@ -342,8 +344,8 @@ pub enum AdministeredChange {
 pub enum AdministrationOutcome {
     /// The change committed: its owner received the write's durable result.
     Committed,
-    /// The write began and its result is not known: the administered object
-    /// may hold the earlier state or the new one.
+    /// The owner did not learn a durable result: the object may hold the
+    /// earlier state or the new one.
     Unknown,
 }
 

@@ -2379,9 +2379,11 @@ export class MeerkatClient {
   /**
    * Record what a host presenter showed of a durable decision: the audience,
    * the subject digest shown, the parts shown, the channel and message
-   * references and the host clock reading `at_ms`. It counts only when it
-   * shows every canonical part to the party that decides now. Needs a
-   * Meerkat 0.9.11 or newer server: an older one answers method not found
+   * references and the host clock reading `at_ms`; a summary a surface with
+   * a size limit showed adds the `link` it carried (`reference` and
+   * `served_digest`). It counts only when it shows every canonical part, or
+   * its link served the held rendering, to the party that decides now. Needs
+   * a Meerkat 0.9.11 or newer server: an older one answers method not found
    * (`-32601`), raised as a `MeerkatError` that names the method.
    */
   async presentDecision(

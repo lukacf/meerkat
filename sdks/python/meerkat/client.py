@@ -2819,11 +2819,13 @@ class MeerkatClient:
         "approver_id": ...}`` or ``{"kind": "reviewer", "reviewer": ...}``),
         the ``subject_digest`` shown, the ``parts_shown``, the
         ``channel_ref`` and ``message_ref`` and the host clock reading
-        ``at_ms``. It counts only when it shows every canonical part to the
-        party that decides now. Returns ``{"decision": {...}}``. Needs a
-        Meerkat 0.9.11 or newer server: an older one answers method not
-        found (``-32601``), raised as a :class:`MeerkatError` that names the
-        method.
+        ``at_ms``; a summary a surface with a size limit showed adds the
+        ``link`` it carried (``{"reference": ..., "served_digest": ...}``).
+        It counts only when it shows every canonical part, or its link
+        served the held rendering, to the party that decides now. Returns
+        ``{"decision": {...}}``. Needs a Meerkat 0.9.11 or newer server: an
+        older one answers method not found (``-32601``), raised as a
+        :class:`MeerkatError` that names the method.
         """
         params: dict[str, Any] = {
             "decision_id": decision_id,

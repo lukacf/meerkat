@@ -317,7 +317,13 @@ them.
   one a decision event carries, and a decision observed before it is refused
   `decided_before_presentation`, as for a shown one. A summary with no link,
   or whose link served another rendering, stays `presentation_incomplete`.
-  A record without a link is stored as before.
+  A record without a link is stored as before. On the RPC wire,
+  `decision/present` takes the summary's `link` (`reference`,
+  `served_digest`) and a decision's `presentations` carry it
+  (`meerkat-contracts`: `WirePresentationLink`, and the `link` of
+  `DecisionPresentationRequest` and `WirePresentationRecord`;
+  `meerkat-core`: `PresentationRecord::with_link`); the Python and
+  TypeScript SDK types carry it too.
 
 ### Changed
 

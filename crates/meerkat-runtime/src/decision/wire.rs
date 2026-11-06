@@ -9,15 +9,15 @@ use meerkat_contracts::{
     DecisionAudienceRequest, DecisionListResult, DecisionPresentationRequest, WireCanonicalPart,
     WireDecision, WireDecisionAssurance, WireDecisionEvidence, WireDecisionNoticeState,
     WireDecisionOutcome, WireDecisionPhase, WireDecisionRefusal, WireDecisionReviewVerdict,
-    WireDecisionStage, WireDecisionTier, WirePresentationAudience, WirePresentationRecord,
-    WireUnreadableDecision,
+    WireDecisionStage, WireDecisionTier, WirePresentationAudience, WirePresentationLink,
+    WirePresentationRecord, WireUnreadableDecision,
 };
 use meerkat_core::ApprovalAssurance;
 use meerkat_core::approval::decision::{
     ApproverId, CanonicalPart, DecisionContractError, DecisionEvidence, DecisionNotice,
     DecisionOutcome, DecisionPhase, DecisionPrincipalKey, DecisionReference, DecisionReviewVerdict,
-    DecisionStage, DecisionTier, PresentationAudience, PresentationRecord, Sha256Digest,
-    StoredDecision, UnreadableDecision,
+    DecisionStage, DecisionTier, PresentationAudience, PresentationLink, PresentationRecord,
+    Sha256Digest, StoredDecision, UnreadableDecision,
 };
 
 use super::service::{DecisionListing, DecisionRefusal};
@@ -178,7 +178,10 @@ pub fn wire_presentation(record: &PresentationRecord) -> WirePresentationRecord 
         subject_digest: record.subject_digest.to_string(),
         max_part_bytes: record.max_part_bytes.map(NonZeroU32::get),
         parts_shown: record.parts_shown.iter().map(wire_canonical_part).collect(),
-        link: None,
+        link: record.link.as_ref().map(|link| WirePresentationLink {
+            reference: link.reference.to_string(),
+            served_digest: link.served_digest.to_string(),
+        }),
         channel_ref: record.channel_ref.to_string(),
         message_ref: record.message_ref.to_string(),
         at_ms: record.at_ms,
@@ -252,11 +255,13 @@ fn wire_decision_evidence(evidence: &DecisionEvidence) -> WireDecisionEvidence {
     }
 }
 
-/// The presentation record a host presenter's request states.
+/// The presentation record a host presenter's request states, with the link
+/// a summary carried when the request names one.
 ///
 /// # Errors
 /// [`DecisionContractError::Invalid`] for a value that is not valid: an
-/// approver id, principal key, digest or reference, or a part size of 0.
+/// approver id, principal key, digest or reference (a link's included), or
+/// a part size of 0.
 pub fn presentation_from_wire(
     request: &DecisionPresentationRequest,
 ) -> Result<PresentationRecord, DecisionContractError> {
@@ -285,7 +290,7 @@ pub fn presentation_from_wire(
             ))
         })
         .collect::<Result<Vec<_>, DecisionContractError>>()?;
-    Ok(PresentationRecord::new(
+    let record = PresentationRecord::new(
         audience,
         Sha256Digest::new(request.subject_digest.clone())?,
         max_part_bytes,
@@ -293,5 +298,12 @@ pub fn presentation_from_wire(
         DecisionReference::new(request.channel_ref.clone())?,
         DecisionReference::new(request.message_ref.clone())?,
         request.at_ms,
-    ))
+    );
+    Ok(match &request.link {
+        None => record,
+        Some(link) => record.with_link(PresentationLink::new(
+            DecisionReference::new(link.reference.clone())?,
+            Sha256Digest::new(link.served_digest.clone())?,
+        )),
+    })
 }

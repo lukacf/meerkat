@@ -3710,6 +3710,218 @@ fn the_identity_runtime_never_reads_its_rotation_records() {
     }
 }
 
+/// A reset of an identity its host holds in this process (a held pass's
+/// roster or a held add marked it) and that Core never created asks Core's
+/// verdict first, by the identity's declaration: Core answers that it
+/// awaits its held creation, so the reset answers `HeldCompletionOwed` and
+/// asks Core for no fresh life.
+///
+/// RED before the host's hold was the declaration's held flag: with no
+/// state directory the mark was kept nowhere, so the reset gave the identity
+/// a fresh life outside its host's held protocol.
+#[tokio::test]
+async fn a_reset_of_an_identity_its_host_holds_answers_core_s_held_creation_verdict() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    register_all(&runtime, &[spec(&alice)]).await;
+    runtime
+        .mark_held_completion_owed(std::slice::from_ref(&alice))
+        .await
+        .expect("the host holds alice");
+    let applied = core.apply_calls.load(Ordering::SeqCst);
+
+    let refused = runtime.reset(&alice).await;
+
+    assert!(
+        matches!(
+            &refused,
+            Err(IdentityRuntimeError::HeldCompletionOwed { identity }) if *identity == alice
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        core.apply_calls.load(Ordering::SeqCst) > applied,
+        "the reset asked Core's verdict by the identity's declaration"
+    );
+    assert_eq!(
+        core.rotation_calls.load(Ordering::SeqCst),
+        0,
+        "Core was asked for no fresh life"
+    );
+    assert!(
+        core.session_of(&alice).is_none(),
+        "Core holds no member of alice"
+    );
+}
+
+/// Held creation follows the host's hold in each process, in every
+/// composition (a state directory, or none): the marks a held pass writes
+/// are the mirror for a rollback to 0.9.10, never read here. After a restart
+/// over the same Core, an identity a held pass never published awaits its
+/// held creation when the restarted host holds it again, and is seated as
+/// any other identity when it does not; Core never created it, so Core's
+/// verdict decides either way. (The host store composition is
+/// `a_failover_build_never_reads_the_held_completion_marks_the_realm_keeps`.)
+///
+/// RED before the marks stopped being read: without a state directory the
+/// restarted host's hold reached no declaration (the identity was seated
+/// outside its held protocol), and with one the marks refused an identity
+/// its host no longer held.
+#[tokio::test]
+async fn held_creation_follows_the_host_s_hold_across_a_restart_in_every_composition() {
+    for durable in [false, true] {
+        let alice = identity("personal:alice");
+        let core = Arc::new(SeatCore::default());
+        let state_dir = tempfile::tempdir().expect("state dir");
+        let compose = |core: &Arc<SeatCore>| {
+            let runtime = runtime_over(None, core);
+            runtime.set_held_completion_state_dir(durable.then(|| state_dir.path().to_path_buf()));
+            runtime
+        };
+        // The first process: a held pass marks alice and never publishes her.
+        {
+            let runtime = compose(&core);
+            register_all(&runtime, &[spec(&alice)]).await;
+            runtime
+                .mark_held_completion_owed(std::slice::from_ref(&alice))
+                .await
+                .expect("the host holds alice");
+        }
+        // A restart whose host holds alice again: she awaits her held
+        // creation, and a door is refused typed.
+        {
+            let runtime = compose(&core);
+            register_all(&runtime, &[spec(&alice)]).await;
+            runtime
+                .mark_held_completion_owed(std::slice::from_ref(&alice))
+                .await
+                .expect("the host holds alice again");
+            let refused = runtime.materialize(&alice).await;
+            assert!(
+                matches!(
+                    &refused,
+                    Err(IdentityRuntimeError::HeldCompletionOwed { .. })
+                ),
+                "durable={durable}: {refused:?}"
+            );
+            assert!(
+                core.session_of(&alice).is_none(),
+                "durable={durable}: Core seated nothing"
+            );
+        }
+        // A restart whose host does not hold alice: she is seated as any
+        // other identity.
+        {
+            let runtime = compose(&core);
+            let outcomes = roster_pass(&runtime, &[spec(&alice)], None).await;
+            assert!(
+                pass_refusal(&outcomes[&alice]).is_none(),
+                "durable={durable}: {:?}",
+                outcomes[&alice]
+            );
+            assert!(
+                core.session_of(&alice).is_some(),
+                "durable={durable}: Core seated alice"
+            );
+        }
+    }
+}
+
+/// Source guard: nothing online reads the held-completion marks. They are
+/// the mirror written for a rollback to 0.9.10, whose runtime reads them back
+/// after a restart (O3, until 0.9.12); held creation follows the host's hold
+/// in this process and Core's verdict. Two offline diagnostics read them
+/// until the mirror expires, each in one function: the gateway's identity
+/// census (`held_completion_owed`) and the offline `identity-reset`, which
+/// refuses on a mark and never acts on it.
+///
+/// RED before the marks stopped being read: the identity runtime read them
+/// before a declaration, a held create and a fresh life.
+#[test]
+fn nothing_online_reads_the_held_completion_marks() {
+    const READERS: [&str; 4] = [
+        "load_held_completion_marks",
+        "read_host_store_marks",
+        "read_host_store_rollback_marks",
+        "read_rollback_marks",
+    ];
+    let online = [
+        ("identity_first/runtime.rs", include_str!("../runtime.rs")),
+        (
+            "identity_first/runtime/declare.rs",
+            include_str!("declare.rs"),
+        ),
+        (
+            "identity_first/runtime/records.rs",
+            include_str!("records.rs"),
+        ),
+        (
+            "identity_first/runtime/build_preparation.rs",
+            include_str!("build_preparation.rs"),
+        ),
+        (
+            "identity_first/runtime/lifecycle_projection.rs",
+            include_str!("lifecycle_projection.rs"),
+        ),
+        (
+            "identity_first/orchestrator.rs",
+            include_str!("../orchestrator.rs"),
+        ),
+        (
+            "identity_first/held_bootstrap.rs",
+            include_str!("../held_bootstrap.rs"),
+        ),
+        (
+            "unified_runtime/mod.rs",
+            include_str!("../../unified_runtime/mod.rs"),
+        ),
+        ("rpc_gateway.rs", include_str!("../../rpc_gateway.rs")),
+    ];
+    for (file, source) in online {
+        let production = production_code(source);
+        assert!(
+            !production.trim().is_empty(),
+            "{file}: no production code was read"
+        );
+        for reader in READERS {
+            let named = production.matches(&format!("{reader}(")).count();
+            let defined = production.matches(&format!("fn {reader}(")).count();
+            assert_eq!(
+                named - defined,
+                0,
+                "{file} reads the held-completion marks (`{reader}`): they are a rollback's \
+                 mirror, written and never read"
+            );
+        }
+    }
+    for (file, source, function) in [
+        (
+            "storage_migrate_native/offline_identities.rs",
+            include_str!("../../storage_migrate_native/offline_identities.rs"),
+            "fn identity_census_offline(",
+        ),
+        (
+            "storage_migrate_native/identity_reset.rs",
+            include_str!("../../storage_migrate_native/identity_reset.rs"),
+            "fn reset(",
+        ),
+    ] {
+        let production = production_code(source);
+        let body = item_body(&production, function);
+        let everywhere = production.matches("read_rollback_marks(").count();
+        assert!(
+            body.contains("read_rollback_marks("),
+            "{file}: `{function}` reads the rollback mirror as its offline diagnostic"
+        );
+        assert_eq!(
+            body.matches("read_rollback_marks(").count(),
+            everywhere,
+            "{file} reads the held-completion marks outside `{function}`"
+        );
+    }
+}
+
 /// A roster pass that moves a seated identity to another profile keeps it a
 /// member: with no migration declared, Core holds it typed under its
 /// previous role and releases its live member, never retiring it. Its

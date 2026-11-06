@@ -1385,6 +1385,17 @@ impl ToolkitOriginalOwner {
                 .compare_and_swap(transition)
                 .await
                 .map_err(controller::store_error)?;
+            #[cfg(test)]
+            self.record_helper_admission_event_for_test("helper_custody_attempt_written");
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::SubmitPersisted,
+            &admitted.item_id().to_string(),
+        ) {
+            crate::source_hold_probe::retain(
+                self.hold_sources_for_test(hold.owner_change, hold.duration),
+            );
         }
         self.check_admitted_helper(admitted)?;
         self.check_bound_source(&source.original)

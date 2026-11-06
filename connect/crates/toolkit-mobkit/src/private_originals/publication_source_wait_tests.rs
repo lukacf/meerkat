@@ -46,6 +46,8 @@ pub(super) struct Found {
     pub(super) concurrent_change: Option<Duration>,
     /// Whether the original's turn completed (its native ticket answered).
     pub(super) turn_completed: bool,
+    /// The helper custody attempt writes of the whole run.
+    pub(super) attempt_writes: usize,
 }
 
 fn helper_scope(fixture: &Fixture) -> toolkit_store::StoreScope {
@@ -255,6 +257,13 @@ pub(super) async fn finds_with_hold_at(
                 rows,
                 concurrent_change: None,
                 turn_completed,
+                attempt_writes: fixture
+                    .source
+                    .owner
+                    .helper_admission_events_for_test()
+                    .iter()
+                    .filter(|event| **event == "helper_custody_attempt_written")
+                    .count(),
             }
         }),
     ))

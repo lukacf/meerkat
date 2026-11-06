@@ -327,3 +327,52 @@ async fn helper_preparation_held_past_the_bound_is_refused_typed() {
     assert_refused_at_the_bound(&found, hold.duration);
     assert!(found.issued.is_empty(), "nothing was issued");
 }
+
+// A helper submission's binder, inside Core's governed bind, meets the held
+// collection at its first source check. It refuses with nothing staged, and
+// the submission waits for the collection outside the bind, holding nothing,
+// and dispatches the same input again; one custody attempt is written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn submission_bind_waits_out_a_held_source_collection() {
+    let found = finds_with_hold_at(Site::SubmitBind, 1, collection_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+    assert_eq!(found.attempt_writes, 1, "one custody attempt was written");
+}
+
+// The binder meets the held collection at its custody attempt's source
+// checks, the attempt's write just done: the submission waits and binds
+// again, and the equal pending attempt is reused, never written again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn submission_persist_waits_out_a_held_source_collection_after_its_attempt_write() {
+    let found = finds_with_hold_at(Site::SubmitPersisted, 1, collection_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+    assert_eq!(
+        found.attempt_writes, 1,
+        "the custody attempt was written once and reused"
+    );
+}
+
+// Held past the bound at the binder's first source check: the submission
+// answers at its one deadline, before the hold ended, and the Find answers
+// retry_safe with nothing admitted; no custody attempt was written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn submission_bind_held_past_the_bound_answers_retry_safe() {
+    let hold = held_past_the_bound();
+    let found = finds_with_hold_at(Site::SubmitBind, 1, hold, 0, false).await;
+    assert!(found.turn_completed, "the original's turn completed");
+    assert_eq!(found.feedback.len(), 1, "{:?}", found.feedback);
+    let first = &found.feedback[0];
+    assert_eq!(
+        reply(first)["worker"]["state"],
+        "retry_safe",
+        "{}",
+        reply(first)
+    );
+    assert!(
+        found.answered_after >= OWNER_CHANGE_WAIT_BOUND - Duration::from_millis(500)
+            && found.answered_after < hold.duration,
+        "answered once the submission's deadline ran out, before the hold ended: {:?}",
+        found.answered_after
+    );
+    assert_eq!(found.attempt_writes, 0, "no custody attempt was written");
+}

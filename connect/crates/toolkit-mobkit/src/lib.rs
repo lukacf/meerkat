@@ -929,6 +929,16 @@ pub mod source_hold_probe {
         /// acquisition original, a result source), just before it takes the
         /// collection; keyed by the contributor's original work.
         BasisRead,
+        /// A helper submission's binder, inside Core's governed bind, before
+        /// its first source check; keyed by work item.
+        SubmitBind,
+        /// A helper submission's binder, on a later bind of the same
+        /// submission, before it binds the exact first input again; keyed by
+        /// work item.
+        SubmitRebind,
+        /// A helper submission's custody attempt, its write just done, before
+        /// its source checks; keyed by work item.
+        SubmitPersisted,
     }
     /// A control's answer at a site, given its key.
     pub type Probe = Arc<dyn Fn(Site, &str) -> Option<Hold> + Send + Sync>;

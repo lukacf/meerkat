@@ -413,6 +413,39 @@ async fn helper_rebind_waits_out_a_held_source_collection_at_its_source_check() 
     );
 }
 
+// The submission's later bind, after a definite non-admission for a policy
+// change, binds the exact first input again and meets the held collection
+// there: the binder refuses with nothing staged, the submission waits for the
+// collection outside the bind and binds again, and the input is admitted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn helper_first_input_rebind_waits_out_a_held_source_collection() {
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = hits.clone();
+    crate::source_hold_probe::install(Arc::new(move |site, _key| {
+        (site == crate::source_hold_probe::Site::SubmitRebind
+            && seen.fetch_add(1, Ordering::SeqCst) == 0)
+            .then_some(crate::source_hold_probe::Hold {
+                owner_change: false,
+                duration: Duration::from_millis(150),
+            })
+    }));
+    Box::pin(exercise_helper_wait(WaitControl {
+        hold: Duration::from_secs(1),
+        tool_time: Duration::from_secs(10),
+        changes: 1,
+        selected: false,
+        retire_after: None,
+        calls: 2,
+        end: WaitEnd::Admitted,
+    }))
+    .await;
+    crate::source_hold_probe::clear();
+    assert!(
+        hits.load(Ordering::SeqCst) >= 1,
+        "the first input's rebind met the held collection"
+    );
+}
+
 // Two changes in a row, each held 300 ms and each settling within the
 // dispatch's bounds: the submission rebinds after each settled wait of its one
 // churn, with the same input, and the third native call admits.

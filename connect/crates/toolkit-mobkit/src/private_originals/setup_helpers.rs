@@ -1500,6 +1500,13 @@ impl GovernedInputBinder for SubmitHelperBinder {
             crate::aa1_failure("helper.bind.placement", "PlacementChanged");
             return Err("Toolkit helper native placement changed".into());
         }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::SubmitBind,
+            &self.admitted.item_id().to_string(),
+        ) {
+            crate::source_hold_probe::retain(self.source.hold_sources_for_test(hold));
+        }
         self.source
             .owner
             .check_admitted_helper(&self.admitted)
@@ -1548,6 +1555,13 @@ impl GovernedInputBinder for SubmitHelperBinder {
             )
             .map_err(|_| "Toolkit first helper input changed")?
             {
+                #[cfg(any(test, feature = "test-support"))]
+                if let Some(hold) = crate::source_hold_probe::observe(
+                    crate::source_hold_probe::Site::SubmitRebind,
+                    &self.admitted.item_id().to_string(),
+                ) {
+                    crate::source_hold_probe::retain(self.source.hold_sources_for_test(hold));
+                }
                 prepared = self
                     .source
                     .owner

@@ -43,6 +43,16 @@ Return to Connect in the same realm and ask to reconnect, replace a key or disco
 
 Use the service provider's controls when you need to revoke the credential itself. Agent access is managed separately through grants.
 
+## Answer setup prompts in the Console
+
+In an integrated application's Console, a setup prompt (installing software, reviewing an account's access, entering credentials or approving a public service) belongs to the person whose Console message started the request. Only that person answers it, in the login they used.
+
+Only a signed-in person answers setup prompts. A caller without a token on a console without sign-in, a service token, a token that names no person and a token from a shared account (one account that several people sign in with) answer nothing: the answer routes refuse them with `403` and `{"error": "approver_unauthenticated"}`, the Console's shared refusal. So does a person whose login ended while the answer waited.
+
+Connect records each answer as the person's. The approval record names the person by Core's qualified principal key, `principal:["human","oidc-issuer:<issuer>","<sub>"]`: kind `human`, the verified token's `sub`, in the trust domain `oidc-issuer:` followed by its issuer, so two issuers' identical subjects stay apart. Its provenance keeps the assurance (`person_authenticated`) and a digest of the login (`sha256:` and the hex SHA-256 of the token's `sid`), never the token or the login itself.
+
+Several people can answer setup prompts at the same time: each login has its own prompt, and one login's prompts come one at a time, in the order they arrived. An answer from a login that has no open prompt is refused with `409`.
+
 ## Cancellation and recovery
 
 Connect reports saved configuration, credentials and grants separately. After an interrupted action, read its status before repeating it. An entered update can complete while later steps are cancelled.

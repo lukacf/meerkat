@@ -106,6 +106,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   from `meta/console/whoami`), and a change made for another caller is
   refused with `caller_changed`.
 
+- Rust: `http_console::CONSOLE_APPROVER_UNAUTHENTICATED_KIND` and
+  `CONSOLE_APPROVER_UNAUTHENTICATED_CODE` name the console's
+  `approver_unauthenticated` refusal, so a host route beside the console
+  (Connect's setup answers) refuses a caller that is not a person with the
+  same kind.
+
 ### Changed
 
 - The stock console sends no approver with a decision and shows approvals

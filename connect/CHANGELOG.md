@@ -5,8 +5,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Breaking
+
+- Console setup: only a signed-in person answers a setup prompt. The answer
+  routes (`POST /host/toolkit/setup/start`, `/answer`, `/credentials`,
+  `/cancel-sign-in` and `/callback`) refuse a caller that is not a verified,
+  current person (no token on a console without sign-in, a service token, a
+  token that names no person, a shared-account token, or a login that ended
+  before the answer was applied) with `403` and
+  `{"error": "approver_unauthenticated"}`, a new refusal kind (the one the
+  Meta console uses for approval decisions); nothing is answered.
+- Console setup: an answer from a login that has no open setup prompt is
+  refused with `409`, whether or not another login's prompt is open. Before,
+  it was refused with `403` while another login's prompt was open.
+
 ### Fixed
 
+- Console setup approvals record the person who answered. The decision's
+  actor is the person's qualified principal key
+  (`principal:["human","oidc-issuer:<issuer>","<sub>"]`), and its provenance
+  keeps the assurance (`person_authenticated`) and a digest of the login,
+  never the token or the login itself. Before, every Console answer was
+  recorded as the Console presenter (`connect-console-presenter`).
+- Console setup: several people answer setup prompts at the same time. Each
+  login has its own prompt, and one login's prompts come one at a time, in
+  the order they arrived. Before, one person's open prompt held back every
+  other person's.
 - Setup: when a setup check answered again for a validation it had already
   accepted, with something that is not a valid proposal (for example a file
   list that names both a declaration and an activation document), the check

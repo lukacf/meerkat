@@ -6566,6 +6566,14 @@ async fn handle_memory_quarantine_decide(
             return invalid_params(response_id, format!("Invalid params: {}", err.message()));
         }
     };
+    #[cfg(test)]
+    console_decide_holds::pass(
+        params
+            .get("memory_id")
+            .and_then(Value::as_str)
+            .map_or("", str::trim),
+    )
+    .await;
     // Right before the decision is handed to the store: a person, still
     // current.
     let Some(decider) = decider.filter(ConsoleApprovalDecider::still_current) else {
@@ -10462,10 +10470,12 @@ impl ConsoleDecideRefusal {
     }
 }
 
-/// Test hook: holds a Console decision right before its last step (a
-/// gating decide before it takes the gating owner, a WorkGraph goal
-/// confirmation before its person is checked again), until the test
-/// releases it. Keyed by the pending id or the binding id.
+/// Test hook: holds a Console decision right before its last step, until the
+/// test releases it: a gating decide once it holds the gating owner, a
+/// WorkGraph goal confirmation or a memory quarantine review right before its
+/// caller is checked again, and a WorkGraph release once it has read the
+/// item. Keyed by the pending id, the binding id, the memory id or the item
+/// id.
 #[cfg(test)]
 pub(crate) mod console_decide_holds {
     use std::collections::BTreeMap;
@@ -13078,9 +13088,11 @@ async fn handle_console_runtime_rpc_with_visibility(
                 .get("reason")
                 .and_then(Value::as_str)
                 .map(ToString::to_string);
+            let mut owner = module_runtime.lock().await;
+            // Test hook: the decide waits here while it holds the gating
+            // owner, after the route's last await and before the apply.
             #[cfg(test)]
             console_decide_holds::pass(pending_id).await;
-            let mut owner = module_runtime.lock().await;
             let request = GatingDecideRequest {
                 pending_id: pending_id.to_string(),
                 approver_id: decider.principal.clone(),

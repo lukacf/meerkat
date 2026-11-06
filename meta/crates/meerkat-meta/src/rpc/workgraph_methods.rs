@@ -1135,6 +1135,8 @@ async fn refuse_release_by_non_owner(
         .get(None, request.namespace.clone(), request.id.clone())
         .await
         .map_err(workgraph_error_to_rpc)?;
+    #[cfg(test)]
+    crate::http_console::console_decide_holds::pass(&request.id.to_string()).await;
     if item.revision != request.expected_revision {
         return Err(workgraph_error_to_rpc(WorkGraphError::StaleRevision {
             id: request.id.clone(),

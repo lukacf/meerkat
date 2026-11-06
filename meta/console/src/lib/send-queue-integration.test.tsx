@@ -584,7 +584,6 @@ describe("stock durable queue integration", () => {
   });
 
   it.each([
-    ["a caller that is not a person", async () => ({ actorKind: "anonymous", approverIds: [], canAdminister: false })],
     ["a transport without whoami", undefined],
     ["a failed whoami read", async () => { throw new Error("whoami unavailable"); }],
   ] as const)("shows approvals read-only to %s", async (_label, whoami) => {
@@ -594,6 +593,19 @@ describe("stock durable queue integration", () => {
     const approve = await screen.findByRole("button", { name: "Approve" }) as HTMLButtonElement;
     expect(approve.disabled).toBe(true);
     expect(screen.getAllByText("Read-only access").length).toBeGreaterThan(0);
+    fireEvent.click(approve);
+    await act(async () => { await new Promise(resolve => window.setTimeout(resolve, 20)); });
+    expect(commands.some(entry => entry.command === "decideGating")).toBe(false);
+  });
+
+  it.each(["anonymous", "service", "token_principal"] as const)("tells a %s caller to sign in as themselves to decide", async (actorKind) => {
+    const { fake, commands } = approvalTransport(async () => ({ actorKind, approverIds: [], canAdminister: false }));
+    render(<ConsoleApp baseUrl="" transport={fake} storageNamespace="scope" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Needs you, 1 pending approval" }));
+    const approve = await screen.findByRole("button", { name: "Approve" }) as HTMLButtonElement;
+    expect(approve.disabled).toBe(true);
+    expect(screen.getAllByText("Sign in as yourself to decide").length).toBeGreaterThan(0);
+    expect(screen.queryAllByText("Read-only access")).toHaveLength(0);
     fireEvent.click(approve);
     await act(async () => { await new Promise(resolve => window.setTimeout(resolve, 20)); });
     expect(commands.some(entry => entry.command === "decideGating")).toBe(false);

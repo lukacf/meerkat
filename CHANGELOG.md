@@ -39,7 +39,9 @@ them.
 
 - `meerkat-contracts`: `WireMemberPreviewUnavailable` gains `StoreRefused`
   (wire `store_refused`), appended last. The enum is exhaustive, so a
-  downstream exhaustive match needs an arm.
+  downstream exhaustive match needs an arm; so does an exhaustive switch over
+  the Web SDK's `WireMemberPreviewUnavailable` type, which gains
+  `"store_refused"`.
 
 - Behaviour-only (not measured by the gate): `meerkat-mob`,
   `meerkat-contracts`: a member status read whose session the store refuses
@@ -81,12 +83,14 @@ them.
   its outcome unknown, so a caller classifies it by type. Both enums are
   `#[non_exhaustive]`.
 
-- `meerkat-contracts`, `meerkat-mob`, Python and TypeScript SDKs: the
+- `meerkat-contracts`, `meerkat-mob`, Python, TypeScript and Web SDKs: the
   `store_refused` value of a member's `preview_unavailable`
   (`WireMemberPreviewUnavailable::StoreRefused`): the store refuses the
   member's session until its realm is reopened. The SDKs read it as a known
-  reason, and read a reason a later server adds as
-  `MobMemberPreviewUnavailableUnknown`.
+  reason; the Python and TypeScript SDKs read a reason a later server adds as
+  `MobMemberPreviewUnavailableUnknown`, and the Web SDK, whose runtime is the
+  same release, keeps its closed vocabulary. `mob_check_member` gives such a
+  member a note of its own (see Fixed).
 
 ### Fixed
 
@@ -124,6 +128,13 @@ them.
   lease or the listing shows a batch it did not write. With no timed-out
   acquire, a holder it does not know poisons the realm at once, as before.
   Affects 0.9.5 through 0.9.10.
+
+- `meerkat-mob-mcp`: `mob_check_member` no longer tells the model to check
+  again later for a member whose session the store refuses until its realm
+  is reopened. Such a member's status carried `read_failed` on the wire, so
+  its note said a later check may bring the preview back; it now carries
+  `store_refused`, and its note says that no check brings the preview back
+  before that reopen. Affects 0.9.10.
 
 ### Upgrade notes
 

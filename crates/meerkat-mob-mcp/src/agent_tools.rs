@@ -3636,6 +3636,11 @@ const PREVIEW_NOT_OBSERVED_WHILE_RETIRING_NOTE: &str = "The member is retiring, 
      read did not read its session: output_preview and tokens_used are missing, not empty or \
      zero. status is current.";
 
+const PREVIEW_STORE_REFUSED_NOTE: &str = "The store refuses to read the member's session until \
+     its realm is reopened, so output_preview and tokens_used are missing, not empty or zero, and \
+     checking again will not bring them back before that reopen. status and progress.run_state \
+     are current; the other progress fields may be from an earlier read.";
+
 /// The plain-language note a `mob_check_member` result carries, chosen from
 /// the typed status fields: the preview marker's variant says why the
 /// preview is missing and whether it can come back, and an open turn keeps
@@ -3658,6 +3663,7 @@ fn check_member_note(status: &meerkat_contracts::MobMemberStatusResult) -> Optio
         meerkat_contracts::WireMemberPreviewUnavailable::NotObservedWhileRetiring => {
             PREVIEW_NOT_OBSERVED_WHILE_RETIRING_NOTE
         }
+        meerkat_contracts::WireMemberPreviewUnavailable::StoreRefused => PREVIEW_STORE_REFUSED_NOTE,
     });
     match (running, preview_note) {
         (true, Some(preview_note)) => {
@@ -4437,12 +4443,34 @@ mod tests {
         assert!(retiring.contains("retiring"));
         assert!(!retiring.contains("progress"));
 
+        // A store that refuses the session until its realm is reopened: no
+        // check brings the preview back before that reopen, and the run
+        // state was still observed.
+        let refused = note(Some(Marker::StoreRefused), Some(WireMemberRunState::Idle))
+            .expect("a refused session read is called out");
+        assert_eq!(refused, PREVIEW_STORE_REFUSED_NOTE);
+        assert!(refused.contains("until its realm is reopened"));
+        assert!(refused.contains("checking again will not bring them back"));
+        assert!(!refused.contains("Check again later"));
+        assert!(refused.contains("status and progress.run_state are current"));
+        assert_eq!(
+            note(
+                Some(Marker::StoreRefused),
+                Some(WireMemberRunState::RunOpen)
+            ),
+            Some(format!(
+                "{MEMBER_TURN_RUNNING_SENTENCE} {PREVIEW_STORE_REFUSED_NOTE}"
+            )),
+            "an open turn keeps its running note alongside the marker's"
+        );
+
         // Every note is distinct: the variant decides it.
         let notes = [
             PREVIEW_OBSERVATION_DEADLINE_NOTE,
             PREVIEW_READ_FAILED_NOTE,
             PREVIEW_SESSION_ABSENT_NOTE,
             PREVIEW_NOT_OBSERVED_WHILE_RETIRING_NOTE,
+            PREVIEW_STORE_REFUSED_NOTE,
             MEMBER_TURN_RUNNING_NOTE,
         ];
         let distinct: std::collections::BTreeSet<_> = notes.iter().collect();

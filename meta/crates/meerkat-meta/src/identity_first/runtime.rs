@@ -12811,7 +12811,7 @@ impl IdentityRuntime {
                     return Ok((defanged, Vec::new()));
                 }
                 let injected_context = injector
-                    .inject_for_turn(identity, memory_session_key, &defanged, None)
+                    .inject_for_turn(identity, memory_session_key, &defanged)
                     .await
                     .map_err(|err| {
                         IdentityRuntimeError::Internal(format!("agent memory recall: {err}"))

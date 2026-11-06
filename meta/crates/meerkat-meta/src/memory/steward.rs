@@ -7792,6 +7792,117 @@ mod tests {
         assert_eq!(manifest[0].title, "Terse updates");
     }
 
+    fn raw_operator_create(key: &str) -> RawStewardOp {
+        RawStewardOp {
+            op: "create".to_string(),
+            id: Some("op-fact".to_string()),
+            prior: None,
+            scope: Some(RawScope {
+                kind: "operator".to_string(),
+                key: key.to_string(),
+            }),
+            kind: Some("preference".to_string()),
+            title: "Operator prefers terse updates".to_string(),
+            description: "Matters when reporting to the operator.".to_string(),
+            body: "Keep updates short.".to_string(),
+            tags: Vec::new(),
+            trust: None,
+            derived_from: Vec::new(),
+            rationale: None,
+        }
+    }
+
+    /// An operator key the dream model names never routes a record into
+    /// operator scope, with operator routing on or off: operator memory
+    /// enters only through the proposal made for the person who said it.
+    #[test]
+    fn steward_ignores_operator_keys_the_model_names() {
+        for routing in [false, true] {
+            let mut run = DreamRun::default();
+            let (ops, _) = map_consolidate_ops_impl(
+                REALM,
+                vec![raw_operator_create("console-caller:v1:named-by-the-model")],
+                &HashSet::new(),
+                "run-1",
+                &mut run,
+                routing,
+            );
+            assert!(
+                ops.is_empty(),
+                "a model-named operator key commits nothing (routing {routing}): {ops:?}"
+            );
+            assert!(!run.skips.is_empty(), "the drop is recorded");
+        }
+    }
+
+    /// The dream accepts an operator-scope proposal only into the key it was
+    /// proposed for (the person who said it): the accept commits it there,
+    /// and an op in the same reply that names another person's key commits
+    /// nothing.
+    #[tokio::test]
+    async fn steward_accepts_operator_proposals_only_into_their_own_key() {
+        let own = MemoryScope::Operator {
+            realm: REALM.to_string(),
+            operator: "console-caller:v1:own".to_string(),
+        };
+        let other = MemoryScope::Operator {
+            realm: REALM.to_string(),
+            operator: "console-caller:v1:other".to_string(),
+        };
+        let fixture = build_operator_fixture(vec![empty_gather(), "SLOT".to_string()], vec![]);
+        let proposal_id = fixture
+            .store
+            .propose(
+                &own,
+                new_record("Terse updates", "operator said: keep updates short"),
+                MemoryAuthor::Agent {
+                    identity: "identity:worker".to_string(),
+                },
+            )
+            .await
+            .expect("propose to the person's operator scope");
+        {
+            let mut replies = fixture.llm.replies.lock().unwrap();
+            *replies.iter_mut().find(|r| r.as_str() == "SLOT").unwrap() =
+                json_reply(serde_json::json!({
+                    "ops": [{
+                        "op": "create", "id": "copied",
+                        "scope": {"kind": "operator", "key": "console-caller:v1:other"},
+                        "kind": "preference", "title": "Terse updates",
+                        "description": "for another person", "body": "Keep updates short."
+                    }],
+                    "quarantine_verdicts": [], "open_loop_escalations": [],
+                    "contradictions": [], "working_set": [],
+                    "proposal_verdicts": [
+                        {"proposal_id": proposal_id, "verdict": "accept",
+                         "rationale": "the person said it"}
+                    ]
+                }));
+        }
+        fixture.engine.note_session_completed();
+        let outcome = fixture.engine.dream_now().await;
+        let DreamOutcome::Completed(run) = outcome else {
+            panic!("dream must complete: {outcome:?}");
+        };
+        assert_eq!(run.verdicts.proposals_accepted, 1, "{:?}", run.skips);
+        let other_records = fixture
+            .store
+            .manifest(&[other], ManifestTier::Full)
+            .await
+            .expect("manifest");
+        assert!(
+            other_records.is_empty(),
+            "a key the dream names commits nothing: {:?}",
+            run.skips
+        );
+        let own_records = fixture
+            .store
+            .manifest(&[own], ManifestTier::Full)
+            .await
+            .expect("manifest");
+        assert_eq!(own_records.len(), 1, "the accept commits into its own key");
+    }
+
     /// The prompt renders the activation fact as data, and operator-fact
     /// candidates (identity scope, tagged epistemic:operator_said) surface
     /// only while routing is active.

@@ -771,10 +771,21 @@ impl AgentMemoryRuntimeInjector {
         identity: &AgentIdentity,
         session_key: Option<&str>,
         content: &meerkat_core::ContentInput,
-        requester: Option<&meerkat_core::TurnRequester>,
     ) -> Result<Vec<meerkat_core::ContentInput>, AgentMemoryError> {
         self.coordinator
-            .inject_for_turn(identity, session_key, content, requester)
+            .inject_for_turn(identity, session_key, content)
+            .await
+    }
+
+    /// [`RecallCoordinator::operator_context_for_turn`].
+    pub async fn operator_context_for_turn(
+        &self,
+        identity: &AgentIdentity,
+        session_key: Option<&str>,
+        requester: Option<&meerkat_core::TurnRequester>,
+    ) -> Result<Option<meerkat_core::lifecycle::TurnRequestContext>, AgentMemoryError> {
+        self.coordinator
+            .operator_context_for_turn(identity, session_key, requester)
             .await
     }
 
@@ -2632,7 +2643,7 @@ mod tests {
         let content = meerkat_core::ContentInput::Text("Where did I put my passport?".to_string());
 
         let injected = injector
-            .inject_for_turn(&identity()?, None, &content, None)
+            .inject_for_turn(&identity()?, None, &content)
             .await?;
 
         let request = {
@@ -2672,7 +2683,7 @@ mod tests {
         let content = meerkat_core::ContentInput::Text("hello".to_string());
 
         let injected = injector
-            .inject_for_turn(&identity()?, None, &content, None)
+            .inject_for_turn(&identity()?, None, &content)
             .await?;
 
         assert!(injected.is_empty());
@@ -2691,10 +2702,7 @@ mod tests {
         );
         let content = meerkat_core::ContentInput::Text("hello".to_string());
 
-        let err = match injector
-            .inject_for_turn(&identity()?, None, &content, None)
-            .await
-        {
+        let err = match injector.inject_for_turn(&identity()?, None, &content).await {
             Ok(_) => return Err("fail policy should return provider error".into()),
             Err(err) => err,
         };
@@ -2716,7 +2724,7 @@ mod tests {
         let content = meerkat_core::ContentInput::Text("hello".to_string());
 
         let injected = injector
-            .inject_for_turn(&identity()?, None, &content, None)
+            .inject_for_turn(&identity()?, None, &content)
             .await?;
 
         assert!(injected.is_empty());
@@ -2779,7 +2787,7 @@ mod tests {
         let content = meerkat_core::ContentInput::Text("where is the fact?".to_string());
 
         let injected = injector
-            .inject_for_turn(&identity()?, Some("session-1"), &content, None)
+            .inject_for_turn(&identity()?, Some("session-1"), &content)
             .await?;
 
         // Recall ran and the record was injected as its own body — and the
@@ -2819,12 +2827,12 @@ mod tests {
         let content = meerkat_core::ContentInput::Text("hello".to_string());
 
         let first = injector
-            .inject_for_turn(&identity()?, Some("session-a"), &content, None)
+            .inject_for_turn(&identity()?, Some("session-a"), &content)
             .await?;
         assert!(first.text_content().contains("Stable fact"));
 
         let second = injector
-            .inject_for_turn(&identity()?, Some("session-a"), &content, None)
+            .inject_for_turn(&identity()?, Some("session-a"), &content)
             .await?;
         assert!(
             second.is_empty(),
@@ -2832,7 +2840,7 @@ mod tests {
         );
 
         let other_session = injector
-            .inject_for_turn(&identity()?, Some("session-b"), &content, None)
+            .inject_for_turn(&identity()?, Some("session-b"), &content)
             .await?;
         assert!(other_session.text_content().contains("Stable fact"));
         Ok(())
@@ -2855,7 +2863,7 @@ mod tests {
         let content = meerkat_core::ContentInput::Text("hello".to_string());
 
         let injected = injector
-            .inject_for_turn(&identity()?, None, &content, None)
+            .inject_for_turn(&identity()?, None, &content)
             .await?;
         let text = injected.text_content();
         let blocks = text.matches("<meta_memory_observation ").count();
@@ -2888,7 +2896,7 @@ mod tests {
         let mut saw_passthrough_at = None;
         for turn in 0..8 {
             let injected = injector
-                .inject_for_turn(&identity()?, Some("session-x"), &content, None)
+                .inject_for_turn(&identity()?, Some("session-x"), &content)
                 .await?;
             let overhead = injected.text_content().len();
             assert!(overhead <= MAX_INJECTED_ASSEMBLY_BYTES + 64);
@@ -3345,6 +3353,168 @@ memory = false
             call_memory_tool(&dispatcher, serde_json::json!({"action": "recall"})).await?;
         assert!(!is_error);
         assert!(text.contains("No matching memory records"), "{text}");
+        Ok(())
+    }
+
+    /// Dispatch one `memory` call in a run whose requester is `requester`.
+    async fn call_memory_tool_for(
+        dispatcher: &Arc<dyn AgentToolDispatcher>,
+        args: serde_json::Value,
+        requester: Option<meerkat_core::TurnRequester>,
+    ) -> Result<(String, bool), Box<dyn Error>> {
+        let raw = serde_json::value::RawValue::from_string(args.to_string())?;
+        let context = meerkat_core::ToolDispatchContext::default().with_requester(requester);
+        let outcome = dispatcher
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: "call-1",
+                    name: MEMORY_TOOL_NAME,
+                    args: &raw,
+                },
+                &context,
+            )
+            .await?;
+        let text = outcome
+            .result
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                meerkat_core::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok((text, outcome.result.is_error))
+    }
+
+    /// A person as a Console send names its requester.
+    fn console_person(subject: &str) -> Result<meerkat_core::PrincipalRef, Box<dyn Error>> {
+        Ok(meerkat_core::PrincipalRef::in_domain(
+            meerkat_core::PrincipalKind::Human,
+            subject,
+            meerkat_core::TrustDomainId::new(format!(
+                "{}https://issuer.example.test",
+                crate::runtime::CONSOLE_HUMAN_TRUST_DOMAIN_PREFIX
+            ))?,
+        )?)
+    }
+
+    fn operator_said(title: &str) -> serde_json::Value {
+        serde_json::json!({
+            "action": "remember",
+            "title": title,
+            "body": format!("{title}."),
+            "epistemic": "operator_said",
+        })
+    }
+
+    async fn operator_memory_recorder() -> Result<
+        (
+            SqliteAgentMemoryStore,
+            Arc<dyn AgentToolDispatcher>,
+            tempfile::TempDir,
+        ),
+        Box<dyn Error>,
+    > {
+        let dir = tempfile::tempdir()?;
+        let store = SqliteAgentMemoryStore::open(dir.path())?;
+        let dispatcher = recorder_dispatcher(
+            Arc::new(store.clone()),
+            AgentMemoryConfig {
+                operator_scope: AgentMemoryOperatorScope::Provisional,
+                ..AgentMemoryConfig::default()
+            },
+        )
+        .await?
+        .ok_or("recorder registered")?;
+        Ok((store, dispatcher, dir))
+    }
+
+    /// The operator scopes the store holds pending proposals for.
+    async fn proposed_operator_scopes(
+        store: &SqliteAgentMemoryStore,
+    ) -> Result<Vec<MemoryScope>, Box<dyn Error>> {
+        use crate::memory::StewardStore as _;
+        Ok(store
+            .pending_proposals("default", 16)
+            .await?
+            .into_iter()
+            .map(|proposal| proposal.scope)
+            .filter(|scope| matches!(scope, MemoryScope::Operator { .. }))
+            .collect())
+    }
+
+    /// An `operator_said` fact the memory tool records is proposed to the
+    /// operator memory of the run's direct requester, and to no other
+    /// operator scope.
+    #[tokio::test]
+    async fn memory_tool_proposes_operator_said_to_the_direct_requester()
+    -> Result<(), Box<dyn Error>> {
+        let (store, dispatcher, _dir) = operator_memory_recorder().await?;
+        let alice = console_person("alice")?;
+        let (text, is_error) = call_memory_tool_for(
+            &dispatcher,
+            operator_said("Prefers terse status notes"),
+            Some(meerkat_core::TurnRequester::direct(alice.clone())),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        let alice_key =
+            crate::http_console::person_caller_scope(&alice).ok_or("a person has a key")?;
+        assert_eq!(
+            proposed_operator_scopes(&store).await?,
+            vec![MemoryScope::Operator {
+                realm: "default".to_string(),
+                operator: alice_key,
+            }],
+            "the fact is proposed to the requester's own operator memory: {text}"
+        );
+        Ok(())
+    }
+
+    /// A run without a direct person requester proposes no operator memory:
+    /// no requester, a requester carried across a peer hop, or a principal
+    /// that names no person. The person's own direct run does.
+    #[tokio::test]
+    async fn memory_tool_proposes_no_operator_memory_without_a_direct_requester()
+    -> Result<(), Box<dyn Error>> {
+        let (store, dispatcher, _dir) = operator_memory_recorder().await?;
+        let alice = console_person("alice")?;
+        let service = meerkat_core::PrincipalRef::in_domain(
+            meerkat_core::PrincipalKind::ServiceAccount,
+            "svc:reporter",
+            meerkat_core::TrustDomainId::new("service-issuer:reporting")?,
+        )?;
+        for (label, requester) in [
+            ("no requester", None),
+            (
+                "a carried requester",
+                Some(meerkat_core::TurnRequester::carried(alice.clone())),
+            ),
+            (
+                "a service principal",
+                Some(meerkat_core::TurnRequester::direct(service)),
+            ),
+        ] {
+            let (text, is_error) =
+                call_memory_tool_for(&dispatcher, operator_said(label), requester).await?;
+            assert!(!is_error, "{label}: {text}");
+            assert!(
+                proposed_operator_scopes(&store).await?.is_empty(),
+                "{label} proposes no operator memory: {text}"
+            );
+        }
+        call_memory_tool_for(
+            &dispatcher,
+            operator_said("the person's own run"),
+            Some(meerkat_core::TurnRequester::direct(alice)),
+        )
+        .await?;
+        assert_eq!(
+            proposed_operator_scopes(&store).await?.len(),
+            1,
+            "the person's own direct run proposes"
+        );
         Ok(())
     }
 
@@ -4116,7 +4286,6 @@ memory = false
                 &identity,
                 Some("sess-1"),
                 &meerkat_core::ContentInput::Text("what is the deploy policy?".to_string()),
-                None,
             )
             .await?;
         let injected_text = injected

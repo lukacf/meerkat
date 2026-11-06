@@ -1388,6 +1388,50 @@ pub(crate) fn person_caller_scope(principal: &meerkat_core::PrincipalRef) -> Opt
     }))
 }
 
+#[cfg(test)]
+mod person_caller_scope_tests {
+    use super::*;
+    use meerkat_core::{PrincipalKind, PrincipalRef, TrustDomainId};
+
+    /// A person's operator memory key is the caller scope
+    /// `meta/console/whoami` reports to them: the principal the Console
+    /// qualifies for a verified human gives the digest of that human's send
+    /// scope. A principal that names no Console person has none.
+    #[test]
+    fn person_caller_scope_is_the_whoami_caller_scope() -> Result<(), Box<dyn std::error::Error>> {
+        let issuer = "https://issuer.example.test";
+        let subject = "person-sub";
+        let person = PrincipalRef::in_domain(
+            PrincipalKind::Human,
+            subject,
+            TrustDomainId::new(format!(
+                "{}{issuer}",
+                crate::runtime::CONSOLE_HUMAN_TRUST_DOMAIN_PREFIX
+            ))?,
+        )?;
+        assert_eq!(
+            person_caller_scope(&person),
+            Some(console_caller_scope(&ConsoleSendScope::Human {
+                issuer: issuer.to_string(),
+                subject: subject.to_string(),
+            }))
+        );
+        let service = PrincipalRef::in_domain(
+            PrincipalKind::ServiceAccount,
+            "svc:reporter",
+            TrustDomainId::new("service-issuer:reporting")?,
+        )?;
+        assert_eq!(person_caller_scope(&service), None);
+        let other_domain = PrincipalRef::in_domain(
+            PrincipalKind::Human,
+            subject,
+            TrustDomainId::new("directory:corp")?,
+        )?;
+        assert_eq!(person_caller_scope(&other_domain), None);
+        Ok(())
+    }
+}
+
 /// Storage keys are opaque projections of the authenticated runtime/principal.
 /// Anonymous consoles form an explicit shared local account. The browser also
 /// includes its gateway base URL, and custom hosts can supply a stricter scope.

@@ -819,11 +819,13 @@ fn present_one(
 }
 
 /// Present the Console's setup requests: every login's at once, and one
-/// login's one at a time, in the order they arrived. Host closure, a
-/// presentation that reports the host stopped and a shared custody failure
-/// each end the intake: waiting requests retire with their enrollments, and
-/// every running presentation is joined (each observes the closure itself),
-/// never dropped.
+/// login's one at a time, in the order they arrived. An enrollment (one
+/// agent session's setup owner) yields its next request only after its
+/// current one is presented, so requests presented at once come from
+/// different enrollments. Host closure, a presentation that reports the host
+/// stopped and a shared custody failure each end the intake: waiting
+/// requests retire with their enrollments, and every running presentation
+/// is joined (each observes the closure itself), never dropped.
 pub async fn serve_console_setup(
     reviews: super::LocalSetupReviews,
     closed: PrivateHostClosed,

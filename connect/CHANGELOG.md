@@ -29,8 +29,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   recorded as the Console presenter (`connect-console-presenter`).
 - Console setup: several people answer setup prompts at the same time. Each
   login has its own prompt, and one login's prompts come one at a time, in
-  the order they arrived. Before, one person's open prompt held back every
-  other person's.
+  the order they arrived; an agent session still asks for one setup answer
+  at a time. Before, one person's open prompt held back every other
+  person's.
 - Setup: when a setup check answered again for a validation it had already
   accepted, with something that is not a valid proposal (for example a file
   list that names both a declaration and an activation document), the check

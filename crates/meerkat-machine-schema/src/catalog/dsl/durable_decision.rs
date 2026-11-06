@@ -62,6 +62,17 @@
 //! service nor a host compares the times again. It is separate from the
 //! deadline, which the owner's clock (`now_ms`) decides.
 //!
+//! # Complete presentations
+//!
+//! A presentation counts only when it is complete for the held subject: it
+//! showed every canonical part of the rendering (`complete`, which the owner
+//! service compares), or it is a summary that a surface with a size limit
+//! sent with a link to the full presentation, and that link served the held
+//! subject's rendering whole and unchanged (`link_served_digest` is the
+//! sealed subject digest). The machine decides it: a summary with no link,
+//! or with a link that served another rendering, is `PresentationIncomplete`,
+//! so nothing is decided on a silently truncated presentation.
+//!
 //! # Latching
 //!
 //! `Rejected`, `Expired`, `Withdrawn`, `Executed` and `ExecutionRefused` are
@@ -435,6 +446,15 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     } else {
                         first
                     }
+                }
+
+                // Whether a presentation of the held subject is complete: it
+                // showed every canonical part, or it is a summary whose link
+                // to the full presentation served the held subject's
+                // rendering, whole and unchanged (a link that served another
+                // rendering completes nothing).
+                helper presentation_complete(complete: bool, link_served_digest: Option<DecisionDigest>, subject_digest: DecisionDigest) -> bool {
+                    complete || link_served_digest == Some(subject_digest)
                 }
 
                 // An unheld record carries no decision facts at all.
@@ -851,7 +871,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     guard "open" { self.lifecycle_phase == Phase::Open }
                     guard "before_deadline" { now_ms < self.deadline_at_ms }
                     guard "subject_matches" { digest == self.subject_digest }
-                    guard "incomplete" { !complete }
+                    guard "incomplete" { !presentation_complete(complete, link_served_digest, self.subject_digest) }
                     update {}
                     to Open
                     emit Refused {
@@ -865,7 +885,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     guard "open" { self.lifecycle_phase == Phase::Open }
                     guard "before_deadline" { now_ms < self.deadline_at_ms }
                     guard "subject_matches" { digest == self.subject_digest }
-                    guard "complete" { complete }
+                    guard "complete" { presentation_complete(complete, link_served_digest, self.subject_digest) }
                     guard "human_stage" { self.stage == DurableDecisionStage::Human }
                     guard "approver_audience" { audience == self.approver_id }
                     guard "timed" { presented_at_ms != 0 }
@@ -886,7 +906,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     guard "open" { self.lifecycle_phase == Phase::Open }
                     guard "before_deadline" { now_ms < self.deadline_at_ms }
                     guard "subject_matches" { digest == self.subject_digest }
-                    guard "complete" { complete }
+                    guard "complete" { presentation_complete(complete, link_served_digest, self.subject_digest) }
                     guard "human_stage" { self.stage == DurableDecisionStage::Human }
                     guard "approver_audience" { audience == self.approver_id }
                     guard "untimed" { presented_at_ms == 0 }
@@ -903,7 +923,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     guard "open" { self.lifecycle_phase == Phase::Open }
                     guard "before_deadline" { now_ms < self.deadline_at_ms }
                     guard "subject_matches" { digest == self.subject_digest }
-                    guard "complete" { complete }
+                    guard "complete" { presentation_complete(complete, link_served_digest, self.subject_digest) }
                     guard "human_stage" { self.stage == DurableDecisionStage::Human }
                     guard "other_audience" { audience != self.approver_id }
                     update {}
@@ -919,7 +939,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     guard "open" { self.lifecycle_phase == Phase::Open }
                     guard "before_deadline" { now_ms < self.deadline_at_ms }
                     guard "subject_matches" { digest == self.subject_digest }
-                    guard "complete" { complete }
+                    guard "complete" { presentation_complete(complete, link_served_digest, self.subject_digest) }
                     guard "review_stage" { self.stage == DurableDecisionStage::Review }
                     guard "reviewer_audience" { self.reviewer == Some(audience) }
                     update {
@@ -934,7 +954,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     guard "open" { self.lifecycle_phase == Phase::Open }
                     guard "before_deadline" { now_ms < self.deadline_at_ms }
                     guard "subject_matches" { digest == self.subject_digest }
-                    guard "complete" { complete }
+                    guard "complete" { presentation_complete(complete, link_served_digest, self.subject_digest) }
                     guard "review_stage" { self.stage == DurableDecisionStage::Review }
                     guard "other_audience" { self.reviewer != Some(audience) }
                     update {}

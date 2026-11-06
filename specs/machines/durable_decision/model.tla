@@ -36,6 +36,7 @@ VARIABLES phase, model_step_count, decision_id, deadline_at_ms, subject_digest, 
 
 vars == << phase, model_step_count, decision_id, deadline_at_ms, subject_digest, operation_id, request_digest, requester, approver_id, reviewer, stage, first_presented_to_approver_at_ms, presented_to_reviewer, evidence_digest, decided_at_ms, ended_at_ms, permit_issued, executed_request_digest, notice >>
 
+presentation_complete(complete, link_served_digest, arg_subject_digest) == (IF complete THEN TRUE ELSE (link_served_digest = Some(arg_subject_digest)))
 earliest_presentation(first, presented) == (IF ((presented # None) /\ (IF (first = None) THEN TRUE ELSE ((IF "value" \in DOMAIN presented THEN presented["value"] ELSE None) < (IF "value" \in DOMAIN first THEN first["value"] ELSE None)))) THEN presented ELSE first)
 owed_if_due(arg_notice) == (IF (arg_notice = "NotDue") THEN "Owed" ELSE arg_notice)
 
@@ -332,7 +333,7 @@ PresentRefusedIncomplete(audience, digest, complete, link_served_digest, present
     /\ phase = "Open"
     /\ (now_ms < deadline_at_ms)
     /\ (digest = subject_digest)
-    /\ ~(complete)
+    /\ ~(presentation_complete(complete, link_served_digest, subject_digest))
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f7d4c4b3385291f4
@@ -342,7 +343,7 @@ PresentToApprover(audience, digest, complete, link_served_digest, presented_at_m
     /\ phase = "Open"
     /\ (now_ms < deadline_at_ms)
     /\ (digest = subject_digest)
-    /\ complete
+    /\ presentation_complete(complete, link_served_digest, subject_digest)
     /\ (stage = "Human")
     /\ (audience = approver_id)
     /\ (presented_at_ms # 0)
@@ -356,7 +357,7 @@ PresentRefusedUntimed(audience, digest, complete, link_served_digest, presented_
     /\ phase = "Open"
     /\ (now_ms < deadline_at_ms)
     /\ (digest = subject_digest)
-    /\ complete
+    /\ presentation_complete(complete, link_served_digest, subject_digest)
     /\ (stage = "Human")
     /\ (audience = approver_id)
     /\ (presented_at_ms = 0)
@@ -369,7 +370,7 @@ PresentRefusedWrongApproverAudience(audience, digest, complete, link_served_dige
     /\ phase = "Open"
     /\ (now_ms < deadline_at_ms)
     /\ (digest = subject_digest)
-    /\ complete
+    /\ presentation_complete(complete, link_served_digest, subject_digest)
     /\ (stage = "Human")
     /\ (audience # approver_id)
     /\ phase' = "Open"
@@ -381,7 +382,7 @@ PresentToReviewer(audience, digest, complete, link_served_digest, presented_at_m
     /\ phase = "Open"
     /\ (now_ms < deadline_at_ms)
     /\ (digest = subject_digest)
-    /\ complete
+    /\ presentation_complete(complete, link_served_digest, subject_digest)
     /\ (stage = "Review")
     /\ (reviewer = Some(audience))
     /\ phase' = "Open"
@@ -394,7 +395,7 @@ PresentRefusedWrongReviewerAudience(audience, digest, complete, link_served_dige
     /\ phase = "Open"
     /\ (now_ms < deadline_at_ms)
     /\ (digest = subject_digest)
-    /\ complete
+    /\ presentation_complete(complete, link_served_digest, subject_digest)
     /\ (stage = "Review")
     /\ (reviewer # Some(audience))
     /\ phase' = "Open"
@@ -1508,12 +1509,12 @@ Next ==
     \/ (phase = "ExecutionRefused") /\ \E arg_decision_id \in StringValues : \E now_ms \in 0..2 : \E arg_deadline_at_ms \in 0..2 : \E arg_subject_digest \in DecisionDigestValues : \E arg_operation_id \in StringValues : \E arg_request_digest \in DecisionDigestValues : \E arg_requester \in DecisionPartyValues : \E arg_approver_id \in DecisionPartyValues : \E arg_reviewer \in OptionDecisionPartyValues : \E notice_routable \in BOOLEAN : HoldConflictExecutionRefused(arg_decision_id, now_ms, arg_deadline_at_ms, arg_subject_digest, arg_operation_id, arg_request_digest, arg_requester, arg_approver_id, arg_reviewer, notice_routable)
     \/ (phase = "Open") /\ \E audience \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E complete \in BOOLEAN : \E link_served_digest \in OptionDecisionDigestValues : \E presented_at_ms \in 0..2 : \E now_ms \in 0..2 : PresentAtDeadline(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
     \/ (phase = "Open") /\ \E audience \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E complete \in BOOLEAN : \E link_served_digest \in OptionDecisionDigestValues : \E presented_at_ms \in 0..2 : \E now_ms \in 0..2 : PresentRefusedSubjectChanged(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
-    \/ (phase = "Open") /\ \E audience \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E link_served_digest \in OptionDecisionDigestValues : \E presented_at_ms \in 0..2 : \E now_ms \in 0..2 : PresentRefusedIncomplete(audience, digest, FALSE, link_served_digest, presented_at_ms, now_ms)
-    \/ (phase = "Open") /\ \E audience \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E link_served_digest \in OptionDecisionDigestValues : \E presented_at_ms \in 0..2 : \E now_ms \in 0..2 : PresentToApprover(audience, digest, TRUE, link_served_digest, presented_at_ms, now_ms)
-    \/ (phase = "Open") /\ \E audience \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E link_served_digest \in OptionDecisionDigestValues : \E presented_at_ms \in 0..2 : \E now_ms \in 0..2 : PresentRefusedUntimed(audience, digest, TRUE, link_served_digest, presented_at_ms, now_ms)
-    \/ (phase = "Open") /\ \E audience \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E link_served_digest \in OptionDecisionDigestValues : \E presented_at_ms \in 0..2 : \E now_ms \in 0..2 : PresentRefusedWrongApproverAudience(audience, digest, TRUE, link_served_digest, presented_at_ms, now_ms)
-    \/ (phase = "Open") /\ \E audience \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E link_served_digest \in OptionDecisionDigestValues : \E presented_at_ms \in 0..2 : \E now_ms \in 0..2 : PresentToReviewer(audience, digest, TRUE, link_served_digest, presented_at_ms, now_ms)
-    \/ (phase = "Open") /\ \E audience \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E link_served_digest \in OptionDecisionDigestValues : \E presented_at_ms \in 0..2 : \E now_ms \in 0..2 : PresentRefusedWrongReviewerAudience(audience, digest, TRUE, link_served_digest, presented_at_ms, now_ms)
+    \/ (phase = "Open") /\ \E audience \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E complete \in BOOLEAN : \E link_served_digest \in OptionDecisionDigestValues : \E presented_at_ms \in 0..2 : \E now_ms \in 0..2 : PresentRefusedIncomplete(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
+    \/ (phase = "Open") /\ \E audience \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E complete \in BOOLEAN : \E link_served_digest \in OptionDecisionDigestValues : \E presented_at_ms \in 0..2 : \E now_ms \in 0..2 : PresentToApprover(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
+    \/ (phase = "Open") /\ \E audience \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E complete \in BOOLEAN : \E link_served_digest \in OptionDecisionDigestValues : \E presented_at_ms \in 0..2 : \E now_ms \in 0..2 : PresentRefusedUntimed(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
+    \/ (phase = "Open") /\ \E audience \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E complete \in BOOLEAN : \E link_served_digest \in OptionDecisionDigestValues : \E presented_at_ms \in 0..2 : \E now_ms \in 0..2 : PresentRefusedWrongApproverAudience(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
+    \/ (phase = "Open") /\ \E audience \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E complete \in BOOLEAN : \E link_served_digest \in OptionDecisionDigestValues : \E presented_at_ms \in 0..2 : \E now_ms \in 0..2 : PresentToReviewer(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
+    \/ (phase = "Open") /\ \E audience \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E complete \in BOOLEAN : \E link_served_digest \in OptionDecisionDigestValues : \E presented_at_ms \in 0..2 : \E now_ms \in 0..2 : PresentRefusedWrongReviewerAudience(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
     \/ (phase = "Approved") /\ \E audience \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E complete \in BOOLEAN : \E link_served_digest \in OptionDecisionDigestValues : \E presented_at_ms \in 0..2 : \E now_ms \in 0..2 : PresentRefusedNotOpenApproved(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
     \/ (phase = "Rejected") /\ \E audience \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E complete \in BOOLEAN : \E link_served_digest \in OptionDecisionDigestValues : \E presented_at_ms \in 0..2 : \E now_ms \in 0..2 : PresentRefusedNotOpenRejected(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
     \/ (phase = "Expired") /\ \E audience \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E complete \in BOOLEAN : \E link_served_digest \in OptionDecisionDigestValues : \E presented_at_ms \in 0..2 : \E now_ms \in 0..2 : PresentRefusedNotOpenExpired(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)

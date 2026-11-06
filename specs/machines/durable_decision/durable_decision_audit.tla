@@ -20,7 +20,11 @@
 \* one carries no presentation or one shown at 0, 1 or 2 (0 is no reading),
 \* and its ingress observed it at any time in 0..2, before, at or after each
 \* presentation; one with a defect carries a presentation shown at 1,
-\* observed at 1. A complete presentation of the held subject to the
+\* observed at 1. A presentation shows every canonical part, or is a
+\* summary that shows none, with a link to the full presentation that served
+\* the held subject's rendering or another one, or with no link; it is
+\* complete when it shows every part or its link served the held subject. A
+\* complete presentation of the held subject to the
 \* approver was shown at 0, 1 or 2, any other at 1, whatever clock reading
 \* records it; the first presentation is the earliest reading. A review
 \* verdict is the
@@ -94,7 +98,7 @@
 \*     that fired.
 \*
 \* Reachability (the runner): every wrapper fires in the bounded space,
-\* checked from TLC's coverage, and seventeen scenarios are checked as
+\* checked from TLC's coverage, and eighteen scenarios are checked as
 \* expected violations of their negations: a human approval executed and its
 \* notice delivered; an execution retried after a release; an approval
 \* closed by the owner's permanent refusal; a review escalated and then
@@ -107,9 +111,11 @@
 \* the deadline refused; a decision observed before the first presentation
 \* refused and then an approval; an approval observed in the same
 \* millisecond as the first presentation; an approver no longer current
-\* whose decision ends refused with no permit; and an approver no longer
+\* whose decision ends refused with no permit; an approver no longer
 \* current while a permit is outstanding, whose commit still settles as
-\* executed. With --mutants the runner seeds one defect per property into a
+\* executed; and a summary whose link served the held subject's rendering
+\* recorded as the approver's presentation, then an approval. With
+\* --mutants the runner seeds one defect per property into a
 \* copy of the generated model and requires TLC to refuse each with that
 \* property.
 \*
@@ -178,13 +184,19 @@ AuditPresentShapes ==
       [complete |-> FALSE, link |-> Some(AuditHeld)],
       [complete |-> FALSE, link |-> Some(AuditOther)] }
 
+\* Whether a presentation is complete for the held subject: it showed every
+\* canonical part, or its link served the held subject's rendering.
+AuditCompleteFor(complete, link, subject) == complete \/ link = Some(subject)
+
 \* A complete presentation of the held subject to the approver is shown at
 \* 0 (no reading) or at a reading; any other presentation records no time,
 \* so it is shown at 1.
 AuditPresentInputs ==
     UNION { { [audience |-> a, digest |-> g, complete |-> s.complete,
                link_served_digest |-> s.link, presented_at_ms |-> p, now_ms |-> n] :
-              p \in IF a = AuditApprover /\ g = AuditHeld /\ s.complete THEN AuditTimes ELSE {1},
+              p \in IF a = AuditApprover /\ g = AuditHeld
+                       /\ AuditCompleteFor(s.complete, s.link, AuditHeld)
+                    THEN AuditTimes ELSE {1},
               n \in AuditTimes } :
             <<a, g, s>> \in {AuditRequester, AuditApprover} \X {AuditHeld, AuditOther}
                              \X AuditPresentShapes }
@@ -433,7 +445,9 @@ AuditFirstShown(in) == AuditEarliest(audit_first_presented, AuditTimedCarried(in
 \* A presentation the approver's first presentation time comes from, read
 \* from the input itself and never from the arm that fired: on an open
 \* human-stage decision before its deadline, a complete presentation of
-\* the held subject to the approver id, shown at a reading other than 0.
+\* the held subject to the approver id (every part shown, or a summary
+\* whose link served the held subject's rendering), shown at a reading
+\* other than 0.
 AuditApproverPresentation(kind, in) ==
     /\ kind = "Present"
     /\ phase = "Open"
@@ -441,7 +455,7 @@ AuditApproverPresentation(kind, in) ==
     /\ in.now_ms < deadline_at_ms
     /\ in.audience = approver_id
     /\ in.digest = subject_digest
-    /\ in.complete
+    /\ AuditCompleteFor(in.complete, in.link_served_digest, subject_digest)
     /\ in.presented_at_ms > 0
 
 AuditPresentationOrderKept(kind, arm, in) ==
@@ -505,6 +519,7 @@ AuditMarks(arm, in) ==
           THEN {"ApproverRevokedRefused"} ELSE {})
     \cup (IF arm = "AuthorizeExecutionRefusedRevokedSettlementOwed"
           THEN {"RevokedSettlementOwed"} ELSE {})
+    \cup (IF arm = "PresentToApprover" /\ ~in.complete THEN {"LinkedPresented"} ELSE {})
 
 \* Every wrapper ends with this step: the step properties it broke, the
 \* marks it left and the earliest approver presentation accepted.
@@ -1062,6 +1077,10 @@ AuditWitnessApproverRevokedEndsRefused ==
 \* executed.
 AuditWitnessRevokedPermitSettledExecuted ==
     audit_committed /\ phase = "Executed" /\ "RevokedSettlementOwed" \in audit_seen
+\* A summary whose link served the held subject's rendering, recorded as the
+\* approver's presentation, then an approval.
+AuditWitnessLinkedPresentationThenApproved ==
+    phase = "Approved" /\ "LinkedPresented" \in audit_seen
 
 NotAuditWitnessHumanApprovalExecutedAndNoticed == ~AuditWitnessHumanApprovalExecutedAndNoticed
 NotAuditWitnessRetriedAfterRelease == ~AuditWitnessRetriedAfterRelease
@@ -1081,4 +1100,5 @@ NotAuditWitnessDecidedBeforePresentationRefused ==
 NotAuditWitnessApprovedAtThePresentation == ~AuditWitnessApprovedAtThePresentation
 NotAuditWitnessApproverRevokedEndsRefused == ~AuditWitnessApproverRevokedEndsRefused
 NotAuditWitnessRevokedPermitSettledExecuted == ~AuditWitnessRevokedPermitSettledExecuted
+NotAuditWitnessLinkedPresentationThenApproved == ~AuditWitnessLinkedPresentationThenApproved
 ====

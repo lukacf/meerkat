@@ -35,6 +35,38 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat-runtime`, `meerkat-machine-schema`, `meerkat-machine-kernels`:
+  `DurableDecisionInput::Present` (meerkat-runtime `decision::dsl` and
+  meerkat-machine-schema `catalog::dsl::durable_decision`) and the kernel
+  `generated::durable_decision::inputs::Present` gain the public field
+  `link_served_digest: Option<DecisionDigest>`, the digest a summary's link
+  served, so code that builds them literally must set it (`None` keeps the
+  previous behaviour).
+
+### Added
+
+- `meerkat-core`, `meerkat-runtime`: a durable decision's presentation can
+  be a summary with a link. A surface with a size limit records
+  `PresentationRecord::linked`: a summary that says it is shortened, with a
+  `PresentationLink` (the reference the summary carried, and the digest of
+  the rendering that link served). It is a complete presentation only when
+  the link served the whole, unchanged rendering, that is when its served
+  digest is the decision's subject digest: `PresentationRecord::is_complete_for`
+  and `DurableDecisionMachine` count it for a recorded presentation and for
+  one a decision event carries, and a decision observed before it is refused
+  `decided_before_presentation`, as for a shown one. A summary with no link,
+  or whose link served another rendering, stays `presentation_incomplete`.
+  A record without a link is stored as before.
+
+### Upgrade notes
+
+- A durable decision row that holds a linked presentation (recorded, or in a
+  decided decision's evidence) does not read under 0.9.10, which refuses the
+  record's `link` field: that decision reads as unreadable there. Rows
+  without a link read as before.
+
 ## [0.9.10] - 2026-11-04
 
 ### Highlights

@@ -3,9 +3,16 @@
 //! A rendering is presented in canonical parts: consecutive byte ranges on
 //! UTF-8 character boundaries of at most a presenter's part size, each with
 //! its own digest. The split is a pure function of the rendering and the
-//! part size, so a presentation is complete exactly when the parts it shows
-//! equal the split for its own part size. A presenter's escaping and channel
-//! splitting are never digest inputs.
+//! part size, so a presentation that shows parts is complete exactly when
+//! the parts it shows equal the split for its own part size. A presenter's
+//! escaping and channel splitting are never digest inputs.
+//!
+//! A surface with a size limit may instead send a summary that says it is
+//! shortened, with a link to the full presentation that its host serves by
+//! decision id and subject digest. Such a presentation is complete only when
+//! the link served the whole, unchanged rendering: its served digest is the
+//! rendering's subject digest. Nothing counts a silently truncated
+//! presentation.
 
 use std::num::NonZeroU32;
 use std::ops::Range;
@@ -204,9 +211,17 @@ impl PresentationRecord {
         self.parts_shown == canonical_parts(rendering.as_str(), self.max_part_bytes)
     }
 
-    /// Whether this record is a complete presentation of `rendering`.
+    /// Whether this record is a complete presentation of `rendering`: it
+    /// showed every canonical part, or it is a summary whose link served the
+    /// whole, unchanged rendering (the link's served digest is the
+    /// rendering's subject digest). A summary without a link, or whose link
+    /// served another rendering, is incomplete.
     #[must_use]
     pub fn is_complete_for(&self, rendering: &DecisionRendering) -> bool {
         self.shows_every_part_of(rendering)
+            || self
+                .link
+                .as_ref()
+                .is_some_and(|link| link.served_digest == rendering.subject_digest())
     }
 }

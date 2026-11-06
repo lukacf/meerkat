@@ -872,7 +872,11 @@ impl DurableDecisionService {
     /// Record a presentation of the decision's rendering. Only a complete
     /// presentation of the held subject to the party that decides now (the
     /// approver id in the human stage, the reviewer in the review stage)
-    /// counts; it is kept as that audience's latest. The decision's machine
+    /// counts: one that showed every canonical part, or a summary whose link
+    /// to the full presentation served the whole, unchanged rendering
+    /// ([`PresentationRecord::linked`]); the decision's machine decides it
+    /// from the parts shown and the digest the link served. It is kept as
+    /// that audience's latest. The decision's machine
     /// keeps, from the presentation's own time (`at_ms`), when a
     /// presentation first reached the approver: a human decision observed
     /// before that is refused. A presentation to the approver at 0 is no

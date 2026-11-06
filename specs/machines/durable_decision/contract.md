@@ -60,6 +60,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Helpers
 - `owed_if_due`(notice: DurableDecisionNotice) -> `DurableDecisionNotice`
 - `earliest_presentation`(first: Option<u64>, presented: Option<u64>) -> `Option<u64>`
+- `presentation_complete`(complete: Bool, link_served_digest: Option<DecisionDigest>, subject_digest: DecisionDigest) -> `Bool`
 
 ## Invariants
 - `unheld_is_empty`

@@ -49,7 +49,10 @@
 #     decision ends refused (ApproverRevokedEndsRefused);
 #   - an approver no longer current while a permit is outstanding: no new
 #     permit, and the commit made under it settles as executed
-#     (RevokedPermitSettledExecuted).
+#     (RevokedPermitSettledExecuted);
+#   - a summary whose link served the held subject's rendering, recorded as
+#     the approver's presentation, then an approval
+#     (LinkedPresentationThenApproved).
 # With --mutants it seeds one defect into a copy of the generated model per
 # mutant and requires TLC to refuse each with its property. TLC stops at its
 # first violation and reports only the first violated invariant of a state,
@@ -79,7 +82,8 @@
 #     millisecond as the first presentation
 #     (AuditDecisionFollowsPresentation);
 #   - a presentation that overwrites the first presentation time with its
-#     own, and one to another audience recorded as the approver's
+#     own, one to another audience recorded as the approver's, and a summary
+#     whose link served another rendering counted complete
 #     (AuditFirstPresentationIsTheEarliest);
 #   - a presentation at 0 recorded as the first presentation
 #     (first_presentation_is_a_reading, a generated invariant), and a
@@ -352,7 +356,7 @@ for witness in HumanApprovalExecutedAndNoticed RetriedAfterRelease ExecutionRefu
   WithdrawnThenDecideRefused SelfApprovalThenAnotherApproves CommitThenRecordReplayed \
   HoldReplayedAndConflicting PermitAcrossDeadlineExecuted ReleaseAfterDeadlineExpires \
   AuthorizeAtDeadlineRefused DecidedBeforePresentationRefused ApprovedAtThePresentation \
-  ApproverRevokedEndsRefused RevokedPermitSettledExecuted; do
+  ApproverRevokedEndsRefused RevokedPermitSettledExecuted LinkedPresentationThenApproved; do
   cfg="${work_dir}/witness-${witness}.cfg"
   write_cfg "${cfg}" "" "
   NotAuditWitness${witness}"
@@ -577,6 +581,16 @@ PresentToApprover
 /\ TRUE
 EOF
   mutate present_to_another_audience AuditFirstPresentationIsTheEarliest "${edits}"
+
+  # A summary whose link served another rendering, counted complete: the
+  # audit reads the link's served digest from the input, never from the arm
+  # that fired.
+  cat > "${edits}" <<'EOF'
+PresentToApprover
+/\ presentation_complete(complete, link_served_digest, subject_digest)
+/\ (complete \/ link_served_digest # None)
+EOF
+  mutate link_to_another_rendering_counted_complete AuditFirstPresentationIsTheEarliest "${edits}"
 
   # A presentation at 0, no reading, recorded as the first presentation.
   cat > "${edits}" <<'EOF'

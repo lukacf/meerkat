@@ -26846,7 +26846,8 @@ function createPendingApprovalResource(input) {
     status: "loading",
     requests: [],
     decisions: {},
-    readOnly: input.readOnly === true
+    readOnly: input.readOnly === true,
+    ...input.readOnly === true && input.readOnlyReason ? { readOnlyReason: input.readOnlyReason } : {}
   };
   const listeners2 = /* @__PURE__ */ new Set();
   const lifetime = new AbortController();
@@ -32113,7 +32114,7 @@ function AskedLine({ request, waiting, testId }) {
     waiting ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("span", { className: "cc-approval__waiting", children: "Waiting ".concat(waiting) }) : null
   ] });
 }
-function ApprovalCard({ request, resourceStatus, decision, readOnly = false, decideLinks, onDecide }) {
+function ApprovalCard({ request, resourceStatus, decision, readOnly = false, readOnlyReason, decideLinks, onDecide }) {
   const now3 = useApprovalClock([request.deadlineAtMs]);
   const pending = request.status === "pending" && decision?.phase !== "settled";
   const submitting = decision?.phase === "submitting";
@@ -32177,7 +32178,7 @@ function ApprovalCard({ request, resourceStatus, decision, readOnly = false, dec
           "Escalated to a new request ",
           /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(TechnicalId, { value: decision.result.next_pending_id, label: "Request ID" })
         ] }) : null,
-        readOnly && !hostDecide ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Notice, { tone: "locked", children: "Read-only access" }) : null,
+        readOnly && !hostDecide ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Notice, { tone: "locked", children: readOnlyReason === "sign_in" ? "Sign in as yourself to decide" : "Read-only access" }) : null,
         resourceStatus === "forbidden" ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Notice, { tone: "locked", children: "Approval access denied" }) : null,
         /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("footer", { className: "cc-approval__footer", children: [
           /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("span", { className: "cc-approval__status", role: "status", children: /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { tone: words2.tone, mark: true, variant: state === "pending" ? "quiet" : void 0, children: words2.text }) }),
@@ -32326,6 +32327,7 @@ function ConversationApprovals({ approvalSnapshot, approvalIdentity, onApprovalD
   if (!approvalSnapshot || !approvalIdentity) return null;
   const requests = approvalSnapshot.requests.filter((request) => Boolean(request.origin?.interactionId) === Boolean(interactionIds) && approvalMatchesConversation(request, { identity: approvalIdentity, conversationId, interactionIds }));
   const readOnly = approvalSnapshot.readOnly || !onApprovalDecision;
+  const readOnlyReason = approvalSnapshot.readOnly ? approvalSnapshot.readOnlyReason : void 0;
   return /* @__PURE__ */ (0, import_jsx_runtime49.jsx)(import_jsx_runtime49.Fragment, { children: requests.map((request) => /* @__PURE__ */ (0, import_jsx_runtime49.jsx)(
     ApprovalCard,
     {
@@ -32333,6 +32335,7 @@ function ConversationApprovals({ approvalSnapshot, approvalIdentity, onApprovalD
       resourceStatus: approvalSnapshot.status,
       decision: approvalSnapshot.decisions[request.pendingId],
       readOnly,
+      readOnlyReason,
       decideLinks: readOnly ? hostDecideLinks(decideSources, request.pendingId) : void 0,
       onDecide: onApprovalDecision ?? (() => {
       })
@@ -60972,6 +60975,10 @@ function workGraphClaimOwnedBy(item, principal) {
   const key = item.claim?.owner?.key;
   return Boolean(principal) && key?.kind === "principal" && key.id === principal;
 }
+function workGraphMayRelease(item, caller) {
+  if (!item.claim) return false;
+  return workGraphClaimOwnedBy(item, caller.principal) || Boolean(caller.principal) && caller.canAdminister === true;
+}
 
 // src/lib/topology.ts
 var MUTATION_KINDS = [
@@ -67287,6 +67294,7 @@ function GatingInboxPanel({
               resourceStatus: resource.status,
               decision: resource.decisions[request.pendingId],
               readOnly: readOnly || resource.readOnly,
+              readOnlyReason: readOnly ? void 0 : resource.readOnlyReason,
               decideLinks: readOnly || resource.readOnly ? hostDecideLinks(hostDecideSources, request.pendingId) : void 0,
               onDecide
             }
@@ -92948,7 +92956,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     void Promise.resolve().then(() => consoleTransport.whoami ? consoleTransport.whoami() : null).then((whoami) => {
       if (!active) return;
       const claimant = whoami && whoami.actorKind !== "anonymous" ? whoami.principal : void 0;
-      setApprovalDecider({ scope, person: whoami?.actorKind === "person", ...claimant ? { claimant } : {} });
+      setApprovalDecider({
+        scope,
+        person: whoami?.actorKind === "person",
+        answered: Boolean(whoami),
+        ...claimant ? { claimant } : {},
+        canAdminister: whoami?.canAdminister === true
+      });
     }).catch(() => {
       if (active) setApprovalDecider({ scope, person: false });
     });
@@ -92956,8 +92970,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       active = false;
     };
   }, [consoleTransport, sendScope]);
-  const approvalsDecidable = approvalDecider?.scope === sendScope ? approvalDecider.person : void 0;
-  const workGraphClaimant = approvalDecider?.scope === sendScope ? approvalDecider.claimant : void 0;
+  const currentDecider = approvalDecider?.scope === sendScope ? approvalDecider : void 0;
+  const approvalsDecidable = currentDecider?.person;
+  const signInToDecide = currentDecider?.answered === true && !currentDecider.person;
+  const workGraphClaimant = currentDecider?.claimant;
+  const workGraphAdmin = currentDecider?.canAdminister === true;
   import_react102.default.useEffect(() => {
     setApprovalSnapshot(void 0);
     setSelectedApprovalId(void 0);
@@ -92966,6 +92983,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     const resource = createPendingApprovalResource({
       scopeKey: approvalScope,
       readOnly: consoleReadOnly || !approvalsDecidable,
+      ...!consoleReadOnly && signInToDecide ? { readOnlyReason: "sign_in" } : {},
       load: async (signal) => (await consoleController.commands.execute({
         command: CONSOLE_COMMAND_NAMES2.listGatingPending,
         target,
@@ -92988,7 +93006,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       resource.dispose();
       if (approvalResourceRef.current === resource) approvalResourceRef.current = null;
     };
-  }, [approvalScope, Boolean(experience), hasMobControlSurface, consoleReadOnly, approvalsDecidable, consoleController]);
+  }, [approvalScope, Boolean(experience), hasMobControlSurface, consoleReadOnly, approvalsDecidable, signInToDecide, consoleController]);
   const activeApprovals = approvalSnapshot?.owner === consoleController && approvalSnapshot.snapshot.scopeKey === approvalScope ? approvalSnapshot.snapshot : void 0;
   const hostAttentionKey = JSON.stringify(experience?.console_config?.attention?.sources || []);
   const hostAttentionSources = import_react102.default.useMemo(
@@ -95628,7 +95646,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             onRefresh: () => void refreshWorkGraphData(),
             onClaim: workGraphPanelHandlers.onClaim,
             onClose: workGraphPanelHandlers.onClose,
-            canRelease: (item) => workGraphClaimOwnedBy(item, workGraphClaimant),
+            canRelease: (item) => workGraphMayRelease(item, { principal: workGraphClaimant, canAdminister: workGraphAdmin }),
             onRelease: ({ itemId: itemId2, revision }) => {
               void (async () => {
                 let expectedRevision = revision;

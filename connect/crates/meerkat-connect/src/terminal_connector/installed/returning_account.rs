@@ -317,6 +317,7 @@ async fn account_review_scenarios() {
         assert_eq!(result["available_setup_tools"].as_array().unwrap().len(), 1);
         assert!(selected.secret_slots().is_err());
         let mut startup = SessionStartup {
+            provider_store_root: None,
             storage: package.storage.clone(),
             config: meerkat::Config::default(),
             factory: meerkat::AgentFactory::new(root.path().join("factory"))

@@ -24,6 +24,9 @@ pub mod update;
 /// The same member facts later matched by the installed host at adoption.
 /// No placeholder surface reference or independent destination codec is used.
 pub use meerkat_toolkit::host_lifetime::policy::PreparedNativeMember as ApplicationMemberSelection;
+use meerkat_toolkit::host_lifetime::policy::{
+    CompiledMemberClass, CompiledMemberClassPurpose, validate_member_classes,
+};
 
 /// Separate schema4 input. Legacy ApplicationSetupInput schema3 is unchanged.
 #[derive(Clone, Serialize, Deserialize)]
@@ -34,9 +37,16 @@ pub struct ApplicationSetupCompilationInput {
     pub definition: ApplicationSetupDefinition,
     pub roster: Vec<DurableAgentSpec>,
     pub members: Vec<ApplicationMemberSelection>,
-    pub helper: InstalledSetupSelection,
-    pub helper_tools: ApplicationSetupTools,
-    pub helper_profile: ApplicationSetupProfile,
+    /// Packaged classes may have zero initial instances. They do not add roster
+    /// rows or policy grants until the trusted host admits a concrete member.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_classes: Vec<CompiledMemberClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub helper: Option<InstalledSetupSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub helper_tools: Option<ApplicationSetupTools>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub helper_profile: Option<ApplicationSetupProfile>,
     pub tool_policy: ApplicationToolPolicyInput,
 }
 
@@ -47,8 +57,8 @@ pub struct ValidatedApplicationCompilation {
     input_sha256: String,
     storage: ResolvedStorage,
     definition: MobDefinition,
-    helper_index: usize,
-    roster_index: usize,
+    helper_index: Option<usize>,
+    roster_index: Option<usize>,
     policy_bytes: Vec<u8>,
 }
 impl ApplicationSetupCompilationInput {
@@ -56,10 +66,66 @@ impl ApplicationSetupCompilationInput {
         let definition = self.definition.resolve()?;
         if self.schema != 4
             || definition.source_identity.is_some()
-            || definition.id.as_str() != self.helper.member.mob_id
-            || self.members.is_empty()
+            || (self.members.is_empty() && self.member_classes.is_empty())
+            || self
+                .helper
+                .as_ref()
+                .is_some_and(|helper| definition.id.as_str() != helper.member.mob_id)
         {
             return Err("schema4 requires the selected unsealed application definition".into());
+        }
+        if self.helper.is_some() != self.helper_tools.is_some()
+            || self.helper.is_some() != self.helper_profile.is_some()
+            || (self.helper.is_none()
+                && self
+                    .members
+                    .iter()
+                    .any(|member| member.setup_capability.is_some()))
+        {
+            return Err("helper, helper_tools and helper_profile must be selected together".into());
+        }
+        if self.members.is_empty() && !self.tool_policy.members.is_empty() {
+            return Err("empty native inventory requires an explicit empty member policy".into());
+        }
+        validate_member_classes(&self.member_classes).map_err(|error| error.to_string())?;
+        for class in &self.member_classes {
+            let profile = definition
+                .resolve_inline_profile(&ProfileName::from(class.profile.clone()))
+                .ok_or("member class requires an exact inline application profile")?;
+            if class.purpose == CompiledMemberClassPurpose::SharedWorkflow {
+                // This is a late, per-workflow selection. A packaged profile
+                // cannot smuggle a permanent G into the bootstrap roster or
+                // select a saved setup connection as attachment authority.
+                if self
+                    .roster
+                    .iter()
+                    .any(|row| row.profile.as_str() == class.profile)
+                    || self
+                        .members
+                        .iter()
+                        .any(|row| row.member.role == class.profile)
+                    || profile.tools.mcp.iter().any(|name| name == "toolkit-setup")
+                    || profile
+                        .tools
+                        .mcp_servers
+                        .iter()
+                        .any(|server| server.name == "toolkit-setup")
+                    || class
+                        .grants
+                        .iter()
+                        .any(|grant| grant.tool_name == meerkat_toolkit::setup::SETUP_REPORT)
+                {
+                    return Err("shared workflow class requires a late member and live setup resource; generic setup_report is not composed".into());
+                }
+            }
+            if self.helper_profile == Some(ApplicationSetupProfile::ExclusiveApplicationRole)
+                && self
+                    .helper
+                    .as_ref()
+                    .is_some_and(|helper| class.profile == helper.member.role)
+            {
+                return Err("member class cannot reuse the selected setup helper profile".into());
+            }
         }
         let mut identities = BTreeSet::new();
         for row in &self.members {
@@ -104,37 +170,42 @@ impl ApplicationSetupCompilationInput {
         if self.members.len() != self.roster.len() {
             return Err("selected member inventory does not cover the current roster".into());
         }
-        let helper_index = self
-            .members
-            .iter()
-            .position(|row| row.member == self.helper.member)
-            .ok_or("selected helper is absent from member selections")?;
-        let roster_index = matching_roster(&self.roster, &self.helper.member)?;
-        surface::require_report_policy(&self.tool_policy, &self.helper.member)?;
-        if self.helper_profile == ApplicationSetupProfile::ExclusiveApplicationRole
-            && (self.roster.iter().enumerate().any(|(index, row)| {
-                index != roster_index && row.profile.as_str() == self.helper.member.role
-            }) || self.members.iter().enumerate().any(|(index, row)| {
-                index != helper_index && row.member.role == self.helper.member.role
-            }))
-        {
-            return Err("application helper role is not exclusive".into());
-        }
-        let source = definition
-            .resolve_inline_profile(&ProfileName::from(self.helper.member.role.clone()))
-            .ok_or("selected helper requires an inline application research profile")?;
-        if self.helper.member.role.starts_with("toolkit-setup-")
-            || source.tools.mcp.iter().any(|name| name == "toolkit-setup")
-            || source
-                .tools
-                .mcp_servers
+        let (helper_index, roster_index) = if let Some(helper) = &self.helper {
+            let helper_index = self
+                .members
                 .iter()
-                .any(|server| server.name == "toolkit-setup")
-        {
-            return Err("source helper profile already contains setup resources".into());
-        }
+                .position(|row| row.member == helper.member)
+                .ok_or("selected helper is absent from member selections")?;
+            let roster_index = matching_roster(&self.roster, &helper.member)?;
+            surface::require_report_policy(&self.tool_policy, &helper.member)?;
+            if self.helper_profile == Some(ApplicationSetupProfile::ExclusiveApplicationRole)
+                && (self.roster.iter().enumerate().any(|(index, row)| {
+                    index != roster_index && row.profile.as_str() == helper.member.role
+                }) || self.members.iter().enumerate().any(|(index, row)| {
+                    index != helper_index && row.member.role == helper.member.role
+                }))
+            {
+                return Err("application helper role is not exclusive".into());
+            }
+            let source = definition
+                .resolve_inline_profile(&ProfileName::from(helper.member.role.clone()))
+                .ok_or("selected helper requires an inline application research profile")?;
+            if helper.member.role.starts_with("toolkit-setup-")
+                || source.tools.mcp.iter().any(|name| name == "toolkit-setup")
+                || source
+                    .tools
+                    .mcp_servers
+                    .iter()
+                    .any(|server| server.name == "toolkit-setup")
+            {
+                return Err("source helper profile already contains setup resources".into());
+            }
+            (Some(helper_index), Some(roster_index))
+        } else {
+            (None, None)
+        };
         let storage = self.realm.resolve().map_err(|error| error.to_string())?;
-        let expected_realm = meerkat_core::mob_realm_id(&self.helper.member.mob_id)
+        let expected_realm = meerkat_core::mob_realm_id(definition.id.as_str())
             .map_err(|error| error.to_string())?;
         if storage.locator.realm != expected_realm {
             return Err("selected storage realm differs from the native mob realm".into());
@@ -159,6 +230,27 @@ impl ApplicationSetupCompilationInput {
 }
 
 impl ValidatedApplicationCompilation {
+    pub fn prepare_without_helper(self) -> Result<ApplicationSetupCompilation, String> {
+        if self.input.helper.is_some() {
+            return Err("selected helper requires its actual resource preparation".into());
+        }
+        let policy = PreparedInstalledToolPolicy::from_canonical(&self.policy_bytes)
+            .map_err(|error| error.to_string())?;
+        Ok(ApplicationSetupCompilation {
+            input: self.input,
+            input_sha256: self.input_sha256,
+            definition: self.definition,
+            source_helper_member: None,
+            source_helper_roster: None,
+            server: None,
+            resources: None,
+            resource: None,
+            policy,
+            policy_bytes: self.policy_bytes,
+            captured: Mutex::new(BTreeMap::new()),
+            final_authorities: OnceLock::new(),
+        })
+    }
     pub fn storage(&self) -> &ResolvedStorage {
         &self.storage
     }
@@ -172,32 +264,43 @@ impl ValidatedApplicationCompilation {
         let policy = PreparedInstalledToolPolicy::from_canonical(&self.policy_bytes)
             .map_err(|error| error.to_string())?;
         let mut input = self.input;
-        let source_helper_member = input.helper.member.clone();
-        let source_helper_roster = input.roster[self.roster_index].clone();
-        let projection = input
-            .helper_profile
-            .project(
-                prepared.connection,
-                source_helper_member.clone(),
-                input.helper_tools,
-            )
+        let source_helper_member = input
+            .helper
+            .as_ref()
+            .ok_or("helper resources were supplied to a helperless compiler")?
+            .member
+            .clone();
+        let source_helper_roster = input.roster[self
+            .roster_index
+            .ok_or("helper roster selection is absent")?]
+        .clone();
+        let profile = input.helper_profile.ok_or("helper profile is absent")?;
+        let tools = input.helper_tools.ok_or("helper tools are absent")?;
+        let projection = profile
+            .project(prepared.connection, source_helper_member.clone(), tools)
             .map_err(|error| error.to_string())?
             .with_public_research_from_policy(policy.compiled());
         let mut definition = self.definition;
         projection
             .compose_definition(&mut definition)
             .map_err(|error| error.to_string())?;
-        input.helper.member = projection.member().clone();
-        input.members[self.helper_index].member = projection.member().clone();
+        input
+            .helper
+            .as_mut()
+            .ok_or("helper selection is absent")?
+            .member = projection.member().clone();
+        input.members[self
+            .helper_index
+            .ok_or("helper member selection is absent")?]
+        .member = projection.member().clone();
         let handoff_path = prepared.artifact_directory.join("prepare.stdout");
         let bytes = read_regular_artifact(&handoff_path)?;
-        let retained = input
-            .helper_profile
+        let retained = profile
             .project(
                 PreparedSetupConnection::from_preparer_output(&bytes)
                     .map_err(|error| error.to_string())?,
                 source_helper_member.clone(),
-                input.helper_tools,
+                tools,
             )
             .map_err(|error| error.to_string())?
             .with_public_research_from_policy(policy.compiled());
@@ -219,16 +322,17 @@ impl ValidatedApplicationCompilation {
             source_helper_member.clone(),
             resources.clone(),
             projection.server().clone(),
-        ));
+            policy.clone(),
+        )?);
         let phase = ApplicationSetupCompilation {
             input,
             input_sha256: self.input_sha256,
             definition,
-            source_helper_member,
-            source_helper_roster,
-            server: projection.server().clone(),
-            resources,
-            resource,
+            source_helper_member: Some(source_helper_member),
+            source_helper_roster: Some(source_helper_roster),
+            server: Some(projection.server().clone()),
+            resources: Some(resources),
+            resource: Some(resource),
             policy,
             policy_bytes: self.policy_bytes,
             captured: Mutex::new(BTreeMap::new()),
@@ -245,6 +349,7 @@ struct CapturedMember {
     member: CompiledNativeMember,
     surface: PreparedToolSurface,
     selection: ToolSurfaceSelection,
+    bytes: Vec<u8>,
 }
 
 /// Configuration and collected immutable compiler outputs, not a runtime or an
@@ -255,15 +360,15 @@ pub struct ApplicationSetupCompilation {
     input: ApplicationSetupCompilationInput,
     input_sha256: String,
     definition: MobDefinition,
-    source_helper_member: MobMemberBinding,
-    source_helper_roster: DurableAgentSpec,
-    server: McpServerConfig,
-    resources: PreparedApplicationResources,
+    source_helper_member: Option<MobMemberBinding>,
+    source_helper_roster: Option<DurableAgentSpec>,
+    server: Option<McpServerConfig>,
+    resources: Option<PreparedApplicationResources>,
     policy: PreparedInstalledToolPolicy,
     policy_bytes: Vec<u8>,
     captured: Mutex<BTreeMap<usize, CapturedMember>>,
     final_authorities: OnceLock<FinalAuthoritySelection>,
-    resource: Arc<super::resource::SetupResourceSelection>,
+    resource: Option<Arc<super::resource::SetupResourceSelection>>,
 }
 
 /// One final artifact projection from the existing preparation owner. The
@@ -271,7 +376,7 @@ pub struct ApplicationSetupCompilation {
 /// late grants are never read from that early capture during bundle creation.
 struct FinalAuthoritySelection {
     owner: meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy,
-    helper: InstalledSetupSelection,
+    helper: Option<InstalledSetupSelection>,
 }
 
 impl ApplicationSetupCompilation {
@@ -287,56 +392,85 @@ impl ApplicationSetupCompilation {
         Arc<crate::resources::LocalRoundAttempts>,
         Box<(crate::resources::LocalRoundOwner, String)>,
     > {
-        self.resource.retain_local_round(owner)
+        match &mut self.resource {
+            Some(resource) => resource.retain_local_round(owner),
+            None => Err(Box::new((
+                owner,
+                "helperless compilation has no local round".into(),
+            ))),
+        }
     }
     pub fn definition(&self) -> &MobDefinition {
         &self.definition
     }
-    pub fn helper(&self) -> &InstalledSetupSelection {
-        &self.input.helper
+    pub fn helper(&self) -> Option<&InstalledSetupSelection> {
+        self.input.helper.as_ref()
     }
     pub(crate) fn project_policy(
         &self,
         mut selected: meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy,
     ) -> Result<meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy, String> {
         let mut expected = self.input.members.clone();
-        let helper = expected
-            .iter_mut()
-            .find(|member| member.member == self.input.helper.member)
-            .ok_or("selected helper is missing")?;
-        helper.member = self.source_helper_member.clone();
+        if let Some(helper) = &self.input.helper {
+            let member = expected
+                .iter_mut()
+                .find(|member| member.member == helper.member)
+                .ok_or("selected helper is missing")?;
+            member.member = self
+                .source_helper_member
+                .clone()
+                .ok_or("source helper is absent")?;
+        }
         if selected.native_host.members != expected
+            || selected.native_host.member_classes != self.input.member_classes
             || selected.native_host.realm.as_str() != self.input.realm.realm_id
         {
             return Err("early host selection differs from the actual compilation input".into());
         }
         selected.native_host.members = self.input.members.clone();
-        for channel in &mut selected.channels {
-            if channel.member == self.source_helper_member {
-                channel.member = self.input.helper.member.clone();
+        if let (Some(source), Some(helper)) = (&self.source_helper_member, &self.input.helper) {
+            for channel in &mut selected.channels {
+                if channel.member == *source {
+                    channel.member = helper.member.clone();
+                }
             }
-        }
-        for route in &mut selected.native_host.routes {
-            if let meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceOrigin::LocalConsole { member, .. } = &mut route.origin
-                && member == &self.source_helper_member { *member = self.input.helper.member.clone(); }
+            for route in &mut selected.native_host.routes {
+                if let meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceOrigin::LocalConsole { member, .. } = &mut route.origin
+                    && member == source { *member = helper.member.clone(); }
+            }
         }
         selected.validate().map_err(|error| error.to_string())?;
         Ok(selected)
     }
     /// Existing preparation paths already have their final helper selection.
-    #[cfg(test)]
     pub(crate) fn retain_owner(
         &self,
         selected: meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy,
     ) -> Result<(), String> {
-        self.retain_authorities(selected, self.input.helper.clone())
+        match &self.input.helper {
+            Some(helper) => self.retain_authorities(selected, helper.clone()),
+            None => {
+                selected.validate().map_err(|error| error.to_string())?;
+                if selected.native_host.members != self.input.members
+                    || selected.native_host.member_classes != self.input.member_classes
+                    || selected.native_host.realm.as_str() != self.input.realm.realm_id
+                {
+                    return Err("resolved owner differs from helperless compilation".into());
+                }
+                self.final_authorities
+                    .set(FinalAuthoritySelection {
+                        owner: selected,
+                        helper: None,
+                    })
+                    .map_err(|_| "resolved owner already retained".into())
+            }
+        }
     }
 
     /// Freeze the final owner and helper together after actual held route
     /// observation and native issuance/recovery. Member destinations, helper
     /// identity and every existing operation selection remain unchanged. The
     /// helper-access entry below admits only the separately requested additions.
-    #[cfg(test)]
     pub(crate) fn retain_authorities(
         &self,
         selected: meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy,
@@ -348,7 +482,6 @@ impl ApplicationSetupCompilation {
     /// The preparation issuer may insert only the explicitly requested bundled
     /// server target. All early base/target selections remain byte-identical;
     /// the compiler does not derive or authorize any native grant itself.
-    #[cfg(test)]
     pub(crate) fn retain_authorities_with_helper_mcp(
         &self,
         selected: meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy,
@@ -369,6 +502,7 @@ impl ApplicationSetupCompilation {
     ) -> Result<(), String> {
         selected.validate().map_err(|error| error.to_string())?;
         if selected.native_host.members.len() != self.input.members.len()
+            || selected.native_host.member_classes != self.input.member_classes
             || selected.native_host.realm.as_str() != self.input.realm.realm_id
         {
             return Err("resolved owner differs from prepared members".into());
@@ -384,7 +518,11 @@ impl ApplicationSetupCompilation {
                 return Err("resolved owner changes a prepared destination".into());
             }
         }
-        let early = &self.input.helper;
+        let early = self
+            .input
+            .helper
+            .as_ref()
+            .ok_or("helper authority supplied to helperless compilation")?;
         if (!early.controller_parent.is_empty()
             && helper.controller_parent != early.controller_parent)
             || (early.report_capability.is_some()
@@ -426,7 +564,7 @@ impl ApplicationSetupCompilation {
         self.final_authorities
             .set(FinalAuthoritySelection {
                 owner: selected,
-                helper,
+                helper: Some(helper),
             })
             .map_err(|_| "resolved owner already retained".into())
     }
@@ -445,7 +583,7 @@ impl ApplicationSetupCompilation {
             .as_ref()
             .ok_or("missing helper operator")?;
         let target = GrantTarget::McpServer {
-            server: self.server().name.clone(),
+            server: self.server().ok_or("helper server is absent")?.name.clone(),
         };
         let (
             WorkAuthorityBasis::TargetedGrantLineages {
@@ -500,10 +638,12 @@ impl ApplicationSetupCompilation {
         Ok(())
     }
 
-    pub(crate) fn server(&self) -> &McpServerConfig {
-        self.resource.server()
+    pub(crate) fn server(&self) -> Option<&McpServerConfig> {
+        self.server.as_ref()
     }
-    pub(crate) fn resource_selection(&self) -> Arc<super::resource::SetupResourceSelection> {
+    pub(crate) fn resource_selection(
+        &self,
+    ) -> Option<Arc<super::resource::SetupResourceSelection>> {
         self.resource.clone()
     }
     pub(crate) fn selected_destination(
@@ -511,10 +651,36 @@ impl ApplicationSetupCompilation {
         identity: &MemberRuntimeBuildIdentity,
         destination: &MemberDestinationSelection,
     ) -> Result<(), MobError> {
-        self.resource.selected_destination(identity, destination)
+        match &self.resource {
+            Some(resource) => resource.selected_destination(identity, destination),
+            None => {
+                let expected = if self
+                    .input
+                    .members
+                    .iter()
+                    .any(|row| &row.member == identity.member())
+                {
+                    Some(self.destination(identity).map_err(MobError::WiringError)?)
+                } else {
+                    self.policy
+                        .member_class_destination(identity)
+                        .map_err(|error| MobError::WiringError(error.to_string()))?
+                };
+                if expected.as_ref() == Some(destination) {
+                    Ok(())
+                } else {
+                    Err(MobError::WiringError(
+                        "selected member destination differs".into(),
+                    ))
+                }
+            }
+        }
     }
     pub(crate) fn helper_projection(&self) -> Result<PreparedSetupHelper, String> {
-        self.resource.helper_projection()
+        self.resource
+            .as_ref()
+            .ok_or("helperless compilation has no helper projection")?
+            .helper_projection()
     }
 
     /// Driver composition reuses the exact policy-bound resource selected
@@ -523,10 +689,13 @@ impl ApplicationSetupCompilation {
         &self,
         spec: meerkat_mobkit::mob_handle_runtime::MobBootstrapSpec,
     ) -> Result<meerkat_mobkit::mob_handle_runtime::MobBootstrapSpec, String> {
+        if self.input.helper.is_none() {
+            return Ok(spec);
+        }
         let helper = self
             .helper_projection()?
             .with_public_research_from_policy(self.policy.compiled());
-        if helper.server() != &self.server {
+        if Some(helper.server()) != self.server.as_ref() {
             return Err("prepared helper ceiling differs from its compiled policy".into());
         }
         helper.compose(spec).map_err(|error| error.to_string())
@@ -547,17 +716,22 @@ impl ApplicationSetupCompilation {
         &self,
         current: &[DurableAgentSpec],
     ) -> Result<Vec<DurableAgentSpec>, String> {
-        project_roster_selection(
+        match (
             &self.source_helper_member,
-            &self.input.helper.member,
+            &self.input.helper,
             &self.source_helper_roster,
             self.input.helper_profile,
-            current,
-        )
+        ) {
+            (Some(source), Some(helper), Some(roster), Some(profile)) => {
+                project_roster_selection(source, &helper.member, roster, profile, current)
+            }
+            (None, None, None, None) => Ok(current.to_vec()),
+            _ => Err("incomplete helper projection".into()),
+        }
     }
 
     fn selected(&self, identity: &MemberRuntimeBuildIdentity) -> Result<usize, String> {
-        let expected_realm = meerkat_core::mob_realm_id(&self.input.helper.member.mob_id)
+        let expected_realm = meerkat_core::mob_realm_id(self.definition.id.as_str())
             .map_err(|error| error.to_string())?;
         if identity.realm_id() != &expected_realm {
             return Err("prepared native member belongs to another realm".into());
@@ -600,7 +774,11 @@ impl ApplicationSetupCompilation {
     ) -> Result<ToolSurfaceSelection, String> {
         let row = &self.input.members[index];
         let identities = full_identities(surface)?;
-        if row.member == self.input.helper.member
+        if self
+            .input
+            .helper
+            .as_ref()
+            .is_some_and(|helper| row.member == helper.member)
             && !identities.contains(
                 &toolkit_mobkit::installed_host::acquisition::setup_report_definition().identity(),
             )
@@ -628,7 +806,9 @@ impl ApplicationSetupCompilation {
         }
         // Append-only facts. No overwrite or retry can transform an old/native
         // failed preparation into the output of another construction.
-        write_new(&self.resources.artifact_directory.join(&name), &bytes)?;
+        if let Some(resources) = &self.resources {
+            write_new(&resources.artifact_directory.join(&name), &bytes)?;
+        }
         captured.insert(
             index,
             CapturedMember {
@@ -646,6 +826,7 @@ impl ApplicationSetupCompilation {
                 },
                 surface: surface.clone(),
                 selection: selection.clone(),
+                bytes,
             },
         );
         Ok(selection)
@@ -715,7 +896,12 @@ impl ApplicationSetupCompilation {
             .input
             .members
             .iter()
-            .position(|row| row.member == self.input.helper.member)
+            .position(|row| {
+                self.input
+                    .helper
+                    .as_ref()
+                    .is_some_and(|helper| row.member == helper.member)
+            })
             .ok_or("selected helper is absent")?;
         self.captured
             .lock()
@@ -797,13 +983,28 @@ impl ApplicationSetupCompilation {
             helper_profile: self.input.helper_profile,
             server: self.server.clone(),
             resources: self.resources.clone(),
+            artifact_directory: self.input.helper.is_none().then(|| output.clone()),
             application_tool_policy: CompiledArtifactReference {
                 name: "application-tool-policy.json".into(),
                 sha256: hash(&self.policy_bytes),
             },
         };
-        setup.helper_projection_for_policy(self.policy.compiled())?;
-        let manifest = write_bundle(&output, &setup, &self.policy_bytes)?;
+        let manifest = if setup.helper.is_some() {
+            setup.helper_projection_for_policy(self.policy.compiled())?;
+            write_bundle(&output, &setup, &self.policy_bytes)?
+        } else {
+            setup.validate_helperless()?;
+            let artifacts = captured
+                .values()
+                .map(|value| {
+                    (
+                        value.member.initial_surface.name.clone(),
+                        value.bytes.clone(),
+                    )
+                })
+                .collect();
+            write_bundle_with_artifacts(&output, &setup, &self.policy_bytes, artifacts)?
+        };
         Ok((setup, manifest))
     }
 }
@@ -913,7 +1114,22 @@ fn full_identities(surface: &PreparedToolSurface) -> Result<Vec<ToolIdentity>, S
 pub(super) fn validate_final_artifacts(
     setup: &PreparedApplicationSetup,
 ) -> Result<Vec<(String, Vec<u8>)>, String> {
-    if setup.schema != 4 || setup.helper_source_surface.is_some() || setup.native_members.is_empty()
+    validate_final_artifacts_with(setup, |name| {
+        read_regular_artifact(&setup.artifact_root()?.join(name))
+    })
+}
+
+pub(crate) fn validate_final_artifacts_with(
+    setup: &PreparedApplicationSetup,
+    mut read: impl FnMut(&str) -> Result<Vec<u8>, String>,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    if setup.schema != 4
+        || setup.helper_source_surface.is_some()
+        || (setup.native_members.is_empty()
+            && !setup
+                .native_owner
+                .as_ref()
+                .is_some_and(|owner| !owner.native_host.member_classes.is_empty()))
     {
         return Err("invalid final schema4 artifact selection".into());
     }
@@ -928,12 +1144,7 @@ pub(super) fn validate_final_artifacts(
         {
             return Err("final member surface association is duplicate or changed".into());
         }
-        let bytes = read_regular_artifact(
-            &setup
-                .resources
-                .artifact_directory
-                .join(&row.initial_surface.name),
-        )?;
+        let bytes = read(&row.initial_surface.name)?;
         let identities: Vec<ToolIdentity> =
             serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
         if hash(&bytes) != row.initial_surface.sha256
@@ -947,7 +1158,10 @@ pub(super) fn validate_final_artifacts(
         {
             return Err("final member surface differs from its canonical compiler artifact".into());
         }
-        if row.member == setup.helper.member
+        if setup
+            .helper
+            .as_ref()
+            .is_some_and(|helper| row.member == helper.member)
             && !identities.contains(
                 &toolkit_mobkit::installed_host::acquisition::setup_report_definition().identity(),
             )

@@ -13,7 +13,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use meerkat::{McpRouter, McpRouterAdapter};
+use meerkat::{McpRouter, McpRouterAdapter, McpStdioLaunchProfile};
 use meerkat_core::{
     AgentToolDispatcher, ResolvedStorage, ToolDef, ToolError, ToolMutationClass, ToolResult,
     gateway::DynamicToolComposite, ops::ToolDispatchOutcome, types::ToolCallView,
@@ -29,6 +29,10 @@ pub const TOOLKIT_PREPARE_SERVICES: &str = "toolkit_prepare_services";
 
 pub(crate) mod native;
 pub use native::NativeSetup;
+#[cfg(unix)]
+mod private_attempt;
+#[cfg(unix)]
+pub(crate) mod private_native;
 
 pub(crate) type TerminalToolFactory = Arc<
     dyn Fn(Arc<crate::service_install::CheckedInstalls>) -> Arc<dyn AgentToolDispatcher>
@@ -43,6 +47,12 @@ enum HandoffState {
     Retired,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ServicePreparationShutdown {
+    Retired,
+    StatePoisoned,
+}
+
 pub(crate) struct ServicePreparationOwner {
     adapter: Arc<McpRouterAdapter>,
     installs: Option<Arc<crate::service_install::CheckedInstalls>>,
@@ -51,6 +61,11 @@ pub(crate) struct ServicePreparationOwner {
     state: Mutex<HandoffState>,
     requests: mpsc::Sender<ServicePreparationRequest>,
     native_adapter_owner: bool,
+    #[cfg(unix)]
+    private_custody: std::sync::OnceLock<Arc<private_attempt::PrivateCustody>>,
+    #[cfg(target_os = "linux")]
+    selected_input:
+        std::sync::OnceLock<Arc<crate::protected_parent::selected_input::SelectedInput>>,
 }
 
 impl ServicePreparationOwner {
@@ -62,10 +77,18 @@ impl ServicePreparationOwner {
         self.acquisition
     }
 
+    pub(crate) fn shutdown_reason(&self) -> Option<ServicePreparationShutdown> {
+        match self.state.lock() {
+            Ok(state) if matches!(*state, HandoffState::Retired) => {
+                Some(ServicePreparationShutdown::Retired)
+            }
+            Ok(_) => None,
+            Err(_) => Some(ServicePreparationShutdown::StatePoisoned),
+        }
+    }
+
     pub(crate) fn requires_shutdown(&self) -> bool {
-        self.state
-            .lock()
-            .map_or(true, |state| matches!(*state, HandoffState::Retired))
+        self.shutdown_reason().is_some()
     }
 
     pub(crate) fn accepted(&self) -> bool {
@@ -97,13 +120,83 @@ impl ServicePreparationOwner {
         }
     }
 
-    pub(crate) async fn shutdown(&self) {
+    pub(crate) async fn shutdown(self: &Arc<Self>) -> Result<(), ConnectError> {
         self.retire();
+        #[cfg(unix)]
+        if let Some(custody) = self.private_custody.get() {
+            return custody.close(&self.adapter).await.map_err(|()| {
+                ConnectError::native(
+                    "Close private setup resources",
+                    private_attempt::RetainedClose(self.clone()),
+                )
+            });
+        }
         // Legacy lazy setup created this adapter and must join it explicitly.
         // Standalone setup uses the factory's adapter and its native shutdown
         // owner; both paths retire the same Toolkit admission above.
         if !self.native_adapter_owner {
             self.adapter.shutdown().await;
+        }
+        Ok(())
+    }
+
+    // The existing close result remains authoritative. Observation is retained
+    // only after that same shutdown and guard join returns, including Err.
+    pub(crate) async fn shutdown_observed(
+        self: &Arc<Self>,
+    ) -> (Result<(), ConnectError>, Option<serde_json::Value>) {
+        let result = self.shutdown().await;
+        #[cfg(unix)]
+        let diagnostic = match self.private_custody.get() {
+            Some(custody) => custody.diagnostic().await,
+            None => None,
+        };
+        #[cfg(not(unix))]
+        let diagnostic = None;
+        (result, diagnostic)
+    }
+
+    pub(crate) fn has_private_custody(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.private_custody.get().is_some()
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    pub(crate) fn private_session_matches(&self, session: &meerkat_core::SessionId) -> bool {
+        #[cfg(unix)]
+        {
+            self.private_custody
+                .get()
+                .is_some_and(|custody| custody.matches_session(session))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = session;
+            false
+        }
+    }
+
+    fn prepared_result(&self, value: serde_json::Value) -> String {
+        #[cfg(target_os = "linux")]
+        {
+            let mut value = value;
+            if let Some(selected) = self
+                .private_custody
+                .get()
+                .and_then(|owner| owner.staged_input())
+            {
+                value["selected_input"] = serde_json::json!(selected);
+            }
+            value.to_string()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            value.to_string()
         }
     }
 
@@ -130,7 +223,9 @@ impl ServicePreparationOwner {
                 HandoffState::Accepted => {
                     return Ok(ToolResult::new(
                         call.id.into(),
-                        r#"{"state":"requested","changed":false}"#.into(),
+                        self.prepared_result(
+                            serde_json::json!({"state":"requested","changed":false}),
+                        ),
                         false,
                     )
                     .into());
@@ -197,10 +292,9 @@ impl ServicePreparationOwner {
         }
         Ok(ToolResult::new(
             call.id.into(),
-            serde_json::json!({
+            self.prepared_result(serde_json::json!({
                 "state":"requested", "changed":true, "native_pending_sources":applied.pending_count,
-            })
-            .to_string(),
+            })),
             false,
         )
         .into())
@@ -314,7 +408,7 @@ impl LazySetup {
             true,
             false,
             false,
-            McpRouter::new_with_stdio_profile(meerkat::McpStdioLaunchProfile::trusted_host()),
+            McpRouter::new_with_stdio_profile(McpStdioLaunchProfile::trusted_host()),
             None,
             None,
             Some(forge),
@@ -337,7 +431,7 @@ impl LazySetup {
             include_forge,
             false,
             false,
-            McpRouter::new_with_stdio_profile(meerkat::McpStdioLaunchProfile::trusted_host()),
+            McpRouter::new_with_stdio_profile(McpStdioLaunchProfile::trusted_host()),
         );
         drop(presenter);
         setup
@@ -354,7 +448,7 @@ impl LazySetup {
             false,
             true,
             false,
-            McpRouter::new_with_stdio_profile(meerkat::McpStdioLaunchProfile::trusted_host()),
+            McpRouter::new_with_stdio_profile(McpStdioLaunchProfile::trusted_host()),
         );
         drop(presenter);
         setup
@@ -363,23 +457,60 @@ impl LazySetup {
     /// Separate service preparation composition. The caller must retain the
     /// returned worker and qualify its native MCP shutdown before admitting it.
     /// Checked installation uses the existing native decision owner. Account
-    /// authentication, usable attachment and full service availability remain
-    /// separate; the private-pipe service mode is still unavailable.
+    /// authentication and usable attachment remain separate. The owned private
+    /// composition below additionally retains its native initial-attempt guard.
     #[cfg(test)]
     pub(crate) fn private_services() -> (Self, ServicePreparationPresenter) {
         Self::private_services_with_router(McpRouter::new_with_stdio_profile(
-            meerkat::McpStdioLaunchProfile::trusted_host(),
+            McpStdioLaunchProfile::trusted_host(),
         ))
     }
 
     /// Retain the caller's fresh native router, configured before session
     /// binding, through the existing adapter and preparation owner.
+    #[cfg(test)]
     pub(crate) fn private_services_with_router(
         router: McpRouter,
     ) -> (Self, ServicePreparationPresenter) {
         let (paired_host, hosts) = PairedHostFrontend::deferred_with_research();
         drop(hosts);
         Self::compose_selected(paired_host, false, true, false, false, true, router)
+    }
+
+    /// Construct only around the fresh Session that the private startup will
+    /// move into native materialization. No application member is invented.
+    pub(crate) fn private_services_owned(
+        router: McpRouter,
+        session: &meerkat_core::SessionId,
+        public_services: Option<TerminalToolFactory>,
+    ) -> Result<(Self, ServicePreparationPresenter), ConnectError> {
+        #[cfg(unix)]
+        {
+            let (router, custody) = private_attempt::PrivateCustody::new(router, session.clone());
+            let (paired_host, hosts) = PairedHostFrontend::deferred_with_research();
+            drop(hosts);
+            let (lazy, presenter) = Self::compose_selected_with_owner(
+                paired_host,
+                false,
+                true,
+                false,
+                false,
+                true,
+                router,
+                None,
+                public_services,
+                None,
+            );
+            // Both references are still local to this constructor. No caller can
+            // stage the selected helper before its custody has been installed.
+            assert!(lazy.owner.private_custody.set(Arc::new(custody)).is_ok());
+            Ok((lazy, presenter))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (router, session, public_services);
+            Err(ended())
+        }
     }
 
     #[cfg(test)]
@@ -404,7 +535,7 @@ impl LazySetup {
             true,
             false,
             false,
-            McpRouter::new_with_stdio_profile(meerkat::McpStdioLaunchProfile::trusted_host()),
+            McpRouter::new_with_stdio_profile(McpStdioLaunchProfile::trusted_host()),
         )
     }
 
@@ -444,7 +575,7 @@ impl LazySetup {
             false,
             false,
             true,
-            McpRouter::new_with_stdio_profile(meerkat::McpStdioLaunchProfile::trusted_host()),
+            McpRouter::new_with_stdio_profile(McpStdioLaunchProfile::trusted_host()),
             Some(installs),
             None,
             None,
@@ -510,6 +641,10 @@ impl LazySetup {
             }),
             requests,
             native_adapter_owner,
+            #[cfg(unix)]
+            private_custody: std::sync::OnceLock::new(),
+            #[cfg(target_os = "linux")]
+            selected_input: std::sync::OnceLock::new(),
         });
         let mut members: Vec<Arc<dyn AgentToolDispatcher>> =
             vec![Arc::new(crate::recipe_discovery::RecipeTools::new())];
@@ -528,7 +663,10 @@ impl LazySetup {
         if let (Some(terminal), Some(installs)) = (terminal_connectors, installs.as_ref()) {
             members.push(terminal(installs.clone()));
         }
-        if !preparation_only {
+        // Frontend-only compositions have no preparation receiver. Keep their
+        // empty adapter out of the dispatcher so it cannot advertise a native
+        // service catalog that this composition can never prepare.
+        if services && !preparation_only {
             match installs {
                 Some(installs) => members.push(installs),
                 None => members.push(adapter),
@@ -608,11 +746,16 @@ impl LazySetup {
         let mut allowed = self.paired_host.allowed_tools();
         allowed.extend(crate::recipe_discovery::RECIPE_TOOLS.iter().copied());
         allowed.push(crate::public_document::READ_PUBLIC_DOCUMENT);
-        allowed.push(TOOLKIT_PREPARE_SERVICES);
         allowed.extend(crate::forge::FORGE_TOOLS.iter().copied());
-        allowed.extend(crate::setup::PREPARATION_TOOLS.iter().copied());
+        // Preparation and catalog names require an acquisition-capable service composition.
         if self.owner.allows_acquisition() {
+            allowed.push(TOOLKIT_PREPARE_SERVICES);
+            allowed.extend(crate::setup::PREPARATION_TOOLS.iter().copied());
             allowed.extend(crate::setup::ACQUISITION_TOOLS.iter().copied());
+            allowed.extend([
+                meerkat_core::tool_catalog::TOOL_CATALOG_SEARCH_NAME,
+                meerkat_core::tool_catalog::TOOL_CATALOG_LOAD_NAME,
+            ]);
         }
         if self.owner.installs.is_some() {
             allowed.extend(crate::service_install::INSTALL_TOOLS.iter().copied());
@@ -621,10 +764,6 @@ impl LazySetup {
         if self.owner.allows_terminal_connectors() {
             allowed.extend(crate::terminal_connector::TOOLS.iter().copied());
         }
-        allowed.extend([
-            meerkat_core::tool_catalog::TOOL_CATALOG_SEARCH_NAME,
-            meerkat_core::tool_catalog::TOOL_CATALOG_LOAD_NAME,
-        ]);
         allowed.into_iter().map(str::to_owned).collect()
     }
     pub(crate) fn matches(&self, dispatcher: &Arc<dyn AgentToolDispatcher>) -> bool {
@@ -666,6 +805,17 @@ pub struct ServicePreparationRequest {
     response: Option<oneshot::Sender<(PreparedSetupConnection, oneshot::Sender<()>)>>,
 }
 impl ServicePreparationRequest {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn bind_selected_input(
+        &self,
+        input: Arc<crate::protected_parent::selected_input::SelectedInput>,
+    ) -> Result<(), ConnectError> {
+        if !self.owner.is_live(&self.token) || self.owner.private_custody.get().is_none() {
+            return Err(ended());
+        }
+        self.owner.selected_input.set(input).map_err(|_| ended())
+    }
+
     /// Wait for the exact native tool waiter to end. An embedding preparer
     /// should feed this into its owned cancellation-and-join path, rather than
     /// dropping a running child/preparation future. Closure does not undo
@@ -700,6 +850,8 @@ impl ServicePreparationRequest {
             return Err(ended());
         }
         tokio::pin!(interrupted);
+        #[cfg(unix)]
+        let preparation_owner = self.owner.clone();
         let prepared = {
             let cancelled = async {
                 tokio::select! {
@@ -708,8 +860,29 @@ impl ServicePreparationRequest {
                     signal = &mut interrupted => signal,
                 }
             };
-            resources.prepare(storage, cancelled).await?
+            #[cfg(unix)]
+            if let Some(custody) = preparation_owner.private_custody.get() {
+                let (prepared, owner) = resources
+                    .prepare_with_local_round_owner(storage, cancelled)
+                    .await?;
+                custody.retain(prepared.connection.server().clone(), owner)?;
+                prepared
+            } else {
+                resources.prepare(storage, cancelled).await?
+            }
+            #[cfg(not(unix))]
+            {
+                resources.prepare(storage, cancelled).await?
+            }
         };
+        #[cfg(target_os = "linux")]
+        if let Some(input) = preparation_owner.selected_input.get().cloned() {
+            let custody = preparation_owner.private_custody.get().ok_or_else(ended)?;
+            let cancelled = async {
+                tokio::select! { biased; _ = self.closed() => Ok(()), signal = &mut interrupted => signal }
+            };
+            custody.stage_selected(input, cancelled).await?;
+        }
         tokio::select! {
             biased;
             signal = &mut interrupted => {
@@ -765,3 +938,146 @@ pub async fn present_service_preparation(
         .prepare_installed(resources, storage, interrupted)
         .await
 }
+
+#[cfg(test)]
+mod composition_tests {
+    use super::*;
+
+    fn assert_frontend_only(setup: &LazySetup) {
+        let dispatcher = setup.dispatcher();
+        let capabilities = dispatcher.tool_catalog_capabilities();
+        assert!(capabilities.exact_catalog);
+        assert!(!capabilities.may_require_catalog_control_plane);
+        assert!(!meerkat_core::should_compose_tool_catalog_control_plane(
+            dispatcher.as_ref()
+        ));
+        assert!(!setup.owner().accepted());
+
+        let declared = setup.declared_tools();
+        let options = setup.session_options(SessionOptions::default()).unwrap();
+        let policy =
+            meerkat_core::ToolExecutionPolicy::resolve(options.build.tool_access_policy.unwrap())
+                .unwrap();
+        for name in [
+            TOOLKIT_PREPARE_SERVICES,
+            meerkat_core::tool_catalog::TOOL_CATALOG_SEARCH_NAME,
+            meerkat_core::tool_catalog::TOOL_CATALOG_LOAD_NAME,
+        ]
+        .into_iter()
+        .chain(crate::setup::PREPARATION_TOOLS.iter().copied())
+        .chain(crate::setup::ACQUISITION_TOOLS.iter().copied())
+        .chain(crate::service_install::INSTALL_TOOLS.iter().copied())
+        .chain([crate::service_install::SELECTED_CHECK])
+        .chain(crate::terminal_connector::TOOLS.iter().copied())
+        {
+            assert!(!declared.iter().any(|tool| tool == name), "{name}");
+            assert!(
+                !policy.permits_call(name, ToolMutationClass::ReadOnly),
+                "{name}"
+            );
+            assert!(
+                !policy.permits_call(name, ToolMutationClass::Mutating),
+                "{name}"
+            );
+        }
+        for name in crate::recipe_discovery::RECIPE_TOOLS {
+            assert!(declared.iter().any(|tool| tool == name), "{name}");
+            assert!(
+                policy.permits_call(name, ToolMutationClass::ReadOnly),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn frontend_only_compositions_have_no_unusable_service_catalog() {
+        assert_frontend_only(&LazySetup::reading());
+        for include_paired_host in [false, true] {
+            for include_forge in [false, true] {
+                let (paired_host, _hosts) = PairedHostFrontend::deferred();
+                let setup =
+                    LazySetup::private_frontends(paired_host, include_paired_host, include_forge);
+                let _forge = include_forge.then(|| setup.take_forge_presenter().unwrap());
+                assert_frontend_only(&setup);
+                let declared = setup.declared_tools();
+                assert_eq!(
+                    declared.iter().any(|name| name.starts_with("paired_host_")),
+                    include_paired_host
+                );
+                assert_eq!(
+                    declared.iter().any(|name| name.starts_with("forge_")),
+                    include_forge
+                );
+            }
+        }
+        let (paired_host, _hosts) = PairedHostFrontend::deferred();
+        assert_frontend_only(&LazySetup::paired_host_preparation(paired_host));
+    }
+
+    #[test]
+    fn service_compositions_keep_the_native_catalog_and_preparation_path() {
+        let (paired_host, _hosts) = PairedHostFrontend::deferred();
+        let (legacy, _presenter) = LazySetup::new(paired_host);
+        let (private, _worker) = LazySetup::private_services();
+        for setup in [&legacy, &private] {
+            assert!(
+                setup
+                    .dispatcher()
+                    .tool_catalog_capabilities()
+                    .may_require_catalog_control_plane
+            );
+            assert!(meerkat_core::should_compose_tool_catalog_control_plane(
+                setup.dispatcher().as_ref()
+            ));
+            assert!(
+                setup
+                    .declared_tools()
+                    .iter()
+                    .any(|name| name == TOOLKIT_PREPARE_SERVICES)
+            );
+            assert!(!setup.owner().accepted());
+            let options = setup.session_options(SessionOptions::default()).unwrap();
+            let policy = meerkat_core::ToolExecutionPolicy::resolve(
+                options.build.tool_access_policy.unwrap(),
+            )
+            .unwrap();
+            assert!(policy.permits_call(TOOLKIT_PREPARE_SERVICES, ToolMutationClass::Mutating));
+            for name in [
+                meerkat_core::tool_catalog::TOOL_CATALOG_SEARCH_NAME,
+                meerkat_core::tool_catalog::TOOL_CATALOG_LOAD_NAME,
+            ] {
+                assert!(policy.permits_call(name, ToolMutationClass::ReadOnly));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod shutdown_observation_tests {
+    use super::*;
+
+    #[test]
+    fn shutdown_reason_keeps_retired_and_poisoned_fail_closed() {
+        let (paired_host, _hosts) = PairedHostFrontend::deferred();
+        let (lazy, _presenter) = LazySetup::new(paired_host);
+        let owner = lazy.owner();
+        assert_eq!(owner.shutdown_reason(), None);
+        owner.retire();
+        assert_eq!(
+            owner.shutdown_reason(),
+            Some(ServicePreparationShutdown::Retired)
+        );
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = owner.state.lock().unwrap();
+            panic!("poison control");
+        }));
+        assert_eq!(
+            owner.shutdown_reason(),
+            Some(ServicePreparationShutdown::StatePoisoned)
+        );
+        assert!(owner.requires_shutdown());
+    }
+}
+
+#[cfg(all(test, feature = "console", target_os = "linux"))]
+mod selected_input_tests;

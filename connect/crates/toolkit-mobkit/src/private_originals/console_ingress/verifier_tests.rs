@@ -1,5 +1,5 @@
 //! Controlled issuer -> configured Meta verifier -> normal POST /console/send
-//! -> CurrentHumanBinder -> actual InstalledConsoleIngress. Fixture login and
+//! -> prepared gateway wrapper -> CurrentHumanBinder -> installed ingress. Fixture login and
 //! signing prove this composed route, not deployed application authentication.
 use super::*;
 use axum::http::{HeaderMap, Uri, header};
@@ -15,6 +15,7 @@ use super::super::auth_fixture::*;
 #[derive(Clone, Copy)]
 enum Case {
     Valid,
+    Unadopted,
     Retired,
     RetiredAfterSelection,
     MismatchedScope,
@@ -26,6 +27,7 @@ struct RouteObservation {
     selected: AtomicUsize,
     attempted: AtomicUsize,
     human: Mutex<Option<AuthenticatedConsoleHuman>>,
+    send_context: Mutex<Option<meerkat_mobkit::console_governed_ingress::ConsoleSendContext>>,
     raw: Mutex<Option<Input>>,
     bound: Mutex<Option<Input>>,
     failure: Mutex<Option<String>>,
@@ -40,6 +42,7 @@ impl RouteObservation {
             selected: AtomicUsize::new(0),
             attempted: AtomicUsize::new(0),
             human: Mutex::new(None),
+            send_context: Mutex::new(None),
             raw: Mutex::new(None),
             bound: Mutex::new(None),
             failure: Mutex::new(None),
@@ -66,6 +69,22 @@ impl ConsoleGovernedIngress for ObserveInstalledIngress {
         self.observation.attempted.fetch_add(1, Ordering::SeqCst);
         *self.observation.human.lock().unwrap() = Some(human.clone());
         let inner = self.inner.binder_for(identity, human)?;
+        self.observation.selected.fetch_add(1, Ordering::SeqCst);
+        Ok(Arc::new(ObserveInstalledBinder {
+            inner,
+            observation: self.observation.clone(),
+        }))
+    }
+    fn binder_for_send(
+        &self,
+        identity: &AgentIdentity,
+        human: &AuthenticatedConsoleHuman,
+        send: &meerkat_mobkit::console_governed_ingress::ConsoleSendContext,
+    ) -> Result<Arc<dyn GovernedInputBinder>, String> {
+        self.observation.attempted.fetch_add(1, Ordering::SeqCst);
+        *self.observation.human.lock().unwrap() = Some(human.clone());
+        *self.observation.send_context.lock().unwrap() = Some(send.clone());
+        let inner = self.inner.binder_for_send(identity, human, send)?;
         self.observation.selected.fetch_add(1, Ordering::SeqCst);
         Ok(Arc::new(ObserveInstalledBinder {
             inner,
@@ -200,7 +219,7 @@ async fn controlled_console(case: Case) {
             .as_ref()
             .unwrap();
         let member = native.members[0].member.member.clone();
-        let route = fixture.source.route(&Id::new("console").unwrap()).unwrap();
+        let route = &fixture.source.route(&Id::new("console").unwrap()).unwrap();
         assert_eq!(route.requester, selected_human());
         assert_eq!(route.represented_subject.as_ref(), Some(&selected_human()));
         assert!(
@@ -291,10 +310,15 @@ async fn controlled_console(case: Case) {
             .unwrap();
         let runtime = fixture.native_for_console_mut();
         runtime.set_access_controller(access);
-        runtime.set_console_governed_ingress(Arc::new(ObserveInstalledIngress {
+        let observed: Arc<dyn ConsoleGovernedIngress> = Arc::new(ObserveInstalledIngress {
             inner: ingress,
             observation: observation.clone(),
-        }));
+        });
+        runtime.set_console_governed_ingress(
+            crate::host_gateway::PreparedGatewayRuntime::console_ingress_for_test(
+                (!matches!(case, Case::Unadopted)).then_some(observed),
+            ),
+        );
         let resolver = runtime.console_viewer_resolver(&decisions);
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, bearer.parse().unwrap());
@@ -385,6 +409,18 @@ async fn controlled_console(case: Case) {
             }
             reply
         };
+        {
+            let send = observation.send_context.lock().unwrap();
+            if invalid_credential || matches!(case, Case::Unadopted) {
+                assert!(send.is_none());
+            } else {
+                let send = send
+                    .as_ref()
+                    .expect("prepared gateway must forward actual send context");
+                assert_eq!(send.idempotency_key, "controlled-verifier-input");
+                assert_eq!(send.origin, "console");
+            }
+        }
         if matches!(case, Case::Valid | Case::RetiredAfterSelection) {
             let permit = tokio::time::timeout(WAIT, observation.finished.acquire())
                 .await
@@ -507,6 +543,71 @@ async fn controlled_console(case: Case) {
                 login: login.clone(),
             };
             entry.validate_custody_input(&record, &raw, &bound).unwrap();
+            assert!(
+                held.console_login
+                    .get()
+                    .is_some_and(|saved| saved.same_owner(&login)),
+                "actual Console entry must retain its exact source-held login"
+            );
+            assert!(
+                !held.console_child_input && record.console_child_input.is_none(),
+                "ordinary unselected Console remains outside child retention"
+            );
+            let exact = OnceLock::new();
+            assert!(
+                cold_service_admission::RetainedBoundInput::retain_exact_for_attempt(
+                    &exact, &bound
+                )
+                .unwrap()
+                .is_none()
+            );
+            let restored = cold_service_admission::RetainedBoundInput::retain_exact_for_attempt(
+                &exact, &bound,
+            )
+            .unwrap()
+            .expect("same exact retained native input");
+            assert_eq!(
+                canonical_json(&restored).unwrap(),
+                canonical_json(&bound).unwrap()
+            );
+            assert!(
+                restored.header().ingress_context.is_none()
+                    && restored.header().retained_resume.is_none(),
+                "serialized evidence restores no process authority"
+            );
+            for field in ["id", "timestamp", "idempotency_key"] {
+                let Input::Prompt(mut changed) = bound.clone() else {
+                    panic!("Console prompt missing")
+                };
+                match field {
+                    "id" => changed.header.id = PromptInput::new("fresh", None).header.id,
+                    "timestamp" => {
+                        changed.header.timestamp = "1970-01-01T00:00:00Z".parse().unwrap()
+                    }
+                    _ => {
+                        changed.header.idempotency_key =
+                            Some(IdempotencyKey::new("different-stock-key"))
+                    }
+                }
+                // Exercise the retained-input owner, without submitting this
+                // altered value or asserting that its native proof is valid.
+                assert!(matches!(
+                    cold_service_admission::RetainedBoundInput::retain_exact_for_attempt(
+                        &exact,
+                        &Input::Prompt(changed)
+                    ),
+                    Err(PrivateOriginalError::Conflict)
+                ));
+            }
+            let mut marked_ordinary = record.clone();
+            marked_ordinary.console_child_input = Some(ConsoleChildInputEvidence::NativeConsole);
+            assert!(
+                matches!(
+                    validate_console_child_input(&marked_ordinary, &bound),
+                    Err(PrivateOriginalError::Conflict)
+                ),
+                "a Console marker alone must not fabricate EffectWaiter/child authority"
+            );
             let Input::Prompt(mut changed) = bound.clone() else {
                 panic!("Console prompt missing")
             };
@@ -572,9 +673,19 @@ async fn controlled_console(case: Case) {
                     .unwrap(),
                 before_rows
             );
+            if matches!(case, Case::Unadopted) {
+                assert_eq!(reply.0, 403);
+                assert_eq!(reply.1["error"], "governed_send_refused");
+                assert!(
+                    reply.1["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("application preparation is not installed")
+                );
+            }
             assert_eq!(
                 observation.attempted.load(Ordering::SeqCst),
-                usize::from(!invalid_credential)
+                usize::from(!invalid_credential && !matches!(case, Case::Unadopted))
             );
             assert_eq!(
                 observation.selected.load(Ordering::SeqCst),
@@ -615,6 +726,10 @@ async fn controlled_console(case: Case) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn configured_verifier_and_normal_console_send_admit_exact_enrolled_human() {
     controlled_console(Case::Valid).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unadopted_prepared_gateway_refuses_normal_console_send_without_admission() {
+    controlled_console(Case::Unadopted).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retired_login_refuses_normal_console_send_without_admission() {

@@ -238,9 +238,72 @@ fn public_failure(result: &ToolResult) -> PublicReadFailure {
         let expected =
             meerkat_core::ops::terminal_tool_outcome_for_error(result.tool_use_id.clone(), error)
                 .result;
-        serde_json::to_value(result).unwrap() == serde_json::to_value(expected).unwrap()
+        serde_json::to_value(result).unwrap() == serde_json::to_value(&expected).unwrap()
+            || (matches!(kind, PublicReadFailure::ReprepareRequired)
+                && certified_not_dispatched(result, &expected))
     })
     .expect("only exact native operation refusal or unavailable feedback permits a fresh choice")
+}
+
+/// Core certifies a ReprepareRequired refusal met before the effect entered
+/// (the MCP router enters its effect only when it calls the server) as not
+/// dispatched: the same refusal, with tool_invoked false in place of the
+/// plain form's value.
+fn certified_not_dispatched(result: &ToolResult, plain: &ToolResult) -> bool {
+    let payload =
+        |value: &ToolResult| serde_json::from_str::<serde_json::Value>(&value.text_content()).ok();
+    let (Some(mut actual), Some(expected)) = (payload(result), payload(plain)) else {
+        return false;
+    };
+    result.tool_use_id == plain.tool_use_id
+        && result.is_error == plain.is_error
+        && actual["data"]["tool_invoked"] == serde_json::json!(false)
+        && {
+            actual["data"]["tool_invoked"] = expected["data"]["tool_invoked"].clone();
+            actual == expected
+        }
+}
+
+#[test]
+fn public_failure_takes_a_reprepare_refusal_plain_or_certified_not_dispatched() {
+    let refusal = |kind| {
+        meerkat_core::ops::terminal_tool_outcome_for_error(
+            "public-read",
+            meerkat_core::ToolError::AuthorizationRefused {
+                refusal: meerkat_core::OperationRefused::new(kind),
+            },
+        )
+        .result
+    };
+    let with_data = |result: &ToolResult, field: &str, value: serde_json::Value| {
+        let mut body: serde_json::Value = serde_json::from_str(&result.text_content()).unwrap();
+        body["data"][field] = value;
+        let mut changed = result.clone();
+        changed.set_text_content(body.to_string());
+        changed
+    };
+    let plain = refusal(meerkat_core::OperationRefusalKind::ReprepareRequired);
+    let certified = with_data(&plain, "tool_invoked", serde_json::json!(false));
+    assert_ne!(certified, plain);
+    for result in [&plain, &certified] {
+        assert_eq!(public_failure(result), PublicReadFailure::ReprepareRequired);
+    }
+    // Only that one field may differ, only to false, and only for this kind.
+    for result in [
+        with_data(&plain, "tool_invoked", serde_json::json!(true)),
+        with_data(&certified, "kind", serde_json::json!("denied")),
+        refusal(meerkat_core::OperationRefusalKind::Denied),
+        with_data(
+            &refusal(meerkat_core::OperationRefusalKind::Denied),
+            "tool_invoked",
+            serde_json::json!(false),
+        ),
+    ] {
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| public_failure(&result)))
+                .is_err()
+        );
+    }
 }
 
 struct PublicReadProvider {

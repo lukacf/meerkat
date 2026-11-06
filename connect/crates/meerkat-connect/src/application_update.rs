@@ -103,7 +103,13 @@ impl ValidatedReplacementStartup {
             selection: startup.selection.clone(),
             prior: startup.prior_tool_policy.clone(),
             update_id: update.selection().update_id.clone(),
-            helper: update.original_setup().helper.member.clone(),
+            helper: update
+                .original_setup()
+                .helper
+                .as_ref()
+                .ok_or_else(invalid)?
+                .member
+                .clone(),
             observed: Mutex::new(BTreeMap::new()),
         });
         Ok(Self {

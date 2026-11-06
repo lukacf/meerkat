@@ -4,11 +4,12 @@ description: "Inspect packages, validate selections and compose native setup."
 icon: "rust"
 ---
 
-The public source has a root workspace for `toolkit-package` and `toolkit-store`,
-and a `native-candidate` workspace for Connect and its native adapters. It uses
-published Core and Meta 0.9.0 crates plus the exact included Core code generator.
-Build with Rust 1.97.0. See the repository
-`BUILDING.md` for resource-bound native build commands.
+The root workspace owns `toolkit-package`; `native-candidate` owns Connect,
+its native adapters and `toolkit-store`. The native workspace selects exact
+Core and Meta development Git sources for 0.9.5, including the Core code generator.
+This is not a published release tuple. The manifests declare Rust 1.94. Follow
+[BUILDING.md](https://github.com/lukacf/meerkat-connect/blob/main/BUILDING.md)
+for the selected sources and resource-bound native build commands.
 
 ## Crate map
 
@@ -30,7 +31,7 @@ router or the adapter's shutdown.
 
 | Public API | Use |
 | --- | --- |
-| `NativeSetup::new` | Retain the existing Reading Forge recipe with the selected home-automation host frontend binding, terminal connectors and local approvals |
+| `NativeSetup::new` | Retain the existing Reading Forge recipe with the selected example-host frontend binding, terminal connectors and local approvals |
 | `NativeSetup::with_forge` | Supply the application's loaded Forge binding and its matching protected presenter |
 | `SessionStartup::open_native_setup` | Open the selected governed standalone setup with protected approval and the existing cancellation listener |
 | `session::ResumedStandalone::open_native_setup` | Continue the retained standalone startup using its native owners |
@@ -44,12 +45,21 @@ Crossed, used or previously claimed pairs are refused. A later setup needs a
 fresh pair from the same trusted application configuration after the earlier
 setup closes. This operation selects no new host origin, login or permission.
 
+`ConnectSession::submit` returns an admission receipt and a native
+`CompletionHandle`; admission alone is not a completed response. Await
+`try_wait_with_terminal_outcome()` and retain its outcome.
+`terminal::committed_text` returns text only for committed completion, including
+an empty string for `CompletedWithoutResult`. That empty string is not a failed
+request or a reason to resubmit. Pending callbacks and durable finalization
+failures remain distinct outcomes; a completion wait error does not prove that
+work completed.
+
 Keep the returned setup and presenters with the existing session owner. Cancel
 and await active input before awaiting `ConnectSession::close`; preserve a
 returned cleanup failure instead of treating a drop as completed shutdown.
 If installation enters finalization, retain that future until it settles as
 required by [service-secret setup](/connect/guides/host-composition#standalone-service-secret-setup).
-The selected home-automation host binding can expose its frontend setup operations; this
+The selected example-host binding can expose its frontend setup operations; this
 standalone composer does not turn the session into a persistent frontend host.
 
 See [host composition](/connect/guides/host-composition#native-application-lifecycle) for application restore, preparation and replacement.
@@ -106,7 +116,9 @@ An agent or application supplies the concrete `ActivationManifest`. Its `validat
 
 `IntegrationBundle::export_portable(&bundle_digest, selection)` validates a concrete `ActivationManifest` through the existing recipe owner and returns `PortablePluginExport`. It exports exactly the selected remote recipe's retained server, with matching portable declarations. Required Connect contracts, services, dependencies and package state prevent portable export. It does not invent host capabilities or claim host compatibility.
 
-`PortablePluginExport::new` also supports plain portable manifests and inert skill files through `with_file`. Optional metadata remains absent rather than null, namespaces remain opaque and placeholders remain literal. Artifact realization is explicitly unsupported. `write_new` writes files into a new host-controlled directory and refuses existing destinations; it is not an atomic or durable install.
+`PortablePluginExport::new` also supports plain portable manifests and explicitly included files through `with_file`, including skill documents, supporting references and already bundled executables. Optional metadata remains absent rather than null, namespaces remain opaque and placeholders remain literal. Realizing artifact-backed Connect components is still unsupported. `write_new` writes files into a new host-controlled directory and refuses existing destinations; it is not an atomic or durable install.
+
+On Unix, `with_file` retains exact bytes and executable intent from the same opened regular file. `write_new` uses creation mode `0755` for an executable and `0644` for other files, subject to the caller's umask, without copying ownership or special/group-write/world-write bits. The included program is never run by import or export. `inspect_existing` detects executable-mode drift even when bytes are unchanged; the optional fingerprint field `executable` is unrecorded for legacy observations. This behavior has a local generic stdio-client round-trip control, with source removal and exact skill/reference preservation. Windows permission behavior and automatic plugin-directory discovery are not qualified by that control.
 
 The local operator's `export` command requires an existing recipe, its exact identity and bundle digest, an absolute selection-file path and a new destination. Its result retains local decision provenance and hashes the selection and emitted files. A generic client gets the whole endpoint, not a proxy enforcing Connect operation lists, grants or resource limits. The client owns its authentication and authorization.
 
@@ -119,6 +131,11 @@ The dispatcher implements Meerkat's tool surface, but the application must compo
 ## MCP integrations
 
 Connect supports MCP servers through Meerkat's native session APIs. Use the host's existing credential, grant and runtime owners when attaching a selected integration.
+
+The development [service collection API](/connect/guides/service-collections) lets a
+trusted Rust host run bounded, result-dependent checks over one installed
+service. Its private protocol 7 requires an explicit host selection and retains
+historical observations; installed and live acceptance remain pending.
 
 ## Source locations
 

@@ -104,6 +104,7 @@ impl Fixture {
     fn host(&self) -> HostSetupRequest {
         HostSetupRequest {
             setup_helper: None,
+            work_context: None,
             target: self.receiver.clone(),
             correlation: id("logical-call-1"),
             parent_operation: Some(id("business-task-1")),

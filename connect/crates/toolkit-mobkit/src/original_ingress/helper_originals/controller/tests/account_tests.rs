@@ -35,7 +35,12 @@ async fn account_and_report_partial_issuance_keep_one_pending_row_until_all_chil
         let candidate = f.candidate();
         let (controller, report, account, public, _catalog) = f
             .owner
-            .retain_helper_operation_intents(&f.store, &f.admitted, candidate.clone())
+            .retain_helper_operation_intents(
+                &f.store,
+                &f.admitted,
+                candidate.clone(),
+                tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+            )
             .await
             .unwrap();
         let report = report.unwrap();
@@ -78,7 +83,12 @@ async fn account_and_report_partial_issuance_keep_one_pending_row_until_all_chil
         assert_eq!(f.row().await.unwrap(), pending);
         let again = f
             .owner
-            .retain_helper_operation_intents(&f.store, &f.admitted, candidate)
+            .retain_helper_operation_intents(
+                &f.store,
+                &f.admitted,
+                candidate,
+                tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -133,7 +143,12 @@ async fn account_selection_refuses_report_parent_and_retains_narrow_target_revoc
     let f = Fixture::with_account().await;
     let (controller, report, account, public, _catalog) = f
         .owner
-        .retain_helper_operation_intents(&f.store, &f.admitted, f.candidate())
+        .retain_helper_operation_intents(
+            &f.store,
+            &f.admitted,
+            f.candidate(),
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+        )
         .await
         .unwrap();
     let report = report.unwrap();
@@ -239,7 +254,12 @@ async fn public_request_child_is_independent_and_partial_settlement_recovers_the
         let candidate = f.candidate();
         let (controller, report, account, public, _catalog) = f
             .owner
-            .retain_helper_operation_intents(&f.store, &f.admitted, candidate.clone())
+            .retain_helper_operation_intents(
+                &f.store,
+                &f.admitted,
+                candidate.clone(),
+                tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+            )
             .await
             .unwrap();
         let report = report.unwrap();
@@ -271,14 +291,26 @@ async fn public_request_child_is_independent_and_partial_settlement_recovers_the
         changed.public = None;
         assert!(
             f.owner
-                .retain_helper_operation_intents(&f.store, &f.admitted, changed)
+                .retain_helper_operation_intents(
+                    &f.store,
+                    &f.admitted,
+                    changed,
+                    tokio::time::Instant::now()
+                        + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND
+                )
                 .await
                 .is_err()
         );
         assert_eq!(f.row().await.unwrap(), pending);
         assert_eq!(
             f.owner
-                .retain_helper_operation_intents(&f.store, &f.admitted, candidate)
+                .retain_helper_operation_intents(
+                    &f.store,
+                    &f.admitted,
+                    candidate,
+                    tokio::time::Instant::now()
+                        + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND
+                )
                 .await
                 .unwrap(),
             (
@@ -418,7 +450,12 @@ async fn public_only_selection_never_infers_account_and_legacy_rows_omit_public(
     let f = Fixture::with_public(false).await;
     let (_, report, account, public, _catalog) = f
         .owner
-        .retain_helper_operation_intents(&f.store, &f.admitted, f.candidate())
+        .retain_helper_operation_intents(
+            &f.store,
+            &f.admitted,
+            f.candidate(),
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+        )
         .await
         .unwrap();
     assert!(account.is_none());

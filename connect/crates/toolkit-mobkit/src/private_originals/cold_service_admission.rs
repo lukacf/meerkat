@@ -19,6 +19,20 @@ use meerkat_runtime::{
 pub(crate) struct RetainedBoundInput(serde_json::Value);
 
 impl RetainedBoundInput {
+    pub(super) fn retain_exact_for_attempt(
+        slot: &OnceLock<Self>,
+        input: &Input,
+    ) -> Result<Option<Input>, PrivateOriginalError> {
+        let candidate = Self::from_bound(input)?;
+        if slot.set(candidate.clone()).is_ok() {
+            return Ok(None);
+        }
+        let saved = slot.get().ok_or(PrivateOriginalError::Unavailable)?;
+        if saved != &candidate {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        saved.decode().map(Some)
+    }
     pub(crate) fn from_bound(input: &Input) -> Result<Self, PrivateOriginalError> {
         if input.header().ingress_context.is_none() || input.header().retained_resume.is_some() {
             return Err(PrivateOriginalError::Conflict);
@@ -46,6 +60,55 @@ impl RetainedBoundInput {
         retained.decode().map(Some)
     }
 
+    pub(super) fn from_peer_bound(
+        input: &Input,
+        peer: &peer_ingress::PeerSource,
+    ) -> Result<Self, PrivateOriginalError> {
+        peer.check_input(input, true)?;
+        if input.header().ingress_context.is_none() {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        Ok(Self(
+            serde_json::to_value(input).map_err(|_| PrivateOriginalError::Conflict)?,
+        ))
+    }
+    pub(super) fn decode_peer(
+        &self,
+        peer: &peer_ingress::PeerSource,
+    ) -> Result<Input, PrivateOriginalError> {
+        let input: Input =
+            serde_json::from_value(self.0.clone()).map_err(|_| PrivateOriginalError::Conflict)?;
+        peer.check_input(&input, true)?;
+        if input.header().authority_association.is_none()
+            || serde_json::to_value(&input).map_err(|_| PrivateOriginalError::Conflict)? != self.0
+        {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        Ok(input)
+    }
+    pub(super) fn retain_peer_attempt(
+        slot: &OnceLock<Self>,
+        input: &Input,
+        peer: &peer_ingress::PeerSource,
+    ) -> Result<Option<Input>, PrivateOriginalError> {
+        let candidate = Self::from_peer_bound(input, peer)?;
+        if slot.set(candidate.clone()).is_ok() {
+            return Ok(None);
+        }
+        let saved = slot.get().ok_or(PrivateOriginalError::Unavailable)?;
+        let exact = saved.decode_peer(peer)?;
+        let mut repeated =
+            serde_json::to_value(input).map_err(|_| PrivateOriginalError::Conflict)?;
+        *repeated
+            .pointer_mut("/header/timestamp")
+            .ok_or(PrivateOriginalError::Conflict)? =
+            serde_json::to_value(exact.header().timestamp)
+                .map_err(|_| PrivateOriginalError::Conflict)?;
+        if repeated != saved.0 {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        Ok(Some(exact))
+    }
     pub(crate) fn decode(&self) -> Result<Input, PrivateOriginalError> {
         let input: Input =
             serde_json::from_value(self.0.clone()).map_err(|_| PrivateOriginalError::Conflict)?;
@@ -80,6 +143,9 @@ impl RetainedBoundInput {
 pub(super) fn source_event_key(
     record: &SourceRecord,
 ) -> Result<IdempotencyKey, PrivateOriginalError> {
+    if let Some(peer) = &record.peer_ingress {
+        return Ok(peer.event_key());
+    }
     let coordinate = canonical_json(&serde_json::json!({
         "schema": "toolkit.original-occurrence.v1", "realm": record.source.realm,
         "ingress": record.source.ingress, "source_authority": record.source.source_authority,
@@ -92,17 +158,53 @@ pub(super) fn source_event_key(
     )))
 }
 
+pub(super) fn decode_source_input(
+    record: &SourceRecord,
+    input: &RetainedBoundInput,
+) -> Result<Input, PrivateOriginalError> {
+    match &record.peer_ingress {
+        Some(peer) => input.decode_peer(peer),
+        None => input.decode(),
+    }
+}
+
 pub(super) fn validate_retained_input(record: &SourceRecord) -> Result<(), PrivateOriginalError> {
     let Some(saved) = &record.bound_service_input else {
         return Ok(());
     };
+    if record.console_child_input.is_none()
+        && record.peer_ingress.is_none()
+        && record.approved_task.is_none()
+        && record.setup_request.is_none()
+        && record.configured_setup.is_none()
+        && record.planning_source_evidence.is_none()
+    {
+        return Err(PrivateOriginalError::Conflict);
+    }
+    validate_source_input(record, saved)
+}
+
+/// Exact source correlation shared by selected service evidence and ordinary
+/// custody evidence. The caller separately enforces the field's purpose and
+/// custody fingerprint; these bytes never establish admission or live ingress.
+pub(super) fn validate_source_input(
+    record: &SourceRecord,
+    saved: &RetainedBoundInput,
+) -> Result<(), PrivateOriginalError> {
+    if record.console_child_input.is_some() {
+        return super::console_ingress::validate_console_child_input(record, &saved.decode()?);
+    }
+    if let Some(peer) = &record.peer_ingress {
+        let input = saved.decode_peer(peer)?;
+        if input.header().authority_association != record.final_association {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        return Ok(());
+    }
     let Input::Prompt(input) = saved.decode()? else {
         return Err(PrivateOriginalError::Conflict);
     };
-    if (record.approved_task.is_none()
-        && record.setup_request.is_none()
-        && record.configured_setup.is_none())
-        || input.header.authority_association != record.final_association
+    if input.header.authority_association != record.final_association
         || input.header.idempotency_key.as_ref() != Some(&source_event_key(record)?)
         || !matches!(&input.content, meerkat_core::ContentInput::Text(text)
             if digest(text.as_bytes()) == record.event.content_sha256)
@@ -129,6 +231,40 @@ pub(super) fn writer_error(error: OriginalWriterError) -> PrivateOriginalError {
     }
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    // Same-crate control only: hold a cold operation inside its
+    // session-owner wake window at the stage the control selects.
+    pub(super) static WAKE_WINDOW: Arc<WakeWindow>;
+}
+
+/// Where a same-crate control holds an operation inside its wake window.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum WakeWindowStage {
+    /// After the pre-wake publication check, before the owner is asked.
+    BeforeWake,
+    /// After the owner answered Ready, before the post-wake check.
+    AfterReady,
+}
+
+#[cfg(test)]
+pub(super) struct WakeWindow {
+    pub(super) stage: WakeWindowStage,
+    pub(super) held: tokio::sync::Notify,
+    pub(super) release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+async fn hold_wake_window(stage: WakeWindowStage) {
+    if let Ok(window) = WAKE_WINDOW.try_with(Arc::clone)
+        && window.stage == stage
+    {
+        window.held.notify_one();
+        window.release.notified().await;
+    }
+}
+
 impl PrivateOriginals {
     pub(crate) fn bind_controller_pin_source(
         &self,
@@ -141,11 +277,22 @@ impl PrivateOriginals {
             .map_err(|_| PrivateOriginalError::Denied)
     }
 
+    #[cfg(test)]
     pub(super) async fn retain_bound_service_input(
         &self,
         reference: &PrivateOriginalRef,
         original: &Arc<RetainedToolkitOriginal>,
         input: &Input,
+    ) -> Result<(), PrivateOriginalError> {
+        self.retain_bound_service_input_from_console(reference, original, input, None)
+            .await
+    }
+    pub(super) async fn retain_bound_service_input_from_console(
+        &self,
+        reference: &PrivateOriginalRef,
+        original: &Arc<RetainedToolkitOriginal>,
+        input: &Input,
+        console: Option<(&super::console_ingress::ConsoleEntry, &Input)>,
     ) -> Result<(), PrivateOriginalError> {
         let _writer = self.owner.source_writer().await;
         self.owner
@@ -162,7 +309,71 @@ impl PrivateOriginals {
         if record.final_association.as_ref() != Some(original.association()) {
             return Err(PrivateOriginalError::Conflict);
         }
-        if record.approved_task.is_none() {
+        if let Some(peer) = &record.peer_ingress {
+            let selected = RetainedBoundInput::from_peer_bound(input, peer)?;
+            if let Some(saved) = &record.bound_service_input {
+                return if saved == &selected {
+                    Ok(())
+                } else {
+                    Err(PrivateOriginalError::Conflict)
+                };
+            }
+            if record.operation_cancelled {
+                return Err(PrivateOriginalError::Denied);
+            }
+            record.bound_service_input = Some(selected);
+            validate_retained_input(&record)?;
+            self.store
+                .compare_and_swap(Transition {
+                    key,
+                    expected_revision: stored.revision,
+                    expected_digest: Some(stored.content_digest),
+                    claim: None,
+                    data: encode(record)?,
+                    events: vec![],
+                    effects: vec![],
+                })
+                .await
+                .map_err(store_error)?;
+            return Ok(());
+        }
+        if record.planning_source_evidence.is_some() {
+            // This profile is an explicit host submission. A Console login is
+            // an independent live owner and cannot be recreated from evidence.
+            if record.console_child_input.is_some() {
+                let (entry, raw) = console.ok_or(PrivateOriginalError::Denied)?;
+                entry.validate_custody_input(&record, raw, input)?;
+                super::console_ingress::validate_console_child_input(&record, input)?;
+                if !self
+                    .retained
+                    .lock()
+                    .map_err(|_| PrivateOriginalError::Unavailable)?
+                    .iter()
+                    .any(|held| {
+                        Arc::ptr_eq(&held.original, original)
+                            && held
+                                .console_login
+                                .get()
+                                .is_some_and(|login| login.same_owner(entry.login()))
+                    })
+                {
+                    return Err(PrivateOriginalError::Denied);
+                }
+            } else if self
+                .retained
+                .lock()
+                .map_err(|_| PrivateOriginalError::Unavailable)?
+                .iter()
+                .any(|held| {
+                    Arc::ptr_eq(&held.original, original) && held.console_login.get().is_some()
+                })
+            {
+                return Err(PrivateOriginalError::Denied);
+            }
+            self.check_planning_evidence_source(&record, reference)?;
+            self.check_workflow_waiter_binding(&record, reference)
+                .await?;
+        } else if record.approved_task.is_none() {
             // Preserve ordinary fresh input behavior for other source classes.
             // They receive no new cold-recovery evidence or classification.
             if !self.stock_setup_source(&record, reference)? {
@@ -175,7 +386,12 @@ impl PrivateOriginals {
             return Err(PrivateOriginalError::Denied);
         }
         if let Some(saved) = &record.bound_service_input {
-            return if saved.same_binding(input)? {
+            let same = if record.console_child_input.is_some() {
+                saved == &RetainedBoundInput::from_bound(input)?
+            } else {
+                saved.same_binding(input)?
+            };
+            return if same {
                 Ok(())
             } else {
                 Err(PrivateOriginalError::Conflict)
@@ -196,6 +412,79 @@ impl PrivateOriginals {
             .await
             .map_err(store_error)?;
         Ok(())
+    }
+
+    /// Before a live operation on an admitted original reads the live owners
+    /// of `session` (its runtime registration, executor attachment and live
+    /// actor), wake the session's owner when no live actor serves it. A
+    /// restarted host restores its members Dormant until a live operation
+    /// wakes them (Core's on-demand member restore), and a session-keyed live
+    /// operation that finds no actor asks Core's session-owner wake before it
+    /// fails (`meerkat_core::session_owner_wake`). The owner wakes exactly
+    /// the member bound to that session: no new session, actor or turn.
+    ///
+    /// Only operations call this, after their canonical reads and with no
+    /// source writer held. A read or a cancellation never wakes a member.
+    /// `stamp` is the operation's publication observation: a cancellation or
+    /// any other authority change that entered since those reads refuses
+    /// before the wake, and the check is repeated once the wake returns. The
+    /// caller then reads the registration, attachment and actor again, and
+    /// its native callback repeats every authority check.
+    ///
+    /// A session whose registration and attachment are present is left to the
+    /// caller's own reads, so a live member's actor is observed once, by the
+    /// caller, as before.
+    ///
+    /// Every refusal stays this source's `Unavailable`, as for a missing live
+    /// owner before: a session no owner serves in this process, an owner that
+    /// no longer binds the session (`NotOwned`), a busy member (retryable)
+    /// and any other typed wake refusal alike.
+    pub(super) async fn wake_original_session_owner(
+        machine: &Arc<MeerkatMachine>,
+        pins: &dyn ControllerPinSource,
+        session: &meerkat_core::SessionId,
+        stamp: &meerkat_authorization::publication::LocalPublicationStamp,
+    ) -> Result<(), PrivateOriginalError> {
+        if machine
+            .current_session_registration_witness(session)
+            .await
+            .is_some()
+            && machine
+                .current_executor_attachment_witness(session)
+                .await
+                .is_some()
+        {
+            return Ok(());
+        }
+        if pins.live_actor(session).await.is_some() {
+            return Ok(());
+        }
+        stamp
+            .check_current()
+            .map_err(|_| PrivateOriginalError::Unavailable)?;
+        #[cfg(test)]
+        hold_wake_window(WakeWindowStage::BeforeWake).await;
+        // The owner's wake can build the member (a deep construction chain).
+        // Run it on its own task, as every deep chain under an arbitrary
+        // caller is, so it never stacks beneath the operation's poll frames.
+        // A dropped caller aborts it; a late completion only wakes the member,
+        // which the owner's machine joins and fences.
+        let owned = session.clone();
+        let woke = meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+            meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global()
+                .wake(&owned)
+                .await
+        })
+        .await;
+        match woke {
+            Some(Ok(meerkat_core::session_owner_wake::SessionOwnerWakeOutcome::Ready)) => {}
+            Some(Ok(_)) | Some(Err(_)) | None => return Err(PrivateOriginalError::Unavailable),
+        }
+        #[cfg(test)]
+        hold_wake_window(WakeWindowStage::AfterReady).await;
+        stamp
+            .check_current()
+            .map_err(|_| PrivateOriginalError::Unavailable)
     }
 
     /// None is native NotAdmitted, never permission to submit again. Errors
@@ -302,6 +591,7 @@ impl PrivateOriginals {
             .ok_or(PrivateOriginalError::Unavailable)?;
         let machine = self.machine()?;
         let session = &task.original_task.origin_session_id;
+        Self::wake_original_session_owner(&machine, &*pins, session, &stamp).await?;
         let registration = machine
             .current_session_registration_witness(session)
             .await

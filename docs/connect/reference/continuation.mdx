@@ -53,12 +53,17 @@ Shared preparation does not merge requester, grant, role, target, audience, dead
 | --- | --- |
 | Browser or UI closes | Observe the durable operation; UI lifetime does not cancel it |
 | Auth callback arrives late | Revalidate the owning attempt and current cancellation/expiry state |
-| Runtime member is restored | Resolve the current session from durable identity and reconcile bindings |
+| Runtime member is restored | Resolve its canonical durable identity and exact session; explicitly materialize a dormant member before live custody checks, then reconcile bindings |
 | Deployment wait expires | Report waiter expiry separately from rollout outcome |
 | Send may have completed | Preserve unknown effect; reconcile before any permitted repeat |
 | Provider accepted one multipart part | Retain each part's receipt and uncertainty independently |
 
 A credential challenge must itself be durably owned or explicitly invalidated after restart. Persisting setup state alone does not preserve a process-local browser transaction. Person-bound ceremonies may prohibit replacement until domain reconciliation.
+
+Restored identity observations are read-only and do not start an executor.
+Materialization, source admission and recovery completion remain separate
+steps. See the [host reconstruction contract](/connect/guides/host-composition) for the
+development setup-continuation path and its remaining qualification limits.
 
 ## Output delivery
 

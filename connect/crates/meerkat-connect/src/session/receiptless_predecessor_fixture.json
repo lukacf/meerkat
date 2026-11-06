@@ -1,0 +1,202 @@
+{
+  "schema": "genuine-ce43-paired-receiptless-predecessor-v1",
+  "session": "01a178b2-9485-71f1-8a47-fdde3345082b",
+  "input": "01a178b2-94f3-7462-8420-aee6269f1d48",
+  "run": "01a178b2-94fa-7de3-b4a0-a533cb05d880",
+  "snapshots": {
+    "staged": {
+      "CAPTURE.json": {
+        "sha256": "ea4b85892bf80338e333958f40d4d2f3f4836b4c9448444731f38f90376eaf8c",
+        "size": 2796,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/.rkat/events/.event-log-head/01a178b2-9485-71f1-8a47-fdde3345082b.json": {
+        "sha256": "80a18eb4c0e69197982989210175891152d8c0e63428a923322b54d0d4faa584",
+        "size": 781,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/.rkat/events/.sequence/01a178b2-9485-71f1-8a47-fdde3345082b.lock": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/.rkat/events/01a178b2-9485-71f1-8a47-fdde3345082b.jsonl": {
+        "sha256": "ee99b8cd279058882a2e5da83220d12df06a9db276731f40f2fb2eb2a3cb67e8",
+        "size": 1421,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/.rkat/sessions/01a178b2-9485-71f1-8a47-fdde3345082b/checkpoint": {
+        "sha256": "07ea61ac3300373595e9341efe0961756185d3bd3448dc8a33b0ebe35eef4b33",
+        "size": 32,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/.rkat/sessions/01a178b2-9485-71f1-8a47-fdde3345082b/events.jsonl": {
+        "sha256": "433b53883ff78ca79436eed1c145384e94ad32ba961a5c794be7c78ab44dc46b",
+        "size": 1094,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/approvals.json": {
+        "sha256": "079769b881bb34f5b1141f378ec392fc1b0844f505e4814beb5c76a3081e5628",
+        "size": 21,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/approvals.json.lock": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/hosting/01a178b2-9485-71f1-8a47-fdde3345082b.lock": {
+        "sha256": "84637d66634c4b6e21293357913f61c61f2cb698b249e858e21f65ffae00e68a",
+        "size": 56,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/jobs.sqlite3": {
+        "sha256": "337b748a2b398ae229c8c3e9b4c0cf009e1c03afce5d294160252778217d2fbb",
+        "size": 40960,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/jobs.sqlite3.mfence": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/realm_manifest.json": {
+        "sha256": "74cf7eb4eea1055824421dcb425b4dc2ed392995fc7b1449a2a6d5afad60e213",
+        "size": 119,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/sessions.sqlite3": {
+        "sha256": "f19872d4734e2c9eaae34787940183abcac55f034eb7de84cbc790f647c49592",
+        "size": 507904,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/sessions.sqlite3.execution-custody": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/sessions.sqlite3.execution-custody-admission": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/sessions.sqlite3.mfence": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/tool_process_custody/.incarnations/018043c6-d76f-4c80-8e4e-ff55589a2766.lock": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/workgraph.sqlite3": {
+        "sha256": "b877952a5a1ef5debd35fbdbef3d63e43204f30d13bf5c8c3f7e891e70bbef15",
+        "size": 118784,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/workgraph.sqlite3.mfence": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0,
+        "mode": 384
+      }
+    },
+    "consumed": {
+      "CAPTURE.json": {
+        "sha256": "ea4b85892bf80338e333958f40d4d2f3f4836b4c9448444731f38f90376eaf8c",
+        "size": 2796,
+        "mode": 384
+      },
+      "RECOVERED.json": {
+        "sha256": "5a6bbcaeee5854501249a19abfe832f9051c15bb5b75a1e67e9922f07b1b3458",
+        "size": 4735,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/.rkat/events/.event-log-head/01a178b2-9485-71f1-8a47-fdde3345082b.json": {
+        "sha256": "80a18eb4c0e69197982989210175891152d8c0e63428a923322b54d0d4faa584",
+        "size": 781,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/.rkat/events/.sequence/01a178b2-9485-71f1-8a47-fdde3345082b.lock": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/.rkat/events/01a178b2-9485-71f1-8a47-fdde3345082b.jsonl": {
+        "sha256": "ee99b8cd279058882a2e5da83220d12df06a9db276731f40f2fb2eb2a3cb67e8",
+        "size": 1421,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/.rkat/sessions/01a178b2-9485-71f1-8a47-fdde3345082b/checkpoint": {
+        "sha256": "07ea61ac3300373595e9341efe0961756185d3bd3448dc8a33b0ebe35eef4b33",
+        "size": 32,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/.rkat/sessions/01a178b2-9485-71f1-8a47-fdde3345082b/events.jsonl": {
+        "sha256": "433b53883ff78ca79436eed1c145384e94ad32ba961a5c794be7c78ab44dc46b",
+        "size": 1094,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/approvals.json": {
+        "sha256": "079769b881bb34f5b1141f378ec392fc1b0844f505e4814beb5c76a3081e5628",
+        "size": 21,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/approvals.json.lock": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/hosting/01a178b2-9485-71f1-8a47-fdde3345082b.lock": {
+        "sha256": "1c9f582e89d7c73627907ba118a28ff682e7cbebde6c8dabc2ab0379cc771f10",
+        "size": 56,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/jobs.sqlite3": {
+        "sha256": "337b748a2b398ae229c8c3e9b4c0cf009e1c03afce5d294160252778217d2fbb",
+        "size": 40960,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/jobs.sqlite3.mfence": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/realm_manifest.json": {
+        "sha256": "74cf7eb4eea1055824421dcb425b4dc2ed392995fc7b1449a2a6d5afad60e213",
+        "size": 119,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/sessions.sqlite3": {
+        "sha256": "2ef16a9bdac088d18bc0da566e43a174f57c9e3792ecfc0515f360c0c92027e3",
+        "size": 512000,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/sessions.sqlite3.execution-custody": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/sessions.sqlite3.execution-custody-admission": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/sessions.sqlite3.mfence": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/workgraph.sqlite3": {
+        "sha256": "b877952a5a1ef5debd35fbdbef3d63e43204f30d13bf5c8c3f7e891e70bbef15",
+        "size": 118784,
+        "mode": 384
+      },
+      "realms/older-boundary-capture/workgraph.sqlite3.mfence": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0,
+        "mode": 384
+      }
+    }
+  }
+}

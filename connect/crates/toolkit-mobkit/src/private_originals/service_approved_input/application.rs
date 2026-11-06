@@ -42,6 +42,15 @@ pub trait ApplicationServicePolicy: Send + Sync {
     ) -> Result<ApplicationToolPolicyRecoveryDecision, HostLifetimeError> {
         Ok(ApplicationToolPolicyRecoveryDecision::RequiresHuman)
     }
+    /// An instance is selected by the same application owner as ordinary
+    /// service policy. No profile name, recovered record or callback request
+    /// grants permission without this current, held owner decision.
+    fn reserve_member_policy(
+        &self,
+        _request: &crate::installed_host::dynamic_members::ApplicationMemberPolicyRequest<'_>,
+    ) -> Result<ApplicationToolPolicyRecoveryDecision, HostLifetimeError> {
+        Ok(ApplicationToolPolicyRecoveryDecision::RequiresHuman)
+    }
 }
 
 /// An owned exclusion against invalidating this decision during native issue
@@ -81,6 +90,10 @@ pub struct ApplicationServicePolicyRequest<'a> {
     pub permission: &'a PrivateServiceMcpPermission,
     pub attachment: &'a PrivateServiceMcpLiveAttachment,
     pub tool_policy: Option<&'a ServiceToolPolicyProposal>,
+    /// Existing class records from the exact prepared policy's prior slot.
+    /// They explain preserved rows; native admission and per-member revocation
+    /// remain with their existing owners.
+    pub member_admissions: &'a [crate::installed_host::dynamic_members::MemberClassAdmission],
 }
 
 /// Fix the adapter to the exact live native host, not equivalent snapshots.
@@ -156,27 +169,24 @@ impl InstalledApplicationServicePolicy {
         Arc::ptr_eq(&self.lifetime, lifetime)
     }
     fn check(&self, task: &InstalledServiceTask) -> Result<(), ServiceOperationError> {
-        let lifetime = task
-            .source
-            .host_lifetime
-            .get()
-            .and_then(Weak::upgrade)
-            .ok_or(PrivateOriginalError::Unavailable)?;
+        let lifetime = task.source.host_lifetime.get().and_then(Weak::upgrade)
+            .ok_or(PrivateOriginalError::Unavailable)
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.policy.lifetime"}}"#))?;
         if !self.belongs_to(&lifetime) {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.policy.owner"}}"#
+            );
             return Err(PrivateOriginalError::Denied.into());
         }
-        self.lifetime.validate_current_selection()?;
+        self.lifetime.validate_current_selection()
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.policy.selection"}}"#))?;
         let selected = self.lifetime.selected_policy();
-        if selected.deployment != self.deployment
-            || selected.source_policy_sha256 != self.source_policy_sha256
-            || selected
-                .native_host
-                .as_ref()
-                .is_none_or(|native| native.grant_administrator != self.owner)
-            || !task
-                .source
-                .application_service_source(&task.parent, &task.task)?
+        if selected.deployment != self.deployment || selected.source_policy_sha256 != self.source_policy_sha256
+            || selected.native_host.as_ref().is_none_or(|native| native.grant_administrator != self.owner)
+            || !task.source.application_service_source(&task.parent, &task.task)
+                .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.policy.source_read"}}"#))?
         {
+            eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.policy.source_match"}}"#);
             return Err(PrivateOriginalError::Denied.into());
         }
         match &self.parent_provisioning {
@@ -187,6 +197,9 @@ impl InstalledApplicationServicePolicy {
                 .as_ref()
                 .is_none_or(|parent| parent.is_empty()) =>
             {
+                eprintln!(
+                    r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.policy.parent_absent"}}"#
+                );
                 return Err(PrivateOriginalError::Denied.into());
             }
             Some((operator, rule, _)) => {
@@ -198,6 +211,9 @@ impl InstalledApplicationServicePolicy {
                     || native.service_parent_administration.as_ref() != Some(rule)
                     || !rule.routes().contains(&task.parent.route)
                 {
+                    eprintln!(
+                        r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.policy.parent_rule"}}"#
+                    );
                     return Err(PrivateOriginalError::Denied.into());
                 }
             }
@@ -243,10 +259,13 @@ impl PreparedApplicationServiceInstruction {
         // when its caller is dropped. Only full source publication settles it.
         let retained_login = Arc::new(std::sync::Mutex::new(reservation));
         let worker_login = retained_login.clone();
+        let workflow_task = self.task.clone();
         let result = self
             .apply_retained(Arc::new(move || {
                 let _retained_login = &worker_login;
-                login.as_ref().is_none_or(|login| login.try_check().is_ok()) && current()
+                workflow_task.workflow_effect_current().is_ok()
+                    && login.as_ref().is_none_or(|login| login.try_check().is_ok())
+                    && current()
             }))
             .await;
         if result.is_ok()
@@ -464,7 +483,7 @@ impl ApplicationServiceDecision {
             return Err(PrivateOriginalError::Denied.into());
         }
         self.lifetime.validate_current_selection()?;
-        let route = source.route(&self.decision.route)?;
+        let route = &source.route(&self.decision.route)?;
         self.evidence
             .validate(route, &self.decision, &source.scope.owner)?;
         let parent = match (&self.evidence.service_parent, self.parent) {
@@ -590,13 +609,24 @@ impl InstalledServiceTask {
         progress: Option<&ServiceOperationProgress>,
         tool_policy: Option<ServiceToolPolicySelection>,
     ) -> Result<ApplicationServicePreparation, ServiceOperationError> {
-        let (parent, _) = self.current().await?;
-        policy.check(&self)?;
+        let (parent, _) = self.current().await.inspect_err(|_| {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.current"}}"#
+            )
+        })?;
+        policy.check(&self).inspect_err(|_| {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.policy"}}"#
+            )
+        })?;
         if self
             .installation_readback
             .as_ref()
             .is_some_and(|selected| selected.configuration().ok().as_ref() != Some(config))
         {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.readback"}}"#
+            );
             return Err(PrivateOriginalError::Denied.into());
         }
         if tool_policy.is_some()
@@ -606,42 +636,45 @@ impl InstalledServiceTask {
                 .get()
                 .is_none_or(|owner| !owner.same_participant(&policy.policy))
         {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.tool_policy_owner"}}"#
+            );
             return Err(PrivateOriginalError::Denied.into());
         }
-        let tool_policy = self.prepare_tool_policy(tool_policy).await?;
-        let route = self.source.route(&self.parent.route)?;
-        let source_record = self.source.decode_record(&parent, &self.parent)?;
+        let tool_policy = self.prepare_tool_policy(tool_policy).await
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.tool_policy"}}"#))?;
+        let route = &self.source.route(&self.parent.route).inspect_err(|_| {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.route"}}"#
+            )
+        })?;
+        let source_record = self.source.decode_record(&parent, &self.parent)
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.source_record"}}"#))?;
         let id = Id::new(self.fresh.as_str()).map_err(|_| PrivateOriginalError::Conflict)?;
         let operator = if policy.parent_provisioning.is_some() {
             // Explicit selected application operator only; do not use the
             // convenience method that falls back to the local OS operator.
-            Some(
-                self.source
-                    .application_operator_setup(policy.lifetime.clone())?,
-            )
+            Some(self.source.application_operator_setup(policy.lifetime.clone())
+                .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.operator"}}"#))?)
         } else {
             None
         };
         let retained_expiry = match &operator {
-            Some(operator) => {
-                operator
-                    .retained_service_parent_expiry(
-                        &self.parent,
-                        &self.acquisition,
-                        &id,
-                        &digest(self.instruction.as_bytes()),
-                        expires_in_ms,
-                        progress,
-                    )
-                    .await?
-            }
+            Some(operator) => operator.retained_service_parent_expiry(&self.parent, &self.acquisition,
+                &id, &digest(self.instruction.as_bytes()), expires_in_ms, progress).await
+                .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.retained_expiry"}}"#))?,
             None => None,
         };
         let now = u64::try_from(self.store.now_ms().await.map_err(store_error)?)
             .map_err(|_| PrivateOriginalError::Unavailable)?;
         let expiry = match retained_expiry {
             Some(expiry) if expiry <= self.before_ms => expiry,
-            Some(_) => return Err(PrivateOriginalError::Denied.into()),
+            Some(_) => {
+                eprintln!(
+                    r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.expiry_bound"}}"#
+                );
+                return Err(PrivateOriginalError::Denied.into());
+            }
             None => expires_in_ms
                 .map(|ttl| now.checked_add(ttl).ok_or(PrivateOriginalError::Denied))
                 .transpose()?
@@ -662,48 +695,40 @@ impl InstalledServiceTask {
             },
         };
         if permission.operations.is_empty() || !permission.lifetime.active_at(now) {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.permission"}}"#
+            );
             return Err(PrivateOriginalError::Denied.into());
         }
-        let (reservation, tool_policy_approval) =
-            match policy.policy.reserve(&ApplicationServicePolicyRequest {
-                owner: &policy.owner,
-                deployment: &policy.deployment,
-                source_policy_sha256: &policy.source_policy_sha256,
-                route,
-                original: &self.parent,
-                authenticated_event: &source_record.event,
-                task: &self.task,
-                acquisition: &self.acquisition,
-                fresh_original: &self.fresh,
-                instruction: &self.instruction,
-                configuration: config,
-                permission: &permission,
-                attachment: &attachment,
-                tool_policy: tool_policy.as_ref().map(|prepared| &prepared.proposal),
-            })? {
-                ApplicationServicePolicyDecision::RequiresHuman => {
-                    return Ok(ApplicationServicePreparation::RequiresHuman);
-                }
-                ApplicationServicePolicyDecision::Permit(reservation) if tool_policy.is_none() => {
-                    (reservation, None)
-                }
-                ApplicationServicePolicyDecision::Permit(_) => {
-                    return Err(PrivateOriginalError::Denied.into());
-                }
-                ApplicationServicePolicyDecision::PermitWithToolPolicy {
-                    reservation,
-                    approval,
-                } => {
-                    let proposal = &tool_policy
-                        .as_ref()
-                        .ok_or(PrivateOriginalError::Denied)?
-                        .proposal;
-                    approval.check(proposal)?;
-                    (reservation, Some(approval))
-                }
-            };
-        reservation.check_current()?;
+        let (reservation, tool_policy_approval) = match policy.policy.reserve(&ApplicationServicePolicyRequest {
+            owner: &policy.owner, deployment: &policy.deployment, source_policy_sha256: &policy.source_policy_sha256,
+            route, original: &self.parent, authenticated_event: &source_record.event,
+            task: &self.task, acquisition: &self.acquisition,
+            fresh_original: &self.fresh, instruction: &self.instruction, configuration: config,
+            permission: &permission, attachment: &attachment,
+            tool_policy: tool_policy.as_ref().map(|prepared| &prepared.proposal),
+            member_admissions: tool_policy.as_ref().map(|prepared| prepared.member_admissions.as_slice()).unwrap_or(&[]),
+        }).inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.reserve"}}"#))? {
+            ApplicationServicePolicyDecision::RequiresHuman => return Ok(ApplicationServicePreparation::RequiresHuman),
+            ApplicationServicePolicyDecision::Permit(reservation) if tool_policy.is_none() => (reservation, None),
+            ApplicationServicePolicyDecision::Permit(_) => {
+                eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.tool_policy_approval_absent"}}"#);
+                return Err(PrivateOriginalError::Denied.into());
+            }
+            ApplicationServicePolicyDecision::PermitWithToolPolicy { reservation, approval } => {
+                let proposal = &tool_policy.as_ref().ok_or(PrivateOriginalError::Denied)
+                    .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.tool_policy_proposal_absent"}}"#))?.proposal;
+                approval.check(proposal)
+                    .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.tool_policy_approval"}}"#))?;
+                (reservation, Some(approval))
+            }
+        };
+        reservation.check_current()
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.reservation"}}"#))?;
         if reservation.owner() != &policy.owner {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.reservation_owner"}}"#
+            );
             return Err(PrivateOriginalError::Denied.into());
         }
         let evidence = ApplicationServiceEvidence {
@@ -747,29 +772,24 @@ impl InstalledServiceTask {
             ))
             .map_err(|_| PrivateOriginalError::Conflict)?,
         };
-        evidence.validate(route, &decision, &self.source.scope.owner)?;
+        evidence.validate(route, &decision, &self.source.scope.owner)
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.evidence"}}"#))?;
         // Mechanical validation uses the same native restrictions as reviewed
         // access; current full-lineage checks still run at actual issue_child.
-        selection.restrictions(route, &decision, now)?;
-        self.current().await?;
-        policy.check(&self)?;
-        reservation.check_current()?;
-        let parent_provisioning = operator
-            .map(|operator| {
-                let mut proposal = operator.prepare_standing_service_parent(
-                    self.parent.clone(),
-                    self.acquisition.clone(),
-                    digest(self.instruction.as_bytes()),
-                    expires_in_ms,
-                    decision.clone(),
-                    selection.clone(),
-                )?;
-                if let Some(prepared) = &tool_policy {
-                    proposal.set_tool_policy(prepared.proposal.clone())?;
-                }
-                Ok::<_, HostLifetimeError>((operator, proposal))
-            })
-            .transpose()?;
+        selection.restrictions(route, &decision, now)
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.restrictions"}}"#))?;
+        self.current().await
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.final_current"}}"#))?;
+        policy.check(&self)
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.final_policy"}}"#))?;
+        reservation.check_current()
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.final_reservation"}}"#))?;
+        let parent_provisioning = operator.map(|operator| {
+            let mut proposal = operator.prepare_standing_service_parent(self.parent.clone(), self.acquisition.clone(),
+                digest(self.instruction.as_bytes()), expires_in_ms, decision.clone(), selection.clone())?;
+            if let Some(prepared) = &tool_policy { proposal.set_tool_policy(prepared.proposal.clone())?; }
+            Ok::<_, HostLifetimeError>((operator, proposal))
+        }).transpose().inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.prepare.parent_proposal"}}"#))?;
         let approved = ApplicationServiceDecision {
             source: self.source.clone(),
             lifetime: policy.lifetime.clone(),
@@ -822,12 +842,14 @@ impl PrivateOriginals {
             .native_host
             .as_ref()
             .ok_or(PrivateOriginalError::Unavailable)?;
-        let route = self.route(&reference.route)?;
-        let compiled = native
-            .routes
-            .iter()
-            .find(|route| route.id == reference.route)
-            .ok_or(PrivateOriginalError::Denied)?;
+        let route = &self.route(&reference.route)?;
+        let (compiled, _, admitted_context) = self.selected_source_route(&reference.route)?;
+        if admitted_context
+            .as_ref()
+            .is_some_and(|context| context.as_str() != task.origin_session_id.to_string())
+        {
+            return Err(PrivateOriginalError::Denied);
+        }
         let (member, requester, actor) = compiled.source_binding(selected).map_err(policy_error)?;
         if task.member.as_ref() != Some(member)
             || requester != &route.requester
@@ -959,7 +981,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            let route = fixture.source.route(&task.parent.route).unwrap();
+            let route = &fixture.source.route(&task.parent.route).unwrap();
             assert_eq!(route.requester.kind, kind);
             assert!(
                 route.application_parent.is_none(),

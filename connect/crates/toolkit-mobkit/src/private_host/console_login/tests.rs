@@ -315,6 +315,7 @@ async fn actual_login_expiry_refuses_native_entry_while_publication_is_unchanged
     let old = logins
         .fixture_enroll(2, selection("same", expires))
         .unwrap();
+    let lifetime = logins.observe_login(&old).unwrap();
     let (observed, captured) = publication.observe(|| old.try_check()).unwrap();
     assert_eq!(observed, Ok(()));
     // Observe the actual wall-clock deadline, without modifying this login.
@@ -327,6 +328,10 @@ async fn actual_login_expiry_refuses_native_entry_while_publication_is_unchanged
         "actual login deadline was reached"
     );
     assert!(captured.check_current().is_ok());
+    assert_eq!(
+        lifetime.check_current(&old),
+        Err(ConsoleLoginRefusal::Expired)
+    );
     assert_eq!(old.try_check(), Err(ConsoleLoginRefusal::Expired));
     assert!(matches!(
         GovernedEntryFence::enter(&old),

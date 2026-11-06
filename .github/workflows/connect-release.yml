@@ -196,11 +196,12 @@ jobs:
             echo "${TAG}: release exists; nothing to create"
             exit 0
           fi
-          # A prerelease that is not latest: Core's release stays latest, and
-          # the accepted assets arrive later through publish-accepted.
+          # A prerelease that is not latest: Core's release stays latest. The
+          # assets arrive later: publish-accepted adds a hosted candidate's, and
+          # the release owner uploads a direct (retained-host) production's.
           gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --verify-tag \
             --prerelease --latest=false --title "Meerkat Connect ${TAG#connect-v}" \
-            --notes "Meerkat Connect ${TAG#connect-v}. Assets are added only from accepted, attested candidates."
+            --notes "Meerkat Connect ${TAG#connect-v}. RELEASE-MANIFEST.json and SHA256SUMS name each asset and how it was produced."
 
   build:
     name: Build and verify ${{ inputs.target }}

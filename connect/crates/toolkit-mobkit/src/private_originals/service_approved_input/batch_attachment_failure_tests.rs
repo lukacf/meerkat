@@ -25,8 +25,7 @@ async fn input_rows(fixture: &PersistentFixture, history: &dyn RuntimeStore) -> 
     .unwrap()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn actual_second_attachment_failure_retires_and_compensates_only_unbound_batch_once() {
+async fn attachment_failure_case(close_before_compensation: bool) {
     let (mut fixture, history) =
         PersistentFixture::for_console_service_batch(selected_human(), |inner| inner).await;
     let endpoints = [Endpoint::new(), Endpoint::failing_initialize()];
@@ -40,7 +39,7 @@ async fn actual_second_attachment_failure_retires_and_compensates_only_unbound_b
         let parent_key = fixture.source.key(&task.parent).unwrap();
         let parent_before = fixture.store.get(&parent_key).await.unwrap().unwrap();
 
-        let route = fixture.source.route(&b.route).unwrap();
+        let route = &fixture.source.route(&b.route).unwrap();
         let original = meerkat_authorization_contracts::work_association::OriginalWorkRef {
             authority: route.source_authority.clone(),
             work: b.original.clone(),
@@ -157,11 +156,41 @@ async fn actual_second_attachment_failure_retires_and_compensates_only_unbound_b
             beta_receipt.attempt.wait("read", WAIT).await,
             McpAttachmentReadiness::Failed { .. }
         ));
-        fixture
-            .source
-            .step_service_input_with_attachment(&fixture.store, &stored)
-            .await
-            .unwrap();
+        if close_before_compensation {
+            use meerkat_toolkit::host_lifetime::control::{
+                HostCloseReason, PrivateHostLifetimeControl,
+            };
+            fixture
+                .lifetime()
+                .begin_close_activation(HostCloseReason::Shutdown)
+                .unwrap();
+            assert!(
+                fixture
+                    .source
+                    .service_operator_setup(fixture.lifetime().clone())
+                    .is_err(),
+                "closing cannot open a fresh operator setup entry"
+            );
+            // The native failure above is real. Model close after the accepted
+            // failure observation but before its asynchronous cancellation and
+            // compensation callback settles. Optional metadata is not authority.
+            fixture
+                .source
+                .reject_failed_service_attachment_member(
+                    &b,
+                    &members[1].grant,
+                    ApprovedServiceAttachmentFailure::Failed,
+                    None,
+                )
+                .await
+                .unwrap();
+        } else {
+            fixture
+                .source
+                .step_service_input_with_attachment(&fixture.store, &stored)
+                .await
+                .unwrap();
+        }
         let saved = fixture.store.get(&stored.key).await.unwrap().unwrap();
         let rejected = fixture.source.decode_record(&saved, &b).unwrap();
         assert!(rejected.operation_cancelled);
@@ -174,14 +203,18 @@ async fn actual_second_attachment_failure_retires_and_compensates_only_unbound_b
             rejected.service_attachment_failure == Some(ApprovedServiceAttachmentFailure::Failed)
         );
         assert!(rejected.service_attachment_member.as_ref() == Some(&members[1].grant));
-        assert_eq!(
-            rejected
-                .service_attachment_observation
-                .as_ref()
-                .unwrap()
-                .phase,
-            ApprovedServiceAttachmentPhase::Initialize
-        );
+        if close_before_compensation {
+            assert!(rejected.service_attachment_observation.is_none());
+        } else {
+            assert_eq!(
+                rejected
+                    .service_attachment_observation
+                    .as_ref()
+                    .unwrap()
+                    .phase,
+                ApprovedServiceAttachmentPhase::Initialize
+            );
+        }
         assert!(rejected.approved_task.as_ref() == Some(&task));
         assert_eq!(
             fixture.store.get(&parent_key).await.unwrap().unwrap(),
@@ -279,4 +312,14 @@ async fn actual_second_attachment_failure_retires_and_compensates_only_unbound_b
         Ok(Err(_)) => panic!("actual batch attachment failure control timed out"),
         Err(panic) => std::panic::resume_unwind(panic),
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actual_second_attachment_failure_retires_and_compensates_only_unbound_batch_once() {
+    attachment_failure_case(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_host_settles_accepted_batch_failure_without_new_setup_entry() {
+    attachment_failure_case(true).await;
 }

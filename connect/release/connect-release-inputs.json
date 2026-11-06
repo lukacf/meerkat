@@ -57,6 +57,11 @@
     "requirements": null,
     "wheels": null
   },
+  "forge_reader_source": {
+    "repository": "lukacf/meerkat-meta",
+    "source_sha": null,
+    "tag": ""
+  },
   "forge_reader_source_pins": {
     "installer/launchkit/runtime_selection.py": null,
     "installer/launchkit/runtime_candidates.py": null,

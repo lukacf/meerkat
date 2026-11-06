@@ -15,11 +15,44 @@ The root Rust workspace contains the standalone `toolkit-package` crate. Use
 artifact and recipe functionality. `python3 scripts/verify-local` records
 formatting, tests and Clippy against that workspace's actual source and graph.
 
+`repo-cargo` shares one `CARGO_HOME` across linked worktrees using the physical
+Git common directory. Each worktree gets a separate target directory by default.
+Set `RUST_LANE_ID` to reuse a named target directory, and serialize Cargo commands
+that share that lane. Existing cache directories are not migrated when repository
+identity changes. Inspect the selected paths with `./scripts/repo-cargo --print-env`.
+
+Run `python3 -B -m unittest -v scripts.test_repo_cargo` to check cache routing with
+temporary Git repositories. These tests do not invoke Cargo or access the network.
+
 The native integration crates, including `toolkit-store`, remain required work
-in the explicit `native-candidate` workspace. Use `python3 scripts/verify-local --manifest-path native-candidate/Cargo.toml` with the exact reviewed prerequisite checkouts and
-lockfile. That graph retains local development paths and can fail before
-compilation. A root workspace pass does not certify native integration, and
+in the explicit `native-candidate` workspace. Use `python3 scripts/verify-local --manifest-path native-candidate/Cargo.toml` with the Core and Meta Git revisions
+selected by its manifest and matching lockfile. Native dependency resolution can
+fail before compilation. A root workspace pass does not certify native integration, and
 an older passing snapshot does not establish current compatibility.
+
+Native tests and product binaries can require different dependency artifacts
+within the same warm build lane. The `meerkat-connect` and `toolkit-mobkit`
+dev-dependencies enable Core's `test-support` feature for fault and race controls.
+The product build excludes those test controls. Even when Toolkit's own features
+and profile match, the different dependency features can require another Toolkit
+library build. Check the dependency features and compiler artifacts before
+treating this as a cache miss; keep test-only controls out of the product graph.
+
+## Native admission diagnostics
+
+When `find_and_install` reaches its admission deadline, `AA1` reports
+`leaf.timeout` followed by `leaf.timeout_wait`. The latter names the last
+admission await entered by that invocation, such as `leaf.host_admit`,
+`leaf.admit_or_recover` or an `advance.*` step. These fixed labels contain no
+request, grant or identity data. They locate a waiting boundary; identifying
+the underlying cause still requires evidence from that boundary's owner.
+
+Keep consent transfer, consent spending and the tool's subsequent result
+separate in failure reports. A timeout after spending consent does not show
+that transfer failed or that consent was withdrawn. For lifecycle failures,
+retain the actual input row before asserting its phase, terminal outcome,
+recovery lane and Requeue mark. A requested unregister policy does not prove
+the effective policy when the call can join an unregister already in progress.
 
 ## Evidence levels
 
@@ -64,4 +97,4 @@ Mintlify validation parses the actual MDX/configuration. Inspect representative 
 
 When changing an operation, update the corresponding SDK reference and examples. When changing a recipe, update its version and evidence, compiled registration if intended, and [catalog inventory](/reference/catalog). When changing readiness or native composition, recheck [availability](/availability), [readiness](/concepts/readiness) and the affected host guides.
 
-Keep public pages concise and audience-focused. Detailed private reviews, validation captures, source snapshots and requirement ledgers remain outside `docs/site/`. The repository's `docs/DOCUMENTATION.md` contains the maintainer source map and site workflow.
+Keep public pages concise and audience-focused. Detailed private reviews, validation captures, source snapshots and requirement ledgers remain outside `docs/site/`.

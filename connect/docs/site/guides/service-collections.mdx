@@ -1,0 +1,474 @@
+---
+title: "Collect service observations"
+description: "Compose bounded, result-dependent service checks through a trusted native host."
+icon: "list-check"
+---
+
+A service collection runs a trusted program over one installed service. The
+program can use a committed native result to choose its next operation and
+arguments. Each required resource keeps its own observations and assessment.
+
+<Note>
+This guide describes the development Rust, Python and TypeScript APIs and
+private protocol 7. They are not part of the released 0.9.4 downloads. Native
+compilation, installed collection acceptance and production launcher integration
+remain pending. See [installation options](/availability) for released artifacts.
+</Note>
+
+## Select the source in the host
+
+Construct a `RequiredServiceCollection` for each source before starting the
+private pipe. Give each source a stable ID, an installed family/profile/agent,
+and the complete set of required resource checks. Each
+`RequiredCollectionOperation` retains its resource selector, allowed raw
+operations, and an `Arc<dyn CollectionProgram>`.
+
+`ServiceCollectionSelection::new` requires every source in one invocation to
+share the installed family, profile and agent. To select multiple services, use
+`ServiceCollectionSelection::for_services` as described below. The binding is the host's actual authenticated
+caller, original viewer/login scope, expiry, origin and realm roots.
+
+```rust
+use std::path::PathBuf;
+use meerkat_connect::{
+    ConnectError,
+    service_collection::{RequiredServiceCollection, ServiceCollectionSelection},
+    service_probe::{ProbeHostBinding, ServiceProbeControl},
+    stdio,
+};
+
+async fn serve_collections(
+    binding: ProbeHostBinding,
+    sources: Vec<RequiredServiceCollection>,
+    provider_store_root: Option<PathBuf>,
+    register_retirement: impl FnOnce(ServiceProbeControl) -> Result<(), ConnectError>,
+) -> Result<(), ConnectError> {
+    let selection = ServiceCollectionSelection::new(binding, sources)?;
+    register_retirement(selection.control())?;
+    stdio::run_with_service_collections(selection, provider_store_root).await
+}
+```
+
+`register_retirement` is application-supplied code, not a Connect API. It must
+attach the retained `ServiceProbeControl` to the actual authenticated login's
+logout and retirement path before the invocation begins. Registration must
+serialize with that logout path: if the login has already retired, return an
+error or retire the supplied control before starting the invocation. Constructing
+the binding does not establish that the login is still active. Calling
+`retire()` stops further admission through that original host. Retain the
+invocation and join work it already entered; retiring the control does not join
+that work.
+
+A background task that waits for logout and then calls `retire()` does not
+provide this ordering: native admission can run before that task is scheduled.
+The login owner's authoritative transition must fence collection admission
+synchronously and invalidate the native publication. Expiry is checked at use;
+an expiry timer is only a wakeup. Keep the original login's reservations until
+entered work and cleanup have actually settled.
+
+The ordinary `--stdio` entrypoint has no collection selection and refuses
+protocol 7. A browser, model or SDK cannot supply a program, caller, grant,
+credential or resource predicate through initialization.
+
+## Select multiple services in one protected invocation
+
+The development Rust and Python path supports an ordered list of explicitly
+selected services under the same original host:
+
+```rust
+let selection = ServiceCollectionSelection::for_services(binding, vec![
+    ("official".into(), official_sources),
+    ("package".into(), selected_package_sources),
+])?;
+```
+
+Each group has a unique nonsecret service ID and a nonempty collection list
+sharing its own family, profile and agent. Source IDs remain unique across all
+groups. The whole invocation retains the existing limits of 16 sources, 256
+requirements and 256 distinct raw operations. Commissioning receives only the
+active group's exact operation union. It cannot grant the union of different
+services.
+
+`state.collection_sources` lists sources across every service in the
+invocation. Choose sources from the host's retained per-service composition
+for the observed `state.service_id`; the source list carries no source-to-service
+mapping. Wait for `state.can_collect` and use that service's newly observed
+native `job_id`. Native still checks membership before admission.
+
+The first service uses the ordinary setup, review, finalization and collect
+flow. After every source in that group has returned its report, the Python
+state may expose `can_open_next_service`. Call
+`client.open_next_service(service_id=next_id)` using the next ID in the observed
+`service_ids`. Keep the prompt reader active while awaiting the matching
+result. The governed next-service startup prepares its helper, then asks for
+protected approval of that exact helper, model route, catalog and setup
+operations before the result arrives. Answer this review through the existing
+approval prompt. After the result, handle the new setup's remaining protected
+prompts and collect using its newly observed job ID. This is the same client,
+original pipe pair, scope, authenticated host and parent reservation. Each
+service has a fresh setup session and an actual reviewed installation. Do not
+create another client, process, parent reservation or initialization request.
+The TypeScript client uses `openNextService({service_id: observedNextService})`
+on the same retained client and process. Both SDKs preserve earlier reports,
+refuse unsolicited or reused service identities, and never retry a transition.
+
+The wire request is `connect/collection/open_next` with exactly `scope` and
+`service_id`. Its result contains `scope`, `service_id`, `session_id` and
+`state`. It accepts no replacement binding, receipt, raw operation, program or
+credential. The transition requires the current setup's actual `Ready`, all
+source reports, joined setup workers and a live original host. Cancellation,
+expiry, external retirement and failed cleanup cannot be reset. Old setup
+presentation channels are replaced only after their workers join. Previous
+installations, reports and finalization outcomes stay retained until the one
+invocation closes.
+
+The observed order is the accepted next-service state, a protected approval
+prompt, its `prompt_closed` event, and the matching open result with the same
+scope and a fresh session. Denial prevents that setup from opening and retains
+the earlier reports. Approval may save configuration and grants even if a
+later step fails. Package installation and service access still need their
+separate reviews. The helper is already retained, so a later
+`toolkit_prepare_services({})` call is idempotent and reports `changed: false`.
+There is no second request to govern the already governed realm.
+
+An application-owned program can retain the opaque value returned by
+`CommittedCollectionResult::invocation_observation()` and compare it with a
+later result using `same_invocation`. Connect creates it only on the committed,
+joined result path. Equal application/login labels in another host allocation
+do not match. This observation is historical correlation only: it carries no
+access, credential identity or currentness. The application still validates
+both actual result bodies, exact source/resource/installation attribution,
+account comparison, and the final joined invocation. A completed first-service
+report does not prove success of the next service.
+
+This path is source work awaiting native compilation, independent lifecycle
+review and installed acceptance. Python pipe controls exercise real test
+processes but do not establish native installation or protected-parent proof.
+
+## Compose the native launcher
+
+For a Linux application launched by a root login broker, the development
+[protected service host](/guides/protected-service-host) supplies the separate
+parent-channel and sealed-mapping entry. Its original descriptor acquisition,
+compiled catalog and launcher isolation must be composed by the application.
+Native and installed acceptance remain pending.
+
+The public entrypoint is
+`stdio::run_with_service_collections(ServiceCollectionSelection, Option<PathBuf>)`.
+It reads the inherited stdin and writes the inherited stdout of the embedding
+process. The optional provider-store root must be absolute when supplied and
+must match the host's selected credential scope. It is not a way to select an
+authenticated caller or grant access to another workspace.
+
+Build the selection in this order:
+
+1. Construct `ProbeHostBinding` from the host's authenticated caller and ingress,
+   application/instance/origin, viewer/login/expiry, and canonical realm,
+   context and user-config roots. The corresponding initialization fields must
+   match exactly; an SDK binding only projects these host-selected values.
+2. Construct each `RequiredCollectionOperation::new(id, resource,
+   raw_operation_ceiling, program)`. The program is an
+   `Arc<dyn CollectionProgram>` compiled into the trusted host. The resource
+   is nonsecret JSON, and the ceiling is a `Vec<String>` of exact raw operation
+   names from the selected installed service.
+3. Construct each `RequiredServiceCollection::new(source_id, family, profile,
+   agent, requirements, limits)`, using `CollectionLimits::new(calls,
+   argument_bytes, result_bytes)`. Keep each required source and resource
+   association explicit even when several use the same operation.
+4. Call `ServiceCollectionSelection::new(binding, sources)`, register its
+   original control with the authenticated host, then move the selection into
+   the entrypoint. The host owns the selected executable and its matching
+   installed resources; the Python or TypeScript launcher starts that executable.
+
+There is no public `InstalledSelection` parameter or registration command.
+Connect creates that private value from the actual checked installation,
+retains it through review and commissioning, and joins it to the native
+finalization result. This flow establishes the `Ready` owner used by collection
+calls. A remote MCP export or access-only review without that installed owner
+reports `unsupported_source`; supplying family/profile strings cannot replace
+it. MCP OAuth completion alone does not establish this installed collection
+path.
+
+The host selects stable source IDs before startup. The SDK learns those IDs
+from `state.collection_sources`. It learns the actual `job_id` from the
+`service_collection_state` event whose `state` is `available`, after native
+commissioning and finalization. Use both observations from the same invocation.
+Do not derive a job ID from a repository name, reuse an earlier process's IDs,
+or treat setup's finalization event by itself as collection availability.
+
+### Integrate an existing Console host
+
+The current development source provides the Rust collection entrypoint, but
+does not yet provide a production Console-to-collection adapter or executable
+that retains application collection programs. The private acceptance host is
+test support and must not be installed as that adapter.
+
+An existing Toolkit host can compose a disjoint route through
+`ToolkitGatewayHost::augment_console_routes`, which receives the actual native
+`ConsoleViewerResolver`. Its `ConsoleSetupBinding::current_login` resolves the
+verified viewer to the original connection's `ConsoleLoginHandle`. These are
+the existing routing and login-owner seams; they do not construct a collection
+selection or adopt an installed collection owner.
+
+The native bridge must retain the verified human, authentication evidence,
+original login and installed host through admission and joined disposal.
+`StockAuthenticatedCaller::new` validates principal qualification and retains
+evidence; it does not authenticate a caller. Display principal strings, HTTP
+fields and SDK bindings cannot replace the verified native carrier. Re-resolve
+the native viewer after awaits, and bind retirement to the retained login owner
+as described above. A fresh collection prompt also needs its own native
+admission; matching the original Console caller's labels does not give it the
+original task's lineage or authority.
+
+### Bind repository-specific programs
+
+Preserve the application's source identity. One source covering two repositories
+on the same installed family/profile/agent keeps one `source_id` and separate
+requirement rows for each repository and required operation. Register distinct
+source IDs when the application actually defines distinct sources. If the
+repositories require different installed tuples, use separate authenticated
+selections and keep that split explicit in the application. Do not merge or
+split sources solely because their resources are GitHub Enterprise repositories.
+
+Connect supplies the collection engine, not a built-in GitHub Enterprise
+result-schema program. The application must select the installed server's real
+tool names and schemas. Its `accepts_target` checks the canonical endpoint and
+account mapping for the chosen repository. Its cursor validates repository
+identity and the required resource in each actual committed result. A history
+requirement must also interpret the service's real pagination and completion
+contract; a successful first page is not evidence that full history was read.
+Until these programs and their installed route are present, keep the source
+unavailable rather than substituting generic tool success.
+
+## Implement a result-dependent program
+
+`CollectionProgram::accepts_target` checks the exact resource and installed
+connection, including the endpoint/account mapping relevant to your service.
+`start` creates a fresh `CollectionCursor`. The engine calls `begin` once and
+then calls `observe` with each `CommittedCollectionResult`.
+
+The cursor returns one of four steps:
+
+| Step | Meaning |
+| --- | --- |
+| `Call(CollectionCall)` | Request one raw operation with nonsecret JSON object arguments |
+| `ReobserveRead(ReadObservation)` | Request a fresh invocation of a previously committed read using its original arguments |
+| `Finish(ResourceAssessment)` | Assess this required resource using the observations received |
+| `Refuse` | Stop the source attempt without a successful assessment |
+
+For example, one requirement can list items, extract an identifier from that
+actual result, read its details, and check the returned resource identity.
+Inspect the service's real result schema. A model's answer or generic tool
+success does not establish that the required resource was checked.
+
+The engine supplies a result to `observe` only after correlating the native
+input, run and tool call, observing committed terminal completion, and joining
+native close. Failed, uncertain or unconfirmed-cleanup results are not passed
+to the cursor. A `Verified` assessment requires at least one such completed
+call for that requirement; another requirement's calls cannot satisfy it.
+
+Callbacks are synchronous trusted Rust code. They must return promptly and
+avoid blocking I/O. Collection limits bound call counts and payload sizes;
+they do not sandbox a callback or bound its CPU time.
+
+### Recheck a read after pagination
+
+A program can read resource details, collect intervening pages, then read the
+same details again to detect changes. Request the initial call with
+`CollectionCall::read_only(operation, arguments)`. This asks the native router
+to enforce both the exact operation name and a positive read-only classification
+from the installed operation owner. The request itself cannot classify a tool.
+Unknown and known-mutating operations are refused.
+
+For a selected Python service with native secret-environment binding, the
+trusted program can implement
+`declares_read_only(&SelectedPackageIdentity, raw_operation) -> bool`. The
+default returns `false`. Connect supplies this view only after checking the
+current retained receipt, frozen package and selection bytes, canonical Python
+plan, complete secret-slot declaration, exact launch and native operation
+access. It accepts both supported selection document forms. The view exposes
+the package identity, raw package and selection hashes, retained setup effect
+hash, receipt hash, component, service, wheel hash and installed connection.
+The setup effect hash belongs to the retained setup proposal; it is not a field
+in the raw software installer's receipt.
+
+The compiled host program must pin the reviewed software and raw operation.
+Package `declared_effect: read`, MCP annotations, server names and access lists
+cannot supply that trust. Connect requires the package's effect to agree, but
+only a positive trusted callback can classify an otherwise unknown operation.
+Callback failure or changed retained inputs refuses the read. The declaration
+adds no grants, never overrides a native mutating classification, and preserves
+the original credential provider's final check and leases.
+
+Route a separate Python service through its own `RequiredServiceCollection`
+with family `selected-python`, profile `python`, exact operation ceiling and
+trusted program. Its installation and grants must complete independently.
+Keep account comparison in the host's source-bound result interpretation; a
+common environment slot name does not prove that two services use one account.
+Native compilation, focused controls and installed acceptance of this binding
+remain required before qualification.
+
+In `observe`, retain `result.read_observation()` when it returns `Some(handle)`.
+After the intervening calls, return `CollectionStep::ReobserveRead(handle)`.
+The engine retains the original arguments and exact source, requirement,
+resource, installed configuration and observed configuration generation. The
+handle is local Rust state, has no public constructor or wire representation,
+and can be consumed once even if cloned. Another source or attempt cannot use it.
+
+Each reobservation spends the existing call and argument budgets, receives fresh
+native call identities, and must commit and join close before its result reaches
+`observe`. Result bytes spend the same aggregate budget. Failure, cancellation,
+uncertainty or unconfirmed close stops the attempt without automatic retry.
+The program must compare the actual new result with its earlier observation;
+the handle does not prove that the resource or credentials remained unchanged.
+
+This API has source review coverage. The focused controls and actual installed
+repeated-read acceptance remain pending; it is not release qualification.
+
+## Commission and request a collection
+
+The setup conversation must complete its real installation, native close,
+protected commissioning and finalization. The human-reviewed native grant
+must select exactly the union of the retained raw-operation ceilings. A
+missing operation, superset or different installed tuple is refused. The
+collection does not rewrite a reviewed grant or issue permissions itself.
+
+After the actual `service_collection_state` event reports `available`, request
+one of the source IDs retained by that invocation:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "collect:1",
+  "method": "connect/collect",
+  "params": {
+    "scope": "<current initialized scope>",
+    "job_id": "<actual finalized installation job>",
+    "source_id": "<retained source ID>"
+  }
+}
+```
+
+The result contains `scope`, `collection_request_id`, `report` and `state`.
+State exposes `can_collect`, `active_collection`, `collection_sources` and
+`commissioning`. Availability indicates that the retained owner can attempt
+a collection; it does not promise a successful check.
+
+Each source can be attempted once per finalized owner. Failure, cancellation
+or uncertainty does not reset that admission. Within an attempt, an ordinary
+`Call` repeating the same requirement, raw operation and canonical arguments is
+refused. The bounded `ReobserveRead` path above is the explicit exception for
+an enforced read that already committed and closed. Collections sharing that
+owner execute serially.
+
+The host selects `CollectionLimits` for each source: up to 256 calls, 8 MiB of
+argument bytes and 32 MiB of result bytes across its requirements. A call has
+at most 32 KiB of arguments. One source has 1-64 required resource checks;
+one invocation has 1-16 distinct sources, at most 256 checks in total, and at
+most 256 distinct raw operations.
+
+## Use a matching development SDK
+
+The Python client is `ServiceCollectionClient` from
+`meerkat_toolkit.service_collection`. TypeScript exposes the same client through
+`@rkat/toolkit/service-collection`. Both require the application host's selected
+launcher and authenticated binding. For an original root-launched child, Python
+also supports [adopting the original pipes](/guides/protected-service-host#adopt-the-root-launched-pipes-in-python)
+with `ServiceCollectionClient.adopt`. Constructing or adopting a client does not
+supply the native source selection or replace commissioning.
+
+| Action | Python | TypeScript |
+| --- | --- | --- |
+| Submit observed IDs | `client.collect(job_id=job_id, source_id=source_id)` | `client.collect({job_id, source_id})` |
+| Open the next preselected service | `client.open_next_service(service_id=service_id)` | `client.openNextService({service_id})` |
+| Read the next protected event | `client.next_event()` | `await client.nextEvent()` |
+| Read a validated report | The matching event's `report` | `client.collectionReport(event)` |
+| Observe current projected state | `client.state` | `client.state` |
+
+A collect call returns a request ID for correlation. It is not a completion
+receipt. Await the matching result and retain its report, including partial
+observations. State and viewer-currentness snapshots describe observations;
+they do not grant permission or prove reusable source coverage.
+
+Keep the original process owner in a long-lived host registry before awaiting
+close. A timeout leaves that same owner pending; observe and join it again.
+Do not launch a replacement or retry the source. A joined process without a
+native close receipt is a failed cleanup observation to retain. Protected
+prompts, answers, events and reports must stay out of model messages and
+ordinary logs.
+
+## Interpret reports and close the owner
+
+Reports retain source and requirement IDs, exact resource selectors,
+argument digests and body-free native observations. They do not expose tool
+result bodies. `historical_checks_completed` means all requirements were
+verified using their own committed, joined calls.
+
+`reusable_source_coverage` remains
+`unqualified_credential_continuity`, including after completed checks.
+A fresh correlated call with joined close is historical execution evidence.
+It does not identify a secret write or OAuth grant, or prove that credentials
+remain unchanged. Configuration generations and stored-secret presence do
+not provide that missing evidence. See [readiness](/concepts/readiness).
+
+To cancel, use `connect/cancel` with the current `scope` and the collection
+request ID in `send_request_id`. The active request returns
+`cancellation_requested`; the latest completed request returns `not_current`.
+Both retire the original admission. Queuing the next service ends the preceding
+collection's cancel window immediately, even before its next native state is
+observed. Use `connect/close` (or the SDK's `close()`) to abort during that
+transition, and retain the same owner until it joins. An older setup or collection
+request cannot cancel a newer collection. EOF, expiry, host retirement and output
+failure also retire that same owner.
+
+Cancellation does not discard an entered native operation. Await invocation
+completion and preserve any returned cleanup error. `shutdown_unconfirmed`
+must not be treated as joined cleanup. If a protocol 7 invocation fails,
+`ConnectError::Native` can retain a typed `ServiceCollectionFailure` with its
+actual reports and original error. Rust hosts can inspect those reports;
+their retention does not claim that a broken pipe delivered them or that
+they were durably stored.
+
+### Observe checked native shutdown in Rust
+
+An embedding that retained the original `ServiceProbeControl` can call
+`fence()` to retire local native admission and check invalidation of the host's
+registered native publications. It returns an opaque `NativeHostFence`. This
+synchronous call does not drain entered work or close the private pipe.
+
+Keep driving the original `run_with_service_collections` invocation. Its pipe
+peer must keep reading output and send `connect/close` or close input with EOF.
+Only then can `NativeHostFence::joined()` observe successful joins of the
+invocation's work, close and output writer, after its reader is disposed. The
+same API applies to the trusted `run_with_service_probes` entrypoint.
+
+Using the control retained by `register_retirement` above, the shutdown observer
+can obtain both receipts while the original invocation owner continues running:
+
+```rust
+use meerkat_connect::service_probe::{NativeHostClosed, NativeHostFence};
+
+let fence: NativeHostFence = control.fence()?;
+assert!(fence.belongs_to(&control));
+
+// The original invocation and its pipe peer remain driven by their owners.
+let closed: NativeHostClosed = fence.joined().await?;
+assert!(closed.belongs_to(&control));
+```
+
+`belongs_to` checks the exact retained host allocation, not matching identity
+strings. Neither receipt has a public constructor or serialized form. A
+never-entered invocation returns an error from `joined()` immediately. Failed,
+lost or poisoned custody stays unconfirmed; preserve the invocation's original
+error and reports. Cancelling this observer must not drop or replace the
+retained invocation owner.
+
+These are local native lifecycle observations. A successful `joined()` does
+not authenticate a parent, release an original login reservation, prove a
+native effect outcome or acknowledge a cross-process protocol. The separate
+[protected parent entry](/guides/protected-service-host) must retain its actual
+authentication and reservation; these receipts alone do not prove an installed
+host integration.
+
+Use the existing host's [ownership model](/concepts/ownership) and keep
+[component, installed and live acceptance](/contributing/validation) distinct.

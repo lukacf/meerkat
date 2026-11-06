@@ -456,6 +456,64 @@ class GmailOperations:
             raise self._failure(FailureKind.INVALID_RESPONSE, write=False)
         return cast(dict[str, Any], result)
 
+    async def history_page(
+        self,
+        *,
+        start_history_id: str,
+        page_token: str | None = None,
+        max_results: int = 100,
+        history_types: list[str] | tuple[str, ...] = (),
+        label_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Read one bounded Gmail history response without advancing any cursor.
+
+        max_results counts history records, not messages. A record may contain
+        many messages. Only an absent nextPageToken settles this provider read.
+        A 404 remains NOT_FOUND; the observation adapter classifies it as an
+        expired/invalid checkpoint instead of replaying mailbox history.
+        """
+        if (type(start_history_id) is not str or not 1 <= len(start_history_id) <= 1024
+                or not start_history_id.isascii() or not start_history_id.isdecimal()):
+            raise ValueError("expected a bounded Gmail history identifier")
+        if type(max_results) is not int or not 1 <= max_results <= 500:
+            raise ValueError("max_results must be an integer from 1 to 500")
+        if (type(history_types) not in (list, tuple) or len(history_types) > 4
+                or any(value not in ("messageAdded", "messageDeleted", "labelAdded", "labelRemoved")
+                       for value in history_types) or len(set(history_types)) != len(history_types)):
+            raise ValueError("expected distinct Gmail history types")
+        params = [("startHistoryId", start_history_id), ("maxResults", str(max_results))]
+        if page_token is not None:
+            params.append(("pageToken", _text(page_token)))
+        if label_id is not None:
+            params.append(("labelId", _id(label_id)))
+        params.extend(("historyTypes", value) for value in history_types)
+        result = await self._json("GET", "history", params=params)
+        valid = type(result) is dict
+        if valid:
+            head = result.get("historyId")
+            records = result.get("history", [])
+            token = result.get("nextPageToken")
+            valid = (type(head) is str and 1 <= len(head) <= 1024 and head.isascii()
+                     and head.isdecimal() and type(records) is list and len(records) <= max_results
+                     and (token is None or type(token) is str and bool(token)))
+            if valid:
+                for record in records:
+                    if (type(record) is not dict or type(record.get("id")) is not str
+                            or not 1 <= len(record["id"]) <= 1024 or not record["id"].isascii()
+                            or not record["id"].isdecimal()):
+                        valid = False
+                        break
+                    for field in ("messagesAdded", "messagesDeleted", "labelsAdded", "labelsRemoved"):
+                        if field in record and (type(record[field]) is not list or any(
+                            type(row) is not dict or not _message(row.get("message"))
+                            for row in record[field]
+                        )):
+                            valid = False
+                            break
+        if not valid:
+            raise self._failure(FailureKind.INVALID_RESPONSE, write=False)
+        return cast(dict[str, Any], result)
+
     async def list_messages_page(
         self,
         *,

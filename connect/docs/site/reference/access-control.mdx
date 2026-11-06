@@ -43,6 +43,142 @@ also use the inherited terminal. Plain `meerkat-connect` setup prepares later fr
 does not retain or resume a one-turn `rkat` input. Native Rust and JSON-RPC with Python/TypeScript
 provide the application composition surfaces.
 
+## Operation review tiers (unreleased)
+
+An operation's review tier comes from its actual native authorization allowance.
+Setting a class tool's consequence to `r3` does not request human review: Meta
+uses that consequence as observability metadata. A tool can therefore declare
+that consequence while its installed authorization still selects R1.
+
+| Selection | Responsibility |
+| --- | --- |
+| Class tool consequence | Describe the declared consequence for observation |
+| `InstalledOperationReviewPolicy` | Select an application review floor for an already locally authorized native tool target |
+| Operation-review owner and human-consent route | Review the actual prepared operation and route any required human decision |
+| Native grants and entry checks | Determine whether that operation may enter under current authority |
+
+Rust application hosts can select an immutable, trusted
+`InstalledOperationReviewPolicy` before composition. Use
+`InstalledGatewayOptions.operation_review_policy` for installed startup or
+`ApplicationDriverOptions.operation_review_policy` for preparation and final
+adoption. Direct Toolkit embedders use
+`InstalledToolkitHost::with_operation_review_policy`. Omission preserves the
+existing review selection.
+
+The policy receives the actual installed owner selection, input association,
+prepared binding, exact native tool target and local allowance. It runs after
+ordinary local authorization succeeds. Its result can only raise the allowance's
+review tier; it cannot add operation values, widen restrictions, extend a
+deadline or bypass a refused operation. Native grants and current entry checks
+still apply. Match typed targets and owner context rather than inferring
+authority from a tool name, argument or model-supplied label.
+
+Selecting R3 also needs the real operation-review owner and a usable human-consent
+route. Console consent configuration supplies those review and presentation
+owners; it does not select the operation's tier. Keep this policy in trusted
+process composition, outside application-plan, tool and Console request data.
+The callback is synchronous and must not re-enter the host lifetime while its
+policy custody is held.
+
+This describes the pending development implementation. Native consent and
+recovery qualification remain separate requirements; a source-level policy
+selection does not establish that a pending approval, delivery or resumed
+operation has been observed.
+
+### Review lifetime during cancellation (unreleased)
+
+For a consumed native review, the `Used` notice is deferred until the admitting
+dispatch has ended and every retained effect owner has released its custody.
+Cancelling the request handler does not establish either effect completion or
+rollback. A SQLite worker, native admission settlement or registered recovery
+task can still own work after that handler has returned.
+
+The pending Connect implementation carries that same review custody through
+its actual I/O and recovery owners. An uncertain workflow delivery keeps the
+review with its live reconciliation owner. Exact reconciliation can release
+that hold. Owner shutdown can also end custody after closing registration and
+joining every actual task, even while the typed effect remains uncertain;
+shutdown does not establish success or non-application. Reconciliation reads
+the original operation's evidence; it does not authorize a fresh dispatch.
+Retaining custody grants no new authority and does not permit another review
+spend. Graph admission and child issuance still require their native entry
+contracts and current authority.
+
+A `Used` notice records the spent review after that tracked lifetime ends. It
+is not a success receipt for the business action. Likewise, a missing notice
+cannot prove that entry never happened, especially if observation or publication
+failed. Read the operation's typed outcome separately. These lifetime changes
+remain under native runtime qualification and do not establish complete
+reviewed Find or installed-host acceptance.
+
+### Resuming parked consent (unreleased)
+
+The stock composition can resume approved parked consent only while the
+original remains held and its destination is still current. Each later governed
+prompt binds a new destination generation, even when the selected controller
+has not changed. An earlier run's notice then fails with
+`NoAdmissibleWorkBinding`, and its parked consent is withdrawn. Approval does
+not restore the earlier destination.
+
+Stock original custody exists only in its owning process. After process loss,
+reopening the session or restoring its history does not restore that custody.
+A notice referring to an original the new process does not hold fails with
+`AuthorityDenied`; it does not authorize a model request. Durable consent
+recovery requires the application's actual durable original source and a
+supported retained-resume owner composed through
+`ScopedGrantComposition::with_retained_resume`.
+
+Multiple approvals can resume separately when their parked calls still share
+the current destination and their owners remain valid. A stock session closed
+and reopened within the same process can leave a notice owed until that
+destination is next bound; an owed notice is not an admitted input. These are
+the development source contract's boundaries. Current Connect runtime and cold
+recovery acceptance remain under validation.
+
+### Withdrawn approvals and a fresh human request
+
+On the published Core 0.9.7 / Meta 0.9.6 pair, an unrelated owner-context
+publication can withdraw a pending consent as `ContextChanged`. A parked
+consent notice that ends during the affected Requeue path can be withdrawn as
+`NoticeInputEnded`. These remain documented limitations; a fresh request is a
+separate operation, not a successful resume of the old approval.
+
+Within the same selected Console route, an authenticated
+`POST /host/toolkit/consent/read` can return an additional `recovery` object
+beside the actual `approval`. It appears only for those exact unspent
+withdrawals, excludes transferred custody, and requires parked custody for
+`NoticeInputEnded`. Its action is `review_current_state_then_request_again`,
+with `new_request_required` and `new_human_approval_required` true and
+`automatic_retry` false. `original_liveness` and `other_effects` remain
+`not_established`. Missing guidance is not permission to retry.
+
+The caller should show the withdrawal and retain the old approval ID for
+history. Approving that old ID still fails; a refused decision is not changed
+into HTTP 200 or reported as accepted. Check the current operation state and
+any independently live work before requesting another effect. An unspent
+approval does not prove that unrelated effects are absent or that a request
+is safe to duplicate. Do not retry automatically or use equal arguments as
+proof that the old approval authorizes a new call.
+
+If the user still wants the action, use the application's normal authenticated
+request path for the current session, including its ordinary source and
+workflow preparation. The Console send path is `/console/send`; it is not a
+consent-retry endpoint. Treat the resulting original/input and new approval as
+a separate request. Show its current action and scope, and require a new
+human decision before any protected entry. If current ownership or effect
+state cannot be established, leave the operation unresolved instead of
+resubmitting it.
+
+Route replacement or process restart changes the selected route identity.
+The old approval can then be inaccessible even to an authenticated read.
+This fence is intentional and is not relaxed for recovery. Re-authenticate
+against the current session and use its ordinary request path; do not
+reconstruct a native notice or reuse an old approval to restore authority.
+This guidance does not establish same-original continuation after restart,
+restore a withdrawn parked notice, or provide a frontend recovery workflow.
+Runtime qualification of these recovery paths is separate from the original
+single-approval and Hold/Requeue/Resume controls.
+
 ## Delegation
 
 Work retains its authenticated requester or explicit service mandate, acting agent, tenant, selected account, audience and actual permissions across peers, forks and continuations. Each hop preserves or narrows the incoming authority and intersects it with local grants.

@@ -170,6 +170,30 @@ async fn application_v4_composes_generic_schema_and_only_one_frontend_presenter(
     assert!(lazy.take_forge_presenter().is_err());
     assert!(lazy.installs().is_none());
     assert!(!lazy.owner().allows_acquisition());
+    assert!(
+        !lazy
+            .dispatcher()
+            .tool_catalog_capabilities()
+            .may_require_catalog_control_plane
+    );
+    assert!(!meerkat_core::should_compose_tool_catalog_control_plane(
+        lazy.dispatcher().as_ref()
+    ));
+    let options = lazy
+        .session_options(crate::SessionOptions::default())
+        .unwrap();
+    let policy =
+        meerkat_core::ToolExecutionPolicy::resolve(options.build.tool_access_policy.unwrap())
+            .unwrap();
+    for name in [
+        crate::service_preparation::TOOLKIT_PREPARE_SERVICES,
+        meerkat_core::tool_catalog::TOOL_CATALOG_SEARCH_NAME,
+        meerkat_core::tool_catalog::TOOL_CATALOG_LOAD_NAME,
+    ] {
+        assert!(!lazy.allowed_tools().iter().any(|tool| tool == name));
+        assert!(!policy.permits_call(name, meerkat_core::ToolMutationClass::ReadOnly));
+        assert!(!policy.permits_call(name, meerkat_core::ToolMutationClass::Mutating));
+    }
     let tools = lazy.dispatcher().tools();
     let prepare = tools
         .iter()

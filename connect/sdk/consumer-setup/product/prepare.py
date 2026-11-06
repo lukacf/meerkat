@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -22,6 +23,66 @@ HOST_TARGETS = {("Darwin", "arm64"): "macos-arm64", ("Linux", "x86_64"): "linux-
 
 class ResourceError(ValueError):
     pass
+
+
+class PreparationDiagnostic:
+    """Finite observation only; never render an exception or an owner argument."""
+
+    PHASES = frozenset({
+        "entry", "resources", "runtime", "destination", "destination_filesystem", "acquisition_inputs",
+        "starter_loading", "product_inputs", "starter_inputs", "archive_validation",
+        "archive_extraction", "release_validation", "recipe_tool_validation",
+        "recipe_initialization", "recipe_receipt", "staging_creation", "bootstrap",
+        "bootstrap_result", "receipts", "projection", "final_validation", "descriptors",
+    })
+    OS_CODES = {
+        errno.EACCES: "os_permission_denied", errno.EPERM: "os_operation_not_permitted",
+        errno.ENOENT: "os_not_found", errno.ENOTDIR: "os_not_directory",
+        errno.EEXIST: "os_already_exists", errno.ENOEXEC: "os_exec_format",
+        errno.ENOSPC: "os_no_space", errno.EROFS: "os_read_only",
+        errno.EMFILE: "os_file_limit", errno.ENFILE: "os_system_file_limit",
+        errno.EINTR: "os_interrupted",
+    }
+    OWNER_CODES = {code: code for code in (
+        "preparation_cancelled", "bootstrap_cancelled", "bootstrap_timeout",
+        "bootstrap_cleanup_unconfirmed", "owner_refused", "owner_output_limit",
+        "invalid_owner_result", "local_recipes_owner_unavailable",
+        "local_recipes_initialization_unconfirmed",
+        "destination_noexec", "destination_mount_unconfirmed",
+    )}
+
+    def __init__(self):
+        self.phase = "entry"
+        self.owner_errors = ()
+
+    def mark(self, phase):
+        self.phase = phase if type(phase) is str and phase in self.PHASES else "unknown"
+
+    def code(self, error):
+        if isinstance(error, OSError):
+            return self.OS_CODES.get(error.errno, "os_error") if type(error.errno) is int else "os_error"
+        if isinstance(error, (ResourceError, *self.owner_errors)):
+            if len(error.args) == 1 and type(error.args[0]) is str:
+                code = self.OWNER_CODES.get(error.args[0])
+                if code is not None:
+                    return code
+            return "resource_error" if isinstance(error, ResourceError) else "owner_error"
+        return "unexpected_error"
+
+    def emit(self, error):
+        # The native caller retains stderr privately. Flush this bounded record
+        # before the unchanged generic failure; stdout remains protocol-only.
+        try:
+            phase = self.phase if type(self.phase) is str and self.phase in self.PHASES else "unknown"
+            record = {"schema_version": 1, "kind": "preparation_failure",
+                      "phase": phase, "code": self.code(error)}
+            stream = sys.stderr
+            if stream is None:
+                return  # print(file=None) would corrupt the stdout protocol.
+            print(json.dumps(record, sort_keys=True), file=stream, flush=True)
+        except Exception:
+            # Diagnostic retention cannot replace the original failure path.
+            pass
 
 
 def unique_object(pairs):
@@ -82,6 +143,43 @@ def tree_entries(root):
     return sorted(rows, key=lambda row: row["path"])
 
 
+def immutable_library_release(root, manifest):
+    """Resolve only the archive-derived directory inside the pinned resources."""
+    if "library_release" not in manifest:
+        return None
+    archive = relative(manifest["archive"])
+    selected = manifest["library_release"]
+    expected = "library/" + PurePosixPath(archive).name.removesuffix(".tar.gz")
+    if (type(selected) is not str or not archive.endswith(".tar.gz")
+            or selected != expected or not relative(selected)):
+        raise ResourceError("invalid_immutable_library_selection")
+    release = root / selected
+    for directory in (root / "library", release):
+        info = directory.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o555
+                or directory.resolve(strict=True) != directory):
+            raise ResourceError("invalid_immutable_library_directory")
+    count = 0
+    for directory, subdirs, files in os.walk(release, followlinks=False):
+        for name in subdirs + files:
+            info = (Path(directory) / name).lstat()
+            mode = stat.S_IMODE(info.st_mode)
+            if not ((stat.S_ISDIR(info.st_mode) and mode == 0o555)
+                    or (stat.S_ISREG(info.st_mode) and mode in (0o444, 0o555))):
+                raise ResourceError("invalid_immutable_library_member")
+            count += 1
+            if count > ENTRY_LIMIT:
+                raise ResourceError("resource_entry_limit")
+    return release
+
+
+def selected_library_release(root, manifest, prepared):
+    release = immutable_library_release(root, manifest)
+    if release is not None:
+        return release
+    return prepared / "distribution" / Path(manifest["archive"]).name.removesuffix(".tar.gz")
+
+
 def verify_resources(root):
     root = root.resolve(strict=True)
     manifest_path = root / "resources.json"
@@ -98,11 +196,14 @@ def verify_resources(root):
         raise ResourceError("unsupported_resource_manifest")
     for key in ("prepare", "python", "node", "npm_cli", "starter", "archive"):
         relative(value[key])
+    if "families" in value and not isinstance(value["families"], str):
+        raise ResourceError("invalid_library_families")
     npm_resources(root, value)
     node_prebuilt_resources(root, value)
     node_build_resources(root, value)
     if tree_entries(root) != value["entries"]:
         raise ResourceError("resource_closure_changed")
+    immutable_library_release(root, value)
     return value, hashlib.sha256(raw).hexdigest()
 
 
@@ -199,34 +300,72 @@ def local_workspace_evidence(helper, backend, prepared, workspace, binding, sele
     return record_raw, checkpoint
 
 
-def prepare(root, destination, stopped, *, realm_state_root=None, realm=None):
+def check_preparation_filesystem(parent, target):
+    """Reject an observed Linux noexec mount without executing a probe.
+
+    This is a negative compatibility check, not proof that imports or service
+    execution will succeed. The installation and mount must remain stable.
+    """
+    if target != "linux-x86_64":
+        return
+    noexec = getattr(os, "ST_NOEXEC", None)
+    observe = getattr(os, "statvfs", None)
+    if type(noexec) is not int or noexec <= 0 or not callable(observe):
+        raise ResourceError("destination_mount_unconfirmed")
+    flags = observe(parent).f_flag
+    if type(flags) is not int or flags < 0:
+        raise ResourceError("destination_mount_unconfirmed")
+    if flags & noexec:
+        raise ResourceError("destination_noexec")
+
+
+def prepare(root, destination, stopped, *, realm_state_root=None, realm=None, diagnostic=None):
+    diagnostic = diagnostic if diagnostic is not None else PreparationDiagnostic()
+    diagnostic.mark("resources")
     manifest, manifest_sha = verify_resources(root)
+    diagnostic.mark("runtime")
     if HOST_TARGETS.get((platform.system(), platform.machine())) != manifest["target"]:
         raise ResourceError("unsupported_product_target")
     python = (root / manifest["python"]).resolve(strict=True)
     if Path(sys.executable).resolve(strict=True) != python:
         raise ResourceError("invoke_with_bundled_python")
+    diagnostic.mark("destination")
     destination = Path(destination)
     if (not destination.is_absolute() or destination.exists() or destination.is_symlink()
             or destination.parent.resolve(strict=True) != destination.parent
             or destination.is_relative_to(root) or root.is_relative_to(destination)):
         raise ResourceError("fresh_disjoint_destination_required")
+    # The fresh preparation tree includes client and service native extensions.
+    # Inspect its existing canonical parent before loading a starter, creating
+    # directories, initializing recipes or invoking a package installer.
+    diagnostic.mark("destination_filesystem")
+    check_preparation_filesystem(destination.parent, manifest["target"])
     # Product-owned acquisition uses the pinned trusted pip already in this
     # immutable closure. It downloads inert wheels only; the native tool ceiling
     # and the separate checked-install decision still govern agent actions.
+    diagnostic.mark("acquisition_inputs")
     pip = root / "runtime/pip.pyz"
     if pip.is_symlink() or not pip.is_file():
         raise ResourceError("bundled_python_acquisition_unavailable")
     npm = npm_resources(root, manifest)
     # These exact starter bytes belong to the selected distribution. Native
     # verification precedes Python startup; this recheck precedes owner entry.
+    diagnostic.mark("starter_loading")
     starter = ModuleType("product_starter")
     starter.__file__ = str(root / manifest["starter"])
     exec(compile(Path(starter.__file__).read_bytes(), starter.__file__, "exec"), starter.__dict__)
+    diagnostic.owner_errors = (starter.host.PreparationError, starter.runner.BootstrapError)
+    diagnostic.mark("product_inputs")
+    library_node = ("families" not in manifest or bool(
+        set(manifest["families"].split(",")) & {"activepieces", "official-playwright"}))
     args = SimpleNamespace(archive_dir=str((root / manifest["archive"]).parent),
-        destination=str(destination), node=str(root / manifest["node"]),
-        npm_cli=str(root / manifest["npm_cli"]), allow_public_pypi=True,
+        destination=str(destination), node=str(root / manifest["node"]) if library_node else None,
+        npm_cli=str(root / manifest["npm_cli"]) if library_node else None, allow_public_pypi=True,
         pip_zipapp=str(pip), timeout_seconds=300, enable_public_github_research=True)
+    if "families" in manifest:
+        # Selection is pinned product policy. The archived preparer owns family
+        # admission and exact official bindings; payload presence enables nothing.
+        args.families = manifest["families"]
     if npm is not None:
         args.allow_public_npm = args.enable_node_search = True
         args.selected_node = str(npm["node"])
@@ -257,7 +396,14 @@ def prepare(root, destination, stopped, *, realm_state_root=None, realm=None):
         args.recipes_owner = "meerkat-connect"
         args.recipes_scope = "retain"
         args.allow_remote_recipes = True
-    result = starter.start(args, stopped=stopped)
+    # An internal optional callback preserves compatibility with older selected
+    # starters, which ignore it and retain the coarser starter_inputs phase.
+    args._preparation_phase = diagnostic.mark
+    diagnostic.mark("starter_inputs")
+    release = immutable_library_release(root, manifest)
+    selected = {"release_dir": str(release)} if release is not None else {}
+    result = starter.start(args, stopped=stopped, **selected)
+    diagnostic.mark("receipts")
     host = starter.host
     bootstrap = result["bootstrap"]
     receipt = checked_receipt(host, destination / "config/prepared.json", bootstrap["host"]["receipt_sha256"])
@@ -286,6 +432,11 @@ def prepare(root, destination, stopped, *, realm_state_root=None, realm=None):
             or set(config["mcpServers"]["toolkit-setup"]) != {"command", "args"}
             or config["mcpServers"]["toolkit-setup"]["command"] != "/usr/bin/env"):
         raise ResourceError("invalid_prepared_mcp_projection")
+    if "families" in manifest:
+        argv = config["mcpServers"]["toolkit-setup"]["args"]
+        if (argv.count("--families") != 1 or argv.index("--families") + 1 >= len(argv)
+                or argv[argv.index("--families") + 1] != manifest["families"]):
+            raise ResourceError("family_selection_not_prepared")
     if "--allow-acquired-inspection" not in config["mcpServers"]["toolkit-setup"]["args"]:
         raise ResourceError("acquired_inspection_not_prepared")
     if (receipt.get("public_npm_enabled", False) is not (npm is not None)
@@ -316,15 +467,18 @@ def prepare(root, destination, stopped, *, realm_state_root=None, realm=None):
                 or profile.get("scope") != "retain_and_disclose_nonsecret_local_recipe_metadata"
                 or "--allow-remote-recipes" not in config["mcpServers"]["toolkit-setup"]["args"]):
             raise ResourceError("remote_recipes_not_prepared")
+    diagnostic.mark("projection")
     archive = root / manifest["archive"]
-    release = destination / "distribution" / archive.name.removesuffix(".tar.gz")
+    release = selected_library_release(root, manifest, destination)
     snapshot, retained = host.release_snapshot(str(archive), sha256(archive), release, manifest["target"])
     _, binding, config = local_projection(host, destination, release, retained, files["mcp.json"])
     descriptor_raw = (json.dumps(config, sort_keys=True) + "\n").encode()
+    diagnostic.mark("final_validation")
     if stopped.is_set():
         raise ResourceError("preparation_cancelled")
     host.recheck_release(release, snapshot)
     verify_resources(root)
+    diagnostic.mark("descriptors")
     host.write_new(destination / "product-mcp.json", descriptor_raw)
     # Keep the owner's result on disk, not mixed with the MCP command on stdout.
     host.write_new(destination / "product-prepared.json", (json.dumps({
@@ -384,7 +538,7 @@ def retained_preparation(root, manifest, manifest_sha, host, parent, setup):
     if not stat.S_ISDIR(prepared.lstat().st_mode) or prepared.resolve(strict=True) != prepared:
         raise ResourceError("retained_preparation_unconfirmed")
     archive = root / manifest["archive"]
-    release = prepared / "distribution" / archive.name.removesuffix(".tar.gz")
+    release = selected_library_release(root, manifest, prepared)
     if host.directory(str(release)) != release:
         raise ResourceError("retained_preparation_changed")
     snapshot, retained = host.release_snapshot(str(archive), sha256(archive), release, manifest["target"])
@@ -648,6 +802,10 @@ def installation_readback(root, destination, request_path, stopped):
         raise ResourceError("invalid_readback_request")
     selected = request[source_key]
     selected_package = selected.get("family") in ("selected-python", "selected-node")
+    official = selected.get("family") == "official-github"
+    if official and (selected.get("profile") not in ("selected-reads", "enterprise-selected-reads")
+                     or retained_context is None and credential is None):
+        raise ResourceError("unsupported_readback_owner")
     # The protected native caller selects the account, public or credential
     # branch. Each reuses the canonical installed-artifact owner.
     if (retained_context is None and (remote and (public is None or credential is not None)
@@ -655,9 +813,13 @@ def installation_readback(root, destination, request_path, stopped):
             and not (selected.get("family") == "agno" and selected.get("profile") == "salesforce")
             or service is not None and (not isinstance(service, dict)
                 or credential is None and set(service) != {"operation_basis", "operations"}
-                or not remote and selected.get("family") not in ("agno", "services", "activepieces", "selected-python", "selected-node")))):
+                or not remote and selected.get("family") not in ("agno", "services", "activepieces", "selected-python", "selected-node", "official-github")))):
         raise ResourceError("unsupported_readback_owner")
     credential_slots = credential_readback_slots(credential, selected_package) if credential is not None else None
+    if official and credential is not None:
+        if (credential["credential_slots"] != [{"source": "library_field", "declaration": {
+                "field_path": ["config", "token_env"], "environment_variable": "GITHUB_PERSONAL_ACCESS_TOKEN"}}]):
+            raise ResourceError("invalid_credential_readback")
     if remote:
         if (set(selected) != {"job_id", "request_sha256", "recovery_request_sha256", "export"}
                 or not isinstance(selected["export"], dict)):
@@ -687,10 +849,19 @@ def installation_readback(root, destination, request_path, stopped):
             or any(host.compose_overlaps(destination, path) for path in (root, workspace, prepared))):
         raise ResourceError("readback_destination_mismatch")
     archive = root / manifest["archive"]
-    release = prepared / "distribution" / archive.name.removesuffix(".tar.gz")
-    snapshot, retained = host.release_snapshot(str(archive), sha256(archive), release, manifest["target"])
+    release = selected_library_release(root, manifest, prepared)
+    archive_sha = sha256(archive)
+    snapshot, retained = host.release_snapshot(str(archive), archive_sha, release, manifest["target"])
+    immutable_receipt_raw = None
+    if "library_release" in manifest:
+        # The installed release is no longer inside this preparation. Bind its
+        # archive to the original receipt before constructing a readback owner.
+        immutable_receipt_raw = host.read_regular(prepared / "config/prepared.json", MANIFEST_LIMIT)[0]
+        receipt_release = decode(immutable_receipt_raw).get("release")
+        if not isinstance(receipt_release, dict) or receipt_release.get("archive_sha256") != archive_sha:
+            raise ResourceError("readback_preparation_changed")
     backend = host.owner_module("product_readback_backend", release / "setup/backend.py", retained["setup/backend.py"])
-    if local_attempt or selected_package or remote:
+    if local_attempt or selected_package or remote or official:
         product_raw = host.read_regular(prepared / "product-prepared.json", MANIFEST_LIMIT)[0]
         product = decode(product_raw)
         receipt = checked_receipt(host, prepared / "config/prepared.json",
@@ -698,7 +869,7 @@ def installation_readback(root, destination, request_path, stopped):
         if (product["resources_sha256"] != manifest_sha
                 or receipt.get("target") != manifest["target"]
                 or receipt.get("workspace") != str(prepared / "session")
-                or receipt.get("release", {}).get("archive_sha256") != sha256(archive)
+                or receipt.get("release", {}).get("archive_sha256") != archive_sha
                 or product["mcp_sha256"] != receipt["files"]["mcp.json"]):
             raise ResourceError("readback_preparation_changed")
     if local_attempt:
@@ -712,6 +883,13 @@ def installation_readback(root, destination, request_path, stopped):
         evidence = (local_workspace_evidence(helper, backend, prepared, workspace, binding, selected)
             if retained_context is None else (retained_context.record_raw, retained_checkpoint_raw))
     selected_options = {}
+    if official:
+        # Reuse the exact official producer from this verified preparation's
+        # release. The request cannot substitute a bundle or installer.
+        selected_options = {"official_bundle": release / "official",
+            "official_contents_sha256": snapshot["hashes"]["official/CONTENTS.json"],
+            "official_installer": release / "setup/install-library-consumer.py",
+            "official_installer_sha256": snapshot["hashes"]["setup/install-library-consumer.py"]}
     if selected_package:
         # The original product receipt pins this fixed preparation profile and
         # its installer/validator closure. A request cannot choose a new owner.
@@ -738,13 +916,14 @@ def installation_readback(root, destination, request_path, stopped):
                             "local_recipes_profile_sha256": profile_sha}
     if stopped.is_set():
         raise ResourceError("readback_cancelled")
+    verifier = "setup/install-library-consumer.py" if official else "consumers/install-library-consumer.py"
     owner = backend.Controller(
         bundle=release / "consumers", contents_sha256=snapshot["hashes"]["consumers/CONTENTS.json"],
         workspace=destination, families=() if selected_package or remote else (selected["family"],), python=str(python),
         node=str((root / manifest["node"]).resolve(strict=True)),
         npm_cli=str((root / manifest["npm_cli"]).resolve(strict=True)),
-        verifier=release / "consumers/install-library-consumer.py",
-        verifier_sha256=snapshot["hashes"]["consumers/install-library-consumer.py"],
+        verifier=release / verifier,
+        verifier_sha256=snapshot["hashes"][verifier],
         recover_workspace=workspace, recover_request=selected["job_id"],
         recover_request_sha256=selected["recovery_request_sha256"],
         **selected_options,
@@ -761,7 +940,17 @@ def installation_readback(root, destination, request_path, stopped):
                     or detail["job"]["recovery_request"] != {"id": selected["job_id"], "sha256": selected["recovery_request_sha256"]}):
                 raise ResourceError("remote_readback_request_changed")
         value = owner.reconcile({"job_id": selected["job_id"]},
-            **({"retained_setup_metadata": True} if retained_context is not None else {}))
+            **({"retained_setup_metadata": True} if retained_context is not None or official else {}))
+        if official and value.get("observation", {}).get("status") == "matched":
+            # The canonical installer checks the exact pinned bundle, config,
+            # host and launch. Reuse its selected operations, not a second list
+            # of provider tools or the broader profile's possible operations.
+            metadata = value["observation"].get("setup_metadata", {})
+            selection = metadata.get("selection", {})
+            if (selection.get("family") != selected["family"]
+                    or selection.get("profile") != selected["profile"]
+                    or credential is not None and not set(credential["operations"]) <= set(selection.get("operations", []))):
+                raise ResourceError("invalid_credential_readback" if credential is not None else "readback_official_selection_changed")
         if selected_package and retained_context is None and value.get("observation", {}).get("status") == "matched":
             result = value["observation"]["result"]
             basis = service["operation_basis"]
@@ -799,7 +988,10 @@ def installation_readback(root, destination, request_path, stopped):
         raise ResourceError("readback_cancelled_or_changed")
     host.recheck_release(release, snapshot)
     verify_resources(root)
-    if local_attempt or selected_package or remote:
+    if (immutable_receipt_raw is not None
+            and host.read_regular(prepared / "config/prepared.json", MANIFEST_LIMIT)[0] != immutable_receipt_raw):
+        raise ResourceError("readback_preparation_changed")
+    if local_attempt or selected_package or remote or official:
         if host.read_regular(prepared / "product-prepared.json", MANIFEST_LIMIT)[0] != product_raw:
             raise ResourceError("readback_local_attempt_changed")
         checked_receipt(host, prepared / "config/prepared.json",
@@ -863,8 +1055,10 @@ def local_round_owner(root, request_path, stopped, cancelled_fd):
     host = starter.host
     raw = host.read_regular(Path(request_path), 1024 * 1024)[0]
     request = decode(raw)
-    if (type(request) is not dict or set(request) != {"prepared", "realm_state_root", "realm",
-            "descriptor_sha256", "preparation_sha256"}):
+    if (type(request) is not dict or set(request) not in ({"prepared", "realm_state_root", "realm",
+            "descriptor_sha256", "preparation_sha256"}, {"prepared", "realm_state_root", "realm",
+            "descriptor_sha256", "preparation_sha256", "expected_round"})
+            or ("expected_round" in request and type(request["expected_round"]) is not dict)):
         raise ResourceError("invalid_local_round_request")
     prepared = host.directory(request["prepared"])
     realm_parent = host.directory(request["realm_state_root"]) / ".meerkat-connect" / request["realm"]
@@ -875,7 +1069,7 @@ def local_round_owner(root, request_path, stopped, cancelled_fd):
     receipt = checked_receipt(host, prepared / "config/prepared.json",
         product["preparation"]["bootstrap"]["host"]["receipt_sha256"])
     archive = root / manifest["archive"]
-    release = prepared / "distribution" / archive.name.removesuffix(".tar.gz")
+    release = selected_library_release(root, manifest, prepared)
     snapshot, retained = host.release_snapshot(str(archive), sha256(archive), release, manifest["target"])
     if (product["resources_sha256"] != manifest_sha or receipt.get("target") != manifest["target"]
             or receipt.get("workspace") != str(prepared / "session")
@@ -892,8 +1086,10 @@ def local_round_owner(root, request_path, stopped, cancelled_fd):
     backend = host.owner_module("product_round_backend", release / "setup/backend.py", retained["setup/backend.py"])
     if stopped.is_set():
         raise ResourceError("local_round_cancelled")
+    check_preparation_filesystem(prepared, manifest["target"])
     helper.offer_next_round(backend, prepared / "local-session", binding,
-                           sys.stdin.buffer, sys.stdout.buffer, cancelled_fd)
+                           sys.stdin.buffer, sys.stdout.buffer, cancelled_fd,
+                           expected_round=request.get("expected_round"))
     if (stopped.is_set() or host.read_regular(Path(request_path), 1024 * 1024)[0] != raw
             or host.read_regular(prepared / "product-mcp.json", MANIFEST_LIMIT)[0] != descriptor_raw):
         raise ResourceError("local_round_changed")
@@ -910,6 +1106,7 @@ def main(argv=None):
     parser.add_argument("--realm-state-root")
     parser.add_argument("--realm")
     args = parser.parse_args(argv)
+    diagnostic = None if args.local_round_owner or args.installation_readback else PreparationDiagnostic()
     stopped = threading.Event()
     wake_read, wake_write = os.pipe()
     os.set_blocking(wake_write, False)
@@ -931,8 +1128,10 @@ def main(argv=None):
                 return 0
             value = (installation_readback(root, args.destination, args.installation_readback, stopped)
                      if args.installation_readback else prepare(root, args.destination, stopped,
-                         realm_state_root=args.realm_state_root, realm=args.realm))
-        except Exception:
+                         realm_state_root=args.realm_state_root, realm=args.realm, diagnostic=diagnostic))
+        except Exception as error:
+            if diagnostic is not None:
+                diagnostic.emit(error)
             # Do not echo data, paths or owner exceptions into an agent turn.
             parser.exit(1, "Setup preparation unconfirmed. Preserve the setup directory for recovery.\n")
     finally:

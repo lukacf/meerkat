@@ -3181,6 +3181,10 @@ mod console_side_chat_tests;
 mod console_schedule_tests;
 
 #[cfg(test)]
+#[path = "console_shared_object_tests.rs"]
+mod console_shared_object_tests;
+
+#[cfg(test)]
 #[path = "console_actor_tests.rs"]
 mod console_actor_tests;
 

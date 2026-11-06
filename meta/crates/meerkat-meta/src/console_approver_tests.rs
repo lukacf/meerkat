@@ -159,8 +159,9 @@ impl ApprovalConsole {
         )
     }
 
-    /// Whether the goal of `binding_id` is completed.
-    async fn goal_completed(&self, binding_id: &str) -> bool {
+    /// The revision of the goal item of `binding_id`: a confirmation adds
+    /// its evidence to the item, a new revision.
+    async fn goal_revision(&self, binding_id: &str) -> u64 {
         let request: meerkat::GoalStatusRequest =
             serde_json::from_value(json!({ "binding_id": binding_id })).expect("status request");
         let status = self
@@ -168,7 +169,9 @@ impl ApprovalConsole {
             .goal_status(request)
             .await
             .expect("goal status");
-        serde_json::to_value(status).expect("status json")["item"]["status"] == json!("completed")
+        serde_json::to_value(status).expect("status json")["item"]["revision"]
+            .as_u64()
+            .expect("goal item revision")
     }
 
     /// An open work item: its id and revision.
@@ -693,22 +696,22 @@ async fn non_person_cannot_confirm_goal() {
     let mut refused = Vec::new();
     for (label, bearer) in non_person_tokens() {
         let answer = console_rpc_as(&console.app, Some(&bearer), CONFIRM, confirm.clone()).await;
-        refused.push((label, answer, console.goal_completed(&binding_id).await));
+        refused.push((label, answer, console.goal_revision(&binding_id).await));
     }
     let confirmed = console_rpc_as(&console.app, Some(&person_token()), CONFIRM, confirm).await;
-    let completed = console.goal_completed(&binding_id).await;
+    let confirmed_revision = console.goal_revision(&binding_id).await;
     console.stop().await;
 
-    for (label, answer, completed) in refused {
+    for (label, answer, after) in refused {
         assert_eq!(
             refusal_kind(&answer),
             &json!("approver_unauthenticated"),
             "{label}: {answer}"
         );
-        assert!(!completed, "{label}: {answer}");
+        assert_eq!(after, revision, "{label}: {answer}");
     }
     assert!(confirmed["error"].is_null(), "{confirmed}");
-    assert!(completed, "{confirmed}");
+    assert!(confirmed_revision > revision, "{confirmed}");
 }
 
 /// An open Console's caller without a token confirms no goal.
@@ -723,7 +726,7 @@ async fn open_goal_confirm_is_unauthenticated() {
         json!({ "binding_id": binding_id, "expected_revision": revision }),
     )
     .await;
-    let completed = console.goal_completed(&binding_id).await;
+    let after = console.goal_revision(&binding_id).await;
     console.stop().await;
 
     assert_eq!(
@@ -731,7 +734,7 @@ async fn open_goal_confirm_is_unauthenticated() {
         &json!("approver_unauthenticated"),
         "{answer}"
     );
-    assert!(!completed, "{answer}");
+    assert_eq!(after, revision, "{answer}");
 }
 
 /// A goal confirmation checks its person again after its last await: once
@@ -771,7 +774,7 @@ async fn goal_confirm_rechecks_person_after_last_await() {
         fences.revoke_sessions(BOB, std::time::SystemTime::now() + Duration::from_secs(5));
     hold.release();
     let answer = tokio::time::timeout(Duration::from_secs(30), confirm).await;
-    let completed = console.goal_completed(&binding_id).await;
+    let after = console.goal_revision(&binding_id).await;
     console.stop().await;
 
     reached.expect("the confirmation reached its last await");
@@ -784,7 +787,7 @@ async fn goal_confirm_rechecks_person_after_last_await() {
         &json!("approver_unauthenticated"),
         "{answer}"
     );
-    assert!(!completed, "{answer}");
+    assert_eq!(after, revision, "{answer}");
 }
 
 /// Row 9. A Console claim is owned by its caller: a claim that names no

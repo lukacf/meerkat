@@ -73,12 +73,16 @@
 //! reopens the realm. A fence loss poisons the whole realm. An unknown
 //! outcome is always settled (by retrying the same batch, or by reading the
 //! head's commit id) before a scope's next version is written, and a
-//! poisoned scope writes no next version at all. A batch whose outcome stays
-//! unknown is remembered as such, so a later re-acquire does not read it as
-//! another writer's. The realm keeps every poisoned scope with its cause
-//! ([`SpiRealm::poisoned_scopes`]), and a read across many scopes refuses
-//! only while a scope of a family it reads is poisoned
-//! ([`SpiRealm::check_cross_scope_read_of`]).
+//! poisoned scope writes no next version at all. A batch is sent, the first
+//! time or again, only while the realm holds its fence and before the
+//! self-fence deadline of the token it carries; a settle still unknown at
+//! that deadline stops there, typed ([`SpiError::UnsettledAtFenceWindow`]),
+//! and poisons its scopes like any batch whose outcome stays unknown. A
+//! batch whose outcome stays unknown is remembered as such, so a later
+//! re-acquire does not read it as another writer's. The realm keeps every
+//! poisoned scope with its cause ([`SpiRealm::poisoned_scopes`]), and a read
+//! across many scopes refuses only while a scope of a family it reads is
+//! poisoned ([`SpiRealm::check_cross_scope_read_of`]).
 //!
 //! # Cancellation
 //!
@@ -191,7 +195,10 @@ pub struct SpiRealmConfig {
     /// the last.
     pub renew_timeout: Duration,
     /// How long an unknown or unavailable commit is retried before the
-    /// scopes it touched are poisoned.
+    /// scopes it touched are poisoned. No attempt is sent past the
+    /// self-fence deadline of the token the batch carries, so while renews
+    /// fail a longer budget is cut at the self-fence window
+    /// ([`FenceTiming::self_fence_window`]).
     pub commit_retry_budget: Duration,
 }
 
@@ -2160,13 +2167,30 @@ impl SpiRealm {
     /// [`commit_retry_pause`] says. From its first retryable answer, or once
     /// its first call outlasts the host's declared longest commit, the
     /// settle counts in [`Self::slow_settles`] until it ends.
+    ///
+    /// A batch is sent, the first time or again, only while the realm holds
+    /// its fence and before the self-fence deadline of the token it carries
+    /// ([`Self::fence_deadline`]): the token's lease at the store may end
+    /// soon after that deadline, and another writer may then acquire. Past
+    /// it the settle stops with [`SpiError::UnsettledAtFenceWindow`]: the
+    /// batch's outcome is unknown, never taken as landed. A head read that
+    /// shows the batch still settles it as landed, whenever it is made.
     async fn commit_settled(&self, batch: &CommitBatch) -> Result<(), SpiError> {
         let deadline = Instant::now() + self.config.commit_retry_budget;
         // A local of this future: it drops on every return below, and with
         // the future when the caller drops the settle mid-way.
         let mut slow: Option<SlowSettle<'_>> = None;
         let mut attempt: u32 = 0;
+        let mut last: Option<HostStoreError> = None;
         loop {
+            self.check_realm()?;
+            if Instant::now() >= self.fence_deadline() {
+                return Err(SpiError::UnsettledAtFenceWindow {
+                    token: batch.fence(),
+                    attempts: attempt,
+                    last,
+                });
+            }
             let mut call = self.host.commit(batch);
             let answer = if slow.is_some() {
                 call.await
@@ -2200,8 +2224,19 @@ impl SpiRealm {
             if Instant::now() + backoff >= deadline {
                 return Err(SpiError::Host(error));
             }
+            last = Some(error);
             tokio::time::sleep(backoff).await;
         }
+    }
+
+    /// The instant from which no batch carrying this writer's current token
+    /// is sent: the start of its last successful acquire or renew plus the
+    /// self-fence window, before the lease the store recorded from that call
+    /// can end. A renew of the token moves it later; a failed renew does not
+    /// move it at all. A settle in flight holds the fence gate, so no
+    /// re-acquire changes the token under it.
+    fn fence_deadline(&self) -> Instant {
+        self.lease_started() + self.self_fence_window
     }
 
     /// Whether `batch` landed, read from its first update's scope: the head

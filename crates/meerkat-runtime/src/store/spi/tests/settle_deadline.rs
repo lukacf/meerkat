@@ -73,7 +73,13 @@ async fn a_commit_sends_nothing_past_its_tokens_self_fence_deadline() {
         late.is_empty(),
         "attempts were sent past the token's self-fence deadline, by {late:?}"
     );
-    assert!(written.is_err(), "the batch did not settle: {written:?}");
+    assert!(
+        matches!(
+            written,
+            Err(RuntimeStoreError::UnsettledAtFenceWindow { .. })
+        ),
+        "the settle stopped typed, its outcome unknown: {written:?}"
+    );
     let refused = store.load_input_states(&runtime).await;
     assert!(
         matches!(&refused, Err(RuntimeStoreError::ScopeRefused { scopes })
@@ -161,4 +167,54 @@ async fn a_commit_keeps_retrying_while_renews_move_its_deadline() {
     );
     assert!(realm.realm_poisoned().is_none());
     assert!(realm.lease_is_live());
+}
+
+// Unrun until the candidate's validation. The stop is typed at the realm, for
+// an adapter that commits through it directly: it names the token the batch
+// carried, the attempts it sent and the last answer, the scope it touched is
+// poisoned with that account, and the realm keeps its fence.
+#[tokio::test(start_paused = true)]
+async fn a_settle_stopped_at_its_fence_window_names_its_token_attempts_and_last_answer() {
+    let host = fast_host();
+    let realm = SpiRealm::open(Arc::clone(&host) as _, SpiRealmConfig::default())
+        .await
+        .expect("realm opens");
+    let token = realm.fence();
+    {
+        let mut faults = host.faults.lock().unwrap();
+        faults.renew_unavailable = 1000;
+        faults.unavailable = 1000;
+    }
+    host.take_calls();
+    let id = ScopeId::new(TEST_FAMILY, "late");
+    let outcome = commit_one(
+        &realm,
+        &id,
+        ScopeDelta::Changes(vec![("pin".into(), Some(Arc::new(b"value".to_vec())))]),
+    )
+    .await;
+    let sent = commit_attempts(&host).len();
+    assert!(sent >= 2, "the batch was retried within its window");
+    assert!(
+        matches!(
+            &outcome,
+            Err(SpiError::UnsettledAtFenceWindow {
+                token: stopped,
+                attempts,
+                last: Some(HostStoreError::Unavailable(_)),
+            }) if *stopped == token && *attempts as usize == sent
+        ),
+        "{outcome:?} after {sent} attempts"
+    );
+    let poisoned = realm.poisoned_scopes();
+    assert_eq!(poisoned.len(), 1, "{poisoned:?}");
+    assert_eq!(poisoned[0].id, id);
+    assert_eq!(
+        poisoned[0].cause,
+        outcome
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default()
+    );
+    assert!(realm.realm_poisoned().is_none());
 }

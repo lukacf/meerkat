@@ -1108,20 +1108,22 @@ class ConsoleFront:
             return Response("Console changes require a same-origin authenticated browser.", status_code=403,
                             headers=availability_headers)
         if path == "/logout" and request.method == "POST":
+            # The front's own login ends first and in every case: its session
+            # is revoked here and its cookie cleared in every answer below.
             retirement = self._retire_login(login.session, "logout")
-            # This front revoked the login first; the console then ends it too,
-            # so a token this front already issued for it stops working there.
+            # The console then ends it too, so a token this front already
+            # issued for the login stops working there.
             signed_out = await self._console_sign_out(login)
+            problem = None
             if retirement is not None:
                 try:
                     await asyncio.shield(retirement)
                 except Exception:
-                    return Response("Console access was revoked but cleanup is unconfirmed.", status_code=503)
-            if not signed_out:
-                return Response("You are signed out here, but the Console did not confirm ending this login. "
-                                "Tokens it already holds for this login expire within two minutes.",
-                                status_code=503, headers=_console_public_headers())
-            response = RedirectResponse("/login", status_code=303)
+                    problem = "Console access was revoked but cleanup is unconfirmed."
+            if problem is None and not signed_out:
+                problem = ("You are signed out here, but the Console did not confirm ending this login. "
+                           "Tokens it already holds for this login expire within two minutes.")
+            response = RedirectResponse("/login", status_code=303) if problem is None else _signed_out_page(problem)
             response.delete_cookie(self.cookie, secure=self._secure_cookie, httponly=True,
                                    samesite="strict", path="/")
             return response
@@ -2024,6 +2026,15 @@ class ConsoleFront:
             if inspect.isawaitable(result):
                 await asyncio.wait_for(result, 10)
             self.delivered.add(event.interaction_id)
+
+
+def _signed_out_page(problem):
+    """A logout whose cleanup is not confirmed: signed out here, said plainly."""
+    from starlette.responses import HTMLResponse
+    return HTMLResponse(f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Signed out</title><style>body{{font:16px system-ui;background:#faf9f6;color:#242522;margin:0;padding:6vh 20px}}main{{max-width:400px;margin:auto}}p{{line-height:1.6}}</style></head><body><main><h1>Signed out</h1><p role="alert">{html.escape(problem)}</p><p><a href="/login">Sign in again</a></p></main></body></html>''',
+        status_code=503, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'"})
 
 
 def _login_form(nonce, error=None, *, named=False):

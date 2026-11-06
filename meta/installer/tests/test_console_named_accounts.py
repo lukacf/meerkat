@@ -332,11 +332,16 @@ async def test_logout_signs_the_login_out_of_the_console(tmp_path):
         await console.close()
 
 
-@pytest.mark.parametrize("answer,status", [("refused", 503), ("unavailable", 503), ("not-served", 303)])
+@pytest.mark.parametrize("answer,status", [("refused", 503), ("unavailable", 503), ("unauthenticated", 503),
+                                           ("not-served", 303)])
 async def test_logout_reports_an_unconfirmed_console_sign_out(tmp_path, answer, status):
     def sign_out(identity):
         if answer == "unavailable":
             raise httpx.ConnectError("the console is unavailable")
+        if answer == "unauthenticated":
+            # A console that did not verify the token fenced nothing.
+            return httpx.Response(401, json={"jsonrpc": "2.0", "id": identity, "error": {
+                "code": -32600, "message": "unauthorized", "data": {"kind": "unauthenticated"}}})
         code = -32603 if answer == "refused" else -32601
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": identity,
             "error": {"code": code, "message": "synthetic console answer"}})
@@ -346,14 +351,17 @@ async def test_logout_reports_an_unconfirmed_console_sign_out(tmp_path, answer, 
     try:
         async with browser(app, console) as client:
             await sign_in(client, console, None, OPERATOR_PASSWORD)
+            assert console.cookie in client.cookies
             response = await client.post("/logout", headers={"Origin": console.origin})
             assert response.status_code == status, response.text
             assert len(native.sign_outs) == 1
             if status == 503:
-                assert "did not confirm" in response.text
-            # The front's own login has ended either way.
-            assert console.sessions == {}
+                assert "did not confirm" in response.text and 'href="/login"' in response.text
+            # The front's own login has ended either way, and its cookie is gone.
+            assert console.sessions == {} and console.cookie not in client.cookies
             assert (await client.get("/console/experience")).status_code == 401
+            # The person can sign in again at once.
+            await sign_in(client, console, None, OPERATOR_PASSWORD)
     finally:
         await console.close()
 

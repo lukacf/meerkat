@@ -834,6 +834,92 @@ async fn generic_autonomous_work_remains_external_event_not_mirrored_human() {
     fixture.finish().await;
 }
 
+fn person(subject: &str) -> meerkat_core::PrincipalRef {
+    meerkat_core::PrincipalRef::in_domain(
+        meerkat_core::PrincipalKind::Human,
+        subject,
+        meerkat_core::TrustDomainId::new("oidc-issuer:https://issuer.example")
+            .expect("trust domain"),
+    )
+    .expect("qualified requester")
+}
+
+/// The requester a host authenticated rides its host human input onto the
+/// member's admitted runtime input and the turn's transcript rows. Work that
+/// is not host human input refuses a requester before any admission, rather
+/// than delivering the turn without it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn host_human_requester_reaches_the_member_input_and_its_turn() {
+    let fixture = Fixture::new().await;
+    let before = fixture.durable().await;
+    let requester = person("a");
+    let human = delivery("requester-human");
+    let id = interaction(&human);
+    let turn = fixture
+        .start(
+            WorkSpec::new(HUMAN, WorkOrigin::External)
+                .with_interaction_id(id)
+                .with_requester(requester.clone()),
+            HandlingMode::Queue,
+            human.clone(),
+        )
+        .await
+        .expect("host human input carries its requester");
+    completed(turn).await;
+    let observed = fixture.input_for_delivery(&human).await;
+    assert_eq!(
+        observed.state().state.requester(),
+        Some(&requester),
+        "the member's admitted input names the requester"
+    );
+    let durable = fixture.durable().await;
+    let appended = &durable.messages()[before.messages().len()..];
+    let row = appended
+        .iter()
+        .find_map(|message| match message {
+            Message::User(user) if user.text_content() == HUMAN => Some(user),
+            _ => None,
+        })
+        .expect("the human row");
+    assert_eq!(
+        row.identity.requester,
+        Some(meerkat_core::TurnRequester::direct(requester.clone())),
+        "the turn's transcript names its direct requester"
+    );
+
+    let rows_before = fixture.input_count().await;
+    let scope = fixture
+        .handle
+        .capture_member_delivery_scope(&fixture.entry.agent_identity)
+        .await
+        .expect("capture the member's delivery scope");
+    let refused = fixture
+        .handle
+        .submit_work_with_mode_and_delivery_identity_bounded(
+            &scope,
+            WorkSpec::new("generic work", WorkOrigin::External).with_requester(requester),
+            HandlingMode::Queue,
+            delivery("requester-generic"),
+            deadline(),
+        )
+        .await;
+    assert!(
+        matches!(
+            &refused,
+            Err(MobError::UnsupportedForMode { reason, .. })
+                if reason == "a requester rides only host human input"
+        ),
+        "generic work refuses a requester: {:?}",
+        refused.as_ref().map(|_| ())
+    );
+    assert_eq!(
+        fixture.input_count().await,
+        rows_before,
+        "the refused work admitted nothing"
+    );
+    fixture.finish().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cross_kind_generic_then_host_human_replay_refuses_reclassification() {
     let fixture = Fixture::new().await;

@@ -6,6 +6,7 @@
 //!
 //! Unrun until the candidate's validation.
 
+use super::member_wake_rows::refused_for_build_preparation_retry;
 use super::*;
 use crate::machines::mob_machine as dsl;
 use crate::runtime::{MobBootSetBasis, MobBootSetUnobservedCause};
@@ -35,6 +36,19 @@ fn phase_of(
     identity: &AgentIdentity,
 ) -> Option<dsl::MemberMaterializationPhase> {
     handle.member_materialization_for_test(identity)
+}
+
+/// The host preparation MobMachine records `identity` owing.
+fn preparation_of(
+    handle: &MobHandle,
+    identity: &AgentIdentity,
+) -> Option<dsl::HostPreparationCause> {
+    handle
+        .machine_state_watch_rx
+        .borrow()
+        .member_host_preparation_causes
+        .get(&dsl::AgentIdentity::from_domain(identity))
+        .copied()
 }
 
 /// A persistent runtime over `store`, as one process opens it.
@@ -162,6 +176,27 @@ impl CrashedStoreMob {
         ))
         .with_session_service(self.service.clone())
         .notify_orchestrator_on_resume(false);
+        tokio::time::timeout(ROW_STEP, Box::pin(builder.resume()))
+            .await
+            .expect("the resume answers")
+            .expect("the resume succeeds")
+    }
+
+    /// [`Self::resume`], with the host's build `preparer` and the mob's wake
+    /// retry backoff at `backoff`.
+    async fn resume_with_preparer(
+        &self,
+        preparer: Arc<dyn crate::runtime::MemberBuildPreparer>,
+        backoff: Duration,
+    ) -> MobHandle {
+        let builder = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+            self.events.clone(),
+            self.runtime_metadata.clone(),
+        ))
+        .with_session_service(self.service.clone())
+        .notify_orchestrator_on_resume(false)
+        .with_member_build_preparer(preparer)
+        .with_member_wake_retry_backoff(backoff, backoff);
         tokio::time::timeout(ROW_STEP, Box::pin(builder.resume()))
             .await
             .expect("the resume answers")
@@ -462,4 +497,124 @@ async fn a_member_restored_at_boot_with_pending_work_keeps_its_spawn_grant_in_th
     })
     .await
     .expect("the restored member's runtime delivers the completion as a turn");
+}
+
+/// A host that asks to retry the first `refusals` build preparations and
+/// prepares every later one; it counts every preparation asked.
+struct RetriesFirstPreparations {
+    refusals: usize,
+    asked: AtomicUsize,
+}
+
+#[async_trait]
+impl crate::runtime::MemberBuildPreparer for RetriesFirstPreparations {
+    async fn prepare_member_build(
+        &self,
+        _request: crate::runtime::MemberBuildPreparation,
+    ) -> Result<crate::runtime::MemberBuildPrepared, crate::runtime::MemberBuildPreparationRefusal>
+    {
+        if self.asked.fetch_add(1, Ordering::SeqCst) < self.refusals {
+            return Err(crate::runtime::MemberBuildPreparationRefusal::Retryable {
+                reason: "the host is not ready for this member yet".to_string(),
+            });
+        }
+        Ok(crate::runtime::MemberBuildPrepared::Prepared)
+    }
+}
+
+/// The wake retry backoff of the build preparation retry row: long enough
+/// that the row's steps run while the retry stands, short enough to wait
+/// for its timer.
+const PREPARATION_RETRY: Duration = Duration::from_secs(5);
+
+/// A member that still owes work across a restart (a background operation
+/// completion its runtime owes), whose host asks to retry its build
+/// preparation at the start's wake: MobMachine records the retry
+/// (`HostPreparationCause::BuildPreparationRetry`) and the member stays
+/// Dormant, its wakes refused for it without asking the host again (a
+/// host's wake meanwhile is refused `BuildPreparationRetry`). The retry
+/// timer ends the cause at the wake retry backoff and, the work still owed,
+/// wakes the member: the host is asked once more, prepares the build, and
+/// the woken runtime delivers the completion as a turn. The other member
+/// stays Dormant and runs nothing.
+///
+/// RED before MobMachine recorded the retry: no cause was recorded, so a
+/// host's wake meanwhile asked the host again and woke the member.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owed_work_whose_host_asks_to_retry_its_build_runs_after_the_retry() {
+    let mob = CrashedStoreMob::new("boot-rows-build-preparation-retry", 2).await;
+    let (owed_member, owed) = mob.sessions[1].clone();
+    mob.store
+        .persist_ops_lifecycle(
+            &LogicalRuntimeId::for_session(&owed),
+            &undelivered_completion(&owed),
+        )
+        .await
+        .expect("the completion is durable");
+    let preparer = Arc::new(RetriesFirstPreparations {
+        refusals: 1,
+        asked: AtomicUsize::new(0),
+    });
+
+    let handle = mob
+        .resume_with_preparer(preparer.clone(), PREPARATION_RETRY)
+        .await;
+    assert_eq!(
+        handle.status().await.expect("the mob's phase"),
+        MobState::Running
+    );
+    assert_eq!(
+        preparer.asked.load(Ordering::SeqCst),
+        1,
+        "the start's wake asked the host to prepare the member's build"
+    );
+    assert_eq!(
+        phase_of(&handle, &owed_member),
+        Some(dsl::MemberMaterializationPhase::Dormant)
+    );
+    assert_eq!(
+        preparation_of(&handle, &owed_member),
+        Some(dsl::HostPreparationCause::BuildPreparationRetry),
+        "MobMachine records the build preparation the host asked to retry"
+    );
+
+    let refused = tokio::time::timeout(ROW_STEP, handle.ensure_member_live(&owed_member))
+        .await
+        .expect("the wake answers");
+    assert!(
+        refused_for_build_preparation_retry(&refused),
+        "a host's wake while the retry stands is refused for it: {refused:?}"
+    );
+    assert_eq!(
+        preparer.asked.load(Ordering::SeqCst),
+        1,
+        "the host is not asked again while the retry stands"
+    );
+
+    tokio::time::timeout(ROW_STEP, async {
+        while !mob.service.has_started_turn_for(&owed).await {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the retry wakes the member and its runtime delivers the completion");
+    assert_eq!(
+        preparer.asked.load(Ordering::SeqCst),
+        2,
+        "the retry asked the host once more"
+    );
+    assert_eq!(
+        phase_of(&handle, &owed_member),
+        Some(dsl::MemberMaterializationPhase::Live)
+    );
+    assert_eq!(preparation_of(&handle, &owed_member), None);
+    let (other, other_session) = mob.sessions[0].clone();
+    assert_eq!(
+        phase_of(&handle, &other),
+        Some(dsl::MemberMaterializationPhase::Dormant)
+    );
+    assert!(
+        !mob.service.has_started_turn_for(&other_session).await,
+        "{other} ran no turn"
+    );
 }

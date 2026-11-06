@@ -574,7 +574,7 @@ impl ConsoleScheduleToolGate {
         &self,
         call: meerkat_core::types::ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
-        meerkat_schedule::dispatch_schedule_list_where(&self.service, call, &|schedule| {
+        meerkat::dispatch_schedule_list_where(&self.service, call, &|schedule| {
             !is_console_schedule(schedule)
         })
         .await
@@ -631,10 +631,10 @@ impl meerkat_core::AgentToolDispatcher for ConsoleScheduleToolGate {
             return self.list_without_console_schedules(call).await;
         }
         // Arguments that do not parse reach the tools, which refuse them.
-        if let Ok(args) = serde_json::from_str::<Value>(call.args.get()) {
-            if let Some(refusal) = self.refusal(call.name, &args).await {
-                return Err(refusal);
-            }
+        if let Ok(args) = serde_json::from_str::<Value>(call.args.get())
+            && let Some(refusal) = self.refusal(call.name, &args).await
+        {
+            return Err(refusal);
         }
         self.inner.dispatch_with_context(call, context).await
     }

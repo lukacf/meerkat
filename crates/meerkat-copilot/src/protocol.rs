@@ -528,11 +528,11 @@ impl CopilotModelOffering {
         self.endpoints().chain(default)
     }
 
-    /// The endpoint `provider`'s family speaks to this model on the account
-    /// ([`Self::served_endpoints`]): the OpenAI family takes Responses first,
-    /// then Chat Completions; the Gemini family Chat Completions; the
-    /// Anthropic family Messages. `None` when the account's policy for the
-    /// model is not `enabled`.
+    /// The endpoint `provider`'s family speaks to this model on the account:
+    /// the OpenAI family takes Responses first, then Chat Completions; the
+    /// Gemini family Chat Completions; the Anthropic family Messages. A model
+    /// that advertises no endpoint at all is served on Chat Completions.
+    /// `None` when the account's policy for the model is not `enabled`.
     pub fn route_for(&self, provider: Provider) -> Option<CopilotEndpoint> {
         if !self.enabled() {
             return None;

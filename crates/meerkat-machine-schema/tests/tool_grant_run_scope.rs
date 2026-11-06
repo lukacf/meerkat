@@ -329,7 +329,7 @@ fn recover_from_state_rejects_torn_run_scope_rows() {
             State {
                 ended_at_ms: None,
                 end_reason: None,
-                ..ended.clone()
+                ..ended
             },
         ),
     ];

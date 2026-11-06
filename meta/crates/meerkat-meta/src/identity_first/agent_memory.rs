@@ -128,11 +128,11 @@ pub struct AgentMemoryConfig {
     #[serde(default)]
     pub content_trust: crate::memory::taint::ContentTrustConfig,
     /// §7.2 operator-scope activation (`agent_memory.operator_scope`).
-    /// PROVISIONAL keying (§16 Q1): the enum leaves room for a final keying
-    /// mode; `provisional` keys the scope by whatever the installed
-    /// [`crate::memory::coordinator::OperatorResolver`] yields (the intended
-    /// resolver is the console auth principal). Off by default; provisional
-    /// with no resolver installed composes nothing (inert, not an error).
+    /// `provisional` gives each console person an operator scope keyed by
+    /// their caller scope: a turn recalls the operator memory of its direct
+    /// requester only, request-only
+    /// ([`RecallCoordinator::operator_context_for_turn`]), and no build
+    /// composes it. Off by default.
     #[serde(default)]
     pub operator_scope: AgentMemoryOperatorScope,
 }
@@ -157,11 +157,10 @@ impl Default for AgentMemoryConfig {
 }
 
 /// §7.2 operator-scope activation semantics. `Off` keeps the scope schema
-/// present but unpopulated (the P0 posture); `Provisional` activates
-/// composition (resolver-keyed) and steward routing under the §16 Q1
-/// provisional keying. A final keying mode gets its own variant when the
-/// open question closes — deployments on `provisional` accept that the
-/// keying may change.
+/// present but unpopulated (the P0 posture); `Provisional` gives each
+/// console person an operator scope keyed by their caller scope, which a
+/// turn recalls request-only for its direct requester. The value keeps its
+/// name for configuration compatibility.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentMemoryOperatorScope {
@@ -531,16 +530,6 @@ impl AgentMemoryRuntimeInjector {
         self
     }
 
-    /// Install the §7.2 provisional operator resolver on the turn-path
-    /// coordinator. Effective only with `operator_scope = "provisional"`.
-    pub fn with_operator_resolver(
-        mut self,
-        resolver: Option<Arc<dyn crate::memory::coordinator::OperatorResolver>>,
-    ) -> Self {
-        self.coordinator = self.coordinator.with_operator_resolver(resolver);
-        self
-    }
-
     /// Install the §7.2 mob-scope resolver on the turn-path coordinator so
     /// injection and the selector compose the member's bound mob scopes.
     pub fn with_mob_resolver(
@@ -832,17 +821,6 @@ impl AgentMemoryCustomizer {
         policy: BTreeMap<meerkat_mob::ProfileName, bool>,
     ) -> Self {
         self.profile_memory_policy = policy;
-        self
-    }
-
-    /// Install the §7.2 provisional operator resolver on the build-time
-    /// coordinator (the composed index and build bodies see the operator
-    /// scope through the same seam as the turn path).
-    pub fn with_operator_resolver(
-        mut self,
-        resolver: Option<Arc<dyn crate::memory::coordinator::OperatorResolver>>,
-    ) -> Self {
-        self.coordinator = self.coordinator.with_operator_resolver(resolver);
         self
     }
 

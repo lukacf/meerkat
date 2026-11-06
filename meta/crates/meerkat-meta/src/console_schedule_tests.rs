@@ -1236,7 +1236,6 @@ fn doors(
         identity_runtime: fixture.identity_runtime.clone(),
         console_events: fixture.events.clone(),
         governed_ingress: ingress,
-        operator_resolver: None,
         session_fences,
     }));
     doors

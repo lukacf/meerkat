@@ -656,8 +656,6 @@ pub(crate) struct ConsoleSendDoor {
     pub(crate) identity_runtime: Option<Arc<crate::identity_first::IdentityRuntime>>,
     pub(crate) console_events: ConsoleEventStore,
     pub(crate) governed_ingress: crate::console_governed_ingress::ConsoleGovernedIngressSlot,
-    pub(crate) operator_resolver:
-        Option<Arc<crate::memory::coordinator::ConsolePrincipalOperatorResolver>>,
     pub(crate) session_fences: crate::auth::session_fence::ConsoleSessionFences,
 }
 
@@ -708,7 +706,6 @@ impl crate::console_schedules::ConsoleScheduleDoor for ConsoleSendDoor {
             access: self.access.as_ref(),
             identity_runtime: self.identity_runtime.as_ref(),
             console_events: Some(&self.console_events),
-            operator_resolver: self.operator_resolver.as_ref(),
         };
         Box::pin(send_as_admitted_console_caller(
             &path,

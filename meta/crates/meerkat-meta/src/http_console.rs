@@ -115,12 +115,6 @@ pub struct ConsoleJsonState {
     /// (recall-only provider, no memory configured) leaves those methods
     /// unadvertised.
     pub(crate) memory_panel: Option<Arc<dyn crate::memory::capabilities::MemoryPanelStore>>,
-    /// §16 Q1 provisional operator keying: the console send path notes
-    /// "authenticated principal P addressed identity I" through this
-    /// resolver; the memory coordinator reads it for operator-scope recall.
-    /// `None` when the operator scope is off (or memory is unconfigured).
-    pub(crate) operator_resolver:
-        Option<Arc<crate::memory::coordinator::ConsolePrincipalOperatorResolver>>,
     /// Identity-first gateways: the mutable desired-identity roster that
     /// `meta/ensure_member` extends (ask K0). `None` on session-owned
     /// deployments.
@@ -640,7 +634,6 @@ pub fn console_json_router(decisions: RuntimeDecisionState) -> Router {
         snapshot_read_model: ConsoleSnapshotReadModel::default(),
         access: None,
         memory_panel: None,
-        operator_resolver: None,
         identity_roster: None,
         workgraph: None,
         topology: None,
@@ -685,7 +678,6 @@ pub fn console_json_router_with_aggregator_and_access(
         snapshot_read_model: ConsoleSnapshotReadModel::default(),
         access,
         memory_panel: None,
-        operator_resolver: None,
         identity_roster: None,
         workgraph: None,
         topology: None,
@@ -753,7 +745,6 @@ pub(crate) fn console_json_router_with_runtime_and_events(
         None,
         None,
         None,
-        None,
         Default::default(),
         crate::auth::session_fence::ConsoleSessionFences::detached(),
         Default::default(),
@@ -776,7 +767,6 @@ pub(crate) fn console_json_router_with_runtime_events_and_policy(
     visibility_policy: Arc<dyn ConsoleVisibilityPolicy>,
     access: Option<AccessController>,
     memory_panel: Option<Arc<dyn crate::memory::capabilities::MemoryPanelStore>>,
-    operator_resolver: Option<Arc<crate::memory::coordinator::ConsolePrincipalOperatorResolver>>,
     identity_roster: Option<Arc<crate::identity_first::MutableRosterProvider>>,
     workgraph: Option<meerkat::WorkGraphService>,
     topology: Option<crate::topology_control::TopologyRuntimeHandle>,
@@ -840,7 +830,6 @@ pub(crate) fn console_json_router_with_runtime_events_and_policy(
         snapshot_read_model,
         access,
         memory_panel,
-        operator_resolver,
         identity_roster,
         workgraph,
         topology,
@@ -2368,8 +2357,6 @@ pub(crate) struct ConsoleSendPath<'a> {
     pub(crate) access: Option<&'a AccessController>,
     pub(crate) identity_runtime: Option<&'a Arc<crate::identity_first::IdentityRuntime>>,
     pub(crate) console_events: Option<&'a ConsoleEventStore>,
-    pub(crate) operator_resolver:
-        Option<&'a Arc<crate::memory::coordinator::ConsolePrincipalOperatorResolver>>,
 }
 
 impl<'a> ConsoleSendPath<'a> {
@@ -2385,7 +2372,6 @@ impl<'a> ConsoleSendPath<'a> {
                 .as_ref()
                 .map(crate::identity_first::PublicIdentityRuntime::runtime),
             console_events: state.console_events.as_ref(),
-            operator_resolver: state.operator_resolver.as_ref(),
         }
     }
 }
@@ -2490,20 +2476,11 @@ pub(crate) async fn send_as_admitted_console_caller(
     )
     .await
     .map_err(AdmittedConsoleSendError::Gate)?;
-    // The caller is checked after the gate's reads, before the operator
-    // note, and again right before the send is reserved or sent.
+    // The caller is checked after the gate's reads, and again right before
+    // the send is reserved or sent.
     governance
         .refuse_unless_caller_current()
         .map_err(|_| AdmittedConsoleSendError::CallerNotCurrent)?;
-    // §16 Q1 provisional operator keying: an authenticated principal
-    // addressing this identity IS the active operator for its turns.
-    // Unauthenticated consoles (no subject) note nothing: operator-scope
-    // recall stays inert without a real principal.
-    if let Some(resolver) = path.operator_resolver
-        && let Some(subject) = access_view.and_then(|view| view.subject())
-    {
-        resolver.note_interaction(request.identity.as_str(), subject);
-    }
     let Some(aggregator) = path.aggregator else {
         return Err(AdmittedConsoleSendError::AggregatorUnavailable);
     };
@@ -20746,7 +20723,6 @@ message = "review"
             snapshot_read_model: ConsoleSnapshotReadModel::default(),
             access: Some(access.clone()),
             memory_panel: None,
-            operator_resolver: None,
             identity_roster: None,
             workgraph: None,
             topology: None,
@@ -29870,7 +29846,6 @@ mod console_viewer_resolver_tests {
             snapshot_read_model: ConsoleSnapshotReadModel::default(),
             access,
             memory_panel: None,
-            operator_resolver: None,
             identity_roster: None,
             workgraph: None,
             topology: None,
@@ -30373,7 +30348,6 @@ mod console_human_admission_tests {
             snapshot_read_model: ConsoleSnapshotReadModel::default(),
             access: None,
             memory_panel: None,
-            operator_resolver: None,
             identity_roster: None,
             workgraph: None,
             topology: None,

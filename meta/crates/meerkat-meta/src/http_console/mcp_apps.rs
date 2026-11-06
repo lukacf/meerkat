@@ -609,7 +609,6 @@ mod tests {
             snapshot_read_model: Default::default(),
             access: None,
             memory_panel: None,
-            operator_resolver: None,
             identity_roster: None,
             workgraph: None,
             topology: None,

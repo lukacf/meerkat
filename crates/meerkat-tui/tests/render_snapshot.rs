@@ -189,6 +189,7 @@ fn diff_block_snapshot() {
             added: 1,
             removed: 1,
         }),
+        note: None,
         depth: 0,
         collapsed: false,
     });
@@ -290,7 +291,8 @@ fn queued_block_status_count_and_hints() {
     );
     // Steered into the runtime: not recallable, Esc interrupts.
     assert!(
-        rows[9].contains("Enter queues · Esc/Ctrl-C interrupts"),
+        rows[9]
+            .contains("Enter queues · Ctrl-X Ctrl-S interrupts and sends · Esc/Ctrl-C interrupts"),
         "input title: {:?}",
         rows[9]
     );
@@ -327,7 +329,7 @@ fn queued_block_status_count_and_hints() {
     });
     let rows = render_sized(&mut app, now, 100);
     assert!(
-        rows[9].contains("Esc recall all · ↑ edit last queued"),
+        rows[9].contains("Esc recall all · ↑ edit last queued · Ctrl-X Ctrl-S send now"),
         "input title: {:?}",
         rows[9]
     );

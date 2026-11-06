@@ -98,9 +98,9 @@ fn draw_input(frame: &mut Frame<'_>, app: &App, area: Rect, now: Instant) {
     } else if app.search().is_some() {
         " Ctrl-R older · Enter accept · Esc cancel "
     } else if app.has_recallable() {
-        " Esc recall all · ↑ edit last queued "
+        " Esc recall all · ↑ edit last queued · Ctrl-X Ctrl-S send now "
     } else if app.is_running() {
-        " Enter queues · Esc/Ctrl-C interrupts "
+        " Enter queues · Ctrl-X Ctrl-S interrupts and sends · Esc/Ctrl-C interrupts "
     } else {
         ""
     };
@@ -475,6 +475,7 @@ pub fn block_lines(block: &Block, width: u16) -> Vec<Line<'static>> {
             state,
             result_preview,
             diff,
+            note,
             depth,
             collapsed,
         } => {
@@ -509,6 +510,12 @@ pub fn block_lines(block: &Block, width: u16) -> Vec<Line<'static>> {
                 ),
                 Span::styled(truncate_to_width(&sanitize(&status), w), dim),
             ]));
+            if let Some(note) = note {
+                out.push(Line::styled(
+                    truncate_to_width(&sanitize(&format!("{indent}  {note}")), w),
+                    dim,
+                ));
+            }
             if !*collapsed {
                 tool_body(
                     &indent,
@@ -676,6 +683,7 @@ mod tests {
             },
             result_preview: Some("fn main() {}".into()),
             diff: None,
+            note: None,
             depth: 0,
             collapsed: true,
         };
@@ -751,6 +759,7 @@ mod tests {
             },
             result_preview: None,
             diff: None,
+            note: None,
             depth: 0,
             collapsed: true,
         };
@@ -888,6 +897,7 @@ mod tests {
                 added: 51,
                 removed: 1,
             }),
+            note: None,
             depth: 0,
             collapsed: false,
         };

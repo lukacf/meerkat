@@ -304,3 +304,42 @@ async fn sign_out_needs_a_login_and_a_durable_record() {
         "signed out of a read-only console"
     );
 }
+
+/// A sign-out wakes every open stream of the console, and a stream of the
+/// login that signed out finds its caller no longer current, while a stream
+/// of another login of the same person stays current: each stream verifies
+/// its retained token again when the record changes.
+#[tokio::test]
+async fn a_sign_out_ends_the_streams_of_its_login_only() {
+    let (_dir, fences, app) = signed_in_console();
+    let decisions = state().decisions;
+    let issued = now_seconds() - 60;
+    let first = login_token(Some("login-1"), issued);
+    let second = login_token(Some("login-2"), issued);
+    let opened = |token: &str| {
+        crate::runtime::resolve_authorized_console_caller_from_token(&decisions, &fences, token)
+            .expect("a signed-in caller")
+            .verification
+    };
+    let (first_stream, second_stream) = (opened(&first), opened(&second));
+    let mut first_wakes = first_stream.session_fence_changes();
+    let mut second_wakes = second_stream.session_fence_changes();
+    first_wakes.mark_unchanged();
+    second_wakes.mark_unchanged();
+
+    let (status, signed_out) = console_answer(&app, Some(&first), SIGN_OUT, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{signed_out}");
+    assert!(signed_out["error"].is_null(), "{signed_out}");
+
+    assert!(first_wakes.has_changed().expect("the record is alive"));
+    assert!(second_wakes.has_changed().expect("the record is alive"));
+    let now = std::time::SystemTime::now();
+    assert!(
+        first_stream.current_at(now).is_none(),
+        "the stream of the login that signed out ends"
+    );
+    assert!(
+        second_stream.current_at(now).is_some(),
+        "the stream of the other login stays open"
+    );
+}

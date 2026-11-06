@@ -2731,6 +2731,15 @@ impl MethodRouter {
             "session/instruction_activations" => {
                 routed_arm(|| self.handle_session_instruction_activations(id, params)).await
             }
+            "session/set_instruction" => {
+                routed_arm(|| self.handle_session_set_instruction(id, params)).await
+            }
+            "session/revoke_instruction" => {
+                routed_arm(|| self.handle_session_revoke_instruction(id, params)).await
+            }
+            "session/instruction_status" => {
+                routed_arm(|| self.handle_session_instruction_status(id, params)).await
+            }
             "session/restore_transcript_revision" => {
                 routed_arm(|| self.handle_session_restore_transcript_revision(id, params)).await
             }
@@ -3092,6 +3101,21 @@ impl MethodRouter {
                     )
                 })
                 .await
+            }
+            #[cfg(feature = "mob")]
+            "mob/set_instruction" => {
+                routed_arm(|| handlers::mob::handle_set_instruction(id, params, &self.mob_state))
+                    .await
+            }
+            #[cfg(feature = "mob")]
+            "mob/revoke_instruction" => {
+                routed_arm(|| handlers::mob::handle_revoke_instruction(id, params, &self.mob_state))
+                    .await
+            }
+            #[cfg(feature = "mob")]
+            "mob/instruction_status" => {
+                routed_arm(|| handlers::mob::handle_instruction_status(id, params, &self.mob_state))
+                    .await
             }
             #[cfg(feature = "mob")]
             "mob/flows" => {
@@ -4333,6 +4357,143 @@ impl MethodRouter {
                 error::SESSION_NOT_FOUND,
                 format!("Session not found: {session_id}"),
             ),
+        }
+    }
+
+    /// `session/set_instruction` and `session/revoke_instruction`: one
+    /// session-owned operator-instruction write. A mob member's session takes
+    /// no session-level write: its instructions come from its mob
+    /// (`mob/set_instruction` with a member target), so it answers
+    /// `owned_by_mob`, the session-document authority's own verdict for a
+    /// member session.
+    async fn handle_session_instruction_write(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        session_id: &str,
+        write: meerkat_core::SessionInstructionWrite,
+    ) -> RpcResponse {
+        let session_id =
+            match handlers::parse_session_id_for_runtime(id.clone(), session_id, &self.runtime) {
+                Ok(session_id) => session_id,
+                Err(response) => return response,
+            };
+        match self.resolve_session_owner(&session_id).await {
+            Some(SessionOwner::Runtime) => {
+                match self
+                    .runtime
+                    .set_session_instruction(&session_id, write)
+                    .await
+                {
+                    Ok(receipt) => RpcResponse::success(
+                        id,
+                        meerkat_contracts::SessionInstructionWriteResult::from_receipt(
+                            &session_id,
+                            &receipt,
+                        ),
+                    ),
+                    Err(error) => RpcResponse::from_error(id, error),
+                }
+            }
+            #[cfg(feature = "mob")]
+            Some(SessionOwner::Mob) => handlers::instruction_set_error_response(
+                id,
+                meerkat_core::InstructionSetErrorCode::OwnedByMob,
+                "a mob member's session takes no session-level operator-instruction write; \
+                 write to the member through mob/set_instruction"
+                    .to_string(),
+            ),
+            None => RpcResponse::error(
+                id,
+                error::SESSION_NOT_FOUND,
+                format!("Session not found: {session_id}"),
+            ),
+        }
+    }
+
+    async fn handle_session_set_instruction(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: meerkat_contracts::SetSessionInstructionParams =
+            match handlers::parse_params(params) {
+                Ok(params) => params,
+                Err(response) => return response.with_id(id),
+            };
+        let write = params.write();
+        self.handle_session_instruction_write(id, &params.session_id, write)
+            .await
+    }
+
+    async fn handle_session_revoke_instruction(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: meerkat_contracts::RevokeSessionInstructionParams =
+            match handlers::parse_params(params) {
+                Ok(params) => params,
+                Err(response) => return response.with_id(id),
+            };
+        let write = params.write();
+        self.handle_session_instruction_write(id, &params.session_id, write)
+            .await
+    }
+
+    /// `session/instruction_status`: the session's committed
+    /// operator-instruction state, read without materializing it. A mob
+    /// member's session is read through its mob's session service.
+    async fn handle_session_instruction_status(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: meerkat_contracts::SessionInstructionStatusParams =
+            match handlers::parse_params(params) {
+                Ok(params) => params,
+                Err(response) => return response.with_id(id),
+            };
+        let session_id = match handlers::parse_session_id_for_runtime(
+            id.clone(),
+            &params.session_id,
+            &self.runtime,
+        ) {
+            Ok(session_id) => session_id,
+            Err(response) => return response,
+        };
+        let read = match self.resolve_session_owner(&session_id).await {
+            Some(SessionOwner::Runtime) => {
+                self.runtime.read_session_instructions(&session_id).await
+            }
+            #[cfg(feature = "mob")]
+            Some(SessionOwner::Mob) => self
+                .mob_state
+                .session_service()
+                .read_member_instructions(std::slice::from_ref(&session_id))
+                .await
+                .pop()
+                .unwrap_or_else(|| {
+                    Err(meerkat_core::service::SessionInstructionError::Session(
+                        meerkat_core::SessionError::NotFound {
+                            id: session_id.clone(),
+                        },
+                    ))
+                })
+                .map_err(crate::session_runtime::session_instruction_error_to_rpc),
+            None => {
+                return RpcResponse::error(
+                    id,
+                    error::SESSION_NOT_FOUND,
+                    format!("Session not found: {session_id}"),
+                );
+            }
+        };
+        match read {
+            Ok(read) => RpcResponse::success(
+                id,
+                meerkat_contracts::SessionInstructionStatusResult::from_read(&session_id, &read),
+            ),
+            Err(error) => RpcResponse::from_error(id, error),
         }
     }
 

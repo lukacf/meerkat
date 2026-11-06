@@ -11866,9 +11866,77 @@ async function exerciseCallerScope() {
   }
 }
 
+// After an answer that says its caller may have changed (a 401, or Meta's
+// refusal of the caller, `-32056`), the editor reads its capabilities again
+// before it sends anything else, so its next change names the caller the
+// surface names now. The refused change is not sent again, and without such
+// an answer nothing is read again.
+async function exerciseCallerScopeRefresh() {
+  const originalFetch = global.fetch;
+  const calls = [];
+  let scope = "console-caller:v1:first";
+  let answerOnce = null;
+  const answer = (request, body) => ({ ok: true, status: 200, json: async () => ({ jsonrpc: "2.0", id: request.id, ...body }) });
+  global.fetch = async (url, options) => {
+    const request = JSON.parse(options.body);
+    calls.push(request);
+    if (request.method === "meta/capabilities") {
+      return answer(request, {
+        result: { methods: ["meta/capabilities"], auth: { mode: "reference_app", reason: "reference app", caller_scope: scope } },
+      });
+    }
+    if (answerOnce) {
+      const once = answerOnce;
+      answerOnce = null;
+      return once(request);
+    }
+    return answer(request, { result: { source: request.method, row: { id: "f_scope" }, rows: [] } });
+  };
+  try {
+    controller.configure({ rpcUrl: "/flow-editor/rpc" });
+    await controller.loadCapabilities();
+
+    // Another person signed in to this browser: Meta refuses the change the
+    // editor made for the first one.
+    scope = "console-caller:v1:second";
+    answerOnce = (request) => answer(request, { error: { code: -32056, message: "caller changed", data: { kind: "caller_changed" } } });
+    await assert.rejects(() => controller.createDocument({ template: "blank" }));
+    const createMethod = calls[calls.length - 1].method;
+    let next = calls.length;
+    await controller.createDocument({ template: "blank" });
+    assert.equal(calls[next].method, "meta/capabilities", "the editor reads its caller again before its next request");
+    assert.equal(calls[next + 1].method, createMethod, "then sends the next change");
+    assert.equal(calls[next + 1].params.expected_caller_scope, "console-caller:v1:second", "which names the caller the surface names now");
+    assert.equal(calls.length, next + 2, "the refused change is not sent again");
+
+    // A 401 says the same.
+    scope = "console-caller:v1:third";
+    answerOnce = () => ({ ok: false, status: 401, json: async () => ({}) });
+    await assert.rejects(() => controller.createDocument({ template: "blank" }));
+    next = calls.length;
+    await controller.createDocument({ template: "blank" });
+    assert.equal(calls[next].method, "meta/capabilities", "after a 401 the editor reads its caller again");
+    assert.equal(calls[next + 1].params.expected_caller_scope, "console-caller:v1:third");
+
+    // Without such an answer nothing is read again.
+    next = calls.length;
+    await controller.createDocument({ template: "blank" });
+    assert.equal(calls.length, next + 1, "no capabilities read without a reason");
+    assert.equal(calls[next].params.expected_caller_scope, "console-caller:v1:third");
+
+    // Leave the editor naming no caller, as the exercises before found it.
+    scope = undefined;
+    await controller.loadCapabilities();
+  } finally {
+    global.fetch = originalFetch;
+    controller.configure({ rpcUrl: "/flow-editor/rpc" });
+  }
+}
+
 exerciseAuthoringOperationRunner()
   .then(exerciseReadOnlyRenderDraftGuardRetry)
   .then(exerciseCallerScope)
+  .then(exerciseCallerScopeRefresh)
   .then(() => {
     console.log("controller projection metadata ok");
   })

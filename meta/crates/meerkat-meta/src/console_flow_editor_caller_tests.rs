@@ -226,7 +226,7 @@ async fn flow_editor_change_rechecks_caller_after_await() {
         .revoke_sessions(BOB, std::time::SystemTime::now())
         .expect("revoke");
     hold.release();
-    let (status, answer) = tokio::time::timeout(Duration::from_secs(60), pending)
+    let (status, answer) = tokio::time::timeout(Duration::from_mins(1), pending)
         .await
         .expect("the write answers")
         .expect("the request task");
@@ -279,14 +279,7 @@ async fn flow_editor_deploy_rechecks_caller_before_it_runs() {
     let rkat = recording_rkat(work.path(), &marker);
     let bob = bob_token();
 
-    let (_, catalogs) = flow_editor_rpc(&app, &bob, "meta/mobpacks/catalogs", json!({})).await;
-    let document = catalogs["result"]["sample_mobpacks"]
-        .as_array()
-        .unwrap_or_else(|| panic!("sample mobpacks: {catalogs}"))
-        .iter()
-        .find(|sample| sample["id"] == "sample_docs_only")
-        .expect("the docs sample")["document"]
-        .clone();
+    let document = sample_document(&app, &bob).await;
     let (_, saved) = flow_editor_rpc(
         &app,
         &bob,
@@ -318,7 +311,7 @@ async fn flow_editor_deploy_rechecks_caller_before_it_runs() {
         .revoke_sessions(BOB, std::time::SystemTime::now())
         .expect("revoke");
     hold.release();
-    let (status, answer) = tokio::time::timeout(Duration::from_secs(60), pending)
+    let (status, answer) = tokio::time::timeout(Duration::from_mins(1), pending)
         .await
         .expect("the deploy answers")
         .expect("the request task");
@@ -330,6 +323,69 @@ async fn flow_editor_deploy_rechecks_caller_before_it_runs() {
     );
     assert!(!marker.exists(), "rkat never ran");
     assert!(!deploy_dir.exists(), "no archive was written");
+}
+
+/// The document of the docs-only sample mobpack, as the catalogs list it.
+async fn sample_document(app: &Router, token: &str) -> Value {
+    let (_, catalogs) = flow_editor_rpc(app, token, "meta/mobpacks/catalogs", json!({})).await;
+    catalogs["result"]["sample_mobpacks"]
+        .as_array()
+        .unwrap_or_else(|| panic!("sample mobpacks: {catalogs}"))
+        .iter()
+        .find(|sample| sample["id"] == "sample_docs_only")
+        .expect("the docs sample")["document"]
+        .clone()
+}
+
+/// A validation through `rkat` is a change: made for another caller it is
+/// refused with `caller_changed`, and `rkat` never runs. A validation
+/// without `rkat_validate` checks the document in process only, so it is no
+/// change, and the same scope passes it.
+#[cfg(unix)]
+#[tokio::test]
+async fn flow_editor_rkat_validation_checks_the_caller_scope() {
+    let (_dir, fences) = durable_fences();
+    let app = flow_editor(fences);
+    let work = tempfile::tempdir().expect("work directory");
+    let marker = work.path().join("rkat.runs");
+    let rkat = recording_rkat(work.path(), &marker);
+    let bob = bob_token();
+    let robot_scope = caller_scope(&robot_token()).await;
+    let document = sample_document(&app, &bob).await;
+
+    let (status, refused) = flow_editor_rpc(
+        &app,
+        &bob,
+        "meta/mobpacks/validate",
+        json!({
+            "document": document,
+            "rkat_validate": true,
+            "rkat_bin": rkat,
+            "expected_caller_scope": robot_scope,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{refused}");
+    assert_eq!(refused["error"]["code"], json!(-32056), "{refused}");
+    assert_eq!(
+        refused["error"]["data"]["kind"], "caller_changed",
+        "{refused}"
+    );
+    assert!(!marker.exists(), "rkat never ran");
+
+    let (status, validated) = flow_editor_rpc(
+        &app,
+        &bob,
+        "meta/mobpacks/validate",
+        json!({ "document": document, "expected_caller_scope": robot_scope }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{validated}");
+    assert!(
+        validated["error"].is_null(),
+        "a validation in process is no change: {validated}"
+    );
+    assert!(!marker.exists(), "rkat never ran");
 }
 
 /// The Flow Editor's capabilities on the Console's listener name the caller

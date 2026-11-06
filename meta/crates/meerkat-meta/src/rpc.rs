@@ -8312,6 +8312,69 @@ mod tests {
         }
     }
 
+    /// The Flow Editor's changes are one list, read by the Console's caller
+    /// check and by a candidate launch's refusal alike, and each arm is
+    /// decided on the request as its handler parses it: a change for one is
+    /// a change for the other, and a read or an in-process arm is neither.
+    /// (A candidate refuses every draft write that reaches a store the
+    /// authoritative launch reads, as one naming no store does.)
+    #[test]
+    fn the_flow_editor_changes_are_one_list_for_both_checks() {
+        let changes = [
+            ("meta/mobpacks/create", json!({})),
+            ("meta/mobpacks/save", json!({})),
+            ("meta/mobpacks/delete", json!({})),
+            ("meta/mobpacks/undo", json!({})),
+            ("meta/mobpacks/redo", json!({})),
+            ("meta/mobpacks/deploy", json!({ "execute": true })),
+            ("meta/mobpacks/validate", json!({ "rkat_validate": true })),
+            ("meta/mobpacks/validate", json!({ "rkatValidate": true })),
+        ];
+        let reads = [
+            ("meta/mobpacks/list", json!({})),
+            ("meta/mobpacks/get", json!({})),
+            ("meta/mobpacks/catalogs", json!({})),
+            ("meta/mobpacks/schema", json!({})),
+            ("meta/mobpacks/templates", json!({})),
+            ("meta/mobpacks/apply_operation", json!({})),
+            ("meta/mobpacks/graph_projection", json!({})),
+            ("meta/mobpacks/graph_to_flow", json!({})),
+            ("meta/mobpacks/source", json!({})),
+            ("meta/mobpacks/export", json!({})),
+            ("meta/mobpacks/import", json!({})),
+            ("meta/mobpacks/deploy_command", json!({ "execute": true })),
+            ("meta/mobpacks/deploy", json!({ "execute": false })),
+            ("meta/mobpacks/deploy", json!({ "execute": "true" })),
+            ("meta/mobpacks/validate", json!({})),
+            // The handler reads `rkat_validate` first and only falls back to
+            // `rkatValidate` when it is absent.
+            (
+                "meta/mobpacks/validate",
+                json!({ "rkat_validate": false, "rkatValidate": true }),
+            ),
+        ];
+        for (method, params) in &changes {
+            assert!(
+                super::is_mobpack_authoring_change(method, params),
+                "{method} with {params} is a change"
+            );
+            assert!(
+                super::candidate_launch_refuses(method, params, None),
+                "a candidate refuses {method} with {params}"
+            );
+        }
+        for (method, params) in &reads {
+            assert!(
+                !super::is_mobpack_authoring_change(method, params),
+                "{method} with {params} changes nothing"
+            );
+            assert!(
+                !super::candidate_launch_refuses(method, params, None),
+                "a candidate serves {method} with {params}"
+            );
+        }
+    }
+
     /// A candidate launch acts nowhere: it refuses the operator verbs that
     /// write a member's session transcript, typed, as it refuses member
     /// input, and an authoritative launch serves them.

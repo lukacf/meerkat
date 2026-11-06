@@ -40,6 +40,16 @@
 //!   realm. Renews and re-acquires never overlap, and a re-acquire runs on
 //!   a task of its own, so a dropped caller never leaves a granted token
 //!   unrecorded.
+//! - **An acquire the realm gave up on** (it runs under the realm's acquire
+//!   timeout) may still be granted by a store that completes a request its
+//!   caller dropped: a token this writer never recorded then holds the fence.
+//!   So while an acquire of this writer timed out since its last grant, a
+//!   holder it does not know may be its own: it waits out that holder's
+//!   recorded lease, making no acquire before it ends, and acquires again.
+//!   The same holder still holding after that end renewed its lease, and
+//!   only a live writer renews: that poisons the realm, as a foreign batch in
+//!   the listing does. With no timed-out acquire, an unknown holder poisons
+//!   at once.
 //! - **Self-fence on the local clock:** a mutation runs only while the last
 //!   renew did not fail and the last successful acquire or renew *started*
 //!   less than the lease minus the host-declared margin ago
@@ -577,6 +587,22 @@ impl ScopePlan {
     }
 }
 
+/// The acquires this writer gave up on at its acquire timeout since its last
+/// grant ([`SpiRealm::reacquire_serialized`]). A store may still grant such
+/// an acquire after the realm dropped the call, so while one exists a holder
+/// the writer does not know may be its own late grant.
+#[derive(Debug, Default)]
+struct UnansweredAcquires {
+    /// How many acquires timed out since the last grant.
+    timed_out: u32,
+    /// The holder a re-acquire met while acquires had timed out, and the
+    /// instant its recorded lease ends unless it is renewed: when the
+    /// answer arrived plus what the store said remained of it, so never
+    /// before the store's own end. No acquire is made before that instant,
+    /// and the same holder met after it renewed its lease.
+    waiting_out: Option<(FenceToken, Instant)>,
+}
+
 /// The shared realm handle. See the module documentation.
 pub struct SpiRealm {
     host: Arc<dyn HostStore>,
@@ -607,6 +633,9 @@ pub struct SpiRealm {
     /// attempt, so waits that give up during an outage leave one attempt
     /// behind them, not one each.
     reacquire_in_flight: StdMutex<Option<SharedReacquire>>,
+    /// The acquires this writer gave up on since its last grant, and the
+    /// holder it waits out meanwhile.
+    unanswered: StdMutex<UnansweredAcquires>,
     /// The version of every visible scope as this writer last saw or wrote
     /// it: a re-acquire compares a fresh listing with it to prove no other
     /// writer committed while this one was stopped.
@@ -861,6 +890,7 @@ impl SpiRealm {
             slow_settles: tokio::sync::watch::Sender::new(0),
             renew_gate: Mutex::new(()),
             reacquire_in_flight: StdMutex::new(None),
+            unanswered: StdMutex::new(UnansweredAcquires::default()),
             known_heads: StdMutex::new(HashMap::new()),
             uncertain: StdMutex::new(HashMap::new()),
             realm_poison: StdMutex::new(None),
@@ -1097,10 +1127,11 @@ impl SpiRealm {
     /// holder re-acquires; it never resumes on a later renew).
     ///
     /// # Errors
-    /// [`SpiError::LeaseLapsed`] when the acquire fails or times out
-    /// (nothing is poisoned: the caller has not mutated anything yet), and
-    /// [`SpiError::RealmPoisoned`] when another writer holds the realm or
-    /// committed while this one was stopped.
+    /// [`SpiError::LeaseLapsed`] when the acquire fails or times out, or
+    /// while the writer waits out a holder that may be its own acquire that
+    /// timed out (nothing is poisoned: the caller has not mutated anything
+    /// yet), and [`SpiError::RealmPoisoned`] when another writer holds the
+    /// realm or committed while this one was stopped.
     pub async fn ensure_lease(&self) -> Result<(), SpiError> {
         self.check_realm()?;
         if self.lease_is_live() {
@@ -1146,7 +1177,9 @@ impl SpiRealm {
     /// Acquire the fence again after a stop, and resume only when no other
     /// writer committed in between: a fresh listing (which, after the
     /// acquire, shows every batch committed before it) must match every
-    /// version this writer last saw or wrote.
+    /// version this writer last saw or wrote. A holder this writer does not
+    /// know is waited out while an acquire of its own timed out since its
+    /// last grant (see the module documentation).
     async fn reacquire(&self) -> Result<(), SpiError> {
         let _serial = self.renew_gate.lock().await;
         self.reacquire_serialized().await
@@ -1157,6 +1190,11 @@ impl SpiRealm {
         self.check_realm()?;
         if self.lease_is_live() {
             return Ok(());
+        }
+        // An exclusive acquire cannot supersede a holder before its
+        // recorded lease ends: make none until then.
+        if let Some(waiting) = self.waiting_out_holder(Instant::now()) {
+            return Err(waiting);
         }
         // No batch with the old token may be in flight.
         let _no_commits = self.fence_gate.write().await;
@@ -1184,29 +1222,22 @@ impl SpiRealm {
                             "the writer stopped and a re-acquire failed: {error}"
                         )));
                     }
-                    Err(_) => {
-                        return Err(SpiError::LeaseLapsed(
-                            "the writer stopped and a re-acquire timed out".into(),
-                        ));
-                    }
+                    Err(_) => return Err(self.acquire_timed_out()),
                 }
             }
-            Ok(Err(HostStoreError::Held { holder, .. })) => {
-                return Err(self.poison_realm(format!(
-                    "fenced out while stopped: token {holder} holds the realm"
-                )));
+            Ok(Err(HostStoreError::Held { holder, remaining })) => {
+                return Err(self.unknown_holder(holder, remaining));
             }
             Ok(Err(error)) => {
                 return Err(SpiError::LeaseLapsed(format!(
                     "the writer stopped and a re-acquire failed: {error}"
                 )));
             }
-            Err(_) => {
-                return Err(SpiError::LeaseLapsed(
-                    "the writer stopped and a re-acquire timed out".into(),
-                ));
-            }
+            Err(_) => return Err(self.acquire_timed_out()),
         };
+        // The grant's token is above every token acquired before it, a late
+        // grant of an acquire this writer gave up on included.
+        *lock(&self.unanswered) = UnansweredAcquires::default();
         let listed = self.list_versions().await?;
         if !self.listing_matches(&listed) {
             return Err(self.poison_realm(
@@ -1243,6 +1274,72 @@ impl SpiRealm {
         self.stopped.store(false, Ordering::Release);
         tracing::info!(token = %grant.token, "host store writer re-acquired the fence and resumes");
         Ok(())
+    }
+
+    /// The refusal of a re-acquire made before the recorded lease of the
+    /// holder this writer waits out ends, as of `now`; `None` once it ended,
+    /// or when the writer waits out no holder.
+    fn waiting_out_holder(&self, now: Instant) -> Option<SpiError> {
+        let (holder, until) = lock(&self.unanswered).waiting_out?;
+        (now < until).then(|| {
+            SpiError::LeaseLapsed(format!(
+                "the writer waits out the recorded lease of token {holder} ({:?} more): it may \
+                 be an acquire of this writer that timed out, granted late",
+                until - now
+            ))
+        })
+    }
+
+    /// An acquire of the re-acquire timed out: the realm dropped it, and a
+    /// store may still grant it. The refusal the re-acquire answers.
+    fn acquire_timed_out(&self) -> SpiError {
+        let mut unanswered = lock(&self.unanswered);
+        unanswered.timed_out = unanswered.timed_out.saturating_add(1);
+        SpiError::LeaseLapsed("the writer stopped and a re-acquire timed out".into())
+    }
+
+    /// An exclusive acquire met `holder`, a token this writer does not hold,
+    /// whose recorded lease lasts `remaining` more. Another writer holds the
+    /// realm, unless an acquire of this writer timed out since its last
+    /// grant: the holder may then be that acquire, granted late, which
+    /// nobody renews. The writer waits out its recorded lease and acquires
+    /// again. The same holder met once that lease ended renewed it, and only
+    /// a live writer renews.
+    fn unknown_holder(&self, holder: FenceToken, remaining: Duration) -> SpiError {
+        let mut unanswered = lock(&self.unanswered);
+        if unanswered.timed_out == 0 {
+            drop(unanswered);
+            return self.poison_realm(format!(
+                "fenced out while stopped: token {holder} holds the realm"
+            ));
+        }
+        if unanswered
+            .waiting_out
+            .is_some_and(|(waited, _)| waited == holder)
+        {
+            // Met only once its recorded lease ended: the re-acquire makes
+            // no acquire before that (`waiting_out_holder`).
+            drop(unanswered);
+            return self.poison_realm(format!(
+                "fenced out while stopped: token {holder} renewed its lease after this writer \
+                 waited it out, so another writer holds the realm"
+            ));
+        }
+        let timed_out = unanswered.timed_out;
+        unanswered.waiting_out = Some((holder, Instant::now() + remaining));
+        drop(unanswered);
+        tracing::warn!(
+            token = %holder,
+            ?remaining,
+            timed_out,
+            "host store fence is held by a token this writer does not know while acquires of its \
+             own timed out; it may be one of them, granted late, so the writer waits out its \
+             recorded lease and acquires again"
+        );
+        SpiError::LeaseLapsed(format!(
+            "token {holder} holds the fence for {remaining:?} more; it may be an acquire of this \
+             writer that timed out, granted late, so the writer waits it out"
+        ))
     }
 
     /// Whether a fresh listing shows only batches this writer wrote: every

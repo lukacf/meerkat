@@ -171,6 +171,26 @@ describe("user switch", () => {
     await waitFor(() => expect(vi.mocked(fake.loadExperience).mock.calls.length).toBeGreaterThan(experienceReads), { timeout: 1_000 });
     await waitFor(() => expect(screen.queryByText("Made as a")).toBeNull(), { timeout: 1_000 });
   });
+
+  it("host_items_cleared_on_principal_change", async () => {
+    const state: { caller: Caller } = { caller: "a" };
+    const { fake } = transport(state);
+    fake.loadExperience = vi.fn(async () => experienceFor(state.caller, {
+      console_config: { layout: { initial_agent: identity }, attention: { sources: [{ id: "host", label: "Host", url: "/host/attention" }] } },
+    })) as never;
+    // The host's source answers for whoever this browser's login is now.
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ items: [
+      { id: `item-${state.caller}`, title: `Waiting for ${state.caller}`, href: `/host/items/${state.caller}` },
+    ] }), { status: 200, headers: { "content-type": "application/json" } })));
+    render(<ConsoleApp baseUrl="" transport={fake} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Needs you/ }));
+    expect(await screen.findByTestId("host-attention:host:item-a")).toBeVisible();
+    await waitFor(() => expect(fake.whoami).toHaveBeenCalled());
+    state.caller = "b";
+    announceFromAnotherTab("caller-b");
+    // a's host items go at once, not at the next 30 s source read.
+    await waitFor(() => expect(screen.queryByTestId("host-attention:host:item-a")).toBeNull(), { timeout: 1_000 });
+  });
 });
 
 describe("one sign-in state", () => {

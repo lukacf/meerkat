@@ -102,8 +102,10 @@ import {
   consoleCommandMethod,
   createHttpConsoleTransport,
   createMetaConsoleController,
+  type ConsoleWhoami,
   type MetaConsoleTransport,
 } from "./lib/headless";
+import { announceConsoleCaller, consoleCallerFailure, subscribeConsoleCaller } from "./lib/console-caller";
 import {
   WORKGRAPH_CONFLICT_CODE,
   resolveWorkGraphBindingRevision,
@@ -240,7 +242,7 @@ import {
 } from "./panels/WorkGraphPanel";
 import { RoutingPanel, deliverySummaries } from "./panels/RoutingPanel";
 import { LogsPanel } from "./panels/LogsPanel";
-import { Topbar } from "./panels/Topbar";
+import { Topbar, type TopbarIdentity } from "./panels/Topbar";
 import { useConsoleDisplay, type ConsoleTheme } from "./panels/Tweaks";
 import {
   Sidebar as DesignSidebar,
@@ -620,6 +622,23 @@ function browserLocalStorage(): Storage | null {
   }
 }
 
+/** The identity chip's words for who the console acts as. A shared account
+ * names a principal but no person; an open console names nobody. */
+function consoleCallerWords(whoami: ConsoleWhoami): Pick<TopbarIdentity, "kind" | "label" | "detail"> {
+  switch (whoami.actorKind) {
+    case "person":
+      return { kind: "person", label: whoami.principal ?? "Signed in", detail: "Signed in" };
+    case "token_principal":
+      return { kind: "token_principal", label: whoami.principal ?? "Shared account", detail: "Signed in with a shared account, not as a person" };
+    case "service":
+      return { kind: "service", label: whoami.principal ?? "Service", detail: "Signed in as a service" };
+    case "anonymous":
+      return { kind: "anonymous", label: "Not signed in", detail: "Open console: everyone here acts as the open console" };
+    default:
+      return { kind: whoami.actorKind, label: whoami.principal ?? "Signed in", detail: "Signed in" };
+  }
+}
+
 /// Settle a saved send attempt in its own namespace after the view that
 /// dispatched it ended (remount) or moved to another principal's scope. Runs
 /// under the same storage lock and merge rules as every durable writer, then
@@ -905,31 +924,142 @@ export function ConsoleApp(props: ConsoleAppProps): React.JSX.Element {
   return <ConsoleAppAuthority key={instanceKey} {...props} />;
 }
 
+/** How an instance tells its authority what it learned about its caller. */
+interface ConsoleCallerHandlers {
+  /** The experience's storage scope: `false` when it changed (the instance ends). */
+  observeScope: (scope: string | undefined) => boolean;
+  /** The caller this instance acts as (`meta/console/whoami`'s `caller_scope`). */
+  onCaller: (callerScope: string) => void;
+  /** A console request said the login ended (a 401, a sign-in redirect). */
+  onSignInRequired: () => void;
+  /** The gateway serves another caller than this instance acts for. */
+  onCallerChanged: () => void;
+  /** The instance's lifetime, so a switch can end it at once. */
+  registerLifetime: (lifetime: { active: boolean; generation: number }) => void;
+}
+
 function ConsoleAppAuthority(props: ConsoleAppProps): React.JSX.Element {
   const observedScope = React.useRef<{ value: string | undefined } | null>(null);
   const [generation, setGeneration] = React.useState(0);
+  // Why the console shows no views: the login ended (a 401 or a sign-in
+  // redirect), or this browser signed out of this console.
+  const [signedOut, setSignedOut] = React.useState<"ended" | "signed_out" | null>(null);
+  const signedOutRef = React.useRef(signedOut);
+  signedOutRef.current = signedOut;
+  // The caller of the current instance, and the last one any instance knew.
+  const callerRef = React.useRef<string | undefined>(undefined);
+  const lastCallerRef = React.useRef<string | undefined>(undefined);
+  const lifetimeRef = React.useRef<{ active: boolean; generation: number } | null>(null);
+  // Ends the current instance's work now, before React unmounts it: its
+  // requests, locks and queue drains stop with its lifetime.
+  const retireInstance = React.useCallback(() => {
+    const lifetime = lifetimeRef.current;
+    if (lifetime) {
+      lifetime.active = false;
+      lifetime.generation += 1;
+    }
+    callerRef.current = undefined;
+  }, []);
+  const restart = React.useCallback((callerChanged: boolean) => {
+    // A same-URL account switch ends all old subscriptions, locks, drafts
+    // and transcript state before the replacement authority loads. The
+    // previous account's sends no longer read "You asked".
+    retireInstance();
+    if (callerChanged) forgetOwnSends();
+    observedScope.current = null;
+    setSignedOut(null);
+    setGeneration(current => current + 1);
+  }, [retireInstance]);
   const observeScope = React.useCallback((value: string | undefined): boolean => {
     const previous = observedScope.current;
     observedScope.current = { value };
     if (previous && previous.value !== value) {
-      // A same-URL account switch ends all old subscriptions, locks, drafts
-      // and transcript state before the replacement authority loads. The
-      // previous account's sends no longer read "You asked".
+      retireInstance();
       forgetOwnSends();
       setGeneration(current => current + 1);
       return false;
     }
     return true;
-  }, []);
-  return <ConsoleAppInstance key={generation} {...props} observeScope={observeScope} />;
+  }, [retireInstance]);
+  const handlers = React.useMemo<ConsoleCallerHandlers>(() => ({
+    observeScope,
+    onCaller: (callerScope) => {
+      callerRef.current = callerScope;
+      lastCallerRef.current = callerScope;
+      announceConsoleCaller(browserLocalStorage(), props.baseUrl, callerScope);
+    },
+    onSignInRequired: () => {
+      if (signedOutRef.current) return;
+      retireInstance();
+      setSignedOut("ended");
+    },
+    onCallerChanged: () => restart(true),
+    registerLifetime: (lifetime) => { lifetimeRef.current = lifetime; },
+  }), [observeScope, props.baseUrl, restart, retireInstance]);
+  // Another tab of this gateway's console learned who it acts as, or signed
+  // out: a different caller reloads this tab's authority at once, a sign-out
+  // leaves its views, and a sign-in after this tab's login ended brings it back.
+  React.useEffect(() => subscribeConsoleCaller(props.baseUrl, (announcement) => {
+    if (announcement.caller === null) {
+      retireInstance();
+      setSignedOut("signed_out");
+      return;
+    }
+    if (signedOutRef.current) {
+      restart(announcement.caller !== lastCallerRef.current);
+      return;
+    }
+    if (callerRef.current !== undefined && announcement.caller !== callerRef.current) restart(true);
+  }), [props.baseUrl, restart, retireInstance]);
+  // While signed out, coming back to the tab tries the login again.
+  React.useEffect(() => {
+    if (!signedOut) return undefined;
+    const retry = () => { if (document.visibilityState !== "hidden") restart(false); };
+    window.addEventListener("focus", retry);
+    return () => window.removeEventListener("focus", retry);
+  }, [signedOut, restart]);
+  if (signedOut) return <ConsoleSignInState reason={signedOut} onRetry={() => restart(false)} />;
+  return <ConsoleAppInstance key={generation} {...props} callerHandlers={handlers} />;
 }
 
-function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlPolicy, customPanels: suppliedPanels, panelService, mcpAppsHost, observeScope }: ConsoleAppProps & { observeScope: (scope: string | undefined) => boolean }): React.JSX.Element {
+/** The one sign-in state: the login ended (an expired login, a sign-out in
+ * another tab, a front's sign-in redirect), so no view of it stays. */
+function ConsoleSignInState({ reason, onRetry }: { reason: "ended" | "signed_out"; onRetry: () => void }): React.JSX.Element {
+  // The browser's own display choices; there is no caller to read others for.
+  const display = useConsoleDisplay();
+  return (
+    <div
+      className="cc-theme-scope console-sign-in"
+      data-cc-theme={display.settings.theme}
+      data-cc-variant={display.settings.variant}
+      data-testid="console-sign-in"
+      data-reason={reason}
+      role="alert"
+    >
+      <h1 className="console-sign-in__title">{reason === "signed_out" ? "You signed out of this console" : "Your console sign-in ended"}</h1>
+      <p className="console-sign-in__text">
+        {reason === "signed_out"
+          ? "Sign in to use the console again. Other tabs of this console signed out too."
+          : "Sign in again to continue. Nothing from the ended sign-in is shown, and messages you queued stay saved in this browser."}
+      </p>
+      <div className="console-sign-in__actions">
+        <button type="button" className="cc-btn cc-btn--primary" onClick={() => window.location.reload()}>Sign in</button>
+        <button type="button" className="cc-btn" onClick={onRetry}>Try again</button>
+      </div>
+    </div>
+  );
+}
+
+function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlPolicy, customPanels: suppliedPanels, panelService, mcpAppsHost, callerHandlers }: ConsoleAppProps & { callerHandlers: ConsoleCallerHandlers }): React.JSX.Element {
   countRender("ConsoleApp");
+  const observeScope = callerHandlers.observeScope;
+  const callerHandlersRef = React.useRef(callerHandlers);
+  callerHandlersRef.current = callerHandlers;
   const lifetimeRef = React.useRef({ active: true, generation: 0 });
   React.useLayoutEffect(() => {
     lifetimeRef.current.active = true;
     lifetimeRef.current.generation += 1;
+    callerHandlersRef.current.registerLifetime(lifetimeRef.current);
     return () => {
       lifetimeRef.current.active = false;
       lifetimeRef.current.generation += 1;
@@ -947,10 +1077,25 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           throw new DOMException("Console authority lifetime ended", "AbortError");
         }
       };
+      // A request answered that the login ended (one sign-in state for the
+      // whole console) or that the gateway serves another caller now (a
+      // switch, at once). The caller of the request still gets its error.
+      const report = (error: unknown, generation: number) => {
+        if (!lifetimeRef.current.active || lifetimeRef.current.generation !== generation) return;
+        const failure = consoleCallerFailure(error);
+        if (failure === "sign_in") callerHandlersRef.current.onSignInRequired();
+        else if (failure === "caller_changed") callerHandlersRef.current.onCallerChanged();
+      };
       const call = async <T,>(operation: () => Promise<T>): Promise<T> => {
         const generation = lifetimeRef.current.generation;
         current(generation);
-        const value = await operation();
+        let value: T;
+        try {
+          value = await operation();
+        } catch (error) {
+          report(error, generation);
+          throw error;
+        }
         current(generation);
         return value;
       };
@@ -969,9 +1114,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           const generation = lifetimeRef.current.generation;
           current(generation);
           const active = () => lifetimeRef.current.active && lifetimeRef.current.generation === generation;
-          return source.subscribeTimeline({ ...input, onTransportState: state => { if (active()) input.onTransportState?.(state); } },
+          // A stream that needs a sign-in is the console's sign-in state too.
+          const watch = (state: ConsoleTransportState) => {
+            if (state.phase === "authentication-required") callerHandlersRef.current.onSignInRequired();
+          };
+          return source.subscribeTimeline({ ...input, onTransportState: state => { if (active()) { input.onTransportState?.(state); watch(state); } } },
             frame => { if (active()) onFrame(frame); },
-            { ...options, onTransportState: state => { if (active()) options?.onTransportState?.(state); } });
+            { ...options, onTransportState: state => { if (active()) { options?.onTransportState?.(state); watch(state); } } });
         },
       };
       return scoped;
@@ -988,7 +1137,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     () => consoleTransport.readBlob ? input => consoleTransport.readBlob!(input) : undefined,
     [consoleTransport],
   );
-  const { voice, state: voiceState } = useVoiceController(baseUrl);
+  // The caller this console acts as (`caller_scope`), for requests that do
+  // not go through the transport: voice and MCP Apps tool calls.
+  const callerScopeRef = React.useRef<string | undefined>(undefined);
+  const { voice, state: voiceState } = useVoiceController(baseUrl, () => callerScopeRef.current);
   const sampleVoiceWaveform = React.useCallback(
     (source: "microphone" | "speaker", samples: Float32Array<ArrayBuffer>) => voice?.sampleWaveform(source, samples),
     [voice],
@@ -2851,6 +3003,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [approvalOpens, setApprovalOpens] = React.useState(0);
   const approvalResourceRef = React.useRef<PendingApprovalResource | null>(null);
   const approvalScope = `${sendScope}:${experience?.runtime_id || "loading"}`;
+  // Who this console acts as, read once per scope from `meta/console/whoami`
+  // (`undefined` until it answers; `null` when the connection has no whoami,
+  // an older gateway, or the read failed). The instance tells its authority,
+  // which tells this browser's other tabs of the console.
   // The gateway decides approvals only as the signed-in person the
   // connection names (anyone else is refused as approver_unauthenticated),
   // so the inbox offers decisions only when whoami reports a person. A
@@ -2859,7 +3015,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   // The same read names the principal the caller's WorkGraph claims are
   // owned by: an identified caller claims as itself, and an open console's
   // caller without a token claims nothing.
-  const [approvalDecider, setApprovalDecider] = React.useState<{ scope: string; person: boolean; claimant?: string }>();
+  const [callerRead, setCallerRead] = React.useState<{ scope: string; whoami: ConsoleWhoami | null }>();
   React.useEffect(() => {
     let active = true;
     const scope = sendScope;
@@ -2867,18 +3023,31 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       .then(() => consoleTransport.whoami ? consoleTransport.whoami() : null)
       .then((whoami) => {
         if (!active) return;
-        const claimant = whoami && whoami.actorKind !== "anonymous" ? whoami.principal : undefined;
-        setApprovalDecider({ scope, person: whoami?.actorKind === "person", ...(claimant ? { claimant } : {}) });
+        setCallerRead({ scope, whoami });
+        if (whoami?.callerScope) callerHandlersRef.current.onCaller(whoami.callerScope);
       })
       .catch(() => {
-        if (active) setApprovalDecider({ scope, person: false });
+        if (active) setCallerRead({ scope, whoami: null });
       });
     return () => {
       active = false;
     };
   }, [consoleTransport, sendScope]);
-  const approvalsDecidable = approvalDecider?.scope === sendScope ? approvalDecider.person : undefined;
-  const workGraphClaimant = approvalDecider?.scope === sendScope ? approvalDecider.claimant : undefined;
+  const caller = callerRead?.scope === sendScope ? callerRead.whoami : undefined;
+  callerScopeRef.current = caller?.callerScope;
+  const approvalsDecidable = caller === undefined ? undefined : caller?.actorKind === "person";
+  const workGraphClaimant = caller && caller.actorKind !== "anonymous" ? caller.principal : undefined;
+  // Signing out: this browser's other tabs of the console leave their views
+  // at once, then the browser goes to the host's sign-out.
+  const signOutOfConsole = React.useCallback(() => {
+    announceConsoleCaller(browserLocalStorage(), baseUrl, null);
+  }, [baseUrl]);
+  const signOutHref = experience?.console_config?.sign_out?.href;
+  const signOutMethod = experience?.console_config?.sign_out?.method === "post" ? "post" : "get";
+  const identityChip = React.useMemo<TopbarIdentity | undefined>(() => (caller ? {
+    ...consoleCallerWords(caller),
+    ...(signOutHref ? { signOut: { href: signOutHref, method: signOutMethod }, onSignOut: signOutOfConsole } : {}),
+  } : undefined), [caller, signOutHref, signOutMethod, signOutOfConsole]);
   React.useEffect(() => {
     setApprovalSnapshot(undefined);
     setSelectedApprovalId(undefined);
@@ -4722,7 +4891,15 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       if (previous?.inFlight || previous?.token === token) return;
       const request = { inFlight: true, token };
       autoDrainRequestedRef.current.set(key, request);
-      void dispatchPendingAttempt(identity, head.id, "queue").finally(() => {
+      // Nobody pressed Send: read who this console acts as first. When this
+      // browser's login changed, the experience names another scope and the
+      // instance ends before anything is sent; a failed read sends nothing.
+      const scope = sendScopeRef.current;
+      void (async () => {
+        try { await loadExperience(); } catch { return false; }
+        if (!lifetimeRef.current.active || scope !== sendScopeRef.current) return false;
+        return dispatchPendingAttempt(identity, head.id, "queue");
+      })().finally(() => {
         if (autoDrainRequestedRef.current.get(key) !== request) return;
         const current = getPendingStack(identity).find((item) => item.id === head.id);
         if (current?.state === "draft") autoDrainRequestedRef.current.set(key, { inFlight: false, token: tokenFor() });
@@ -5020,7 +5197,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     try {
       return createNativeMcpAppsHost({ baseUrl, sandboxProxyUrl, authority: sendScope,
         runtimeId: experience?.runtime_id, readOnly: consoleReadOnly,
-        requestTimeoutMs: consoleFetchTimeoutMsRef.current });
+        requestTimeoutMs: consoleFetchTimeoutMsRef.current,
+        callerScope: () => callerScopeRef.current });
     } catch {
       // A missing or invalid isolated sandbox retains the ordinary transcript.
       return undefined;
@@ -6361,6 +6539,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       )}
       <Topbar
         connectionStatus={<ConsoleTransportStatus state={transportState} onRetry={() => setTransportRetry((value) => value + 1)} />}
+        identity={identityChip}
         mobName={mobName}
         brandLabel={brand?.label}
         brandLogoUrl={brand?.logo_url}

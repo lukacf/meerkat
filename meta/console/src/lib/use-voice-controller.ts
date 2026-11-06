@@ -12,10 +12,14 @@ const IDLE: VoiceSessionSnapshot = {
 const idleSnapshot = () => IDLE;
 const idleSubscribe = () => () => {};
 
-export function useVoiceController(baseUrl: string) {
+/** The console's voice session for `baseUrl`. `callerScope` names the caller
+ * the console acts as on every voice request (`expected_caller_scope`). */
+export function useVoiceController(baseUrl: string, callerScope?: () => string | undefined) {
   const [voice, setVoice] = React.useState<VoiceSession | null>(null);
+  const callerScopeRef = React.useRef(callerScope);
+  callerScopeRef.current = callerScope;
   React.useEffect(() => {
-    const owned = createVoiceSession(baseUrl);
+    const owned = createVoiceSession(baseUrl, undefined, () => callerScopeRef.current?.());
     setVoice(owned);
     return () => owned.dispose();
   }, [baseUrl]);

@@ -680,11 +680,21 @@ describe("stock durable queue integration", () => {
   });
   const savedAttempts = (scope = "runtime/realm/principal") =>
     JSON.parse(window.localStorage.getItem(consoleSendStorageKey(scope, identity))!).attempts;
+  /** A 401 is the console's one sign-in state; signing in again (here, in
+   * another tab of this browser) brings the console and its saved rows back. */
+  const signInAgain = async () => {
+    expect(await screen.findByTestId("console-sign-in")).toBeVisible();
+    act(() => {
+      window.dispatchEvent(new StorageEvent("storage", { key: "meta-console-caller:v1:", newValue: JSON.stringify({ caller: "caller-signed-in-again", at: Date.now() }) }));
+    });
+    await screen.findByTestId(`chat-composer:${identity}`);
+  };
 
   it("shows a refused queue send as a typed 401, never as a pending acceptance, and clears the busy mark", async () => {
     const send = vi.fn(async () => { throw unauthenticated(); });
     render(<ConsoleApp baseUrl="" storageNamespace="runtime/realm/principal" transport={transport(send)} />);
     await compose("sent from off the home network");
+    await signInAgain();
     const row = await screen.findByTestId(/^pending-item:/);
     await waitFor(() => expect(within(row).getByText("Not sent")).toBeVisible());
     expect(within(row).getByTestId(/^pending-explanation:/)).toHaveTextContent(
@@ -713,6 +723,7 @@ describe("stock durable queue integration", () => {
     await compose("steer from off the home network");
     await waitFor(() => expect(screen.getByTestId("pending-stack")).toBeTruthy());
     fireEvent.click(screen.getByTestId(/^pending-steer:/));
+    await signInAgain();
     const row = await screen.findByTestId(/^pending-item:/);
     await waitFor(() => expect(within(row).getByText("Not sent")).toBeVisible());
     const saved = savedAttempts();
@@ -868,14 +879,31 @@ describe("stock durable queue integration", () => {
     const send = vi.fn(async () => { throw Object.assign(new TypeError("Failed to fetch"), { transportFailure: "connection_failed" }); });
     const fake = transport(send);
     fake.capabilities = async () => ({ version: "test", methods: ["meta/console/send", "meta/console/timeline", "meta/console/inspect_identity"] }) as never;
-    fake.executeCommand = vi.fn(async () => { throw unauthenticated(); });
+    fake.executeCommand = vi.fn(async () => { throw Object.assign(new Error("meta/console/inspect_identity request failed 503"), { httpStatus: 503 }); });
     render(<ConsoleApp baseUrl="" storageNamespace="runtime/realm/principal" transport={fake} />);
     await compose("check me");
     const row = await screen.findByTestId(/^pending-item:/);
     fireEvent.click(await within(row).findByRole("button", { name: "Check" }));
     expect(await within(row).findByTestId(/^pending-check:/)).toHaveTextContent(
-      "Couldn't check: you were signed out. Sign in and check again.",
+      "Couldn't check: the server had a problem.",
     );
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(savedAttempts()[0].state).toBe("outcome-unknown");
+  });
+
+  it("enters the sign-in state when an acceptance check meets an ended login, and keeps the row uncertain", async () => {
+    const send = vi.fn(async () => { throw Object.assign(new TypeError("Failed to fetch"), { transportFailure: "connection_failed" }); });
+    const fake = transport(send);
+    fake.capabilities = async () => ({ version: "test", methods: ["meta/console/send", "meta/console/timeline", "meta/console/inspect_identity"] }) as never;
+    fake.executeCommand = vi.fn(async () => { throw unauthenticated(); });
+    render(<ConsoleApp baseUrl="" storageNamespace="runtime/realm/principal" transport={fake} />);
+    await compose("check me");
+    const row = await screen.findByTestId(/^pending-item:/);
+    fireEvent.click(await within(row).findByRole("button", { name: "Check" }));
+    expect(await screen.findByTestId("console-sign-in")).toBeVisible();
+    fake.executeCommand = vi.fn(async () => ({ result: {} }) as never);
+    await signInAgain();
+    expect(within(await screen.findByTestId(/^pending-item:/)).getByRole("button", { name: "Check" })).toBeEnabled();
     expect(send).toHaveBeenCalledTimes(1);
     expect(savedAttempts()[0].state).toBe("outcome-unknown");
   });
@@ -885,7 +913,11 @@ describe("stock durable queue integration", () => {
       static createObjectURL = vi.fn(() => `blob:preview-${Math.random()}`);
       static revokeObjectURL = vi.fn();
     });
-    const send = vi.fn(async (_input: Parameters<MetaConsoleTransport["send"]>[0]) => { throw unauthenticated(); });
+    const refused = Object.assign(new Error("meta/console/send request failed 403: send access denied"), {
+      httpStatus: 403,
+      responseRpcError: { code: -32030, message: "send access denied", data: { kind: "access_denied" } },
+    });
+    const send = vi.fn(async (_input: Parameters<MetaConsoleTransport["send"]>[0]) => { throw refused; });
     const fake = transport(send); const experience = await fake.loadExperience();
     fake.loadExperience = async () => ({ ...experience, agent_sidebar: { live_snapshot: { agents: [{ identity, member_id: identity, agent_id: identity, label: "Queue agent", kind: "member", state: "running", addressable: true, affordances: { can_send_message: true }, model_capabilities: { image_input: true } }] } } }) as never;
     render(<ConsoleApp baseUrl="" storageNamespace="runtime/realm/principal" transport={fake} />);
@@ -897,10 +929,30 @@ describe("stock durable queue integration", () => {
     await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
     expect(send.mock.calls[0][0].attachments).toEqual([file]);
     expect(await screen.findByTestId("console-action-error")).toHaveTextContent(
-      "Sign-in required (401). Nothing was sent.",
+      "Not allowed to send to this agent (403): send access denied. Nothing was sent.",
     );
     expect(textarea.value).toBe("look at this from off the home network");
     expect(screen.getAllByRole("button", { name: "Remove attachment" })).toHaveLength(1);
+    expect(screen.queryByText("Sending")).toBeNull();
+  });
+
+  it("keeps an attachment send's text when it meets an ended login", async () => {
+    vi.stubGlobal("URL", class extends URL {
+      static createObjectURL = vi.fn(() => `blob:preview-${Math.random()}`);
+      static revokeObjectURL = vi.fn();
+    });
+    const send = vi.fn(async (_input: Parameters<MetaConsoleTransport["send"]>[0]) => { throw unauthenticated(); });
+    const fake = transport(send); const experience = await fake.loadExperience();
+    fake.loadExperience = async () => ({ ...experience, agent_sidebar: { live_snapshot: { agents: [{ identity, member_id: identity, agent_id: identity, label: "Queue agent", kind: "member", state: "running", addressable: true, affordances: { can_send_message: true }, model_capabilities: { image_input: true } }] } } }) as never;
+    render(<ConsoleApp baseUrl="" storageNamespace="runtime/realm/principal" transport={fake} />);
+    await screen.findByTestId(`chat-composer:${identity}`);
+    const file = new File([new Uint8Array([1, 2, 3])], "photo.png", { type: "image/png" });
+    fireEvent.drop(document.querySelector(".composer__shell")!, { dataTransfer: { files: [file], items: [], types: ["Files"], getData: () => "" } });
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Remove attachment" })).toHaveLength(1));
+    await compose("look at this from off the home network");
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    await signInAgain();
+    expect((screen.getByTestId(`chat-composer:${identity}`) as HTMLTextAreaElement).value).toBe("look at this from off the home network");
     expect(screen.queryByText("Sending")).toBeNull();
   });
 

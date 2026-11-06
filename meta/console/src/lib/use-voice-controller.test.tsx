@@ -52,5 +52,14 @@ it("keeps the controller on rerender and disposes it when the gateway changes", 
   expect(sessions).toHaveLength(2);
   expect(sessions[0].dispose).toHaveBeenCalledOnce();
   expect(view.result.current.voice).toBe(sessions[1]);
-  expect(create).toHaveBeenLastCalledWith("/second");
+  expect(create.mock.lastCall?.[0]).toBe("/second");
+});
+
+it("names the caller the console acts as on the session's requests, as the console learns it", () => {
+  let callerScope: string | undefined;
+  renderHook(() => useVoiceController("/gateway", () => callerScope));
+  const sessionCaller = create.mock.lastCall?.[2];
+  expect(sessionCaller?.()).toBeUndefined();
+  callerScope = "caller-a";
+  expect(sessionCaller?.()).toBe("caller-a");
 });

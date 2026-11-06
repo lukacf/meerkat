@@ -6,7 +6,7 @@ import {
   type LivePlaybackOwnerReadiness,
   type PendingLiveChannelHandle,
 } from "../../../sdk/typescript/src/live";
-import { callConsoleRpc } from "./network";
+import { callConsoleRpc, callerScopeParam } from "./network";
 import { errorMessage, httpStatusCode, jsonRpcErrorCode } from "./errors";
 import { CONSOLE_RPC_PATHS } from "./contract";
 import { parseVoiceContextStatus, type VoiceContextPreparation } from "./voice-context";
@@ -227,7 +227,7 @@ export function isTransientRpcFailure(error: unknown): boolean {
   return true;
 }
 
-function browserEnvironment(baseUrl: string): VoiceSessionEnvironment {
+function browserEnvironment(baseUrl: string, callerScope?: () => string | undefined): VoiceSessionEnvironment {
   return {
     voiceAvailable: (identity) => queryVoiceAvailability(baseUrl, identity),
     createAudioContext: () => {
@@ -248,7 +248,9 @@ function browserEnvironment(baseUrl: string): VoiceSessionEnvironment {
     createPeerConnection: () => new RTCPeerConnection(),
     createMediaStream: (tracks) => new MediaStream(tracks ?? []),
     createAudioElement: () => document.createElement("audio"),
-    rpc: (method, params, timeoutMs) => callConsoleRpc(baseUrl, method, params, timeoutMs),
+    // Every voice request names the caller the console acts as; the gateway
+    // refuses a voice open made for another caller (`caller_changed`).
+    rpc: (method, params, timeoutMs) => callConsoleRpc(baseUrl, method, { ...params, ...callerScopeParam(callerScope?.()) }, timeoutMs),
     pagehideClose: (params) => {
       // Keepalive is needed specifically during document unloading, unlike ordinary console RPC.
       void fetch(`${baseUrl}${CONSOLE_RPC_PATHS.jsonRpc}`, {
@@ -415,8 +417,10 @@ export interface VoiceSession {
 export function createVoiceSession(
   baseUrl: string,
   environment?: VoiceSessionEnvironment,
+  /** The caller the console acts as, for the browser environment's requests. */
+  callerScope?: () => string | undefined,
 ): VoiceSession {
-  const env = environment ?? browserEnvironment(baseUrl);
+  const env = environment ?? browserEnvironment(baseUrl, callerScope);
   const listeners = new Set<() => void>();
   let snapshot: VoiceSessionSnapshot = {
     phase: "idle", target: null, microphoneMuted: false, speakerMuted: false,

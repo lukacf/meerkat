@@ -12,6 +12,7 @@ import {
 } from "./contract";
 import {
   callConsoleRpc,
+  callerScopeParam,
   fetchJson,
   queryTimeline,
   sendConsole,
@@ -533,21 +534,48 @@ export function createHttpConsoleTransport({
   fetchTimeoutMs?: number | (() => number);
 }): MetaConsoleTransport {
   const timeout = () => typeof fetchTimeoutMs === "function" ? fetchTimeoutMs() : fetchTimeoutMs;
+  // Who this transport acts as: the latest `meta/console/whoami` answer.
+  // Every command, send and upload names it (`expected_caller_scope`), so the
+  // gateway refuses a change made for anyone else instead of making it as
+  // them. Each `whoami()` reads again, so a console that loads again after a
+  // user switch names the caller its own read found; the first change waits
+  // for a read when none has answered yet. A failed read keeps the previous
+  // answer, and a gateway without whoami (method not found) is not asked
+  // again by a change: its changes name no caller.
+  let known: ConsoleWhoami | undefined;
+  let reading: Promise<ConsoleWhoami> | undefined;
+  let reads = 0;
+  let unsupported = false;
+  const whoami = (): Promise<ConsoleWhoami> => {
+    const sequence = ++reads;
+    const read = callConsoleRpc<unknown>(baseUrl, CONSOLE_RPC_METHODS.whoami, {}, timeout()).then(normalizeWhoami);
+    reading = read;
+    void read.then(
+      (value) => { if (sequence === reads) known = value; },
+      (error: unknown) => { if (isJsonRpcMethodNotFoundError(error)) unsupported = true; },
+    ).finally(() => { if (reading === read) reading = undefined; });
+    return read;
+  };
+  const callerScope = async (): Promise<string | undefined> => {
+    if (unsupported) return undefined;
+    const pending = reading ?? (known ? undefined : whoami());
+    if (pending) await pending.catch(() => undefined);
+    return known?.callerScope;
+  };
   return {
     loadExperience: () => fetchJson<ConsoleExperience>(baseUrl, CONSOLE_REST_PATHS.experience, timeout()),
     loadModules: () => fetchJson<ConsoleModulesResponse>(baseUrl, CONSOLE_REST_PATHS.modules, timeout()),
     capabilities: async () => normalizeCapabilities(
       await callConsoleRpc<unknown>(baseUrl, CONSOLE_RPC_METHODS.capabilities, {}, timeout()),
     ),
-    whoami: async () => normalizeWhoami(
-      await callConsoleRpc<unknown>(baseUrl, CONSOLE_RPC_METHODS.whoami, {}, timeout()),
-    ),
+    whoami,
     queryTimeline: (input) => queryTimeline(baseUrl, input, input.limit, timeout(), input.signal),
     subscribeTimeline: (input, onFrame, options) => subscribeTimelineEvents(baseUrl, input, onFrame, {
       signal: input.signal, onTransportState: input.onTransportState, ...options,
     }),
-    send: (input) => {
+    send: async (input) => {
       const handlingMode = input.handlingMode ?? "queue";
+      const scope = await callerScope();
       if (input.attachments?.length) {
         return sendConsoleMultipart(
           baseUrl,
@@ -558,6 +586,7 @@ export function createHttpConsoleTransport({
           input.idempotencyKey,
           handlingMode,
           timeout(),
+          scope,
         );
       }
       return sendConsole(
@@ -568,6 +597,7 @@ export function createHttpConsoleTransport({
         input.idempotencyKey,
         handlingMode,
         timeout(),
+        scope,
       );
     },
     executeCommand: async (input) => {
@@ -580,6 +610,8 @@ export function createHttpConsoleTransport({
         }
         params.identity = identity;
       }
+      Object.assign(params, callerScopeParam(await callerScope()));
+      input.signal?.throwIfAborted();
       let result: unknown;
       try {
         result = await callConsoleRpc<unknown>(baseUrl, spec.method, params, timeout(), input.signal);
@@ -598,7 +630,7 @@ export function createHttpConsoleTransport({
         result,
       };
     },
-    upload: (input) => uploadConsoleBlobMultipart(baseUrl, input, timeout()),
+    upload: async (input) => uploadConsoleBlobMultipart(baseUrl, input, timeout(), await callerScope()),
     readBlob: (input) => readConsoleBlob(baseUrl, input.blobId, timeout(), input.signal),
     blobUrl: (blobId) => `${baseUrl}${CONSOLE_BLOB_PATH_PREFIX}${encodeURIComponent(blobId)}`,
   };

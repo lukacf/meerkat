@@ -1,13 +1,30 @@
 import React from "react";
 import { Chip } from "../../../packages/console-components/src/panel-kit/chip";
-import { IconButton } from "../../../packages/console-components/src/panel-kit/button";
+import { Button, IconButton } from "../../../packages/console-components/src/panel-kit/button";
+import { Popover } from "../../../packages/console-components/src/panel-kit/popover";
 import { ViewOptions, type ViewOptionsControl } from "../../../packages/console-components/src/panel-kit/view-options";
 import { Icon } from "../icon";
 import type { ConsoleDisplayKey, ConsoleDisplaySettings, ConsoleTheme } from "./Tweaks";
 
+/** Who the console acts as (`meta/console/whoami`), with the host's sign-out. */
+export interface TopbarIdentity {
+  /** The kind of caller (`person`, `token_principal`, `service`, `anonymous`). */
+  kind: string;
+  /** The caller's own principal, or words for a console nobody signed in to. */
+  label: string;
+  /** How the console knows the caller, in words. */
+  detail: string;
+  /** The host's sign-out (console configuration `[sign_out]`). */
+  signOut?: { href: string; method: "get" | "post" };
+  /** Runs right before the browser leaves for the sign-out. */
+  onSignOut?: () => void;
+}
+
 interface TopbarProps {
   mobName: string;
   connectionStatus?: React.ReactNode;
+  /** Who the console acts as; without it the identity chip is absent. */
+  identity?: TopbarIdentity;
   brandLabel?: string;
   brandLogoUrl?: string;
   brandLogoAlt?: string;
@@ -159,9 +176,62 @@ function DisplayOptions({
   );
 }
 
+/**
+ * Who the console acts as, and the host's sign-out. The chip names the
+ * caller; its popover says how the console knows them and, when the host
+ * configures one, signs out: a POST form or a link to the host's page.
+ */
+function IdentityChip({ identity }: { identity: TopbarIdentity }): React.JSX.Element {
+  const [open, setOpen] = React.useState(false);
+  const triggerRef = React.useRef<HTMLButtonElement | null>(null);
+  const popoverId = `${React.useId()}-identity`;
+  const signOut = identity.signOut;
+  return (
+    <div className="meta-topbar__identity" data-testid="identity-chip" data-kind={identity.kind}>
+      <button
+        ref={triggerRef}
+        type="button"
+        className="meta-topbar__identity-trigger"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls={open ? popoverId : undefined}
+        aria-label={`${identity.label}, ${identity.detail}`}
+        title={`${identity.label} (${identity.detail})`}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="meta-topbar__identity-mark" aria-hidden="true" />
+        <span className="meta-topbar__identity-label">{identity.label}</span>
+      </button>
+      <Popover
+        open={open}
+        anchorRef={triggerRef}
+        onClose={() => setOpen(false)}
+        ariaLabel="Who this console acts as"
+        id={popoverId}
+        testId="identity-popover"
+        className="meta-topbar__identity-popover"
+        width={260}
+      >
+        <p className="meta-topbar__identity-name">{identity.label}</p>
+        <p className="meta-topbar__identity-detail">{identity.detail}</p>
+        {signOut?.method === "post" ? (
+          <form method="post" action={signOut.href} className="meta-topbar__identity-sign-out" onSubmit={() => identity.onSignOut?.()}>
+            <Button type="submit" size="sm">Sign out</Button>
+          </form>
+        ) : signOut ? (
+          <a className="cc-btn cc-btn--sm meta-topbar__identity-sign-out" href={signOut.href} onClick={() => identity.onSignOut?.()}>
+            Sign out
+          </a>
+        ) : null}
+      </Popover>
+    </div>
+  );
+}
+
 export function Topbar({
   mobName,
   connectionStatus,
+  identity,
   brandLabel = "Meta",
   brandLogoUrl,
   brandLogoAlt,
@@ -212,6 +282,7 @@ export function Topbar({
       ) : null}
       <div className="meta-topbar__spacer" />
       {connectionStatus}
+      {identity ? <IdentityChip identity={identity} /> : null}
       <div className="meta-topbar__util">
         {display && onChooseDisplay && onResetDisplay ? (
           <DisplayOptions display={display} chosen={displayChosen} onChoose={onChooseDisplay} onReset={onResetDisplay} />

@@ -251,6 +251,10 @@ async function fetchWithConsoleTimeout<T>(
     let response: Response;
     try {
       response = await fetch(input, {
+        // A front that wants the browser to sign in answers with a redirect
+        // to its login page; following it would read that page as the
+        // gateway's answer. Kept unfollowed, it is an opaque redirect.
+        redirect: "manual",
         ...init,
         signal: fetchSignal,
       });
@@ -265,6 +269,7 @@ async function fetchWithConsoleTimeout<T>(
       }
       throw error;
     }
+    if (response.type === "opaqueredirect") throw signInRedirectFailure(label);
     if (!consume) return response;
     try {
       return await consume(response);
@@ -281,8 +286,10 @@ async function fetchWithConsoleTimeout<T>(
  * back out of a message. */
 /** `connection_failed`: the fetch rejected with no HTTP response. The
  * browser cannot tell a gateway it never reached from a response lost after
- * the gateway handled the request, so this never implies "not sent". */
-export type ConsoleTransportFailureKind = "timeout" | "connection_failed" | "invalid_response";
+ * the gateway handled the request, so this never implies "not sent".
+ * `sign_in_redirect`: a front answered with a redirect to its sign-in page,
+ * so the request never reached the gateway and the browser must sign in. */
+export type ConsoleTransportFailureKind = "timeout" | "connection_failed" | "invalid_response" | "sign_in_redirect";
 export interface ConsoleTransportFailure extends Error {
   httpStatus?: number;
   transportFailure?: ConsoleTransportFailureKind;
@@ -291,6 +298,14 @@ export interface ConsoleTransportFailure extends Error {
    * `data.kind: "unauthenticated"`). Kept apart from `rpcError`, which marks
    * an answered 200 JSON-RPC error. */
   responseRpcError?: { code?: unknown; message?: unknown; data?: unknown };
+}
+
+/** A console request met a redirect (kept unfollowed, so opaque): the
+ * front in front of the gateway sent the browser to sign in. */
+function signInRedirectFailure(label: string): ConsoleTransportFailure {
+  const failure = new Error(`${label}: a sign-in page answered instead of the gateway`) as ConsoleTransportFailure;
+  failure.transportFailure = "sign_in_redirect";
+  return failure;
 }
 
 function jsonRpcErrorFromText(text: string): ConsoleTransportFailure["responseRpcError"] | undefined {
@@ -378,9 +393,19 @@ export async function fetchJson<T>(
   );
   if (!response.ok) {
     const preview = await responseErrorPreview(response);
-    throw new Error(`Request failed ${response.status} for ${path}${preview ? `: ${preview}` : ""}`);
+    const failure = new Error(`Request failed ${response.status} for ${path}${preview ? `: ${preview}` : ""}`) as ConsoleTransportFailure;
+    failure.httpStatus = response.status;
+    throw failure;
   }
   return response.json() as Promise<T>;
+}
+
+/** The `expected_caller_scope` param a console request carries when the
+ * console knows the caller it acts for (`meta/console/whoami`'s
+ * `caller_scope`). The gateway refuses a change made for another caller
+ * (`caller_changed`), and every read ignores it. */
+export function callerScopeParam(callerScope: string | undefined): { expected_caller_scope?: string } {
+  return callerScope ? { expected_caller_scope: callerScope } : {};
 }
 
 async function rpc<T>(
@@ -455,6 +480,9 @@ export async function sendConsoleMultipart(
   idempotencyKey: string,
   handlingMode: "queue" | "steer" = "queue",
   timeoutMs = DEFAULT_CONSOLE_FETCH_TIMEOUT_MS,
+  /** The caller the console sends for (`meta/console/whoami`'s
+   * `caller_scope`); the gateway refuses the send for anyone else. */
+  callerScope?: string,
 ): Promise<ConsoleTimelineAccepted> {
   const content: Array<Record<string, unknown>> = typeof contentInput === "string"
     ? (contentInput.trim() ? [{ type: "text", text: contentInput }] : [])
@@ -482,6 +510,7 @@ export async function sendConsoleMultipart(
       origin_kind: "operator",
       idempotency_key: idempotencyKey,
       handling_mode: handlingMode,
+      ...callerScopeParam(callerScope),
     },
   }));
 
@@ -515,6 +544,8 @@ export async function uploadConsoleBlobMultipart(
   baseUrl: string,
   input: { blobId?: string; file?: File; mediaType?: string },
   timeoutMs = DEFAULT_CONSOLE_FETCH_TIMEOUT_MS,
+  /** The caller the console uploads for (`expected_caller_scope`). */
+  callerScope?: string,
 ): Promise<{ blob_id: string; url?: string }> {
   const file = input.file;
   if (!file) {
@@ -538,6 +569,7 @@ export async function uploadConsoleBlobMultipart(
         media_type: mediaType,
         alt: file.name || "upload",
       },
+      ...callerScopeParam(callerScope),
     },
   }));
 
@@ -746,6 +778,8 @@ export async function sendConsole(
   idempotencyKey: string,
   handlingMode: "queue" | "steer" = "queue",
   timeoutMs = DEFAULT_CONSOLE_FETCH_TIMEOUT_MS,
+  /** The caller the console sends for (`expected_caller_scope`). */
+  callerScope?: string,
 ): Promise<ConsoleTimelineAccepted> {
   const accepted = await rpc<unknown>(baseUrl, CONSOLE_RPC_METHODS.send, {
     identity,
@@ -755,6 +789,7 @@ export async function sendConsole(
     origin_kind: "operator",
     idempotency_key: idempotencyKey,
     handling_mode: handlingMode,
+    ...callerScopeParam(callerScope),
   }, timeoutMs);
   if (!accepted || typeof accepted !== "object") {
     throw new Error(`${CONSOLE_RPC_METHODS.send} returned an invalid acceptance payload`);
@@ -819,8 +854,15 @@ export function subscribeTimelineEvents(
       const headers: Record<string, string> = { "content-type": "application/json" };
       if (after) headers["Last-Event-ID"] = after;
       const response = await fetchImpl(`${baseUrl}${timelineStreamPath(target)}`, {
-        method: "GET", headers, signal,
+        method: "GET", headers, signal, redirect: "manual",
       });
+      if (response.type === "opaqueredirect") {
+        // A front sent the browser to sign in: the stream needs a sign-in,
+        // as after a 401, and is not retried.
+        const failure = new Error("interaction stream: a sign-in page answered instead of the gateway") as ConsoleStreamFailure;
+        failure.transportFailure = "sign_in_redirect";
+        throw failure;
+      }
       if (response.ok) connected();
       await streamFramesFromResponse(response, {
         signal, onFrame: deliver, stopOnTerminal: false,

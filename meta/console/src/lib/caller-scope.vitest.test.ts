@@ -65,6 +65,43 @@ describe.each(transports)("every_console_request_names_its_caller (%s transport)
     expect(seen.map((request) => request.method)).toEqual(["meta/console/whoami", "meta/console/send"]);
     expect(seen[1].params.expected_caller_scope).toBe("caller-a");
   });
+
+  it("names the caller of its latest whoami read, and keeps it when a read fails", async () => {
+    const { fetch, seen } = gateway();
+    vi.stubGlobal("fetch", fetch);
+    const transport = create({ baseUrl: "" });
+    const retire = () => transport.executeCommand!({ command: "retireIdentity", target: { kind: "meta/chat", identity: "member" } as never, params: { identity: "member" } });
+    await retire();
+    // Someone else signs in to this browser; a console that loads again
+    // reads who it acts as now, and its changes name that caller.
+    fetch.mockImplementationOnce(async (_url: string, init: RequestInit = {}) => {
+      const request = JSON.parse(String(init.body));
+      seen.push({ method: request.method, params: request.params ?? {} });
+      return json({ jsonrpc: "2.0", id: request.id, result: { actor: { kind: "person", principal: "b@example.test", assurance: "person_authenticated" }, caller_scope: "caller-b" } });
+    });
+    expect((await transport.whoami!()).callerScope).toBe("caller-b");
+    await retire();
+    fetch.mockImplementationOnce(async () => new Response("unavailable", { status: 503 }));
+    await expect(transport.whoami!()).rejects.toBeTruthy();
+    await retire();
+    const retires = seen.filter((request) => request.method === "meta/retire");
+    expect(retires.map((request) => request.params.expected_caller_scope)).toEqual(["caller-a", "caller-b", "caller-b"]);
+  });
+
+  it("names no caller on a gateway without whoami, and does not ask it again", async () => {
+    const seen: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit = {}) => {
+      const request = JSON.parse(String(init.body));
+      seen.push(request.method);
+      if (request.method === "meta/console/whoami") return json({ jsonrpc: "2.0", id: request.id, error: { code: -32601, message: "method not found" } });
+      expect(request.params?.expected_caller_scope).toBeUndefined();
+      return json({ jsonrpc: "2.0", id: request.id, result: { interaction_id: "interaction", identity: "member" } });
+    }));
+    const transport = create({ baseUrl: "" });
+    await transport.send({ identity: "member", content: "One", origin: "console:pane", idempotencyKey: "key-1" });
+    await transport.send({ identity: "member", content: "Two", origin: "console:pane", idempotencyKey: "key-2" });
+    expect(seen).toEqual(["meta/console/whoami", "meta/console/send", "meta/console/send"]);
+  });
 });
 
 describe("MCP Apps tool calls name their caller", () => {

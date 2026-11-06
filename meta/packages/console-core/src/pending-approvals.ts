@@ -161,9 +161,12 @@ function unavailableCapability(error: unknown): { method: string; availableMetho
     && Array.isArray(record.availableMethods) && record.availableMethods.every((method) => typeof method === "string")
     ? { method: record.method, availableMethods: record.availableMethods } : null;
 }
+/** Denied for good: the caller may not see approvals (403, `access_denied`).
+ * A 401 is not a denial: the login ended, and the console's sign-in state
+ * owns it; the resource stays readable once the caller signs in again. */
 const isDenied = (error: unknown) => {
   const record = error as { httpStatus?: number; rpcError?: { code?: number; data?: { kind?: string } } } | null;
-  return record?.httpStatus === 401 || record?.httpStatus === 403 || record?.rpcError?.code === -32030 || record?.rpcError?.data?.kind === "access_denied";
+  return record?.httpStatus === 403 || record?.rpcError?.code === -32030 || record?.rpcError?.data?.kind === "access_denied";
 };
 
 /** One active scoped owner feeds the inbox and every attention/inline view. */

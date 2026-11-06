@@ -10,6 +10,9 @@ export interface NativeMcpAppsHostOptions {
   runtimeId?: string;
   readOnly?: boolean;
   requestTimeoutMs?: number;
+  /** The caller the console acts as (`meta/console/whoami`'s `caller_scope`):
+   * a tool call names it, and the gateway refuses one made for anyone else. */
+  callerScope?: () => string | undefined;
 }
 
 /** The stock gateway remains the only owner of viewer, member and MCP admission. */
@@ -86,7 +89,10 @@ export function createNativeMcpAppsHost(options: NativeMcpAppsHostOptions): Cons
         ...(resolved.canCallTools === true && !options.readOnly ? {
           async callTool(name: string, toolArgs: Record<string, unknown>, requestSignal: AbortSignal) {
             current(requestSignal);
-            return CallToolResultSchema.parse(await request(CONSOLE_REST_PATHS.mcpAppsCallTool, original, { name, arguments: toolArgs }, requestSignal));
+            const expectedCallerScope = options.callerScope?.();
+            return CallToolResultSchema.parse(await request(CONSOLE_REST_PATHS.mcpAppsCallTool, original, {
+              name, arguments: toolArgs, ...(expectedCallerScope ? { expectedCallerScope } : {}),
+            }, requestSignal));
           },
         } : {}),
       };

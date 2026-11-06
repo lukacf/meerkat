@@ -244,7 +244,7 @@ prepverdicts_states=294
 placement_states=105
 unlist_states=336
 recovered_states=180
-doors_states=unmeasured
+doors_states=576
 
 # Every arm each run must fire. TLC names an arm after the generated
 # operator where it is applied plainly (an audit wrapper that only applies

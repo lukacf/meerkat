@@ -160,10 +160,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   **Sign out** when the console configuration names `[sign_out]`: `href`, a
   same-origin path, and `method`, `"get"` (a link, the default) or `"post"`
   (a form, for a front whose sign-out takes a POST).
-- Approval cards in the stock console say whom a request waits for: **For
-  you**, or **Waiting for** the approver it names (with no decision offered).
-  A request for you that someone else decides keeps its card, saying how and
-  by whom, read from the gating audit.
 
 ### Changed
 
@@ -229,9 +225,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Pins set in two tabs of the stock console are both kept, and every tab
   follows them. A tab left open no longer rewrites the panel layout another
   tab arranged each time it reloads the console experience.
-- **Needs you** counts only the approval requests that wait for you, not
-  the ones routed to another approver. Before, it counted every pending
-  request, and a request decided elsewhere vanished at the next poll.
 
 ## [0.9.10] - 2026-11-04
 

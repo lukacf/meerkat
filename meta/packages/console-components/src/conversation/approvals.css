@@ -39,15 +39,6 @@
   overflow-wrap: anywhere;
 }
 .cc-approval__risk { flex: none; }
-/* Whom the request waits for: the viewer ("For you") or another approver. */
-.cc-approval__audience { flex: none; }
-/* A request decided elsewhere stays where its card was, quieter, saying who
-   decided it; it offers nothing to decide. */
-.cc-approval--departed {
-  background: var(--_cc-surface-soft);
-  color: var(--_cc-foreground-muted);
-}
-.cc-approval--departed .cc-approval__title { color: var(--_cc-foreground-muted); }
 .cc-approval__deadline { flex: none; margin-top: 1px; }
 .cc-approval__deadline[data-past="true"] { font-weight: 500; }
 

@@ -54,6 +54,9 @@ const MODEL_DISCOVERY_CLAIM_SECONDS: u64 = 60;
 const TOKEN_EXCHANGE_RETRY_SECONDS: u64 = 30;
 /// The shortest wait before that next attempt, whatever `Retry-After` says.
 const TOKEN_EXCHANGE_MIN_RETRY_SECONDS: u64 = 1;
+/// The longest an exchange's `Retry-After` holds the next attempt off once no
+/// token is left to serve.
+const TOKEN_EXCHANGE_MAX_RETRY_SECONDS: u64 = 3600;
 const BEARER_SCHEME: &str = "Bearer";
 const COPILOT_HTTP_TIMEOUT: StdDuration = StdDuration::from_secs(30);
 const MAX_COPILOT_HTTP_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
@@ -230,6 +233,7 @@ impl CopilotTokenExchangeError {
             message,
             retry_after,
             retryable,
+            not_before: None,
         })
     }
 
@@ -263,6 +267,7 @@ impl CopilotTokenExchangeError {
             message,
             retry_after: None,
             retryable,
+            not_before: None,
         })
     }
 }
@@ -286,6 +291,10 @@ struct CopilotExchangeUnavailable {
     retry_after: Option<StdDuration>,
     /// The retryable class a turn fails with once no valid token is left.
     retryable: meerkat_llm_core::LlmError,
+    /// Once recorded with no token left to serve: the instant before which
+    /// the outage answers in place of the exchange, when the exchange sent
+    /// `Retry-After` ([`exchange_not_before`]).
+    not_before: Option<DateTime<Utc>>,
 }
 
 #[async_trait]
@@ -1917,6 +1926,9 @@ impl CopilotAuthorizer {
                         }
                         return Ok(cached);
                     }
+                    if let Some(outage) = self.outage_before_its_retry(source_generation, now) {
+                        return Err(outage);
+                    }
                     (source_generation, LeaderTask::Device(source))
                 }
                 CopilotCredentialMode::OperatorToken => match self.observe_operator_lease()? {
@@ -2021,7 +2033,7 @@ impl CopilotAuthorizer {
         source: &PersistedTokens,
         source_generation: u64,
     ) -> Result<CachedTokenView, CopilotTokenError> {
-        let unavailable = match self.mint_and_cache_token(source, source_generation).await {
+        let mut unavailable = match self.mint_and_cache_token(source, source_generation).await {
             Ok(view) => return Ok(view),
             Err(CopilotTokenExchangeError::Failed(error)) => {
                 if let Some(cached) = self.state.cache.write().as_mut() {
@@ -2032,6 +2044,10 @@ impl CopilotAuthorizer {
             Err(CopilotTokenExchangeError::Unavailable(unavailable)) => unavailable,
         };
         let now = (self.env.now)();
+        // Recorded below only when no token is left to serve.
+        unavailable.not_before = unavailable
+            .retry_after
+            .map(|retry_after| exchange_not_before(now, retry_after));
         let error = ProviderAuthError::SourceResolutionFailed(unavailable.message.clone());
         let mut cache = self.state.cache.write();
         let Some(cached) = cache.as_mut() else {
@@ -2165,6 +2181,31 @@ impl CopilotAuthorizer {
             exchange_unavailable: None,
         });
         Ok(view)
+    }
+
+    /// The account's recorded exchange outage, while it answers in place of
+    /// the exchange: no token is left to serve, the outage was recorded for
+    /// the current sign-in, and the instant its exchange's `Retry-After`
+    /// named is still ahead. Every request until then fails with the
+    /// outage's retryable class without calling the exchange.
+    fn outage_before_its_retry(
+        &self,
+        source_generation: u64,
+        now: DateTime<Utc>,
+    ) -> Option<CopilotTokenError> {
+        let cache = self.state.cache.read();
+        let cached = cache.as_ref()?;
+        let unavailable = cached.exchange_unavailable.as_ref()?;
+        (cached.source_generation == source_generation
+            && now >= cached.expires_at
+            && unavailable
+                .not_before
+                .is_some_and(|not_before| now < not_before))
+        .then(|| {
+            CopilotTokenError::ExchangeUnavailable(ProviderAuthError::SourceResolutionFailed(
+                unavailable.message.clone(),
+            ))
+        })
     }
 
     fn fresh_cached(&self, source_generation: u64, now: DateTime<Utc>) -> Option<CachedTokenView> {
@@ -3929,6 +3970,21 @@ fn exchange_retry_at(
         .ok()
         .and_then(|delay| now.checked_add_signed(delay))
         .map_or(expires_at, |retry_at| retry_at.min(expires_at))
+}
+
+/// The instant before which a recorded exchange outage answers in place of
+/// the exchange: `retry_after` (the exchange's own `Retry-After`) from `now`,
+/// at least [`TOKEN_EXCHANGE_MIN_RETRY_SECONDS`] and at most
+/// [`TOKEN_EXCHANGE_MAX_RETRY_SECONDS`].
+fn exchange_not_before(now: DateTime<Utc>, retry_after: StdDuration) -> DateTime<Utc> {
+    let delay = retry_after.clamp(
+        StdDuration::from_secs(TOKEN_EXCHANGE_MIN_RETRY_SECONDS),
+        StdDuration::from_secs(TOKEN_EXCHANGE_MAX_RETRY_SECONDS),
+    );
+    Duration::from_std(delay)
+        .ok()
+        .and_then(|delay| now.checked_add_signed(delay))
+        .unwrap_or(DateTime::<Utc>::MAX_UTC)
 }
 
 fn insert_header(

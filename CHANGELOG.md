@@ -222,6 +222,20 @@ them.
   finishes in a stopped or retired session as well. Affects 0.6.0 through
   0.9.10.
 
+- `meerkat-sandbox`: on Linux, a read-only literal file grant whose last
+  component is a symbolic link is confined, where it was refused
+  (`UnsupportedRequirement`), so a confined process with IP access resolves
+  host names on a host whose `/etc/resolv.conf` links to systemd-resolved's
+  file (grant `/etc/resolv.conf` as a literal read path). The link's
+  regular-file target is pinned when the requirement compiles and bound
+  read-only at the link's path; every launch checks that the link still
+  resolves to that file, and setup reopens it only while it is that file.
+  The link must name its target itself, through no other link, and the link
+  and every directory above it must be owned by root or the effective user
+  and writable by neither group nor others unless sticky; any other link is
+  still refused. macOS Seatbelt still refuses such a grant. Affects 0.8.52
+  through 0.9.10.
+
 ## [0.9.10] - 2026-11-04
 
 ### Highlights

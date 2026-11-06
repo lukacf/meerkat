@@ -4,6 +4,15 @@
 //! grants. No host procfs is exposed. This module owns no permission policy or
 //! child supervisor; it adapts the retained requirement and transfers the one
 //! spawned child into NativeChild.
+//!
+//! Every granted path is canonical, with one exception: a read-only literal
+//! file grant may name a symbolic link as its final component
+//! (`/etc/resolv.conf` on a systemd-resolved host), when the link names its
+//! regular-file target in one hop and only root or the effective uid can
+//! retarget it (`final_link_grantable`). The target is pinned at compile time
+//! and bound read-only at the link's own path; every launch checks that the
+//! link still resolves to it, and setup reopens it only while it is the
+//! pinned object.
 #![allow(unsafe_code)]
 
 use std::ffi::{CStr, CString, OsStr};
@@ -468,11 +477,82 @@ fn validate_baseline_kind(
     }
 }
 
+/// Whether the symbolic link at `path`, the final component of a read-only
+/// file grant, may stand for `canonical`, the path it resolves to:
+///
+/// - One hop: the link's own text, resolved lexically from the link's
+///   directory, is `canonical` itself. No other link takes part in the
+///   resolution, so nobody outside the next rule chooses the target. A link
+///   reaching its target through another link (a link to a link, a target
+///   under a linked directory) is refused, whoever can change that link.
+/// - Only root or the effective uid can retarget the link: the link and
+///   every directory from `/` down to its own are owned by one of them, and
+///   none of those directories is writable by group or others unless it is
+///   sticky (in a sticky directory only an entry's owner, the directory's
+///   owner or root can rename or remove the entry).
+///
+/// Any metadata error refuses.
+fn final_link_grantable(path: &Path, canonical: &Path) -> bool {
+    final_link_grantable_for(path, canonical, unsafe { libc::geteuid() })
+}
+
+/// [`final_link_grantable`] with `user` as the one trusted owner besides root.
+fn final_link_grantable_for(path: &Path, canonical: &Path, user: libc::uid_t) -> bool {
+    const STICKY: u32 = 0o1000;
+    const GROUP_OR_OTHER_WRITE: u32 = 0o022;
+    let Some(directory) = path.parent() else {
+        return false;
+    };
+    if !path
+        .components()
+        .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
+    {
+        return false;
+    }
+    let Ok(text) = std::fs::read_link(path) else {
+        return false;
+    };
+    let mut target = directory.to_path_buf();
+    for component in text.components() {
+        match component {
+            Component::RootDir => target = PathBuf::from("/"),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // `/..` is `/`, as for the kernel.
+                target.pop();
+            }
+            Component::Normal(name) => target.push(name),
+            Component::Prefix(_) => return false,
+        }
+    }
+    if target != canonical {
+        return false;
+    }
+    let trusted_owner =
+        |metadata: &std::fs::Metadata| metadata.uid() == 0 || metadata.uid() == user;
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|link| link.file_type().is_symlink() && trusted_owner(&link))
+        && directory.ancestors().all(|ancestor| {
+            std::fs::symlink_metadata(ancestor).is_ok_and(|metadata| {
+                metadata.is_dir()
+                    && trusted_owner(&metadata)
+                    && (metadata.mode() & GROUP_OR_OTHER_WRITE == 0
+                        || metadata.mode() & STICKY != 0)
+            })
+        })
+}
+
 impl Mount {
+    /// Captures one granted path. Every granted path is canonical, except
+    /// that a read-only file grant may name a symbolic link as its final
+    /// component (`/etc/resolv.conf` on a systemd-resolved host): its
+    /// regular-file target is pinned here and bound read-only at the link's
+    /// own path, when [`final_link_grantable`] accepts the link.
     fn capture(path: &Path, baseline: bool, writable: bool) -> Result<Self, ConfinementRefusal> {
         let canonical =
             std::fs::canonicalize(path).map_err(|_| ConfinementRefusal::UnsupportedRequirement)?;
-        if !baseline && canonical != path {
+        let link = !baseline && canonical != path;
+        if link && (writable || !final_link_grantable(path, &canonical)) {
             return Err(ConfinementRefusal::UnsupportedRequirement);
         }
         let file = OpenOptions::new()
@@ -493,7 +573,8 @@ impl Mount {
         if !metadata.is_dir() && !metadata.is_file() && !device {
             return Err(ConfinementRefusal::UnsupportedRequirement);
         }
-        if metadata.is_file() && metadata.nlink() != 1 {
+        // A final link stands only for a regular file.
+        if (metadata.is_file() && metadata.nlink() != 1) || (link && !metadata.is_file()) {
             return Err(ConfinementRefusal::UnsupportedRequirement);
         }
         let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::uninit();
@@ -1126,7 +1207,7 @@ pub(super) fn spawn(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -1208,6 +1289,205 @@ mod tests {
         std::fs::create_dir(&work).unwrap();
         assert_eq!(
             directory.reopen(),
+            Err(SetupFailure {
+                step: SetupStep::MountIdentity,
+                errno: libc::ESTALE,
+            })
+        );
+    }
+
+    // Sets `path`'s permission bits exactly, whatever the umask made them.
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// A read-only file grant may name a symbolic link as its final
+    /// component (`/etc/resolv.conf` on a systemd-resolved host) when the
+    /// link itself names its regular-file target: the target is pinned and
+    /// bound read-only at the link's own path. A link that reaches its
+    /// target through a second link is refused, whoever can change that
+    /// second link. No namespace is entered.
+    #[test]
+    fn a_final_link_is_granted_only_when_it_names_its_target_in_one_hop() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        // No directory below is group- or other-writable, whatever the umask.
+        set_mode(&root, 0o700);
+        let etc = root.join("etc");
+        let run = root.join("run");
+        let shared = root.join("shared");
+        for directory in [&etc, &run, &shared] {
+            std::fs::create_dir(directory).unwrap();
+            set_mode(directory, 0o755);
+        }
+        let target = run.join("stub-resolv.conf");
+        std::fs::write(&target, b"nameserver 127.0.0.53\n").unwrap();
+        // One hop, relative, as systemd-resolved installs it.
+        let link = etc.join("resolv.conf");
+        std::os::unix::fs::symlink("../run/stub-resolv.conf", &link).unwrap();
+
+        let mount = Mount::capture(&link, false, false)
+            .expect("a read-only grant of a trusted one-hop final link is captured");
+        assert_eq!(mount.path, link);
+        assert_eq!(mount.canonical, target);
+        assert_eq!(mount.source.as_bytes(), target.as_os_str().as_bytes());
+        assert_eq!(
+            mount.destination.as_bytes(),
+            Path::new("/tmp")
+                .join(link.strip_prefix("/").unwrap())
+                .as_os_str()
+                .as_bytes()
+        );
+        assert!(!mount.directory && !mount.writable);
+        assert_eq!(mount.validate(), Ok(()));
+        let source = mount.reopen().unwrap();
+        assert_eq!(stat_identity(source), Ok(mount.pinned));
+        unsafe { libc::close(source) };
+
+        let refused = Some(ConfinementRefusal::UnsupportedRequirement);
+        // The second hop sits in a directory anyone may write, so its owner
+        // could choose what the grant exposes: refused.
+        let hop = shared.join("hop");
+        std::os::unix::fs::symlink(&target, &hop).unwrap();
+        set_mode(&shared, 0o777);
+        let chained = etc.join("chained.conf");
+        std::os::unix::fs::symlink("../shared/hop", &chained).unwrap();
+        assert_eq!(Mount::capture(&chained, false, false).err(), refused);
+        // Refused when every link of the chain is trusted, too: only the
+        // grant's own link may take part in the resolution.
+        set_mode(&shared, 0o755);
+        assert_eq!(Mount::capture(&chained, false, false).err(), refused);
+    }
+
+    // A directory `root/name` with exactly `mode`, for the final-link rows.
+    fn directory(root: &Path, name: &str, mode: u32) -> PathBuf {
+        let directory = root.join(name);
+        std::fs::create_dir(&directory).unwrap();
+        set_mode(&directory, mode);
+        directory
+    }
+
+    /// A final link is granted only where no less-trusted party can retarget
+    /// it: a link in a directory that group or others may write is refused
+    /// unless that directory is sticky, and so is a link under such an
+    /// ancestor or one owned by another user. No namespace is entered.
+    #[test]
+    fn a_final_link_is_granted_only_where_no_other_user_can_retarget_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        set_mode(&root, 0o700);
+        let shared = directory(&root, "shared", 0o755);
+        let run = directory(&root, "run", 0o755);
+        let target = run.join("stub-resolv.conf");
+        std::fs::write(&target, b"nameserver 127.0.0.53\n").unwrap();
+        let link = shared.join("resolv.conf");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let refused = Some(ConfinementRefusal::UnsupportedRequirement);
+
+        assert!(Mount::capture(&link, false, false).is_ok());
+        // World-writable without the sticky bit: anyone may replace the link.
+        set_mode(&shared, 0o777);
+        assert_eq!(Mount::capture(&link, false, false).err(), refused);
+        // Group-writable alone is refused too.
+        set_mode(&shared, 0o775);
+        assert_eq!(Mount::capture(&link, false, false).err(), refused);
+        // Sticky: only the link's owner, the directory's owner or root may
+        // rename or remove it, as under /tmp.
+        set_mode(&shared, 0o1777);
+        assert!(Mount::capture(&link, false, false).is_ok());
+        // A shared writable ancestor further up refuses as well.
+        set_mode(&shared, 0o755);
+        set_mode(&root, 0o777);
+        assert_eq!(Mount::capture(&link, false, false).err(), refused);
+        set_mode(&root, 0o700);
+        assert!(Mount::capture(&link, false, false).is_ok());
+        // This test's link and directories belong to the effective uid: with
+        // another uid trusted, they are another user's.
+        let euid = unsafe { libc::geteuid() };
+        assert!(final_link_grantable_for(&link, &target, euid));
+        if euid != 0 {
+            assert!(!final_link_grantable_for(
+                &link,
+                &target,
+                euid.wrapping_add(1)
+            ));
+        }
+    }
+
+    /// Only a read-only grant of a final link to a regular file with one
+    /// name is captured: a writable grant, a link to a directory, a dangling
+    /// link, a link under a linked directory and a link to a hard-linked
+    /// file are refused. No namespace is entered.
+    #[test]
+    fn a_final_link_grant_is_read_only_and_names_a_regular_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        set_mode(&root, 0o700);
+        let etc = directory(&root, "etc", 0o755);
+        let run = directory(&root, "run", 0o755);
+        let target = run.join("stub-resolv.conf");
+        std::fs::write(&target, b"nameserver 127.0.0.53\n").unwrap();
+        let link = etc.join("resolv.conf");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let refused = Some(ConfinementRefusal::UnsupportedRequirement);
+
+        assert!(Mount::capture(&link, false, false).is_ok());
+        assert_eq!(Mount::capture(&link, false, true).err(), refused);
+        let directory_link = etc.join("run");
+        std::os::unix::fs::symlink(&run, &directory_link).unwrap();
+        assert_eq!(Mount::capture(&directory_link, false, false).err(), refused);
+        let dangling = etc.join("dangling");
+        std::os::unix::fs::symlink(run.join("missing"), &dangling).unwrap();
+        assert_eq!(Mount::capture(&dangling, false, false).err(), refused);
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&etc, &alias).unwrap();
+        assert_eq!(
+            Mount::capture(&alias.join("resolv.conf"), false, false).err(),
+            refused
+        );
+        std::fs::hard_link(&target, run.join("second-name")).unwrap();
+        assert_eq!(Mount::capture(&link, false, false).err(), refused);
+    }
+
+    /// Every launch revalidates a final link against the target pinned at
+    /// capture: a retargeted link, or a target replaced under its name,
+    /// fails validation, and setup refuses a replaced target at its
+    /// identity step. No namespace is entered.
+    #[test]
+    fn a_final_link_grant_is_revalidated_against_its_pinned_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        set_mode(&root, 0o700);
+        let etc = directory(&root, "etc", 0o755);
+        let run = directory(&root, "run", 0o755);
+        let target = run.join("stub-resolv.conf");
+        std::fs::write(&target, b"nameserver 127.0.0.53\n").unwrap();
+        let link = etc.join("resolv.conf");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let mount = Mount::capture(&link, false, false).unwrap();
+        assert_eq!(mount.validate(), Ok(()));
+
+        let other = run.join("other.conf");
+        std::fs::write(&other, b"nameserver 192.0.2.1\n").unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&other, &link).unwrap();
+        assert_eq!(
+            mount.validate(),
+            Err(ConfinementRefusal::BackendUnavailable)
+        );
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(mount.validate(), Ok(()));
+
+        std::fs::rename(&target, run.join("retained")).unwrap();
+        std::fs::write(&target, b"nameserver 192.0.2.2\n").unwrap();
+        assert_eq!(
+            mount.validate(),
+            Err(ConfinementRefusal::BackendUnavailable)
+        );
+        assert_eq!(
+            mount.reopen(),
             Err(SetupFailure {
                 step: SetupStep::MountIdentity,
                 errno: libc::ESTALE,

@@ -1,5 +1,17 @@
 //! OS lowering and exact native spawn. Authorization and process-group
 //! containment remain with their existing runtime owners.
+//!
+//! # Granted paths
+//!
+//! A granted path passes through no symbolic link (macOS also accepts its
+//! immutable system aliases `/etc`, `/tmp` and `/var`), with one Linux
+//! exception: a read-only literal file grant may name a symbolic link as its
+//! final component (`/etc/resolv.conf` on a systemd-resolved host) when the
+//! link names its regular-file target directly, through no other link, and
+//! only root or the effective user can change the link or a directory above
+//! it. Linux binds that target read-only at the link's path. macOS
+//! (Seatbelt) refuses such a grant, as it refuses every mutable symbolic
+//! link.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};

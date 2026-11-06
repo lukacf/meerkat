@@ -1055,6 +1055,58 @@ async fn linux_strict_paths_cover_metadata_and_namespace_escape() {
     assert_eq!(sibling.stdout, b"still permitted");
 }
 
+/// A confined child with IP access resolves a host name through a read-only
+/// grant of `/etc/resolv.conf` on a host that points it at systemd-resolved
+/// through a symbolic link: the backend binds the link's target at the
+/// link's path. systemd-resolved answers every `.localhost` name itself, so
+/// the lookup needs no outside network.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "Linux positive confinement acceptance lane; requires an eligible host"
+)]
+async fn linux_resolves_a_host_name_through_a_symlinked_resolv_conf() {
+    let resolv_conf = PathBuf::from("/etc/resolv.conf");
+    assert!(
+        std::fs::symlink_metadata(&resolv_conf)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "this host points /etc/resolv.conf through a symbolic link (systemd-resolved)"
+    );
+    let fixture = Fixture::new();
+    let mut spec = fixture.spec();
+    spec.read = FilesystemAccess::Paths(vec![
+        PathAccess::Subtree(fixture.work.clone()),
+        PathAccess::Literal(resolv_conf),
+    ]);
+    spec.network = IpNetworkAccess::Unrestricted;
+    let name = "meerkat-confinement-probe.localhost";
+    let launch = ProcessLaunchSpec::new(
+        PathBuf::from("/usr/bin/getent"),
+        vec![OsString::from("hosts"), OsString::from(name)],
+        fixture.work.clone(),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let prepared = prepare(&ExecutionConfinement::try_from(spec).unwrap(), launch);
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(refusal) => {
+            panic!("a read-only grant of a symlinked /etc/resolv.conf is confined: {refusal:?}")
+        }
+    };
+    let output = prepared.output().await.unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let answer = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        answer.split_whitespace().nth(1) == Some(name)
+            && ["::1", "127.0.0.1"].contains(&answer.split_whitespace().next().unwrap_or("")),
+        "the confined child resolved {name} through the granted resolv.conf: {answer:?}"
+    );
+}
+
 #[cfg(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")

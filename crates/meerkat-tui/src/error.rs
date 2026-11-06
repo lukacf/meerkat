@@ -38,6 +38,26 @@ pub enum TuiError {
     /// The realm persistence backend could not be opened.
     #[error("failed to open realm persistence: {0}")]
     Persistence(#[from] meerkat::PersistenceError),
+    /// The workspace's (or realm's) state directory could not be opened at
+    /// start-up: the message names the directory and how to start fresh or
+    /// carry its sessions forward, since another `rkat-tui` or `rkat` version
+    /// may have written it.
+    #[error(
+        "failed to open the state directory {}: {source}\n\nIf another rkat-tui or rkat version wrote it and you do not need its sessions, move it aside and start fresh:\n  mv '{}' '{}.old'\nTo keep them, follow the message above with `--state-root '{}' --realm '{realm_id}'`.",
+        realm_root.display(), realm_root.display(), realm_root.display(), state_root.display()
+    )]
+    PersistenceOpen {
+        /// The realm's directory (`<state_root>/<realm_id>`).
+        realm_root: PathBuf,
+        /// The realms root `rkat --state-root` takes.
+        state_root: PathBuf,
+        /// The realm id `rkat --realm` takes.
+        realm_id: String,
+        /// Underlying persistence error (boxed: the variant must not widen the
+        /// error type).
+        #[source]
+        source: Box<meerkat::PersistenceError>,
+    },
     /// A session store operation failed.
     #[error("session store error: {0}")]
     Store(#[from] meerkat_store::StoreError),
@@ -152,6 +172,7 @@ impl TuiError {
             | Self::NotATerminal => 2,
             Self::Io { .. }
             | Self::Persistence(_)
+            | Self::PersistenceOpen { .. }
             | Self::Store(_)
             | Self::SessionStore(_)
             | Self::LlmClient(_)
@@ -165,5 +186,37 @@ impl TuiError {
             | Self::Admission(_)
             | Self::Ui(_) => 1,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TuiError;
+    use std::path::PathBuf;
+
+    #[test]
+    fn a_failed_state_dir_open_names_the_directory_and_both_ways_out() {
+        let err = TuiError::PersistenceOpen {
+            realm_root: PathBuf::from("/work/.rkat/tui"),
+            state_root: PathBuf::from("/work/.rkat"),
+            realm_id: "tui".to_string(),
+            source: Box::new(meerkat::PersistenceError::RealmGoverned {
+                realm_id: "tui".to_string(),
+            }),
+        };
+        let text = err.to_string();
+        assert!(
+            text.starts_with("failed to open the state directory /work/.rkat/tui: "),
+            "{text}"
+        );
+        assert!(
+            text.contains("mv '/work/.rkat/tui' '/work/.rkat/tui.old'"),
+            "{text}"
+        );
+        assert!(
+            text.contains("`--state-root '/work/.rkat' --realm 'tui'`"),
+            "{text}"
+        );
+        assert_eq!(err.exit_code(), 1);
     }
 }

@@ -356,15 +356,21 @@ pub async fn bootstrap_with(
         &extra_grants(args, &layered),
     )?;
 
+    let realm_root = realm_paths_in(&scope.state_root, &scope.realm_id).root;
     let (manifest, persistence) = meerkat::open_realm_persistence_in(
         &scope.state_root,
         &scope.realm_id,
         scope.backend_hint,
         Some(scope.origin),
     )
-    .await?;
+    .await
+    .map_err(|source| TuiError::PersistenceOpen {
+        realm_root: realm_root.clone(),
+        state_root: scope.state_root.clone(),
+        realm_id: scope.realm_id.clone(),
+        source: Box::new(source),
+    })?;
     let store = persistence.session_store();
-    let realm_root = realm_paths_in(&scope.state_root, &scope.realm_id).root;
     let store_path = persistence
         .store_path()
         .map_or_else(|| realm_root.clone(), PathBuf::from);

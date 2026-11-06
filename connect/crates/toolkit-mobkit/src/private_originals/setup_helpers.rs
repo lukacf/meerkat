@@ -1702,6 +1702,13 @@ impl GovernedInputBinder for SubmitHelperBinder {
         else {
             return Err(self.held());
         };
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::SubmitAdmitted,
+            &self.admitted.item_id().to_string(),
+        ) {
+            crate::source_hold_probe::retain(self.source.hold_sources_for_test(hold));
+        }
         let admitted = prepared
             .admitted()
             .map_err(|_| "Toolkit admitted helper is unavailable")?;
@@ -1773,6 +1780,17 @@ impl GovernedInputBinder for SubmitHelperBinder {
         self.source
             .require_helper_selection(self.admitted.selection())
             .map_err(|_| "Toolkit helper selection is unavailable")?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::SubmitRecoveryControl,
+            &self.admitted.item_id().to_string(),
+        ) {
+            crate::source_hold_probe::retain(
+                self.source
+                    .custody_recovery
+                    .hold_control_for_test(hold.duration),
+            );
+        }
         let (input, pending) = self
             .source
             .custody_recovery
@@ -1814,6 +1832,15 @@ impl GovernedInputBinder for SubmitHelperBinder {
                             if prior.session != context.session_id {
                                 return Err(PrivateOriginalError::Conflict);
                             }
+                            #[cfg(any(test, feature = "test-support"))]
+                            if let Some(hold) = crate::source_hold_probe::observe(
+                                crate::source_hold_probe::Site::SubmitPriorRebind,
+                                &self.admitted.item_id().to_string(),
+                            ) {
+                                crate::source_hold_probe::retain(
+                                    self.source.hold_sources_for_test(hold),
+                                );
+                            }
                             let ((input, pending), handoff) = prior.handoff.rebind(|| {
                                 prior
                                     .publication
@@ -1825,6 +1852,15 @@ impl GovernedInputBinder for SubmitHelperBinder {
                             (input, pending, handoff)
                         }
                         None => {
+                            #[cfg(any(test, feature = "test-support"))]
+                            if let Some(hold) = crate::source_hold_probe::observe(
+                                crate::source_hold_probe::Site::SubmitStage,
+                                &self.admitted.item_id().to_string(),
+                            ) {
+                                crate::source_hold_probe::retain(
+                                    self.source.hold_sources_for_test(hold),
+                                );
+                            }
                             let (input, pending) = prepared
                                 .stage()
                                 .map_err(|_| PrivateOriginalError::Unavailable)?;

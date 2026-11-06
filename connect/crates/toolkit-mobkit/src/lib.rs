@@ -949,6 +949,25 @@ pub mod source_hold_probe {
         /// answer is read; a hold here delays the submission itself, as a
         /// task descheduled there would be; keyed by work item.
         SubmitReturned,
+        /// A helper submission's binder, inside its recovery enrollment,
+        /// just before it stages the helper's source as a candidate; keyed
+        /// by work item.
+        SubmitStage,
+        /// A helper submission's custody attempt just before it takes the
+        /// owner's source writer; the hold is of the source writer itself,
+        /// not the collection; keyed by work item.
+        SubmitPersistWriter,
+        /// A helper submission's binder just before its recovery enrollment
+        /// takes the custody recovery's control; the hold is of that
+        /// control, not the collection; keyed by work item.
+        SubmitRecoveryControl,
+        /// A helper submission's binder just before it reads the helper
+        /// source's admitted custody; keyed by work item.
+        SubmitAdmitted,
+        /// A helper submission's binder, on a later bind after a definite
+        /// refusal, just before it rebinds its retained first candidate;
+        /// keyed by work item.
+        SubmitPriorRebind,
     }
     /// A control's answer at a site, given its key.
     pub type Probe = Arc<dyn Fn(Site, &str) -> Option<Hold> + Send + Sync>;

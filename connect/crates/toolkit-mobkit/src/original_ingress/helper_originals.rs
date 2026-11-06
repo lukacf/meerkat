@@ -1394,6 +1394,13 @@ impl ToolkitOriginalOwner {
         input: &Input,
     ) -> Result<bool, OriginalWriterError> {
         self.check_canonical_source(store, &admitted.source_scope)?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::SubmitPersistWriter,
+            &admitted.item_id().to_string(),
+        ) {
+            crate::source_hold_probe::retain(self.hold_writer_for_test(hold.duration));
+        }
         let _writer = self.source_writer().await;
         let stored = store
             .get(&source.source_record.key)
@@ -2252,6 +2259,54 @@ mod tests {
             .unwrap();
         let pending = owner.record_candidate(&original).unwrap();
         (original, pending)
+    }
+
+    // Negative controls: a candidate whose contributor is not admitted is a
+    // genuine conflict, never a transitional state, whether the contributor
+    // was withdrawn or is another requester's admitted original.
+    #[test]
+    fn a_candidate_whose_contributor_was_withdrawn_is_refused_as_a_conflict() {
+        let (_directory, owner, base) = fixture();
+        let (ancestor, pending) = pending_source(&owner, &base, "withdrawn", "user", &[]);
+        drop(pending);
+        let mut candidate = claims("child", &base).candidate().clone();
+        candidate.requester = principal("user");
+        candidate.contributing_work = vec![ancestor.association.candidate().original_work.clone()];
+        let association = InputAuthorityAssociation::new(candidate).unwrap();
+        let child = owner
+            .publish_binding(
+                association.clone(),
+                source(&association),
+                OriginalGrantBinding::Helper,
+                super::CanonicalBindingObservation::Unretained,
+            )
+            .unwrap();
+        assert!(matches!(
+            owner.record_candidate(&child),
+            Err(OriginalWriterError::Conflict)
+        ));
+    }
+
+    #[test]
+    fn a_candidate_whose_contributor_is_another_requesters_is_refused_as_a_conflict() {
+        let (_directory, owner, base) = fixture();
+        let ancestor = retained(&owner, &base, "other-requester", "someone-else", &[]);
+        let mut candidate = claims("child", &base).candidate().clone();
+        candidate.requester = principal("user");
+        candidate.contributing_work = vec![ancestor.association.candidate().original_work.clone()];
+        let association = InputAuthorityAssociation::new(candidate).unwrap();
+        let child = owner
+            .publish_binding(
+                association.clone(),
+                source(&association),
+                OriginalGrantBinding::Helper,
+                super::CanonicalBindingObservation::Unretained,
+            )
+            .unwrap();
+        assert!(matches!(
+            owner.record_candidate(&child),
+            Err(OriginalWriterError::Conflict)
+        ));
     }
 
     pub(super) fn fixture() -> (

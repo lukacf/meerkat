@@ -19,7 +19,15 @@
 //!   change, the hold lasting into the change, where the write tries the
 //!   collection;
 //! - `PrepareBind`: a helper preparation's capture binder;
-//! - `Submit`: a helper submission's source check.
+//! - `Submit`: a helper submission's source check;
+//! - `SubmitStage`, `SubmitPersistWriter` and `SubmitRecoveryControl`: a
+//!   helper submission's binder staging the helper's source, taking the
+//!   source writer for its custody attempt, and taking the custody
+//!   recovery's control for its enrollment. The binder never waits there
+//!   inside Core's bind: it refuses at once, the submission waits outside
+//!   and binds again, so the site is reached twice;
+//! - `SubmitAdmitted`: the same binder's earlier read of the helper source's
+//!   admitted custody.
 //!
 //! A held collection is waited out within Core's owner-change bound, and an
 //! owner change met by the lineage resolution is a stale read, waited out
@@ -470,4 +478,151 @@ async fn submission_past_its_source_deadline_after_a_held_bind_is_denied() {
     assert_eq!(reply(first), expected, "an expired source is a denial");
     assert_eq!(found.site_hits, 1, "the binder ran once: no late dispatch");
     assert_eq!(found.attempt_writes, 0, "no custody attempt was written");
+}
+
+/// The Find answered retry_safe with nothing admitted, and the site was
+/// reached once: no dispatch past the submission's deadline.
+fn assert_retry_safe_after_one_bind(found: &Found) {
+    assert!(found.turn_completed, "the original's turn completed");
+    assert_eq!(found.feedback.len(), 1, "{:?}", found.feedback);
+    let first = &found.feedback[0];
+    assert_eq!(
+        reply(first)["worker"]["state"],
+        "retry_safe",
+        "{}",
+        reply(first)
+    );
+    assert_eq!(found.site_hits, 1, "no dispatch past the deadline");
+}
+
+// The binder's recovery enrollment meets the held collection as it stages
+// the helper's source as a candidate. It refuses at once with nothing staged
+// and the submission waits outside the bind and binds again; the custody
+// attempt is written once and reused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn submission_stage_waits_out_a_held_source_collection_outside_the_bind() {
+    let found = finds_with_hold_at(Site::SubmitStage, 1, collection_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+    assert_eq!(
+        found.site_hits, 2,
+        "the staging refused the held collection at once and bound again"
+    );
+    assert_eq!(
+        found.attempt_writes, 1,
+        "the custody attempt was written once and reused"
+    );
+}
+
+// The same with an owner change held on the shared publication: the staging
+// meets the change at once, never waits for its writer inside the bind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn submission_stage_waits_out_an_owner_change_outside_the_bind() {
+    let found = finds_with_hold_at(Site::SubmitStage, 1, change_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+    assert_eq!(
+        found.site_hits, 2,
+        "the staging refused the owner change at once and bound again"
+    );
+    assert_eq!(
+        found.attempt_writes, 1,
+        "the custody attempt was written once and reused"
+    );
+}
+
+// Held past the bound at the staging: the submission answers retry_safe at
+// its one deadline with nothing admitted; the custody attempt written before
+// the staging stays written once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn submission_stage_held_past_the_bound_answers_retry_safe() {
+    let found = finds_with_hold_at(Site::SubmitStage, 1, held_past_the_bound(), 0, false).await;
+    assert_retry_safe_after_one_bind(&found);
+    assert_eq!(
+        found.attempt_writes, 1,
+        "the custody attempt stays written once"
+    );
+}
+
+// The custody attempt meets the source writer held by another writer across
+// its durable write. It refuses at once (a native binder never waits for
+// that writer), and the submission waits for the writer outside the bind
+// and binds again; the attempt is written once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn submission_persist_waits_out_a_held_source_writer_outside_the_bind() {
+    let found = finds_with_hold_at(Site::SubmitPersistWriter, 1, collection_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+    assert_eq!(
+        found.site_hits, 2,
+        "the custody attempt refused the held writer at once and bound again"
+    );
+    assert_eq!(
+        found.attempt_writes, 1,
+        "the custody attempt was written once"
+    );
+}
+
+// The source writer held past the bound: retry_safe at the submission's
+// deadline, nothing admitted and no custody attempt written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn submission_persist_writer_held_past_the_bound_answers_retry_safe() {
+    let found = finds_with_hold_at(
+        Site::SubmitPersistWriter,
+        1,
+        held_past_the_bound(),
+        0,
+        false,
+    )
+    .await;
+    assert_retry_safe_after_one_bind(&found);
+    assert_eq!(found.attempt_writes, 0, "no custody attempt was written");
+}
+
+// The binder's read of the helper source's admitted custody meets the held
+// collection: it refuses at once, the submission waits outside the bind and
+// binds again; the custody attempt, after that read, is written once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn submission_admitted_read_waits_out_a_held_source_collection_outside_the_bind() {
+    let found = finds_with_hold_at(Site::SubmitAdmitted, 1, collection_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+    assert_eq!(
+        found.site_hits, 2,
+        "the admitted read refused the held collection at once and bound again"
+    );
+    assert_eq!(
+        found.attempt_writes, 1,
+        "the custody attempt was written once"
+    );
+}
+
+// The same read meets an owner change held on the shared publication: it
+// never waits for the change's writer inside the bind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn submission_admitted_read_waits_out_an_owner_change_outside_the_bind() {
+    let found = finds_with_hold_at(Site::SubmitAdmitted, 1, change_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+    assert_eq!(
+        found.site_hits, 2,
+        "the admitted read refused the owner change at once and bound again"
+    );
+    assert_eq!(
+        found.attempt_writes, 1,
+        "the custody attempt was written once"
+    );
+}
+
+// The recovery enrollment meets the custody recovery's control held by a
+// recovery round: it refuses at once, and the submission waits for the
+// control outside the bind and binds again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn submission_enrollment_waits_out_a_held_recovery_control_outside_the_bind() {
+    let found =
+        finds_with_hold_at(Site::SubmitRecoveryControl, 1, collection_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+    assert_eq!(
+        found.site_hits, 2,
+        "the enrollment refused the held control at once and bound again"
+    );
+    assert_eq!(
+        found.attempt_writes, 1,
+        "the custody attempt was written once and reused"
+    );
 }

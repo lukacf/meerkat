@@ -184,6 +184,9 @@ struct Attempt {
     dispatch_error: Option<meerkat_core::ToolDispatchTerminalErrorKind>,
     deadline: Instant,
     custody: Custody,
+    // Who the recorded decision names: this owner's presenter, or the person
+    // who answered in the Console. Set only when the decision is recorded.
+    decided_by: Option<ApprovalPrincipalId>,
     held: Option<HeldAction>,
     service: Option<ServiceReview>,
     service_entry: Option<toolkit_mobkit::private_host::ConsoleLoginReservation>,
@@ -610,6 +613,7 @@ impl LocalApprovals {
                 dispatch_error: None,
                 deadline,
                 custody: Custody::AwaitingDecision,
+                decided_by: None,
                 held: None,
                 service: None,
                 service_entry: None,
@@ -679,7 +683,7 @@ impl LocalApprovals {
             || retained != **request
             || native.status != expected_status
             || native.decision.as_ref().is_none_or(|record| {
-                record.decision != decision || record.actor != self.shared.actor
+                record.decision != decision || attempt.decided_by.as_ref() != Some(&record.actor)
             })
             || attempt.custody != Custody::DecisionRecorded(decision)
         {
@@ -1368,6 +1372,34 @@ impl ConsoleAnswerer {
             ),
         })
     }
+
+    /// What a decision records of this person: as its actor, Core's
+    /// canonical key of the qualified principal (two issuers' identical
+    /// subjects stay apart), and as its provenance the approver, named as
+    /// Core's consent records name one.
+    fn recorded(&self) -> Result<RecordedDecider, ConnectError> {
+        let key = meerkat_core::approval::decision::DecisionPrincipalKey::of(&self.principal)
+            .map_err(|_| invalid("The Console answer names no verified person"))?;
+        let actor = ApprovalPrincipalId::new(key.as_str())
+            .map_err(|error| ConnectError::native("identify the Console answerer", error))?;
+        Ok(RecordedDecider {
+            actor,
+            provenance: serde_json::json!({"approver": {
+                "principal": self.principal,
+                "assurance": meerkat_core::ApprovalAssurance::PersonAuthenticated,
+                "authentication_scope_digest": self.authentication_scope_digest,
+            }}),
+        })
+    }
+}
+
+/// Who a decision is recorded as made by, when it is not this owner's
+/// presenter: the actor and the provenance of the decision's record. Only a
+/// Console answer builds one.
+#[cfg_attr(not(feature = "console"), allow(dead_code))]
+struct RecordedDecider {
+    actor: ApprovalPrincipalId,
+    provenance: serde_json::Value,
 }
 
 impl ApprovalPrompt {
@@ -1379,6 +1411,16 @@ impl ApprovalPrompt {
     /// endpoint; only the currently retained prompt owns its one-shot response.
     pub fn decide(&mut self, decision: ApprovalDecision) -> Result<(), ConnectError> {
         self.decide_current(decision, None)
+    }
+    /// A Console answer to a review prompt, recorded as made by `answerer`,
+    /// the person the Console verified on the accepted answer.
+    #[cfg(feature = "console")]
+    pub(crate) fn decide_answered(
+        &mut self,
+        decision: ApprovalDecision,
+        answerer: &ConsoleAnswerer,
+    ) -> Result<(), ConnectError> {
+        self.decide_as(decision, None, Some(answerer.recorded()?))
     }
     #[cfg(feature = "console")]
     pub(crate) fn console_task(
@@ -1398,13 +1440,21 @@ impl ApprovalPrompt {
         if self.console_task().is_none() {
             return Err(invalid("The software prompt has no Console task"));
         }
-        let _ = answerer;
-        self.decide_current(decision, Some(current))
+        self.decide_as(decision, Some(current), Some(answerer.recorded()?))
     }
     fn decide_current(
         &mut self,
         decision: ApprovalDecision,
         current: Option<crate::installed_service_review::account_request::console::DecisionCheck>,
+    ) -> Result<(), ConnectError> {
+        self.decide_as(decision, current, None)
+    }
+    /// Record `decision` as made by `decider`, or by this owner's presenter.
+    fn decide_as(
+        &mut self,
+        decision: ApprovalDecision,
+        current: Option<crate::installed_service_review::account_request::console::DecisionCheck>,
+        decider: Option<RecordedDecider>,
     ) -> Result<(), ConnectError> {
         let mut state = self.shared.live_state()?;
         if state.closed {
@@ -1443,14 +1493,20 @@ impl ApprovalPrompt {
             }
             return Err(invalid("The Console decision changed before entry"));
         }
+        // A Console answer records the person who answered; every other
+        // decision records this owner's presenter.
+        let (actor, provenance) = match decider {
+            Some(RecordedDecider { actor, provenance }) => (actor, Some(provenance)),
+            None => (self.shared.actor.clone(), None),
+        };
         self.shared
             .service
             .decide(
                 &attempt.approval_id,
                 decision,
-                self.shared.actor.clone(),
+                actor.clone(),
                 None,
-                None,
+                provenance,
             )
             .map_err(|e| ConnectError::native("record native approval decision", e))?;
         if let Some(reservation) = reservation {
@@ -1459,6 +1515,7 @@ impl ApprovalPrompt {
         if let Some(service) = &mut attempt.service {
             service.decision_current = current;
         }
+        attempt.decided_by = Some(actor);
         attempt.custody = Custody::DecisionRecorded(decision);
         self.response
             .take()
@@ -1596,18 +1653,22 @@ impl Shared {
                 expires_at: Some(expires.into()), metadata: Default::default(),
                 request_provenance: policy_provenance,
             }).map_err(|_| refused())?;
-            if let Some(entry) = &policy_entry {
-                let actor = entry.actor().map_err(|_| refused())?;
-                self.service
-                    .decide(
-                        &record.approval_id,
-                        ApprovalDecision::Approve,
-                        actor,
-                        None,
-                        None,
-                    )
-                    .map_err(|_| refused())?;
-            }
+            let decided_by = match &policy_entry {
+                Some(entry) => {
+                    let actor = entry.actor().map_err(|_| refused())?;
+                    self.service
+                        .decide(
+                            &record.approval_id,
+                            ApprovalDecision::Approve,
+                            actor.clone(),
+                            None,
+                            None,
+                        )
+                        .map_err(|_| refused())?;
+                    Some(actor)
+                }
+                None => None,
+            };
             state.attempt = Some(Attempt {
                 approval_id: record.approval_id.clone(),
                 input: AttemptInput::Dispatch {
@@ -1628,6 +1689,7 @@ impl Shared {
                 } else {
                     Custody::AwaitingDecision
                 },
+                decided_by,
                 readback: held.as_ref().and_then(HeldAction::readback_target),
                 service: task.clone().map(|task| ServiceReview {
                     task,
@@ -2387,6 +2449,7 @@ mod tests {
                     dispatch_error: None,
                     deadline: Instant::now() + DECISION_LIFETIME,
                     custody: Custody::SpentUncertain,
+                    decided_by: None,
                     held: None,
                     service: None,
                     service_entry: None,

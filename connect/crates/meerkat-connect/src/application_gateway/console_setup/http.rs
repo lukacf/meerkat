@@ -92,7 +92,7 @@ pub(super) fn answering_person(viewer: Option<&ConsoleViewerContext>) -> Result<
     if person {
         Ok(())
     } else {
-        Err(Refusal::Status(StatusCode::FORBIDDEN))
+        Err(Refusal::ApproverUnauthenticated)
     }
 }
 fn response(status: StatusCode, content_type: &'static str, body: impl Into<String>) -> Response {

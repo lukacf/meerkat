@@ -772,14 +772,16 @@ where
                         answer = bridge.ask(projection) => answer?,
                     };
                     refresh().await?;
-                    let _ = answerer;
+                    // The person the accepted answer's verified carrier names,
+                    // read after the last await; no current person decides nothing.
+                    let answerer = answerer()?;
                     let reservation = decision_login.map(|login| login.reserve()).transpose()
                         .map_err(|_| refused("The Console login refused approval entry"))?;
                     let result = match answer {
-                        PromptAnswer::Approval { decision } => prompt.decide(match decision {
+                        PromptAnswer::Approval { decision } => prompt.decide_answered(match decision {
                             crate::stdio::wire::Decision::Approve => ApprovalDecision::Approve,
                             crate::stdio::wire::Decision::Deny => ApprovalDecision::Deny,
-                        }),
+                        }, &answerer),
                         _ => Err(refused("The protected account answer is invalid")),
                     };
                     if result.is_ok()

@@ -593,8 +593,10 @@ export class MetaBuilder {
    *
    * Emitted as `runtime_options.allow_remote`. Same word and rule as
    * `--allow-remote` on `rkat-rpc --tcp`: an exposure acknowledgement, not an
-   * auth mechanism. Pass it only with an authenticating proxy in front of the
-   * listener. Mirrors the Python builder's `allow_remote`.
+   * auth mechanism. Without app auth the console treats every caller as one
+   * anonymous caller, even behind a proxy that signs people in; configure
+   * `auth_config` to tell people apart. Mirrors the Python builder's
+   * `allow_remote`.
    */
   allowRemote(allow = true): this {
     this._config.allowRemote = allow;

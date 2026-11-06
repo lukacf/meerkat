@@ -163,7 +163,7 @@ impl UnifiedRuntime {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let app = self.build_reference_app_router(decisions);
+        let app = served_by(&listener, self.build_reference_app_router(decisions));
         let serve = axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_signal)
             .into_future();
@@ -180,7 +180,7 @@ impl UnifiedRuntime {
         listener: tokio::net::TcpListener,
         decisions: RuntimeDecisionState,
     ) -> std::io::Result<()> {
-        let app = self.build_reference_app_router(decisions);
+        let app = served_by(&listener, self.build_reference_app_router(decisions));
         self.serve_while_draining(axum::serve(listener, app).into_future())
             .await
     }
@@ -1876,5 +1876,16 @@ mod event_log_intake_tests {
              router load: {took:?}"
         );
         let _ = runtime.shutdown().await;
+    }
+}
+
+/// `app`, recording on every request it serves the hosts `listener`
+/// serves ([`ServedHosts`](crate::gateway_composition::ServedHosts)).
+fn served_by(listener: &tokio::net::TcpListener, app: axum::Router) -> axum::Router {
+    match listener.local_addr() {
+        Ok(addr) => app.layer(axum::Extension(
+            crate::gateway_composition::ServedHosts::new(addr, None),
+        )),
+        Err(_) => app,
     }
 }

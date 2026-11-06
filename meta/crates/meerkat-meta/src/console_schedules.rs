@@ -310,6 +310,70 @@ pub(crate) fn refuse_reserved_runnable_name(name: &HostRunnableName) -> Result<(
 pub(crate) struct AttachedConsoleSchedules {
     pub(crate) service: ScheduleService,
     pub(crate) firing: ScheduleFiringHostBinding,
+    /// Test hook: while set, a console schedule update waits here after its
+    /// reads and before it writes.
+    #[cfg(test)]
+    pub(crate) write_hold: Arc<std::sync::Mutex<Option<ScheduleWriteHold>>>,
+}
+
+/// Test hook: holds a console schedule update between its reads and its
+/// write until the test releases it.
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct ScheduleWriteHold {
+    reached: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+#[cfg(test)]
+impl Default for ScheduleWriteHold {
+    fn default() -> Self {
+        Self {
+            reached: Arc::new(tokio::sync::Semaphore::new(0)),
+            release: Arc::new(tokio::sync::Semaphore::new(0)),
+        }
+    }
+}
+
+#[cfg(test)]
+impl ScheduleWriteHold {
+    /// Wait until an update reached the hold.
+    pub(crate) async fn reached(&self) {
+        if let Ok(permit) = self.reached.acquire().await {
+            permit.forget();
+        }
+    }
+
+    /// Let the held update write.
+    pub(crate) fn release(&self) {
+        self.release.add_permits(1);
+    }
+}
+
+#[cfg(test)]
+impl AttachedConsoleSchedules {
+    /// Hold the next update with `hold`.
+    pub(crate) fn hold_writes(&self, hold: ScheduleWriteHold) {
+        *self
+            .write_hold
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(hold);
+    }
+
+    /// Wait at the hold, when one is set.
+    pub(crate) async fn wait_at_write_hold(&self) {
+        let hold = self
+            .write_hold
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(hold) = hold {
+            hold.reached.add_permits(1);
+            if let Ok(permit) = hold.release.acquire().await {
+                permit.forget();
+            }
+        }
+    }
 }
 
 /// Where a runtime's console schedules live: empty until the gateway's
@@ -325,8 +389,12 @@ impl ConsoleSchedules {
     /// console schedules from then on, and writes them while the firing host
     /// is bound.
     pub fn attach(&self, service: ScheduleService, firing: ScheduleFiringHostBinding) {
-        *self.0.write().unwrap_or_else(PoisonError::into_inner) =
-            Some(AttachedConsoleSchedules { service, firing });
+        *self.0.write().unwrap_or_else(PoisonError::into_inner) = Some(AttachedConsoleSchedules {
+            service,
+            firing,
+            #[cfg(test)]
+            write_hold: Arc::default(),
+        });
     }
 
     /// The attached schedule service, if any.

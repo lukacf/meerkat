@@ -132,6 +132,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The event log and console status fixes above lift the two matching 0.9.10
   Known limitations.
 
+- The console forwarder no longer attaches a member's event stream that
+  would attach only at the member's wake. A member released between the
+  forwarder's reconcile pass and its subscription, as a mob's teardown
+  releases its members, came back as a deferred stream that yielded nothing
+  until the member woke, or closed when the mob ended, and the pass tracked
+  it as attached. The pass now skips such a subscription, as it skips a
+  member it finds dormant, and the member's wake runs the pass again.
+
 ## [0.9.10] - 2026-11-04
 
 Meta 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10 and Connect

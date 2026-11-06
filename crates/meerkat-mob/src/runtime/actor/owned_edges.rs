@@ -18,46 +18,7 @@ fn machine_edge(a: &AgentIdentity, b: &AgentIdentity) -> mob_dsl::WiringEdge {
     )
 }
 
-/// The owned edges of `members` that wait for their realization in `state`:
-/// each joins a member of `members` to another member, both seated and
-/// active, and MobMachine has not wired it. Each unordered pair once, as
-/// (member of `members`, other end), in edge order.
-pub(super) fn owned_pairs_to_realize(
-    state: &mob_dsl::MobMachineState,
-    members: &[AgentIdentity],
-) -> Vec<(AgentIdentity, AgentIdentity)> {
-    let seated_and_active = |identity: &mob_dsl::AgentIdentity| {
-        state.identity_to_runtime.contains_key(identity)
-            && MobMemberLifecycleProjection::is_active_machine_lifecycle(
-                &state.member_lifecycle_for_identity(identity),
-            )
-    };
-    let members: BTreeSet<mob_dsl::AgentIdentity> = members
-        .iter()
-        .map(mob_dsl::AgentIdentity::from_domain)
-        .collect();
-    let mut pairs = Vec::new();
-    for edge in state.identity_edge_owners.keys() {
-        if state.wiring_edges.contains(edge)
-            || !seated_and_active(&edge.a)
-            || !seated_and_active(&edge.b)
-        {
-            continue;
-        }
-        let (local, peer) = if members.contains(&edge.a) {
-            (&edge.a, &edge.b)
-        } else if members.contains(&edge.b) {
-            (&edge.b, &edge.a)
-        } else {
-            continue;
-        };
-        pairs.push((
-            AgentIdentity::from(local.0.as_str()),
-            AgentIdentity::from(peer.0.as_str()),
-        ));
-    }
-    pairs
-}
+pub(super) use crate::runtime::owned_edges::owned_pairs_to_realize;
 
 impl MobActor {
     /// Declare on `authority` each edge `owner`'s change lists
@@ -357,11 +318,7 @@ impl MobActor {
         if state.lifecycle_phase != mob_dsl::MobPhase::Running {
             return;
         }
-        let members: Vec<AgentIdentity> = state
-            .identity_edge_owners
-            .values()
-            .map(|owner| AgentIdentity::from(owner.0.as_str()))
-            .collect();
+        let members = crate::runtime::owned_edges::edge_owners(state);
         Box::pin(self.realize_owned_edges_of(&members)).await;
     }
 

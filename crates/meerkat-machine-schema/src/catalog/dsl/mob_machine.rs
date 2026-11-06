@@ -40121,6 +40121,10 @@ mod origin_custody_guard_tests {
         // The roster writer's one-entry unlist, which acts on a Declared entry
         // only.
         "UnlistIdentityEntry",
+        // An owned edge's declaration and its recovery (0.9.11): its owner is
+        // a store-owned identity, whose row persists the edge.
+        "DeclareOwnedIdentityEdge",
+        "RecoverOwnedIdentityEdge",
     ];
 
     const ORIGIN_GUARD_INVARIANTS: &[&str] = &[
@@ -40128,6 +40132,7 @@ mod origin_custody_guard_tests {
         "retiring_entry_is_a_declared_entry",
         "archived_entry_is_store_owned",
         "entry_ending_marks_are_seated_and_disjoint",
+        "owned_edge_owner_is_a_store_owned_end",
     ];
 
     /// The byte offsets of every read of an origin value in `code`: a path to

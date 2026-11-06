@@ -66,4 +66,15 @@ describe("memory events in words", () => {
     expect(words("Steward { run_id: \"dream-7\" }")).toBe("the memory steward");
     expect(words("Operator")).toBe("an operator");
   });
+
+  it("reads the person a console memory write names as its operator", () => {
+    expect(parseMemoryAuthor("Operator { principal: Some(\"bob@example.test\") }"))
+      .toEqual({ author: "operator", principal: "bob@example.test" });
+    expect(parseMemoryAuthor("Operator { principal: None }")).toEqual({ author: "operator" });
+    expect(parseMemoryAuthor({ author: "operator", principal: " bob@example.test " }))
+      .toEqual({ author: "operator", principal: "bob@example.test" });
+    expect(parseMemoryAuthor({ author: "operator" })).toEqual({ author: "operator" });
+    expect(memoryAuthorWords({ author: "operator", principal: "bob@example.test" }, names)).toBe("bob@example.test");
+    expect(memoryAuthorWords({ author: "operator" }, names)).toBe("an operator");
+  });
 });

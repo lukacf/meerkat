@@ -16,6 +16,13 @@ CARGO ?= ./scripts/repo-cargo
 # bare `--workspace` would compile Core's crates with the products' features.
 # Each product's own lanes select its packages (`--product NAME`).
 CORE_WORKSPACE = $(shell node scripts/core-workspace-args.mjs)
+# A lane that builds test targets without --all-features also passes the
+# selected members' test features (their [package.metadata.meerkat.standalone-tests]
+# features and `workspace-tests`): no dev-dependency turns them on, and a test
+# build without them fails to compile here. CORE_WORKSPACE_TESTS is Core's
+# whole workspace, $(call TEST_PACKAGES,-p NAME ...) the named packages.
+CORE_WORKSPACE_TESTS = $(shell node scripts/core-workspace-args.mjs --tests)
+TEST_PACKAGES = $(shell node scripts/core-workspace-args.mjs --tests $(1))
 # Python >= 3.11 for the repo's scripts and SDK tooling (tomllib,
 # hashlib.file_digest). scripts/require-python prefers python3.13..3.11 over a
 # PATH python3 (macOS can put Apple's 3.9 first). If none qualifies, any target
@@ -34,7 +41,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all install-build-deps build test test-unit test-mob-dense-topology test-mcp-confinement-positive test-int e2e-fast e2e-build e2e-system e2e-live e2e-copilot-live e2e-smoke e2e-auth test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-web test-sdk-suites wasm-check lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-lock-update buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-e2e-smoke-turbo-s buildbuddy-e2e-auth buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-doctor release-preflight release-preflight-smoke release-workflow release-assets release-packages release-web-sdk release-prebuild publish-dry-run publish-dry-run-python publish-dry-run-typescript publish-dry-run-web release-dry-run release-dry-run-smoke clean doc docs-check docs-only-contract-gate docs-sync-meta release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage verify-fixture-mint-generator check-rust-release-config check-crate-license-files check-published-crates-standalone-guard published-crates-standalone-selftest published-crates-standalone-census check-rust-release-packaging check-rust-release-packaging-contract verify-lock-consistency verify-bazel-locks verify-bazel-locks-strict verify-bazel-module-lock-inputs verify-bazel-release-features release-test-code-guards-selftest check-published-facade-link bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-verify-deep-compositions machine-verify-full machine-check-drift machine-authority-docs-gate mobpack-docs-contract-gate runtime-authority-bypass storage-ambient-gate seam-inventory rmat-audit rmat-audit-effect-authority rmat-audit-ownership-ledger rmat-audit-strict audit-generated-headers semver-breaks semver-breaks-meta protocol-codegen protocol-check-drift semver-breaks-selftest path-classifier-selftest stack-budget-release turbo-s-oracle-gate
+.PHONY: all install-build-deps build test test-unit test-mob-dense-topology test-mcp-confinement-positive test-int e2e-fast e2e-build e2e-system e2e-live e2e-copilot-live e2e-smoke e2e-auth test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-web test-sdk-suites wasm-check lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor buildbuddy-install buildbuddy-generate buildbuddy-lock-update buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-e2e-smoke-turbo-s buildbuddy-e2e-auth buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-doctor release-preflight release-preflight-smoke release-workflow release-assets release-packages release-web-sdk release-prebuild publish-dry-run publish-dry-run-python publish-dry-run-typescript publish-dry-run-web release-dry-run release-dry-run-smoke clean doc docs-check docs-only-contract-gate docs-sync-meta release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage verify-fixture-mint-generator check-rust-release-config check-crate-license-files check-published-crates-standalone-guard published-crates-standalone-selftest test-feature-canary-selftest published-crates-standalone-census check-rust-release-packaging check-rust-release-packaging-contract verify-lock-consistency verify-bazel-locks verify-bazel-locks-strict verify-bazel-module-lock-inputs verify-bazel-release-features release-test-code-guards-selftest check-published-facade-link bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-verify-deep-compositions machine-verify-full machine-check-drift machine-authority-docs-gate mobpack-docs-contract-gate runtime-authority-bypass storage-ambient-gate seam-inventory rmat-audit rmat-audit-effect-authority rmat-audit-ownership-ledger rmat-audit-strict audit-generated-headers semver-breaks semver-breaks-meta protocol-codegen protocol-check-drift semver-breaks-selftest path-classifier-selftest stack-budget-release turbo-s-oracle-gate
 
 # Default target
 all: ci
@@ -67,7 +74,7 @@ test-unit:
 # neighboring tests and opts the Linux-hosted case back in explicitly.
 test-mob-dense-topology:
 	@echo "$(GREEN)Running dense Mob topology stress lane...$(NC)"
-	$(CARGO) nextest run --profile mob-dense-topology -p meerkat-mob --lib --run-ignored all --no-tests=fail
+	$(CARGO) nextest run --profile mob-dense-topology $(call TEST_PACKAGES,-p meerkat-mob) --lib --run-ignored all --no-tests=fail
 
 # Linux positive confinement acceptance. These cases need a host whose kernel
 # policy allows the native backend, so on Linux they are ignored in ordinary
@@ -231,7 +238,7 @@ test-minimal:
 	$(CARGO) check -p meerkat-tools --no-default-features
 	$(CARGO) check -p meerkat --no-default-features
 	$(CARGO) check -p rkat --no-default-features
-	$(CARGO) nextest run -p meerkat-core
+	$(CARGO) nextest run $(call TEST_PACKAGES,-p meerkat-core)
 
 # Library crate feature combinations
 test-feature-matrix-lib:
@@ -252,7 +259,7 @@ test-feature-matrix-lib:
 	$(CARGO) check -p meerkat-mob --no-default-features --features runtime-adapter
 	MEERKAT_MCP_TEST_SERVER="$$(scripts/mcp-test-server-fixture)" && \
 		export MEERKAT_MCP_TEST_SERVER && \
-		$(CARGO) nextest run -p meerkat --features all-providers,comms,mcp
+		$(CARGO) nextest run $(call TEST_PACKAGES,-p meerkat) --features all-providers,comms,mcp
 
 # Surface crate feature combinations
 test-feature-matrix-surface:
@@ -343,15 +350,14 @@ ci-lanes-selftest:
 	@scripts/test-ci-non-rust-readers.sh
 	@scripts/test-ci-clippy-sccache-wrapper.sh
 	@scripts/test-setup-sccache-ci.sh
-	@echo "$(GREEN)Checking that CI runs what the pre-push hook no longer runs...$(NC)"
-	@scripts/test-pre-push-ratchets.sh
 
 .PHONY: native-cost-analysis-selftest
 native-cost-analysis-selftest:
 	@$(PYTHON) scripts/test_analyze_native_cost.py
 
 # Path classifiers (machine-authority-changed, buildbuddy-edge-changes,
-# cargo-agent-gate) and gate wiring contracts. Pure shell, no cargo build.
+# the local affected-test selection) and gate wiring contracts. Pure shell
+# and Node, no cargo build.
 path-classifier-selftest:
 	@echo "$(GREEN)Self-testing path classifiers and gate wiring...$(NC)"
 	@bash scripts/tests/xtask_scripts_dogma_gates.sh
@@ -365,22 +371,7 @@ path-classifier-selftest:
 	@node scripts/buildbuddy-edge-changes-selftest.mjs
 	@node scripts/rust-source-text-selftest.mjs
 	@node scripts/precommit-build-hook-selftest.mjs
-
-cargo-agent-gate: rust-lane-doctor
-	@echo "$(GREEN)Running Cargo agent changed-path gate...$(NC)"
-	@scripts/cargo-agent-gate $(AGENT_GATE_ARGS)
-
-agent-gate: SHELL := /bin/bash
-agent-gate:
-	@set -e; . ./scripts/build-backend-env; \
-	if meerkat_buildbuddy_enabled; then \
-		$(MAKE) buildbuddy-doctor; \
-	else \
-		$(MAKE) rust-lane-doctor; \
-	fi
-	@$(MAKE) docs-check
-	@printf '%b\n' "$(GREEN)Running agent changed-path gate...$(NC)"
-	@scripts/agent-gate $(AGENT_GATE_ARGS)
+	@node scripts/affected-tests-selftest.mjs
 
 buildbuddy-install:
 	@echo "$(GREEN)Installing pinned BuildBuddy CLI...$(NC)"
@@ -742,7 +733,7 @@ outdated:
 # Run benchmarks (if you have benches/)
 bench:
 	@echo "$(GREEN)Running benchmarks...$(NC)"
-	$(CARGO) bench $(CORE_WORKSPACE)
+	$(CARGO) bench $(CORE_WORKSPACE_TESTS)
 
 # ── Version parity & release targets ────────────────────────────────────────
 
@@ -821,7 +812,15 @@ check-published-crates-standalone-guard:
 published-crates-standalone-selftest:
 	@$(PYTHON) scripts/test_published_crates_standalone.py
 
-STANDALONE_CENSUS_OUT ?= target/published-crates-standalone
+# The test-feature canary in each Core crate's lib.rs trips a test binary
+# built without the crate's test features and nothing else: a fixture crate
+# with the same canary, built on the pinned toolchain in a scratch directory.
+test-feature-canary-selftest:
+	@scripts/test-feature-canary-selftest.sh
+
+# Outside the repository: the standalone builds run in it, and must not read
+# the repository's Cargo configuration (the census refuses such a directory).
+STANDALONE_CENSUS_OUT ?= $(or $(TMPDIR),/tmp)/meerkat-published-crates-standalone
 published-crates-standalone-census:
 	@$(PYTHON) scripts/published_crates_standalone.py census --out $(STANDALONE_CENSUS_OUT) $(STANDALONE_CENSUS_ARGS)
 
@@ -1133,8 +1132,6 @@ help:
 	@echo "  $(GREEN)fmt-check$(NC)     - Check code formatting"
 	@echo "  $(GREEN)audit$(NC)         - Run security audit (cargo-deny)"
 	@echo "  $(GREEN)rust-lane-doctor$(NC)- Check Rust lane isolation and filtered test lanes"
-	@echo "  $(GREEN)agent-gate$(NC)    - Run Cargo or MEERKAT_BUILDBUDDY=1 BuildBuddy changed gate (AGENT_GATE_ARGS=...)"
-	@echo "  $(GREEN)cargo-agent-gate$(NC)- Run Cargo gate for changed agent files"
 	@echo "  $(GREEN)buildbuddy-install$(NC)- Install pinned optional BuildBuddy CLI"
 	@echo "  $(GREEN)buildbuddy-generate$(NC)- Regenerate optional Bazel BUILD files"
 	@echo "  $(GREEN)buildbuddy-lock-update$(NC)- Refresh Bazel module lockfile"

@@ -2985,6 +2985,154 @@ pub enum RuntimeStoreError {
     /// inconsistent. A re-read answers the same until it is repaired.
     #[error("Store data is corrupt: {0}")]
     Corrupt(String),
+    /// A host store refuses the call until its realm is reopened: scopes the
+    /// call needs are poisoned. A batch that touched each of them failed, or
+    /// its outcome stayed unknown, after the process's memory changed, so
+    /// that memory may hold what the host does not. Nothing was read or
+    /// written. Every later call that needs one of these scopes answers the
+    /// same until the process opens the realm again, and a call that needs
+    /// none of them is served: this is no outage a later call gets past, and
+    /// a caller does not retry it.
+    #[error(
+        "Store refused until the host store realm is reopened: {}",
+        RefusedScopesDisplay(scopes)
+    )]
+    ScopeRefused {
+        /// The poisoned scopes the call needs, each with its poison cause.
+        scopes: Vec<RefusedScope>,
+    },
+    /// A host store realm lost its fence (another writer holds it, or this
+    /// writer broke the writer rules): every call refuses until the realm is
+    /// reopened, and nothing was read or written.
+    #[error("Store refused until the host store realm is reopened: the realm is poisoned: {cause}")]
+    RealmRefused {
+        /// Why the realm was poisoned.
+        cause: String,
+    },
+}
+
+impl RuntimeStoreError {
+    /// Whether the store refuses this call until its realm is reopened
+    /// ([`Self::ScopeRefused`], [`Self::RealmRefused`]): every later call
+    /// that needs the same scopes answers the same, so the refusal can be
+    /// remembered and is never retried as an outage.
+    #[must_use]
+    pub fn is_refused_until_reopen(&self) -> bool {
+        matches!(self, Self::ScopeRefused { .. } | Self::RealmRefused { .. })
+    }
+}
+
+/// One poisoned host store scope a refused call needs
+/// ([`RuntimeStoreError::ScopeRefused`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RefusedScope {
+    /// The scope, as its family tag and key: `<tag>:<key>`. A runtime's
+    /// scope is `rt:<runtime id>`.
+    pub scope: String,
+    /// Why the scope was poisoned.
+    pub cause: String,
+}
+
+impl RefusedScope {
+    #[must_use]
+    pub fn new(scope: impl Into<String>, cause: impl Into<String>) -> Self {
+        Self {
+            scope: scope.into(),
+            cause: cause.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for RefusedScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "host store scope {} is poisoned: {}",
+            self.scope, self.cause
+        )
+    }
+}
+
+/// The scopes of a [`RuntimeStoreError::ScopeRefused`], each with its cause.
+struct RefusedScopesDisplay<'a>(&'a [RefusedScope]);
+
+impl std::fmt::Display for RefusedScopesDisplay<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            [] => f.write_str("a host store scope is poisoned"),
+            [only] => only.fmt(f),
+            several => {
+                f.write_str("host store scopes ")?;
+                for (index, scope) in several.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(", ")?;
+                    }
+                    f.write_str(&scope.scope)?;
+                }
+                f.write_str(" are poisoned (")?;
+                for (index, scope) in several.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str("; ")?;
+                    }
+                    write!(f, "{}: {}", scope.scope, scope.cause)?;
+                }
+                f.write_str(")")
+            }
+        }
+    }
+}
+
+/// A runtime a store-wide read could not answer for: the store refuses the
+/// runtime's scope until its realm is reopened
+/// ([`RuntimeStore::list_runtime_delivery_authorities_or_unavailable`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct UnavailableRuntime {
+    /// The runtime.
+    pub runtime_id: LogicalRuntimeId,
+    /// The store's refusal of the runtime's scope.
+    pub refusal: RefusedScope,
+}
+
+impl UnavailableRuntime {
+    #[must_use]
+    pub fn new(runtime_id: LogicalRuntimeId, refusal: RefusedScope) -> Self {
+        Self {
+            runtime_id,
+            refusal,
+        }
+    }
+}
+
+/// The delivery authorities of a store, answered per runtime
+/// ([`RuntimeStore::list_runtime_delivery_authorities_or_unavailable`]):
+/// the record of every runtime the store answers for, and every runtime it
+/// cannot answer for now. The two sets are disjoint, and a runtime in
+/// neither holds no delivery authority.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RuntimeDeliveryAuthorityListing {
+    /// Every runtime the store answers for that holds a delivery authority,
+    /// with its record.
+    pub records: Vec<(LogicalRuntimeId, RuntimeDeliveryAuthorityRecord)>,
+    /// Every runtime the store cannot answer for until it is reopened. Any
+    /// of them may hold a delivery authority with pending rows: none is
+    /// reported absent.
+    pub unavailable: Vec<UnavailableRuntime>,
+}
+
+impl RuntimeDeliveryAuthorityListing {
+    #[must_use]
+    pub fn new(
+        records: Vec<(LogicalRuntimeId, RuntimeDeliveryAuthorityRecord)>,
+        unavailable: Vec<UnavailableRuntime>,
+    ) -> Self {
+        Self {
+            records,
+            unavailable,
+        }
+    }
 }
 
 /// Classify whether `candidate` may become the durable direct-member semantic
@@ -10059,6 +10207,29 @@ pub trait RuntimeStore: Send + Sync {
     ) -> Result<Vec<(LogicalRuntimeId, RuntimeDeliveryAuthorityRecord)>, RuntimeStoreError> {
         Err(RuntimeStoreError::Unsupported(
             "list_runtime_delivery_authorities".into(),
+        ))
+    }
+
+    /// [`Self::list_runtime_delivery_authorities`], answered per runtime: the
+    /// record of every runtime the store can answer for, and every runtime
+    /// it cannot answer for until it is reopened
+    /// ([`UnavailableRuntime`]: a host store whose scope of that runtime is
+    /// poisoned). An unavailable runtime may hold pending rows, so a caller
+    /// never reads it as holding none: a drain leaves it alone, a boot plan
+    /// reads it as an obligation, and a total refuses.
+    ///
+    /// The default answers every record of
+    /// [`Self::list_runtime_delivery_authorities`] and no unavailable
+    /// runtime: a store whose listing answers all or nothing changes nothing.
+    /// A decorator forwards this method to the store it wraps; left to the
+    /// default, it answers through its own listing, which a host store
+    /// refuses while any of its runtime scopes is poisoned.
+    async fn list_runtime_delivery_authorities_or_unavailable(
+        &self,
+    ) -> Result<RuntimeDeliveryAuthorityListing, RuntimeStoreError> {
+        Ok(RuntimeDeliveryAuthorityListing::new(
+            self.list_runtime_delivery_authorities().await?,
+            Vec::new(),
         ))
     }
 

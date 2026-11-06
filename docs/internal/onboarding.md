@@ -22,7 +22,7 @@ make install-build-deps
 ```
 
 This target bootstraps Rust, not every validation tool. Install the separate
-Cargo test runner before using `make test` or `make agent-gate`:
+Cargo test runner before using `make test` or `scripts/affected-tests.mjs`:
 
 ```bash
 ./scripts/repo-cargo install cargo-nextest --locked
@@ -47,8 +47,8 @@ make check
 make test
 ```
 
-For a smaller first pass, `make agent-gate` derives the Rust lanes affected by
-the current diff and runs the scoped checks.
+For a smaller first pass, `node scripts/affected-tests.mjs --run` runs the
+tests the current diff affects (see [Affected Tests](#affected-tests)).
 
 ## Architecture In Five Minutes
 
@@ -89,14 +89,34 @@ make build
 make check
 make lint
 make test
-make agent-gate
 ```
 
-Use the repository wrapper for a targeted Cargo command:
+For the tests a change affects, see [Affected Tests](#affected-tests).
+
+Use the repository wrapper for a targeted Cargo command. A test command passes
+the crate's test features, which
+`node scripts/core-workspace-args.mjs --tests -p <crate>` prints:
 
 ```bash
-./scripts/repo-cargo test -p meerkat-core session
+./scripts/repo-cargo test $(node scripts/core-workspace-args.mjs --tests -p meerkat-core) session
 ```
+
+Pass the same flags to a run narrowed to one integration target
+(`--test <target>`): it builds no lib test, so the crate's test-feature check
+does not stop it, and without them it compiles the gated tests out without a
+word. Add any feature the target's own `#![cfg(feature = ...)]` names
+(meerkat-core's `wholeblob_compaction_media_guard` needs `test-support`; a
+second `--features` adds it).
+
+For rust-analyzer, set `rust-analyzer.cargo.features` to `"all"` (in VS Code,
+the `rust-analyzer.cargo.features` setting). Without features it treats the
+code the test features gate, such as the `workspace-tests` test modules, as
+inactive, and its Run test lens stops on the test-feature check. A
+package-qualified list does not work: Cargo refuses a feature of a package the
+command does not select, and rust-analyzer's runnables select one package.
+`"all"` also turns on every other feature (the live, realtime and GPT Live
+ones, and the products'), so the editor's check compiles more than a default
+build does; it is still the one global value that works.
 
 Avoid raw `cargo` and raw `bb` for normal repository work. The wrapper keeps
 multi-worktree and multi-agent build outputs isolated. In one checkout, give
@@ -151,13 +171,63 @@ with schemas and BUILD files:
 UPDATE_DOC_EXAMPLES_FIXTURE=1 cargo test -p rkat --test doc_examples_fixture
 ```
 
+## Affected Tests
+
+Run the tests your change affects before you push, and let pull request CI run
+the full pass. `scripts/affected-tests.mjs` prints the commands, one per line,
+with a short summary on stderr:
+
+```bash
+node scripts/affected-tests.mjs                     # merge-base(origin/main, HEAD)..HEAD plus uncommitted changes
+node scripts/affected-tests.mjs origin/main...HEAD --no-uncommitted
+node scripts/affected-tests.mjs -- crates/meerkat-core/src/lib.rs   # what these paths select
+node scripts/affected-tests.mjs --run               # run the commands in order, stop at the first failure
+```
+
+The script hands the changed paths to the CI planner
+(`scripts/ci-cargo-lanes.mjs`) and prints CI's own command for each lane the
+plan selects:
+
+- regeneration: machine and protocol codegen, the machine posters, schemas;
+- Clippy of the changed crates, and the compile check of their reverse
+  dependencies;
+- nextest over the changed crates and their reverse dependencies, one run per
+  product, plus their feature suites, the integration suites the change
+  selects and the tests that read changed non-Rust files
+  (`scripts/ci-non-rust-readers.json`);
+- TLC for the touched machines, or the whole lane when that cannot be narrowed;
+- the Python, TypeScript and Web SDK suites when wire schemas change.
+
+A change that only touches a crate's `tests/*.rs` targets runs just those
+targets, with the features they need (cargo's `required-features`, or a
+crate-level `#![cfg(feature = "...")]`), and again with the features of an
+integration suite that CI runs them in. A target that needs live provider
+credentials, or whose tests are all `#[ignore]`d for a lane, is named on stderr
+with that lane instead of run. The summary names what CI runs beyond the list
+(governance gates, rustdoc, feature-combination checks and so on), so a green
+local run is not the whole pass. In the pull request, report the commands you
+ran with their exit codes and test counts, and name any listed command you did
+not run.
+
+Work in your own worktree: `./scripts/repo-cargo` then gives your runs their
+own target directory. Set `CARGO_BUILD_JOBS` for the host's current load.
+Branches may overlap: several changes can edit the same crates, modules and
+machine DSL files, and each keeps an accountable author and reviewer. When two
+changes touch the same contract or machine, their owners agree who reconciles
+the combined behavior. Before each push, merge `main` into your branch, resolve
+the source declarations, regenerate the generated files on the merged tree
+instead of hand-merging them, and run the script again there. TLC follows the
+regenerated specs, so a clean textual merge is not a validated one. Merging a
+branch does not remove its target directory; clean target directories up for
+actual disk pressure, not on merge.
+
 ## Before You Open A Pull Request
 
 Run the narrowest relevant tests while iterating, then finish with the broad
 gate appropriate to the change:
 
 ```bash
-make agent-gate
+node scripts/affected-tests.mjs --run
 make docs-check          # when docs changed
 make verify-version-parity
 ```

@@ -50,6 +50,7 @@ import {
   compiledInDocKeys,
   readerRows,
   touchesGuardLane,
+  withTestFeatures,
 } from "./ci-cargo-lanes.mjs";
 import { readMetadata, workspacePackages } from "./rust-test-selector.mjs";
 import { CORE, loadProducts } from "./ci-products.mjs";
@@ -59,7 +60,12 @@ const PRODUCTS = loadProducts();
 // `--exclude` for every other product's package) and each product's (`-p`
 // each of its packages).
 const SELECTIONS = laneSelections(readMetadata(), { products: PRODUCTS });
-const selectionFlags = (product) => SELECTIONS.selections.get(product).flags;
+// A test row selects with its lane selection's test flags: the selection
+// plus every selected member's test features.
+const selectionFlags = (product) => SELECTIONS.selections.get(product).testFlags;
+const WORKSPACE_BY_NAME = new Map(workspacePackages(readMetadata()).map((pkg) => [pkg.name, pkg]));
+// A package-scoped test row's flags with its members' test features.
+const testRowFlags = (flags) => withTestFeatures(flags, WORKSPACE_BY_NAME);
 import { durationsOf, rowOf } from "./ci-row-durations.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -135,10 +141,16 @@ function assertLanes(plan, label) {
   }
   assertEventSplit(plan, label);
   // The push-to-main plan covers the whole workspace: the packed shards
-  // plus the archived (build once, partitioned run) lanes, never both.
+  // plus the archived (build once, partitioned run) lanes, never both. A
+  // package's default-feature archive is named after it (a feature suite's
+  // adds `[id]`) and carries only its test features.
   const archivedPackages = plan.main_archive_builds
-    .filter((build) => !build.package_flags.includes("--features"))
-    .map((build) => build.package_flags.replace(/^-p /, ""));
+    .filter((build) => !build.name.includes("["))
+    .map((build) => build.package_flags.match(/^-p (\S+)/)[1]);
+  for (const build of plan.main_archive_builds.filter((candidate) => !candidate.name.includes("["))) {
+    const name = build.package_flags.match(/^-p (\S+)/)[1];
+    assert.equal(build.package_flags, testRowFlags(`-p ${name}`), `${label}: archive ${build.name} builds ${name} with its test features`);
+  }
   const packed = unitLanesOf(plan.main_unit_shards, label).flatMap((shard) => shard.packages);
   for (const name of archivedPackages) {
     assert.ok(!packed.includes(name), `${label}: archived package ${name} is not also packed`);
@@ -389,6 +401,56 @@ const HOOK_STACK = 8 * 1024 * 1024;
   const exported = [...hook.matchAll(/^export RUST_MIN_STACK="\$\{RUST_MIN_STACK:-(\d+)\}"$/gm)];
   assert.equal(exported.length, 1, "scripts/pre-push-unit.sh exports one default RUST_MIN_STACK");
   assert.equal(Number(exported[0][1]), HOOK_STACK, "the hook's lanes run on the closure rows' stack");
+}
+
+// The hooks whose lanes CI runs before merge stay manual-only: no push runs
+// the deterministic gate (cargo-test, scripts/pre-push-unit.sh, whose lanes
+// the closure-tests rows run) or the machine codegen and TLC lanes
+// (machine-codegen-drift and machine-codegen-verify; the ratchets and
+// tlc-audits jobs). The hook config is read without a YAML package: a hook
+// starts at `      - id: NAME`, its keys are indented eight spaces and its
+// stages are a flow list; anything else is refused rather than guessed.
+const MANUAL_ONLY_HOOKS = ["cargo-test", "machine-codegen-drift", "machine-codegen-verify"];
+function automaticManualOnlyHooks(config) {
+  const defaults = config.match(/^default_stages: \[([^\]]*)\]$/m);
+  assert.ok(defaults, ".pre-commit-config.yaml gives default_stages as a flow list");
+  const listed = (value) => value.split(",").map((item) => item.trim()).filter(Boolean);
+  const stages = new Map();
+  for (const block of config.split(/^      - id: /m).slice(1)) {
+    const id = block.slice(0, block.indexOf("\n")).trim();
+    assert.ok(!stages.has(id), `${id} is defined once`);
+    const keys = [...block.matchAll(/^        stages:(.*)$/gm)];
+    assert.ok(keys.length <= 1, `${id} names its stages once`);
+    if (keys.length === 0) {
+      stages.set(id, listed(defaults[1]));
+      continue;
+    }
+    const flow = keys[0][1].match(/^ \[([^\]]*)\]$/);
+    assert.ok(flow, `${id}: stages is a flow list`);
+    stages.set(id, listed(flow[1]));
+  }
+  for (const id of MANUAL_ONLY_HOOKS) assert.ok(stages.has(id), `.pre-commit-config.yaml defines ${id}`);
+  return MANUAL_ONLY_HOOKS.filter((id) => JSON.stringify(stages.get(id)) !== JSON.stringify(["manual"]));
+}
+{
+  const config = readFileSync(resolve(root, ".pre-commit-config.yaml"), "utf8");
+  assert.deepEqual(automaticManualOnlyHooks(config), [], "cargo-test and the machine codegen hooks stay manual-only");
+  // Nor does any hook run Clippy: the required CI Clippy lanes lint every
+  // package before merge.
+  assert.ok(!/pre-push-clippy|id: cargo-clippy/.test(config), "no hook runs the Clippy body");
+  assert.ok(!existsSync(resolve(root, "scripts/pre-push-clippy.sh")), "scripts/pre-push-clippy.sh stays deleted");
+  // Each made automatic, on a push stage or on the default stages, fails.
+  const manual = "        stages: [manual]\n";
+  for (const id of MANUAL_ONLY_HOOKS) {
+    const start = config.indexOf(`\n      - id: ${id}\n`);
+    const next = config.indexOf("\n      - id: ", start + 1);
+    const at = config.indexOf(manual, start);
+    assert.ok(start >= 0 && at > start && (next < 0 || at < next), `${id} declares ${manual.trim()}`);
+    const pushed = `${config.slice(0, at)}        stages: [pre-push]\n${config.slice(at + manual.length)}`;
+    assert.deepEqual(automaticManualOnlyHooks(pushed), [id], `${id} on the push stage fails the check`);
+    const defaulted = config.slice(0, at) + config.slice(at + manual.length);
+    assert.deepEqual(automaticManualOnlyHooks(defaulted), [id], `${id} on the default stages fails the check`);
+  }
 }
 const OTHER_E2E_LANES = ["e2e_auth_lane", "e2e_build_lane", "e2e_system_lane", "e2e_live_lane", "e2e_smoke_lane", "e2e_models_lane"];
 
@@ -1073,7 +1135,7 @@ for (const path of [
   ".config/nextest.toml",
   "rust-toolchain.toml",
   "scripts/repo-cargo",
-  "scripts/cargo-agent-gate",
+  "scripts/cargo-fast-nextest",
   "scripts/ci-cargo-lanes.mjs",
   "scripts/ci-hook-coverage.mjs",
   "scripts/ci-verify-row-binaries.mjs",
@@ -1457,8 +1519,8 @@ for (const path of [
 }
 
 // The typed governance gates run on the agent gate's governance paths: the
-// machine-authority paths and the dogma documents (scripts/cargo-agent-gate,
-// is_governance_path), which ran them in the pre-push hook's ratchets.
+// machine-authority paths and the dogma documents (scripts/buildbuddy-agent-gate,
+// is_governance_path).
 {
   assert.equal(planFor(["specs/machines/meerkat_machine/model.tla"]).governance_gates, true, "machine authority runs the governance gates");
   for (const path of [
@@ -1474,9 +1536,9 @@ for (const path of [
   for (const path of ["docs/architecture/meerkat-dogma-notes.md", ".claude/skills/meerkat-architecture/SKILL.md", "docs/internal/machine-posters/mob_machine.html"]) {
     assert.equal(planFor([path]).governance_gates, false, `${path} does not run the governance gates`);
   }
-  const gate = readFileSync(resolve(root, "scripts/cargo-agent-gate"), "utf8");
+  const gate = readFileSync(resolve(root, "scripts/buildbuddy-agent-gate"), "utf8");
   const start = gate.indexOf("is_governance_path() {");
-  assert.ok(start >= 0, "scripts/cargo-agent-gate defines is_governance_path");
+  assert.ok(start >= 0, "scripts/buildbuddy-agent-gate defines is_governance_path");
   const body = gate.slice(start, gate.indexOf("\n}\n", start));
   assert.ok(body.includes("scripts/machine-authority-changed"), "the agent gate's governance paths start from machine authority");
   const patterns = body
@@ -1725,7 +1787,7 @@ for (const path of [
   // request, below).
   assert.equal(lines.unit_shard_count, "0");
   assert.equal(lines.unit_rows_on_main, "core");
-  assert.ok(bothWaves(lines, "main_unit_shard_matrix", "main_unit_rest_shard_matrix").some((row) => row.packages === "-p meerkat-core"));
+  assert.ok(bothWaves(lines, "main_unit_shard_matrix", "main_unit_rest_shard_matrix").some((row) => row.packages === testRowFlags("-p meerkat-core")));
   const prLines = Object.fromEntries(
     run(["--format", "github", "--event", "pull_request", "--", "crates/meerkat-core/src/lib.rs"]).stdout.trim().split("\n")
       .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
@@ -1734,19 +1796,19 @@ for (const path of [
   assert.equal(prLines.unit_rows_on_main_count, "0");
   assert.deepEqual(
     JSON.parse(prLines.unit_shard_matrix).include.map((row) => row.packages).sort(),
-    ["-p meerkat-core"],
+    [testRowFlags("-p meerkat-core")],
   );
   assert.equal(lines.unit_deferred, "");
   assert.ok(Number(lines.main_unit_shard_count) >= 2);
   const integrationRows = JSON.parse(lines.integration_matrix).include;
   assert.deepEqual(integrationRows.find((row) => row.name === "standalone-turn-lifecycle"), {
     name: "standalone-turn-lifecycle",
-    packages: "-p meerkat",
+    packages: testRowFlags("-p meerkat"),
     tests: "--test standalone_turn_lifecycle",
   });
   assert.deepEqual(integrationRows.find((row) => row.name === "rpc-configured-turn-limit"), {
     name: "rpc-configured-turn-limit",
-    packages: "-p meerkat-rpc",
+    packages: testRowFlags("-p meerkat-rpc"),
     tests: "--test configured_turn_limit",
   });
 }
@@ -1802,7 +1864,7 @@ for (const path of [
   assert.equal(lines.unit_shard_count, "0", "a push's unit lane runs no row");
   assert.equal(lines.unit_rows_on_main, "core");
   assert.equal(lines.unit_rows_on_main_count, "1");
-  assert.ok(bothWaves(lines, "main_unit_shard_matrix", "main_unit_rest_shard_matrix").some((row) => row.name === "core" && row.packages === "-p meerkat-core"));
+  assert.ok(bothWaves(lines, "main_unit_shard_matrix", "main_unit_rest_shard_matrix").some((row) => row.name === "core" && row.packages === testRowFlags("-p meerkat-core")));
   assertUnitJobsMatch(readFileSync(resolve(root, ".github/workflows/ci.yml"), "utf8"), "ci.yml");
 }
 
@@ -2355,7 +2417,7 @@ for (const path of [
   );
   assert.deepEqual(
     mob.main_archive_builds.map((build) => build.package_flags),
-    ["-p meerkat-mob", "-p meerkat-mob --features experimental-gpt-live,schema"],
+    [testRowFlags("-p meerkat-mob"), testRowFlags("-p meerkat-mob --features experimental-gpt-live,schema")],
     "mob's default lane and feature suite build archives on main",
   );
   const mobGithub = run(["--format", "github", "--", "crates/meerkat-mob/src/lib.rs"]);
@@ -2498,7 +2560,11 @@ for (const path of [
     const authorization = planFor([path]);
     const selected = authorization.integration_suites.filter((suite) => suite.packages[0] === "meerkat-authorization");
     assert.equal(selected.length, 1, `${path} selects exactly one native authorization suite`);
-    assert.equal(selected[0].package_flags, "-p meerkat-authorization", "ordinary native fixtures keep default features and ignored acceptance opt-in");
+    assert.equal(
+      selected[0].package_flags,
+      testRowFlags("-p meerkat-authorization"),
+      "ordinary native fixtures keep default features (plus the crate's test features) and ignored acceptance opt-in",
+    );
   }
   const authorizationGithub = run(["--format", "github", "--", "crates/meerkat-authorization/tests/native_governed_loop.rs"]);
   assert.equal(authorizationGithub.status, 0, authorizationGithub.stderr);
@@ -2507,7 +2573,7 @@ for (const path of [
   // machine-authority contracts, which the closure-tests rows do not build).
   assert.equal(authorizationLines.integration_count, "2");
   assert.deepEqual(JSON.parse(authorizationLines.integration_matrix).include.map((row) => row.packages), [
-    "-p meerkat-authorization",
+    testRowFlags("-p meerkat-authorization"),
     "-p xtask --features machine-authority",
   ]);
   // xtask's integration tests pin the workflows: an xtask change or a
@@ -2539,7 +2605,7 @@ for (const path of [
     "-p meerkat-integration-tests",
     "-p meerkat-authorization",
   ]);
-  assert.equal(rows[3].packages, "-p meerkat --features session-store,local-authorization,mcp");
+  assert.equal(rows[3].packages, testRowFlags("-p meerkat --features session-store,local-authorization,mcp"));
   assert.equal(rows[4].packages, "-p meerkat-integration-tests --features gpt-live-replay");
   assert.deepEqual(rows.map((row) => row.tests), [
     undefined,
@@ -2829,7 +2895,7 @@ for (const path of [
   );
   assert.ok(
     plan.main_unit_shards.some((shard) => shard.packages.includes("meerkat-mcp")) &&
-      plan.main_archive_builds.some((build) => build.package_flags === "-p meerkat-mob"),
+      plan.main_archive_builds.some((build) => build.package_flags === testRowFlags("-p meerkat-mob")),
     "the push-to-main unit lanes hold the scope's lib tests",
   );
   const withRunner = planFor(["crates/meerkat-mcp/src/lib.rs"], ["--lib-row-runner", "ubuntu-24.04"]);
@@ -3044,6 +3110,15 @@ for (const path of [
   assert.ok(
     partial.errors.some((error) => error.includes("must exclude exactly the other products' packages")),
     "a Core row that leaves one product package in is refused",
+  );
+  // No dev-dependency turns a member's test features on: a Core row without
+  // them would compile its tests without them.
+  const featureless = mutate((copy) => {
+    coreRow(copy).package_flags = SELECTIONS.selections.get(CORE).flags;
+  });
+  assert.ok(
+    featureless.errors.some((error) => error.includes("must pass exactly Core's test features")),
+    "a Core row without the members' test features is refused",
   );
   const metaRow = (copy) => copy.closure_test_rows.find((row) => row.product === "meta");
   const metaKey = (() => {
@@ -3657,6 +3732,93 @@ for (const path of [
     assert.deepEqual(JSON.parse(out.floor_check_matrix).include.map((row) => row.product), lock.products.floor_checks);
     assert.equal(out.core_changed, "true");
     assert.match(out.rustdoc_flags, /^--workspace( --exclude \S+)+$/, "the rustdoc lane documents Core's members");
+  }
+}
+
+// Test features. No dev-dependency turns a member's test features on (its
+// [package.metadata.meerkat.standalone-tests] features and `workspace-tests`
+// when it declares that feature): every row that builds a member's test
+// targets passes them, bare beside a single package with a bare list and
+// named by package otherwise, and the workspace's test aliases pass Core's.
+{
+  const pkg = (name, features, standalone = null) => ({
+    name,
+    features: Object.fromEntries(features.map((feature) => [feature, []])),
+    ...(standalone ? { metadata: { meerkat: { "standalone-tests": { features: standalone } } } } : {}),
+  });
+  const byName = new Map([
+    ["alpha", pkg("alpha", ["workspace-tests", "x"])],
+    ["beta", pkg("beta", ["test-support", "y"], ["test-support"])],
+    ["gamma", pkg("gamma", ["z"])],
+  ]);
+  assert.equal(withTestFeatures("-p alpha", byName), "-p alpha --features workspace-tests");
+  assert.equal(withTestFeatures("-p alpha --features x", byName), "-p alpha --features x,workspace-tests");
+  assert.equal(withTestFeatures("-p beta --features test-support", byName), "-p beta --features test-support", "a feature the row names is not repeated");
+  assert.equal(withTestFeatures("-p gamma --features z", byName), "-p gamma --features z", "a member without test features is unchanged");
+  assert.equal(
+    withTestFeatures("-p alpha -p beta -p gamma", byName),
+    "-p alpha -p beta -p gamma --features alpha/workspace-tests,beta/test-support",
+    "several packages name each feature by its package",
+  );
+  assert.equal(
+    withTestFeatures("-p beta --no-default-features --features beta/y", byName),
+    "-p beta --no-default-features --features beta/y,beta/test-support",
+    "a list already named by package keeps that spelling",
+  );
+  assert.throws(() => withTestFeatures("--workspace", byName), /withTestFeatures does not read/);
+  assert.throws(() => withTestFeatures("-p delta", byName), /unknown package delta/);
+  assert.throws(
+    () => withTestFeatures("-p beta", new Map([["beta", pkg("beta", ["y"], ["test-support"])]])),
+    /standalone-tests feature test-support is not declared/,
+  );
+  assert.throws(
+    () => withTestFeatures("-p alpha", new Map([["alpha", pkg("alpha", ["workspace-tests"], ["workspace-tests"])]])),
+    /must not include workspace-tests/,
+  );
+
+  // Every test row of a whole-workspace push passes its members' test
+  // features, and Core's rows Core's selection with them.
+  const whole = run(["--format", "json", "--event", "push"]);
+  assert.equal(whole.status, 0, whole.stderr);
+  const plan = JSON.parse(whole.stdout);
+  assert.equal(plan.mode, "workspace");
+  const withFeatures = [
+    ...plan.main_unit_shards,
+    ...plan.main_feature_unit_shards,
+    ...plan.main_archive_builds,
+    ...plan.integration_suites,
+    ...plan.reader_rows,
+  ];
+  assert.ok(withFeatures.length > 0, "the push has package-scoped test rows");
+  for (const row of withFeatures) {
+    assert.equal(testRowFlags(row.package_flags), row.package_flags, `${row.name} passes its members' test features`);
+  }
+  assert.ok(
+    plan.main_unit_shards.some((row) => row.package_flags === testRowFlags("-p meerkat-rpc") && testRowFlags("-p meerkat-rpc") !== "-p meerkat-rpc"),
+    "meerkat-rpc's own unit row passes `workspace-tests`",
+  );
+  const core = SELECTIONS.selections.get(CORE);
+  assert.notEqual(core.testFlags, core.flags, "Core's members have test features");
+  for (const row of plan.closure_test_rows.filter((candidate) => candidate.product === CORE && candidate.package_flags.startsWith("--workspace"))) {
+    assert.equal(row.package_flags, core.testFlags, `${row.name} selects Core with its members' test features`);
+  }
+  // A build of no test target (the rustdoc lane) selects Core without them.
+  assert.equal(plan.rustdoc_flags, core.flags, "the rustdoc lane passes no test feature");
+
+  // The workspace's test aliases (no package flag: Core's default members)
+  // pass exactly Core's test features.
+  const config = readFileSync(resolve(root, ".cargo/config.toml"), "utf8");
+  const coreFeatures = core.testArgs.slice(core.args.length);
+  assert.equal(coreFeatures[0], "--features");
+  for (const alias of ["fast", "rct", "unit", "int"]) {
+    const entry = config.match(new RegExp(`^${alias} = (\\[[\\s\\S]*?\\]|"[^"]*")$`, "m"));
+    assert.ok(entry, `.cargo/config.toml defines the ${alias} alias`);
+    const words = entry[1].startsWith("[")
+      ? [...entry[1].matchAll(/"([^"]*)"/g)].map((match) => match[1])
+      : entry[1].slice(1, -1).split(/\s+/);
+    const at = words.indexOf("--features");
+    assert.ok(at >= 0 && words.indexOf("--features", at + 1) < 0, `the ${alias} alias passes one --features list`);
+    assert.equal(words[at + 1], coreFeatures[1], `the ${alias} alias passes exactly Core's test features`);
   }
 }
 

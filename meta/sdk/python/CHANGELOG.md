@@ -1,8 +1,12 @@
-# Changelog — meerkat-meta (Python SDK)
+# Changelog: meerkat-meta (Python SDK)
 
 All notable changes to the Python SDK are documented here.
 
 ## Unreleased
+
+## 0.9.10
+
+No SDK API changes; released with Meta 0.9.10.
 
 ## 0.9.9
 

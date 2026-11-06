@@ -301,7 +301,7 @@ Meerkat is pre-1.0 and patch releases can contain declared public API breaks.
 Exactly pin the Meerkat crate family and bump deliberately:
 
 ```toml
-meerkat = { version = "=0.9.9", features = ["sqlite-store", "session-store"] }
+meerkat = { version = "=0.9.10", features = ["sqlite-store", "session-store"] }
 ```
 
 ### Architecture
@@ -492,14 +492,16 @@ make build
 make check
 make lint
 make test
-make agent-gate
+node scripts/affected-tests.mjs --run   # the tests your change affects
 ```
 
 Use the repository wrapper instead of bare `cargo` for targeted work. It keeps
-a separate build cache per worktree:
+a separate build cache per worktree. Test commands pass the crate's test
+features, which `node scripts/core-workspace-args.mjs --tests -p <crate>`
+prints:
 
 ```bash
-./scripts/repo-cargo test -p meerkat-core session
+./scripts/repo-cargo test $(node scripts/core-workspace-args.mjs --tests -p meerkat-core) session
 ```
 
 Documentation and generated contract gates:

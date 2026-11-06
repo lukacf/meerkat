@@ -82,7 +82,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
     },
     proc_macro_deps = all_crate_deps(
@@ -142,7 +142,7 @@ rust_library(
         "//tests/integration:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
     },
     proc_macro_deps = all_crate_deps(
@@ -204,7 +204,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
     },
     tags = [
@@ -232,7 +232,6 @@ rust_test(
     deps = [
         "//crates/meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
-        "//crates/meerkat-rpc:meerkat_rpc_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_anthropic_agent_factory_build",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
@@ -299,7 +298,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "rkat-rpc",
         "CARGO_MANIFEST_DIR": "crates/meerkat-rpc",
     },
@@ -367,7 +366,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "atif_export_contract",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
@@ -458,7 +457,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "binary_fatal_error_display",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
@@ -549,7 +548,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "binary_sigterm_mcp_attempt_sweep",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
@@ -641,7 +640,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "configured_turn_limit",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
@@ -732,7 +731,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "confinement_startup",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
@@ -824,7 +823,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "integration_server",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
@@ -914,7 +913,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "lazy_resume_uncommitted_terminal",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
@@ -1006,7 +1005,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "live_dependency_guards",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
@@ -1098,7 +1097,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "live_rpc_regression",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
@@ -1193,7 +1192,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "live_smoke_rpc",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
@@ -1288,7 +1287,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "mob_registration_redrive_ordering",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
@@ -1379,7 +1378,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "multi_process_delivery",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
@@ -1471,7 +1470,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "realm_config_ingress",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
@@ -1563,7 +1562,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "realm_mcp_original_session",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
@@ -1655,7 +1654,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "regression_rpc",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
@@ -1746,7 +1745,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "rpc_auth_methods",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
@@ -1837,7 +1836,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "runtime_backed_ingress",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
@@ -1929,7 +1928,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "stdio_operator_decisions",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
@@ -2020,7 +2019,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "tool_process_custody_rpc_attach",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
@@ -2091,7 +2090,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_MANIFEST_DIR": "crates/meerkat-rpc",
     },
     tags = [
@@ -2137,7 +2136,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "rkat-rpc",
         "CARGO_MANIFEST_DIR": "crates/meerkat-rpc",
     },
@@ -2152,7 +2151,6 @@ rust_binary(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob",
-        "//crates/meerkat-rpc:meerkat_rpc",
         "//crates/meerkat:meerkat",
         "//crates/meerkat:meerkat_anthropic_agent_factory_build",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
@@ -2199,7 +2197,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_MANIFEST_DIR": "crates/meerkat-rpc",
     },
     tags = [
@@ -2249,7 +2247,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "rkat-rpc",
         "CARGO_MANIFEST_DIR": "crates/meerkat-rpc",
     },
@@ -2264,7 +2262,6 @@ rust_binary(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob",
-        "//crates/meerkat-rpc:meerkat_rpc",
         "//crates/meerkat:meerkat",
         "//crates/meerkat:meerkat_anthropic_agent_factory_build",
         "//crates/meerkat:meerkat_atif_agent_factory_build",

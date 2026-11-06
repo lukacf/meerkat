@@ -115,6 +115,17 @@ test("declared Console credentials obey runtime rules without inferring them fro
   assert.deepEqual(deploymentFieldIssues(authenticatedConsole, { CONSOLE_LOGIN_PASSWORD: "" }), []);
 });
 
+test("a Console with named accounts checks the installation's own account like one shared account", () => {
+  const named = { ...authenticatedConsole, console_scope: { authentication: "local-accounts" } };
+  const values = { CONSOLE_USER_ID: "test reader", CONSOLE_LOGIN_PASSWORD: "short" };
+  assert.deepEqual(deploymentFieldIssues(named, values), deploymentFieldIssues(authenticatedConsole, values));
+  assert.equal(deploymentFieldIssues(named, values).length, 2);
+  assert.equal(deploymentCanSubmit(named, values), false);
+  const valid = { CONSOLE_USER_ID: "test-reader+one@example.test", CONSOLE_LOGIN_PASSWORD: "  exact secret  " };
+  assert.deepEqual(deploymentFieldIssues(named, valid), []);
+  assert.deepEqual(deploymentSettings(named, valid), valid);
+});
+
 test("remote metadata constraints require bounded declarations", () => {
   for (const field of constrained.fields) assert.equal(deploymentFieldConstraintsValid(field), true);
   for (const field of [{ min_length: true }, { max_length: 32769 }, { min_length: 4, max_length: 3 },

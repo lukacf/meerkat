@@ -58,6 +58,9 @@ def inputs_destination(request, monkeypatch):
             b'enabled = true\nadmins = ["fixture-operator"]\nrules = []\n\n[groups]\n')
         if getattr(request, "param", None) == "two-admins":
             chosen["config/access.toml"] = b'enabled = true\nadmins = ["fixture-operator", "foreign-operator"]\n'
+        elif getattr(request, "param", None) == "further-admins":
+            chosen["config/access.toml"] = (b'enabled = true\nadmins = ["fixture-operator", "second-admin@example.test"]\n'
+                b'rules = []\n\n[groups]\n')
         elif getattr(request, "param", None) == "nested-access":
             chosen["config/access.toml"] = b'[access]\nenabled = true\nadmins = ["fixture-operator"]\n'
         return package(chosen)
@@ -381,6 +384,16 @@ async def test_original_ambiguous_or_nonshipping_operator_choice_refuses_before_
         await create(f)
     assert not (f.root / SOURCE_DIRECTORY).exists() and not f.directory.exists()
     assert not (f.root / ".env").exists() and f.service.application_host_selection is None
+
+
+@pytest.mark.parametrize("inputs_destination", ["further-admins"], indirect=True)
+async def test_destination_custody_admits_further_admins_after_the_operator(inputs_destination):
+    # The installation's own account is the first admin; further admins are
+    # other people's accounts, which the console's access rules name.
+    f = inputs_destination
+    owner = await create(f)
+    assert owner.host._console_subject == "fixture-operator"
+    assert (f.root / SOURCE_DIRECTORY).exists()
 
 
 @pytest.mark.parametrize("case", ["local", "cloud", "native-bundle", "helper"])

@@ -181,6 +181,19 @@ test("remote Console hints use only declared receipt authentication and exact cr
   assert.deepEqual(receipt, before);
 });
 
+test("remote Console hints accept named accounts with the installation's own credential fields", () => {
+  const fields = [
+    { key: "CONSOLE_USER_ID", label: "Console user", required: true, secret: false },
+    { key: "CONSOLE_LOGIN_PASSWORD", label: "Console password", required: true, secret: true },
+  ];
+  const receipt = { ...ready, fields, console_scope: { authentication: "local-accounts", health_scope: "native-bootstrap-and-console" } };
+  assert.deepEqual(remotePrivateOptions(receipt).console_scope, { authentication: "local-accounts" });
+  assert.equal(remoteCanInstall(receipt, options, checked, guide, { CONSOLE_USER_ID: "test reader", CONSOLE_LOGIN_PASSWORD: "short" }), false);
+  const valid = { CONSOLE_USER_ID: "test-reader", CONSOLE_LOGIN_PASSWORD: "  exact synthetic password  " };
+  assert.equal(remoteCanInstall(receipt, options, checked, guide, valid), true);
+  assert.equal(remotePrivateOptions({ ...receipt, fields: receipt.fields.slice(1) }), null);
+});
+
 test("initial Console port selection needs exact current source and never-admitted custody", () => {
   assert.equal(remoteSetupConsolePort(initialPortSetup, portOptions, checked, guide), 18088);
   assert.equal(remoteSetupConsolePortValue(initialPortSetup, portOptions, checked, guide, {}), "18088");

@@ -444,6 +444,57 @@ def test_logical_console_declaration_is_exact_and_never_claims_authentication(se
         selected.host.validate_settings("original-guide", {"CONSOLE_USER_ID": "other"})
 
 
+def test_installed_access_edits_keep_the_operator_and_forge_settings_open(selected, tmp_path):
+    # The console's Access panel owns the installed config/access.toml once the
+    # application runs. Forge keeps its own operator an admin of an enabled
+    # configuration and the package it recorded exact, not the file's bytes.
+    operator, other = "inert-selected-operator", "second-admin@example.test"
+    access = ('enabled = true\nadmins = ["' + operator + '"]\nrules = []\n\n[groups]\n').encode()
+    sources = {"application/configuration.json": encoded({"fields": []}),
+        "application/console.json": encoded({"authentication": "local-accounts"}),
+        "config/access.toml": access}
+    protected = {name: put(selected.root / "named" / name, value) for name, value in sources.items()}
+    viewer = put(selected.root / "named" / "APPLICATION-SELECTION.json", {
+        "base_source_selection": selected.acquisition.pin(),
+        "operator": {"subject": operator, "private_configuration_key": "CONSOLE_USER_ID",
+            "authenticated_evidence": None},
+        "source_inputs": {name: pin.pin() for name, pin in protected.items()}})
+    host = ForgeApplicationHost(guide_id="original-guide", runtime_target=selected.target,
+        acquisition_selection=selected.acquisition, viewer_selection=viewer, require_current=lambda: None)
+    destination = tmp_path / "installed"
+    for name, content in sources.items():
+        path = destination / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        path.chmod(0o644)
+    package = {name: (content, 0o644) for name, content in sources.items()}
+    receipt, settings = {"source_kind": "application"}, {"CONSOLE_USER_ID": operator}
+    host.validate_installed_settings("original-guide", receipt, destination, package, settings)
+    edited = destination / "config/access.toml"
+    edited.write_bytes(("# Meta access control. Managed by the console Access panel;\n"
+        "# hand edits are preserved until the next console save.\n\n"
+        'enabled = true\nadmins = ["' + operator + '", "' + other + '"]\n\n'
+        '[[rules]]\nid = "people-use-agents"\neffect = "allow"\nsubjects = ["' + other + '"]\n'
+        'actions = ["agent.view", "agent.send"]\n\n[groups]\n').encode())
+    edited.chmod(0o644)
+    host.validate_installed_settings("original-guide", receipt, destination, package, settings)
+    for changed in ('enabled = true\nadmins = ["' + other + '"]\n',
+                    'enabled = false\nadmins = ["' + operator + '"]\n', "enabled = [\n"):
+        edited.write_bytes(changed.encode())
+        with pytest.raises(CustodyError):
+            host.validate_installed_settings("original-guide", receipt, destination, package, settings)
+    edited.write_bytes(access)
+    host.validate_installed_settings("original-guide", receipt, destination, package, settings)
+    # The package Forge recorded must still equal the selected source exactly.
+    with pytest.raises(CustodyError):
+        host.validate_installed_settings("original-guide", receipt, destination,
+            {**package, "config/access.toml": (access + b"\n", 0o644)}, settings)
+    # The application's own declarations stay exact once installed.
+    (destination / "application/console.json").write_bytes(encoded({"authentication": "local-password"}))
+    with pytest.raises(CustodyError):
+        host.validate_installed_settings("original-guide", receipt, destination, package, settings)
+
+
 def startup(selected, kind):
     policy = selected.policy.pin()
     common = {"kind": kind, "gateway": policy, "preparation_plan": policy}

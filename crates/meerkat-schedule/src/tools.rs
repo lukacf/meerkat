@@ -292,18 +292,44 @@ impl AgentToolDispatcher for ScheduleToolDispatcher {
             return Err(ToolError::not_found(call.name));
         }
 
-        let arguments: Value = serde_json::from_str(call.args.get()).map_err(|error| {
-            ToolError::invalid_arguments(
-                call.name,
-                format!("invalid schedule tool-call arguments JSON: {error}"),
-            )
-        })?;
+        let arguments = call_arguments(&call)?;
         let result = run_schedule_tools_call(&self.service, call.name, &arguments)
             .await
             .map_err(|failure| map_schedule_tool_dispatch_error(call.name, failure))?;
 
         Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())
     }
+}
+
+/// A schedule tool call's arguments as JSON.
+fn call_arguments(call: &ToolCallView<'_>) -> Result<Value, ToolError> {
+    serde_json::from_str(call.args.get()).map_err(|error| {
+        ToolError::invalid_arguments(
+            call.name,
+            format!("invalid schedule tool-call arguments JSON: {error}"),
+        )
+    })
+}
+
+/// `meerkat_schedule_list` over only the schedules `keep` admits, for a host
+/// that hides some of the realm's schedules from its agents. The page is the
+/// tool's own: `keep` is applied before the creation order, the cursor and
+/// the page cut, so a page is as full as the admitted schedules allow, a
+/// cursor continues over admitted schedules only, and every row is the same
+/// bounded summary [`ScheduleToolDispatcher`] returns. The arguments are
+/// checked and refused exactly as the tool refuses them.
+pub async fn dispatch_schedule_list_where(
+    service: &ScheduleService,
+    call: ToolCallView<'_>,
+    keep: &(dyn Fn(&Schedule) -> bool + Send + Sync),
+) -> Result<ToolDispatchOutcome, ToolError> {
+    let arguments = call_arguments(&call)?;
+    let args: ListArgs = parse_args(call.name, &arguments)
+        .map_err(|error| map_schedule_tool_dispatch_error(call.name, error.into()))?;
+    let result = list_schedule_summaries(service, &args, keep)
+        .await
+        .map_err(|failure| map_schedule_tool_dispatch_error(call.name, failure))?;
+    Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())
 }
 
 /// Resolves the agent-facing `current_session` shortcut into a persisted target.
@@ -785,7 +811,7 @@ pub(crate) async fn run_schedule_tools_call(
         }
         "meerkat_schedule_list" => {
             let args: ListArgs = parse_args(name, arguments)?;
-            list_schedule_summaries(service, &args).await
+            list_schedule_summaries(service, &args, &|_| true).await
         }
         "meerkat_schedule_update" => {
             let args: UpdateScheduleArgs = parse_args(name, arguments)?;
@@ -1006,12 +1032,14 @@ impl<'a> OccurrenceDetail<'a> {
 }
 
 /// `meerkat_schedule_list`: one page of schedule summaries in creation order.
-/// The store returns every live schedule; the order, the cursor and the page
-/// cut are applied here, so the reply stays bounded whatever the realm holds
-/// and whatever order a host-injected store returns.
+/// The store returns every live schedule; the schedules `keep` admits are
+/// ordered, the cursor and the page cut are applied here, so the reply stays
+/// bounded whatever the realm holds and whatever order a host-injected store
+/// returns, and a host's filter never leaves a short page or a gap.
 async fn list_schedule_summaries(
     service: &ScheduleService,
     args: &ListArgs,
+    keep: &(dyn Fn(&Schedule) -> bool + Send + Sync),
 ) -> Result<Value, ScheduleToolFailure> {
     let limit = page_limit(args.limit)?;
     let after_key = args
@@ -1020,6 +1048,7 @@ async fn list_schedule_summaries(
         .map(SchedulePageKey::decode)
         .transpose()?;
     let mut schedules = service.list().await?;
+    schedules.retain(|schedule| keep(schedule));
     schedules.sort_by_cached_key(SchedulePageKey::of);
     if let Some(after) = &after_key {
         schedules.retain(|schedule| SchedulePageKey::of(schedule) > *after);
@@ -4986,6 +5015,194 @@ mod tests {
             host["target"],
             json!({ "target_kind": "host_runnable", "runnable": "nightly-report" })
         );
+        Ok(())
+    }
+
+    /// A host's filter applies before the order, the cursor and the page cut:
+    /// with every third of 30 schedules left out, pages of 7 are full (7, 7,
+    /// 6), the cursor continues over admitted schedules only, nothing left out
+    /// is listed, and the rows are the tool's own. Malformed options are
+    /// refused as the tool refuses them.
+    #[tokio::test]
+    async fn schedule_list_where_filters_before_the_page_cut() -> Result<(), String> {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let mut created = Vec::new();
+        for _ in 0..30 {
+            let schedule = service
+                .create(bounded_read_request(interval_trigger(60), 1))
+                .await
+                .map_err(|error| error.to_string())?;
+            created.push((schedule.config.created_at_utc, schedule.schedule_id));
+        }
+        created.sort();
+        let hidden: BTreeSet<ScheduleId> = created
+            .iter()
+            .step_by(3)
+            .map(|(_, id)| id.clone())
+            .collect();
+        let expected: Vec<String> = created
+            .iter()
+            .filter(|(_, id)| !hidden.contains(id))
+            .map(|(_, id)| id.to_string())
+            .collect();
+        assert_eq!(expected.len(), 20);
+        let keep = |schedule: &Schedule| !hidden.contains(&schedule.schedule_id);
+        let list = |args: Value| {
+            let service = service.clone();
+            let keep = &keep;
+            async move {
+                let raw = RawValue::from_string(args.to_string()).map_err(|e| e.to_string())?;
+                let outcome = dispatch_schedule_list_where(
+                    &service,
+                    ToolCallView {
+                        id: "call-1",
+                        name: "meerkat_schedule_list",
+                        args: &raw,
+                    },
+                    keep,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                serde_json::from_str::<Value>(&outcome.result.text_content())
+                    .map_err(|error| error.to_string())
+            }
+        };
+
+        let unfiltered =
+            call_tool(&service, "meerkat_schedule_list", json!({ "limit": 200 })).await?;
+        let core_rows: Vec<Value> = unfiltered["schedules"]
+            .as_array()
+            .ok_or("schedules")?
+            .iter()
+            .filter(|row| expected.iter().any(|id| row["schedule_id"] == json!(id)))
+            .cloned()
+            .collect();
+
+        let mut paged = Vec::new();
+        let mut rows = Vec::new();
+        let mut sizes = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut args = json!({ "limit": 7 });
+            if let Some(cursor) = &cursor {
+                args["cursor"] = json!(cursor);
+            }
+            let page = list(args).await?;
+            let ids = listed_ids(&page)?;
+            sizes.push(ids.len());
+            paged.extend(ids);
+            rows.extend(page["schedules"].as_array().ok_or("schedules")?.clone());
+            match page["page"]["next_cursor"].as_str() {
+                Some(next) => {
+                    assert_eq!(page["page"]["has_more"].as_bool(), Some(true), "{page}");
+                    cursor = Some(next.to_string());
+                }
+                None => {
+                    assert_eq!(page["page"]["has_more"].as_bool(), Some(false), "{page}");
+                    break;
+                }
+            }
+        }
+        assert_eq!(sizes, vec![7, 7, 6], "full pages over admitted schedules");
+        assert_eq!(paged, expected, "each admitted schedule once, in order");
+        assert_eq!(rows, core_rows, "the rows are the tool's own summaries");
+
+        assert_eq!(
+            listed_ids(&list(json!({})).await?)?.len(),
+            20,
+            "default page"
+        );
+        for args in [
+            json!({ "limit": 0 }),
+            json!({ "limit": -1 }),
+            json!({ "cursor": "not-a-cursor" }),
+        ] {
+            let refused = list(args.clone()).await.expect_err("refused");
+            assert!(
+                refused.to_lowercase().contains("invalid"),
+                "{args}: {refused}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The serialized UTF-8 bytes one `meerkat_schedule_list` row can take,
+    /// derived from the summary's own bounds: fixed fields (ids, phase,
+    /// revision, two timestamps, action_chars and the keys) in 512 bytes; a
+    /// name and an action head of at most `SUMMARY_NAME_CHARS` and
+    /// `ACTION_HEAD_CHARS` characters plus "...", each character at most 6
+    /// bytes once JSON-escaped (a control character is `\u00XX`); a trigger
+    /// of at most `SUMMARY_TRIGGER_BYTES`; and every `SUMMARY_TARGET_KEYS` key
+    /// with an id of at most `SUMMARY_ID_CHARS` characters plus "...".
+    const SUMMARY_ROW_MAX_BYTES: usize = 512
+        + 6 * (SUMMARY_NAME_CHARS + 3)
+        + 6 * (ACTION_HEAD_CHARS + 3)
+        + SUMMARY_TRIGGER_BYTES
+        + SUMMARY_TARGET_KEYS.len() * (24 + 6 * (SUMMARY_ID_CHARS + 3));
+
+    /// Every summary row stays within `SUMMARY_ROW_MAX_BYTES` whatever its
+    /// schedule carries: a long name and a 40 KB prompt of characters JSON
+    /// escapes to 6 bytes, the longest target ids of each target kind, a
+    /// calendar trigger with 10,000 values, and a large superseded-ack set.
+    /// So a page of `limit` rows stays within `limit` times the bound.
+    #[tokio::test]
+    async fn a_schedule_summary_row_has_a_byte_bound() -> Result<(), String> {
+        assert!(
+            SUMMARY_ROW_MAX_BYTES <= 16 * 1024,
+            "{SUMMARY_ROW_MAX_BYTES}"
+        );
+        let worst = "\u{1}".repeat(40_000);
+        let long_id = "\u{1}".repeat(5_000);
+        let prompt = || ScheduledSessionAction::Prompt {
+            prompt: ContentInput::from(worst.clone()),
+            system_prompt: None,
+            render_metadata: None,
+            skill_refs: Vec::new(),
+            additional_instructions: Vec::new(),
+        };
+        let targets = vec![
+            TargetBinding::session(SessionTargetBinding::ExactSession {
+                session_id: SessionId::new(),
+                action: prompt(),
+            }),
+            TargetBinding::Mob(Box::new(MobTargetBinding::Member {
+                mob_id: long_id.clone(),
+                member_id: long_id.clone(),
+                action: ScheduledMobAction::Send {
+                    content: ContentInput::from(worst.clone()),
+                    render_metadata: None,
+                },
+            })),
+        ];
+        let trigger = TriggerSpec::Calendar(crate::CalendarTriggerSpec {
+            timezone: "Europe/Stockholm".into(),
+            minute: crate::CalendarFieldSpec::Values((0..10_000).map(|value| value % 60).collect()),
+            hour: crate::CalendarFieldSpec::Any,
+            day_of_month: crate::CalendarFieldSpec::Any,
+            month: crate::CalendarFieldSpec::Any,
+            day_of_week: crate::CalendarFieldSpec::Any,
+            year: None,
+        });
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let mut schedule = service
+            .create(bounded_read_request(interval_trigger(60), 1))
+            .await
+            .map_err(|error| error.to_string())?;
+        schedule.config.name = Some(worst.clone());
+        schedule.trigger = trigger;
+        schedule.superseded_ack_ids = (0..1_000).map(|_| OccurrenceId::new()).collect();
+        for target in targets {
+            schedule.target = target;
+            let row = schedule_summary(&schedule).map_err(|error| error.message)?;
+            let bytes = row.to_string().len();
+            assert!(
+                bytes <= SUMMARY_ROW_MAX_BYTES,
+                "a row is {bytes} bytes, over {SUMMARY_ROW_MAX_BYTES}: {}",
+                row["target"]
+            );
+            assert!(row.get("superseded_ack_ids").is_none());
+            assert!(row.get("machine_state").is_none());
+        }
         Ok(())
     }
 }

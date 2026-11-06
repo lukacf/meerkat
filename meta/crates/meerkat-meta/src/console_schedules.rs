@@ -565,31 +565,19 @@ impl ConsoleScheduleToolGate {
         }
     }
 
-    /// `meerkat_schedule_list` without the console schedules, in the
-    /// listing's own shape.
+    /// `meerkat_schedule_list` without the console schedules: the tool's own
+    /// page of summaries over the other schedules. Core leaves the console
+    /// schedules out before it orders, pages and cuts, so the reply keeps the
+    /// tool's advertised shape (limit, cursor, bounded rows), its pages stay
+    /// full and its cursor never steps on a console schedule.
     async fn list_without_console_schedules(
         &self,
-        call_id: &str,
+        call: meerkat_core::types::ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
-        let schedules = self.service.list().await.map_err(|error| {
-            meerkat_core::ToolError::execution_failed(format!(
-                "meerkat_schedule_list failed: {error}"
-            ))
-        })?;
-        let schedules = schedules
-            .into_iter()
-            .filter(|schedule| !is_console_schedule(schedule))
-            .collect::<Vec<_>>();
-        let schedules = serde_json::to_value(&schedules).map_err(|error| {
-            meerkat_core::ToolError::execution_failed(format!(
-                "failed to encode meerkat_schedule_list result: {error}"
-            ))
-        })?;
-        let listed = serde_json::json!({ "schedules": schedules });
-        Ok(
-            meerkat_core::types::ToolResult::new(call_id.to_string(), listed.to_string(), false)
-                .into(),
-        )
+        meerkat_schedule::dispatch_schedule_list_where(&self.service, call, &|schedule| {
+            !is_console_schedule(schedule)
+        })
+        .await
     }
 }
 
@@ -637,13 +625,15 @@ impl meerkat_core::AgentToolDispatcher for ConsoleScheduleToolGate {
         call: meerkat_core::types::ToolCallView<'_>,
         context: &meerkat_core::ToolDispatchContext,
     ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        // Every listing leaves the console schedules out; its arguments are
+        // the tool's to check.
+        if call.name == "meerkat_schedule_list" {
+            return self.list_without_console_schedules(call).await;
+        }
         // Arguments that do not parse reach the tools, which refuse them.
         if let Ok(args) = serde_json::from_str::<Value>(call.args.get()) {
             if let Some(refusal) = self.refusal(call.name, &args).await {
                 return Err(refusal);
-            }
-            if call.name == "meerkat_schedule_list" {
-                return self.list_without_console_schedules(call.id).await;
             }
         }
         self.inner.dispatch_with_context(call, context).await
@@ -662,6 +652,7 @@ mod tests {
     use meerkat_core::types::ToolCallView;
     use serde_json::json;
     use serde_json::value::RawValue;
+    use std::collections::BTreeSet;
 
     const ISSUER: &str = "https://issuer.example.test";
 
@@ -1208,5 +1199,386 @@ mod tests {
             service.get(&own.schedule_id).await.unwrap().phase,
             meerkat::SchedulePhase::Paused
         );
+    }
+
+    /// The agent tool stack a gateway composes over its own durable store:
+    /// the schedule service, and the dispatcher agents call, with the
+    /// firing-host gate, the console gate and the identity rewrite around
+    /// Core's tools.
+    fn attached_stack(dir: &std::path::Path) -> (ScheduleService, Arc<dyn AgentToolDispatcher>) {
+        let factory = meerkat::AgentFactory::new(dir);
+        let builder = meerkat::FactoryAgentBuilder::new(factory, meerkat::Config::default());
+        let service = crate::schedule_wiring::attach_schedule_tools(&builder, dir)
+            .expect("the durable schedule store opens");
+        let tools = builder
+            .default_schedule_tools
+            .read()
+            .unwrap()
+            .clone()
+            .expect("the schedule tools are attached");
+        (service, tools)
+    }
+
+    /// An agent's schedule with a long prompt, planning `occurrences` ahead.
+    fn agent_schedule(name: String, prompt: String, occurrences: u32) -> CreateScheduleRequest {
+        CreateScheduleRequest {
+            name: Some(name),
+            planning_horizon_occurrences: Some(occurrences),
+            ..create_request(prompt_target(prompt))
+        }
+    }
+
+    fn prompt_target(prompt: String) -> TargetBinding {
+        TargetBinding::session(meerkat::SessionTargetBinding::ExactSession {
+            session_id: meerkat_core::types::SessionId::new(),
+            action: meerkat::ScheduledSessionAction::Prompt {
+                prompt: meerkat_core::ContentInput::from(prompt),
+                system_prompt: None,
+                render_metadata: None,
+                skill_refs: Vec::new(),
+                additional_instructions: Vec::new(),
+            },
+        })
+    }
+
+    /// About 40 KB of prompt, multi-byte text included, ending in a marker no
+    /// summary may carry.
+    fn long_prompt(index: usize, marker: &str) -> String {
+        let mut prompt = format!("{index:03} ");
+        while prompt.len() < 40_000 {
+            prompt.push_str("Kontrollera veckans schema, jämför med förra veckan och svara kort. ");
+        }
+        prompt.push_str(marker);
+        prompt
+    }
+
+    async fn list_page(tools: &Arc<dyn AgentToolDispatcher>, args: Value) -> Result<Value, String> {
+        let args = raw(&args);
+        let outcome = tools
+            .dispatch(call("meerkat_schedule_list", &args))
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::from_str(&outcome.result.text_content()).map_err(|error| error.to_string())
+    }
+
+    fn page_ids(page: &Value) -> Vec<String> {
+        page["schedules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["schedule_id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// Core's summary row: the keys `meerkat_schedule_list` may carry.
+    const SUMMARY_ROW_KEYS: &[&str] = &[
+        "schedule_id",
+        "phase",
+        "revision",
+        "trigger",
+        "target",
+        "created_at_utc",
+        "updated_at_utc",
+        "name",
+        "action_head",
+        "action_chars",
+    ];
+    /// The target keys a summary keeps (Core's `SUMMARY_TARGET_KEYS`).
+    const SUMMARY_TARGET_KEYS: &[&str] = &[
+        "target_kind",
+        "type",
+        "session_id",
+        "bound_session_id",
+        "identity",
+        "mob_id",
+        "member_id",
+        "source_member_id",
+        "flow_id",
+        "runnable",
+    ];
+    /// Serialized UTF-8 bytes of one summary row of these schedules. A row's
+    /// variable parts are bounded by Core: a name of at most 203 characters,
+    /// an action head of at most 163, an exact-session target (two short
+    /// keys and a UUID) and an interval trigger; 2 KiB holds them with room
+    /// for multi-byte text. Core's own worst case over every field is bounded
+    /// in `a_schedule_summary_row_has_a_byte_bound` (meerkat-schedule).
+    const ROW_MAX_BYTES: usize = 2_048;
+    /// The page envelope: `{"schedules":[...],"page":{...}}` with a cursor.
+    const PAGE_ENVELOPE_BYTES: usize = 512;
+
+    /// The agent-facing `meerkat_schedule_list`, through the stack a gateway
+    /// attaches, pages over the agents' schedules only: 120 agent schedules
+    /// with ~40 KB prompts and large superseded-ack sets, and 5 console
+    /// schedules interleaved among them (two straddling the first page
+    /// boundary), list as full pages of 50, 50 and 20 in creation order, each
+    /// agent schedule once, no console schedule, every row a bounded summary
+    /// equal to Core's own row for that schedule. `meerkat_schedule_get` still
+    /// returns the whole schedule, and still refuses a console schedule.
+    #[tokio::test]
+    async fn the_attached_listing_pages_agent_schedules_without_console_schedules() {
+        const CONSOLE_AT: [usize; 5] = [7, 49, 50, 98, 124];
+        const MARKER: &str = "END-OF-PROMPT-MARKER";
+        let dir = tempfile::tempdir().unwrap();
+        let (service, tools) = attached_stack(dir.path());
+
+        let mut agent_ids = Vec::new();
+        let mut console_ids = Vec::new();
+        for index in 0..125 {
+            if CONSOLE_AT.contains(&index) {
+                let console = service
+                    .create(create_request(send().target().unwrap()))
+                    .await
+                    .unwrap();
+                console_ids.push(console.schedule_id.to_string());
+                continue;
+            }
+            let schedule = service
+                .create(agent_schedule(
+                    format!("agent schedule {index}"),
+                    long_prompt(index, MARKER),
+                    30,
+                ))
+                .await
+                .unwrap();
+            if agent_ids.len() % 3 == 0 {
+                // A revision supersedes the planned occurrences: the stored
+                // schedule carries their acknowledgements.
+                service
+                    .update(
+                        &schedule.schedule_id,
+                        meerkat::UpdateScheduleRequest {
+                            target: Some(prompt_target(long_prompt(index + 1_000, MARKER))),
+                            ..meerkat::UpdateScheduleRequest::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+            agent_ids.push(schedule.schedule_id.to_string());
+        }
+        assert_eq!(agent_ids.len(), 120);
+        let heavy = service
+            .get(&ScheduleId::parse(&agent_ids[0]).unwrap())
+            .await
+            .unwrap();
+        assert!(
+            heavy.superseded_ack_ids.len() >= 20,
+            "the fixture carries large ack sets: {}",
+            heavy.superseded_ack_ids.len()
+        );
+
+        // Core's own rows for every schedule in the realm, console ones too.
+        let core = ScheduleToolDispatcher::new(service.clone());
+        let all = raw(&json!({ "limit": 200 }));
+        let core_page: Value = serde_json::from_str(
+            &core
+                .dispatch(call("meerkat_schedule_list", &all))
+                .await
+                .unwrap()
+                .result
+                .text_content(),
+        )
+        .unwrap();
+        let core_rows = core_page["schedules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                (
+                    row["schedule_id"].as_str().unwrap().to_string(),
+                    row.clone(),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(core_rows.len(), 125, "Core lists the whole realm");
+        // The order the pages must follow: Core's order, console schedules left out.
+        let expected = page_ids(&core_page)
+            .into_iter()
+            .filter(|id| !console_ids.contains(id))
+            .collect::<Vec<_>>();
+        assert_eq!(expected.len(), 120);
+
+        // Explicit limit 50: pages of 50, 50 and 20 that continue by cursor.
+        let mut walked = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut sizes = Vec::new();
+        loop {
+            let mut args = json!({ "limit": 50 });
+            if let Some(cursor) = &cursor {
+                args["cursor"] = json!(cursor);
+            }
+            let page = list_page(&tools, args).await.unwrap();
+            let object = page.as_object().unwrap();
+            assert_eq!(
+                object.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+                BTreeSet::from(["page", "schedules"]),
+                "{page}"
+            );
+            assert_eq!(
+                page["page"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from(["has_more", "next_cursor", "returned"]),
+            );
+            let rows = page["schedules"].as_array().unwrap();
+            assert_eq!(page["page"]["returned"].as_u64(), Some(rows.len() as u64));
+            let page_bytes = page.to_string().len();
+            assert!(
+                page_bytes <= rows.len() * ROW_MAX_BYTES + PAGE_ENVELOPE_BYTES,
+                "a page of {} rows is {page_bytes} bytes",
+                rows.len()
+            );
+            for row in rows {
+                let id = row["schedule_id"].as_str().unwrap();
+                assert!(!console_ids.iter().any(|console| console == id), "{id}");
+                for key in row.as_object().unwrap().keys() {
+                    assert!(SUMMARY_ROW_KEYS.contains(&key.as_str()), "{key}: {row}");
+                }
+                for key in row["target"].as_object().unwrap().keys() {
+                    assert!(SUMMARY_TARGET_KEYS.contains(&key.as_str()), "{key}: {row}");
+                }
+                let text = row.to_string();
+                assert!(!text.contains(MARKER), "a summary carries the whole prompt");
+                assert!(text.len() <= ROW_MAX_BYTES, "a row is {} bytes", text.len());
+                assert_eq!(row, &core_rows[id], "the row is Core's summary row");
+            }
+            sizes.push(rows.len());
+            walked.extend(page_ids(&page));
+            match page["page"]["next_cursor"].as_str() {
+                Some(next) => {
+                    assert_eq!(page["page"]["has_more"], true, "{}", page["page"]);
+                    cursor = Some(next.to_string());
+                }
+                None => {
+                    assert_eq!(page["page"]["has_more"], false, "{}", page["page"]);
+                    break;
+                }
+            }
+        }
+        assert_eq!(sizes, vec![50, 50, 20]);
+        assert_eq!(walked, expected, "each agent schedule once, in order");
+
+        // Without a limit the page is the default 50, the same first page.
+        let first = list_page(&tools, json!({ "limit": 50 })).await.unwrap();
+        assert_eq!(list_page(&tools, json!({})).await.unwrap(), first);
+
+        // The whole schedule stays `meerkat_schedule_get`'s, and a console
+        // schedule stays refused there.
+        let get_args = raw(&json!({ "schedule_id": agent_ids[0] }));
+        let through_stack = tools
+            .dispatch(call("meerkat_schedule_get", &get_args))
+            .await
+            .unwrap()
+            .result
+            .text_content();
+        let from_core = core
+            .dispatch(call("meerkat_schedule_get", &get_args))
+            .await
+            .unwrap()
+            .result
+            .text_content();
+        assert_eq!(through_stack, from_core, "get is unchanged");
+        assert!(
+            through_stack.contains(MARKER),
+            "get returns the whole action"
+        );
+        assert!(through_stack.contains("superseded_ack_ids"));
+        let console_args = raw(&json!({ "schedule_id": console_ids[0] }));
+        let refused = tools
+            .dispatch(call("meerkat_schedule_get", &console_args))
+            .await
+            .expect_err("a console schedule stays refused");
+        assert!(
+            refused.to_string().contains("console schedule"),
+            "{refused}"
+        );
+
+        // A cursor whose following schedules are gone ends on an empty page.
+        let all_but_last = list_page(&tools, json!({ "limit": 119 })).await.unwrap();
+        let cursor = all_but_last["page"]["next_cursor"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        service
+            .delete(&ScheduleId::parse(expected.last().unwrap()).unwrap())
+            .await
+            .unwrap();
+        let empty = list_page(&tools, json!({ "cursor": cursor }))
+            .await
+            .unwrap();
+        assert_eq!(
+            empty,
+            json!({
+                "schedules": [],
+                "page": { "returned": 0, "has_more": false, "next_cursor": null },
+            })
+        );
+    }
+
+    /// The listing's controls hold through the attached stack: a limit over
+    /// 200 returns 200 with more to follow, a limit of 0, a negative limit and
+    /// a cursor that is not one are refused as invalid arguments, and an empty
+    /// realm and a realm of console schedules only list nothing.
+    #[tokio::test]
+    async fn the_attached_listing_keeps_the_tools_controls() {
+        let dir = tempfile::tempdir().unwrap();
+        let (service, tools) = attached_stack(dir.path());
+        let nothing = json!({
+            "schedules": [],
+            "page": { "returned": 0, "has_more": false, "next_cursor": null },
+        });
+        assert_eq!(list_page(&tools, json!({})).await.unwrap(), nothing);
+
+        for _ in 0..3 {
+            service
+                .create(create_request(send().target().unwrap()))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            list_page(&tools, json!({})).await.unwrap(),
+            nothing,
+            "a realm of console schedules lists nothing"
+        );
+
+        for index in 0..205 {
+            service
+                .create(agent_schedule(
+                    format!("small {index}"),
+                    format!("prompt {index}"),
+                    1,
+                ))
+                .await
+                .unwrap();
+        }
+        let clamped = list_page(&tools, json!({ "limit": 5_000 })).await.unwrap();
+        assert_eq!(page_ids(&clamped).len(), 200);
+        assert_eq!(clamped["page"]["has_more"], true);
+        let cursor = clamped["page"]["next_cursor"].as_str().unwrap();
+        let rest = list_page(&tools, json!({ "limit": 5_000, "cursor": cursor }))
+            .await
+            .unwrap();
+        assert_eq!(page_ids(&rest).len(), 5);
+        assert_eq!(rest["page"]["has_more"], false);
+
+        for args in [
+            json!({ "limit": 0 }),
+            json!({ "limit": -1 }),
+            json!({ "limit": "ten" }),
+            json!({ "cursor": "not-a-cursor" }),
+            json!({ "cursor": "s1zz" }),
+            json!({ "cursor": 5 }),
+        ] {
+            let refused = list_page(&tools, args.clone())
+                .await
+                .expect_err("malformed page options are refused");
+            assert!(
+                refused.to_lowercase().contains("invalid"),
+                "{args}: {refused}"
+            );
+        }
     }
 }

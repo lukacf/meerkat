@@ -5885,7 +5885,8 @@ mod checked_v1_acceptance {
         assert_eq!(before.audit[0].event_type, "pending_created");
 
         // Carol is authenticated and may invoke gating.decide, but does not
-        // hold this role. Caller fields cannot lend her Alice's authority.
+        // hold this role. Caller fields cannot lend her Alice's authority,
+        // and no request field names an approver.
         let refused = authenticated_rpc(
             &app,
             NEW_ADMIN,
@@ -5893,7 +5894,6 @@ mod checked_v1_acceptance {
             json!({
                 "pending_id": pending_id,
                 "decision": "approve",
-                "approver_id": ROLE,
                 "deciding_principal": ADMIN_B,
                 "held_approver_ids": [ROLE],
             }),
@@ -5909,7 +5909,6 @@ mod checked_v1_acceptance {
             json!({
                 "pending_id": pending_id,
                 "decision": "approve",
-                "approver_id": NEW_ADMIN,
                 "deciding_principal": NEW_ADMIN,
                 "held_approver_ids": ["role:forged"],
             }),

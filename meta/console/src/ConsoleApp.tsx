@@ -960,6 +960,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         loadExperience: () => call(() => source.loadExperience()),
         loadModules: source.loadModules ? () => call(() => source.loadModules!()) : undefined,
         capabilities: () => call(() => source.capabilities()),
+        whoami: source.whoami ? () => call(() => source.whoami!()) : undefined,
         queryTimeline: input => call(() => source.queryTimeline(input)),
         send: input => call(() => source.send(input)),
         executeCommand: source.executeCommand ? input => call(() => source.executeCommand!(input)) : undefined,
@@ -2852,20 +2853,43 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [approvalOpens, setApprovalOpens] = React.useState(0);
   const approvalResourceRef = React.useRef<PendingApprovalResource | null>(null);
   const approvalScope = `${sendScope}:${experience?.runtime_id || "loading"}`;
+  // The gateway decides approvals only as the signed-in person the
+  // connection names (anyone else is refused as approver_unauthenticated),
+  // so the inbox offers decisions only when whoami reports a person. A
+  // transport without whoami, an older gateway or a failed read leaves the
+  // approvals read-only.
+  const [approvalDecider, setApprovalDecider] = React.useState<{ scope: string; person: boolean }>();
+  React.useEffect(() => {
+    let active = true;
+    const scope = sendScope;
+    void Promise.resolve()
+      .then(() => consoleTransport.whoami ? consoleTransport.whoami() : null)
+      .then((whoami) => {
+        if (active) setApprovalDecider({ scope, person: whoami?.actorKind === "person" });
+      })
+      .catch(() => {
+        if (active) setApprovalDecider({ scope, person: false });
+      });
+    return () => {
+      active = false;
+    };
+  }, [consoleTransport, sendScope]);
+  const approvalsDecidable = approvalDecider?.scope === sendScope ? approvalDecider.person : undefined;
   React.useEffect(() => {
     setApprovalSnapshot(undefined);
     setSelectedApprovalId(undefined);
-    if (!experience || !hasMobControlSurface) return;
+    if (!experience || !hasMobControlSurface || approvalsDecidable === undefined) return;
     const target = controlWorkbenchTarget("gating");
     const resource = createPendingApprovalResource({
       scopeKey: approvalScope,
-      readOnly: consoleReadOnly,
+      readOnly: consoleReadOnly || !approvalsDecidable,
       load: async signal => (await consoleController.commands.execute({
         command: CONSOLE_COMMAND_NAMES.listGatingPending, target, signal,
       })).result,
+      // No approver in the request: the gateway decides as the signed-in person.
       decide: async (pendingId, decision, signal) => (await consoleController.commands.execute({
         command: CONSOLE_COMMAND_NAMES.decideGating, target, signal,
-        params: { pending_id: pendingId, approver_id: DEFAULT_APPROVER_ID, decision, reason: `console_${decision}` },
+        params: { pending_id: pendingId, decision, reason: `console_${decision}` },
       })).result,
     });
     approvalResourceRef.current = resource;
@@ -2876,7 +2900,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       unsubscribe(); resource.dispose();
       if (approvalResourceRef.current === resource) approvalResourceRef.current = null;
     };
-  }, [approvalScope, Boolean(experience), hasMobControlSurface, consoleReadOnly, consoleController]);
+  }, [approvalScope, Boolean(experience), hasMobControlSurface, consoleReadOnly, approvalsDecidable, consoleController]);
   // Scope changes hide the previous principal's snapshot before effects run.
   const activeApprovals = approvalSnapshot?.owner === consoleController && approvalSnapshot.snapshot.scopeKey === approvalScope
     ? approvalSnapshot.snapshot : undefined;

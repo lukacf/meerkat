@@ -3185,6 +3185,10 @@ mod console_schedule_tests;
 mod console_actor_tests;
 
 #[cfg(test)]
+#[path = "console_approver_tests.rs"]
+mod console_approver_tests;
+
+#[cfg(test)]
 async fn console_send_identity_first(
     aggregator: &MetaConsoleAggregator,
     identity_runtime: Arc<crate::identity_first::IdentityRuntime>,
@@ -4428,6 +4432,32 @@ pub(crate) const CONSOLE_UNAUTHENTICATED_KIND: &str = "unauthenticated";
 
 /// JSON-RPC code of a console change refused for its caller.
 pub(crate) const CONSOLE_CALLER_REFUSED_CODE: i64 = -32056;
+
+/// JSON-RPC code of a console approval decision refused because the caller
+/// is not a verified, current person: an open Console's caller without a
+/// token, a service token, a token that names no human, a shared-account
+/// token, or a person whose login ended before the decision was applied.
+pub(crate) const CONSOLE_APPROVER_UNAUTHENTICATED_CODE: i64 = -32057;
+
+/// `data.kind` of [`CONSOLE_APPROVER_UNAUTHENTICATED_CODE`], shared by every
+/// console approval decision.
+pub(crate) const CONSOLE_APPROVER_UNAUTHENTICATED_KIND: &str = "approver_unauthenticated";
+
+/// The refusal of a console approval decision whose caller is not a
+/// verified, current person. Nothing was decided.
+fn approver_unauthenticated_rpc_error(response_id: Value) -> Value {
+    response_value(
+        response_id,
+        None,
+        Some(JsonRpcError {
+            code: CONSOLE_APPROVER_UNAUTHENTICATED_CODE,
+            message:
+                "console approvals are decided only by a signed-in person; nothing was decided"
+                    .to_string(),
+            data: Some(json!({ "kind": CONSOLE_APPROVER_UNAUTHENTICATED_KIND })),
+        }),
+    )
+}
 
 /// The request field naming the caller a console change was made for: the
 /// `caller_scope` its client read from `meta/console/whoami`.
@@ -10345,43 +10375,126 @@ fn console_aggregator_unavailable(response_id: Value) -> Value {
     )
 }
 
-/// Who a console gating decision is made as.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ConsoleGatingDecider {
-    /// An authenticated principal and the approver ids it holds.
-    Principal(crate::runtime::GatingDecider),
-    /// An unauthenticated local console names the approver explicitly.
-    Explicit(String),
+/// The person who decides a console approval: the verified human the
+/// connection's token names, as the access principal the Console resolved
+/// it to. Every other caller decides nothing (`approver_unauthenticated`),
+/// and no request field names an approver.
+struct ConsoleApprovalDecider {
+    human: crate::runtime::AuthenticatedConsoleHuman,
+    principal: String,
 }
 
-fn resolve_gating_decider(
-    params: &Value,
-    authenticated_principal: Option<&str>,
-    access_view: Option<&AccessView>,
-) -> Result<ConsoleGatingDecider, &'static str> {
-    if let Some(principal) = authenticated_principal.and_then(|value| {
-        let trimmed = value.trim();
-        (!trimmed.is_empty()).then_some(trimmed)
-    }) {
-        // Identity comes only from authentication and the live access
-        // bindings; request fields are never identity evidence here.
-        return Ok(ConsoleGatingDecider::Principal(
-            crate::runtime::GatingDecider {
-                principal: principal.to_string(),
-                held_approver_ids: access_view
-                    .map(AccessView::held_approver_ids)
-                    .unwrap_or_default(),
-            },
-        ));
+impl ConsoleApprovalDecider {
+    /// The decider of a request, or `None` when its caller is not a verified
+    /// person.
+    fn of(
+        governance: &ConsoleSendGovernance,
+        authenticated_principal: Option<&str>,
+    ) -> Option<Self> {
+        let human = governance.human.clone()?;
+        let principal = authenticated_principal
+            .map(str::trim)
+            .filter(|principal| !principal.is_empty())?;
+        Some(Self {
+            human,
+            principal: principal.to_string(),
+        })
     }
-    let Some(approver_id) = params.get("approver_id").and_then(Value::as_str) else {
-        return Err("approver_id required");
-    };
-    let trimmed = approver_id.trim();
-    if trimmed.is_empty() {
-        return Err("approver_id required");
+
+    /// The person is still current, right before the decision is applied:
+    /// its retained token still verifies (its session fence included) as
+    /// the same access principal.
+    fn still_current(&self) -> bool {
+        self.human
+            .current()
+            .is_ok_and(|principal| principal == self.principal)
     }
-    Ok(ConsoleGatingDecider::Explicit(trimmed.to_string()))
+
+    /// What the decision's audit records of the person's authentication.
+    fn evidence(&self) -> crate::runtime::GatingDecisionEvidence {
+        crate::runtime::GatingDecisionEvidence {
+            assurance: meerkat_core::ApprovalAssurance::PersonAuthenticated,
+            login_scope_digest: self.human.login_scope_digest(),
+        }
+    }
+}
+
+/// Why a console approval decision was refused under the gating owner.
+enum ConsoleDecideRefusal {
+    /// The person's login ended before the decision was applied.
+    NotCurrent,
+    /// The live access policy refuses the decision.
+    AccessDenied(&'static str),
+}
+
+impl ConsoleDecideRefusal {
+    fn into_rpc_error(self, response_id: Value) -> Value {
+        match self {
+            Self::NotCurrent => approver_unauthenticated_rpc_error(response_id),
+            Self::AccessDenied(message) => access_denied_rpc_error(response_id, message),
+        }
+    }
+}
+
+/// Test hook: holds a Console gating decide right before it takes the
+/// gating owner, until the test releases it.
+#[cfg(test)]
+pub(crate) mod gating_decide_holds {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    use tokio::sync::Semaphore;
+
+    static HOLDS: Mutex<BTreeMap<String, GatingDecideHold>> = Mutex::new(BTreeMap::new());
+
+    /// A hold on the next decide of one pending id.
+    #[derive(Clone)]
+    pub(crate) struct GatingDecideHold {
+        reached: Arc<Semaphore>,
+        release: Arc<Semaphore>,
+    }
+
+    impl GatingDecideHold {
+        /// Hold the next decide of `pending_id`.
+        pub(crate) fn install(pending_id: &str) -> Self {
+            let hold = Self {
+                reached: Arc::new(Semaphore::new(0)),
+                release: Arc::new(Semaphore::new(0)),
+            };
+            HOLDS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(pending_id.to_string(), hold.clone());
+            hold
+        }
+
+        /// Wait until a decide reached the hold.
+        pub(crate) async fn reached(&self) {
+            if let Ok(permit) = self.reached.acquire().await {
+                permit.forget();
+            }
+        }
+
+        /// Let the held decide go on.
+        pub(crate) fn release(&self) {
+            self.release.add_permits(1);
+        }
+    }
+
+    /// Wait at the hold on `pending_id`, when one is installed. A hold
+    /// holds one decide.
+    pub(crate) async fn pass(pending_id: &str) {
+        let hold = HOLDS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(pending_id);
+        if let Some(hold) = hold {
+            hold.reached.add_permits(1);
+            if let Ok(permit) = hold.release.acquire().await {
+                permit.forget();
+            }
+        }
+    }
 }
 
 #[allow(clippy::large_futures, clippy::too_many_arguments)]
@@ -12891,6 +13004,14 @@ async fn handle_console_runtime_rpc_with_visibility(
             };
             // The gating owner trims IDs. Authorize that same canonical value.
             let pending_id = pending_id.trim();
+            // The approver comes from the connection alone: a request that
+            // names one is refused rather than decided as someone else.
+            if request.params.get("approver_id").is_some() {
+                return invalid_params(
+                    response_id,
+                    "approver_id is not accepted: the console decides as the signed-in person",
+                );
+            }
             if let Some(view) = access_view {
                 let pending = module_runtime.lock().await.list_gating_pending();
                 if pending.iter().any(|entry| {
@@ -12906,11 +13027,10 @@ async fn handle_console_runtime_rpc_with_visibility(
                     );
                 }
             }
-            let decider =
-                match resolve_gating_decider(&request.params, authenticated_principal, access_view) {
-                    Ok(decider) => decider,
-                    Err(message) => return invalid_params(response_id, message),
-                };
+            let Some(decider) = ConsoleApprovalDecider::of(governance, authenticated_principal)
+            else {
+                return approver_unauthenticated_rpc_error(response_id);
+            };
             let Some(raw_decision) = request.params.get("decision").and_then(Value::as_str) else {
                 return invalid_params(response_id, "decision required");
             };
@@ -12930,74 +13050,61 @@ async fn handle_console_runtime_rpc_with_visibility(
                 .get("reason")
                 .and_then(Value::as_str)
                 .map(ToString::to_string);
+            #[cfg(test)]
+            gating_decide_holds::pass(pending_id).await;
             let mut owner = module_runtime.lock().await;
-            let (decided, notices) = match decider {
-                ConsoleGatingDecider::Principal(decider) => {
-                    let request = GatingDecideRequest {
-                        pending_id: pending_id.to_string(),
-                        approver_id: decider.principal.clone(),
-                        decision,
-                        reason,
-                    };
-                    match access {
-                        // Re-check the current grant, origin and held ids
-                        // under the access fence, through the mutation, so a
-                        // revocation published while this request waited for
-                        // the owner is honored.
-                        Some(controller) => {
-                            let fence = controller.decision_fence(Some(&decider.principal));
-                            let outcome = owner.decide_gating_action_authorized(request, |entry| {
-                                if fence.enforced() && !fence.allows(ACTION_GATING_DECIDE) {
-                                    return Err("access denied to gating decisions");
-                                }
-                                if entry
-                                    .and_then(|entry| entry.origin.as_ref())
-                                    .is_some_and(|origin| !fence.can_view_agent(&origin.identity))
-                                {
-                                    return Err("access denied to approval origin");
-                                }
-                                Ok(crate::runtime::GatingDecider {
-                                    principal: decider.principal.clone(),
-                                    held_approver_ids: fence.held_approver_ids(),
-                                })
-                            });
-                            drop(fence);
-                            (outcome.0, Some(outcome.1))
-                        }
-                        None => {
-                            let (decided, notices) =
-                                owner.decide_gating_action_authorized(request, |_| {
-                                    Ok::<_, &'static str>(decider.clone())
-                                });
-                            (decided, Some(notices))
-                        }
+            let request = GatingDecideRequest {
+                pending_id: pending_id.to_string(),
+                approver_id: decider.principal.clone(),
+                decision,
+                reason,
+            };
+            // After the route's last await, right before the decision is
+            // applied: the person must still be current, and the access
+            // fence, held through the mutation so a revocation published
+            // while this request waited is honored, re-reads the grant, the
+            // origin and the approver ids the person holds now.
+            let fence = access.map(|controller| controller.decision_fence(Some(&decider.principal)));
+            let (decided, notices) =
+                owner.decide_gating_action_attested(request, &decider.evidence(), |entry| {
+                    if !decider.still_current() {
+                        return Err(ConsoleDecideRefusal::NotCurrent);
                     }
-                }
-                ConsoleGatingDecider::Explicit(approver_id) => (
-                    Ok(owner.decide_gating_action(GatingDecideRequest {
-                        pending_id: pending_id.to_string(),
-                        approver_id,
-                        decision,
-                        reason,
-                    })),
-                    None,
-                ),
-            };
+                    let Some(fence) = &fence else {
+                        return Ok(crate::runtime::GatingDecider {
+                            principal: decider.principal.clone(),
+                            held_approver_ids: BTreeSet::new(),
+                        });
+                    };
+                    if fence.enforced() && !fence.allows(ACTION_GATING_DECIDE) {
+                        return Err(ConsoleDecideRefusal::AccessDenied(
+                            "access denied to gating decisions",
+                        ));
+                    }
+                    if entry
+                        .and_then(|entry| entry.origin.as_ref())
+                        .is_some_and(|origin| !fence.can_view_agent(&origin.identity))
+                    {
+                        return Err(ConsoleDecideRefusal::AccessDenied(
+                            "access denied to approval origin",
+                        ));
+                    }
+                    Ok(crate::runtime::GatingDecider {
+                        principal: decider.principal.clone(),
+                        held_approver_ids: fence.held_approver_ids(),
+                    })
+                });
+            drop(fence);
             drop(owner);
-            if let Some(notices) = notices {
-                notices.deliver();
-            }
-            let decided = match decided {
-                Ok(decided) => decided,
-                Err(message) => return access_denied_rpc_error(response_id, message),
-            };
+            notices.deliver();
             match decided {
-                Ok(result) => response_value(
+                Err(refusal) => refusal.into_rpc_error(response_id),
+                Ok(Ok(result)) => response_value(
                     response_id,
                     Some(serde_json::to_value(result).unwrap_or(Value::Null)),
                     None,
                 ),
-                Err(err) => gating_decide_error_response(response_id, err),
+                Ok(Err(err)) => gating_decide_error_response(response_id, err),
             }
         })
         .await,
@@ -20464,85 +20571,6 @@ message = "review"
         Ok(())
     }
 
-    #[test]
-    fn authenticated_gating_decider_comes_from_principal_and_live_bindings() {
-        use super::ConsoleGatingDecider;
-        let forged_params = json!({
-            "approver_id": "person:alice",
-            "deciding_principal": "alice@example.com",
-            "held_approver_ids": ["person:alice"],
-        });
-        let controller = crate::access::AccessController::new(crate::access::AccessControlConfig {
-            groups: [(
-                "release".to_string(),
-                crate::access::AccessGroup {
-                    members: vec!["bob@example.com".to_string()],
-                    ..crate::access::AccessGroup::default()
-                },
-            )]
-            .into(),
-            approvers: [
-                (
-                    "person:bob".to_string(),
-                    crate::access::AccessApprover {
-                        subjects: vec!["bob@example.com".to_string()],
-                        ..crate::access::AccessApprover::default()
-                    },
-                ),
-                (
-                    "role:release-manager".to_string(),
-                    crate::access::AccessApprover {
-                        groups: vec!["release".to_string()],
-                        ..crate::access::AccessApprover::default()
-                    },
-                ),
-            ]
-            .into(),
-            ..crate::access::AccessControlConfig::default()
-        })
-        .expect("controller");
-        let view = controller.view_for_subject(Some("bob@example.com"));
-        assert_eq!(
-            super::resolve_gating_decider(&forged_params, Some("bob@example.com"), Some(&view)),
-            Ok(ConsoleGatingDecider::Principal(
-                crate::runtime::GatingDecider {
-                    principal: "bob@example.com".to_string(),
-                    held_approver_ids: [
-                        "person:bob".to_string(),
-                        "role:release-manager".to_string()
-                    ]
-                    .into(),
-                }
-            ))
-        );
-        assert_eq!(
-            super::resolve_gating_decider(&forged_params, Some("carol@example.com"), None),
-            Ok(ConsoleGatingDecider::Principal(
-                crate::runtime::GatingDecider {
-                    principal: "carol@example.com".to_string(),
-                    held_approver_ids: Default::default(),
-                }
-            ))
-        );
-    }
-
-    #[test]
-    fn unauthenticated_local_gating_approver_requires_request_param() {
-        use super::ConsoleGatingDecider;
-        assert_eq!(
-            super::resolve_gating_decider(
-                &json!({ "approver_id": " local-operator " }),
-                None,
-                None
-            ),
-            Ok(ConsoleGatingDecider::Explicit("local-operator".to_string())),
-        );
-        assert_eq!(
-            super::resolve_gating_decider(&json!({}), None, None),
-            Err("approver_id required"),
-        );
-    }
-
     #[tokio::test]
     async fn authenticated_gating_request_rechecks_revoked_role_before_decision()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -20568,6 +20596,7 @@ message = "review"
             module: &Arc<tokio::sync::Mutex<crate::MetaRuntimeHandle>>,
             access: &AccessController,
             auth: &super::ConsoleHttpAuthContext,
+            governance: &super::ConsoleSendGovernance,
             pending: &str,
         ) -> Value {
             Box::pin(handle_console_runtime_rpc_with_visibility(
@@ -20585,7 +20614,6 @@ message = "review"
                     "meta/gating/decide",
                     json!({
                         "pending_id": pending,
-                        "approver_id": CAROL,
                         "held_approver_ids": [ROLE],
                         "decision": "approve",
                     }),
@@ -20600,7 +20628,7 @@ message = "review"
                 None,
                 None,
                 None,
-                &crate::http_console::ConsoleSendGovernance::default(),
+                governance,
                 &crate::topology_control::TopologyApplyScope::Anonymous,
             ))
             .await
@@ -20773,12 +20801,32 @@ message = "review"
 
         let (_temp_dir, runtime) =
             build_empty_console_test_runtime("gating-in-flight-revocation").await?;
-        let refused = decide(&runtime, &module, &access, &bob, &pending).await;
+        // Each decide carries the governance of its own request: the
+        // verified person its token names.
+        let bob_governance = super::ConsoleSendGovernance::for_request(&state, &bob);
+        let carol_governance = super::ConsoleSendGovernance::for_request(&state, &carol);
+        let refused = decide(&runtime, &module, &access, &bob, &bob_governance, &pending).await;
         let after_refusal = module.lock().await.gating_state_snapshot();
         let notices_after_refusal = collector.0.lock().expect("observer").clone();
-        let permitted = decide(&runtime, &module, &access, &carol, &pending).await;
+        let permitted = decide(
+            &runtime,
+            &module,
+            &access,
+            &carol,
+            &carol_governance,
+            &pending,
+        )
+        .await;
         let after_permitted = module.lock().await.gating_state_snapshot();
-        let repeated = decide(&runtime, &module, &access, &carol, &pending).await;
+        let repeated = decide(
+            &runtime,
+            &module,
+            &access,
+            &carol,
+            &carol_governance,
+            &pending,
+        )
+        .await;
         let after_repeat = module.lock().await.gating_state_snapshot();
         let final_notices = collector.0.lock().expect("observer").clone();
         // Expected RED must still stop the real empty runtime before an

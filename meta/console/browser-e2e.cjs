@@ -760,9 +760,26 @@ function startMockConsoleServer(options = {}) {
             id: rpcId,
             result: {
               pending_id: payload.params?.pending_id,
-              approver_id: payload.params?.approver_id,
+              approver_id: "person@example.test",
               decision: payload.params?.decision,
               outcome: "accepted",
+            },
+          }));
+          return;
+        }
+        // The console decides approvals only for a signed-in person.
+        if (payload.method === "meta/console/whoami") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({
+            jsonrpc: "2.0",
+            id: rpcId,
+            result: {
+              actor: { kind: "person", principal: "person@example.test", assurance: "person_authenticated" },
+              posture: "enforced",
+              login_expires_at_ms: null,
+              can_administer: false,
+              approver_ids: [],
+              caller_scope: "browser-e2e-caller",
             },
           }));
           return;
@@ -3363,6 +3380,13 @@ async function runHeadlessControlSurfaceBrowserProof() {
     await page.getByTestId("gating-action:gate-control-1:escalate").waitFor({ timeout: 10_000 });
     await page.getByTestId("gating-action:gate-control-1:escalate").click();
     await waitForRpcMethod(server, "meta/gating/decide", 3);
+    // The console decides as the signed-in person: no request names an approver.
+    const decides = server.requests
+      .filter((request) => request.method === "POST" && request.url === "/console/rpc")
+      .map((request) => JSON.parse(request.body || "{}"))
+      .filter((request) => request.method === "meta/gating/decide");
+    assert.equal(decides.length >= 3, true);
+    assert.equal(decides.some((request) => request.params && "approver_id" in request.params), false);
 
     await openSidebarAgentChat(page, "Identity Example");
     // Respawn and Retire sit in the chat header's menu and ask first.

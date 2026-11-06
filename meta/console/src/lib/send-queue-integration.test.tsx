@@ -555,6 +555,50 @@ describe("stock durable queue integration", () => {
     expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
   });
 
+  function approvalTransport(whoami: MetaConsoleTransport["whoami"]) {
+    const fake = transport(vi.fn());
+    fake.capabilities = async () => ({ methods: ["meta/gating/pending", "meta/gating/decide", "meta/console/send"] });
+    fake.whoami = whoami;
+    const commands: Array<{ command: string; params?: Record<string, unknown> }> = [];
+    let decided = false;
+    fake.executeCommand = async (input) => {
+      commands.push({ command: input.command, params: input.params });
+      if (input.command === "decideGating") {
+        decided = true;
+        return { command: input.command, accepted: true, result: { pending_id: "gate-1", action_id: "action-1", approver_id: "reviewer@example.com", decision: "approve", outcome: "allowed", decided_at_ms: 10 } } as never;
+      }
+      return { command: input.command, accepted: true, result: { pending: decided ? [] : [{ pending_id: "gate-1", action_id: "action-1", action: "Publish the report", origin: { identity }, risk_tier: "r3" }] } } as never;
+    };
+    return { fake, commands };
+  }
+
+  it("decides an approval as the signed-in person, naming no approver", async () => {
+    const { fake, commands } = approvalTransport(async () => ({ actorKind: "person", principal: "reviewer@example.com", approverIds: [], canAdminister: false }));
+    render(<ConsoleApp baseUrl="" transport={fake} storageNamespace="scope" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Needs you, 1 pending approval" }));
+    const approve = await screen.findByRole("button", { name: "Approve" }) as HTMLButtonElement;
+    await waitFor(() => expect(approve.disabled).toBe(false));
+    fireEvent.click(approve);
+    await waitFor(() => expect(commands.some(entry => entry.command === "decideGating")).toBe(true));
+    expect(commands.find(entry => entry.command === "decideGating")?.params).toEqual({ pending_id: "gate-1", decision: "approve", reason: "console_approve" });
+  });
+
+  it.each([
+    ["a caller that is not a person", async () => ({ actorKind: "anonymous", approverIds: [], canAdminister: false })],
+    ["a transport without whoami", undefined],
+    ["a failed whoami read", async () => { throw new Error("whoami unavailable"); }],
+  ] as const)("shows approvals read-only to %s", async (_label, whoami) => {
+    const { fake, commands } = approvalTransport(whoami as MetaConsoleTransport["whoami"]);
+    render(<ConsoleApp baseUrl="" transport={fake} storageNamespace="scope" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Needs you, 1 pending approval" }));
+    const approve = await screen.findByRole("button", { name: "Approve" }) as HTMLButtonElement;
+    expect(approve.disabled).toBe(true);
+    expect(screen.getAllByText("Read-only access").length).toBeGreaterThan(0);
+    fireEvent.click(approve);
+    await act(async () => { await new Promise(resolve => window.setTimeout(resolve, 20)); });
+    expect(commands.some(entry => entry.command === "decideGating")).toBe(false);
+  });
+
   it("cannot dispatch a persisted intent from a lock callback after unmount", async () => {
     const scope = "scope";
     saveConsoleSendAttempts(window.localStorage, scope, identity, [createConsoleSendAttempt({ id: "unmount-lock", scope, destination: identity, origin: "console:old", idempotencyKey: "unmount-key", text: "old intent", now: 1 })]);

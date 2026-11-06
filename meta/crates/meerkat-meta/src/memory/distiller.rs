@@ -684,6 +684,10 @@ fn project_message(message: &Message) -> Option<(&'static str, String)> {
             .body
             .as_deref()
             .map(|body| ("system notice", body.to_string())),
+        // Injected context (memory recalled into a turn, context a host
+        // attached to a send) is what the agent was given, not what was
+        // said: distilling it would turn recalled memory into new evidence.
+        Message::User(user) if user.transcript_role.is_injected_context() => None,
         Message::User(user) => Some(("user", user.text_content())),
         Message::BlockAssistant(assistant) => Some((
             "assistant",

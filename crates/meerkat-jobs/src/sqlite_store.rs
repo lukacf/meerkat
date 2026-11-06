@@ -1197,6 +1197,7 @@ impl From<PersistedJobSpec> for JobSpec {
                 .collect(),
             submission_key: spec.submission_key,
             terminal_application: spec.terminal_application,
+            requester: None,
         }
     }
 }

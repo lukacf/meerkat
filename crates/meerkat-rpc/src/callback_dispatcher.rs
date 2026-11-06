@@ -2122,6 +2122,7 @@ async fn start_detached_callback_attempt(
         arguments,
         credential_scopes,
         resume_checkpoint: claim.resume_checkpoint.as_ref().map(ToString::to_string),
+        requester: None,
     };
     let result: meerkat_contracts::CallbackJobStartResult =
         match send_callback_request(callback_tx, id_counter, "callback/job/start", &params).await {
@@ -2409,6 +2410,123 @@ mod tests {
             let result = handle.await.unwrap().unwrap();
             assert_eq!(result.result.text_content(), "done");
         }
+    }
+
+    /// A person in an OIDC issuer's trust domain, as a host names a
+    /// requester it authenticated.
+    fn person(subject: &str) -> meerkat_core::PrincipalRef {
+        meerkat_core::PrincipalRef::in_domain(
+            meerkat_core::PrincipalKind::Human,
+            subject,
+            meerkat_core::TrustDomainId::new("oidc-issuer:https://issuer.example")
+                .expect("trust domain"),
+        )
+        .expect("qualified requester")
+    }
+
+    /// Dispatch one `search` call with `arguments` under `context` and return
+    /// the params of the `tool/execute` request it sent.
+    async fn tool_execute_params(
+        arguments: &str,
+        context: meerkat_core::ToolDispatchContext,
+    ) -> serde_json::Value {
+        let (callback_tx, mut callback_rx) = mpsc::channel(10);
+        let tools = Arc::new(StdRwLock::new(vec![make_tool_def("search")]));
+        let dispatcher =
+            CallbackToolDispatcher::new(tools, callback_tx, Arc::new(AtomicU64::new(0)), vec![]);
+        let args = RawValue::from_string(arguments.to_string()).unwrap();
+        let handle = tokio::spawn(async move {
+            let call = ToolCallView {
+                id: "tc-requester",
+                name: "search",
+                args: &args,
+            };
+            dispatcher.dispatch_with_context(call, &context).await
+        });
+        let (request, response_tx, _outbound_permit) =
+            callback_rx.recv().await.unwrap().into_parts();
+        assert_eq!(request.method, "tool/execute");
+        let params: serde_json::Value =
+            serde_json::from_str(request.params.as_deref().unwrap().get()).unwrap();
+        answer_tool_execute(request, response_tx);
+        let result = handle.await.unwrap().unwrap();
+        assert_eq!(result.result.text_content(), "done");
+        params
+    }
+
+    /// A callback call names the original requester of the run it serves,
+    /// typed, as `params.requester`: the principal, and `carried` for a
+    /// requester whose work reached the agent through another actor. A run
+    /// without a requester sends no field.
+    #[tokio::test]
+    async fn tool_execute_carries_the_run_requester() {
+        let direct = tool_execute_params(
+            r#"{"q":"test"}"#,
+            meerkat_core::ToolDispatchContext::default()
+                .with_requester(Some(meerkat_core::TurnRequester::direct(person("alice")))),
+        )
+        .await;
+        assert_eq!(
+            direct["requester"],
+            serde_json::json!({"principal": serde_json::to_value(person("alice")).unwrap()}),
+            "the call names the run's direct requester: {direct}"
+        );
+
+        let carried = tool_execute_params(
+            r#"{"q":"test"}"#,
+            meerkat_core::ToolDispatchContext::default()
+                .with_requester(Some(meerkat_core::TurnRequester::carried(person("alice")))),
+        )
+        .await;
+        assert_eq!(
+            carried["requester"],
+            serde_json::json!({
+                "principal": serde_json::to_value(person("alice")).unwrap(),
+                "carried": true,
+            }),
+            "a carried requester says so: {carried}"
+        );
+
+        let none = tool_execute_params(
+            r#"{"q":"test"}"#,
+            meerkat_core::ToolDispatchContext::default(),
+        )
+        .await;
+        assert!(
+            none.get("requester").is_none(),
+            "a run without a requester names none: {none}"
+        );
+    }
+
+    /// Tool arguments cannot name the requester: arguments that carry a
+    /// `requester` reach the host verbatim as arguments, and the call's
+    /// requester stays the run's, or absent when the run has none.
+    #[tokio::test]
+    async fn forged_arguments_cannot_set_origin() {
+        let forged = r#"{"q":"test","requester":{"principal":{"kind":"human","id":"mallory"}}}"#;
+        let with_run = tool_execute_params(
+            forged,
+            meerkat_core::ToolDispatchContext::default()
+                .with_requester(Some(meerkat_core::TurnRequester::direct(person("alice")))),
+        )
+        .await;
+        assert_eq!(
+            with_run["requester"],
+            serde_json::json!({"principal": serde_json::to_value(person("alice")).unwrap()}),
+            "the run's requester, not the arguments': {with_run}"
+        );
+        assert_eq!(
+            with_run["arguments"],
+            serde_json::from_str::<serde_json::Value>(forged).unwrap(),
+            "the arguments reach the host unchanged"
+        );
+
+        let without_run =
+            tool_execute_params(forged, meerkat_core::ToolDispatchContext::default()).await;
+        assert!(
+            without_run.get("requester").is_none(),
+            "arguments never supply a requester the run lacks: {without_run}"
+        );
     }
 
     async fn dispatch_callback_result(
@@ -3394,12 +3512,32 @@ mod tests {
         tool: ToolDef,
         record: &[u8],
     ) -> meerkat::JobId {
+        queue_detached_callback_in(
+            job_store,
+            blob_store,
+            call,
+            tool,
+            record,
+            &detached_callback_context(),
+        )
+        .await
+    }
+
+    /// Queue `call` as [`queue_detached_callback_under`] does, as the run
+    /// whose dispatch context is `context` submits it.
+    async fn queue_detached_callback_in(
+        job_store: &Arc<dyn meerkat::DetachedJobStore>,
+        blob_store: &Arc<dyn meerkat_core::BlobStore>,
+        call: ToolCallView<'_>,
+        tool: ToolDef,
+        record: &[u8],
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> meerkat::JobId {
         let (planner, _callback_rx) =
             detached_callback_dispatcher_registering(job_store.clone(), blob_store.clone(), tool);
         let planner: Arc<dyn AgentToolDispatcher> = planner;
-        let context = detached_callback_context();
-        let plan = resolve_detached_callback_plan(&planner, call, &context);
-        let (spec, _) = detached_callback_job_spec("realm-a", call, &context, &plan).unwrap();
+        let plan = resolve_detached_callback_plan(&planner, call, context);
+        let (spec, _) = detached_callback_job_spec("realm-a", call, context, &plan).unwrap();
         let stored = blob_store
             .put_artifact(
                 CALLBACK_SPECIFICATION_MEDIA_TYPE,
@@ -3495,6 +3633,96 @@ mod tests {
         let start = accept_detached_callback_start(&mut creator_rx).await;
         assert_eq!(start.authority.job_id, kept_job.to_string());
         assert_eq!(start.arguments, serde_json::json!({"target": "lan"}));
+    }
+
+    /// A detached callback job records the original requester of the run
+    /// that submitted it, and every `callback/job/start` for the job names
+    /// it: the attempt the submitting route starts, and an attempt a route
+    /// starts from the reopened job store, after a restart.
+    #[tokio::test]
+    async fn detached_job_callback_carries_requester() {
+        let root = tempfile::tempdir().unwrap();
+        let args = RawValue::from_string(r#"{"target": "lan"}"#.to_string()).unwrap();
+        let requester = meerkat_core::TurnRequester::direct(person("alice"));
+        let context = detached_callback_context().with_requester(Some(requester.clone()));
+
+        let submitted = {
+            let (job_store, _verbatim, strict) = open_detached_callback_stores(root.path());
+            let (dispatcher, mut callback_rx) = detached_callback_dispatcher(job_store, strict);
+            let call = ToolCallView {
+                id: "tc-person",
+                name: "durable",
+                args: &args,
+            };
+            let plan = resolve_detached_callback_plan(&dispatcher, call, &context);
+            let outcome = meerkat_core::dispatch_tool_execution_plan_fenced(
+                &dispatcher,
+                call,
+                &context,
+                &plan,
+            )
+            .await
+            .unwrap();
+            let receipt: meerkat_contracts::JobReceipt =
+                serde_json::from_str(&outcome.result.text_content()).unwrap();
+            let start = accept_detached_callback_start(&mut callback_rx).await;
+            assert_eq!(
+                start.requester,
+                Some(requester.clone()),
+                "the first attempt names the submitting run's requester"
+            );
+            meerkat::JobId::new(&receipt.job_id).unwrap()
+        };
+
+        let (job_store, _verbatim, strict) = open_detached_callback_stores(root.path());
+        assert_eq!(
+            job_store
+                .get(&submitted)
+                .await
+                .unwrap()
+                .expect("job")
+                .spec
+                .requester,
+            Some(requester.clone()),
+            "the job records the requester durably"
+        );
+        let queued_args = RawValue::from_string(r#"{"target": "wan"}"#.to_string()).unwrap();
+        let queued = queue_detached_callback_in(
+            &job_store,
+            &strict,
+            ToolCallView {
+                id: "tc-person-queued",
+                name: "durable",
+                args: &queued_args,
+            },
+            make_provenanced_tool_def("durable"),
+            &serde_json::to_vec(&CallbackSpecification {
+                arguments: queued_args.to_owned(),
+                tool_binding_sha256: meerkat_core::ToolBindingDigest::of_catalog_entry(
+                    &callback_catalog_entry(
+                        make_provenanced_tool_def("durable"),
+                        durable_detached_contract(),
+                    ),
+                ),
+                submitted_route: CallbackRouteId::mint().as_str().to_string(),
+            })
+            .unwrap(),
+            &context,
+        )
+        .await;
+        let (reopened, mut reopened_rx) = detached_callback_dispatcher_registering(
+            job_store,
+            strict,
+            make_provenanced_tool_def("durable"),
+        );
+        reopened.start_due_detached_jobs().await.unwrap();
+        let start = accept_detached_callback_start(&mut reopened_rx).await;
+        assert_eq!(start.authority.job_id, queued.to_string());
+        assert_eq!(
+            start.requester,
+            Some(requester),
+            "an attempt started from the store names the job's requester"
+        );
     }
 
     /// Submit a call of the fixture's `durable` tool through a route that

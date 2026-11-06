@@ -360,6 +360,12 @@ pub struct JobSpec {
     pub credential_context_refs: Vec<ToolCredentialContextRef>,
     pub submission_key: JobSubmissionKey,
     pub terminal_application: JobTerminalApplication,
+    /// The original requester of the run that submitted the job, as that
+    /// run's tool dispatch context named it (direct or carried); `None` when
+    /// the run had none. The submitting owner records it from the runtime,
+    /// never from tool arguments, and every attempt the job starts names it
+    /// to its host. Part of the submission's replay identity.
+    pub requester: Option<meerkat_core::TurnRequester>,
 }
 
 impl JobSpec {
@@ -389,7 +395,15 @@ impl JobSpec {
             credential_context_refs: Vec::new(),
             submission_key,
             terminal_application: JobTerminalApplication::Subscribers,
+            requester: None,
         }
+    }
+
+    /// Record the original requester of the run that submits the job
+    /// ([`Self::requester`]).
+    pub fn with_requester(mut self, requester: Option<meerkat_core::TurnRequester>) -> Self {
+        self.requester = requester;
+        self
     }
 
     pub fn with_terminal_application(

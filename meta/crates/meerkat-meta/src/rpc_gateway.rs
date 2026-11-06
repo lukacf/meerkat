@@ -4229,10 +4229,20 @@ default_binding = "local"
         dispatcher: &Arc<CallbackToolDispatcher>,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_contracts::JobReceipt, ToolError> {
-        let context = detached_callback_test_context();
-        let plan = resolve_detached_callback_test_plan(dispatcher, call, &context);
+        submit_detached_callback_test_call_in(dispatcher, call, &detached_callback_test_context())
+            .await
+    }
+
+    /// [`submit_detached_callback_test_call`] as the run whose dispatch
+    /// context is `context` submits it.
+    async fn submit_detached_callback_test_call_in(
+        dispatcher: &Arc<CallbackToolDispatcher>,
+        call: ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<meerkat_contracts::JobReceipt, ToolError> {
+        let plan = resolve_detached_callback_test_plan(dispatcher, call, context);
         let outcome =
-            meerkat_core::dispatch_tool_execution_plan_fenced(dispatcher, call, &context, &plan)
+            meerkat_core::dispatch_tool_execution_plan_fenced(dispatcher, call, context, &plan)
                 .await?;
         Ok(serde_json::from_str(&outcome.result.text_content()).expect("job receipt"))
     }
@@ -4538,6 +4548,205 @@ default_binding = "local"
         assert_eq!(sent[0]["method"], "callback/job/start");
         assert_eq!(sent[0]["params"]["authority"]["job_id"], job_id);
         assert_eq!(sent[0]["params"]["arguments"], json!({"target": "build-8"}));
+    }
+
+    /// A person in an OIDC issuer's trust domain, as the console names a
+    /// signed-in person.
+    fn callback_test_person(subject: &str) -> meerkat_core::PrincipalRef {
+        meerkat_core::PrincipalRef::in_domain(
+            meerkat_core::PrincipalKind::Human,
+            subject,
+            meerkat_core::TrustDomainId::new("oidc-issuer:https://issuer.example")
+                .expect("trust domain"),
+        )
+        .expect("person")
+    }
+
+    /// A detached callback job records the original requester of the run
+    /// that submitted it, and every `callback/job/start` the gateway sends
+    /// for the job names it: the attempt the submission starts, and the
+    /// attempt a gateway restarted on the same stores starts for a queued
+    /// job.
+    #[tokio::test]
+    async fn detached_job_callback_carries_requester() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let requester = meerkat_core::TurnRequester::direct(callback_test_person("alice"));
+        let expected = json!({
+            "principal": serde_json::to_value(callback_test_person("alice")).expect("principal"),
+        });
+
+        let args = serde_json::value::RawValue::from_string(r#"{"target":"build-9"}"#.to_string())
+            .expect("raw arguments");
+        let call = ToolCallView {
+            id: "tc-person",
+            name: "security_scan",
+            args: &args,
+        };
+        let job_id = {
+            let (store, _binary, blobs) = open_detached_callback_test_stores(root.path());
+            let (dispatcher, bridge, mut stdout_rx) =
+                detached_callback_test_dispatcher(store, blobs);
+            let receipt = submit_detached_callback_test_call_in(
+                &dispatcher,
+                call,
+                &detached_callback_test_context().with_requester(Some(requester.clone())),
+            )
+            .await
+            .expect("detached submit");
+            let start = accept_detached_callback_start(&bridge, &mut stdout_rx).await;
+            assert_eq!(
+                start["requester"], expected,
+                "the first attempt names the submitting run's requester: {start}"
+            );
+            receipt.job_id
+        };
+        let (store, _binary, _blobs) = open_detached_callback_test_stores(root.path());
+        assert_eq!(
+            store
+                .get(&meerkat::JobId::new(&job_id).expect("job id"))
+                .await
+                .expect("read the job")
+                .expect("the job is stored")
+                .spec
+                .requester,
+            Some(requester.clone()),
+            "the job records the requester durably"
+        );
+        drop(store);
+
+        let queued_root = tempfile::tempdir().expect("temp dir");
+        let queued = {
+            use base64::Engine as _;
+            let (store, _binary, blobs) = open_detached_callback_test_stores(queued_root.path());
+            let specification = blobs
+                .put_artifact(
+                    CALLBACK_ARGUMENTS_MEDIA_TYPE,
+                    &base64::engine::general_purpose::STANDARD.encode(br#"{"target":"build-8"}"#),
+                )
+                .await
+                .expect("callback arguments");
+            let spec = meerkat::JobSpec::new(
+                crate::storage_provider::DEFAULT_MEERKAT_LEVEL_REALM_ID,
+                meerkat_core::SessionId::parse("019f74fb-1907-7b21-932d-ab22c4d1f532")
+                    .expect("session id"),
+                meerkat::ExecutionIntentId::from_string("intent:person").expect("intent"),
+                meerkat::InteractionLineageId::from_string("lineage:person").expect("lineage"),
+                meerkat::ToolIdentity::new("security_scan", "1").expect("tool"),
+                meerkat::RunnerIdentity::new("example.security_scan", "1").expect("runner"),
+                meerkat::RestartClass::Adoptable,
+                meerkat::CanonicalArgumentsHash::new(format!("sha256:{}", "c".repeat(64)))
+                    .expect("arguments hash"),
+                meerkat::JobSubmissionKey::new("callback:person").expect("submission key"),
+            )
+            .with_runner_specification_ref(
+                meerkat::RunnerSpecificationRef::new(specification.blob_id.to_string())
+                    .expect("specification ref"),
+            )
+            .with_requester(Some(requester));
+            meerkat::DetachedJobService::new(store)
+                .submit(spec)
+                .await
+                .expect("submit")
+                .job_id
+                .to_string()
+        };
+        let start = first_callback_after_restart(
+            queued_root.path(),
+            detached_security_scan("1"),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("a restarted gateway starts its queued job");
+        assert_eq!(start["method"], "callback/job/start");
+        assert_eq!(start["params"]["authority"]["job_id"], queued);
+        assert_eq!(
+            start["params"]["requester"], expected,
+            "an attempt started from the store names the job's requester: {start}"
+        );
+    }
+
+    /// A fast callback tool's `callback/call_tool` names the run's
+    /// requester; tool arguments that name one reach the host as arguments
+    /// only, and a run without a requester sends none.
+    #[tokio::test]
+    async fn forged_arguments_cannot_set_origin() {
+        let forged = r#"{"requester":{"principal":{"kind":"human","id":"mallory"}}}"#;
+        for (context, expected) in [
+            (
+                meerkat_core::ToolDispatchContext::default().with_requester(Some(
+                    meerkat_core::TurnRequester::direct(callback_test_person("alice")),
+                )),
+                json!({
+                    "principal": serde_json::to_value(callback_test_person("alice"))
+                        .expect("principal"),
+                }),
+            ),
+            (meerkat_core::ToolDispatchContext::default(), Value::Null),
+        ] {
+            let (stdout_tx, mut stdout_rx) = mpsc::channel::<GatewayStdoutLine>(4);
+            let bridge = StdioCallbackBridge::new(stdout_tx);
+            let dispatcher: Arc<dyn AgentToolDispatcher> = Arc::new(CallbackToolDispatcher::new(
+                bridge.clone(),
+                "build-1".to_string(),
+                vec![CallbackToolSpec::parse(&json!({"name": "lookup"})).expect("tool spec")],
+                None,
+            ));
+            let args = serde_json::value::RawValue::from_string(forged.to_string())
+                .expect("raw arguments");
+            let call = ToolCallView {
+                id: "tc-forged",
+                name: "lookup",
+                args: &args,
+            };
+            let plan = meerkat_core::resolve_tool_execution_plan_fenced(
+                &dispatcher,
+                call,
+                &context,
+                &meerkat_core::ToolExecutionResolutionContext::new(
+                    meerkat_core::ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                        ToolDeadlineOwner::CoreToolDispatch,
+                        Duration::from_secs(30),
+                    )])
+                    .expect("deadline chain"),
+                ),
+            )
+            .expect("execution plan");
+            let host = async {
+                let line = tokio::time::timeout(Duration::from_secs(5), stdout_rx.recv())
+                    .await
+                    .expect("the call reaches the host")
+                    .expect("callback line");
+                let request: Value = serde_json::from_str(&line).expect("callback json");
+                bridge
+                    .route_callback_response(json!({
+                        "jsonrpc": "2.0",
+                        "id": request["id"].clone(),
+                        "result": {"content": "ok"}
+                    }))
+                    .await;
+                request
+            };
+            let (outcome, request) = tokio::join!(
+                meerkat_core::dispatch_tool_execution_plan_fenced(
+                    &dispatcher,
+                    call,
+                    &context,
+                    &plan
+                ),
+                host
+            );
+            outcome.expect("the call completes");
+            assert_eq!(request["method"], "callback/call_tool");
+            assert_eq!(
+                request["params"]["requester"], expected,
+                "the run's requester, never the arguments': {request}"
+            );
+            assert_eq!(
+                request["params"]["arguments"],
+                serde_json::from_str::<Value>(forged).expect("arguments json"),
+                "the arguments reach the host unchanged"
+            );
+        }
     }
 
     #[tokio::test]
@@ -14172,6 +14381,7 @@ async fn start_detached_callback_attempt(
         arguments,
         credential_scopes,
         resume_checkpoint: claim.resume_checkpoint.as_ref().map(ToString::to_string),
+        requester: None,
     };
     spawn_callback_lease_tracker(runtime.clone(), bridge.clone(), params.authority.clone());
     let result: meerkat_contracts::CallbackJobStartResult = serde_json::from_value(
@@ -24377,10 +24587,18 @@ mob = true
         calls: Vec<Value>,
     }
 
-    /// One delegator turn through the gateway composition: the delegator
-    /// starts the helper `call` names, and the helper's first request shows
-    /// which tools reached it.
-    async fn run_helper(call: HelperCall) -> Delegation {
+    /// The gateway's own composition over a temporary state root: a
+    /// `StdioCallbackAgentBuilder` inside a persistent session service, the
+    /// agent mob tools installed the way the gateway installs them, the
+    /// scripted SDK host, and `model` as every member's model.
+    struct Composition {
+        runtime: crate::MobRuntime,
+        sdk_host: Arc<SdkHostLog>,
+        responder: tokio::task::JoinHandle<()>,
+        _state: tempfile::TempDir,
+    }
+
+    async fn compose(model: Arc<dyn meerkat_client::LlmClient>) -> Composition {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = temp.path();
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
@@ -24434,12 +24652,6 @@ mob = true
         let (mob_storage, provenance) =
             crate::mob_composition_manifest::persistent_mob_storage(state.join("mob.sqlite3"))
                 .expect("mob storage");
-        let model = DelegatingModel {
-            call,
-            helper_tools: Arc::default(),
-            helper_seen: Arc::default(),
-            delegated: Arc::default(),
-        };
         let spec = MobBootstrapSpec::new(definition(), mob_storage, service)
             .with_mob_storage_provenance(provenance)
             // The helpers' implicit child mobs live with this process.
@@ -24459,12 +24671,32 @@ mob = true
             .with_options(MobBootstrapOptions {
                 allow_ephemeral_sessions: true,
                 notify_orchestrator_on_resume: true,
-                default_llm_client: Some(Arc::new(model.clone())),
+                default_llm_client: Some(model),
             });
         let runtime = crate::MobRuntime::bootstrap(spec)
             .await
             .expect("bootstrap the mob runtime");
-        let handle = runtime.handle();
+        Composition {
+            runtime,
+            sdk_host,
+            responder,
+            _state: temp,
+        }
+    }
+
+    /// One delegator turn through the gateway composition: the delegator
+    /// starts the helper `call` names, and the helper's first request shows
+    /// which tools reached it.
+    async fn run_helper(call: HelperCall) -> Delegation {
+        let model = DelegatingModel {
+            call,
+            helper_tools: Arc::default(),
+            helper_seen: Arc::default(),
+            delegated: Arc::default(),
+        };
+        let composition = compose(Arc::new(model.clone())).await;
+        let sdk_host = Arc::clone(&composition.sdk_host);
+        let handle = composition.runtime.handle();
         let delegator = meerkat_mob::AgentIdentity::from(DELEGATOR);
         handle
             .ensure_member(meerkat_mob::SpawnMemberSpec::new(
@@ -24515,7 +24747,7 @@ mob = true
         let builds = sdk_host.builds.lock().expect("build log").clone();
         let calls = sdk_host.calls.lock().expect("call log").clone();
         let _ = tokio::time::timeout(BOUND, handle.shutdown()).await;
-        responder.abort();
+        composition.responder.abort();
         Delegation {
             helper_tools,
             delegated: serde_json::from_str(&delegated).expect("json delegate result"),
@@ -24710,6 +24942,133 @@ mob = true
             delegation.helper_tools
         );
         assert_host_tool_call_routed_to_the_helpers_build(&delegation);
+    }
+
+    /// The scripted model of a requester's run: a turn offered the host tool
+    /// calls it once, and every other turn answers.
+    #[derive(Clone)]
+    struct HostToolModel;
+
+    #[async_trait]
+    impl meerkat_client::LlmClient for HostToolModel {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> meerkat_client::types::LlmStream<'a> {
+            let called = request.messages.iter().any(|message| match message {
+                meerkat_core::Message::ToolResults { results, .. } => results
+                    .iter()
+                    .any(|result| result.tool_use_id == HOST_TOOL_CALL_ID),
+                _ => false,
+            });
+            let call = !called && request.tools.iter().any(|tool| tool.name == HOST_TOOL);
+            let [usage, done] = crate::mob_handle_runtime::test_llm_usage::usage_then_done(
+                request,
+                meerkat_core::Provider::OpenAI,
+                if call {
+                    meerkat_core::StopReason::ToolUse
+                } else {
+                    meerkat_core::StopReason::EndTurn
+                },
+            );
+            let lead = if call {
+                meerkat_client::LlmEvent::ToolCallComplete {
+                    id: HOST_TOOL_CALL_ID.to_string(),
+                    name: HOST_TOOL.to_string(),
+                    args: json!({"requester": {"principal": {"kind": "human", "id": "mallory"}}}),
+                    meta: None,
+                }
+            } else {
+                meerkat_client::LlmEvent::TextDelta {
+                    delta: "done".to_string(),
+                    meta: None,
+                }
+            };
+            Box::pin(futures::stream::iter(vec![Ok(lead), Ok(usage), Ok(done)]))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+            Ok(())
+        }
+    }
+
+    /// A person's run calls an SDK host tool, and the `callback/call_tool`
+    /// the SDK host receives names that person, typed, as the requester the
+    /// host authenticated for the run's input (a console send's person),
+    /// through the gateway's own composition. The model's arguments name
+    /// someone else: they reach the host as arguments and never as the
+    /// requester.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn console_run_callback_carries_requester() {
+        let composition = compose(Arc::new(HostToolModel)).await;
+        let handle = composition.runtime.handle();
+        let member = meerkat_mob::AgentIdentity::from("person-assistant");
+        handle
+            .ensure_member(meerkat_mob::SpawnMemberSpec::new(
+                meerkat_mob::ProfileName::from(DELEGATOR),
+                member.clone(),
+            ))
+            .await
+            .expect("seat the member");
+        let entry = handle
+            .get_member(&member)
+            .await
+            .expect("roster read")
+            .expect("member entry");
+        let person = meerkat_core::PrincipalRef::in_domain(
+            meerkat_core::PrincipalKind::Human,
+            "alice",
+            meerkat_core::TrustDomainId::new("oidc-issuer:https://issuer.example")
+                .expect("trust domain"),
+        )
+        .expect("person");
+        let interaction = uuid::Uuid::new_v4();
+        let turn = handle
+            .start_host_human_input_bounded(
+                entry.agent_runtime_id.clone(),
+                entry.fence_token,
+                meerkat_mob::WorkSpec::new(
+                    meerkat_core::types::ContentInput::Text("use the host tool".to_string()),
+                    meerkat_mob::WorkOrigin::External,
+                )
+                .with_interaction_id(meerkat_core::interaction::InteractionId(interaction))
+                .with_requester(person.clone()),
+                meerkat_core::types::HandlingMode::Queue,
+                meerkat_mob::MobDeliveryIdentity::new("console-send", interaction.to_string())
+                    .expect("delivery identity"),
+                std::time::Instant::now() + BOUND,
+            )
+            .await
+            .expect("the person's input is admitted");
+        tokio::time::timeout(BOUND, turn.wait())
+            .await
+            .expect("the person's turn completes within the bound")
+            .expect("the person's turn commits");
+        let calls = composition.sdk_host.calls.lock().expect("call log").clone();
+        let _ = tokio::time::timeout(BOUND, handle.shutdown()).await;
+        composition.responder.abort();
+        assert_eq!(calls.len(), 1, "one host tool call: {calls:?}");
+        assert_eq!(
+            calls[0]["requester"],
+            json!({"principal": serde_json::to_value(&person).expect("principal json")}),
+            "the callback names the run's requester: {calls:?}"
+        );
+        assert_eq!(
+            calls[0]["arguments"],
+            json!({"requester": {"principal": {"kind": "human", "id": "mallory"}}}),
+            "the model's arguments reach the host as arguments"
+        );
     }
 
     /// Two builds for one SDK host keep their own routing scopes and stamp

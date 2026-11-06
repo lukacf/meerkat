@@ -2098,4 +2098,101 @@ model = "gpt-5.5"
         let decoded: SessionSnapshot = serde_json::from_value(v).unwrap();
         assert_eq!(decoded.data, b"hello world");
     }
+
+    /// Dispatch one call of a customizer's SDK tool through Core's fenced
+    /// plan, as a run whose dispatch context is `context`, and return the
+    /// params of the `callback/call_tool` it sent.
+    async fn customizer_tool_call_params(
+        context: &meerkat_core::ToolDispatchContext,
+        arguments: &str,
+    ) -> Value {
+        let mock = Arc::new(MockBridge::new());
+        mock.set_response("callback/call_tool", Ok(json!({"content": "ok"})))
+            .await;
+        let dispatcher: Arc<dyn AgentToolDispatcher> =
+            Arc::new(GatewayCallbackToolDispatcher::new(
+                Arc::new(mock.clone()),
+                "customize-agent:alpha-0".to_string(),
+                vec![ExternalToolDef {
+                    name: "my_tool".to_string(),
+                    description: "A custom tool".to_string(),
+                    input_schema: json!({"type": "object"}),
+                    artifact: None,
+                }],
+            ));
+        let raw_args = serde_json::value::RawValue::from_string(arguments.to_string()).unwrap();
+        let call = ToolCallView {
+            id: "call-requester",
+            name: "my_tool",
+            args: &raw_args,
+        };
+        let plan = meerkat_core::resolve_tool_execution_plan_fenced(
+            &dispatcher,
+            call,
+            context,
+            &meerkat_core::ToolExecutionResolutionContext::new(
+                meerkat_core::ToolDeadlineChain::new(vec![
+                    meerkat_core::ToolDeadlineContributor::finite(
+                        meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                        Duration::from_secs(30),
+                    ),
+                ])
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+        meerkat_core::dispatch_tool_execution_plan_fenced(&dispatcher, call, context, &plan)
+            .await
+            .unwrap();
+        let (method, params) = mock.last_call().await;
+        assert_eq!(method, "callback/call_tool");
+        params
+    }
+
+    fn person(subject: &str) -> meerkat_core::PrincipalRef {
+        meerkat_core::PrincipalRef::in_domain(
+            meerkat_core::PrincipalKind::Human,
+            subject,
+            meerkat_core::TrustDomainId::new("oidc-issuer:https://issuer.example").unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// A customizer's SDK tool call names the original requester of the run
+    /// it serves, typed, beside its routing scope; tool arguments that name a
+    /// requester reach the host as arguments only, and a run without a
+    /// requester sends none.
+    #[tokio::test]
+    async fn customizer_tool_callback_carries_the_run_requester() {
+        let forged = r#"{"requester":{"principal":{"kind":"human","id":"mallory"}}}"#;
+        let params = customizer_tool_call_params(
+            &meerkat_core::ToolDispatchContext::default()
+                .with_requester(Some(meerkat_core::TurnRequester::carried(person("alice")))),
+            forged,
+        )
+        .await;
+        assert_eq!(params["scope_id"], "customize-agent:alpha-0");
+        assert_eq!(params["tool"], "my_tool");
+        assert_eq!(
+            params["requester"],
+            json!({
+                "principal": serde_json::to_value(person("alice")).unwrap(),
+                "carried": true,
+            }),
+            "the call names the run's requester: {params}"
+        );
+        assert_eq!(
+            params["arguments"],
+            serde_json::from_str::<Value>(forged).unwrap(),
+            "the arguments reach the host unchanged"
+        );
+
+        let without =
+            customizer_tool_call_params(&meerkat_core::ToolDispatchContext::default(), forged)
+                .await;
+        assert!(
+            without.get("requester").is_none(),
+            "arguments never supply a requester the run lacks: {without}"
+        );
+    }
 }

@@ -1998,6 +1998,8 @@ pub struct IdentityStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_id: Option<String>,
     pub profile: Option<meerkat_mob::ProfileName>,
+    /// The runtime mode Core runs the identity's member in; `None` while Core
+    /// holds no member of it.
     pub runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
     pub addressability: AgentAddressability,
     pub display_name: Option<DisplayName>,
@@ -2014,7 +2016,8 @@ pub struct IdentityStatus {
     /// identity).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub convergence: Option<meerkat_contracts::wire::WireIdentityConvergenceStatus>,
-    /// The last refused wake, until the next successful one.
+    /// The refused wake an operator has to act on, read from Core's facts
+    /// (see [`WakeRefusal`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_refusal: Option<WakeRefusal>,
     /// The session an earlier release's wake replaced with a fresh one
@@ -2038,15 +2041,16 @@ pub struct IdentityStatus {
 }
 
 /// A refused wake an operator has to act on, as
-/// `meta/status_identity` and `meta/member_health` show it until the next
-/// successful wake.
+/// `meta/status_identity` and `meta/member_health` show it.
 ///
-/// Recorded for the two refusals no retry changes: the last session cannot be
-/// resumed (final; the identity's view is `broken`), and Core held the resume
-/// for the operator (the durable copy is kept; the view stays `dormant`).
-/// Transient refusals are not recorded: the next wake retries them.
-/// Process-local: it records what this process's last wake answered and is
-/// never read back as truth; every wake asks Core again.
+/// Read from Core's facts on every view: Core's durable resume hold of a
+/// member it holds Broken, Core's role hold (`resolve_role_migration`), or
+/// Core's last answer to a wake of the session Core binds the identity to
+/// now: the last session cannot be resumed (final; while Core holds no member
+/// of the identity its view is `broken`), or Core held the resume for the
+/// operator (the durable copy is kept; the view stays `dormant`). Transient
+/// refusals are not shown: the next wake retries them. A refusal of another
+/// session's wake (an incarnation a host replaced) is not shown either.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WakeRefusal {
     /// The JSON-RPC code the refused wake answered with.
@@ -2293,7 +2297,8 @@ pub struct MemberHealthReport {
     /// exposes it (0.8.34).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durability: Option<MemberDurability>,
-    /// The last refused wake (see [`IdentityStatus::wake_refusal`]).
+    /// The refused wake an operator has to act on (see
+    /// [`IdentityStatus::wake_refusal`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_refusal: Option<WakeRefusal>,
     /// Typed "session needs repair" hold (see

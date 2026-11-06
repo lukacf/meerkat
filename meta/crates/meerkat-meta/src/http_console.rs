@@ -2637,7 +2637,7 @@ async fn console_send_identity_candidates(
         return candidates;
     };
     let addressed_directly = match crate::identity_first::AgentIdentity::parse(identity) {
-        Ok(parsed) => identity_runtime.status(&parsed).await.is_ok(),
+        Ok(parsed) => identity_runtime.contains(&parsed).await,
         Err(_) => false,
     };
     if !addressed_directly
@@ -13814,10 +13814,21 @@ async fn handle_console_runtime_rpc_with_visibility(
             }
             // A registered identity answers from its live session, or, when
             // Core holds it Dormant, from its tool record: the read never
-            // wakes it (`tools_source` says which).
+            // wakes it (`tools_source` says which). A status read Core could
+            // not serve refuses typed, never answering from the member plane.
             if let Some(identity_runtime) = identity_runtime.as_ref()
                 && let Ok(parsed) = crate::identity_first::AgentIdentity::parse(&identity)
-                && let Ok(status) = identity_runtime.status(&parsed).await
+                && let Some(status) = match identity_runtime.status(&parsed).await {
+                    Ok(status) => Some(status),
+                    Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => None,
+                    Err(err) => {
+                        return response_value(
+                            response_id,
+                            None,
+                            Some(crate::rpc::identity_json_rpc_error(&err)),
+                        );
+                    }
+                }
                 && let Some(session_id) = status.session_id
             {
                 match identity_runtime
@@ -13966,9 +13977,21 @@ async fn handle_console_runtime_rpc_with_visibility(
             {
                 return response_value(response_id, None, Some(error));
             }
+            // A status read Core could not serve refuses typed, never
+            // answering from the member plane.
             if let Some(identity_runtime) = identity_runtime.as_ref()
                 && let Ok(parsed) = crate::identity_first::AgentIdentity::parse(&identity)
-                && let Ok(status) = identity_runtime.status(&parsed).await
+                && let Some(status) = match identity_runtime.status(&parsed).await {
+                    Ok(status) => Some(status),
+                    Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => None,
+                    Err(err) => {
+                        return response_value(
+                            response_id,
+                            None,
+                            Some(crate::rpc::identity_json_rpc_error(&err)),
+                        );
+                    }
+                }
                 && let Some(session_id) = status.session_id
             {
                 return match model_routing_status_for_session(
@@ -17660,6 +17683,14 @@ mod tests {
             self.core.history()
         }
 
+        async fn identity_entry(
+            &self,
+            identity: &crate::identity_first::AgentIdentity,
+        ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+        {
+            Ok(self.core.identity_entry(identity, false))
+        }
+
         async fn last_member_binding(
             &self,
             identity: &AgentIdentity,
@@ -17787,6 +17818,14 @@ mod tests {
             &self,
         ) -> Result<meerkat_mob::MemberBindingHistory, BridgeError> {
             self.core.history()
+        }
+
+        async fn identity_entry(
+            &self,
+            identity: &crate::identity_first::AgentIdentity,
+        ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+        {
+            Ok(self.core.identity_entry(identity, false))
         }
 
         async fn last_member_binding(
@@ -17931,6 +17970,14 @@ mod tests {
             self.core.history()
         }
 
+        async fn identity_entry(
+            &self,
+            identity: &crate::identity_first::AgentIdentity,
+        ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+        {
+            Ok(self.core.identity_entry(identity, false))
+        }
+
         async fn last_member_binding(
             &self,
             identity: &AgentIdentity,
@@ -18063,6 +18110,14 @@ mod tests {
             &self,
         ) -> Result<meerkat_mob::MemberBindingHistory, BridgeError> {
             self.core.history()
+        }
+
+        async fn identity_entry(
+            &self,
+            identity: &crate::identity_first::AgentIdentity,
+        ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+        {
+            Ok(self.core.identity_entry(identity, false))
         }
 
         async fn last_member_binding(
@@ -21481,45 +21536,60 @@ message = "review"
             "{stale:?}"
         );
 
-        // Every read of Core's member history from here on fails.
-        identity_runtime.bridge.fail_history_reads(0, u64::MAX);
+        // Every read of Core's entry of the identity fails, then (the entry
+        // reading again) every read of Core's member history: either fault
+        // refuses the id, typed and retryable.
         let unreadable = Some(json!({
             "kind": "identity_history_unavailable",
             "identity": "review:guard",
             "retryable": true,
         }));
-        for alias in ["rt:review:guard:1", "rt:review:guard:0"] {
-            let generated = super::stale_generated_alias_error(
-                "inspect_identity",
-                &identity_runtime,
-                &visibility,
-                alias,
-            )
-            .await
-            .ok_or_else(|| {
-                format!("{alias} must be refused when its binding cannot be read, not let through")
-            })?;
-            assert_eq!(
-                (generated.code, &generated.data),
-                (crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE, &unreadable),
-                "{alias}: {generated:?}"
-            );
-            assert!(
-                generated.message.starts_with("inspect_identity failed: "),
-                "{generated:?}"
-            );
-            let member = super::stale_runtime_alias_json_rpc_error(
-                "get_member",
-                Some(&identity_runtime.runtime),
-                alias,
-            )
-            .await
-            .ok_or_else(|| format!("{alias} must be refused when its binding cannot be read"))?;
-            assert_eq!(
-                (member.code, &member.data),
-                (crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE, &unreadable),
-                "{alias}: {member:?}"
-            );
+        for fault in ["entry", "history"] {
+            match fault {
+                "entry" => identity_runtime.bridge.fail_entry_reads(0, u64::MAX),
+                _ => {
+                    identity_runtime.bridge.fail_entry_reads(0, 0);
+                    identity_runtime.bridge.fail_history_reads(0, u64::MAX);
+                }
+            }
+            for alias in ["rt:review:guard:1", "rt:review:guard:0"] {
+                let generated = super::stale_generated_alias_error(
+                    "inspect_identity",
+                    &identity_runtime,
+                    &visibility,
+                    alias,
+                )
+                .await
+                .ok_or_else(|| {
+                    format!(
+                        "{fault}: {alias} must be refused when its binding cannot be read, not \
+                         let through"
+                    )
+                })?;
+                assert_eq!(
+                    (generated.code, &generated.data),
+                    (crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE, &unreadable),
+                    "{fault}: {alias}: {generated:?}"
+                );
+                assert!(
+                    generated.message.starts_with("inspect_identity failed: "),
+                    "{fault}: {generated:?}"
+                );
+                let member = super::stale_runtime_alias_json_rpc_error(
+                    "get_member",
+                    Some(&identity_runtime.runtime),
+                    alias,
+                )
+                .await
+                .ok_or_else(|| {
+                    format!("{fault}: {alias} must be refused when its binding cannot be read")
+                })?;
+                assert_eq!(
+                    (member.code, &member.data),
+                    (crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE, &unreadable),
+                    "{fault}: {alias}: {member:?}"
+                );
+            }
         }
         Ok(())
     }

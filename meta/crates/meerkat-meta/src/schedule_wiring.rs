@@ -1334,6 +1334,9 @@ enum IdentityFireRefusal {
 /// `identity`. Any refusal of a member Core holds broken is final, whatever
 /// its kind: the member does not clear on its own, and a final wake refusal
 /// of it (Core's restore failure) reaches the submit path as plain text.
+/// Whether Core holds it Broken is read from Core's entry of its name for
+/// the fire; a read Core could not serve leaves the fire reclaimable, never
+/// read as "not Broken".
 async fn classify_identity_fire_refusal(
     identity_runtime: &crate::identity_first::IdentityRuntime,
     identity: &crate::identity_first::AgentIdentity,
@@ -1347,20 +1350,20 @@ async fn classify_identity_fire_refusal(
         Refusal::IdentityUnresumable { .. } => {
             IdentityFireRefusal::Final(meerkat::DeliveryFailureReason::TargetMaterializationFailed)
         }
-        _ => {
-            let broken = identity_runtime.status(identity).await.is_ok_and(|status| {
-                status.state == crate::identity_first::IdentityLifecycleState::Broken
-            });
-            if broken {
+        _ => match identity_runtime.core_entry_state(identity).await {
+            Ok(crate::identity_first::IdentityLifecycleState::Broken) => {
                 IdentityFireRefusal::Final(
                     meerkat::DeliveryFailureReason::TargetMaterializationFailed,
                 )
-            } else if error.clears_on_its_own() {
-                IdentityFireRefusal::Retry
-            } else {
-                IdentityFireRefusal::Rejected
             }
-        }
+            Ok(_) if error.clears_on_its_own() => IdentityFireRefusal::Retry,
+            Ok(_) => IdentityFireRefusal::Rejected,
+            // Unregistered since the refusal: no target to deliver to.
+            Err(Refusal::UnknownIdentity(_)) => {
+                IdentityFireRefusal::Final(meerkat::DeliveryFailureReason::TargetMissing)
+            }
+            Err(_) => IdentityFireRefusal::Retry,
+        },
     }
 }
 
@@ -7858,7 +7861,6 @@ schedule = true
         #[derive(Default)]
         struct FireCore {
             core: crate::identity_first::core_test_members::CoreTestMembers,
-            broken: std::sync::Mutex<BTreeMap<meerkat_mob::AgentIdentity, String>>,
         }
 
         #[async_trait::async_trait]
@@ -7910,17 +7912,12 @@ schedule = true
                 self.core.history()
             }
 
-            async fn broken_members(
+            async fn identity_entry(
                 &self,
-            ) -> Result<
-                BTreeMap<meerkat_mob::AgentIdentity, String>,
-                crate::identity_first::BridgeError,
-            > {
-                Ok(self
-                    .broken
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone())
+                identity: &crate::identity_first::AgentIdentity,
+            ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+            {
+                Ok(self.core.identity_entry(identity, false))
             }
 
             async fn deliver_admitted(
@@ -8004,13 +8001,10 @@ schedule = true
             )
             .await?;
             if broken {
-                core.broken
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(
-                        crate::member_comms_id::roster_member_id_for_identity(alice.as_str()),
-                        "the session cannot be restored".to_string(),
-                    );
+                core.core.mark_broken(
+                    &alice,
+                    crate::identity_first::CoreBrokenMember::new("the session cannot be restored"),
+                );
             }
             let retryable = [
                 Refusal::IdentityHistoryUnavailable {

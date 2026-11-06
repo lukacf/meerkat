@@ -880,6 +880,23 @@ impl CoreTestMembers {
     }
 }
 
+/// Core's entry of a name, for a test double whose Core holds members only
+/// as bindings (its `last_member_binding`): no identity entry, with the
+/// member of `binding` while that binding is live, in Core's default runtime
+/// mode.
+pub(crate) fn entry_of_binding(binding: Option<&meerkat_mob::MemberBinding>) -> CoreIdentityEntry {
+    let entry = CoreIdentityEntry::not_an_entry();
+    match binding {
+        Some(binding) if binding.is_live() => entry.with_member(CoreMember::seated(
+            binding.generation().get(),
+            binding.session_id().cloned(),
+            binding.role().clone(),
+            meerkat_mob::MobRuntimeMode::default(),
+        )),
+        _ => entry,
+    }
+}
+
 /// The Core member id of `identity`'s member.
 fn member_id(identity: &AgentIdentity) -> meerkat_mob::AgentIdentity {
     crate::member_comms_id::roster_member_id_for_identity(identity.as_str())

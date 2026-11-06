@@ -1814,8 +1814,16 @@ impl MetaConsoleAggregator {
                     else {
                         continue;
                     };
-                    let Ok(status) = identity_runtime.status(&parsed_identity).await else {
-                        continue;
+                    let status = match identity_runtime.status(&parsed_identity).await {
+                        Ok(status) => status,
+                        // Not an identity of this runtime.
+                        Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => {
+                            continue;
+                        }
+                        // A read Core could not serve fails the request,
+                        // typed: no identity is left out of the match on a
+                        // read that could not tell.
+                        Err(error) => return Err(error.into()),
                     };
                     let mut record = identity_record_for_status(entry, &status);
                     let topology_peers =
@@ -2003,7 +2011,13 @@ impl MetaConsoleAggregator {
                 && let Some(parsed_identity) = identity_runtime
                     .owned_identity_for_member_alias(&resolved.runtime_identity)
                     .await
-                && let Ok(status) = identity_runtime.status(&parsed_identity).await
+                && let Some(status) = match identity_runtime.status(&parsed_identity).await {
+                    Ok(status) => Some(status),
+                    Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => None,
+                    // A read Core could not serve fails the inspection,
+                    // typed, never an answer without the identity's record.
+                    Err(error) => return Err(error.into()),
+                }
             {
                 let durable_record = identity_record_for_status(&resolved.entry, &status);
                 let durable_live_records = Box::pin(self.live_records_for_durable_record(
@@ -2104,8 +2118,16 @@ impl MetaConsoleAggregator {
                     else {
                         continue;
                     };
-                    let Ok(status) = identity_runtime.status(&parsed_identity).await else {
-                        continue;
+                    let status = match identity_runtime.status(&parsed_identity).await {
+                        Ok(status) => status,
+                        // Not an identity of this runtime.
+                        Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => {
+                            continue;
+                        }
+                        // A read Core could not serve fails the retire,
+                        // typed: no identity is left out of the match on a
+                        // read that could not tell.
+                        Err(error) => return Err(error.into()),
                     };
                     let record = identity_record_for_status(entry, &status);
                     if !Box::pin(console_identity_record_visible(entry, &record)).await {

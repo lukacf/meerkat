@@ -2197,15 +2197,14 @@ pub(crate) struct IdentityEntry {
     /// lock, so a pass that wins that lock cannot be mistaken for either its
     /// predecessor or successor merely because the global status epoch moved.
     pub bootstrap_generation: u64,
-    /// The last wake refused for good or held for the operator,
-    /// cleared by the next successful wake or when a lifecycle verb starts on
-    /// a member Core holds live. Process-local and never read as truth:
-    /// every wake asks Core again.
+    /// Core's last refusal of the identity's wake for good, or its hold of
+    /// the wake for the operator, as Core answered it (its declaration or
+    /// its wake), cleared by the next successful wake or when a lifecycle
+    /// verb starts on a member Core holds live. The views read it only while
+    /// Core holds no member of the identity, and only for the session Core
+    /// last bound the identity to: every fact of a member Core holds is
+    /// read from Core. Process-local; every wake asks Core again.
     pub wake_refusal: Option<super::types::WakeRefusal>,
-    /// The session the last wake replaced with a fresh one because Core holds
-    /// no durable session for it, until the next wake or the next
-    /// lifecycle verb on the live member.
-    pub replaced_session: Option<super::types::ReplacedSession>,
     /// The most recent delivery failure for this identity, cleared by the
     /// next successful delivery. Read by `meta/member_health` so an
     /// operator learns WHY sends fail without spending an admission budget.
@@ -3962,16 +3961,14 @@ impl MemberAliasLifecycleTarget {
             .await?
             .is_none()
         {
-            let wake_refusal = self
-                .runtime
-                .entries
-                .read()
-                .await
-                .get(&self.identity)
-                .and_then(|entry| entry.wake_refusal.clone());
+            let state = match self.runtime.member_less_view_state(&self.identity).await {
+                Ok(state) => state,
+                Err(IdentityRuntimeError::UnknownIdentity(_)) => IdentityLifecycleState::Dormant,
+                Err(error) => return Err(error),
+            };
             return Err(IdentityRuntimeError::InvalidState {
                 identity: self.identity.clone(),
-                state: IdentityRuntime::view_state(false, wake_refusal.as_ref()),
+                state,
                 operation: "send as member alias",
             });
         }
@@ -4042,75 +4039,181 @@ struct ResetRosterSource {
     mob_definition: Option<meerkat_mob::MobDefinition>,
 }
 
-/// What Core's member history says of one identity, for the views.
+/// Core's facts of one identity, for its views: Core's entry of the
+/// identity's name ([`SessionBridge::identity_entry`]: the member Core holds
+/// under it, Broken or not, its runtime mode and Core's role hold), Core's
+/// member history for what the entry does not hold (a host's adoption, and
+/// the last binding of an identity Core holds no member of), and the answers
+/// Core last gave this runtime for an identity it holds no member of.
 #[derive(Debug, Clone, Default)]
 struct CoreViewFacts {
-    /// Core holds the identity's member.
+    /// Core holds a member of the identity (seated, or retiring).
     live: bool,
     /// The live member's runtime id (Meta's public alias of Core's).
     runtime_id: Option<AgentRuntimeId>,
-    /// The session of the identity's last binding, live or retired.
+    /// The live member's session; for an identity Core holds no member of,
+    /// the session of its last binding.
     session_id: Option<SessionId>,
-    /// Core's mob member id of that binding.
+    /// Core's mob member id of the live member or of the last binding.
     member_id: Option<String>,
-    /// Core's generation of that binding.
+    /// Core's generation of the live member or of the last binding.
     generation: Option<meerkat_mob::Generation>,
+    /// The runtime mode Core runs the live member in.
+    runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
     /// Core holds an identity intent row for the identity.
     intent_managed: bool,
     /// Core refused the identity's last declaration for good
     /// ([`IdentityEntry::declaration_refused`]): no member is read for it,
     /// and its view reads Broken.
     declaration_refused: bool,
+    /// Core holds the live member Broken.
+    broken: Option<super::bridge::CoreBrokenMember>,
+    /// Core holds the identity's member, and refuses its wakes, for a role
+    /// move its host's roster made without declaring the migration.
+    role_hold: bool,
+    /// Core's last refusal of the identity's wake
+    /// ([`IdentityEntry::wake_refusal`]), while Core holds no member of the
+    /// identity and the refusal names the session Core last bound it to.
+    wake_note: Option<super::types::WakeRefusal>,
 }
 
 impl CoreViewFacts {
-    /// [`Self::of`] for a registered identity whose last declaration Core
-    /// refused for good when `declaration_refused`: no member Core holds
-    /// under its name is the identity's then, so none is read (only its
-    /// intent management is), and its views read it Broken, never live.
-    fn of_entry(
+    /// The facts of `identity` from Core's entry of its name (`None`
+    /// without a bridge: nothing is live) and Core's member history, with
+    /// the answers this runtime keeps of Core's for it: `wake_note`, and
+    /// `declaration_refused`, under which no member Core holds under its
+    /// name is the identity's (only its intent management is read), so its
+    /// views read it Broken, never live.
+    fn read(
+        entry: Option<&super::bridge::CoreIdentityEntry>,
         history: Option<&meerkat_mob::MemberBindingHistory>,
         identity: &AgentIdentity,
+        wake_note: Option<&super::types::WakeRefusal>,
         declaration_refused: bool,
     ) -> Self {
-        let facts = Self::of(history, identity);
-        if !declaration_refused {
-            return facts;
+        let core_identity =
+            crate::member_comms_id::roster_member_id_for_identity(identity.as_str());
+        let intent_managed = history.is_some_and(|history| {
+            !matches!(
+                history.identity_management(&core_identity),
+                meerkat_mob::MemberIdentityManagement::CommandDriven
+            )
+        });
+        if declaration_refused {
+            return Self {
+                intent_managed,
+                declaration_refused: true,
+                ..Self::default()
+            };
         }
+        let role_hold = entry.is_some_and(super::bridge::CoreIdentityEntry::holds_role_migration);
+        // Core's role hold is a fact of an identity entry: for a name Core
+        // holds as one, the hold is read from Core's entry, never a note.
+        let core_reads_role_hold =
+            entry.is_some_and(|entry| entry.kind == super::bridge::CoreNameKind::Entry);
+        // Core's last answer this runtime keeps for the identity describes
+        // the session it named: it is read only for the session Core binds
+        // the identity to now (its member's, or, while Core holds no member
+        // of it, its last binding's), and only for what Core's entry holds
+        // no fact of.
+        let note_of = |session_id: Option<&SessionId>, live: bool| {
+            wake_note
+                .filter(|note| {
+                    !(core_reads_role_hold
+                        && note.remedy == super::types::WakeRefusalRemedy::ResolveRoleMigration)
+                        && session_id.is_none_or(|session_id| *session_id == note.session_id)
+                        && (session_id.is_some() || !live)
+                })
+                .cloned()
+        };
+        if let Some(member) = entry.and_then(|entry| entry.member.as_ref()) {
+            let generation = meerkat_mob::Generation::new(member.generation);
+            return Self {
+                live: true,
+                runtime_id: AgentRuntimeId::parse(&crate::member_comms_id::public_runtime_alias(
+                    &meerkat_mob::ids::AgentRuntimeId::new(core_identity.clone(), generation),
+                ))
+                .ok(),
+                session_id: member.session_id.clone(),
+                member_id: Some(core_identity.as_str().to_string()),
+                generation: Some(generation),
+                runtime_mode: Some(member.runtime_mode),
+                intent_managed,
+                declaration_refused: false,
+                broken: member.broken.clone(),
+                role_hold,
+                wake_note: note_of(member.session_id.as_ref(), true),
+            };
+        }
+        let last = history.and_then(|history| history.last_binding(&core_identity));
+        let session_id = last.and_then(|binding| binding.session_id().cloned());
+        let wake_note = note_of(session_id.as_ref(), false);
         Self {
-            intent_managed: facts.intent_managed,
-            declaration_refused: true,
-            ..Self::default()
+            live: false,
+            runtime_id: None,
+            session_id,
+            member_id: last.map(|binding| binding.identity().as_str().to_string()),
+            generation: last.map(meerkat_mob::MemberBinding::generation),
+            runtime_mode: None,
+            intent_managed,
+            declaration_refused: false,
+            broken: None,
+            role_hold,
+            wake_note,
         }
     }
 
-    /// Read `identity` out of `history` (`None` without a bridge: nothing
-    /// is live).
-    fn of(history: Option<&meerkat_mob::MemberBindingHistory>, identity: &AgentIdentity) -> Self {
-        let Some(history) = history else {
-            return Self::default();
-        };
-        let core_identity =
-            crate::member_comms_id::roster_member_id_for_identity(identity.as_str());
-        let intent_managed = !matches!(
-            history.identity_management(&core_identity),
-            meerkat_mob::MemberIdentityManagement::CommandDriven
-        );
-        let Some(binding) = history.last_binding(&core_identity) else {
-            return Self {
-                intent_managed,
-                ..Self::default()
-            };
-        };
-        Self {
-            live: binding.is_live(),
-            runtime_id: live_binding_runtime_id(binding),
-            session_id: binding.session_id().cloned(),
-            member_id: Some(binding.identity().as_str().to_string()),
-            generation: Some(binding.generation()),
-            intent_managed,
-            declaration_refused: false,
+    /// The identity's lifecycle state: Broken while Core refuses its last
+    /// declaration for good or holds its member Broken, or, while Core holds
+    /// no member of it, after Core refused its wake for good; Active while
+    /// Core holds its member (retiring included); Dormant otherwise.
+    fn state(&self) -> IdentityLifecycleState {
+        if self.declaration_refused || self.broken.is_some() {
+            IdentityLifecycleState::Broken
+        } else {
+            IdentityRuntime::view_state(self.live, self.wake_note.as_ref())
         }
+    }
+
+    /// The refused wake the views show: Core's durable resume hold of a
+    /// member it holds Broken, Core's last refusal of the identity's wake
+    /// (see [`Self::read`]), or Core's role hold. A member Core holds Broken
+    /// with neither shows none: its state reads Broken.
+    fn wake_refusal(&self, identity: &AgentIdentity) -> Option<super::types::WakeRefusal> {
+        let held = |session_id: Option<&SessionId>, hold: WakeHold| {
+            wake_refusal_of(&IdentityRuntimeError::WakeHeld {
+                identity: identity.clone(),
+                session_id: session_id?.clone(),
+                hold,
+                detail: String::new(),
+            })
+        };
+        if let Some(broken) = self.broken.as_ref()
+            && let Some(hold) = broken.hold
+        {
+            return held(
+                broken.session_id.as_ref().or(self.session_id.as_ref()),
+                WakeHold::DurableResume(hold),
+            );
+        }
+        if self.wake_note.is_some() {
+            return self.wake_note.clone();
+        }
+        if self.role_hold {
+            return held(self.session_id.as_ref(), WakeHold::RoleMigrationNotApplied);
+        }
+        None
+    }
+
+    /// Whether Core holds the identity's member, and refuses its wakes, for
+    /// a role move its host's roster made without declaring the migration:
+    /// Core's role hold, or, for a name Core holds as no identity entry,
+    /// Core's last answer that said so.
+    fn role_held(&self) -> bool {
+        self.role_hold
+            || self.wake_note.as_ref().is_some_and(|note| {
+                note.remedy == super::types::WakeRefusalRemedy::ResolveRoleMigration
+            })
     }
 }
 
@@ -4719,15 +4822,25 @@ impl IdentityRuntime {
         mode: IdentityBootstrapMode,
         roster: &[DurableAgentSpec],
     ) {
-        // One read of Core's member history serves every identity: no Core
-        // round trip per identity at boot. A failed read starts every
-        // identity as one Core does not hold yet.
-        let history = self.core_view_history().await.ok().flatten();
+        // One read of Core's entry of each identity's name (published
+        // machine state: no actor command, no wake). An identity whose read
+        // fails starts as one Core does not hold yet, never Active, and the
+        // pass's error names the read: the settle reads it again.
+        let mut unread = Vec::new();
         let mut identities = BTreeMap::new();
         for spec in roster {
             // Core holds a member for the identity (materialized now or on
             // its first delivery): it starts Active.
-            let live = CoreViewFacts::of(history.as_ref(), &spec.identity).live;
+            let live = match self.bridge.as_ref() {
+                Some(bridge) => match bridge.identity_entry(&spec.identity).await {
+                    Ok(entry) => entry.member.is_some(),
+                    Err(error) => {
+                        unread.push(format!("{}: {error}", spec.identity));
+                        false
+                    }
+                },
+                None => false,
+            };
             let state = if live {
                 IdentityBootstrapState::Active
             } else if matches!(&mode, IdentityBootstrapMode::EagerMaterialize) {
@@ -4748,7 +4861,12 @@ impl IdentityRuntime {
             mode,
             complete: false,
             ready: false,
-            error: None,
+            error: (!unread.is_empty()).then(|| {
+                format!(
+                    "Core's entries of identities of the pass could not be read: {}",
+                    unread.join("; ")
+                )
+            }),
             counts: Default::default(),
             identities,
             first_boot_pending: Vec::new(),
@@ -4920,32 +5038,26 @@ impl IdentityRuntime {
             first_boot_pending: Vec::new(),
             deferred: Vec::new(),
         };
-        // One read of Core's member history and of its member list serves
-        // every identity of the pass. A failed read of either is the pass's
-        // own error, so the snapshot is never ready on a read that could not
-        // tell which identities Core holds, or whether it holds one Broken:
-        // a failed history read leaves the identities unread (Dormant), and
-        // each identity's own status read refuses typed until it reads.
+        // One read of Core's member history serves every identity of the
+        // pass, beside one read of Core's entry of each. A failed read is the
+        // pass's own error, so the snapshot is never ready on a read that
+        // could not tell which identities Core holds, or whether it holds one
+        // Broken: an unread identity stays Dormant, and its own status read
+        // refuses typed until it reads.
+        let read_error = |status: &mut IdentityBootstrapStatus, detail: String| {
+            status.error = Some(match status.error.take() {
+                Some(previous) => format!("{previous}; {detail}"),
+                None => detail,
+            });
+        };
         let history = match self.core_view_history().await {
             Ok(history) => Some(history),
             Err(error) => {
-                let detail = format!("Core's member history could not be read: {error}");
-                status.error = Some(match status.error.take() {
-                    Some(previous) => format!("{previous}; {detail}"),
-                    None => detail,
-                });
+                read_error(
+                    &mut status,
+                    format!("Core's member history could not be read: {error}"),
+                );
                 None
-            }
-        };
-        let broken = match self.core_broken_members().await {
-            Ok(broken) => broken,
-            Err(error) => {
-                let detail = format!("Core's broken members could not be read: {error}");
-                status.error = Some(match status.error.take() {
-                    Some(previous) => format!("{previous}; {detail}"),
-                    None => detail,
-                });
-                BTreeMap::new()
             }
         };
         for spec in roster {
@@ -4967,34 +5079,35 @@ impl IdentityRuntime {
                 continue;
             }
             let broken_outcome = refusal.map(ToString::to_string);
-            let lifecycle = match history.as_ref() {
-                Some(history) => self
-                    .status_from(&spec.identity, history.as_ref(), &broken)
-                    .await
-                    .ok()
-                    .map(|item| item.state),
+            let facts = match history.as_ref() {
+                Some(history) => match self.core_view_facts(&spec.identity, history.as_ref()).await
+                {
+                    Ok(facts) => Some(facts),
+                    Err(error) => {
+                        read_error(&mut status, error.to_string());
+                        None
+                    }
+                },
                 None => None,
             };
-            let (state, error) = match (broken_outcome, lifecycle) {
+            let (state, error) = match (broken_outcome, facts) {
                 // A refused wake settles the identity for this pass. The
                 // view reads Dormant after a refusal that is not final, so
                 // consulting it alone would make a terminal wait barrier
                 // time out.
                 (Some(detail), _) => (IdentityBootstrapState::Broken, Some(detail)),
-                (None, Some(IdentityLifecycleState::Active)) => {
-                    (IdentityBootstrapState::Active, None)
-                }
-                // Broken with no refused wake in this pass: Core holds the
-                // identity's live member Broken, and its reason says why.
-                (None, Some(IdentityLifecycleState::Broken)) => (
-                    IdentityBootstrapState::Broken,
-                    broken
-                        .get(&crate::member_comms_id::roster_member_id_for_identity(
-                            spec.identity.as_str(),
-                        ))
-                        .cloned(),
-                ),
-                (None, _) => (IdentityBootstrapState::Dormant, None),
+                (None, Some(facts)) => match facts.state() {
+                    IdentityLifecycleState::Active => (IdentityBootstrapState::Active, None),
+                    // Broken with no refused wake in this pass: Core holds
+                    // the identity's live member Broken, and its reason says
+                    // why.
+                    IdentityLifecycleState::Broken => (
+                        IdentityBootstrapState::Broken,
+                        facts.broken.map(|broken| broken.reason),
+                    ),
+                    _ => (IdentityBootstrapState::Dormant, None),
+                },
+                (None, None) => (IdentityBootstrapState::Dormant, None),
             };
             // The eager pass's typed per-member progress survives into the
             // settled snapshot.
@@ -5289,8 +5402,11 @@ impl IdentityRuntime {
 
     /// Exact concrete member ids represented by the tracked bootstrap roster.
     /// Used only after `ready == true`, preventing a false-ready snapshot of a
-    /// partially warmed mob.
-    pub async fn identity_bootstrap_member_ids(&self) -> Vec<meerkat_mob::ids::AgentIdentity> {
+    /// partially warmed mob. A read of Core's member history Core could not
+    /// serve is typed (`MemberHistoryUnavailable`), never an empty list.
+    pub async fn identity_bootstrap_member_ids(
+        &self,
+    ) -> Result<Vec<meerkat_mob::ids::AgentIdentity>, IdentityRuntimeError> {
         let tracked = self.identity_bootstrap_status();
         self.identity_bootstrap_member_ids_for_status(&tracked)
             .await
@@ -5299,7 +5415,7 @@ impl IdentityRuntime {
     pub(crate) async fn identity_bootstrap_member_ids_for_status(
         &self,
         tracked: &IdentityBootstrapStatus,
-    ) -> Vec<meerkat_mob::ids::AgentIdentity> {
+    ) -> Result<Vec<meerkat_mob::ids::AgentIdentity>, IdentityRuntimeError> {
         // The roster is keyed by the encoded DURABLE identity for every
         // binding. This used to mirror the old spawn-side lowering (identity
         // for external, runtime id for local); keeping that split would report
@@ -5316,9 +5432,13 @@ impl IdentityRuntime {
         };
         // Core's history gates inclusion: an identity Core never spawned
         // (since the latest mob reset) is not a bootstrapped member. One read
-        // serves every identity; a failed read includes none.
-        let history = self.core_view_history().await.ok().flatten();
-        registered
+        // serves every identity.
+        let history = self.core_view_history().await.map_err(|error| {
+            IdentityRuntimeError::MemberHistoryUnavailable {
+                detail: format!("reading Core's member history: {error}"),
+            }
+        })?;
+        Ok(registered
             .into_iter()
             .map(|identity| {
                 crate::member_comms_id::roster_member_id_for_identity(identity.as_str())
@@ -5328,7 +5448,7 @@ impl IdentityRuntime {
                     .as_ref()
                     .is_some_and(|history| history.last_binding(member).is_some())
             })
-            .collect()
+            .collect())
     }
 
     pub async fn set_agent_customizer(&self, customizer: Option<Arc<dyn AgentCustomizer>>) {
@@ -7124,15 +7244,9 @@ impl IdentityRuntime {
         let bootstrap_generation = self.identity_bootstrap_status_with_generation().0;
         {
             let mut entries = self.entries.write().await;
-            let (wake_refusal, replaced_session, previous_refused) = entries
+            let (wake_refusal, previous_refused) = entries
                 .get(&identity)
-                .map(|existing| {
-                    (
-                        existing.wake_refusal.clone(),
-                        existing.replaced_session.clone(),
-                        existing.declaration_refused,
-                    )
-                })
+                .map(|existing| (existing.wake_refusal.clone(), existing.declaration_refused))
                 .unwrap_or_default();
             entries.insert(
                 identity.clone(),
@@ -7140,7 +7254,6 @@ impl IdentityRuntime {
                     spec,
                     bootstrap_generation,
                     wake_refusal,
-                    replaced_session,
                     last_delivery_error: None,
                     last_reload: None,
                     declaration_refused: declaration_refused.unwrap_or(previous_refused),
@@ -7310,14 +7423,15 @@ impl IdentityRuntime {
                 .runtime
                 .ensure_expected_member_alias_current(&target.identity, &target.alias)
                 .await?;
-            let wake_refusal = target
+            if !target
                 .runtime
                 .entries
                 .read()
                 .await
-                .get(&target.identity)
-                .map(|entry| entry.wake_refusal.clone())
-                .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(target.identity.clone()))?;
+                .contains_key(&target.identity)
+            {
+                return Err(IdentityRuntimeError::UnknownIdentity(target.identity));
+            }
             // A member alias names a live Core member.
             if target
                 .runtime
@@ -7326,8 +7440,11 @@ impl IdentityRuntime {
                 .is_none()
             {
                 return Err(IdentityRuntimeError::InvalidState {
+                    state: target
+                        .runtime
+                        .member_less_view_state(&target.identity)
+                        .await?,
                     identity: target.identity,
-                    state: Self::view_state(false, wake_refusal.as_ref()),
                     operation: "mutate member alias",
                 });
             }
@@ -7705,10 +7822,13 @@ impl IdentityRuntime {
         expected_alias: Option<&str>,
         expected_spec_digest: Option<&str>,
     ) -> Result<(), IdentityRuntimeError> {
+        if !self.entries.read().await.contains_key(identity) {
+            return Err(self.unregistered_identity_refusal(identity).await);
+        }
         if self.core_live_member(identity).await?.is_some()
             && !self.has_pending_first_boot_row(identity)
             && !self.first_boot_unread()
-            && !self.held_for_role_migration(identity).await
+            && !self.held_for_role_migration(identity).await?
             && !self.host_pending_seeded_contains(identity)
         {
             return Ok(());
@@ -7752,24 +7872,18 @@ impl IdentityRuntime {
         Ok(())
     }
 
-    /// Whether `identity`'s last declaration held it typed because the
-    /// roster moved it to a role this activation declared no migration to:
-    /// Core still holds it under its previous role, so its deliveries
-    /// declare it again, and Core holds them typed until the migration is
-    /// declared.
-    async fn held_for_role_migration(&self, identity: &AgentIdentity) -> bool {
-        self.entries
-            .read()
-            .await
-            .get(identity)
-            .is_some_and(|entry| {
-                entry.wake_refusal.as_ref().is_some_and(|refusal| {
-                    matches!(
-                        refusal.remedy,
-                        super::types::WakeRefusalRemedy::ResolveRoleMigration
-                    )
-                })
-            })
+    /// Whether Core holds `identity`'s member, and refuses its wakes, for a
+    /// role move its host's roster made without declaring the migration,
+    /// read from Core's entry of its name (the host preparation it owes;
+    /// for a name Core holds as no identity entry, Core's last answer that
+    /// said so): its deliveries declare it again, and Core holds them typed
+    /// until the migration is declared. `false` without a bridge; a read
+    /// Core could not serve is typed history unavailable.
+    async fn held_for_role_migration(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<bool, IdentityRuntimeError> {
+        Ok(self.core_view_facts(identity, None).await?.role_held())
     }
 
     /// The refusal an admission's wake answers. A host-adopted identity is
@@ -8989,14 +9103,12 @@ impl IdentityRuntime {
 
     /// A lifecycle verb is about to act on a member Core holds live (the
     /// caller holds the identity's lifecycle lock and just read it live).
-    /// Neither a recorded wake refusal nor the last wake's replaced-session
-    /// note describes that member, so both go before Core is asked: no read
-    /// between the verb's Core steps (retire, then wake or spawn) shows the
-    /// identity Broken or names a replaced session.
+    /// No recorded wake refusal describes that member, so it goes before
+    /// Core is asked: no read between the verb's Core steps (retire, then
+    /// wake or spawn) shows the identity Broken.
     async fn clear_wake_notes_of_live_member(&self, identity: &AgentIdentity) {
         if let Some(entry) = self.entries.write().await.get_mut(identity) {
             entry.wake_refusal = None;
-            entry.replaced_session = None;
         }
     }
 
@@ -9004,12 +9116,10 @@ impl IdentityRuntime {
     /// the binding observer and the completion waiters, and announce the
     /// view's Active state.
     async fn settle_successful_wake(&self, identity: &AgentIdentity) {
-        // A new member ends any absent-session note, before the binding
-        // notify and the Active event, so a reader woken by either sees it
-        // gone.
+        // A new member ends any recorded refusal, before the binding notify
+        // and the Active event, so a reader woken by either sees it gone.
         if let Some(entry) = self.entries.write().await.get_mut(identity) {
             entry.wake_refusal = None;
-            entry.replaced_session = None;
         }
         self.entries.notify_binding_changed();
         // An identity the bootstrap reported dormant (a hosted identity a
@@ -9033,14 +9143,42 @@ impl IdentityRuntime {
         .await;
     }
 
-    /// Whether this runtime runs the live member Core's binding names: not
-    /// once it began shutting down, though Core keeps the binding live for
-    /// the next start.
-    fn runs_live_member(&self, core_live: bool) -> bool {
-        core_live && !self.foreground_shutdown.load(Ordering::Acquire)
+    /// The view state of `identity`, which Core held no live member of a
+    /// moment ago, for the refusal that names it: [`CoreViewFacts::state`]
+    /// over Core's facts read now (Broken after a final refusal of its wake
+    /// Core answered for the session it last bound the identity to, Dormant
+    /// otherwise). A read Core could not serve is the refusal, typed.
+    async fn member_less_view_state(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<IdentityLifecycleState, IdentityRuntimeError> {
+        let history = self.core_view_history().await.map_err(|error| {
+            IdentityRuntimeError::IdentityHistoryUnavailable {
+                identity: identity.clone(),
+                detail: format!("reading Core's member history: {error}"),
+            }
+        })?;
+        Ok(self
+            .core_view_facts(identity, history.as_ref())
+            .await?
+            .state())
     }
 
-    /// The view state Core's facts give an identity right now.
+    /// The lifecycle state of the registered `identity` read from Core's
+    /// entry of its name alone (no member history read), with the answers
+    /// of Core's this runtime keeps for it: whether Core holds its member
+    /// Broken, for one. A read Core could not serve is typed history
+    /// unavailable.
+    pub(crate) async fn core_entry_state(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<IdentityLifecycleState, IdentityRuntimeError> {
+        Ok(self.core_view_facts(identity, None).await?.state())
+    }
+
+    /// The view state of an identity Core holds no member of, from the
+    /// refusal of its wake Core last answered (Broken when it was final),
+    /// or the state of one Core holds (`live`).
     fn view_state(
         live: bool,
         wake_refusal: Option<&super::types::WakeRefusal>,
@@ -10043,14 +10181,19 @@ impl IdentityRuntime {
         &self,
         identity: &AgentIdentity,
     ) -> Result<(), IdentityRuntimeError> {
-        let entries = self.entries.read().await;
-        let entry = entries
+        let addressability = self
+            .entries
+            .read()
+            .await
             .get(identity)
-            .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))?;
-        if entry.spec.addressability == AgentAddressability::InternalOnly {
+            .map(|entry| entry.spec.addressability);
+        let Some(addressability) = addressability else {
+            return Err(self.unregistered_identity_refusal(identity).await);
+        };
+        if addressability == AgentAddressability::InternalOnly {
             return Err(IdentityRuntimeError::NotAddressable(NotAddressable {
                 identity: identity.clone(),
-                addressability: entry.spec.addressability,
+                addressability,
             }));
         }
         Ok(())
@@ -11368,6 +11511,7 @@ impl IdentityRuntime {
         // traffic, another delivery's completion can also satisfy the wait.
         // Waiting too little beats the failure this replaces (waiting forever).
         let completion_baseline = self.credited_completion_cursor(identity, token).await;
+        let core_runtime_mode = self.core_member_runtime_mode(identity).await?;
         let (
             runtime_id,
             memory_session_key,
@@ -11388,10 +11532,9 @@ impl IdentityRuntime {
                 live.session_id.as_ref().map(ToString::to_string),
                 scope.as_ref().map(|scope| scope.generation().get()),
                 interaction_id_for_delivery(&entry.spec, interaction_id),
-                // Resolved as meerkat resolves it at spawn (override, profile,
-                // default). Generic autonomous work has no user context slot;
-                // the explicit human boundary does.
-                self.effective_runtime_mode(&entry.spec),
+                // The mode Core runs the member in. Generic autonomous work
+                // has no user context slot; the explicit human boundary does.
+                core_runtime_mode,
                 console_human.is_some() && !durable_spec_uses_external_binding(&entry.spec),
                 live.session_id.clone(),
                 durable_spec_uses_external_binding(&entry.spec),
@@ -12336,32 +12479,25 @@ impl IdentityRuntime {
             .map(|outcome| (outcome.admission.fencing_token, outcome.admission.durable))
     }
 
-    /// The runtime mode a member actually runs in, resolved exactly as
-    /// meerkat-mob resolves it at spawn: the roster's explicit override wins,
-    /// else the profile's `runtime_mode`, else meerkat's default
-    /// (`AutonomousHost`). Reading only the override - as the first cut of the
-    /// autonomous-host skip did - treated every member whose roster provider
-    /// set nothing as autonomous, and skipped ambient memory on `turn_driven`
-    /// profiles fleet-wide. Two sources of one fact; this is the one meerkat
-    /// uses.
-    ///
-    /// A profile bound by realm reference (not inline) has no mode Meta can
-    /// read here and resolves to the default; that is a documented limitation,
-    /// not a guess dressed as knowledge.
-    fn effective_runtime_mode(&self, spec: &DurableAgentSpec) -> meerkat_mob::MobRuntimeMode {
-        // The mob definition reaches this runtime through the reset-roster
-        // context the gateway installs at boot; a host that installs none has
-        // given Meta no profile table to read, and resolves to the default.
-        let source = self
-            .reset_roster_source
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        effective_runtime_mode(
-            source
-                .as_ref()
-                .and_then(|source| source.mob_definition.as_ref()),
-            spec,
-        )
+    /// The runtime mode Core runs `identity`'s live member in, read from
+    /// Core's entry of its name: the mode the delivery's ambient memory
+    /// follows (Core's member, never the roster spec, which a mode change of
+    /// Core's member leaves behind, nor a profile table Meta may not hold).
+    /// Core holding no member of the identity at its delivery, or a read
+    /// Core could not serve, refuses the delivery typed, retryable.
+    async fn core_member_runtime_mode(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<meerkat_mob::MobRuntimeMode, IdentityRuntimeError> {
+        self.core_view_facts(identity, None)
+            .await?
+            .runtime_mode
+            .ok_or_else(|| IdentityRuntimeError::IdentityHistoryUnavailable {
+                identity: identity.clone(),
+                detail: "Core's entry of the identity holds no member at its delivery: \
+                         nothing was delivered; send again"
+                    .to_string(),
+            })
     }
 
     /// The ONE delivery preparation every member door runs (send, keyed
@@ -12516,6 +12652,7 @@ impl IdentityRuntime {
         // Same pre-delivery baseline contract as the send path - see
         // `send_with_mode_and_interaction_with_expected_member_alias`.
         let completion_baseline = self.credited_completion_cursor(identity, token).await;
+        let core_runtime_mode = self.core_member_runtime_mode(identity).await?;
         let (
             is_durable,
             runtime_id,
@@ -12538,7 +12675,7 @@ impl IdentityRuntime {
                 live.session_id.clone(),
                 live.session_id.as_ref().map(ToString::to_string),
                 scope.as_ref().map(|scope| scope.generation().get()),
-                self.effective_runtime_mode(&entry.spec),
+                core_runtime_mode,
                 durable_spec_uses_external_binding(&entry.spec),
             )
         };
@@ -12946,13 +13083,15 @@ impl IdentityRuntime {
 
     /// The identity's status, read from Core on every call: Active
     /// while Core holds its member, Broken while Core holds that member
-    /// Broken (it could not restore it), after a FINAL refused wake, or while
-    /// Core refuses the identity's last declaration for good (no member is
-    /// named then: a member Core holds under its name is not the
-    /// identity's), Dormant otherwise. The Core facts come from one read of
-    /// Core's member history, a store read that never waits on the mob
-    /// actor, and one read of Core's member list; a history read fault is
-    /// typed history unavailable, never a guess.
+    /// Broken (it could not restore it), while Core refuses the identity's
+    /// last declaration for good (no member is named then: a member Core
+    /// holds under its name is not the identity's), or, while Core holds no
+    /// member of it, after Core refused its wake for good; Dormant
+    /// otherwise. The Core facts come from one read of Core's entry of the
+    /// identity's name (machine state the mob's actor published: no actor
+    /// command, no wake) and one read of Core's member history, a store read
+    /// that never waits on the mob actor; a fault of either is typed history
+    /// unavailable, never a guess.
     pub async fn status(
         &self,
         identity: &AgentIdentity,
@@ -12966,50 +13105,38 @@ impl IdentityRuntime {
                 detail: format!("reading Core's member history: {error}"),
             }
         })?;
-        let broken = self.core_broken_members().await.map_err(|error| {
-            IdentityRuntimeError::IdentityHistoryUnavailable {
-                identity: identity.clone(),
-                detail: format!("reading Core's broken members: {error}"),
-            }
-        })?;
-        self.status_from(identity, history.as_ref(), &broken).await
+        self.status_from(identity, history.as_ref()).await
     }
 
-    /// [`Self::status`] over a history and Core's broken members already
-    /// read.
+    /// [`Self::status`] over Core's member history already read.
     async fn status_from(
         &self,
         identity: &AgentIdentity,
         history: Option<&meerkat_mob::MemberBindingHistory>,
-        broken: &BTreeMap<meerkat_mob::AgentIdentity, String>,
     ) -> Result<IdentityStatus, IdentityRuntimeError> {
-        let (spec, wake_refusal, replaced_session, declaration_refused) = {
-            let entries = self.entries.read().await;
-            let entry = entries
-                .get(identity)
-                .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))?;
-            (
-                entry.spec.clone(),
-                entry.wake_refusal.clone(),
-                entry.replaced_session.clone(),
-                entry.declaration_refused,
-            )
-        };
-        let facts = CoreViewFacts::of_entry(history, identity, declaration_refused);
+        let spec = self
+            .entries
+            .read()
+            .await
+            .get(identity)
+            .map(|entry| entry.spec.clone())
+            .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))?;
+        let facts = self.core_view_facts(identity, history).await?;
         let convergence = if facts.intent_managed {
             self.core_convergence(identity).await
         } else {
             None
         };
+        let wake_refusal = facts.wake_refusal(identity);
         let session_repair_required = self.session_repair_hold(wake_refusal.as_ref());
         Ok(IdentityStatus {
             identity: identity.clone(),
-            state: self.core_view_state(identity, &facts, broken, wake_refusal.as_ref()),
+            state: facts.state(),
             agent_runtime_id: facts.runtime_id,
             session_id: facts.session_id,
             member_id: facts.member_id,
             profile: Some(spec.profile.clone()),
-            runtime_mode: spec.runtime_mode_override,
+            runtime_mode: facts.runtime_mode,
             addressability: spec.addressability,
             display_name: spec.display_name.clone(),
             labels: spec.labels.clone(),
@@ -13017,10 +13144,49 @@ impl IdentityRuntime {
             intent_managed: facts.intent_managed,
             convergence,
             wake_refusal,
-            replaced_session,
+            replaced_session: None,
             session_repair_required,
             customizer_tools_pending: self.customizer_tools_pending_for(identity),
         })
+    }
+
+    /// Core's facts of the registered `identity` for its views
+    /// ([`CoreViewFacts`]): one read of Core's entry of its name, beside
+    /// Core's member history `history` already read and the answers of
+    /// Core's this runtime keeps for it. Nothing is live without a bridge. A
+    /// fault of the read is typed history unavailable: a member Core may hold
+    /// Broken is never read active on a read that could not tell.
+    async fn core_view_facts(
+        &self,
+        identity: &AgentIdentity,
+        history: Option<&meerkat_mob::MemberBindingHistory>,
+    ) -> Result<CoreViewFacts, IdentityRuntimeError> {
+        let (wake_note, declaration_refused) = self
+            .entries
+            .read()
+            .await
+            .get(identity)
+            .map(|entry| (entry.wake_refusal.clone(), entry.declaration_refused))
+            .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))?;
+        // A refused declaration reads no member: Core's entry is not read.
+        let entry = match self.bridge.as_ref() {
+            Some(bridge) if !declaration_refused => {
+                Some(bridge.identity_entry(identity).await.map_err(|error| {
+                    IdentityRuntimeError::IdentityHistoryUnavailable {
+                        identity: identity.clone(),
+                        detail: format!("reading Core's entry of the identity: {error}"),
+                    }
+                })?)
+            }
+            _ => None,
+        };
+        Ok(CoreViewFacts::read(
+            entry.as_ref(),
+            history,
+            identity,
+            wake_note.as_ref(),
+            declaration_refused,
+        ))
     }
 
     /// The typed repair hold of a wake Core held for audited-endpoint
@@ -13040,42 +13206,6 @@ impl IdentityRuntime {
                  audited-endpoint guard",
             )
         })
-    }
-
-    /// Core's members it holds Broken, with Core's reasons; none without a
-    /// bridge. A failed read is typed: a member Core may hold Broken is never
-    /// reported active on a read that could not tell.
-    async fn core_broken_members(
-        &self,
-    ) -> Result<BTreeMap<meerkat_mob::AgentIdentity, String>, BridgeError> {
-        match self.bridge.as_ref() {
-            Some(bridge) => bridge.broken_members().await,
-            None => Ok(BTreeMap::new()),
-        }
-    }
-
-    /// The view state of `identity` from Core's facts: Broken while Core
-    /// refuses its last declaration for good or holds its live member Broken
-    /// (it could not restore it), otherwise as [`Self::view_state`] answers.
-    fn core_view_state(
-        &self,
-        identity: &AgentIdentity,
-        facts: &CoreViewFacts,
-        broken: &BTreeMap<meerkat_mob::AgentIdentity, String>,
-        wake_refusal: Option<&super::types::WakeRefusal>,
-    ) -> IdentityLifecycleState {
-        if facts.declaration_refused {
-            return IdentityLifecycleState::Broken;
-        }
-        let core_broken = facts.live
-            && broken.contains_key(&crate::member_comms_id::roster_member_id_for_identity(
-                identity.as_str(),
-            ));
-        if core_broken {
-            IdentityLifecycleState::Broken
-        } else {
-            Self::view_state(self.runs_live_member(facts.live), wake_refusal)
-        }
     }
 
     /// Core's member history: one fold of its journal and identity
@@ -13113,9 +13243,10 @@ impl IdentityRuntime {
     }
 
     /// Return statuses for every registered identity without waking any.
-    /// One read of Core's member history serves every identity; when that
-    /// read fails the call fails typed (`MemberHistoryUnavailable`): no
-    /// status is guessed and no empty list stands in for "none".
+    /// One read of Core's member history serves every identity, beside one
+    /// read of Core's entry of each; when a read fails the call fails typed
+    /// (`MemberHistoryUnavailable`): no status is guessed, none is left out
+    /// and no empty list stands in for "none".
     pub async fn statuses(&self) -> Result<Vec<IdentityStatus>, IdentityRuntimeError> {
         let identities = self
             .entries
@@ -13129,19 +13260,32 @@ impl IdentityRuntime {
                 detail: format!("reading Core's member history: {error}"),
             }
         })?;
-        let broken = self.core_broken_members().await.map_err(|error| {
-            IdentityRuntimeError::MemberHistoryUnavailable {
-                detail: format!("reading Core's broken members: {error}"),
-            }
-        })?;
         let mut statuses = Vec::with_capacity(identities.len());
         for identity in identities {
-            // An identity unregistered between the two reads has no status.
-            if let Ok(status) = self.status_from(&identity, history.as_ref(), &broken).await {
-                statuses.push(status);
+            match self.status_from(&identity, history.as_ref()).await {
+                Ok(status) => statuses.push(status),
+                // An identity unregistered between the two reads has no
+                // status.
+                Err(IdentityRuntimeError::UnknownIdentity(_)) => {}
+                Err(error) => return Err(Self::member_history_unavailable(&error)),
             }
         }
         Ok(statuses)
+    }
+
+    /// A per-identity read fault of a call over every identity, typed as
+    /// the call's own (`MemberHistoryUnavailable`).
+    fn member_history_unavailable(error: &IdentityRuntimeError) -> IdentityRuntimeError {
+        match error {
+            IdentityRuntimeError::IdentityHistoryUnavailable { identity, detail } => {
+                IdentityRuntimeError::MemberHistoryUnavailable {
+                    detail: format!("{identity}: {detail}"),
+                }
+            }
+            other => IdentityRuntimeError::MemberHistoryUnavailable {
+                detail: other.to_string(),
+            },
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -13314,17 +13458,12 @@ impl IdentityRuntime {
         // A host-adopted identity is read-only to Meta.
         self.refuse_host_adopted(identity).await?;
         let Some(live) = self.core_live_member(identity).await? else {
-            let wake_refusal = self
-                .entries
-                .read()
-                .await
-                .get(identity)
-                .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))?
-                .wake_refusal
-                .clone();
+            if !self.entries.read().await.contains_key(identity) {
+                return Err(IdentityRuntimeError::UnknownIdentity(identity.clone()));
+            }
             return Err(IdentityRuntimeError::InvalidState {
                 identity: identity.clone(),
-                state: Self::view_state(false, wake_refusal.as_ref()),
+                state: self.member_less_view_state(identity).await?,
                 operation: "retire",
             });
         };
@@ -13778,24 +13917,20 @@ impl IdentityRuntime {
     }
 
     /// The identity's lifecycle and delivery health. Its Core facts come from
-    /// Core's member history (a store read) and the rest is in-process: this
-    /// never touches the mob actor, so it answers while the loop is stalled,
-    /// which is exactly when an operator needs it.
+    /// Core's entry of the identity's name (published machine state) and
+    /// Core's member history (a store read), and the rest is in-process:
+    /// this never touches the mob actor, so it answers while the loop is
+    /// stalled, which is exactly when an operator needs it.
     pub async fn member_health(
         &self,
         identity: &AgentIdentity,
     ) -> Result<MemberHealthReport, IdentityRuntimeError> {
-        let (last_delivery_error, last_reload, wake_refusal, declaration_refused) = {
+        let (last_delivery_error, last_reload) = {
             let entries = self.entries.read().await;
             let entry = entries
                 .get(identity)
                 .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))?;
-            (
-                entry.last_delivery_error.clone(),
-                entry.last_reload.clone(),
-                entry.wake_refusal.clone(),
-                entry.declaration_refused,
-            )
+            (entry.last_delivery_error.clone(), entry.last_reload.clone())
         };
         let history = self.core_view_history().await.map_err(|error| {
             IdentityRuntimeError::IdentityHistoryUnavailable {
@@ -13803,13 +13938,8 @@ impl IdentityRuntime {
                 detail: format!("reading Core's member history: {error}"),
             }
         })?;
-        let facts = CoreViewFacts::of_entry(history.as_ref(), identity, declaration_refused);
-        let broken = self.core_broken_members().await.map_err(|error| {
-            IdentityRuntimeError::IdentityHistoryUnavailable {
-                identity: identity.clone(),
-                detail: format!("reading Core's broken members: {error}"),
-            }
-        })?;
+        let facts = self.core_view_facts(identity, history.as_ref()).await?;
+        let wake_refusal = facts.wake_refusal(identity);
         let bootstrap_state = self
             .identity_bootstrap_status()
             .identities
@@ -13824,7 +13954,7 @@ impl IdentityRuntime {
             .flatten();
         let mut report = MemberHealthReport {
             identity: identity.clone(),
-            state: self.core_view_state(identity, &facts, &broken, wake_refusal.as_ref()),
+            state: facts.state(),
             member_id: facts.runtime_id,
             bootstrap_state,
             materialization_in_flight: bootstrap_state == Some(IdentityBootstrapState::Warming),
@@ -14642,8 +14772,8 @@ impl IdentityRuntime {
     // -----------------------------------------------------------------------
 
     /// Return every registered identity with its spec and status (one read
-    /// of Core's member history serves them all; a failed read fails typed,
-    /// as [`Self::statuses`]).
+    /// of Core's member history serves them all, beside one read of Core's
+    /// entry of each; a failed read fails typed, as [`Self::statuses`]).
     pub async fn roster_inspect(
         &self,
     ) -> Result<BTreeMap<AgentIdentity, (DurableAgentSpec, IdentityStatus)>, IdentityRuntimeError>
@@ -14660,15 +14790,16 @@ impl IdentityRuntime {
                 detail: format!("reading Core's member history: {error}"),
             }
         })?;
-        let broken = self.core_broken_members().await.map_err(|error| {
-            IdentityRuntimeError::MemberHistoryUnavailable {
-                detail: format!("reading Core's broken members: {error}"),
-            }
-        })?;
         let mut result = BTreeMap::new();
         for (identity, spec) in specs {
-            if let Ok(status) = self.status_from(&identity, history.as_ref(), &broken).await {
-                result.insert(identity, (spec, status));
+            match self.status_from(&identity, history.as_ref()).await {
+                Ok(status) => {
+                    result.insert(identity, (spec, status));
+                }
+                // An identity unregistered between the two reads has no
+                // status.
+                Err(IdentityRuntimeError::UnknownIdentity(_)) => {}
+                Err(error) => return Err(Self::member_history_unavailable(&error)),
             }
         }
         Ok(result)
@@ -14708,22 +14839,62 @@ impl IdentityRuntime {
         self.entries.read().await.contains_key(identity)
     }
 
-    /// Whether an identity is registered AND Core holds its member (read from
-    /// Core's member history; a failed read answers `false`). An identity
-    /// whose last declaration Core refused for good is not active.
-    pub async fn is_active(&self, identity: &AgentIdentity) -> bool {
-        let declaration_refused = match self.entries.read().await.get(identity) {
-            Some(entry) => entry.declaration_refused,
-            None => return false,
+    /// Whether an identity is registered AND Core holds its member, read
+    /// from Core's entry of its name. An identity whose last declaration Core
+    /// refused for good is not active. A read Core could not serve is typed
+    /// history unavailable, never `false`.
+    pub async fn is_active(&self, identity: &AgentIdentity) -> Result<bool, IdentityRuntimeError> {
+        if !self.entries.read().await.contains_key(identity) {
+            return Ok(false);
+        }
+        match self.core_view_facts(identity, None).await {
+            Ok(facts) => Ok(facts.live),
+            // Unregistered since the first read.
+            Err(IdentityRuntimeError::UnknownIdentity(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Whether Core holds `name` as an identity entry, or reserves it: a
+    /// name only its identity's host acts on, which Core refuses to every
+    /// door but the identity's own. `false` without a bridge. A read Core
+    /// could not serve is typed history unavailable, never a guess.
+    pub(crate) async fn core_holds_identity_entry(
+        &self,
+        name: &AgentIdentity,
+    ) -> Result<bool, IdentityRuntimeError> {
+        let Some(bridge) = self.bridge.as_ref() else {
+            return Ok(false);
         };
-        match self.core_view_history().await {
-            Ok(history) => {
-                CoreViewFacts::of_entry(history.as_ref(), identity, declaration_refused).live
-            }
-            Err(error) => {
-                tracing::debug!(%identity, %error, "is_active: Core's member history read failed");
-                false
-            }
+        bridge
+            .identity_entry(name)
+            .await
+            .map(|entry| entry.is_entry_or_reserved())
+            .map_err(|error| IdentityRuntimeError::IdentityHistoryUnavailable {
+                identity: name.clone(),
+                detail: format!("reading Core's entry of the name: {error}"),
+            })
+    }
+
+    /// The refusal of a door to `identity`, which this runtime has not
+    /// registered: unknown, unless Core holds the name as an identity entry
+    /// (an earlier process declared it, and this one's roster pass has not
+    /// run yet), when the refusal clears on its own once the pass registers
+    /// it. A read Core could not serve refuses the same way, retryable.
+    async fn unregistered_identity_refusal(
+        &self,
+        identity: &AgentIdentity,
+    ) -> IdentityRuntimeError {
+        match self.core_holds_identity_entry(identity).await {
+            Ok(false) => IdentityRuntimeError::UnknownIdentity(identity.clone()),
+            Ok(true) => IdentityRuntimeError::IdentityHistoryUnavailable {
+                identity: identity.clone(),
+                detail: "Core holds the identity's entry, and this runtime has not registered \
+                         the identity yet: its roster pass has not run. Nothing was delivered; \
+                         send again once the pass registers it"
+                    .to_string(),
+            },
+            Err(error) => error,
         }
     }
 
@@ -14758,12 +14929,27 @@ impl IdentityRuntime {
     }
 
     /// Resolve a mutating member request without allowing a generated alias
-    /// to fall back to the raw mob plane after concurrent deletion. Plain
-    /// durable identities retain their historical registered-only behavior.
+    /// to fall back to the raw mob plane after concurrent deletion. A plain
+    /// durable identity takes its identity's door when this runtime
+    /// registered it or Core holds the name as an identity entry.
     pub(crate) async fn identity_for_member_mutation(&self, alias: &str) -> Option<AgentIdentity> {
         match Self::identity_from_member_alias(alias) {
             Some((identity, true)) => Some(identity),
-            Some((identity, false)) => self.contains(&identity).await.then_some(identity),
+            Some((identity, false)) => {
+                if self.contains(&identity).await {
+                    return Some(identity);
+                }
+                // A name Core holds as an identity entry (an earlier process
+                // declared it, and this one's roster pass has not run yet)
+                // takes the identity's door too, which refuses it typed until
+                // the pass registers it. So does a name whose read Core could
+                // not serve: never the member door on a read that could not
+                // tell.
+                match self.core_holds_identity_entry(&identity).await {
+                    Ok(false) => None,
+                    Ok(true) | Err(_) => Some(identity),
+                }
+            }
             None => None,
         }
     }
@@ -14977,15 +15163,13 @@ impl IdentityRuntime {
         identity: &AgentIdentity,
         operation: &'static str,
     ) -> IdentityRuntimeError {
-        let wake_refusal = match self.entries.read().await.get(identity) {
-            Some(entry) => entry.wake_refusal.clone(),
-            None => return IdentityRuntimeError::UnknownIdentity(identity.clone()),
-        };
-        self.refuse_inactive_delivery(
-            identity,
-            Self::view_state(false, wake_refusal.as_ref()),
-            operation,
-        )
+        if !self.entries.read().await.contains_key(identity) {
+            return IdentityRuntimeError::UnknownIdentity(identity.clone());
+        }
+        match self.member_less_view_state(identity).await {
+            Ok(state) => self.refuse_inactive_delivery(identity, state, operation),
+            Err(error) => error,
+        }
     }
 
     /// Core answers a live member with no session both for a peer-only
@@ -15415,15 +15599,17 @@ impl IdentityRuntime {
             if self.run_failure_count(identity) > failures_at_start {
                 return CompletionWait::RunFailed(cursor);
             }
-            let wake_refusal = self
-                .entries
-                .read()
-                .await
-                .get(identity)
-                .map(|entry| entry.wake_refusal.clone());
-            match wake_refusal {
-                None if registered_at_start => return CompletionWait::IdentityGone(cursor),
-                Some(Some(refusal)) if refusal.is_final() => {
+            // Core's entry of the identity's name (published machine state,
+            // a cheap read): an identity Core holds Broken, or whose wake
+            // Core refused for good while it holds no member of it, never
+            // completes a turn. A read Core could not serve concludes
+            // nothing: the wait reads again at the next change, until its
+            // deadline.
+            match self.core_view_facts(identity, None).await {
+                Err(IdentityRuntimeError::UnknownIdentity(_)) if registered_at_start => {
+                    return CompletionWait::IdentityGone(cursor);
+                }
+                Ok(facts) if facts.state() == IdentityLifecycleState::Broken => {
                     return CompletionWait::Broken(cursor);
                 }
                 _ => {}
@@ -15731,6 +15917,11 @@ mod seat_double {
                 generation,
                 &session_id,
             )?;
+            // Core seats the member in the spec's runtime mode override, or
+            // its default mode (the double holds no profile table).
+            if let Some(mode) = request.spec.runtime_mode_override {
+                core.set_runtime_mode(&request.identity, mode);
+            }
             results.push((request.identity, DormantSeatResult::Seated { session_id }));
         }
         Ok(results)
@@ -16037,6 +16228,14 @@ mod reset_reprofile_tests {
             self.core.history()
         }
 
+        async fn identity_entry(
+            &self,
+            identity: &crate::identity_first::AgentIdentity,
+        ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+        {
+            Ok(self.core.identity_entry(identity, false))
+        }
+
         async fn durable_identity_members(
             &self,
         ) -> Result<Vec<meerkat_mob::MemberBinding>, BridgeError> {
@@ -16236,6 +16435,14 @@ mod reset_reprofile_tests {
             &self,
         ) -> Result<meerkat_mob::MemberBindingHistory, BridgeError> {
             self.core.history()
+        }
+
+        async fn identity_entry(
+            &self,
+            identity: &crate::identity_first::AgentIdentity,
+        ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+        {
+            Ok(self.core.identity_entry(identity, false))
         }
 
         async fn durable_identity_members(
@@ -18342,113 +18549,6 @@ mod bootstrap_failure_attribution_tests {
     }
 }
 
-/// See [`IdentityRuntime::effective_runtime_mode`]. Free so it can be pinned
-/// without a runtime: the resolution order is the contract.
-pub(crate) fn effective_runtime_mode(
-    definition: Option<&meerkat_mob::MobDefinition>,
-    spec: &DurableAgentSpec,
-) -> meerkat_mob::MobRuntimeMode {
-    if let Some(mode) = spec.runtime_mode_override {
-        return mode;
-    }
-    definition
-        .and_then(|definition| definition.profiles.get(&spec.profile))
-        .and_then(|binding| binding.as_inline())
-        .map(|profile| profile.runtime_mode)
-        .unwrap_or_default()
-}
-
-#[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
-mod effective_runtime_mode_tests {
-    use super::*;
-
-    fn spec(profile: &str, override_mode: Option<meerkat_mob::MobRuntimeMode>) -> DurableAgentSpec {
-        DurableAgentSpec {
-            identity: AgentIdentity::parse("identity:probe").expect("valid identity"),
-            profile: meerkat_mob::ProfileName::from(profile),
-            addressability: AgentAddressability::Addressable,
-            display_name: None,
-            labels: Default::default(),
-            context: None,
-            additional_instructions: Vec::new(),
-            initial_message: None,
-            runtime_mode_override: override_mode,
-            backend: None,
-            binding: None,
-            placement: None,
-        }
-    }
-
-    fn definition() -> meerkat_mob::MobDefinition {
-        meerkat_mob::MobDefinition::from_toml(
-            r#"
-[mob]
-id = "mode-probe"
-
-[profiles.driven]
-model = "gpt-5.5"
-runtime_mode = "turn_driven"
-
-[profiles.omitted]
-model = "gpt-5.5"
-"#,
-        )
-        .expect("definition parses")
-    }
-
-    /// The contract, in meerkat's order: override, else profile, else default.
-    /// The first cut of the autonomous-host skip read only the override and
-    /// skipped memory on every turn_driven profile whose roster set nothing.
-    #[test]
-    fn profile_runtime_mode_is_honoured_when_the_roster_sets_no_override() {
-        let definition = definition();
-        assert_eq!(
-            effective_runtime_mode(Some(&definition), &spec("driven", None)),
-            meerkat_mob::MobRuntimeMode::TurnDriven,
-            "a turn_driven profile with no roster override must resolve turn_driven"
-        );
-        assert_eq!(
-            effective_runtime_mode(Some(&definition), &spec("omitted", None)),
-            meerkat_mob::MobRuntimeMode::AutonomousHost,
-            "a profile that omits runtime_mode resolves to meerkat's default"
-        );
-    }
-
-    #[test]
-    fn roster_override_wins_over_the_profile() {
-        let definition = definition();
-        assert_eq!(
-            effective_runtime_mode(
-                Some(&definition),
-                &spec("driven", Some(meerkat_mob::MobRuntimeMode::AutonomousHost)),
-            ),
-            meerkat_mob::MobRuntimeMode::AutonomousHost
-        );
-        assert_eq!(
-            effective_runtime_mode(
-                Some(&definition),
-                &spec("omitted", Some(meerkat_mob::MobRuntimeMode::TurnDriven)),
-            ),
-            meerkat_mob::MobRuntimeMode::TurnDriven
-        );
-    }
-
-    #[test]
-    fn unknown_profile_or_missing_definition_resolves_to_the_default() {
-        let definition = definition();
-        assert_eq!(
-            effective_runtime_mode(Some(&definition), &spec("nope", None)),
-            meerkat_mob::MobRuntimeMode::default()
-        );
-        assert_eq!(
-            effective_runtime_mode(None, &spec("driven", None)),
-            meerkat_mob::MobRuntimeMode::default(),
-            "with no definition installed Meta has no profile table; default, documented"
-        );
-    }
-}
-
 /// Admission-first delivery and plan / wire / revalidate topology reconcile:
 /// no send, steer or dispatch waits behind managed-topology wiring or a peer
 /// build, and a binding change during wiring replans instead of committing a
@@ -18793,6 +18893,14 @@ mod admission_first_topology_tests {
             &self,
         ) -> Result<meerkat_mob::MemberBindingHistory, BridgeError> {
             self.core.history()
+        }
+
+        async fn identity_entry(
+            &self,
+            identity: &crate::identity_first::AgentIdentity,
+        ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+        {
+            Ok(self.core.identity_entry(identity, false))
         }
 
         async fn identity_management(
@@ -19794,6 +19902,14 @@ model = "gpt-5.5"
             self.core.history()
         }
 
+        async fn identity_entry(
+            &self,
+            identity: &crate::identity_first::AgentIdentity,
+        ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+        {
+            Ok(self.core.identity_entry(identity, false))
+        }
+
         async fn identity_management(
             &self,
             _identity: &AgentIdentity,
@@ -20626,13 +20742,13 @@ mod wake_per_reason_tests {
     /// `session` and seats it again there, and whose wake of the seated
     /// member answers one fixed refusal naming the session it was asked to
     /// materialize, as Core names the session it refused. A refusal Core's
-    /// machine settles as Broken (`core_breaks`) leaves the member broken in
-    /// Core's broken members. It counts seats, wakes and creates.
+    /// machine settles as Broken (`core_breaks`) leaves the member Broken in
+    /// Core's entry of its name, with Core's durable resume hold when the
+    /// refusal is one. It counts seats, wakes and creates.
     struct RefusingResumeBridge {
         core: super::super::core_test_members::CoreTestMembers,
         refusal: Box<dyn Fn(&SessionId) -> BridgeError + Send + Sync>,
         core_breaks: bool,
-        broken: std::sync::Mutex<BTreeMap<meerkat_mob::AgentIdentity, String>>,
         seats: AtomicUsize,
         wakes: AtomicUsize,
         creates: AtomicUsize,
@@ -20708,25 +20824,28 @@ mod wake_per_reason_tests {
                 .ok_or_else(|| BridgeError::Mob(format!("{identity} is not seated")))?;
             let refusal = (self.refusal)(&session_id);
             if self.core_breaks {
-                self.broken
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(
-                        crate::member_comms_id::roster_member_id_for_identity(identity.as_str()),
-                        refusal.to_string(),
-                    );
+                let mut broken = super::super::bridge::CoreBrokenMember::new(refusal.to_string())
+                    .with_session(session_id.clone());
+                match &refusal {
+                    BridgeError::ResumeRejected {
+                        kind: ResumeRejectionKind::Held { hold },
+                        ..
+                    } => broken = broken.with_hold(*hold),
+                    BridgeError::SessionRepairRequired { .. } => {
+                        broken = broken.with_hold(DurableResumeHold::AuditedEndpointDivergence);
+                    }
+                    _ => {}
+                }
+                self.core.mark_broken(identity, broken);
             }
             Err(refusal)
         }
 
-        async fn broken_members(
+        async fn identity_entry(
             &self,
-        ) -> Result<BTreeMap<meerkat_mob::AgentIdentity, String>, BridgeError> {
-            Ok(self
-                .broken
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone())
+            identity: &AgentIdentity,
+        ) -> Result<super::super::bridge::CoreIdentityEntry, BridgeError> {
+            Ok(self.core.identity_entry(identity, false))
         }
 
         async fn retire_member(&self, runtime_id: &AgentRuntimeId) -> Result<(), BridgeError> {
@@ -20798,7 +20917,6 @@ mod wake_per_reason_tests {
             core,
             refusal: Box::new(refusal),
             core_breaks,
-            broken: std::sync::Mutex::new(BTreeMap::new()),
             seats: AtomicUsize::new(0),
             wakes: AtomicUsize::new(0),
             creates: AtomicUsize::new(0),
@@ -21161,6 +21279,18 @@ mod wake_per_reason_tests {
             Ok(meerkat_mob::MemberBindingHistory::for_test([], [], [], 0))
         }
 
+        async fn identity_entry(
+            &self,
+            identity: &crate::identity_first::AgentIdentity,
+        ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::core_test_members::entry_of_binding(
+                crate::identity_first::SessionBridge::last_member_binding(self, identity)
+                    .await?
+                    .as_ref(),
+            ))
+        }
+
         async fn apply_declared_roster(
             &self,
             roster: crate::identity_first::DeclaredRosterRequest,
@@ -21355,6 +21485,14 @@ mod wake_per_reason_tests {
             &self,
         ) -> Result<meerkat_mob::MemberBindingHistory, BridgeError> {
             self.core.history()
+        }
+
+        async fn identity_entry(
+            &self,
+            identity: &crate::identity_first::AgentIdentity,
+        ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+        {
+            Ok(self.core.identity_entry(identity, false))
         }
 
         async fn apply_declared_roster(
@@ -21622,9 +21760,7 @@ mod respawn_window_tests {
     use super::super::bridge::{MemberRuntimeBinding, ResumeSessionOutcome};
     use super::super::local_lease::LocalLeaseProvider;
     use super::super::local_store::LocalContinuityStore;
-    use super::super::types::{
-        ReplacedSession, ReplacedSessionReason, WakeRefusal, WakeRefusalRemedy,
-    };
+    use super::super::types::{WakeRefusal, WakeRefusalRemedy};
 
     const PROFILE: &str = "worker";
 
@@ -21831,6 +21967,18 @@ mod respawn_window_tests {
             ))
         }
 
+        async fn identity_entry(
+            &self,
+            identity: &crate::identity_first::AgentIdentity,
+        ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::core_test_members::entry_of_binding(
+                crate::identity_first::SessionBridge::last_member_binding(self, identity)
+                    .await?
+                    .as_ref(),
+            ))
+        }
+
         async fn apply_declared_roster(
             &self,
             roster: crate::identity_first::DeclaredRosterRequest,
@@ -21860,8 +22008,8 @@ mod respawn_window_tests {
             .register(spec(&identity))
             .await
             .expect("the identity registers");
-        // Notes an earlier wake left on a member Core now holds live: a final
-        // refusal and a replaced session. Neither describes the live member.
+        // A note an earlier wake left on a member Core now holds live: a
+        // final refusal. It does not describe the live member.
         {
             let mut entries = runtime.entries.write().await;
             let entry = entries
@@ -21871,10 +22019,6 @@ mod respawn_window_tests {
                 code: crate::rpc::IDENTITY_UNRESUMABLE_CODE,
                 session_id: session.clone(),
                 remedy: WakeRefusalRemedy::DeleteIdentity,
-            });
-            entry.replaced_session = Some(ReplacedSession {
-                session_id: SessionId::new(),
-                reason: ReplacedSessionReason::Absent,
             });
         }
         assert_eq!(
@@ -21988,6 +22132,18 @@ mod history_read_fault_tests {
         ) -> Result<meerkat_mob::MemberBindingHistory, BridgeError> {
             Err(BridgeError::Mob(
                 "the mob journal could not be read".to_string(),
+            ))
+        }
+
+        async fn identity_entry(
+            &self,
+            identity: &crate::identity_first::AgentIdentity,
+        ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::core_test_members::entry_of_binding(
+                crate::identity_first::SessionBridge::last_member_binding(self, identity)
+                    .await?
+                    .as_ref(),
             ))
         }
 

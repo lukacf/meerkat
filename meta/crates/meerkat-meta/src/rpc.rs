@@ -1563,7 +1563,10 @@ where
 
         let member_ids = identity_rt
             .identity_bootstrap_member_ids_for_status(&status)
-            .await;
+            .await
+            .map_err(|error| {
+                format!("identity bootstrap readiness could not read Core's members: {error}")
+            })?;
         let (mapped_generation, mapped_status) =
             identity_rt.identity_bootstrap_status_with_generation();
         if mapped_generation != generation || mapped_status != status {
@@ -7302,12 +7305,12 @@ fn identity_lifecycle_state_json(
 /// The `meta/status_identity` answer of a registered identity: its
 /// roster policy and Core's facts, read per call. `agent_runtime_id`,
 /// `session_id` and `generation` are always present (null when Core holds
-/// no binding), and so are `runtime_mode` (null without a runtime mode
-/// override) and `customizer_tools_pending` (null while the identity's
-/// customizer tools are published); `convergence`, `wake_refusal` and
-/// `replaced_session` only when set. Every field comes from the one status
-/// read. The session repair hold is answered by `meta/member_health`, not
-/// here.
+/// no binding), and so are `runtime_mode` (the mode Core runs the identity's
+/// member in; null while Core holds no member of it) and
+/// `customizer_tools_pending` (null while the identity's customizer tools
+/// are published); `convergence`, `wake_refusal` and `replaced_session`
+/// only when set. Every field comes from the one status read. The session
+/// repair hold is answered by `meta/member_health`, not here.
 fn identity_status_wire(status: &crate::identity_first::IdentityStatus) -> Value {
     let mut result = serde_json::json!({
         "state": identity_lifecycle_state_json(status.state),
@@ -8883,6 +8886,14 @@ mod tests {
             &self,
         ) -> Result<meerkat_mob::MemberBindingHistory, BridgeError> {
             self.core.history()
+        }
+
+        async fn identity_entry(
+            &self,
+            identity: &crate::identity_first::AgentIdentity,
+        ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+        {
+            Ok(self.core.identity_entry(identity, false))
         }
 
         async fn last_member_binding(

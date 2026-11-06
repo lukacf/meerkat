@@ -190,6 +190,11 @@ pub(crate) async fn register_live(
         generation,
         Some(session),
     )?;
+    // Core runs the member in the spec's runtime mode override, or its
+    // default mode (the double holds no profile table).
+    if let Some(mode) = spec.runtime_mode_override {
+        core.set_runtime_mode(&spec.identity, mode);
+    }
     runtime
         .register(spec)
         .await

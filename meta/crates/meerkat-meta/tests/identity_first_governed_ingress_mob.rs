@@ -525,6 +525,16 @@ mod losing {
             self.inner.member_binding_history().await
         }
 
+        async fn identity_entry(
+            &self,
+            identity: &meerkat_meta::identity_first::AgentIdentity,
+        ) -> Result<
+            meerkat_meta::identity_first::CoreIdentityEntry,
+            meerkat_meta::identity_first::BridgeError,
+        > {
+            meerkat_meta::identity_first::SessionBridge::identity_entry(&self.inner, identity).await
+        }
+
         async fn last_member_binding(
             &self,
             identity: &AgentIdentity,

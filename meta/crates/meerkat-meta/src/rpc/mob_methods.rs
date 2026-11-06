@@ -313,10 +313,16 @@ async fn resolve_send_message_target(
     if crate::member_comms_id::is_reserved_generated_alias(&member_id) {
         return Ok(SendMessageTarget::AuthorityUnavailable { alias: member_id });
     }
-    // The identity's registration, never its status view, chooses its door.
+    // The identity's registration, or Core's entry of its name, never its
+    // status view, chooses its door: a name Core holds as an identity entry
+    // takes the identity's door even before this process's roster pass
+    // registered it, and that door refuses it typed and retryable until the
+    // pass does. A read of Core's entry Core could not serve refuses the
+    // send, typed: never the member door on a read that could not tell.
     if let Some(identity_rt) = configured_identity_runtime
         && let Ok(identity) = crate::identity_first::AgentIdentity::parse(&member_id)
-        && identity_rt.contains(&identity).await
+        && (identity_rt.contains(&identity).await
+            || identity_rt.core_holds_identity_entry(&identity).await?)
     {
         return identity_send_target(identity_rt, identity, None).await;
     }

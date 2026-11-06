@@ -3554,7 +3554,10 @@ async fn assert_refused_spec_never_reads_live(boot: &Boot, identity: &AgentIdent
         "{after}: the refused spec's health names no member: {health:?}"
     );
     assert!(
-        !runtime.is_active(identity).await,
+        !runtime
+            .is_active(identity)
+            .await
+            .unwrap_or_else(|error| panic!("{after}: the refused spec's activity: {error}")),
         "{after}: the refused spec is not active"
     );
 }

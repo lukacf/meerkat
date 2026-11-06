@@ -969,7 +969,7 @@ manifest cannot be read.
 
 | Method | Params | Result |
 |--------|--------|--------|
-| `meta/status_identity` | `{identity}` | `IdentityStatus`: `identity`, `state`, `agent_runtime_id` (`null` when not live), `session_id` and `generation` (Core's last binding; `null` when it holds none), `member_id` (Core's mob member id of that binding, live or retired: the identity's roster member id, which is the identity itself when it is already a valid comms name and its `mk--...` encoding otherwise, as for an identity with a `:`; absent when Core holds no binding), `profile`, `runtime_mode` (the roster's `runtime_mode_override` for the identity; `null` when its profile's mode applies), `addressability`, `display_name`, `labels`, `intent_managed`, `customizer_tools_pending` (`null` once the identity's customizer tools are published) and `delivery_scope` (see [Scope-bound dispatch](#scope-bound-dispatch)); `convergence` (host-adopted identities), `wake_refusal` and `replaced_session` only when set |
+| `meta/status_identity` | `{identity}` | `IdentityStatus`: `identity`, `state`, `agent_runtime_id` (`null` when not live), `session_id` and `generation` (Core's last binding; `null` when it holds none), `member_id` (Core's mob member id of that binding, live or retired: the identity's roster member id, which is the identity itself when it is already a valid comms name and its `mk--...` encoding otherwise, as for an identity with a `:`; absent when Core holds no binding), `profile`, `runtime_mode` (the runtime mode Core runs the identity's member in; `null` while Core holds no member of it), `addressability`, `display_name`, `labels`, `intent_managed`, `customizer_tools_pending` (`null` once the identity's customizer tools are published) and `delivery_scope` (see [Scope-bound dispatch](#scope-bound-dispatch)); `convergence` (host-adopted identities), `wake_refusal` and `replaced_session` only when set |
 | `meta/inspect_identity` | `{identity}` | The execution view: `identity`, `state`, `profile`, `addressability`, `display_name`, `labels`, `generation`, `agent_runtime_id`, `session_id`, `intent_managed`, `output_preview`, `preview_unavailable`, `is_final`, `peer_reachable_count`, `completion_cursor`, and the optional keys of the status |
 | `meta/retire` | `{identity}` | `{identity, cleanup_warning}`. Releases the member's live materialization: the identity stays a member of Core's mob, on the same session at the same generation, and still reads `active`; its next delivery materializes it again, and a delivery scope captured before stays valid. A member that is not materialized is left as it is. No `spawned_by` descendant of the member is retired (earlier releases retired them), and a completion wait on the identity goes on to its next completion. A member that is being woken or has work in flight is refused with `-32052`: nothing is interrupted (earlier releases interrupted its run), and the retire succeeds once it is quiescent. An identity Core holds no member for is refused as invalid state. A retire ends no incarnation: a reset or a delete ends it, with Core's rotation onto a fresh session, and so does a respawn, which wakes the member on its session at a new generation. A member that no identity of the gateway holds and no host adopted (a Console side chat, a member made on the worker plane) is retired instead, by Core's retire: it leaves the roster with its `spawned_by` descendants, work in flight is interrupted rather than refused with `-32052`, and the answer carries no `cleanup_warning`. A member a host adopted is refused (`-32053`) whether or not an identity of the gateway holds it |
 | `meta/respawn` | `{identity}` | `{identity, agent_runtime_id, session_id, generation, live_respawn_warning, cleanup_warning}`. Retires the live member and wakes it on the same session at a new generation, so a delivery scope captured before is refused as stale. Core's retirement ends the member's wiring, so Meta wires the identity's managed edges (the roster's and the topology controller's) again at once, bounded, as a reset does; a re-wire that fails is logged and the next reconcile retries it. The atoms are `null` for a peer-only member. A side chat is refused (`-32602`, `side_chat_restart_refused`; see `meta/fork_member` above) |
@@ -978,11 +978,18 @@ manifest cannot be read.
 
 `wake_refusal` is `{code, session_id, remedy}`: `code` is `-32051` for a
 final refusal or `-32603` for a held one, and `remedy` is `delete_identity`,
-`repair_session`, `resolve_role_migration` or `operator_review`. A refusal
+`repair_session`, `resolve_role_migration` or `operator_review`. It is read
+from Core's facts: Core's durable resume hold of a member it holds Broken,
+Core's role hold (`resolve_role_migration`), or Core's last answer to a
+wake of the session Core binds the identity to now (a refusal of another
+session's wake, an incarnation a host replaced, is not shown). A refusal
 does not change the state of an identity Core holds as a member: it reads
 `active` (or `broken` while Core holds its member Broken), with the refusal
 on `wake_refusal`. An identity Core holds no member for reads `broken` after
-a final refusal and `dormant` after a held one. `replaced_session` was set
+a final refusal and `dormant` after a held one. The state and every Core
+fact of the status are read from Core's entry of the identity's name on each
+read (a status read during the runtime's shutdown reads Core's member as
+it is); a read Core could not serve answers `-32052`. `replaced_session` was set
 when Meta woke an identity on a fresh session because Core held no copy of
 its last one; Meta no longer does (Core decides an absent session: it
 repoints the member to a successor, or holds it Broken), so it is absent,

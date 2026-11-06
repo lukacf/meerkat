@@ -505,6 +505,16 @@ impl SessionBridge for RecordingResumeBridge {
         self.core.history()
     }
 
+    async fn identity_entry(
+        &self,
+        identity: &meerkat_meta::identity_first::AgentIdentity,
+    ) -> Result<
+        meerkat_meta::identity_first::CoreIdentityEntry,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        Ok(self.core.identity_entry(identity))
+    }
+
     async fn identity_management(
         &self,
         _identity: &AgentIdentity,
@@ -2112,6 +2122,16 @@ impl SessionBridge for CoreBackedBridge {
         &self,
     ) -> Result<meerkat_mob::MemberBindingHistory, BridgeError> {
         self.core.history()
+    }
+
+    async fn identity_entry(
+        &self,
+        identity: &meerkat_meta::identity_first::AgentIdentity,
+    ) -> Result<
+        meerkat_meta::identity_first::CoreIdentityEntry,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        Ok(self.core.identity_entry(identity))
     }
 
     async fn last_member_binding(

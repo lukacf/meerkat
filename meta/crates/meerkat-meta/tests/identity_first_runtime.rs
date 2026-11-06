@@ -629,6 +629,24 @@ impl CoreMembers {
             .cloned()
     }
 
+    /// Core's entry of `identity`'s name: no identity entry, with its live
+    /// member in Core's default runtime mode.
+    fn identity_entry(
+        &self,
+        identity: &AgentIdentity,
+    ) -> meerkat_meta::identity_first::CoreIdentityEntry {
+        let entry = meerkat_meta::identity_first::CoreIdentityEntry::not_an_entry();
+        match self.live(identity) {
+            Some(member) => entry.with_member(meerkat_meta::identity_first::CoreMember::seated(
+                member.generation,
+                member.session_id,
+                member.profile,
+                meerkat_mob::MobRuntimeMode::default(),
+            )),
+            None => entry,
+        }
+    }
+
     fn binding(&self, identity: &AgentIdentity, member: &CoreMember) -> meerkat_mob::MemberBinding {
         meerkat_mob::MemberBinding::for_test(
             meerkat_meta::member_comms_id::roster_member_id_for_identity(identity.as_str()),
@@ -913,8 +931,11 @@ struct CountingBridge {
     /// journaled for that cause, as Core's seal journals it.
     sealing: AtomicBool,
     /// The runtime mode Core runs an identity's member in
-    /// ([`Self::run_member_in`]); Core's default mode otherwise.
+    /// ([`Self::run_member_in`]); the mode Core spawned it in otherwise.
     core_runtime_modes: Mutex<BTreeMap<AgentIdentity, meerkat_mob::MobRuntimeMode>>,
+    /// The mode Core spawned each identity's member in: the spec's override,
+    /// or Core's default mode (no profile table here).
+    spawn_modes: Mutex<BTreeMap<AgentIdentity, meerkat_mob::MobRuntimeMode>>,
 }
 
 impl CountingBridge {
@@ -925,6 +946,15 @@ impl CountingBridge {
             .lock()
             .unwrap()
             .insert(identity.clone(), mode);
+    }
+
+    /// Core spawned `identity`'s member for `spec`: in its runtime mode
+    /// override, else Core's default mode.
+    fn spawned_for(&self, identity: &AgentIdentity, spec: &DurableAgentSpec) {
+        self.spawn_modes.lock().unwrap().insert(
+            identity.clone(),
+            spec.runtime_mode_override.unwrap_or_default(),
+        );
     }
 
     /// Core's entry read of `identity`, from the members Core holds: an
@@ -940,12 +970,14 @@ impl CountingBridge {
             meerkat_meta::identity_first::CoreIdentityEntry::not_an_entry()
         };
         if let Some(member) = self.core.live(identity) {
-            let mode = self
+            let pinned = self
                 .core_runtime_modes
                 .lock()
                 .unwrap()
                 .get(identity)
-                .copied()
+                .copied();
+            let mode = pinned
+                .or_else(|| self.spawn_modes.lock().unwrap().get(identity).copied())
                 .unwrap_or_default();
             read = read.with_member(meerkat_meta::identity_first::CoreMember::seated(
                 member.generation,
@@ -1213,6 +1245,7 @@ impl SessionBridge for CountingBridge {
                 session_id: None,
             };
             self.core.bind(identity, &binding, &spec.profile);
+            self.spawned_for(identity, spec);
             return Ok(binding);
         }
         *self.deliver_session_id.lock().await = Some(created_session_id.clone());
@@ -1221,6 +1254,7 @@ impl SessionBridge for CountingBridge {
             session_id: Some(created_session_id),
         };
         self.core.bind(identity, &binding, &spec.profile);
+        self.spawned_for(identity, spec);
         Ok(binding)
     }
 
@@ -1280,6 +1314,7 @@ impl SessionBridge for CountingBridge {
             },
             &spec.profile,
         );
+        self.spawned_for(identity, spec);
         Ok(
             meerkat_meta::identity_first::ResumeSessionOutcome::Resumed {
                 session_id: session_id.clone(),
@@ -1343,6 +1378,12 @@ impl SessionBridge for CountingBridge {
                 None => self.seat_fresh(&request).await,
                 Some(session_id) => self.seat_on_session(&request, session_id).await,
             };
+            if matches!(
+                result,
+                DormantSeatResult::Seated { .. } | DormantSeatResult::Embodied { .. }
+            ) {
+                self.spawned_for(&request.identity, &request.spec);
+            }
             results.push((request.identity.clone(), result));
         }
         Ok(results)
@@ -1391,6 +1432,7 @@ impl SessionBridge for CountingBridge {
             },
             &spec.profile,
         );
+        self.spawned_for(identity, spec);
         Ok(session_id)
     }
 
@@ -5057,6 +5099,16 @@ async fn identity_first_runtime_topology_materializes_runtime_peer_wires() {
             Ok(self.core.history())
         }
 
+        async fn identity_entry(
+            &self,
+            identity: &meerkat_meta::identity_first::AgentIdentity,
+        ) -> Result<
+            meerkat_meta::identity_first::CoreIdentityEntry,
+            meerkat_meta::identity_first::BridgeError,
+        > {
+            Ok(self.core.identity_entry(identity))
+        }
+
         async fn last_member_binding(
             &self,
             identity: &AgentIdentity,
@@ -5344,6 +5396,16 @@ async fn identity_first_runtime_topology_claims_persisted_wires_without_rebatchi
             &self,
         ) -> Result<meerkat_mob::MemberBindingHistory, BridgeError> {
             Ok(self.core.history())
+        }
+
+        async fn identity_entry(
+            &self,
+            identity: &meerkat_meta::identity_first::AgentIdentity,
+        ) -> Result<
+            meerkat_meta::identity_first::CoreIdentityEntry,
+            meerkat_meta::identity_first::BridgeError,
+        > {
+            Ok(self.core.identity_entry(identity))
         }
 
         async fn last_member_binding(

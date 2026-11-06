@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Breaking
 
+- `SessionBridge` has a new method, `identity_entry`: Core's entry of an
+  identity's name (`MobHandle::identity_entry`, read from the machine state
+  the mob's actor published: no store read, no actor command, no wake), as a
+  `CoreIdentityEntry`: how Core holds the name (`CoreNameKind`), the member
+  that holds it (`CoreMember`: generation, session, role, runtime mode,
+  retiring, and Core's Broken fact, `CoreBrokenMember`, with its durable
+  resume hold), the host preparation its entry owes and the session its last
+  member's retirement archived. Every view of an identity reads it (status,
+  statuses, member health, roster inspection, `is_active`, the bootstrap
+  snapshot), so does the choice of an identity's door and the memory
+  injection's runtime mode. Its default answers `BridgeError::Unsupported`:
+  over a bridge that does not implement it those reads refuse typed
+  (`-32052`), never stand in for Core's fact. A host's own wrapper of a
+  session bridge forwards it to the bridge it wraps.
+- `SessionBridge::broken_members` is removed: the views read Core's Broken
+  fact from `identity_entry`. An implementation drops the method.
+- `IdentityRuntime::is_active` returns `Result<bool, IdentityRuntimeError>`
+  and `IdentityRuntime::identity_bootstrap_member_ids` returns
+  `Result<Vec<meerkat_mob::AgentIdentity>, IdentityRuntimeError>`: a read
+  Core could not serve is typed (`IdentityHistoryUnavailable`,
+  `MemberHistoryUnavailable`), where it answered `false` and an empty list.
+  A caller handles the result.
+
 - Tokens minted with an `auth_config` shared secret (`provider: "jwt"`)
   are shared-account tokens unless the configuration declares
   `accounts: "personal"`: such a token identifies a principal and never
@@ -129,6 +152,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- An identity's views read Core's entry of its name: it is `active` while
+  Core holds its member (retiring, or during the runtime's shutdown too: the
+  views read no shutdown flag), `broken` while Core holds that member
+  Broken or refuses the identity's last declaration for good, or, while
+  Core holds no member of it, after Core refused its wake for good, and
+  `dormant` otherwise. `wake_refusal` is Core's: its durable resume hold of a
+  member it holds Broken, its role hold (`resolve_role_migration`), or its
+  last answer to a wake of the session it binds the identity to now. A
+  refusal of another session's wake (an incarnation a host replaced) is not
+  shown, and a member Core holds Broken without a hold shows none.
+- The status `runtime_mode` is the mode Core runs the identity's member in,
+  `null` while Core holds no member of it, where it was the roster's
+  `runtime_mode_override`. Ambient memory follows the same mode, where it
+  followed the roster's override or profile table.
+- A name Core holds as an identity entry takes its identity's door (a send,
+  a member mutation, a schedule fire) even before this process's roster pass
+  registered the identity: the door refuses it `-32052`
+  (`identity_history_unavailable`, retryable) until the pass registers it,
+  and nothing reaches the member door. A read of Core's entry Core could not
+  serve refuses the send the same way.
+- A schedule fire's refusal class reads Core's entry of the identity: a
+  member Core holds Broken ends the fire typed, and a read Core could not
+  serve leaves it reclaimable.
+
 - Registering an identity (`IdentityRuntime::register`) or updating its spec
   (`update_spec`) declares it in Core's mob as a one-identity roster: Core's
   MobMachine decides what becomes of the identity's member and Core realizes
@@ -190,6 +237,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   by the previous matched release holds none.
 
 ### Fixed
+
+- A status read over a bridge that cannot read Core's entry of the identity
+  refuses typed, where a member Core held Broken read `active`; `statuses`
+  and roster inspection refuse typed when one identity's read fails, where
+  they left the identity out. A final refusal of a wake no longer reads an
+  identity `broken` after a host seated its member again outside Meta, and a
+  status read during shutdown no longer reads a live member `dormant`.
+- The console's identity inspection, retire, resolved tools and routing
+  status refuse typed on a status read Core could not serve, where they left
+  the identity out of the match or answered from the member plane. The
+  roster pass refuses an identity typed (`-32052`) when Core's member history
+  cannot be read after its declaration, where it read the identity Dormant.
 
 - The exit interview a retirement no Meta verb asked for owes (Core's seal
   unlisted the identity) is queued once when the process stops inside the

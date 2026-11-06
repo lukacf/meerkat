@@ -150,6 +150,51 @@ describe("storage hygiene", () => {
     expect(screen.getByTestId("meerkat-console").getAttribute("data-cc-theme")).toBe("dark");
   });
 
+  it("roster_sections_are_per_user", async () => {
+    const state: { caller: Caller } = { caller: "a" };
+    let view = render(<ConsoleApp baseUrl="" transport={transport(state)} />);
+    const section = await waitFor(() => {
+      const toggle = document.querySelector<HTMLElement>('[data-testid^="sidebar-section-toggle:"]');
+      expect(toggle).not.toBeNull();
+      return toggle!.getAttribute("data-testid")!;
+    });
+    expect(screen.getByTestId(section).getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(screen.getByTestId(section));
+    expect(screen.getByTestId(section).getAttribute("aria-expanded")).toBe("false");
+    view.unmount();
+    // b, on the same browser, finds the roster as arranged by default.
+    state.caller = "b";
+    view = render(<ConsoleApp baseUrl="" transport={transport(state)} />);
+    await screen.findByTestId(`chat-composer:${identity}`);
+    expect((await screen.findByTestId(section)).getAttribute("aria-expanded")).toBe("true");
+    view.unmount();
+    state.caller = "a";
+    render(<ConsoleApp baseUrl="" transport={transport(state)} />);
+    await screen.findByTestId(`chat-composer:${identity}`);
+    await waitFor(() => expect(screen.getByTestId(section).getAttribute("aria-expanded")).toBe("false"));
+  });
+
+  it("a preference an earlier console kept for every user is read once", async () => {
+    // An earlier console kept the theme for everyone using this browser.
+    window.localStorage.setItem("meta-console-theme", "dark");
+    const state: { caller: Caller } = { caller: "a" };
+    let view = render(<ConsoleApp baseUrl="" transport={transport(state)} />);
+    await screen.findByTestId(`chat-composer:${identity}`);
+    expect(screen.getByTestId("meerkat-console").getAttribute("data-cc-theme")).toBe("dark");
+    // The first user to load adopts it; the shared copy goes.
+    expect(window.localStorage.getItem("meta-console-theme")).toBeNull();
+    view.unmount();
+    state.caller = "b";
+    view = render(<ConsoleApp baseUrl="" transport={transport(state)} />);
+    await screen.findByTestId(`chat-composer:${identity}`);
+    await waitFor(() => expect(screen.getByTestId("meerkat-console").getAttribute("data-cc-theme")).toBe("light"));
+    view.unmount();
+    state.caller = "a";
+    render(<ConsoleApp baseUrl="" transport={transport(state)} />);
+    await screen.findByTestId(`chat-composer:${identity}`);
+    await waitFor(() => expect(screen.getByTestId("meerkat-console").getAttribute("data-cc-theme")).toBe("dark"));
+  });
+
   it("host_namespace_is_combined_with_storage_scope", async () => {
     const state: { caller: Caller } = { caller: "a" };
     let view = render(<ConsoleApp baseUrl="" storageNamespace="host-namespace" transport={transport(state)} />);

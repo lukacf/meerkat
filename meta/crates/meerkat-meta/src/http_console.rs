@@ -3185,6 +3185,10 @@ mod console_schedule_tests;
 mod console_actor_tests;
 
 #[cfg(test)]
+#[path = "console_audit_tests.rs"]
+mod console_audit_tests;
+
+#[cfg(test)]
 async fn console_send_identity_first(
     aggregator: &MetaConsoleAggregator,
     identity_runtime: Arc<crate::identity_first::IdentityRuntime>,

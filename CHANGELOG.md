@@ -35,6 +35,104 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-runtime`:
+  the MeerkatMachine gains a host's recovery hold and its settle of the run
+  a session retained (see Added). `RunStartHoldReason` (meerkat-machine-schema
+  `catalog::dsl::meerkat_machine` and the kernel `generated::meerkat`) gains
+  `HostRecovery`, appended last; the runtime's `RunStartHoldReason` and the
+  mob's `HostRunStartHoldReason` are `#[non_exhaustive]`. `MeerkatMachineInput`
+  and `MeerkatMachineInputVariant` (meerkat-runtime `meerkat_machine::dsl` and
+  meerkat-machine-schema `catalog::dsl::meerkat_machine`),
+  `MeerkatMachineRuntimeInternalInput` (meerkat-runtime) and the kernel
+  `generated::meerkat::Input` and `InputKind` gain
+  `SettleRetainedRun { run_id }`, appended last. `MeerkatMachineEffect` and
+  `MeerkatMachineEffectVariant` (the same two modules) and the kernel
+  `Effect` and `EffectKind` gain `RetainedRunSettleResolved { verdict,
+  run_id }`, appended last. The kernel `generated::meerkat::TransitionId`
+  gains the settle's 23 arms, appended last: `SettleRetainedRunAcceptedIdle`,
+  `SettleRetainedRunAcceptedAttached`,
+  `SettleRetainedRunBusyRunCurrentInitializing`,
+  `SettleRetainedRunBusyRunCurrentIdle`,
+  `SettleRetainedRunBusyRunCurrentAttached`,
+  `SettleRetainedRunBusyRunCurrentRunning`,
+  `SettleRetainedRunBusyRunCurrentRetired`,
+  `SettleRetainedRunBusyRunCurrentStopped`,
+  `SettleRetainedRunBusyDrainingIdle`, `SettleRetainedRunBusyDrainingAttached`,
+  `SettleRetainedRunBusyStaleRunIdle`, `SettleRetainedRunBusyStaleRunAttached`,
+  `SettleRetainedRunBusyNotServingInitializing`,
+  `SettleRetainedRunBusyNotServingRunning`,
+  `SettleRetainedRunBusyNotServingRetired`,
+  `SettleRetainedRunBusyNotServingStopped`,
+  `SettleRetainedRunNotRetainedInitializing`,
+  `SettleRetainedRunNotRetainedIdle`, `SettleRetainedRunNotRetainedAttached`,
+  `SettleRetainedRunNotRetainedRunning`, `SettleRetainedRunNotRetainedRetired`,
+  `SettleRetainedRunNotRetainedStopped` and `SettleRetainedRunInertDestroyed`.
+  An exhaustive match needs their arms.
+
+### Added
+
+- `meerkat-runtime`, `meerkat-mob`: a host settles the run a session
+  retained, without resuming it and without a model request, for an app's
+  Recover flow. `RunStartHoldReason::HostRecovery` (in the mob,
+  `HostRunStartHoldReason::HostRecovery`) is a run-start hold only its host
+  stages and releases: no mob or Meta path stages or releases it, so a
+  release of the tools hold or a mob Resume leaves it standing; a retire or
+  destroy of the member drops what the host staged for it.
+  `MeerkatMachine::settle_retained_run(&session_id)` and
+  `MobHandle::settle_member_retained_run(&identity)` answer
+  `RetainedRunSettlement`, and the machine decides the verdict (the
+  MeerkatMachine input `SettleRetainedRun`, the effect
+  `RetainedRunSettleResolved` and the enum `RetainedRunSettleVerdict`):
+  - `Settled { run_id, inputs }`, read under the session's mutation gate
+    after the settlement committed: the registration no longer keeps the
+    run, which was closed as interrupted with its committed rounds kept, and
+    every input bound to it holds its committed terminal
+    (`RetainedRunSettledInput { input_id, terminal }`,
+    `Abandoned { Cancelled }`).
+  - `NotRetained` when nothing is kept, which is also the answer to a retry
+    after the settle.
+  - `Busy { current_run_id: Some(_) }` when a run is current, which is never
+    stopped; `Busy { current_run_id: None }` when the registration cannot
+    settle the run now (it initializes, drains for its unregister, retired
+    or stopped): the host keeps its hold and settles again.
+  - A settlement that did not commit answers the registration's refusal,
+    never `Settled`: a durability reload refusal when its write failed (the
+    reload loses the stop, so the host keeps its hold, reloads and settles
+    again), and the refusal of a session that leaves the process when
+    another writer took its store fence, or when an unregister ended the run
+    first (its inputs then end `Abandoned { Stopped }`).
+  A repeat that arrives while the settle is pending joins it. The mob verb
+  never wakes a member, and answers typed refusals: `MemberNotFound`,
+  `MemberSessionNotLive` (not live in this process: dormant, gone, or leaving
+  through its unregister), `MemberReloadRequired` (its registration needs a
+  durability reload) and `UnsupportedForMode` (a placed member). The
+  durable-runs guide has the Recover recipe: hold, wake, settle, release on
+  every path that leaves no open run.
+- `meerkat-runtime`: `MeerkatMachine::session_work_state(&session_id)` reads
+  cold whether one session holds the work a start wakes a member for,
+  without loading its body or registering it, so a dormant mob member stays
+  dormant: `Registered` (read it live), `Idle`,
+  `HoldsWork(SessionDurableWork { recovery_work, pending_deliveries })`,
+  or `Unobserved(cause)` when the store cannot tell (never a guessed idle).
+  A compaction projection the session still owes is not reported: the
+  member's next wake finalizes it.
+  `RuntimeStore::runtime_holds_recovery_work(&runtime_id)` answers the mob
+  boot's recovery-work predicate for one runtime; its default answers
+  through the store-wide scan, and the SQLite and in-memory stores answer it
+  for the one runtime.
+
+### Fixed
+
+- Docs: the durable-runs guide and the platform skill's sessions reference
+  said a run that resumes from a committed round still gets the
+  tool-process recovery notice for a foreground shell call. The call's
+  `outcome_uncertain` result answers it, whether the run resumes or is
+  closed as interrupted, and no `tool_process_interrupted` block is added
+  for it; a background shell job, a monitor or a command hook keeps the
+  notice.
+
 ## [0.9.10] - 2026-11-04
 
 ### Highlights

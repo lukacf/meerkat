@@ -828,6 +828,7 @@ pub struct ToolExecutionOwnerWitness {
     owner_key: String,
     binding_fingerprint: EphemeralToolBindingFingerprint,
     operation_target: Option<ToolOperationTarget>,
+    request_digest: Option<crate::approval::decision::Sha256Digest>,
 }
 
 /// Typed, nonsecret identity of the exact operation an execution owner
@@ -1026,6 +1027,31 @@ impl ToolOperationTarget {
     }
 }
 
+/// The digest of one MCP call's exact request: SHA-256 of the RFC 8785
+/// canonical JSON ([`crate::canonical_json::canonical_json`]) of
+/// `{"server": server, "tool": tool, "arguments": arguments}`, with `tool`
+/// the server's raw operation. The one derivation every owner of such a
+/// request uses (the MCP router for a call, an access offer for the request
+/// it holds), so two requests have one digest exactly when their server,
+/// tool and arguments are equal as JSON values, whatever the order of their
+/// members or the form of their numbers. `None` for arguments with no
+/// canonical form (an integer a double cannot hold exactly): such a call
+/// matches no grant bound to one exact request.
+#[must_use]
+pub fn mcp_request_digest(
+    server: &str,
+    tool: &str,
+    arguments: &serde_json::Value,
+) -> Option<crate::approval::decision::Sha256Digest> {
+    let request = serde_json::json!({
+        "server": server,
+        "tool": tool,
+        "arguments": arguments,
+    });
+    crate::canonical_json::canonical_json(&request)
+        .map(|text| crate::approval::decision::Sha256Digest::of(text.as_bytes()))
+}
+
 /// The catalog control plane's operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1088,6 +1114,7 @@ impl ToolExecutionOwnerWitness {
             owner_key,
             binding_fingerprint,
             operation_target: None,
+            request_digest: None,
         })
     }
 
@@ -1102,6 +1129,23 @@ impl ToolExecutionOwnerWitness {
     /// the owner produces one.
     pub fn operation_target(&self) -> Option<&ToolOperationTarget> {
         self.operation_target.as_ref()
+    }
+
+    /// This witness's owner states `digest` as the digest of the call's
+    /// exact request (for an MCP server operation, [`mcp_request_digest`]
+    /// over its server, raw operation and arguments). A fact for the
+    /// operation policy owner, like the target: a grant bound to one exact
+    /// request matches only a call whose owner states its digest.
+    #[must_use]
+    pub fn with_request_digest(mut self, digest: crate::approval::decision::Sha256Digest) -> Self {
+        self.request_digest = Some(digest);
+        self
+    }
+
+    /// The digest of the call's exact request, when this witness's owner
+    /// states one.
+    pub fn request_digest(&self) -> Option<&crate::approval::decision::Sha256Digest> {
+        self.request_digest.as_ref()
     }
 
     pub fn authority_key(&self) -> &str {
@@ -2025,6 +2069,31 @@ impl ResolvedToolExecutionPlan {
             .filter_map(ToolExecutionOwnerWitness::operation_target);
         match (targets.next(), targets.next()) {
             (target, None) => Ok(target),
+            (_, Some(_)) => Err(crate::authorization::OperationAuthorizationError::Unavailable),
+        }
+    }
+
+    /// The digest of the call's exact request that the owner of this plan's
+    /// one operation target states with it ([`Self::single_operation_target`]),
+    /// if it states one. `None` for a plan without a target, and for an
+    /// owner that states no digest: a grant bound to one exact request never
+    /// matches such a call.
+    ///
+    /// # Errors
+    /// A plan whose owners name more than one target is ambiguous and
+    /// unavailable, as for [`Self::single_operation_target`].
+    pub fn single_operation_request_digest(
+        &self,
+    ) -> Result<
+        Option<&crate::approval::decision::Sha256Digest>,
+        crate::authorization::OperationAuthorizationError,
+    > {
+        let mut witnesses = self
+            .owner_witnesses
+            .iter()
+            .filter(|witness| witness.operation_target().is_some());
+        match (witnesses.next(), witnesses.next()) {
+            (witness, None) => Ok(witness.and_then(ToolExecutionOwnerWitness::request_digest)),
             (_, Some(_)) => Err(crate::authorization::OperationAuthorizationError::Unavailable),
         }
     }

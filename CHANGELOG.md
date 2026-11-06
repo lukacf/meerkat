@@ -363,6 +363,26 @@ them.
   rule, the terms, the uses and the spend, across a restart from the
   journal and two concurrent attempts.
 
+- `meerkat-core`, `meerkat-mcp`, `meerkat-authorization`: a grant bound to
+  one exact MCP operation. `meerkat_core::canonical_json::canonical_json` is
+  RFC 8785 canonical JSON (members sorted by UTF-16 code units, ECMAScript
+  number and string forms; no canonical form, `None`, for an integer a
+  double cannot hold exactly), and `meerkat_core::mcp_request_digest` the
+  digest of one MCP call's exact request: SHA-256 of the canonical JSON of
+  its server, raw operation and arguments. The MCP router states it with
+  each call's operation target, on its ordinary and its checked routes
+  (`ToolExecutionOwnerWitness::with_request_digest` and `request_digest`,
+  read through `ResolvedToolExecutionPlan::single_operation_request_digest`),
+  and a plan is dispatched only for a call with the same digest. A governed
+  MCP call's grant use names its exact operation
+  (`grant_policy::operation_request_binding`: its target, the action
+  `mcp`/its raw operation, `grants::mcp_operation_binding`, and the
+  digest), so a grant that binds one exact operation serves only a call of
+  exactly that request: a call of another request, or one whose owner
+  states no digest, is refused at its preparation, before any entry, and
+  spends nothing. `grant_child_terms_digest` is over the terms' RFC 8785
+  canonical JSON.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the

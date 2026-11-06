@@ -145,20 +145,46 @@ impl GrantChildTerms {
     }
 }
 
-/// The digest of `terms`: SHA-256 of their canonical JSON, under the format
-/// `grant.child.terms.v1`. The one function both the access offer (for its
-/// held request) and the grant owner (for the record it issues) use, so the
-/// two are equal exactly when the issued terms are the approved ones.
-/// `None` only if the terms cannot be encoded.
+/// The digest of `terms`: SHA-256 of the RFC 8785 canonical JSON of the
+/// terms under the format `grant.child.terms.v1`. The one function both the
+/// access offer (for its held request) and the grant owner (for the record
+/// it issues) use, so the two are equal exactly when the issued terms are
+/// the approved ones. `None` only if the terms cannot be encoded.
 #[must_use]
 pub fn grant_child_terms_digest(terms: &GrantChildTerms) -> Option<Sha256Digest> {
     let canonical = CanonicalTerms {
         format: "grant.child.terms.v1",
         terms,
     };
-    serde_json::to_vec(&canonical)
-        .ok()
-        .map(|bytes| Sha256Digest::of(&bytes))
+    let value = serde_json::to_value(&canonical).ok()?;
+    meerkat_core::canonical_json::canonical_json(&value)
+        .map(|text| Sha256Digest::of(text.as_bytes()))
+}
+
+/// The feature of the action an MCP operation binding names: the raw
+/// operation is the action.
+pub const MCP_OPERATION_FEATURE: &str = "mcp";
+
+/// The binding of one exact MCP operation, as a grant that serves only that
+/// operation states it and as each call's use is resolved with it: the
+/// grant target the call's lineage is selected by (`target`: its server, or
+/// the checked route to it), the action `mcp`/`raw_operation`, and the
+/// digest of the exact request ([`meerkat_core::mcp_request_digest`] over
+/// the server, the raw operation and the arguments).
+#[must_use]
+pub fn mcp_operation_binding(
+    target: meerkat_authorization_contracts::work_association::GrantTarget,
+    raw_operation: &str,
+    request_digest: Sha256Digest,
+) -> GrantOperationBinding {
+    GrantOperationBinding {
+        target,
+        action: ActionRef {
+            feature: MCP_OPERATION_FEATURE.to_string(),
+            action: raw_operation.to_string(),
+        },
+        request_digest,
+    }
 }
 
 /// The terms digest an issuance gives the generated owner: the approval's

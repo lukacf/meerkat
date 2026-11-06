@@ -30,7 +30,8 @@ pub(crate) mod dsl;
 mod durable;
 mod reconstruction;
 pub use approval::{
-    ApprovalChildRefusal, ConsumeUseRefusal, GrantChildTerms, GrantUse, grant_child_terms_digest,
+    ApprovalChildRefusal, ConsumeUseRefusal, GrantChildTerms, GrantUse, MCP_OPERATION_FEATURE,
+    grant_child_terms_digest, mcp_operation_binding,
 };
 pub use dsl::{
     ChildApprovalRule, GrantApproval, GrantDecisionAssurance, GrantDecisionTier, GrantDeviceTrust,

@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::RwLock as AsyncRwLock;
 
+use crate::router::call_request_digest;
 use crate::{McpApplyResult, McpError, McpReloadTarget, McpRouter};
 use meerkat_core::McpServerConfig;
 use meerkat_core::mcp_attachment::McpAttachmentAuthority;
@@ -528,9 +529,10 @@ impl McpRouterAdapter {
     fn owner_witness(
         &self,
         router: &McpRouter,
-        tool_name: &str,
+        call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolExecutionOwnerWitness, meerkat_core::ToolExecutionResolutionError>
     {
+        let tool_name = call.name;
         let fingerprint = self
             .live_binding_fingerprint(router, tool_name)
             .ok_or_else(|| meerkat_core::ToolExecutionResolutionError::NotFound {
@@ -543,25 +545,40 @@ impl McpRouterAdapter {
         )
         .map_err(meerkat_core::ToolExecutionResolutionError::from)?;
         // The exact server registration and raw operation, under the same
-        // router read: the operation owner's fact, revalidated at dispatch.
+        // router read, and the digest of the call's exact request: the
+        // operation owner's facts, revalidated at dispatch.
         Ok(match router.operation_target(tool_name) {
-            Some(target) => witness.with_operation_target(target),
+            Some(target) => {
+                let digest = call_request_digest(&target, call);
+                let witness = witness.with_operation_target(target);
+                match digest {
+                    Some(digest) => witness.with_request_digest(digest),
+                    None => witness,
+                }
+            }
             None => witness,
         })
     }
 
     /// The plan's operation target is still the one this live router
     /// resolves the call to (same server registration, connection
-    /// generation and raw operation).
+    /// generation and raw operation), with the digest of this call's exact
+    /// request.
     fn operation_target_matches(
         &self,
         router: &McpRouter,
-        tool_name: &str,
+        call: ToolCallView<'_>,
         plan: &meerkat_core::ResolvedToolExecutionPlan,
     ) -> bool {
         plan.owner_witness(&self.execution_authority_key())
             .is_some_and(|witness| {
-                witness.operation_target() == router.operation_target(tool_name).as_ref()
+                let live = router.operation_target(call.name);
+                witness.operation_target() == live.as_ref()
+                    && witness.request_digest()
+                        == live
+                            .as_ref()
+                            .and_then(|target| call_request_digest(target, call))
+                            .as_ref()
             })
     }
 
@@ -1650,7 +1667,7 @@ impl AgentToolDispatcher for McpRouterAdapter {
                     call.name,
                     self.live_binding_fingerprint(router, call.name),
                     plan,
-                ) || !self.operation_target_matches(router, call.name, plan)
+                ) || !self.operation_target_matches(router, call, plan)
                 {
                     return Err(ToolError::unavailable(
                         call.name,
@@ -1727,7 +1744,7 @@ impl AgentToolDispatcher for McpRouterAdapter {
                     dispatch_context,
                     resolution_context,
                 )?
-                .with_owner_witness(self.owner_witness(router, call.name)?),
+                .with_owner_witness(self.owner_witness(router, call)?),
                 None => Err(meerkat_core::ToolExecutionResolutionError::Unavailable {
                     tool_name: call.name.to_string(),
                     reason: meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
@@ -2925,7 +2942,7 @@ mod tests {
         {
             let guard = adapter.router.read().await;
             let router = guard.as_ref().expect("router");
-            assert!(adapter.operation_target_matches(router, "echo", &plan));
+            assert!(adapter.operation_target_matches(router, call, &plan));
             // A plan whose target is not the live router's is not dispatched.
             // (A synthetic stale-generation comparison, not a held
             // asynchronous replacement.)
@@ -3118,7 +3135,7 @@ mod tests {
             let guard = adapter.router.read().await;
             let router = guard.as_ref().expect("router");
             assert!(
-                !adapter.operation_target_matches(router, "echo", &before),
+                !adapter.operation_target_matches(router, call, &before),
                 "a plan resolved on the replaced binding is not the live router's"
             );
         }

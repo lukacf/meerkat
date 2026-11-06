@@ -890,6 +890,32 @@ impl SurfaceOwner {
     }
 }
 
+/// The digest of `call`'s exact request on the MCP operation `target`
+/// resolves it to ([`meerkat_core::mcp_request_digest`] over the target's
+/// server, its raw operation and the call's arguments), or `None` for a
+/// target of no MCP server, and for arguments that are not JSON or have no
+/// canonical form.
+pub(crate) fn call_request_digest(
+    target: &meerkat_core::ToolOperationTarget,
+    call: ToolCallView<'_>,
+) -> Option<meerkat_core::approval::decision::Sha256Digest> {
+    let (meerkat_core::ToolOperationTarget::McpServerOperation {
+        server,
+        raw_operation,
+        ..
+    }
+    | meerkat_core::ToolOperationTarget::CheckedMcpServerOperation {
+        server,
+        raw_operation,
+        ..
+    }) = target
+    else {
+        return None;
+    };
+    let arguments: Value = serde_json::from_str(call.args.get()).ok()?;
+    meerkat_core::mcp_request_digest(server, raw_operation, &arguments)
+}
+
 /// Release exactly `held`'s lineages on `handle`. The surface clears
 /// whichever staged, pending or active slot still carries exactly that
 /// lineage and refuses the rest. Releasing an active slot can also cancel a

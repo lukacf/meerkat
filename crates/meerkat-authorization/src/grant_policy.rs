@@ -37,6 +37,60 @@ pub fn single_tool_operation_target(
     plan.single_operation_target()
 }
 
+/// The exact operation a dispatched MCP call makes, as a grant that binds
+/// one exact operation states it ([`crate::grants::mcp_operation_binding`]):
+/// the call's grant target (its server, or the checked route to it), its raw
+/// operation, and the digest of its exact request that the call's owner
+/// states with its target. `None` for every other operation, for a delegate's
+/// operation, for a plan whose owners name more than one target, and for an
+/// MCP call whose owner states no digest: such a use never matches a grant
+/// bound to one exact operation, and changes nothing for any other grant.
+#[must_use]
+pub fn operation_request_binding(
+    binding: &PreparedAuthorizationBinding,
+) -> Option<crate::grants::GrantOperationBinding> {
+    if binding.delegate_attribution().is_some() {
+        return None;
+    }
+    let AuthorizationOperation::Tool(tool) = &binding.facts().operation else {
+        return None;
+    };
+    let ToolAuthorizationTarget::Dispatcher(plan) = &tool.target else {
+        return None;
+    };
+    let (target, raw_operation) = match plan.single_operation_target().ok()?? {
+        ToolOperationTarget::McpServerOperation {
+            server,
+            raw_operation,
+            ..
+        } => (
+            GrantTarget::McpServer {
+                server: server.clone(),
+            },
+            raw_operation,
+        ),
+        ToolOperationTarget::CheckedMcpServerOperation {
+            route,
+            server,
+            raw_operation,
+            ..
+        } => (
+            GrantTarget::CheckedMcpRoute {
+                route: route.clone(),
+                server: server.clone(),
+            },
+            raw_operation,
+        ),
+        _ => return None,
+    };
+    let digest = plan.single_operation_request_digest().ok()??;
+    Some(crate::grants::mcp_operation_binding(
+        target,
+        raw_operation,
+        digest.clone(),
+    ))
+}
+
 /// The typed target an operation's grant lineage is selected by: the single
 /// MCP server a dispatched tool operates on, the exact checked route to that
 /// server it was reached through, the exact registered tool bundle operation
@@ -677,7 +731,8 @@ impl GrantBackedWorkPolicy {
         } else {
             // An operation's lineage is resolved for this work's use: a leaf
             // that carries an approval serves only its own requester and
-            // work.
+            // work, and only the exact operation it binds.
+            let operation = operation_request_binding(binding);
             self.grants.resolve_lineage_with_use_observed(
                 lineage,
                 &candidate.logical_executor,
@@ -685,7 +740,7 @@ impl GrantBackedWorkPolicy {
                 crate::grants::GrantUse {
                     requester: &candidate.requester,
                     work: &candidate.original_work,
-                    operation: None,
+                    operation: operation.as_ref(),
                 },
             )
         };

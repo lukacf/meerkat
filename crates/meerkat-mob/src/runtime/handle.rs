@@ -1511,12 +1511,7 @@ pub enum MemberPreviewUnavailable {
     /// reopened (a host store whose scope of the session, or whose realm,
     /// is poisoned). The refusal is recorded: later status reads answer from
     /// it without reading the session again, and a wait on the member ends
-    /// with it ([`MobHandle::wait_one`]).
-    ///
-    /// Its wire value is `read_failed`, the value a client that predates it
-    /// knows: it serializes as `read_failed`, and nothing deserializes into
-    /// it.
-    #[serde(rename(serialize = "read_failed"), skip_deserializing)]
+    /// with it ([`MobHandle::wait_one`]). Its wire value is `store_refused`.
     StoreRefused,
 }
 
@@ -1784,7 +1779,7 @@ fn wire_registration_hook_call(
     }
 }
 
-/// Project a domain [`MemberPreviewUnavailable`] into its closed wire twin.
+/// Project a domain [`MemberPreviewUnavailable`] into its wire twin.
 fn wire_preview_unavailable(
     marker: MemberPreviewUnavailable,
 ) -> meerkat_contracts::WireMemberPreviewUnavailable {
@@ -1792,10 +1787,11 @@ fn wire_preview_unavailable(
         MemberPreviewUnavailable::ObservationDeadline => {
             meerkat_contracts::WireMemberPreviewUnavailable::ObservationDeadline
         }
-        // A store refusal until the realm reopens is a failed read on the
-        // wire, whose closed vocabulary has no value of its own for it.
-        MemberPreviewUnavailable::ReadFailed | MemberPreviewUnavailable::StoreRefused => {
+        MemberPreviewUnavailable::ReadFailed => {
             meerkat_contracts::WireMemberPreviewUnavailable::ReadFailed
+        }
+        MemberPreviewUnavailable::StoreRefused => {
+            meerkat_contracts::WireMemberPreviewUnavailable::StoreRefused
         }
         MemberPreviewUnavailable::SessionAbsent => {
             meerkat_contracts::WireMemberPreviewUnavailable::SessionAbsent
@@ -22190,6 +22186,10 @@ mod tests {
     /// leaves the process in a snapshot.
     #[test]
     fn a_store_refused_preview_is_store_refused_on_the_wire() {
+        assert_eq!(
+            wire_preview_unavailable(MemberPreviewUnavailable::StoreRefused),
+            meerkat_contracts::WireMemberPreviewUnavailable::StoreRefused
+        );
         assert_eq!(
             serde_json::to_value(wire_preview_unavailable(
                 MemberPreviewUnavailable::StoreRefused

@@ -7354,7 +7354,7 @@ WireNonPortableResourceKind = Literal['rust_bundles', 'per_spawn_external_tools'
 
 # Why a member status read carries no observation of the member's session
 # view.
-WireMemberPreviewUnavailable = Literal['observation_deadline', 'read_failed', 'session_absent', 'not_observed_while_retiring']
+WireMemberPreviewUnavailable = Literal['observation_deadline', 'read_failed', 'session_absent', 'not_observed_while_retiring', 'store_refused']
 
 # The member registration hook call that refused a restored member's
 # registration.

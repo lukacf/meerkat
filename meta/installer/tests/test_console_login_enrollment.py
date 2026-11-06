@@ -10,7 +10,7 @@ import pytest
 
 from launchkit.templates_v2 import console_auth
 from launchkit.templates_v2.console_auth import AUDIENCE, ISSUER, ConsoleFront
-from test_console_auth import login
+from test_console_auth import login, named as named_options
 
 
 class EnrollmentOwner:
@@ -88,7 +88,7 @@ async def entered(event):
 
 @asynccontextmanager
 async def boundary(tmp_path, monkeypatch, configure=None, factory_failure=False,
-                   review_factory=None, upstream=None):
+                   review_factory=None, upstream=None, named=False):
     owners, contexts, forwarded, minted, tasks = [], [], [], [], []
     original_token = console_auth._token
 
@@ -110,9 +110,10 @@ async def boundary(tmp_path, monkeypatch, configure=None, factory_failure=False,
     def native(request):
         forwarded.append(request)
         return upstream(request) if upstream else httpx.Response(200, content=b"synthetic native response")
+    # A named account is one person; the console fixture answers sign-out.
     front = ConsoleFront(tmp_path, 8855, "local-user", "local-password-123",
         console_login_factory=factory, controller_review_factory=review_factory,
-        transport=httpx.MockTransport(native))
+        **(named_options(native) if named else {"transport": httpx.MockTransport(native)}))
     app = front.application("http://127.0.0.1:61347")
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
@@ -376,7 +377,8 @@ async def test_original_review_selection_waits_for_same_login_ack_and_never_ente
         review = Review(context)
         reviews.append(review)
         return review
-    async with boundary(tmp_path, monkeypatch, review_factory=review_factory) as (client, front, owners, contexts, forwarded, minted, tasks):
+    # Only a person's login starts the review: an account people share decides nothing.
+    async with boundary(tmp_path, monkeypatch, review_factory=review_factory, named=True) as (client, front, owners, contexts, forwarded, minted, tasks):
         await login(client, front)
         actual, owner = front._logins[client.cookies[front.cookie]], owners[0]
         await entered(owner.ready_entered)
@@ -398,7 +400,8 @@ async def test_original_review_selection_waits_for_same_login_ack_and_never_ente
             assert selected[0].expires_at_ms == int(actual.expires * 1000)
             assert selected[0].is_current() is True
         assert owner.task.result() is owner.original and owner.start_calls == 1
-        assert forwarded == minted == []
+        # Nothing was forwarded; a logout's console sign-out is the one token minted.
+        assert forwarded == [] and len(minted) == (1 if retire_before_ack else 0)
 
 
 async def test_forwarded_finite_response_hides_private_body_and_etag_after_source_currentness_changes(tmp_path, monkeypatch):

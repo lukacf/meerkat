@@ -496,9 +496,6 @@ class _ConsoleLogin:
     connect_start: asyncio.Task | None = None
     connect_close: asyncio.Task | None = None
     connect_failure: str | None = None
-    controller_review: object = None
-    controller_review_close: asyncio.Task | None = None
-    controller_review_failure: str | None = None
     controller_review_start: asyncio.Task | None = None
     console_login_required: bool = False
     console_login: object = None
@@ -585,10 +582,15 @@ class ConsoleFront:
         if console_login_factory is not None and not callable(console_login_factory):
             raise ValueError("The Console login factory must be application-owned and callable.")
         self.console_login_factory = console_login_factory
-        # One pending application-owned review in this host lifetime. A new
-        # browser login must not retry an unknown or retired native invocation.
+        # One application-owned review in this host lifetime, started at the
+        # first ready login of a person and kept by the front, not by that
+        # login: any administrator's login answers it, also after that login
+        # ends. A new login never retries an unknown or retired invocation.
         self._controller_review_created = False
         self._controller_review_owner = None
+        self._controller_review_failure = None
+        self._controller_review_pending = None
+        self._controller_review_close = None
         self.frontend_management = self.frontend_host = None
         self.frontend_private_fields = ()
         self.client = self.server = self.task = self.listener = None
@@ -657,8 +659,8 @@ class ConsoleFront:
                 login.console_login.revoke()
             except Exception:
                 login.console_login_revoke_failed = True
-        if login.controller_review is not None:
-            login.controller_review.revoke()
+        # The controller review is the host lifetime's, not this login's: the
+        # administrators' other logins keep it after this one ends.
         if login.retirement_task is None:
             login.retirement_task = asyncio.create_task(self._finish_login(login, reason))
             # Keep cleanup failures available to logout/close, without logging
@@ -698,8 +700,7 @@ class ConsoleFront:
         return isinstance(result, dict) and result.get("login") == "session"
 
     async def _finish_login(self, login, reason):
-        fences = [asyncio.create_task(owner.retire(reason))
-                  for owner in (login.connect, login.controller_review) if owner is not None]
+        fences = [asyncio.create_task(login.connect.retire(reason))] if login.connect is not None else []
         if login.console_login is not None:
             fences.append(asyncio.create_task(self._retire_native_login(login, "retire", reason)))
         if login.expiry_task and not login.expiry_task.done():
@@ -725,7 +726,7 @@ class ConsoleFront:
         if login.console_login_revoke_failed or any(isinstance(result, BaseException) for result in fenced):
             raise RuntimeError("Console access retirement is unconfirmed.")
         login.subscriptions.clear()
-        if login.connect is None and login.controller_review is None and login.console_login is None:
+        if login.connect is None and login.console_login is None:
             self._logins.pop(login.session, None)
         # A retirement ACK fences new work, but does not settle entered work or
         # join the child. Keep this retired login's private custody until close.
@@ -884,20 +885,26 @@ class ConsoleFront:
             raise RuntimeError("MCP sign-in cleanup is unconfirmed.")
 
     def _queue_controller_review(self, login):
+        """Start the host lifetime's one review at the first ready person's login.
+
+        An account people share decides nothing, so it starts no review.
+        While a person's login waits for its enrollment, no other login
+        starts one; if that login ends first, the next person's login may.
+        """
+        if (self.controller_review_factory is None or not login.person
+                or self._controller_review_created or self._controller_review_pending is not None):
+            return
         if not login.console_login_required:
             self._reserve_controller_review(login)
             return
-        if self.controller_review_factory is None:
-            return
-        if self._controller_review_created:
-            login.controller_review_failure = "unavailable"
-            return
-        self._controller_review_created = True
+        self._controller_review_pending = login
         async def start():
-            if await self._ready_console_login(login) and self._login_current(login):
-                self._reserve_controller_review(login, reserved=True)
-            else:
-                login.controller_review_failure = "unavailable"
+            try:
+                if await self._ready_console_login(login) and self._login_current(login):
+                    self._reserve_controller_review(login)
+            finally:
+                if self._controller_review_pending is login:
+                    self._controller_review_pending = None
         login.controller_review_start = asyncio.create_task(start())
         login.controller_review_start.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
 
@@ -924,15 +931,17 @@ class ConsoleFront:
             for login in logins:
                 if login.connect is not None and login.connect_close is None:
                     login.connect_close = asyncio.create_task(login.connect.close())
-                if login.controller_review is not None and login.controller_review_close is None:
-                    login.controller_review_close = asyncio.create_task(login.controller_review.close())
                 if login.console_login is not None and login.console_login_close is None:
                     login.console_login_close = asyncio.create_task(self._retire_native_login(login, "close"))
+            review = self._controller_review_owner
+            if review is not None and self._controller_review_close is None:
+                self._controller_review_close = asyncio.create_task(review.close())
             # Joined close can release an entered startup/presenter while its
             # retirement is pending. Neither is abandoned on a view loss.
             joined = await asyncio.gather(*(task for login in logins for task in
-                (login.retirement_task, login.connect_close, login.controller_review_close,
+                (login.retirement_task, login.connect_close,
                  login.console_login_close, login.controller_review_start) if task is not None),
+                *((self._controller_review_close,) if self._controller_review_close is not None else ()),
                 return_exceptions=True)
             # Initialization refusal is not cleanup failure. Its entered work
             # is joined by the child close owner, then this host task is joined.
@@ -953,7 +962,7 @@ class ConsoleFront:
                 # A failed server must not prevent application cleanup.
                 pass
             if any(isinstance(result, BaseException) for result in joined):
-                raise RuntimeError("Console access cleanup is unconfirmed." if any(login.connect is not None or login.controller_review is not None or login.console_login is not None for login in logins)
+                raise RuntimeError("Console access cleanup is unconfirmed." if review is not None or any(login.connect is not None or login.console_login is not None for login in logins)
                                    else "Console subscription cleanup is unconfirmed.")
             self._logins.clear()
             self._mcp_routes.clear()
@@ -1551,17 +1560,18 @@ class ConsoleFront:
                     payload["native_failure"] = codes
             return JSONResponse(payload, status_code=503, headers=headers)
 
-    def _reserve_controller_review(self, login, *, reserved=False):
+    def _reserve_controller_review(self, login):
         """Trusted login lifecycle hook; no browser route starts native review.
 
         The application factory supplies a pending exact retained original and
         source on its existing client. A successful login only binds disclosure
         and invocation lifetime; it does not enroll a root or grant permission.
+        The review keeps this login's correlation (scope, deadline, origin) for
+        its native invocation, but it is the front's: its currentness is the
+        front's and that deadline, so it outlives this login.
         """
-        if self.controller_review_factory is None:
-            return
-        if (self._controller_review_created and not reserved) or not self._login_current(login):
-            login.controller_review_failure = "unavailable"
+        if (self.controller_review_factory is None or self._controller_review_created
+                or not self._login_current(login)):
             return
         self._controller_review_created = True
         try:
@@ -1569,7 +1579,7 @@ class ConsoleFront:
                 from .native_controller_review import NativeControllerReview
             else:
                 from native_controller_review import NativeControllerReview
-            context = self._login_context(login)
+            context = self._review_context(login)
             owner = self.controller_review_factory(context)
             if owner is None:
                 return
@@ -1578,11 +1588,39 @@ class ConsoleFront:
                     or owner.expires_at_ms != context.expires_at_ms or owner.origin != context.origin):
                 raise ValueError("Invalid protected native review binding.")
             application_current = owner.is_current
-            owner.is_current = lambda: self._login_current(login) and application_current() is True
-            login.controller_review = self._controller_review_owner = owner
+            owner.is_current = lambda: context.is_current() and application_current() is True
+            self._controller_review_owner = owner
             owner.start()
         except Exception:
-            login.controller_review_failure = "invalid_binding"
+            self._controller_review_failure = "invalid_binding"
+
+    def _review_context(self, login):
+        principal, scope, origin = login.principal, login.login_scope_id, self.origin
+        deadline = int(login.expires * 1000)
+        return ConsoleConnectLogin(principal, scope, deadline, origin,
+            lambda: not self._closing and self.origin == origin and time.time() * 1000 < deadline)
+
+    async def _console_administrator(self, login):
+        """Whether the console names this login's person an administrator.
+
+        Read from the console's `meta/console/whoami` with a token of the
+        login, so an access edit applies at once. None when it cannot tell.
+        """
+        import httpx
+        token = _token(self.key, login.principal, login_scope_id=login.login_scope_id)
+        try:
+            outgoing = self.client.build_request("POST", self.native_url + "/console/rpc",
+                json={"jsonrpc": "2.0", "id": "forge-whoami", "method": "meta/console/whoami", "params": {}},
+                headers={"Authorization": "Bearer " + token}, timeout=httpx.Timeout(15, connect=5))
+            outgoing.headers.pop("cookie", None)
+            response = await self.client.send(outgoing)
+            value = response.json() if response.status_code == 200 else None
+        except Exception:
+            return None
+        result = value.get("result") if isinstance(value, dict) else None
+        if not isinstance(result, dict) or not isinstance(result.get("actor"), dict):
+            return None
+        return result["actor"].get("kind") == "person" and result.get("can_administer") is True
 
     async def historical_controller_outcome(self):
         """Trusted application/compiler input, never a browser endpoint.
@@ -1614,15 +1652,26 @@ class ConsoleFront:
             # The review asks for a decision, and an account people share
             # decides nothing.
             return refusal("approver_unauthenticated", 403)
-        if login.controller_review_failure:
-            return refusal(login.controller_review_failure, 409)
-        owner = login.controller_review
-        if owner is None:
+        if self._controller_review_failure:
+            return refusal(self._controller_review_failure, 409)
+        owner = self._controller_review_owner
+        if owner is None or not owner.is_current():
             return refusal("unavailable", 409)
         if __package__:
             from .native_controller_review import ControllerReviewError
         else:
             from native_controller_review import ControllerReviewError
+
+        async def administrator():
+            # Any administrator's login sees and answers the review. Read the
+            # console's answer for this login each time: an access edit
+            # applies at once. None: the console could not tell.
+            held = await self._console_administrator(login)
+            if held is None:
+                return refusal("unavailable", 503)
+            if not self._disclosure_current(request, login):
+                return refusal("invalid_binding", 401)
+            return None if held else refusal("not_administrator", 403)
         try:
             if suffix == "/answer":
                 if request.headers.get("content-type", "").split(";", 1)[0].strip() != "application/json":
@@ -1633,12 +1682,18 @@ class ConsoleFront:
                     object_pairs_hook=_frontend_object, parse_constant=invalid_constant)
                 if not isinstance(payload, dict) or set(payload) != {"approval_id", "decision"}:
                     return refusal("invalid_message", 400)
+                refused = await administrator()
+                if refused is not None:
+                    return refused
                 # Exact login and application guard, then claim, with no await.
                 if not self._disclosure_current(request, login):
                     return refusal("invalid_binding", 401)
                 owner.claim_answer(payload["approval_id"], payload["decision"])
                 value, status = {"status": "answer_submitted"}, 202
             else:
+                refused = await administrator()
+                if refused is not None:
+                    return refused
                 value = await owner.observe()
                 status = 202 if value["status"] == "starting" else 200
             if not self._disclosure_current(request, login):

@@ -143,6 +143,9 @@ pub(crate) struct ClassifiedInboxEntry {
     pub(crate) text_projection: String,
     /// How the transport established the sender when it admitted the item.
     pub(crate) sender_authentication: meerkat_core::PeerIngressSenderAuthentication,
+    /// The governed work the item was sent under, when an in-process sender
+    /// carried one.
+    pub(crate) governed_send_origin: Option<meerkat_core::GovernedSendOrigin>,
 }
 
 /// Internal admission decision paired with the peer-trust diagnostic that the
@@ -460,6 +463,7 @@ impl ClassifiedInboxQueue {
             ingress_completion,
             text_projection: prepared.text_projection,
             sender_authentication: prepared.sender_authentication,
+            governed_send_origin: prepared.governed_send_origin,
         };
         let is_actionable = entry.actionable;
         self.entries.push_back(entry);
@@ -1231,6 +1235,7 @@ impl InboxSender {
         self.send_wait_with_sender_authentication(
             item,
             meerkat_core::PeerIngressSenderAuthentication::Unverified,
+            None,
         )
         .await
     }
@@ -1238,11 +1243,17 @@ impl InboxSender {
     /// Send an item through the same admission path as [`Self::send_classified`],
     /// awaiting queue capacity instead of reporting `InboxFull`, for an
     /// in-process delivery: the sending runtime built the envelope from its
-    /// own keypair in this process, so its sender is established.
-    pub(crate) async fn send_wait_in_process(&self, item: InboxItem) -> AdmissionOutcome {
+    /// own keypair in this process, so its sender is established. The item
+    /// keeps the governed origin its sender carried, if any.
+    pub(crate) async fn send_wait_in_process(
+        &self,
+        item: InboxItem,
+        governed_send_origin: Option<meerkat_core::GovernedSendOrigin>,
+    ) -> AdmissionOutcome {
         self.send_wait_with_sender_authentication(
             item,
             meerkat_core::PeerIngressSenderAuthentication::InProcess,
+            governed_send_origin,
         )
         .await
     }
@@ -1251,9 +1262,12 @@ impl InboxSender {
         &self,
         item: InboxItem,
         sender_authentication: meerkat_core::PeerIngressSenderAuthentication,
+        governed_send_origin: Option<meerkat_core::GovernedSendOrigin>,
     ) -> AdmissionOutcome {
         if self.classification_context.is_some() {
-            return self.send_classified_wait(item, sender_authentication).await;
+            return self
+                .send_classified_wait(item, sender_authentication, governed_send_origin)
+                .await;
         }
         let _ = item;
         tracing::warn!(
@@ -1281,6 +1295,7 @@ impl InboxSender {
         &self,
         item: InboxItem,
         park_bound: std::time::Duration,
+        governed_send_origin: Option<meerkat_core::GovernedSendOrigin>,
     ) -> BoundedIngressDelivery {
         let (Some(ctx), Some(classified_queue)) =
             (&self.classification_context, &self.classified_queue)
@@ -1295,8 +1310,10 @@ impl InboxSender {
             });
         };
         // In-process delivery: the sending runtime built the envelope from its
-        // own keypair in this process.
+        // own keypair in this process, and the item keeps the governed origin
+        // that sender carried.
         prepared.sender_authentication = meerkat_core::PeerIngressSenderAuthentication::InProcess;
+        prepared.governed_send_origin = governed_send_origin;
         // ONE budget across both parks, tracked as remaining time rather than
         // as a `tokio::time::Instant` deadline: the wasm glue behind
         // `crate::tokio` exposes neither `Instant` nor `timeout_at`, and this
@@ -1373,6 +1390,7 @@ impl InboxSender {
         &self,
         item: InboxItem,
         sender_authentication: meerkat_core::PeerIngressSenderAuthentication,
+        governed_send_origin: Option<meerkat_core::GovernedSendOrigin>,
     ) -> AdmissionOutcome {
         let (Some(ctx), Some(classified_queue)) =
             (&self.classification_context, &self.classified_queue)
@@ -1396,6 +1414,7 @@ impl InboxSender {
         };
         let mut result = result;
         result.sender_authentication = sender_authentication;
+        result.governed_send_origin = governed_send_origin;
         let kind = result.kind;
         let mut prepared = Some(result);
         let capacity_notify = classified_queue.lock().capacity_notifier();

@@ -333,6 +333,21 @@ test("an edit keeps the timing unless it is changed, and names only a changed na
   assert.equal(daily.timezone, "Asia/Tokyo");
 });
 
+test("an edit carries the revision the console showed, so a change made meanwhile is refused, not overwritten", () => {
+  const now = new Date(2030, 0, 2, 8, 0, 0);
+  const existing = schedule();
+  const edit = scheduleDraftFromSchedule(existing, now, "UTC");
+  assert.deepEqual(scheduleUpdateParams(existing, { ...edit, content: "Post it now" }, now), {
+    params: { schedule_id: "sch_1", content: "Post it now", expected_revision: 3 },
+  });
+  // A schedule whose revision the console could not read sends none.
+  const unread = schedule({ revision: "3" });
+  assert.equal(unread.revision, null);
+  assert.deepEqual(scheduleUpdateParams(unread, { ...edit, content: "Post it now" }, now), {
+    params: { schedule_id: "sch_1", content: "Post it now" },
+  });
+});
+
 test("a refusal reads by its kind, and server text shows only for invalid params", () => {
   const list = CONSOLE_SCHEDULE_COMMANDS.list;
   const create = CONSOLE_SCHEDULE_COMMANDS.create;

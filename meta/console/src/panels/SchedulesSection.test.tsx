@@ -38,13 +38,15 @@ function rpcError(code: number, data?: unknown): Error {
   return Object.assign(new Error(`rpc ${code}`), { rpcError: { code, message: `rpc ${code}`, data } });
 }
 
-/** A gateway that keeps the agent's schedules and records each call. */
+/** A gateway that keeps the agent's schedules and records each call. Every
+ * change moves the schedule to its next revision, as the gateway's does. */
 function gateway(initial: Row[] = []) {
   const state = {
     items: [...initial],
     calls: [] as Call[],
     fail: null as null | ((call: Call) => Error | null),
   };
+  const next = (row: Row): number => (typeof row.revision === "number" ? row.revision + 1 : 1);
   const run = vi.fn(async (command: ConsoleScheduleCommand, params: Record<string, unknown>) => {
     const call = { command, params };
     state.calls.push(call);
@@ -70,13 +72,16 @@ function gateway(initial: Row[] = []) {
           ...(params.content !== undefined ? { content: params.content } : {}),
           ...(params.name !== undefined ? { name: params.name } : {}),
           ...(params.trigger !== undefined ? { trigger: params.trigger } : {}),
+          revision: next(state.items[index]),
         };
         return state.items[index];
       case "pauseSchedule":
-        state.items[index] = { ...state.items[index], phase: "paused", next_due_at_utc: null };
+        state.items[index] = {
+          ...state.items[index], phase: "paused", next_due_at_utc: null, revision: next(state.items[index]),
+        };
         return state.items[index];
       case "resumeSchedule":
-        state.items[index] = { ...state.items[index], phase: "active" };
+        state.items[index] = { ...state.items[index], phase: "active", revision: next(state.items[index]) };
         return state.items[index];
       case "deleteSchedule":
         state.items.splice(index, 1);
@@ -329,5 +334,92 @@ describe("SchedulesSection", () => {
     await waitFor(() =>
       expect(state.calls.map((call) => call.command)).toEqual(["listSchedules", "updateSchedule", "listSchedules"]),
     );
+  });
+
+  it("sends the revision it showed with an edit and a resume", async () => {
+    const { run, state } = gateway([item({ revision: 4 })]);
+    const view = render(section(run, true));
+    await waitFor(() => expect(present(view, "schedule:sch_1")).toBe(true));
+
+    fireEvent.click(view.getByTestId("schedule-edit:sch_1"));
+    const form = view.getByTestId("schedule-form:alpha");
+    fireEvent.change(within(form).getByTestId("schedule-form-content"), { target: { value: "Post it now" } });
+    fireEvent.submit(form);
+    await waitFor(() => expect(view.getByTestId("schedule:sch_1").textContent).toContain("Post it now"));
+
+    await waitFor(() => expect((view.getByTestId("schedule-pause:sch_1") as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(view.getByTestId("schedule-pause:sch_1"));
+    await waitFor(() => expect(present(view, "schedule-resume:sch_1")).toBe(true));
+    await waitFor(() => expect((view.getByTestId("schedule-resume:sch_1") as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(view.getByTestId("schedule-resume:sch_1"));
+    await waitFor(() => expect(view.getByTestId("schedule-phase:sch_1").textContent).toBe("Active"));
+
+    // Each change names the revision the pane showed when it was asked for:
+    // the edit the listed one, the resume the one the pause left.
+    expect(state.calls.filter((call) => call.command !== "listSchedules")).toEqual([
+      { command: "updateSchedule", params: { schedule_id: "sch_1", content: "Post it now", expected_revision: 4 } },
+      { command: "pauseSchedule", params: { schedule_id: "sch_1" } },
+      { command: "resumeSchedule", params: { schedule_id: "sch_1", expected_revision: 6 } },
+    ]);
+  });
+
+  it("asks before an edit takes over a schedule another caller sends as", async () => {
+    const { run, state } = gateway([item({ sender: "erin@example.test", revision: 2 })]);
+    state.fail = (call) =>
+      call.command === "updateSchedule" && call.params.take_over_sender !== true
+        ? rpcError(-32009, { kind: "sender_takeover_required", sender: "erin@example.test" })
+        : null;
+    const view = render(section(run, true));
+    await waitFor(() => expect(present(view, "schedule:sch_1")).toBe(true));
+
+    fireEvent.click(view.getByTestId("schedule-edit:sch_1"));
+    const form = view.getByTestId("schedule-form:alpha");
+    fireEvent.change(within(form).getByTestId("schedule-form-content"), { target: { value: "Post it now" } });
+    fireEvent.submit(form);
+
+    await waitFor(() => expect(present(view, "schedules-takeover:alpha")).toBe(true));
+    expect(view.getByTestId("schedules-takeover:alpha").textContent).toContain("erin@example.test");
+    expect(view.getByTestId("schedules-takeover:alpha").textContent).toContain("makes you its sender");
+    expect(view.getByTestId("schedule:sch_1").textContent).toContain("Post the standup summary");
+    expect(present(view, "schedule-form:alpha")).toBe(true);
+
+    fireEvent.click(view.getByTestId("schedules-takeover-confirm:alpha"));
+    await waitFor(() => expect(view.getByTestId("schedule:sch_1").textContent).toContain("Post it now"));
+    expect(present(view, "schedules-takeover:alpha")).toBe(false);
+    expect(present(view, "schedule-form:alpha")).toBe(false);
+    expect(state.calls.filter((call) => call.command === "updateSchedule").map((call) => call.params)).toEqual([
+      { schedule_id: "sch_1", content: "Post it now", expected_revision: 2 },
+      { schedule_id: "sch_1", content: "Post it now", expected_revision: 2, take_over_sender: true },
+    ]);
+  });
+
+  it("asks before a resume takes over a paused schedule, and a declined takeover changes nothing", async () => {
+    const { run, state } = gateway([
+      item({ sender: "erin@example.test", phase: "paused", revision: 5, next_due_at_utc: null }),
+    ]);
+    state.fail = (call) =>
+      call.command === "resumeSchedule" && call.params.take_over_sender !== true
+        ? rpcError(-32009, { kind: "sender_takeover_required", sender: "erin@example.test" })
+        : null;
+    const view = render(section(run, true));
+    await waitFor(() => expect(present(view, "schedule-resume:sch_1")).toBe(true));
+
+    fireEvent.click(view.getByTestId("schedule-resume:sch_1"));
+    await waitFor(() => expect(present(view, "schedules-takeover:alpha")).toBe(true));
+    expect(view.getByTestId("schedules-takeover:alpha").textContent).toContain("erin@example.test");
+    fireEvent.click(view.getByTestId("schedules-takeover-cancel:alpha"));
+    await waitFor(() => expect(present(view, "schedules-takeover:alpha")).toBe(false));
+    expect(view.getByTestId("schedule-phase:sch_1").textContent).toBe("Paused");
+
+    await waitFor(() => expect((view.getByTestId("schedule-resume:sch_1") as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(view.getByTestId("schedule-resume:sch_1"));
+    await waitFor(() => expect(present(view, "schedules-takeover:alpha")).toBe(true));
+    fireEvent.click(view.getByTestId("schedules-takeover-confirm:alpha"));
+    await waitFor(() => expect(view.getByTestId("schedule-phase:sch_1").textContent).toBe("Active"));
+    expect(state.calls.filter((call) => call.command === "resumeSchedule").map((call) => call.params)).toEqual([
+      { schedule_id: "sch_1", expected_revision: 5 },
+      { schedule_id: "sch_1", expected_revision: 5 },
+      { schedule_id: "sch_1", expected_revision: 5, take_over_sender: true },
+    ]);
   });
 });

@@ -19,8 +19,11 @@
 \* archive-only retirement to every local archive terminal it drives, the
 \* rotation's terminals in Running and Stopped, the legacy fresh-life
 \* respawn's admission and its refusal of an entry (in Running and
-\* Stopped), the legacy respawn's topology-preserving archive terminals,
-\* and the mob's destroy:
+\* Stopped), the legacy respawn's topology-preserving archive terminals, a
+\* host's adoption over the entry (TakeOverIdentityEntry, every arm: the
+\* seated entry marked adopting, the unseated one ended at once, the one
+\* with a member step in flight deferred) and the host-adopted archive
+\* terminals that end it, and the mob's destroy:
 \* its admission, its member retirement and archive, DestroyMob and the
 \* forced DestroyFromAny (with an open ladder's entry custody too). The run
 \* leaves out the retire run's replay of the exempt row, which entries do not
@@ -51,7 +54,16 @@
 \*     entry (an entry's successor keeps its session and its entry);
 \*   AuditPreservingArchiveNeverAnEntry (action property): the legacy
 \*     respawn's topology-preserving archive terminal never takes an
-\*     identity entry, whatever the shell previewed.
+\*     identity entry, whatever the shell previewed;
+\*   AuditHostAdoptedArchiveTakesOnlyAnAdoptingEntry (action property): the
+\*     host-adopted archive terminal takes only a Declared entry a host's
+\*     adoption marked, and ends the entry and its mark;
+\*   AuditTakeOverEndsOnlyUnseated (action property): a host's adoption ends
+\*     an entry at once only when no member holds it; a seated entry ends
+\*     at the end of its member's retirement, whose archive keeps the
+\*     machine topology for the host's member;
+\*   AuditTakeOverExactlyOne (invariant): exactly one arm of the takeover
+\*     answers member 1, in every lifecycle phase of the run.
 \*
 \* AuditWitness* operators are reachability goals the runner checks as
 \* expected violations, so the properties are not vacuous. With --mutants the
@@ -108,7 +120,37 @@ LPreservingArchives ==
     \/ ObserveMemberRetirementArchivedLivePreservingTopology(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, TRUE)
     \/ ObserveMemberRetirementArchivedRetiredPreservingTopology(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, TRUE)
 
+\* A host's adoption over member 1's entry, in every arm.
+LTakeOver ==
+    \/ TakeOverIdentityEntryAdopting(Id1)
+    \/ TakeOverIdentityEntryEnded(Id1)
+    \/ TakeOverIdentityEntryDeferred(Id1)
+    \/ TakeOverIdentityEntryNotADeclaredEntry(Id1)
+    \/ TakeOverIdentityEntryNonAuthoritative(Id1)
+    \/ TakeOverIdentityEntryMobNotRunningStopped(Id1)
+    \/ TakeOverIdentityEntryMobNotRunningCompleted(Id1)
+    \/ TakeOverIdentityEntryMobNotRunningDestroyed(Id1)
+
+LTakeOverEnabled ==
+    << ENABLED TakeOverIdentityEntryAdopting(Id1),
+       ENABLED TakeOverIdentityEntryEnded(Id1),
+       ENABLED TakeOverIdentityEntryDeferred(Id1),
+       ENABLED TakeOverIdentityEntryNotADeclaredEntry(Id1),
+       ENABLED TakeOverIdentityEntryNonAuthoritative(Id1),
+       ENABLED TakeOverIdentityEntryMobNotRunningStopped(Id1),
+       ENABLED TakeOverIdentityEntryMobNotRunningCompleted(Id1),
+       ENABLED TakeOverIdentityEntryMobNotRunningDestroyed(Id1) >>
+
+\* The archive terminals of a retirement a host's adoption took member 1's
+\* entry over for: they keep the machine topology for the host's member and
+\* end the entry.
+LHostAdoptedArchives ==
+    \/ ObserveMemberRetirementArchivedLiveHostAdopted(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, TRUE)
+    \/ ObserveMemberRetirementArchivedRetiredHostAdopted(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, TRUE)
+
 LifecycleNext ==
+    \/ LTakeOver
+    \/ LHostAdoptedArchives
     \/ WRecover
     \/ WBind
     \/ WEndpoint
@@ -182,6 +224,25 @@ AuditFreshLifeRespawnNeverAnEntry ==
 \* identity entry.
 AuditPreservingArchiveNeverAnEntry == [][LPreservingArchives => Id1 \notin LEntries]_vars
 
+\* The host-adopted archive terminal takes only a Declared entry a host's
+\* adoption marked, and ends the entry and its mark.
+AuditHostAdoptedArchiveTakesOnlyAnAdoptingEntry ==
+    [][LHostAdoptedArchives
+         => /\ Id1 \in identity_entry_adopting
+            /\ Id1 \in LEntries
+            /\ identity_entry_origins[Id1] = AuditEntryOrigin
+            /\ Id1 \notin DOMAIN identity_entry_origins'
+            /\ Id1 \notin identity_entry_adopting'
+      ]_vars
+
+\* A host's adoption ends an entry at once only when no member holds it.
+AuditTakeOverEndsOnlyUnseated ==
+    [][(LTakeOver /\ Id1 \in LEntries /\ Id1 \notin DOMAIN identity_entry_origins')
+         => Id1 \notin DOMAIN identity_to_runtime]_vars
+
+\* Exactly one arm of the takeover answers member 1.
+AuditTakeOverExactlyOne == Cardinality({i \in 1..8 : LTakeOverEnabled[i]}) = 1
+
 (***************************************************************************)
 (* Reachability goals, each checked as an expected violation of its        *)
 (* negation: a state goal joins the invariants, a step goal the properties.*)
@@ -238,6 +299,34 @@ AuditWitnessWorkerRespawnAdmitted ==
     /\ Id1 \notin LEntries
     /\ \E rid \in {Rid1, Rid2, Rid3} : RespawnRunning(Id1, rid)
 
+\* A host's adoption ends the entry at its member's archive, and the
+\* archive keeps the machine topology for the host's member.
+AuditWitnessEntryHostAdopted ==
+    /\ Id1 \in identity_entry_adopting
+    /\ LHostAdoptedArchives
+    /\ Id1 \notin DOMAIN identity_entry_origins'
+    /\ Id1 \in pending_respawn_topology'
+\* The name the adoption freed takes the host's member: a ladder opens for
+\* it without entry custody, on the topology kept for it.
+AuditWitnessHostMemberStands ==
+    /\ Id1 \notin LEntries
+    /\ Id1 \in pending_respawn_topology
+    /\ Id1 \notin DOMAIN identity_to_runtime
+    /\ LReseatOpenAs(FALSE)
+\* A host's adoption over an unseated entry ends it at once.
+AuditWitnessTakeOverEndsUnseated ==
+    /\ Id1 \in LEntries
+    /\ Id1 \notin DOMAIN identity_to_runtime
+    /\ TakeOverIdentityEntryEnded(Id1)
+\* A host's adoption waits while the entry's member retires.
+AuditWitnessTakeOverDeferred ==
+    /\ Id1 \in LEntries
+    /\ TakeOverIdentityEntryDeferred(Id1)
+
+NotAuditWitnessEntryHostAdopted == [][~AuditWitnessEntryHostAdopted]_vars
+NotAuditWitnessHostMemberStands == [][~AuditWitnessHostMemberStands]_vars
+NotAuditWitnessTakeOverEndsUnseated == [][~AuditWitnessTakeOverEndsUnseated]_vars
+NotAuditWitnessTakeOverDeferred == [][~AuditWitnessTakeOverDeferred]_vars
 NotAuditWitnessEntrySeated == [][~AuditWitnessEntrySeated]_vars
 NotAuditWitnessEntryLive == ~AuditWitnessEntryLive
 NotAuditWitnessEntryRetiredLive == [][~AuditWitnessEntryRetiredLive]_vars

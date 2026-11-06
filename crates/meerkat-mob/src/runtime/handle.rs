@@ -8541,6 +8541,33 @@ impl MobHandle {
         }
     }
 
+    /// [`Self::retire_exact_incarnation`] of the incarnation at `generation`
+    /// only (see [`Self::join_or_start_retirement_step`]'s pin).
+    async fn retire_exact_incarnation_at(
+        &self,
+        agent_identity: AgentIdentity,
+        generation: Generation,
+    ) -> Result<(), MobError> {
+        let operation_deadline = Instant::now() + super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT;
+        let Some((key, pending)) = self
+            .join_or_start_retirement_step(
+                agent_identity,
+                None,
+                operation_deadline,
+                true,
+                super::state::RetirementRedrive::Plain,
+                Some(generation),
+            )
+            .await?
+        else {
+            return Ok(());
+        };
+        // An unscoped slot re-checks no scope, so its step only ever runs.
+        self.wait_for_retirement_operation(&key, pending)
+            .await
+            .map(|_ran| ())
+    }
+
     async fn retire_exact_incarnation(
         &self,
         agent_identity: AgentIdentity,
@@ -8623,6 +8650,7 @@ impl MobHandle {
             operation_deadline,
             bound_admission,
             redrive,
+            None,
         )
         .await
     }
@@ -8632,6 +8660,14 @@ impl MobHandle {
     /// [`Self::retire_at_scope`] under its root scope. A scoped root step
     /// reads no roster entry: the actor resolves the incarnation only after
     /// MobMachine classified the scope in the step's own command.
+    ///
+    /// An unscoped step with a `pinned_generation` retires the identity's
+    /// incarnation only when the roster holds it at that generation: one
+    /// at another generation is refused before the step elects a slot
+    /// ([`MobError::LifecycleOperationPending`], retryable). The step then
+    /// retires the exact incarnation it read, which the actor checks again
+    /// in its own command, so an incarnation seated after the read is never
+    /// retired by it.
     async fn join_or_start_retirement_step(
         &self,
         agent_identity: AgentIdentity,
@@ -8639,6 +8675,7 @@ impl MobHandle {
         operation_deadline: Instant,
         bound_admission: bool,
         redrive: super::state::RetirementRedrive,
+        pinned_generation: Option<Generation>,
     ) -> Result<Option<(RetirementOperationKey, Arc<PendingRetirementOperation>)>, MobError> {
         // Retire's absent-member convergence is still an operator action.
         // Enter the serialized scope gate before any roster observation so a
@@ -8704,6 +8741,17 @@ impl MobHandle {
                 }
                 return Ok(None);
             };
+            if let Some(pinned) = pinned_generation
+                && entry.generation != pinned
+            {
+                return Err(MobError::LifecycleOperationPending {
+                    intent: format!(
+                        "retire '{agent_identity}' at generation {pinned}: its current \
+                         incarnation is at generation {}",
+                        entry.generation
+                    ),
+                });
+            }
             let expected = super::state::RetireMemberIncarnation {
                 agent_identity: entry.agent_identity.clone(),
                 agent_runtime_id: entry.agent_runtime_id.clone(),
@@ -9956,6 +10004,7 @@ impl MobHandle {
         ) {
             spec.mark_agent_creation();
         }
+        let identity = spec.identity.clone();
         let plan = self
             .send_actor_command(|reply_tx| MobCommand::PlanMemberRotation {
                 spec: Box::new(spec),
@@ -9968,6 +10017,10 @@ impl MobHandle {
                 seated,
                 endpoint_source,
             } => {
+                if !seated {
+                    self.forget_archived_session_for_fresh_life(&identity)
+                        .await?;
+                }
                 let entry = super::dormant_seat::prepare_dormant_seat(
                     self.session_service.as_ref(),
                     endpoint_source.as_ref(),
@@ -10000,6 +10053,8 @@ impl MobHandle {
             // seat of it, which is a spawn; the commit step clears its host
             // preparation as it does for a seat chunk's spawn.
             super::dormant_seat::MemberRotationPlan::Embody(spec) => {
+                self.forget_archived_session_for_fresh_life(&identity)
+                    .await?;
                 let agent_identity = spec.identity.clone();
                 let member_ref = Box::pin(self.spawn_spec_internal(*spec)).await?;
                 let session_id = member_ref.bridge_session_id().cloned().ok_or_else(|| {
@@ -10026,6 +10081,40 @@ impl MobHandle {
             | super::DormantSeatOutcome::Embodied { session_id, .. } => Ok(session_id),
             other => Err(other.into_unseated_error()),
         }
+    }
+
+    /// The fresh life a rotation starts for an identity entry no member
+    /// holds takes a fresh session: the entry's archived session record, if
+    /// it has one, is let go first (`ForgetArchivedSession`,
+    /// `FreshLifeRequested`), as a declared apply's first-boot `Fresh`
+    /// request lets it go. A name that is no entry, or an entry with no
+    /// record, needs nothing.
+    async fn forget_archived_session_for_fresh_life(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<(), MobError> {
+        let archived = {
+            let state = self.machine_state_watch_rx.borrow();
+            state
+                .identity_entry_archived_sessions
+                .get(&mob_dsl::AgentIdentity::from_domain(identity))
+                .map(|session| SessionId::parse(&session.0))
+                .transpose()
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "'{identity}' holds an invalid archived session record: {error}"
+                    ))
+                })?
+        };
+        if let Some(session_id) = archived {
+            self.forget_archived_session(
+                identity,
+                &session_id,
+                mob_dsl::ArchivedSessionForgetReason::FreshLifeRequested,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// One chunk of [`Self::seat_dormant_members`]: plan on the actor,
@@ -10679,6 +10768,25 @@ impl MobHandle {
         &self,
         identity: &AgentIdentity,
     ) -> Result<super::LegacyIdentityEntryAdoption, MobError> {
+        self.adopt_listed_legacy_member(identity)
+            .await
+            .map(|(adoption, _)| adoption)
+    }
+
+    /// [`Self::adopt_legacy_identity_entry`], with the observation
+    /// MobMachine decided the adoption on: `None` for a declared entry,
+    /// which answers without its spawn row being read. The declared apply
+    /// carries the observation into the identity's declaration.
+    pub(super) async fn adopt_listed_legacy_member(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<
+        (
+            super::LegacyIdentityEntryAdoption,
+            Option<super::identity_entry::ObservedLegacyMember>,
+        ),
+        MobError,
+    > {
         // The scope and the lane first: nothing is answered, not even from
         // the entry, to a caller the adoption is refused to.
         self.admit_control_scope_for(
@@ -10698,18 +10806,25 @@ impl MobHandle {
                     .contains(&mob_dsl::AgentIdentity::from_domain(identity))
         };
         if already_an_entry {
-            return Ok(super::LegacyIdentityEntryAdoption::AlreadyAnEntry);
+            return Ok((super::LegacyIdentityEntryAdoption::AlreadyAnEntry, None));
         }
         // The host names the identity: its member is observed as listed.
-        let (_, verdict) = self
+        let (generation, observation, verdict) = self
             .adopt_observed_legacy_member(identity, true, None)
             .await?;
-        super::identity_entry::legacy_adoption_answer(verdict).ok_or_else(|| {
+        let adoption = super::identity_entry::legacy_adoption_answer(verdict).ok_or_else(|| {
             MobError::Internal(format!(
                 "MobMachine answered the adoption of member '{identity}' with no answer: \
                  {verdict:?}"
             ))
-        })
+        })?;
+        Ok((
+            adoption,
+            Some(super::identity_entry::ObservedLegacyMember {
+                generation,
+                marks: observation.marks,
+            }),
+        ))
     }
 
     /// The legacy adoption's observation and MobMachine's decision for an
@@ -10725,7 +10840,8 @@ impl MobHandle {
     /// them), and from a fresh read otherwise. An observation whose
     /// incarnation moved before MobMachine decided is observed again from a
     /// fresh read, a bounded number of times. The answer is MobMachine's
-    /// verdict, with the generation of the incarnation it decided on.
+    /// verdict, with the generation of the incarnation it decided on and the
+    /// observation it decided from.
     pub(super) async fn adopt_observed_legacy_member(
         &self,
         identity: &AgentIdentity,
@@ -10734,6 +10850,7 @@ impl MobHandle {
     ) -> Result<
         (
             crate::ids::Generation,
+            super::identity_entry::LegacyMemberObservation,
             mob_dsl::LegacyIdentityEntryAdoptionKind,
         ),
         MobError,
@@ -10798,7 +10915,7 @@ impl MobHandle {
                 })
                 .await??;
             if super::identity_entry::legacy_adoption_answer(verdict).is_some() {
-                return Ok((generation, verdict));
+                return Ok((generation, observation, verdict));
             }
         }
         Err(MobError::LifecycleOperationPending {
@@ -21187,6 +21304,59 @@ impl MobHandle {
         }
     }
 
+    /// [`Self::retire_member_tree`] of `identity`'s incarnation at
+    /// `generation` only. Nothing is retired when the roster holds the
+    /// identity at another generation: the call answers
+    /// [`MobError::LifecycleOperationPending`], retryable. The member's own
+    /// step retires the exact incarnation it read, which the actor checks
+    /// again in its own command, so an incarnation a respawn seated after
+    /// that read is never retired here. An identity with no incarnation
+    /// retires nothing and answers `Ok(())`, as [`Self::retire`] does.
+    pub(super) async fn retire_at_generation(
+        &self,
+        identity: AgentIdentity,
+        generation: Generation,
+    ) -> Result<(), MobError> {
+        let current = self
+            .roster
+            .read()
+            .await
+            .get(&identity)
+            .map(|entry| entry.generation);
+        if let Some(current) = current
+            && current != generation
+        {
+            return Err(MobError::LifecycleOperationPending {
+                intent: format!(
+                    "retire '{identity}' at generation {generation}: its current incarnation \
+                     is at generation {current}"
+                ),
+            });
+        }
+        let handle = self.clone();
+        // Like `retire`, run the cascade off the caller's stack.
+        meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+            let mut first_error = None;
+            let mut attempted = std::collections::BTreeSet::new();
+            handle
+                .retire_descendants_until_stable(&identity, &mut attempted, &mut first_error)
+                .await;
+            let own = handle
+                .retire_exact_incarnation_at(identity.clone(), generation)
+                .await;
+            if own.is_ok() {
+                handle
+                    .retire_descendants_until_stable(&identity, &mut attempted, &mut first_error)
+                    .await;
+            }
+            match (own, first_error) {
+                (Err(error), _) | (Ok(()), Some(error)) => Err(error),
+                (Ok(()), None) => Ok(()),
+            }
+        })
+        .await
+    }
+
     async fn retire_descendants_until_stable(
         &self,
         ancestor: &AgentIdentity,
@@ -21342,6 +21512,7 @@ impl MobHandle {
                 operation_deadline,
                 true,
                 super::state::RetirementRedrive::Plain,
+                None,
             )
             .await?
         else {

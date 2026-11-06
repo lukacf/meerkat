@@ -188,6 +188,16 @@ impl SessionBridge for HoldingCore {
             .push(member_id.to_string());
         Ok(())
     }
+
+    async fn apply_declared_roster(
+        &self,
+        roster: crate::identity_first::DeclaredRosterRequest,
+    ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+    {
+        Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+            &roster,
+        ))
+    }
 }
 
 /// An identity runtime over `core` with `customizer` installed and a
@@ -275,7 +285,10 @@ async fn r111_the_composition_publishes_a_held_member_and_releases_its_hold_once
     assert_eq!(prepared, Ok(MemberBuildPrepared::HoldUntilReleased));
     assert_eq!(customizer.builds.load(Ordering::SeqCst), 0);
 
-    runtime.register(spec(&alice)).await;
+    runtime
+        .register(spec(&alice))
+        .await
+        .expect("the identity registers");
     runtime.compose_member_builds().await;
 
     assert_eq!(customizer.builds.load(Ordering::SeqCst), 1);
@@ -314,7 +327,10 @@ async fn r109_after_the_composition_a_registered_identity_is_prepared_inline_and
     let (runtime, registry) = runtime_with(&core, Some(Arc::clone(&customizer))).await?;
     let preparer = IdentityBuildPreparer::new(true);
     preparer.bind(&runtime, None).await;
-    runtime.register(spec(&alice)).await;
+    runtime
+        .register(spec(&alice))
+        .await
+        .expect("the identity registers");
     runtime.compose_member_builds().await;
 
     let prepared = preparer
@@ -352,7 +368,10 @@ async fn r112_a_failed_preparation_is_refused_retryable_and_a_delivery_reports_i
     let (runtime, _registry) = runtime_with(&core, Some(customizer)).await?;
     let preparer = IdentityBuildPreparer::new(true);
     preparer.bind(&runtime, None).await;
-    runtime.register(spec(&alice)).await;
+    runtime
+        .register(spec(&alice))
+        .await
+        .expect("the identity registers");
     runtime.compose_member_builds().await;
 
     let prepared = preparer
@@ -570,7 +589,10 @@ async fn a_build_core_reports_unprepared_is_recorded_for_its_registered_identity
     let (runtime, _registry) = runtime_with(&core, None).await?;
     let preparer = IdentityBuildPreparer::new(true);
     preparer.bind(&runtime, None).await;
-    runtime.register(spec(&alice)).await;
+    runtime
+        .register(spec(&alice))
+        .await
+        .expect("the identity registers");
 
     preparer
         .record_member_build(

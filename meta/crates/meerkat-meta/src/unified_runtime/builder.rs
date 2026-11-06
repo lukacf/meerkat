@@ -2120,14 +2120,13 @@ impl UnifiedRuntimeBuilder {
         } else {
             (None, None)
         };
-        // Each identity with a pending first-boot row or a rotation a crash
-        // interrupted waits for the roster pass's seat step: the mob
-        // materializes none of them at start, and refuses their wakes
-        // retryable until the seat step for each ends the mark. The identity
-        // runtime keeps the seeded set, so every seat step ends each mark.
+        // Each identity with a pending first-boot row waits for the roster
+        // pass's declaration of it: the mob materializes none of them at
+        // start, and refuses their wakes retryable until the declaration
+        // that carries the row out ends the mark. The identity runtime keeps
+        // the seeded set.
         let mut host_pending_seeded = Vec::new();
-        if let (Some(roster), Some(mob_id)) =
-            (identity_roster_specs.as_ref(), launch_mob_id.as_deref())
+        if let (Some(roster), Some(_)) = (identity_roster_specs.as_ref(), launch_mob_id.as_deref())
         {
             let first_boot = match self.host_store.as_ref() {
                 Some(host) => Some(
@@ -2142,7 +2141,6 @@ impl UnifiedRuntimeBuilder {
             };
             let host_pending = crate::identity_first::runtime::host_pending_members_before_build(
                 first_boot.as_ref(),
-                Some((persistent_metadata.as_ref(), mob_id)),
                 roster,
             )
             .await;

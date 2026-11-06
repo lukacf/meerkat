@@ -373,9 +373,20 @@ lifecycle_covered_actions=(
   RespawnRunning
   RespawnIdentityEntryRefusedRunning
   RespawnIdentityEntryRefusedStopped
+  TakeOverIdentityEntryAdopting
+  TakeOverIdentityEntryEnded
+  TakeOverIdentityEntryDeferred
+  TakeOverIdentityEntryNotADeclaredEntry
+  TakeOverIdentityEntryMobNotRunningStopped
+  TakeOverIdentityEntryMobNotRunningDestroyed
+  ObserveMemberRetirementArchivedLiveHostAdopted
+  ObserveMemberRetirementArchivedRetiredHostAdopted
 )
 
 apply_covered_actions=(
+  TakeOverIdentityEntryNonAuthoritative
+  RecoverIdentityEntryAdoptingMarkedRunning
+  RecoverIdentityEntryAdoptingStaleRunning
   BeginSpawnExecFresh
   AbortSpawnExecActiveRunning
   AuthorizeSpawnProfileRunning
@@ -765,10 +776,13 @@ write_cfg() {
   AuditRotationKeepsEntry
   AuditLifecycleEntryOnlyWithCause
   AuditFreshLifeRespawnNeverAnEntry
-  AuditPreservingArchiveNeverAnEntry"
+  AuditPreservingArchiveNeverAnEntry
+  AuditHostAdoptedArchiveTakesOnlyAnAdoptingEntry
+  AuditTakeOverEndsOnlyUnseated"
       run_invariants="
   AuditWakingClosable
-  AuditRetirementArchivable"
+  AuditRetirementArchivable
+  AuditTakeOverExactlyOne"
       # member_residency_audit's retire run domains; its state constraint
       # caps the minted wake attempts at one.
       replace_exact_line "  AgentIdentityValues = {}" '  AgentIdentityValues = {"agentidentity_1", "agentidentity_2"}' "${cfg}"
@@ -797,10 +811,13 @@ write_cfg() {
   AuditForgetNamesRecord
   AuditResumeRoleMoveNeedsMigration
   AuditListingUnmarks
-  AuditSeatKeepsRoleHold"
+  AuditSeatKeepsRoleHold
+  AuditApplyLeavesAdoptingEntryAlone
+  AuditSealSparesIntentNamed"
           run_invariants="
   AuditDeclareExactlyOne
-  AuditSealExactlyOne"
+  AuditSealExactlyOne
+  AuditTakeOverExactlyOneApply"
           ;;
         legacy)
           spec="LegacySpec"
@@ -1058,6 +1075,11 @@ for witness in \
   "lifecycle:Action property:EntryRespawnRefused" "lifecycle:Action property:WorkerRespawnAdmitted" \
   "lifecycle:Action property:EntryRespawnRefusedStopped" \
   "lifecycle:Action property:WorkerPreservingArchive" \
+  "lifecycle:Action property:EntryHostAdopted" "lifecycle:Action property:HostMemberStands" \
+  "lifecycle:Action property:TakeOverEndsUnseated" "lifecycle:Action property:TakeOverDeferred" \
+  "apply:Action property:DeclareOverAdopting" "apply:Action property:SealSparesAdopting" \
+  "apply:Action property:TakeOverDeferredBySeal" "apply:Action property:AdoptedEntryEnds" \
+  "apply:Action property:AdoptionMarkReplayed" "apply:Action property:SealSparesIntentNamed" \
   "apply:Action property:RelistedAfterUnlist" \
   "apply:Action property:Revived" "apply:Action property:RetiredEntryKept" \
   "apply:Action property:FreshAfterForget" "apply:Action property:SealRemovesUnseated" \
@@ -1300,21 +1322,13 @@ open(path, "w").write(text)
 PY
 
   # An adoption without the shell's legacy observation: the listed
-  # adoption takes any marks.
+  # adoption takes any marks (its call of the adoption's verdict rule
+  # passes both marks as present).
   mutate entry_listed adoption_without_observation \
     "Invariant AuditAdoptionExactlyOne|Action property AuditAdoptionNeedsObservation|Action property AuditEntryOnlyWithCause" <<'PY'
-import os, re
-path = os.environ["MODEL"]
-text = open(path).read()
-block = re.search(r"^AdoptLegacyIdentityEntryAdopted\(.*?\n\n", text, re.S | re.M)
-assert block, "AdoptLegacyIdentityEntryAdopted not found"
-lines = block.group(0).split("\n")
-guard = [i for i, line in enumerate(lines)
-         if "(listed = TRUE) /\\ (IF (durable_identity_marker = TRUE)" in line]
-assert len(guard) == 1, "expected one observation guard in AdoptLegacyIdentityEntryAdopted"
-del lines[guard[0]]
-text = text[: block.start()] + "\n".join(lines) + text[block.end():]
-open(path, "w").write(text)
+replace_in_arm("AdoptLegacyIdentityEntryAdopted",
+               "durable_identity_marker, own_identity_label, listed, intent_row,",
+               "TRUE, TRUE, listed, intent_row,")
 PY
 
   # An unlisted adoption that takes one legacy mark: refused by the rule
@@ -1322,15 +1336,18 @@ PY
   mutate_target entry_unlisted unlisted_adoption_takes_one_mark \
     "Action property" AuditAdoptionNeedsObservation <<'PY'
 replace_in_arm("AdoptLegacyIdentityEntryAdoptedUnlisted",
-               "(durable_identity_marker = TRUE) /\\ (own_identity_label = TRUE)",
-               "(IF (durable_identity_marker = TRUE) THEN TRUE ELSE (own_identity_label = TRUE))")
+               "durable_identity_marker, own_identity_label, listed, intent_row,",
+               "(durable_identity_marker \\/ own_identity_label), "
+               "(durable_identity_marker \\/ own_identity_label), listed, intent_row,")
 PY
 
   # A retirement without an adoption that ignores the host's intent row:
   # refused by the rule that names the one member it answers, alone.
   mutate_target entry_unlisted retire_unadopted_ignores_intent_row \
     "Action property" AuditRetireUnadoptedQualifies <<'PY'
-replace_in_arm("AdoptLegacyIdentityEntryRetireUnadopted", " /\\ (intent_row = FALSE))", ")")
+replace_in_arm("AdoptLegacyIdentityEntryRetireUnadopted",
+               "durable_identity_marker, own_identity_label, listed, intent_row,",
+               "durable_identity_marker, own_identity_label, listed, FALSE,")
 PY
 
   # The replay of an entry row on an identity that is not seated.
@@ -1405,6 +1422,37 @@ hits = [i for i, line in enumerate(lines) if line.startswith("    /\\ ") and "DO
 assert len(hits) == 1, f"expected one entry guard in the live preserving archive, found {len(hits)}"
 del lines[hits[0]]
 open(path, "w").write(text[:found.start()] + "\n".join(lines) + text[found.end():])
+PY
+
+  # The host-adopted archive without its own guard: it takes any member,
+  # an entry no host's adoption marked and a worker alike.
+  mutate lifecycle host_adopted_archive_takes_any_member \
+    "Action property AuditHostAdoptedArchiveTakesOnlyAnAdoptingEntry" <<'PY'
+drop_guard("ObserveMemberRetirementArchivedLiveHostAdopted", "identity_entry_adopting")
+PY
+
+  # A host's adoption that ends a seated entry at once instead of marking
+  # it: the entry ends with no retirement, so no member is materialized
+  # again under the host's intent.
+  mutate lifecycle takeover_ends_seated_entry "Action property AuditTakeOverEndsOnlyUnseated" <<'PY'
+keep_var("TakeOverIdentityEntryAdopting", "identity_entry_adopting")
+update_var("TakeOverIdentityEntryAdopting", "identity_entry_origins", "MapRemove(identity_entry_origins, agent_identity)")
+PY
+
+  # A seal that marks an entry a host's adoption takes over: the apply and
+  # the adoption both act on it.
+  mutate apply seal_marks_adopting_entry \
+    "Invariant adopting_entry_is_a_seated_declared_entry|Action property AuditApplyLeavesAdoptingEntryAlone" <<'PY'
+replace_text("((id \\in identity_entry_adopting) = FALSE)", "TRUE")
+PY
+
+  # A seal that unlists an identity a host's intent row names: the
+  # roster's seal drives an identity the roster does not own.
+  mutate apply seal_ignores_intent_rows "Action property AuditSealSparesIntentNamed" <<'PY'
+text = open(path).read()
+old = " /\\ ((id \\in outer_intent_named) = FALSE)"
+assert text.count(old) == 4, f"expected the intent-named check in the seal's four loops, found {text.count(old)}"
+open(path, "w").write(text.replace(old, ""))
 PY
 
   # A seat that keeps the entry's unseated cause.

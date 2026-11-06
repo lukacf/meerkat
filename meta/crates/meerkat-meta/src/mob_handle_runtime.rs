@@ -6785,8 +6785,7 @@ pub struct MobBootstrapSpec {
     /// `MobBuilder::with_member_restore_policy`.
     pub(crate) member_restore: crate::identity_first::MemberRestore,
     /// Members the mob leaves to Meta's preparation when it starts (pending
-    /// first-boot rows, interrupted rotations), forwarded to
-    /// `MobBuilder::with_host_pending_members`.
+    /// first-boot rows), forwarded to `MobBuilder::with_host_pending_members`.
     pub(crate) host_pending_members: Vec<meerkat_mob::AgentIdentity>,
     /// The user-global root the member factory keeps the members' session
     /// comms identities under (`<root>/.rkat/session_comms_identity`), when
@@ -7765,7 +7764,7 @@ impl MobBootstrapSpec {
 
     /// Members the mob must leave to Meta's preparation when it starts: it
     /// materializes none of them and refuses each one's wake retryable until
-    /// Meta's seat step for it ends the mark.
+    /// the declaration that carries its first-boot row out ends the mark.
     #[must_use]
     pub(crate) fn with_host_pending_members(
         mut self,
@@ -14274,7 +14273,8 @@ mod tests {
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         *dispatcher
             .identity_runtime
             .write()

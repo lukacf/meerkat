@@ -17678,6 +17678,16 @@ mod tests {
             self.core.retire(runtime_id);
             Ok(())
         }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
+        }
     }
 
     #[async_trait::async_trait]
@@ -17796,6 +17806,16 @@ mod tests {
         async fn retire_member(&self, runtime_id: &AgentRuntimeId) -> Result<(), BridgeError> {
             self.core.retire(runtime_id);
             Ok(())
+        }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
         }
     }
 
@@ -17929,6 +17949,16 @@ mod tests {
             self.core.retire(runtime_id);
             Ok(())
         }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
+        }
     }
 
     /// Reset double: mints the successor binding a real bridge commits through
@@ -18052,6 +18082,16 @@ mod tests {
         async fn retire_member(&self, runtime_id: &AgentRuntimeId) -> Result<(), BridgeError> {
             self.core.retire(runtime_id);
             Ok(())
+        }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
         }
     }
 
@@ -21951,7 +21991,8 @@ message = "review"
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         let before = identity_runtime.status(&identity).await?;
 
         let console_events = ConsoleEventStore::new();
@@ -23248,7 +23289,10 @@ message = "review"
         register_active_identity(&identity_runtime, &core, &active).await?;
         // Registered, but Core holds no member for it: Dormant.
         let lazy = AgentIdentity::parse("review:lazy")?;
-        identity_runtime.register(reset_all_test_spec(&lazy)).await;
+        identity_runtime
+            .register(reset_all_test_spec(&lazy))
+            .await
+            .expect("the identity registers");
         assert_eq!(
             identity_runtime.status(&lazy).await?.state,
             IdentityLifecycleState::Dormant
@@ -23625,7 +23669,8 @@ message = "review"
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         let session_id = identity_runtime
             .status(&identity)
             .await?
@@ -23798,7 +23843,8 @@ message = "review"
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         let memory_dir = tempfile::tempdir()?;
         let memory_store = Arc::new(SqliteAgentMemoryStore::open(memory_dir.path())?);
         identity_runtime

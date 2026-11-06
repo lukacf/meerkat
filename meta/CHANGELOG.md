@@ -36,6 +36,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `caller_changed`, and a call whose caller's login ended while it ran gets
   the route's `403` `mcp_app_unavailable`.
 
+- `IdentityRuntime::register` and `IdentityRuntime::update_spec` declare the
+  identity in Core's mob and return Core's answer for it,
+  `Result<DeclaredIdentityAnswer, IdentityRuntimeError>` (`register` returned
+  `()` and `update_spec` `Result<(), IdentityRuntimeError>`); a caller
+  handles the result. `register` can now fail: with the new
+  `IdentityRuntimeError::DeclarationNotApplied { retryable, detail }` (error
+  kind `identity_declaration_not_applied`) when Core answered nothing for the
+  identity, retryable when another declared apply of the mob stayed in
+  progress past a bounded wait; when the identity's first-boot row
+  contradicts Core's history; when the build its host composes fails; or
+  when the first-boot manifest or Core's member history cannot be read. A
+  `match` over every `IdentityRuntimeError` variant adds an arm for the new
+  one.
+
+- `SessionBridge` has a new method, `apply_declared_roster`: Core's declared
+  apply (`MobHandle::apply_declared_roster`) of a roster of
+  `DeclaredIdentity` values, answered with a `DeclaredRosterAnswer` (a
+  `DeclaredIdentityAnswer` per identity, the unlisted identities of a
+  complete roster, and the first-boot requests Core carried out). Its
+  default answers `BridgeError::Unsupported` and logs at error level, so a
+  registration through a bridge that does not implement it declares nothing
+  and is refused (`DeclarationNotApplied`). A host's own wrapper of a session
+  bridge forwards it to the bridge it wraps; a test double with no Core mob
+  can answer `DeclaredRosterAnswer::kept_for(&roster)`.
+
+- `RestoreFlowResult` has a new field, `unlisted`: what the host's whole
+  roster did with each identity Core held declared that the roster does not
+  list (`UnlistedIdentityAnswer`: its member retired, its declaration
+  removed, its retirement failed, or a legacy member left as it is). A struct
+  literal of `RestoreFlowResult` sets it; `restore_flow` and
+  `lazy_register_flow`, which declare part of the roster, answer it empty.
+
 ### Security
 
 - Tokens minted with an `auth_config` shared secret no longer count as a
@@ -87,6 +119,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Console changes accept `expected_caller_scope` (the `caller_scope` read
   from `meta/console/whoami`), and a change made for another caller is
   refused with `caller_changed`.
+
+- `MemberLifecycleFactRecord::recorded_at_ms`, with
+  `MemberLifecycleFactRecord::with_recorded_at_ms`: when Core appended the
+  fact's journal event, in Unix milliseconds. The session bridge over a Core
+  mob sets it from Core's journal; a bridge that builds its records with
+  `MemberLifecycleFactRecord::new` alone leaves it `None`. The struct is
+  `#[non_exhaustive]`, so the field is additive.
+
+### Changed
+
+- Registering an identity (`IdentityRuntime::register`) or updating its spec
+  (`update_spec`) declares it in Core's mob as a one-identity roster: Core's
+  MobMachine decides what becomes of the identity's member and Core realizes
+  it. Meta records the spec as the identity's registration whatever Core
+  answers: the registration is the host's declaration, and the identity's
+  doors declare it again and answer Core's typed refusal. An identity whose
+  declaration Core refused for good (a raw member holds its name, its name
+  is a removed entry's or unreadable, its first-boot `Resume` row names a
+  session Core holds no copy of, its host rejects its build every time)
+  reads `broken` in its status, the status list and its health, names no
+  member and is not active, until Core answers a later declaration
+  otherwise. An identity Core holds no member for is seated Dormant when it
+  is registered, on its archived
+  session or a fresh one, instead of at the next roster pass or its first
+  delivery. The host's customizer composes the member build only when Core
+  answers that the identity's verdict builds a member: an identity Core keeps
+  is declared with its lifecycle facts alone, and no customizer runs. A raw
+  member a host spawned under the identity's member id is adopted when its
+  spawn carries the durable-identity marker or the `agent_identity` label
+  naming the identity, and is refused (`NameHeldByWorker`) otherwise. A
+  runtime with no session bridge records the spec and answers
+  `DeclaredIdentityAnswer::RecordedOnly`.
+
+- The roster pass declares the host's roster in Core's mob through Core's
+  declared apply, and no longer seats, releases, respawns or retires members
+  itself. A bootstrap or a refresh declares the whole roster: Core seats,
+  keeps, restamps or moves each listed identity (MobMachine decides each
+  verdict), and unlists each identity it holds declared that the roster no
+  longer lists and retires its member, after which the identity leaves
+  Meta's registry. A send, a dispatch or a materialization of an identity
+  Core holds no member for, or one whose first-boot row, held role move or
+  host preparation is still owed, declares that identity alone before it
+  acts. A respawn of a built member is such a declaration: Core seats the
+  member again, Dormant, on the session it kept archived, building nothing,
+  and the wake that follows builds it once, so the host's `customize_build`
+  runs twice (the seat's composed build, then the build's own), as for a
+  lazily seated identity, where the seat step revived the member live with
+  one call. One identity's refusal, held role move or failed retirement is that
+  identity's own typed outcome, and the pass goes on; a retirement that
+  failed is retried by the next complete roster. An identity refused before
+  Core is asked (its first-boot row contradicts Core's history) turns a
+  complete roster into a partial one for that pass, so nothing is unlisted
+  until every listed identity is declared. A placed or externally bound
+  identity Core holds no member of is created through its host (at the
+  default pass, or at its first use after a lazy one), and that creation
+  carries out its pending first-boot `Resume` row: the member is created on
+  the row's session, with its history, and the row is settled; a session
+  Core holds no durable copy of is the row's typed refusal, and nothing is
+  created in its place. An identity awaiting a held creation that no held
+  pass in progress covers is refused typed (`held_completion_owed`): it owes
+  its host a held completion.
+
+- A member whose spawn carries the `agent_identity` label but not the
+  durable-identity marker (the shape Meta 0.9.3 spawned) is no longer
+  respawned onto its session to gain the marker, and the roster pass no
+  longer retires it when the roster stops listing it: to Core such a member
+  is a host's raw member. Every Meta from 0.9.4 to 0.9.10 respawned these
+  members with the marker at its roster pass, so a state directory last run
+  by the previous matched release holds none.
+
+### Fixed
+
+- The exit interview a retirement no Meta verb asked for owes (Core's seal
+  unlisted the identity) is queued once when the process stops inside the
+  retirement's side effects and the next start delivers them again. Its
+  pending harvest was keyed by the time the side effect ran, so the replay
+  after the restart queued a second one; it is now keyed by the time Core
+  journaled the retirement, which the replay reads again. The harvest's
+  `retired_at_ms` stays a wall-clock time (the Console shows it as the
+  retirement's time, and the harvest queue reads oldest first by it). With
+  a session bridge whose journal records carry no time
+  (`MemberLifecycleFactRecord::recorded_at_ms` is `None`), the key stays
+  the time the side effect runs.
+
+- The roster pass no longer retires a member a host spawned under an
+  identity's member id and labelled with the identity when the roster never
+  declared that identity.
+
+- The first roster pass after a restart lets the previous role of an
+  identity the roster moved to another profile go: Core holds the member
+  under its previous role, or migrates it when the activation declared the
+  migration, and releases its materialization. The pass used to skip an
+  identity it had not registered yet in this process, so the member stayed
+  loaded under its previous role.
+
+- One identity whose member Core fails to retire no longer fails the whole
+  roster pass: its outcome is typed and its own, the other identities are
+  declared and unlisted as usual, and the next complete roster retires it
+  again.
 
 ## [0.9.10] - 2026-11-04
 

@@ -1003,7 +1003,10 @@ async fn rebuild_member_for_fresh_build(
     }
     // Adopt the current spec; the wake resumes Core's last binding of the
     // identity, the SAME durable session, through a fresh build.
-    identity_rt.register(spec).await;
+    identity_rt
+        .register(spec)
+        .await
+        .map_err(|err| format!("registration: {err}"))?;
     identity_rt
         .materialize_tracked(identity)
         .await
@@ -2289,7 +2292,10 @@ comms = true
             bridge: Some(Arc::new(bridge)),
             default_timeout: None,
         }));
-        identity_runtime.register(worker_spec(&identity)).await;
+        identity_runtime
+            .register(worker_spec(&identity))
+            .await
+            .expect("the identity registers");
 
         // Install the identity authority on the unified runtime so its
         // identity health monitor drives the completion cursor from member
@@ -2526,7 +2532,11 @@ comms = true
             )
             .await
             .expect("peer kickoff settled");
-        harness.identity_runtime.register(worker_spec(&peer)).await;
+        harness
+            .identity_runtime
+            .register(worker_spec(&peer))
+            .await
+            .expect("the identity registers");
         let edges = vec![
             crate::identity_first::ManagedPeerEdge::new(harness.identity.clone(), peer)
                 .expect("a managed edge"),

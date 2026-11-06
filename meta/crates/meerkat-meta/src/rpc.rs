@@ -8940,6 +8940,16 @@ mod tests {
         ) -> Result<crate::identity_first::MemberStanding, BridgeError> {
             self.core.member_standing(identity)
         }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
+        }
     }
 
     /// A customizer that changes no build and records each seat it is told
@@ -11274,7 +11284,8 @@ shell = true
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         let identity_ctx = IdentityFirstContext {
             runtime: crate::identity_first::PublicIdentityRuntime::new(
                 Arc::new(identity_rt),
@@ -11609,7 +11620,8 @@ shell = true
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         let identity_ctx = IdentityFirstContext {
             runtime: crate::identity_first::PublicIdentityRuntime::new(
                 Arc::new(identity_rt),
@@ -13355,7 +13367,8 @@ shell = true
                     binding: None,
                     placement: None,
                 })
-                .await;
+                .await
+                .expect("the identity registers");
         }
         let identity_ctx = IdentityFirstContext {
             runtime: crate::identity_first::PublicIdentityRuntime::new(
@@ -15034,9 +15047,16 @@ comms = true
                 default_timeout: None,
             }));
             let identity = AgentIdentity::parse(durable)?;
+            // Declared as Core holds its member (turn-driven), so the
+            // registration's declaration keeps the member as it is: a
+            // declared runtime mode that differs restamps the member, whose
+            // successor's comms runtime the wiring could reach before it is up.
+            let mut spec = rpc_durable_spec(identity.as_str(), "worker");
+            spec.runtime_mode_override = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
             identity_rt
-                .register(rpc_durable_spec(identity.as_str(), "worker"))
-                .await;
+                .register(spec)
+                .await
+                .expect("the identity registers");
             runtime.attach_identity_first_context(Arc::new(
                 crate::identity_first::IdentityFirstRuntimeContext::new(
                     identity_rt,

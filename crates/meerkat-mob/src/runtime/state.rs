@@ -1589,9 +1589,12 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<Result<super::declared_apply::DeclarationStep, crate::MobError>>,
     },
     /// Seal a complete declared roster in one MobMachine step: `desired` is
-    /// every identity the roster lists.
+    /// every identity the roster lists, and `intent_named` every identity a
+    /// host's identity intent row names, readable or not, which the seal
+    /// leaves as it is.
     SealDeclaredRoster {
         desired: std::collections::BTreeSet<crate::ids::AgentIdentity>,
+        intent_named: std::collections::BTreeSet<crate::ids::AgentIdentity>,
         reply_tx: oneshot::Sender<Result<super::declared_apply::SealAnswer, crate::MobError>>,
     },
     /// Open a declared apply (`MobHandle::apply_declared_roster`): one apply

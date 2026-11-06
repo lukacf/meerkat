@@ -40,7 +40,16 @@
 //!   whose roster lists its identity: the same session and transcript at a
 //!   higher Core generation, now marked; such a member of an identity the
 //!   roster dropped is retired; a host-adopted member is neither respawned
-//!   nor retired, and a second boot changes nothing.
+//!   nor retired, and a second boot changes nothing;
+//! - a member the host spawned under an identity's member id, which the
+//!   roster never declared, with Meta's `agent_identity` label and no
+//!   durable-identity marker, is the host's: no roster pass retires it; one
+//!   that carries both marks is a legacy roster member, which a pass that
+//!   does not list its identity retires;
+//! - a roster that moved an identity to another profile while the process
+//!   was down is handled by the first pass after the restart: Core lets the
+//!   member's previous role go, and the identity stays seated on its
+//!   session.
 //!
 //! Every assertion reads Core directly (the mob handle's roster), so no test
 //! can pass by agreeing with a Meta copy of the same fact.
@@ -63,12 +72,12 @@ use meerkat_meta::identity_first::contracts::{
 use meerkat_meta::identity_first::{
     AgentAddressability, AgentBuildContext, AgentBuildDraft, AgentIdentity, CheckpointVersion,
     ContinuityGeneration, ContinuityRecord, ContinuityResolveState, ContinuityStore,
-    ContinuityStoreError, CustomizerError, DurabilityPolicy, DurableAgentSpec, FencingToken,
-    FirstBootManifest, FirstBootRow, FirstBootRowKind, FirstBootWait, IdentityFirstRuntimeContext,
-    IdentityRuntime, IdentityRuntimeConfig, IdentityRuntimeError, LeaseAcquireResult, LeaseError,
-    LeaseGrant, LeaseProvider, LeaseRenewResult, ManagedPeerEdge, RestoreFlowResult,
-    RestoreOutcome, RosterContext, RosterError, SessionBridge, SessionSnapshot, TopologyContext,
-    TopologyError,
+    ContinuityStoreError, CustomizerError, DeclaredIdentityAnswer, DurabilityPolicy,
+    DurableAgentSpec, FencingToken, FirstBootManifest, FirstBootRow, FirstBootRowKind,
+    FirstBootWait, IdentityFirstRuntimeContext, IdentityRuntime, IdentityRuntimeConfig,
+    IdentityRuntimeError, LeaseAcquireResult, LeaseError, LeaseGrant, LeaseProvider,
+    LeaseRenewResult, ManagedPeerEdge, RestoreFlowResult, RestoreOutcome, RosterContext,
+    RosterError, SessionBridge, SessionSnapshot, TopologyContext, TopologyError,
 };
 use meerkat_meta::mob_composition_manifest::persistent_mob_storage;
 use meerkat_meta::mob_handle_runtime::SessionCreatedContext;
@@ -88,6 +97,14 @@ external_addressable = true
 runtime_mode = "turn_driven"
 
 [profiles.personal.tools]
+comms = true
+
+[profiles.personal_next]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "turn_driven"
+
+[profiles.personal_next.tools]
 comms = true
 "#;
 
@@ -276,6 +293,40 @@ impl AgentCustomizer for NoopCustomizer {
         _spec: &DurableAgentSpec,
         _draft: &mut AgentBuildDraft,
     ) -> Result<(), CustomizerError> {
+        Ok(())
+    }
+
+    async fn after_create(
+        &self,
+        _identity: &AgentIdentity,
+        _session_id: &SessionId,
+        _context: &SessionCreatedContext,
+    ) -> Result<(), CustomizerError> {
+        Ok(())
+    }
+}
+
+/// An installed customizer that counts the member builds it composes.
+#[derive(Default)]
+struct CountingCustomizer {
+    builds: AtomicUsize,
+}
+
+impl CountingCustomizer {
+    fn builds(&self) -> usize {
+        self.builds.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl AgentCustomizer for CountingCustomizer {
+    async fn customize_build(
+        &self,
+        _context: &AgentBuildContext,
+        _spec: &DurableAgentSpec,
+        _draft: &mut AgentBuildDraft,
+    ) -> Result<(), CustomizerError> {
+        self.builds.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -597,14 +648,6 @@ impl Boot {
             .unwrap_or_else(|error| {
                 panic!("the roster compile must succeed on Core's stores alone: {error}")
             })
-    }
-
-    /// The roster compile's refusal, for a roster the compile must refuse.
-    async fn compile_refusal(&self, roster: &[DurableAgentSpec]) -> IdentityRuntimeError {
-        match self.context.bootstrap_roster(roster).await {
-            Ok(compiled) => panic!("the roster compile must refuse: {compiled:?}"),
-            Err(error) => error,
-        }
     }
 
     /// A host adopts `identity`'s live member through Core, exactly as it
@@ -951,6 +994,46 @@ impl Boot {
             .unwrap_or_else(|| panic!("{identity}'s unmarked member has a session"))
     }
 
+    /// Spawn a member through Core's mob under `identity`'s roster member id
+    /// with exactly `labels` and the durable-identity marker keyed by the
+    /// identity, the way a host spawns a member of a durable profile directly
+    /// on the mob. Waits for its first turn, which asks the model to
+    /// remember `token`, and returns its session.
+    async fn spawn_marked_core_member(
+        &self,
+        identity: &AgentIdentity,
+        token: &str,
+        labels: BTreeMap<String, String>,
+    ) -> SessionId {
+        let core_identity =
+            meerkat_meta::member_comms_id::roster_member_id_for_identity(identity.as_str());
+        let before = self.capture.count();
+        let mut member = meerkat_mob::SpawnMemberSpec::host_root("personal", core_identity)
+            .with_labels(labels)
+            .with_initial_message(meerkat_core::ContentInput::Text(format!(
+                "Remember this token: {token}"
+            )));
+        member.continuity_intent = meerkat_mob::SpawnContinuityIntent::DurableIdentity {
+            continuity_key: identity.as_str().to_string(),
+        };
+        self.unified
+            .mob_handle()
+            .spawn_spec(member)
+            .await
+            .unwrap_or_else(|error| panic!("Core spawns {identity}'s marked member: {error}"));
+        let what = format!("{identity}'s first turn");
+        self.capture.wait_for_requests(before + 1, &what).await;
+        self.wait_settled(identity, &what).await;
+        let binding = self.core_last_binding(identity).await;
+        assert!(
+            binding.marked,
+            "{identity}'s seeded member carries the durable-identity marker"
+        );
+        binding
+            .session
+            .unwrap_or_else(|| panic!("{identity}'s marked member has a session"))
+    }
+
     /// Retire `identity`'s member through Core's mob, the way a host retires
     /// a member it made itself.
     async fn retire_core_member(&self, identity: &AgentIdentity) {
@@ -1007,6 +1090,44 @@ impl Boot {
                     continuity_key: identity.as_str().to_string(),
                 },
             live: binding.is_live(),
+        }
+    }
+
+    /// Core wakes `identity`'s seated member, as an operator does through
+    /// the mob, with no Meta verb.
+    async fn wake_core_member(&self, identity: &AgentIdentity) {
+        let core_identity =
+            meerkat_meta::member_comms_id::roster_member_id_for_identity(identity.as_str());
+        self.unified
+            .mob_handle()
+            .ensure_member_live(&core_identity)
+            .await
+            .unwrap_or_else(|error| panic!("Core wakes {identity}'s member: {error}"));
+    }
+
+    /// Whether Core holds `identity`'s member seated with nothing loaded
+    /// (unmaterialized). Reading it wakes nothing. `false` for a loaded
+    /// member and for an identity Core holds no member for.
+    fn core_member_unloaded(&self, identity: &AgentIdentity) -> bool {
+        let core_identity =
+            meerkat_meta::member_comms_id::roster_member_id_for_identity(identity.as_str());
+        self.unified
+            .mob_handle()
+            .member_unmaterialized(&core_identity)
+    }
+
+    /// Wait (bounded) until Core holds `identity`'s member seated with
+    /// nothing loaded. `false` when it still does not at the deadline.
+    async fn wait_core_member_unloaded(&self, identity: &AgentIdentity) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if self.core_member_unloaded(identity) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            sleep(Duration::from_millis(50)).await;
         }
     }
 
@@ -3156,24 +3277,22 @@ async fn an_unreadable_first_boot_manifest_refuses_every_identity_and_keeps_the_
     boot.stop().await;
 }
 
-/// A member Meta 0.9.3 spawned carries no durable-identity marker, and Core
-/// restores it live across the upgrade, so no Meta wake resumes it and
-/// nothing marks it. The first boot whose roster lists the identity respawns
-/// it through Core, non-destructively: the same session and transcript at a
-/// higher Core generation, with the marker on the new binding, so the
-/// session now resolves as the identity. A member of that era whose identity
-/// the roster dropped still carries Meta's identity label; the same boot
-/// retires it, as it retires a marked member the roster dropped. A second
-/// boot changes neither.
+/// A member Meta 0.9.3 spawned carries Meta's identity label but no
+/// durable-identity marker, and Core restores it live across the upgrade.
+/// The first boot whose roster lists the identity declares it, and Core
+/// adopts the labelled member as the identity's entry and keeps it: the same
+/// session, transcript and Core generation, with nothing respawned. A member
+/// of that era whose identity the roster dropped is a host's raw member to
+/// Core: the boot leaves it live as it is. A second boot changes neither.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_first_boot_respawns_an_unmarked_rostered_member_and_retires_a_dropped_one() {
+async fn the_first_boot_keeps_an_unmarked_rostered_member_and_leaves_a_dropped_one() {
     let temp = tempfile::TempDir::new().expect("temp dir");
     let state = temp.path().join("state");
-    let mob_id = unique_mob_id("unmarked-respawn");
+    let mob_id = unique_mob_id("unmarked-adopt");
     let alice = id("personal:alice");
     let bob = id("personal:bob");
     let roster = vec![spec("personal:alice")];
-    const TOKEN: &str = "MARKER-UNMARKED-RESPAWN-5-TANGO";
+    const TOKEN: &str = "MARKER-UNMARKED-ADOPT-5-TANGO";
 
     let boot = Boot::start(&state, &mob_id, &[]).await;
     boot.compile(&[]).await;
@@ -3196,69 +3315,55 @@ async fn the_first_boot_respawns_an_unmarked_rostered_member_and_retires_a_dropp
         "Core restores the dropped identity's 0.9.3 member live and unmarked: {dropped:?}"
     );
     boot.compile(&roster).await;
-    boot.assert_durable_identity_marker(&alice, "the first boot's respawn")
-        .await;
-    let respawned = boot.core_last_binding(&alice).await;
+    let kept = boot.core_last_binding(&alice).await;
     assert!(
-        respawned.live && respawned.marked,
-        "the respawned binding is live and carries alice's marker: {respawned:?}"
+        kept.live && kept.generation == restored.generation && kept.session == restored.session,
+        "the boot keeps the member, respawning nothing: {kept:?} (was {restored:?})"
     );
+    let handle = boot.unified.mob_handle();
+    let entry = handle
+        .identity_entry(
+            &meerkat_meta::member_comms_id::roster_member_id_for_identity(alice.as_str()),
+        )
+        .expect("Core's entry read");
     assert!(
-        respawned.generation > restored.generation,
-        "the respawn runs under a new Core generation ({} -> {})",
-        restored.generation,
-        respawned.generation
+        matches!(
+            &entry,
+            meerkat_mob::IdentityEntryRead::Entry(view)
+                if view.origin == meerkat_mob::IdentityEntryOrigin::Declared
+                    && matches!(view.standing, meerkat_mob::EntryStanding::Seated(_))
+        ),
+        "Core adopted the labelled member as alice's declared entry: {entry:?}"
     );
     assert_eq!(
-        respawned.session,
-        Some(session.clone()),
-        "the respawn keeps the session"
-    );
-    assert_eq!(
-        boot.core_member_generation(&alice).await,
-        Some(respawned.generation),
-        "Core holds alice live at the respawned generation"
-    );
-    let history = boot.core_history().await;
-    let session_binding = history
-        .binding_for_session(&session)
-        .expect("Core binds the kept session");
-    assert_eq!(
-        session_binding.continuity_intent(),
-        &meerkat_mob::SpawnContinuityIntent::DurableIdentity {
-            continuity_key: alice.as_str().to_string(),
-        },
-        "the binding that names the session carries alice's marker, so the session \
-         resolves as alice"
-    );
-    assert_eq!(
-        boot.runtime()
-            .core_session_owner(&session)
-            .await
-            .expect("Core's session owner read"),
-        Some(alice.clone())
-    );
-    let retired = boot.core_last_binding(&bob).await;
-    assert!(
-        !retired.live,
-        "the boot retires the member of the identity its roster dropped: {retired:?}"
-    );
-    assert_eq!(
-        (retired.generation, retired.session.as_ref(), retired.marked),
-        (dropped.generation, Some(&bob_session), false),
-        "the retirement respawns nothing: the same generation and session, unmarked"
+        boot.core_last_binding(&bob).await,
+        dropped,
+        "the boot leaves the dropped identity's member as it is"
     );
     assert_eq!(
         boot.core_member_generation(&bob).await,
-        None,
-        "Core holds no member for the dropped identity"
+        Some(dropped.generation),
+        "Core still holds the dropped identity's member"
+    );
+    let bob_entry = handle
+        .identity_entry(&meerkat_meta::member_comms_id::roster_member_id_for_identity(bob.as_str()))
+        .expect("Core's entry read");
+    assert!(
+        matches!(
+            &bob_entry,
+            meerkat_mob::IdentityEntryRead::NotAnEntry { worker: Some(_) }
+        ),
+        "to Core the dropped identity's member is a host's raw member: {bob_entry:?}"
     );
     boot.send(&alice, "Which token did I give you?").await;
     let request = boot
         .capture
         .last()
-        .expect("alice's request after the respawn");
-    assert!(request.contains(TOKEN), "the respawn keeps the transcript");
+        .expect("alice's request after the first boot");
+    assert!(
+        request.contains(TOKEN),
+        "the kept member keeps its transcript"
+    );
     boot.assert_continuity_and_leases_unread();
     boot.stop().await;
 
@@ -3266,19 +3371,19 @@ async fn the_first_boot_respawns_an_unmarked_rostered_member_and_retires_a_dropp
     let alice_before = boot.core_last_binding(&alice).await;
     let bob_before = boot.core_last_binding(&bob).await;
     assert!(
-        alice_before.live && alice_before.marked,
-        "alice stays live and marked across the restart: {alice_before:?}"
+        bob_before.live && bob_before.session.as_ref() == Some(&bob_session),
+        "the dropped identity's member stays live on its session: {bob_before:?}"
     );
     boot.compile(&roster).await;
     assert_eq!(
         boot.core_last_binding(&alice).await,
         alice_before,
-        "a second boot respawns nothing"
+        "a second boot changes nothing for alice"
     );
     assert_eq!(
         boot.core_last_binding(&bob).await,
         bob_before,
-        "a second boot leaves the retired member as it is"
+        "a second boot leaves the raw member as it is"
     );
     boot.assert_continuity_and_leases_unread();
     boot.stop().await;
@@ -3286,13 +3391,15 @@ async fn the_first_boot_respawns_an_unmarked_rostered_member_and_retires_a_dropp
 
 /// A member the host made directly on the mob under an identity's member id
 /// carries no `agent_identity` label naming the identity. A roster that
-/// later declares the identity does not adopt it: the compile refuses typed,
-/// naming the member and its session, before it registers anything, and
+/// later declares the identity does not adopt it: Core refuses that
+/// identity's declaration typed, naming the member and its session, and
 /// leaves the member as the host made it (no respawn, its transcript stays
-/// its own). Once the host labels the member for the identity on its
-/// session, the next compile adopts it the way it adopts a member Meta 0.9.3
-/// spawned: one respawn onto the same session, marked, with the transcript
-/// kept.
+/// its own). The refused spec is registered, so its doors answer the
+/// refusal, but it never reads live: its status, the status list and its
+/// health read it Broken and name no member, and it is not active. Once the
+/// host labels the member for the identity on its session, the next compile
+/// adopts it as it is (Core's legacy adoption takes either legacy mark): no
+/// respawn, the same session and transcript, and the identity reads live.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_raw_member_under_a_declared_identitys_member_id_is_refused_until_labelled() {
     let temp = tempfile::TempDir::new().expect("temp dir");
@@ -3320,23 +3427,38 @@ async fn a_raw_member_under_a_declared_identitys_member_id_is_refused_until_labe
         "Core restores the raw member: {raw:?}"
     );
     for compile in ["first", "second"] {
-        let refusal = boot.compile_refusal(&roster).await;
-        assert!(
-            matches!(
-                &refusal,
-                IdentityRuntimeError::IdentityNameHeldByRawMember {
-                    identity,
-                    session_id,
-                    ..
-                } if *identity == alice && session_id.as_ref() == Some(&session)
+        let compiled = boot.compile_outcomes(&roster).await;
+        match compiled.outcomes.get(&alice) {
+            Some(RestoreOutcome::Refused(error)) => assert!(
+                matches!(
+                    error.as_ref(),
+                    IdentityRuntimeError::IdentityNameHeldByRawMember {
+                        identity,
+                        session_id,
+                        ..
+                    } if *identity == alice && session_id.as_ref() == Some(&session)
+                ),
+                "{compile} compile: a roster entry under a raw member's member id is that \
+                 identity's typed refusal: {error:?}"
             ),
-            "{compile} compile: a roster entry under a raw member's member id is a typed \
-             refusal: {refusal:?}"
-        );
+            other => panic!(
+                "{compile} compile: a roster entry under a raw member's member id is that \
+                 identity's typed refusal: {other:?}"
+            ),
+        }
         assert_eq!(
             boot.core_last_binding(&alice).await,
             raw,
             "{compile} compile: the refusal leaves the member as the host made it, unrespawned"
+        );
+        assert_refused_spec_never_reads_live(&boot, &alice, compile).await;
+        assert!(
+            matches!(
+                boot.runtime().materialize(&alice).await,
+                Err(IdentityRuntimeError::IdentityNameHeldByRawMember { ref identity, .. })
+                    if *identity == alice
+            ),
+            "{compile} compile: the door answers the typed refusal"
         );
     }
 
@@ -3349,17 +3471,30 @@ async fn a_raw_member_under_a_declared_identitys_member_id_is_refused_until_labe
         ]),
     )
     .await;
+    let labelled = boot.core_last_binding(&alice).await;
+    assert!(labelled.live, "the relabelled member is live: {labelled:?}");
     boot.compile(&roster).await;
     let adopted = boot.core_last_binding(&alice).await;
-    assert!(
-        adopted.live && adopted.marked,
-        "the labelled member is adopted and marked: {adopted:?}"
+    assert_eq!(
+        adopted, labelled,
+        "the labelled member is adopted as it is: no respawn"
     );
     assert_eq!(
         adopted.session,
         Some(session.clone()),
         "the adoption keeps the session"
     );
+    let status = boot
+        .runtime()
+        .status(&alice)
+        .await
+        .expect("status of alice");
+    assert_eq!(
+        status.state,
+        meerkat_meta::identity_first::IdentityLifecycleState::Active,
+        "the adopted member is alice's: she reads live"
+    );
+    assert_eq!(status.session_id, Some(session.clone()));
     boot.send(&alice, "Which token did I give you?").await;
     let request = boot
         .capture
@@ -3368,6 +3503,60 @@ async fn a_raw_member_under_a_declared_identitys_member_id_is_refused_until_labe
     assert!(request.contains(TOKEN), "the adoption keeps the transcript");
     boot.assert_continuity_and_leases_unread();
     boot.stop().await;
+}
+
+/// A spec Core refused for good never reads live: its status, its entry in
+/// the status list and its health read it Broken and name no member, and it
+/// is not active.
+async fn assert_refused_spec_never_reads_live(boot: &Boot, identity: &AgentIdentity, after: &str) {
+    let runtime = boot.runtime();
+    let status = runtime
+        .status(identity)
+        .await
+        .unwrap_or_else(|error| panic!("{after}: the refused spec is registered: {error}"));
+    assert_eq!(
+        status.state,
+        meerkat_meta::identity_first::IdentityLifecycleState::Broken,
+        "{after}: the refused spec reads Broken"
+    );
+    assert!(
+        status.agent_runtime_id.is_none()
+            && status.session_id.is_none()
+            && status.member_id.is_none()
+            && status.generation.is_none(),
+        "{after}: the refused spec names no member: {status:?}"
+    );
+    let listed = runtime.statuses().await.expect("the status list");
+    let listed = listed
+        .iter()
+        .find(|status| status.identity == *identity)
+        .unwrap_or_else(|| panic!("{after}: the status list names the refused spec"));
+    assert_eq!(
+        listed.state,
+        meerkat_meta::identity_first::IdentityLifecycleState::Broken,
+        "{after}: the status list reads the refused spec Broken"
+    );
+    assert!(
+        listed.session_id.is_none() && listed.agent_runtime_id.is_none(),
+        "{after}: the status list names no member for the refused spec: {listed:?}"
+    );
+    let health = runtime
+        .member_health(identity)
+        .await
+        .unwrap_or_else(|error| panic!("{after}: the refused spec's health: {error}"));
+    assert_eq!(
+        health.state,
+        meerkat_meta::identity_first::IdentityLifecycleState::Broken,
+        "{after}: the refused spec's health reads Broken"
+    );
+    assert!(
+        health.member_id.is_none() && health.session_id.is_none(),
+        "{after}: the refused spec's health names no member: {health:?}"
+    );
+    assert!(
+        !runtime.is_active(identity).await,
+        "{after}: the refused spec is not active"
+    );
 }
 
 /// The other remedy: the host retires its raw member before a roster
@@ -3420,13 +3609,15 @@ async fn a_retired_raw_member_never_becomes_a_declared_identitys_history() {
     boot.stop().await;
 }
 
-/// Delete reads the identity's previous life as the wake does. After Core
-/// retired alice's member (as a host does: Meta's own retire only releases
-/// it), the host made and retired a raw member under her member id, so
-/// Core's last binding of the member id is that raw member's. The delete
-/// finds no life of alice's to end: it answers as for an identity Core never
-/// spawned and leaves Core's last binding as the raw member left it, rather
-/// than distilling that member's session and starting a fresh life over it.
+/// Delete reads the identity's previous life as the wake does. Before any
+/// roster declared alice, the host made a raw member under her member id;
+/// the roster that then lists her is refused for her alone (the raw member
+/// holds the name: a declared identity's entry would refuse the raw spawn
+/// instead), and the host retires the raw member, so Core's last binding of
+/// the member id is that raw member's. The delete finds no life of alice's
+/// to end: it answers as for an identity Core never spawned and leaves
+/// Core's last binding as the raw member left it, rather than distilling
+/// that member's session and starting a fresh life over it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_delete_never_takes_a_retired_raw_members_session_as_the_identitys_life() {
     let temp = tempfile::TempDir::new().expect("temp dir");
@@ -3437,8 +3628,7 @@ async fn a_delete_never_takes_a_retired_raw_members_session_as_the_identitys_lif
     const TOKEN: &str = "MARKER-RAW-DELETE-8-MIKE";
 
     let boot = Boot::start(&state, &mob_id, &roster).await;
-    boot.compile(&roster).await;
-    boot.retire_core_member(&alice).await;
+    boot.compile(&[]).await;
     let raw_session = boot
         .spawn_core_member(
             &alice,
@@ -3446,6 +3636,18 @@ async fn a_delete_never_takes_a_retired_raw_members_session_as_the_identitys_lif
             BTreeMap::from([("team".to_string(), "direct".to_string())]),
         )
         .await;
+    let compiled = boot.compile_outcomes(&roster).await;
+    assert!(
+        matches!(
+            compiled.outcomes.get(&alice),
+            Some(RestoreOutcome::Refused(error)) if matches!(
+                error.as_ref(),
+                IdentityRuntimeError::IdentityNameHeldByRawMember { identity, .. }
+                    if *identity == alice
+            )
+        ),
+        "the raw member holds alice's member id: {compiled:?}"
+    );
     boot.retire_core_member(&alice).await;
     let before = boot.core_last_binding(&alice).await;
     assert!(
@@ -3473,8 +3675,10 @@ async fn a_delete_never_takes_a_retired_raw_members_session_as_the_identitys_lif
 /// the roster lists it: the compile reports the typed host-adopted conflict
 /// and leaves Core's binding as it was. Nor does the compile retire an
 /// adopted member whose identity the roster does not list, although the
-/// member carries Meta's identity label. An unmarked identity beside them is
-/// respawned by the same compile.
+/// member carries Meta's identity label. A member Meta 0.9.3 seated beside
+/// them (Meta's identity label, no marker) is adopted by the same compile as
+/// it is: Core's legacy adoption takes either legacy mark, and nothing
+/// respawns the member.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_roster_compile_never_respawns_or_retires_a_host_adopted_member() {
     let temp = tempfile::TempDir::new().expect("temp dir");
@@ -3530,13 +3734,390 @@ async fn the_roster_compile_never_respawns_or_retires_a_host_adopted_member() {
         adopted_unlisted,
         "the compile never retires an adopted member the roster does not list"
     );
-    let respawned = boot.core_last_binding(&bob).await;
-    assert!(
-        respawned.live && respawned.marked && respawned.generation > unmarked.generation,
-        "the unmarked identity beside them is respawned by the same compile: {unmarked:?} -> \
-         {respawned:?}"
+    let kept = boot.core_last_binding(&bob).await;
+    assert_eq!(
+        kept, unmarked,
+        "the member Meta 0.9.3 seated beside them is adopted as it is by the same compile: no \
+         respawn"
     );
-    assert_eq!(respawned.session, Some(bob_session), "onto its session");
+    assert!(kept.live, "bob's member stays live: {kept:?}");
+    assert_eq!(kept.session, Some(bob_session), "on its session");
     boot.assert_continuity_and_leases_unread();
+    boot.stop().await;
+}
+
+/// A member the host spawns directly on the mob under an identity's member
+/// id, with Meta's `agent_identity` label naming that identity and no
+/// durable-identity marker (one legacy mark), is the host's: the roster
+/// never declared the identity, and Meta writes that label on the members it
+/// seats but never reads it to decide anything. A roster pass that does not
+/// list the identity leaves the member as the host made it, in the running
+/// process and in the first pass after a restart. The pass used to take the
+/// label as the roster's custody and retire the member.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_raw_spawn_labelled_agent_identity_and_unlisted_is_not_retired() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let mob_id = unique_mob_id("raw-labelled-unlisted");
+    let alice = id("personal:alice");
+    let bob = id("personal:bob");
+    let roster = vec![spec("personal:alice")];
+
+    let boot = Boot::start(&state, &mob_id, &roster).await;
+    boot.compile(&roster).await;
+    let session = boot
+        .spawn_core_member(
+            &bob,
+            "MARKER-RAW-LABELLED-2-ECHO",
+            BTreeMap::from([
+                ("agent_identity".to_string(), bob.as_str().to_string()),
+                ("profile_name".to_string(), "personal".to_string()),
+            ]),
+        )
+        .await;
+    let spawned = boot.core_last_binding(&bob).await;
+    assert!(
+        spawned.live && !spawned.marked && spawned.session.as_ref() == Some(&session),
+        "control: Core holds the host's labelled member live and unmarked: {spawned:?}"
+    );
+
+    boot.compile(&roster).await;
+    assert_eq!(
+        boot.core_last_binding(&bob).await,
+        spawned,
+        "a roster pass must not retire a member the host spawned under an identity's member \
+         id that the roster never declared, with one legacy mark"
+    );
+    assert!(
+        boot.core_member_generation(&alice).await.is_some(),
+        "the listed identity stays a member"
+    );
+    boot.stop().await;
+
+    let boot = Boot::start(&state, &mob_id, &roster).await;
+    boot.compile(&roster).await;
+    assert_eq!(
+        boot.core_last_binding(&bob).await,
+        spawned,
+        "the first pass after a restart leaves the host's labelled member as it is too"
+    );
+    boot.assert_continuity_and_leases_unread();
+    boot.stop().await;
+}
+
+/// A member the host spawns directly on the mob under an identity's member
+/// id with both legacy marks, the durable-identity marker (a durable
+/// profile's spawn carries it) and Meta's `agent_identity` label naming that
+/// identity, is a legacy roster member: a roster pass that does not list the
+/// identity retires it, as it retires any member of an identity the roster
+/// dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_raw_spawn_with_both_legacy_marks_and_unlisted_is_retired() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let mob_id = unique_mob_id("raw-marked-unlisted");
+    let alice = id("personal:alice");
+    let bob = id("personal:bob");
+    let roster = vec![spec("personal:alice")];
+
+    let boot = Boot::start(&state, &mob_id, &roster).await;
+    boot.compile(&roster).await;
+    let session = boot
+        .spawn_marked_core_member(
+            &bob,
+            "MARKER-RAW-MARKED-3-DELTA",
+            BTreeMap::from([
+                ("agent_identity".to_string(), bob.as_str().to_string()),
+                ("profile_name".to_string(), "personal".to_string()),
+            ]),
+        )
+        .await;
+    let spawned = boot.core_last_binding(&bob).await;
+    assert!(
+        spawned.live && spawned.marked && spawned.session.as_ref() == Some(&session),
+        "control: Core holds the host's member live with both marks: {spawned:?}"
+    );
+
+    boot.compile(&roster).await;
+    let after = boot.core_last_binding(&bob).await;
+    assert!(
+        !after.live,
+        "a roster pass retires an unlisted member with both legacy marks: {after:?}"
+    );
+    assert!(
+        boot.core_member_generation(&alice).await.is_some(),
+        "the listed identity stays a member"
+    );
+    boot.stop().await;
+}
+
+/// A roster that moved an identity to another profile while the process
+/// was down is handled by the first pass after the restart, as by every
+/// later pass. Core restored the member seated under its previous role, and
+/// a wake loaded it there before the pass. With no declared migration the
+/// pass lets the previous role go (Core releases the member, so that role
+/// does not keep answering) and moves nothing: the identity stays seated on
+/// its session at its generation, its wakes held until the host declares the
+/// move. The pass used to skip the release while it held no registered spec,
+/// which is every first pass after a restart, and left the member loaded
+/// under its previous role.
+#[tokio::test(flavor = "multi_thread")]
+async fn reprofile_after_restart_is_handled_on_the_first_pass() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let mob_id = unique_mob_id("reprofile-restart");
+    let alice = id("personal:alice");
+    let roster = vec![spec("personal:alice")];
+    let moved = vec![DurableAgentSpec {
+        profile: ProfileName::from("personal_next"),
+        ..spec("personal:alice")
+    }];
+
+    let boot = Boot::start(&state, &mob_id, &roster).await;
+    boot.compile(&roster).await;
+    boot.send(&alice, "A first turn.").await;
+    boot.stop().await;
+
+    let boot = Boot::start(&state, &mob_id, &moved).await;
+    boot.wake_core_member(&alice).await;
+    let woken = boot.core_last_binding(&alice).await;
+    assert!(
+        woken.live && !boot.core_member_unloaded(&alice),
+        "control: Core holds the restored member loaded under its previous role before the \
+         pass: {woken:?}"
+    );
+
+    boot.compile(&moved).await;
+    assert!(
+        boot.wait_core_member_unloaded(&alice).await,
+        "the first pass after the restart must let the member's previous role go: Core still \
+         holds it loaded under that role"
+    );
+    assert_eq!(
+        boot.core_last_binding(&alice).await,
+        woken,
+        "with no declared migration the pass moves nothing: the identity stays seated on its \
+         session at its generation"
+    );
+    boot.assert_continuity_and_leases_unread();
+    boot.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Registration declares the identity in Core's mob
+// ---------------------------------------------------------------------------
+
+/// Registering an identity declares it in Core's mob. Core seats an
+/// identity it holds no member for Dormant, and the host's customizer
+/// composes the member build once, because Core needed it. Registering it
+/// again declares its lifecycle facts alone: Core keeps the member, writes
+/// nothing, and no customizer runs.
+///
+/// RED (`RED-1b-cache-only.patch`): `register` records the spec without
+/// declaring it, and the first answer is `RecordedOnly`.
+/// RED (`RED-1b-always-compose.patch`): the first round declares the
+/// composed build, and registering again calls the customizer a second time.
+#[tokio::test(flavor = "multi_thread")]
+async fn registration_declares_the_identity_and_core_seats_it_dormant_then_keeps_it() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let mob_id = unique_mob_id("register-declares");
+    let alice = id("team:alice");
+
+    let boot = Boot::start(&state, &mob_id, &[]).await;
+    boot.compile(&[]).await;
+    let customizer = Arc::new(CountingCustomizer::default());
+    boot.runtime()
+        .set_agent_customizer(Some(customizer.clone() as Arc<dyn AgentCustomizer>))
+        .await;
+
+    let answer = boot
+        .runtime()
+        .register(spec("team:alice"))
+        .await
+        .expect("Core answers the declaration");
+    let DeclaredIdentityAnswer::Seated { session_id, .. } = &answer else {
+        panic!("Core seats an identity it holds no member for: {answer:?}");
+    };
+    let seated = boot.core_last_binding(&alice).await;
+    assert!(seated.live, "Core holds alice's member: {seated:?}");
+    assert!(
+        seated.marked,
+        "the seat carries the durable-identity marker: {seated:?}"
+    );
+    assert_eq!(
+        seated.session.as_ref(),
+        Some(session_id),
+        "the answer names the seat's session"
+    );
+    assert!(
+        boot.core_member_unloaded(&alice),
+        "the seat materializes nothing"
+    );
+    assert_eq!(
+        customizer.builds(),
+        1,
+        "Core needed the member build once: the customizer composed it"
+    );
+
+    let again = boot
+        .runtime()
+        .register(spec("team:alice"))
+        .await
+        .expect("Core answers the declaration");
+    assert!(matches!(again, DeclaredIdentityAnswer::Kept), "{again:?}");
+    assert_eq!(
+        customizer.builds(),
+        1,
+        "an identity Core keeps is declared with its lifecycle facts alone: no customizer runs"
+    );
+    assert_eq!(
+        boot.core_last_binding(&alice).await,
+        seated,
+        "registering it again writes nothing"
+    );
+    boot.stop().await;
+}
+
+/// A declaration Core refuses still records the spec as the identity's
+/// registration (the registration is the host's declaration), and the
+/// refused spec never reads ready or live. A raw member a host spawned under
+/// the identity's member id with no legacy mark holds the name, so Core
+/// refuses the identity (`NameHeldByWorker`): the spec is registered, its
+/// views read it Broken and name no member, it is not active, its door
+/// declares it again and answers the typed refusal, and Core's member is
+/// untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_registration_core_refuses_records_the_spec_and_never_reads_live() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let mob_id = unique_mob_id("register-refused");
+    let bob = id("team:bob");
+
+    let boot = Boot::start(&state, &mob_id, &[]).await;
+    boot.compile(&[]).await;
+    let session = boot
+        .spawn_core_member(&bob, "MARKER-RAW-BOB", BTreeMap::new())
+        .await;
+    let raw = boot.core_last_binding(&bob).await;
+
+    let answer = boot
+        .runtime()
+        .register(spec("team:bob"))
+        .await
+        .expect("Core answers the declaration");
+    assert!(
+        matches!(
+            answer,
+            DeclaredIdentityAnswer::Refused {
+                refusal: meerkat_mob::DeclaredEntryRefusal::NameHeldByWorker
+            }
+        ),
+        "{answer:?}"
+    );
+    assert!(
+        boot.runtime().registered_spec(&bob).await.is_ok(),
+        "the refused declaration records the spec"
+    );
+    assert_refused_spec_never_reads_live(&boot, &bob, "the refused registration").await;
+    assert!(
+        matches!(
+            boot.runtime().materialize(&bob).await,
+            Err(IdentityRuntimeError::IdentityNameHeldByRawMember { ref identity, .. })
+                if *identity == bob
+        ),
+        "the door answers the typed refusal"
+    );
+    assert_eq!(raw.session, Some(session));
+    assert_eq!(
+        boot.core_last_binding(&bob).await,
+        raw,
+        "Core's raw member is untouched"
+    );
+    boot.stop().await;
+}
+
+/// A door acts for a declared identity with its entry's custody. Once
+/// alice is declared, Core holds her member id as a declared identity
+/// entry, and a spawn of that name without custody is refused as a raw
+/// spawn taking a declared name. A delivery to alice after Core retired her
+/// member is admitted: the door that wakes her carries the custody.
+///
+/// RED (`RED-1a-no-custody.patch`): the doors never ask for custody, and
+/// the delivery is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_door_wakes_a_declared_identity_whose_member_core_retired() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let mob_id = unique_mob_id("register-custody");
+    let alice = id("team:alice");
+
+    let boot = Boot::start(&state, &mob_id, &[]).await;
+    boot.compile(&[]).await;
+    let answer = boot
+        .runtime()
+        .register(spec("team:alice"))
+        .await
+        .expect("Core answers the declaration");
+    assert!(
+        matches!(answer, DeclaredIdentityAnswer::Seated { .. }),
+        "{answer:?}"
+    );
+    let seated = boot.core_last_binding(&alice).await;
+    boot.retire_core_member(&alice).await;
+    assert!(
+        !boot.core_last_binding(&alice).await.live,
+        "control: Core holds no live member for alice"
+    );
+
+    boot.send(&alice, "A first turn after the retirement.")
+        .await;
+    let woken = boot.core_last_binding(&alice).await;
+    assert!(woken.live, "the door woke alice: {woken:?}");
+    assert!(
+        woken.generation > seated.generation,
+        "the door seated a new incarnation: {woken:?} after {seated:?}"
+    );
+    boot.stop().await;
+}
+
+/// A delivery to an identity entry whose member Core retired outside a
+/// seal (the entry is left unseated) declares the identity again, and Core
+/// seats it on its archived session: the next incarnation revives that
+/// session, so the identity comes back with its history, and no fresh life
+/// starts.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_door_wake_of_an_unseated_entry_revives_its_archived_session() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let mob_id = unique_mob_id("door-revival");
+    let alice = id("team:alice");
+    let roster = vec![spec("team:alice")];
+
+    let boot = Boot::start(&state, &mob_id, &roster).await;
+    boot.compile(&roster).await;
+    boot.send(&alice, "A first turn.").await;
+    let seated = boot.core_last_binding(&alice).await;
+    assert!(
+        seated.live,
+        "alice is live after her first turn: {seated:?}"
+    );
+    boot.retire_core_member(&alice).await;
+    assert!(
+        !boot.core_last_binding(&alice).await.live,
+        "control: Core holds no live member for alice"
+    );
+
+    boot.send(&alice, "A turn after the retirement.").await;
+    let woken = boot.core_last_binding(&alice).await;
+    assert!(woken.live, "the door woke alice: {woken:?}");
+    assert!(
+        woken.generation > seated.generation,
+        "the door seated a new incarnation: {woken:?} after {seated:?}"
+    );
+    assert_eq!(
+        woken.session, seated.session,
+        "the new incarnation revives alice's archived session"
+    );
     boot.stop().await;
 }

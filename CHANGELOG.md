@@ -37,6 +37,30 @@ them.
 
 ### Breaking
 
+- `meerkat-mob`: `DeclaredEntryRefusal::NonAuthoritative` carries `would_be:
+  DeclaredEntryVerdict`, the verdict an authoritative composition would give
+  the same declaration over the same state. MobMachine's candidate arm
+  decides it with the same verdict rule its other arms apply, and a listed
+  member a host seated before identity entries existed on the basis the
+  authoritative composition's adoption of it gives (see the
+  `DeclareIdentityEntry` entry); it is advisory and never applied, and a
+  candidate still writes nothing. A match on the variant needs
+  `NonAuthoritative { .. }`. `meerkat-machine-kernels`: the MobMachine
+  effect `IdentityEntryDeclared` gains `would_be`, set on a candidate's
+  refusal only.
+
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the
+  `MobMachineInput` variant `DeclareIdentityEntry` (meerkat-machine-schema
+  and meerkat-mob) and the kernel `generated::mob::inputs` struct
+  `DeclareIdentityEntry` gain `legacy_marker` and `legacy_label` (each a
+  `bool`) and `legacy_generation` (a `Generation`): the observation the
+  declared apply's legacy adoption decided a listed member on (the legacy
+  marks on its spawn row and the generation of its incarnation), over which
+  a candidate composition's `would_be` is decided. Code that builds them
+  literally must set them (`false`, `false` and `Generation(0)` declare no
+  observation), and a serialized kernel input without them no longer
+  deserializes.
+
 - Behaviour-only (not measured by the gate): `meerkat-mob`:
   `MobHandle::apply_declared_roster` with a complete roster also retires a
   member the roster does not list when the member's spawn row carries both
@@ -75,6 +99,25 @@ them.
   existing variant's discriminant moves. Exhaustive matches must add the
   new variants.
 
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: a
+  host's adoption of a declared identity entry is MobMachine's takeover of
+  the entry (see Fixed). `MobMachineInput` (meerkat-machine-schema and
+  meerkat-mob) gains `TakeOverIdentityEntry { agent_identity }`,
+  `MobMachineSignal` gains `RecoverIdentityEntryAdopting`, and
+  `MobMachineEffect` gains `IdentityEntryTakenOver`, whose `verdict` is the
+  new `HostAdoptionEntryVerdict`. The kernel `generated::mob` enums `Input`,
+  `InputKind`, `Signal`, `SignalKind`, `Effect` and `EffectKind` gain the
+  same variants, each appended last, and `TransitionId` gains the
+  takeover's twelve arms after every other variant, so no existing
+  variant's discriminant moves. The input `SealDeclaredRoster` (and the
+  kernel `generated::mob::inputs` struct) gains `intent_named` (a
+  `BTreeSet<AgentIdentity>`: the entries whose identity a host's intent row
+  names, which the seal leaves alone), and the kernel
+  `generated::mob::State` gains the public field `identity_entry_adopting`.
+  Code that builds them literally must set the new fields (an empty set
+  keeps the previous seal), a serialized kernel input or state without them
+  no longer deserializes, and exhaustive matches must add the new variants.
+
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-runtime`: the
   MeerkatMachine gains the failure arm of an until-changed switch-turn
   reconfigure, the refusal of an until-changed switch-turn while another
@@ -102,6 +145,11 @@ them.
   new arms, or a wildcard arm.
 
 ### Added
+
+- `meerkat-mob`: `DeclaredEntryVerdict`, the public form of MobMachine's
+  declared-apply verdict a candidate composition reports
+  (`DeclaredEntryRefusal::NonAuthoritative`). Its vocabulary is closed, so a
+  host's projection matches every verdict.
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
   identity's member build (`DeclaredEntry::build`, set with
@@ -134,7 +182,30 @@ them.
   already. The member stays as it is, its own retirement ends it, and the
   next complete apply decides it again if it is still there.
 
+- `meerkat-mob`: `MemberRetirementCause::HostAdopted`, the cause of the
+  retirement with which a host's adoption takes a declared identity entry
+  over (see Fixed): the end of that retirement ends the entry. The enum is
+  `#[non_exhaustive]`, so the variant is additive. It is a Rust-only fact of
+  the member lifecycle journal (`MemberLifecycleEvent::RetirementStarted`)
+  and reaches no wire type or SDK. A release that predates it reads its
+  stored token as no cause: 0.9.10 replays the retirement as one the seal
+  did not start and reads the identity as the declared entry again, so a
+  rollback to 0.9.10 has one step to take (see the upgrading guide).
+
+- `meerkat-mob`: `MemberLifecycleRecord::timestamp`, the time the record's
+  journal event was appended (the `MobEvent` timestamp, stored with the
+  event): a later read of the journal, after a restart included, reads the
+  same time again, so a reader can key work it owes a retirement by when
+  Core journaled it. The struct is `#[non_exhaustive]`, so the field is
+  additive.
+
 ### Changed
+
+- `meerkat-mob`: `DeclaredEntryVerdict`, the verdict a candidate
+  composition reports in `DeclaredEntryRefusal::NonAuthoritative`, is a
+  closed vocabulary (no `#[non_exhaustive]`): a host's projection of it
+  matches every verdict with no wildcard arm, so adding a verdict is a
+  breaking change, named under Breaking in the release that adds it.
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
   sign-in is refused (`AttachmentRefused`), because it is governed and the
@@ -145,6 +216,30 @@ them.
   a later sign-in gets the typed refusal from `McpRouter::retry_authorized`.
 
 ### Fixed
+
+- `meerkat-mob`: a host's adoption of an identity a declared roster lists
+  (`MobHandle::adopt_member_identity_declaration` over a declared identity
+  entry) takes the entry over: the identity reconciler retires the member
+  with the cause `MemberRetirementCause::HostAdopted` and materializes it
+  again under the host's intent, on its own session, as no entry, and the
+  end of that retirement ends the entry. The entry outlived the retirement,
+  unseated and owed its seat, and the reconciler's spawn of the identity was
+  refused `MobError::IdentityMember`, so the host's identity was not served
+  again. From the host's intent row on, a declared apply answers the
+  identity host-adopted (`DeclaredEntryRefusal::HostAdopted`) and a complete
+  roster's seal leaves its entry as it is, where the seal unlisted the entry
+  and retired the host's member.
+
+- `meerkat-mob`: `MobHandle::rotate_member` of an identity whose entry no
+  member holds (the fresh life of an unseated identity: a reset or a delete)
+  is checked as a seat of its name is. With the entry's custody the rotation
+  lets the entry's archived session record go (`ForgetArchivedSession`,
+  reason `FreshLifeRequested`, as the declared apply's first-boot `Fresh`
+  path does; the archived session itself stays readable, its history and
+  transcript included) and seats the member on a fresh session, where it
+  failed at its seat while the entry held that record. Without the entry's
+  custody it is refused `MobError::IdentityMember` before anything is
+  created.
 
 - `meerkat-mob`: a declared role migration (`MobHandle::apply_declared_roster`
   answering `DeclaredEntryOutcome::RoleMigrated`) builds its successor on

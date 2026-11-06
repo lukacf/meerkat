@@ -109,7 +109,7 @@
 //! refused, retryable, with nothing recorded, when the incarnation changed
 //! since the verb first read it (another lifecycle operation of the member
 //! ended in between): the incarnation its record names is the one Core held
-//! at its head. The seat step reads its head before the binding. The
+//! at its head. A declaration reads the head before Core is asked. The
 //! projection reads a rotation's record by the same fact ([`step_reached`]):
 //! the record answers a retirement of its incarnation, or the fresh life's
 //! seat after it, only when Core journaled that fact after the record's head
@@ -181,8 +181,8 @@
 //! nothing kicked (Core's own, a host's). The cursor is read, or started at
 //! the journal's head when there is none, before the first step Meta asks
 //! Core for in this process, so every step Meta asks for is projected; a
-//! seat step is refused, retryable, while no cursor is stored and none can
-//! be started. With one stored, a step goes ahead whatever else failed: what
+//! declaration is refused, retryable, while no cursor is stored and none
+//! can be started. With one stored, a step goes ahead whatever else failed: what
 //! it journals lies past that cursor, and the live task prepares the
 //! projection again at each sweep until a preparation gets through. A
 //! unified runtime's identity bootstrap waits for the projection to reach
@@ -213,7 +213,7 @@ use tokio::task::JoinHandle;
 
 use super::super::bridge::{
     BridgeError, MemberLifecycleFact, MemberLifecycleFactRecord, MemberLifecycleJournalPage,
-    MemberStanding, SessionBridge,
+    MemberStanding, SessionBridge, UnlistedIdentityAnswer,
 };
 use super::super::contracts::AgentCustomizer;
 use super::super::types::{
@@ -649,6 +649,12 @@ impl LifecycleProjection {
         lock(&self.built).remove(&(identity.clone(), session.clone()))
     }
 
+    /// The build the step in flight for `identity` composed and has not
+    /// bound to a seat yet, taken: the step binds nothing after.
+    fn take_building(&self, identity: &AgentIdentity) -> Option<SessionCreatedContext> {
+        lock(&self.building).remove(identity)
+    }
+
     /// A Meta verb's record answered the retirement of `identity`'s
     /// incarnation `generation`. Past [`ANSWERED_PER_IDENTITY`] notes of the
     /// identity, the oldest goes.
@@ -993,8 +999,12 @@ struct Retirement {
     generation: u64,
     session: Option<SessionId>,
     cause: RetiredIdentityCause,
-    /// When its step was asked: the key of the exit interview it queues.
-    asked_at_ms: Option<u64>,
+    /// The key of the exit interview it queues, a wall-clock time a replay
+    /// after a restart reads again: when its step was asked, or, for a
+    /// retirement no Meta verb asked for, when Core journaled the event that
+    /// owes it ([`MemberLifecycleFactRecord::recorded_at_ms`]). `None` when
+    /// neither is known (a bridge whose journal records carry no time).
+    retired_at_ms: Option<u64>,
     /// The retired incarnation's role, for its retirement hook. `None` for
     /// an incarnation Core had retired before the step that owes its memory
     /// side effects (a reset or a delete of an identity no member held): its
@@ -1189,6 +1199,9 @@ struct PendingSeat {
 /// rotation onto a fresh session no Meta verb asked for.
 struct PendingRotation {
     cursor: u64,
+    /// When Core journaled the retirement
+    /// ([`MemberLifecycleFactRecord::recorded_at_ms`]).
+    recorded_at_ms: Option<u64>,
     identity: AgentIdentity,
     member: meerkat_mob::AgentIdentity,
     generation: u64,
@@ -1205,6 +1218,9 @@ struct PendingRotation {
 /// session.
 struct PendingRespawn {
     cursor: u64,
+    /// When Core journaled the seat
+    /// ([`MemberLifecycleFactRecord::recorded_at_ms`]).
+    recorded_at_ms: Option<u64>,
     identity: AgentIdentity,
     member: meerkat_mob::AgentIdentity,
     predecessor: u64,
@@ -1749,7 +1765,7 @@ impl IdentityRuntime {
         };
         // The stored cursor first: once one of the mob's current incarnation
         // is stored, a step Core journals lies past it whatever else fails
-        // here, so a seat step goes ahead.
+        // here, so a declaration goes ahead.
         let (store, mob_id) = self.identity_record_store();
         let stored = store
             .lifecycle_projection_cursor(&mob_id)
@@ -2219,6 +2235,82 @@ impl IdentityRuntime {
                 "the lifecycle effect intent of a step Core refused could not be taken back; \
                  the next step that ends the same incarnation records its own in its place"
             );
+        }
+    }
+
+    /// The incarnation of each registered identity a complete roster of
+    /// `specs` does not list, as the retirement hook reads it, kept for the
+    /// projection before Core is asked: Core's seal may retire it (cause
+    /// `Unlisted`), and the registration its session holds is read now,
+    /// before that retirement ends it, as for a retire Meta asks for. The
+    /// step holds these identities' lifecycle locks, so the projection takes
+    /// what is kept once the step answered. Nothing is read when no
+    /// retirement hook is installed.
+    pub(super) async fn keep_unlisting_incarnations(
+        &self,
+        specs: &[DurableAgentSpec],
+    ) -> Vec<RetiredIdentityMember> {
+        if self.retired_member_observer().is_none() {
+            return Vec::new();
+        }
+        let listed = specs
+            .iter()
+            .map(|spec| &spec.identity)
+            .collect::<BTreeSet<_>>();
+        let unlisted = self
+            .entries
+            .read()
+            .await
+            .keys()
+            .filter(|identity| !listed.contains(identity))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut kept = Vec::new();
+        for identity in unlisted {
+            match self
+                .retiring_incarnation(&identity, RetiredIdentityCause::Unlisted)
+                .await
+            {
+                Ok(Some(member)) => {
+                    self.lifecycle_projection.stash_retiring(member.clone());
+                    kept.push(member);
+                }
+                Ok(None) => {}
+                Err(error) => tracing::debug!(
+                    %identity,
+                    %error,
+                    "the incarnation a complete roster may unlist did not read; its retirement \
+                     hook names no registration"
+                ),
+            }
+        }
+        kept
+    }
+
+    /// What becomes of the incarnations [`Self::keep_unlisting_incarnations`]
+    /// kept once Core answered the roster (`unlisted`, what its seal did): one
+    /// Core retired keeps its record, its registration settled as a retire's
+    /// is; any other is taken back.
+    pub(super) async fn settle_unlisting_incarnations(
+        &self,
+        kept: Vec<RetiredIdentityMember>,
+        unlisted: &BTreeMap<AgentIdentity, UnlistedIdentityAnswer>,
+    ) {
+        for member in kept {
+            if matches!(
+                unlisted.get(&member.identity),
+                Some(UnlistedIdentityAnswer::Retired)
+            ) {
+                let mut retiring = Some(member);
+                self.settle_retired_registration(&mut retiring).await;
+                if let Some(member) = retiring {
+                    self.lifecycle_projection.refine_retiring(member);
+                }
+            } else {
+                let _ = self
+                    .lifecycle_projection
+                    .take_retiring(&member.identity, member.generation);
+            }
         }
     }
 
@@ -2849,6 +2941,7 @@ impl IdentityRuntime {
                             {
                                 pending.respawns.push(PendingRespawn {
                                     cursor: record.cursor,
+                                    recorded_at_ms: record.recorded_at_ms,
                                     identity: identity.clone(),
                                     member: member.clone(),
                                     predecessor: predecessor.get(),
@@ -2989,9 +3082,10 @@ impl IdentityRuntime {
                                     generation: *generation,
                                     session,
                                     cause,
-                                    asked_at_ms: intent
+                                    retired_at_ms: intent
                                         .as_ref()
-                                        .map(|intent| intent.recorded_at_ms),
+                                        .map(|intent| intent.recorded_at_ms)
+                                        .or(record.recorded_at_ms),
                                     hook_role: Some(role.clone()),
                                 }),
                             ));
@@ -2999,6 +3093,7 @@ impl IdentityRuntime {
                         RetirementOwes::IdentitysMember(cause) => {
                             pending.rotations.push(PendingRotation {
                                 cursor: record.cursor,
+                                recorded_at_ms: record.recorded_at_ms,
                                 identity,
                                 member: member.clone(),
                                 generation: *generation,
@@ -3173,7 +3268,7 @@ impl IdentityRuntime {
                 generation: predecessor,
                 session: intent.session_id,
                 cause,
-                asked_at_ms: Some(intent.recorded_at_ms),
+                retired_at_ms: Some(intent.recorded_at_ms),
                 hook_role: None,
             });
         }
@@ -3387,7 +3482,7 @@ impl IdentityRuntime {
                     generation: respawn.predecessor,
                     session: Some(retired_session),
                     cause,
-                    asked_at_ms: None,
+                    retired_at_ms: respawn.recorded_at_ms,
                     hook_role: Some(retired_role),
                 }),
             ));
@@ -3410,7 +3505,7 @@ impl IdentityRuntime {
                     generation: rotation.generation,
                     session: rotation.session,
                     cause: rotation.cause,
-                    asked_at_ms: None,
+                    retired_at_ms: rotation.recorded_at_ms,
                     hook_role: Some(rotation.role),
                 }),
             ));
@@ -3533,10 +3628,19 @@ impl IdentityRuntime {
                 // once the step answered: it holds the identity's lifecycle
                 // lock until then. A step that holds the lock past the
                 // deadline is not waited for; a build it bound, keyed by
-                // the seat's own session, is the seat's all the same.
+                // the seat's own session, is the seat's all the same, and so
+                // is the build it composed and has not bound yet (a
+                // declaration whose other seats Core is still making when
+                // Core journals this one): Core seated the identity with it.
                 let built = {
-                    let _answered = self.answered_step(identity, limits).await;
-                    self.lifecycle_projection.take_built(identity, &session)
+                    let answered = self.answered_step(identity, limits).await;
+                    match self.lifecycle_projection.take_built(identity, &session) {
+                        Some(context) => Some(context),
+                        None if answered.is_none() => {
+                            self.lifecycle_projection.take_building(identity)
+                        }
+                        None => None,
+                    }
                 };
                 let context = match built {
                     Some(context) => context,
@@ -3587,7 +3691,11 @@ impl IdentityRuntime {
         let limits = self.lifecycle_projection.limits();
         let memory = self.agent_memory.read().await.clone();
         let session_key = retirement.session.as_ref().map(ToString::to_string);
-        let asked_at_ms = retirement.asked_at_ms.unwrap_or_else(unix_ms_now);
+        // The exit interview's key ([`Retirement::retired_at_ms`]): a
+        // wall-clock time a replay after a restart reads again, so the
+        // interview is queued once. When neither is known (a bridge whose
+        // journal records carry no time), the time the side effects run.
+        let retired_at_ms = retirement.retired_at_ms.unwrap_or_else(unix_ms_now);
         let owes = RetirementMemory::of(retirement.cause);
         if let Some(memory) = memory.as_ref() {
             if let Some(session_key) = session_key.as_deref() {
@@ -3640,7 +3748,7 @@ impl IdentityRuntime {
                 let key = session_key.as_deref();
                 let queued = bounded(limits, move || async move {
                     memory
-                        .record_identity_retired_at(identity, key, harvest, asked_at_ms)
+                        .record_identity_retired_at(identity, key, harvest, retired_at_ms)
                         .await
                         .map_err(|error| error.to_string())
                 })

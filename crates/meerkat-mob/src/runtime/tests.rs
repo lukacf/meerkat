@@ -91363,7 +91363,8 @@ fn mob_runtime_parity_field_value(
         | "member_definition_wiring_exempt"
         // Identity entries: the parity probes declare none.
         | "spawn_exec_entry_custody"
-        | "identity_entry_retiring" => Some(MobRuntimeParityExprValue::Set(BTreeSet::new())),
+        | "identity_entry_retiring"
+        | "identity_entry_adopting" => Some(MobRuntimeParityExprValue::Set(BTreeSet::new())),
         // Created identity entries, from the runtime's formal state.
         "identity_entry_tombstones" => Some(MobRuntimeParityExprValue::Set(
             snapshot.identity_entry_tombstones.clone(),

@@ -3851,6 +3851,15 @@ mod tests {
                 .remove(&canonical_runtime_edge(a.clone(), b.clone()));
             Ok(())
         }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            crate::identity_first::core_test_bridge::apply_through_seats(self, &roster, None, None)
+                .await
+        }
     }
 
     fn recovery_spec(identity: AgentIdentity) -> DurableAgentSpec {

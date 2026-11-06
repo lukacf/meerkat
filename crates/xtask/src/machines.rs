@@ -4886,33 +4886,42 @@ struct OwnerTestSpec {
     package: &'static str,
     target: &'static str,
     filter: &'static str,
+    /// The package's test features (scripts/ci-products.mjs testFeaturesOf):
+    /// no dev-dependency turns them on, and its lib test stops on the
+    /// test-feature canary without them.
+    features: &'static [&'static str],
 }
 
 fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
     const MEERKAT: &[OwnerTestSpec] = &[
         OwnerTestSpec {
             package: "meerkat-integration-tests",
+            features: &[],
             target: "session_turn_admission_kernel",
             filter: "session_turn_admission_kernel_attached_state_reached",
         },
         OwnerTestSpec {
             package: "meerkat-integration-tests",
+            features: &[],
             target: "session_turn_admission_kernel",
             filter: "session_turn_admission_kernel_interrupt_allowed_while_attached",
         },
         OwnerTestSpec {
             package: "meerkat-integration-tests",
+            features: &[],
             target: "session_tool_visibility_kernel",
             filter: "session_tool_visibility_kernel_publishes_committed_set_from_attached",
         },
         OwnerTestSpec {
             package: "meerkat-integration-tests",
+            features: &[],
             target: "session_tool_visibility_kernel",
             filter: "session_tool_visibility_kernel_stages_deferred_requests_without_touching_active_state",
         },
     ];
     const MOB: &[OwnerTestSpec] = &[OwnerTestSpec {
         package: "meerkat-mob",
+        features: &["test-support"],
         target: "lib",
         filter: "runtime::tests::test_cancel_fallback_uses_direct_pending_to_terminal_cas_attempts",
     }];
@@ -4931,7 +4940,11 @@ fn run_machine_owner_tests(root: &Path, machine: &MachineEntry) -> Result<()> {
             machine.schema.machine, spec.package, spec.target, spec.filter
         );
         let mut cmd = repo_cargo_command(root);
-        cmd.arg("test").arg("-p").arg(spec.package).arg(spec.filter);
+        cmd.arg("test").arg("-p").arg(spec.package);
+        if !spec.features.is_empty() {
+            cmd.arg("--features").arg(spec.features.join(","));
+        }
+        cmd.arg(spec.filter);
         if spec.target == "lib" {
             cmd.arg("--lib");
         } else {

@@ -35,7 +35,10 @@
 \*     forced destroy. The run holds no reset, so an entry is seated on a
 \*     fresh session here only once a forget let its record go.
 \*   legacy (LegacySpec): member 2 a legacy member recovered by replay, a
-\*     worker until its adoption, then unlisted and retired to every copy of
+\*     worker until its adoption (every arm of the legacy adoption over all
+\*     sixteen combinations of the shell's raw observations, the member
+\*     bound to no session until its binding's replay, then bound to one,
+\*     and retiring), then unlisted and retired to every copy of
 \*     the plain end: live or after its runtime retired, in a running or a
 \*     stopped mob, or the replay of its retirement (its runtime recovered or
 \*     already gone, its session archived or not, its incarnation local or
@@ -80,7 +83,10 @@
 \*     declared placed (hosted on its first use) and member 1 declared local
 \*     (owed its seat): the placed spawn ladder opened with or without entry
 \*     custody for either, and its abort; member 2's remote commit, its
-\*     retirement and its placed end.
+\*     retirement and its placed end; the legacy adoption of member 2 over
+\*     all sixteen observations (a placed member is never adopted: listed,
+\*     it is not adoptable; unlisted with both marks and no intent row, it
+\*     is retired without its adoption).
 \*
 \* Each run explores its whole reachable space under a VIEW that leaves out
 \* model_step_count and topology_epoch, which no guard reads, with TLC
@@ -103,7 +109,12 @@
 \*     changes the state);
 \*     AuditApplyEntryOnlyWithCause (action property: an identity becomes an
 \*     entry only by a declaration, the commit of a ladder holding its
-\*     custody, an observed adoption or the replay of its row).
+\*     custody, an adoption from qualifying legacy marks or the replay of
+\*     its row).
+\*   legacy and placed: AuditAdoptionExactlyOneArm (invariant, ENABLED
+\*     form: exactly one arm of the legacy adoption answers each of the
+\*     sixteen observations of member 2, at either generation, in every
+\*     lifecycle phase).
 \*   apply: AuditSeatTakesArchivedSession (a seat holding an entry's custody
 \*     binds the identity's archived session when it has a record);
 \*     AuditSeatBindsArchivedOnlyAsRecord (a seat binds an archived session
@@ -243,17 +254,51 @@ SealOneArm(d) ==
            ENABLED SealDeclaredRosterMobNotRunningCompleted(d),
            ENABLED SealDeclaredRosterMobNotRunningDestroyed(d) >>[i]}) = 1
 
-\* Every arm of the legacy adoption, in the run's phases.
-AdoptArm(id, g, observed) ==
-    \/ AdoptLegacyIdentityEntryAdopted(id, g, observed)
-    \/ AdoptLegacyIdentityEntryNameHeldByWorker(id, g, observed)
-    \/ AdoptLegacyIdentityEntryNotAdoptable(id, g, observed)
-    \/ AdoptLegacyIdentityEntryStaleObservation(id, g, observed)
-    \/ AdoptLegacyIdentityEntryNotSeated(id, g, observed)
-    \/ AdoptLegacyIdentityEntryAlreadyAnEntry(id, g, observed)
-    \/ AdoptLegacyIdentityEntryOtherCustody(id, g, observed)
-    \/ AdoptLegacyIdentityEntryNonAuthoritative(id, g, observed)
-    \/ AdoptLegacyIdentityEntryMobNotRunningStopped(id, g, observed)
+\* Every arm of the legacy adoption, in the run's phases, over the shell's
+\* raw observations: the spawn row's durable-identity marker (m) and
+\* own-identity label (l), whether the roster lists the identity (li) and
+\* whether a host's intent row names it (i).
+AdoptArm(id, g, m, l, li, i) ==
+    \/ AdoptLegacyIdentityEntryAdopted(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryAdoptedUnlisted(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryNameHeldByWorker(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryRetireUnadopted(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryNotAdoptable(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryStaleObservation(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryNotSeated(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryAlreadyAnEntry(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryOtherCustody(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryNonAuthoritative(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryMobNotRunningStopped(id, g, m, l, li, i)
+
+\* The arms that record the member as an entry.
+AdoptRecordArm(id, g, m, l, li, i) ==
+    \/ AdoptLegacyIdentityEntryAdopted(id, g, m, l, li, i)
+    \/ AdoptLegacyIdentityEntryAdoptedUnlisted(id, g, m, l, li, i)
+
+\* The marks that make a member a legacy member: either one for an identity
+\* the roster lists; both, and no host's intent row, for one it does not.
+AuditLegacyMarks(m, l, li, i) == IF li THEN m \/ l ELSE m /\ l /\ ~i
+
+\* Exactly one arm of the legacy adoption answers each observation of id, at
+\* either generation, in every lifecycle phase (a mob that is not running
+\* answers by its phase's arm).
+AdoptOneArm(id) ==
+    \A g \in {0, 1}, m, l, li, i \in BOOLEAN :
+        Cardinality({k \in 1..13 :
+            << ENABLED AdoptLegacyIdentityEntryAdopted(id, g, m, l, li, i),
+               ENABLED AdoptLegacyIdentityEntryAdoptedUnlisted(id, g, m, l, li, i),
+               ENABLED AdoptLegacyIdentityEntryNameHeldByWorker(id, g, m, l, li, i),
+               ENABLED AdoptLegacyIdentityEntryRetireUnadopted(id, g, m, l, li, i),
+               ENABLED AdoptLegacyIdentityEntryNotAdoptable(id, g, m, l, li, i),
+               ENABLED AdoptLegacyIdentityEntryStaleObservation(id, g, m, l, li, i),
+               ENABLED AdoptLegacyIdentityEntryNotSeated(id, g, m, l, li, i),
+               ENABLED AdoptLegacyIdentityEntryAlreadyAnEntry(id, g, m, l, li, i),
+               ENABLED AdoptLegacyIdentityEntryOtherCustody(id, g, m, l, li, i),
+               ENABLED AdoptLegacyIdentityEntryNonAuthoritative(id, g, m, l, li, i),
+               ENABLED AdoptLegacyIdentityEntryMobNotRunningStopped(id, g, m, l, li, i),
+               ENABLED AdoptLegacyIdentityEntryMobNotRunningCompleted(id, g, m, l, li, i),
+               ENABLED AdoptLegacyIdentityEntryMobNotRunningDestroyed(id, g, m, l, li, i) >>[k]}) = 1
 
 \* The replay of an entry's row, on the incarnation it is seated as.
 EntryReplay(id, rid) ==
@@ -342,7 +387,7 @@ AdmitReset == AdmitResetRunning \/ AdmitResetStopped \/ AdmitResetCompleted
 A2Recover == RecoverRosterMemberRunning(Id2, Rid2, 2, 0, AuditProfile, AuditMode, FALSE)
 A2Bind == RecoverMemberSessionBindingFreshRunning(Id2, Rid2, Sess2, None)
 A2Dormant == PlanBootMaterializationStayDormant(Id2, "None", FALSE, FALSE)
-A2Adopt == \E observed \in BOOLEAN : AdoptArm(Id2, 0, observed)
+A2Adopt == \E m, l, li, i \in BOOLEAN : AdoptArm(Id2, 0, m, l, li, i)
 A2Retire ==
     \/ RetireRunningReleasingArchiveOnly(AuditMob, Rid2, Id2, 0, Some(Sess2), Some(Sess2))
     \/ RetireRunningPreservingBindingArchiveOnly(AuditMob, Rid2, Id2, 0, None, Some(Sess2))
@@ -457,14 +502,19 @@ AuditCandidateChangesNothing ==
     [][(composition_authority = "NonAuthoritative" /\ ApplyIdentitySteps) => StateView' = StateView]_vars
 
 \* An identity becomes an entry only by a declaration (which records its
-\* unseated cause), the commit of a ladder holding its custody, an observed
-\* adoption or the replay of its row.
+\* unseated cause), the commit of a ladder holding its custody, an adoption
+\* from qualifying legacy marks or the replay of its row.
 AuditApplyEntryOnlyWithCause ==
     [][\A id \in NewEntries :
          \/ id \in DOMAIN identity_entry_unseated'
          \/ id \in spawn_exec_entry_custody
-         \/ AdoptLegacyIdentityEntryAdopted(id, 0, TRUE)
+         \/ \E m, l, li, i \in BOOLEAN :
+                AuditLegacyMarks(m, l, li, i) /\ AdoptRecordArm(id, 0, m, l, li, i)
       ]_vars
+
+\* The legacy and placed runs: exactly one arm of the legacy adoption answers
+\* every observation of member 2.
+AuditAdoptionExactlyOneArm == AdoptOneArm(Id2)
 
 \* A seat holding an entry's custody binds the identity's archived session
 \* when it has a record: the entry comes back with its history.
@@ -1023,6 +1073,8 @@ PCommit ==
                                 Some(AuditDigest), Some(AuditEngine), Some(PlacedSpawn1), Some(AuditOperation), FALSE)
 PRetire == RetireRemoteReleasingRunning(AuditMob, Rid2, Id2, 0, Some(Sess2), Some(Sess2))
 PArchive == ObserveMemberRetirementArchivedPlacedLiveRunning(Id2, Rid2, 2, 0, Some(Sess2), AuditDisposal, FALSE)
+\* The legacy adoption of member 2 over all sixteen observations.
+PAdopt == \E m, l, li, i \in BOOLEAN : AdoptArm(Id2, 0, m, l, li, i)
 
 PlacedNext ==
     \/ POwner
@@ -1038,6 +1090,7 @@ PlacedNext ==
     \/ PCommit
     \/ PRetire
     \/ PArchive
+    \/ PAdopt
 
 PlacedSpec == Init /\ [][PlacedNext]_vars
 

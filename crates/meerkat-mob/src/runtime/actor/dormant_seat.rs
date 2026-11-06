@@ -1605,6 +1605,16 @@ impl MobActor {
             bridge_session_id: session_id,
             resume_from_role: None,
         };
+        // The build the request carries (a declared role migration's
+        // composed build): the plan takes it into the seat, whose row
+        // journals it for the successor's builds on the kept session.
+        if let Some(inputs) = &request.build_inputs {
+            SeatBuild {
+                inputs: inputs.clone(),
+                local: SeatLocalBuildInputs::default(),
+            }
+            .apply_to(&mut spec);
+        }
         let DormantSeatPlanEntry::Seat(mut candidate) = self
             .plan_dormant_seat(spec, SeatPlanMode::SameSession, None)
             .await?
@@ -2072,12 +2082,12 @@ impl MobActor {
         .with_kickoff_prompt(candidate.kickoff_prompt.clone())
         // A fresh rotation's next session is unborn (CommitMemberRotation
         // records it so): its first wake creates it, applying what the
-        // rotation's spec named. A same-session successor names no build
-        // inputs of its own.
+        // rotation's spec named. A same-session successor names build inputs
+        // only when its request carries a build (a declared role
+        // migration's): its builds on the kept session apply them.
         .with_seat_session_unborn(seat_session_unborn)
         .with_seat_build_inputs(
-            Some(candidate.seat_build.inputs.clone())
-                .filter(|inputs| !inputs.is_empty() && !rotation.keeps_session()),
+            Some(candidate.seat_build.inputs.clone()).filter(|inputs| !inputs.is_empty()),
         );
         spawned.creation = creation;
         spawned.runtime_mode = candidate.runtime_mode;

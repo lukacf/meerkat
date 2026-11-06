@@ -37,6 +37,70 @@ them.
 
 ### Breaking
 
+- Behaviour-only (not measured by the gate): `meerkat-mob`:
+  `MobHandle::apply_declared_roster` with a complete roster also retires a
+  member the roster does not list when the member's spawn row carries both
+  legacy marks (the durable-identity continuity marker and the
+  `agent_identity` label naming the member's own identity) and no host's
+  identity intent row names it. MobMachine decides it from those
+  observations. A local member bound to a session is adopted as an entry,
+  so the seal unlists the entry and retires the member, as it retires any
+  unlisted entry's member (cause `Unlisted`). A member placed on a member
+  host, or bound to no session, is retired through the ordinary retirement
+  without becoming an entry, so its retirement records no cause and its
+  name is left free. Both are answered `UnlistedEntryOutcome::Retired` in
+  `DeclaredRosterOutcome::unlisted`. A member whose retirement started
+  already is answered `UnlistedEntryOutcome::NotAdopted` (see Added), and
+  its own retirement ends it. A member a host seated under its identity
+  before identity entries existed, whose identity the roster dropped before
+  the host first applied it, was left serving as a worker. A member with
+  one mark only, a host-adopted identity, and every member a partial roster
+  does not list are left as they are, as before. Make a complete roster
+  list every identity whose member the host keeps; see the upgrading guide.
+
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`:
+  MobMachine decides the legacy adoption from the shell's raw observation.
+  The `MobMachineInput` variant `AdoptLegacyIdentityEntry`
+  (meerkat-machine-schema and meerkat-mob) and the kernel
+  `generated::mob::inputs` struct `AdoptLegacyIdentityEntry` replace the
+  public field `legacy_roster_member: bool` with `durable_identity_marker`,
+  `own_identity_label`, `listed` and `intent_row` (each a `bool`: the spawn
+  row's two legacy marks, whether the roster or the host names the
+  identity, and whether a host's identity intent row names it), so code
+  that builds them literally must set them, and a serialized kernel input
+  with the old field no longer deserializes. `LegacyIdentityEntryAdoptionKind`
+  gains `RetireUnadopted`, and the kernel `generated::mob::TransitionId`
+  gains `AdoptLegacyIdentityEntryAdoptedUnlisted` and
+  `AdoptLegacyIdentityEntryRetireUnadopted`, each appended last, so no
+  existing variant's discriminant moves. Exhaustive matches must add the
+  new variants.
+
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-runtime`: the
+  MeerkatMachine gains the failure arm of an until-changed switch-turn
+  reconfigure, the refusal of an until-changed switch-turn while another
+  switch is pending, and the completion of a reconfigured switch-turn in a
+  retired or stopped session (see Fixed). `MeerkatMachineInput`
+  (meerkat-machine-schema and meerkat-runtime) and the kernel
+  `generated::meerkat` `Input` gain
+  `AbortUntilChangedSwitchTurnReconfigure { request_id }`, and
+  `MeerkatMachineInputVariant` (meerkat-machine-schema and meerkat-runtime),
+  `MeerkatMachineRuntimeInternalInput` (meerkat-runtime) and the kernel
+  `InputKind` gain `AbortUntilChangedSwitchTurnReconfigure`. The kernel
+  `generated::meerkat::TransitionId` gains
+  `AbortUntilChangedSwitchTurnReconfigureIdle`,
+  `AbortUntilChangedSwitchTurnReconfigureAttached`,
+  `AbortUntilChangedSwitchTurnReconfigureRunning`,
+  `AbortUntilChangedSwitchTurnReconfigureRetired`,
+  `AbortUntilChangedSwitchTurnReconfigureStopped`,
+  `RequestUntilChangedSwitchTurnPendingConflictIdle`,
+  `RequestUntilChangedSwitchTurnPendingConflictAttached`,
+  `RequestUntilChangedSwitchTurnPendingConflictRunning`,
+  `CompleteUntilChangedSwitchTurnReconfigureRetired` and
+  `CompleteUntilChangedSwitchTurnReconfigureStopped`. Every new variant is
+  appended last, so no existing variant's implicit discriminant moves. Every
+  enum named here is exhaustive, so a downstream exhaustive match needs the
+  new arms, or a wildcard arm.
+
 - `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-runtime`:
   the MeerkatMachine gains a host's recovery hold and its settle of the run
   a session retained (see Added). `RunStartHoldReason` (meerkat-machine-schema
@@ -72,6 +136,43 @@ them.
   An exhaustive match needs their arms.
 
 ### Added
+
+- `meerkat-mob`: a declared roster entry says what its spec carries of the
+  identity's member build (`DeclaredEntry::build`, set with
+  `DeclaredEntry::with_build`, a `DeclaredBuild`): `Composed` (the
+  default, as before) or `FactsOnly`, the identity's lifecycle facts with
+  none of its build. No member is ever built from facts only: a verdict
+  that would seat the identity, rotate its member onto a fresh session,
+  migrate it to another role on its own session or start its first-boot
+  fresh life answers
+  `DeclaredEntryOutcome::BuildRequired` and takes no member step (the
+  first-boot request is kept, and so is an archived session record on a
+  session service that keeps durable member sessions), and the host
+  declares the identity again with its composed build. Every other verdict
+  answers as before. A host whose member builds are costly to compose
+  (a customizer per identity) composes only the identities it expects the
+  apply to seat, rotate or migrate, and an unchanged roster composes none.
+
+- `meerkat-mob`: the one encoding of a name into a member id,
+  `ids::member_id_for_name`, and its inverse `ids::name_for_member_id`
+  (with `ids::ENCODED_MEMBER_ID_MARKER`). A name that is a member
+  comms-name component and does not begin with the marker is its own
+  member id; any other name (`team:alice`, or `mk--ops`) is the marker and
+  the escaped name (`mk--team_calice`, `mk--mk--ops`). Meerkat Meta's
+  member ids are this encoding.
+
+- `meerkat-mob`: `UnlistedEntryOutcome::NotAdopted { reason }`, with the new
+  `NotAdoptedReason` (`Retiring`): a complete roster's answer for a member
+  it does not list that carries both legacy marks and that MobMachine
+  neither adopted nor retired, because the member's retirement started
+  already. The member stays as it is, its own retirement ends it, and the
+  next complete apply decides it again if it is still there.
+
+- OpenAI `gpt-6.1-terra` (GPT-6.1 Terra) is cataloged as a Supported OpenAI
+  model: 1.05M context with a separate 922K input ceiling, 128K output,
+  text/image input, the Sol/Luna effort ladder (`none` through `max`), and the
+  GPT-6 Responses prompt-cache defaults (implicit mode with the `30m` TTL,
+  `12h` on request). The OpenAI default stays `gpt-6-astra`.
 
 - `meerkat-runtime`, `meerkat-mob`: a host settles the run a session
   retained, without resuming it and without a model request, for an app's
@@ -123,7 +224,93 @@ them.
   through the store-wide scan, and the SQLite and in-memory stores answer it
   for the one runtime.
 
+### Changed
+
+- `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
+  sign-in is refused (`AttachmentRefused`), because it is governed and the
+  router holds no control that covers it, or because it was signed out
+  ungoverned and its name has been governed since, is reported as a failed
+  add once, at the first boundary after its release settles, where every
+  later boundary reported it again. It stays listed as awaiting sign-in, and
+  a later sign-in gets the typed refusal from `McpRouter::retry_authorized`.
+
 ### Fixed
+
+- `meerkat-mob`: a declared role migration (`MobHandle::apply_declared_roster`
+  answering `DeclaredEntryOutcome::RoleMigrated`) builds its successor on
+  the member's own session with the declaration's build inputs, as a
+  resume of that session built from the declared spec does, after a
+  restart too. Its successor kept the build inputs the session's earlier
+  builds recorded, so the member ran its new role with, for one, its
+  previous role's context.
+
+- `meerkat-mob`: the legacy adoption reads a member's `agent_identity`
+  label in the one encoding of a name into a member id
+  (`ids::member_id_for_name`): a label naming the identity a member id
+  encodes (`team:alice` on the member `mk--team_calice`, `mk--ops` on the
+  member `mk--mk--ops`) marks the member as a legacy member, as a label
+  spelling the member id itself always did. The label is read trimmed, and
+  an empty label or one in the generated runtime-alias namespace (`rt:`)
+  names no member. A declared apply that listed such a member without the
+  durable-identity marker, a member labelled with an identity no member id
+  can spell, refused it `NameHeldByWorker`, and a host that labelled a raw
+  member of that name could not have it adopted.
+
+- `meerkat-mcp`: retained attachment controls are released when the
+  router's close begins (`McpRouterAdapter::begin_close`), so a router whose
+  shutdown never runs no longer keeps the controls it retains for a re-add
+  after a sign-in, and what they hold, alive after its close.
+
+- `meerkat-runtime`: a failed model switch during a session no longer
+  discards an input admitted while the switch was in progress. A switch
+  that lasts until changed (`SwitchTurnDuration::UntilChanged`) records its
+  request and runs the LLM reconfigure without holding the session's
+  mutation gate, so other callers can admit input meanwhile. When the
+  reconfigure failed, the switch wrote back the whole generated state it
+  had read before its request, erasing every fact other callers committed
+  in that gap: an input admitted then lost its generated phase while its
+  ledger row stayed, so the machine no longer tracked an input the runtime
+  had accepted, and a stop in that gap was undone in the machine. A failed
+  switch now withdraws only its own request, through the MeerkatMachine
+  input `AbortUntilChangedSwitchTurnReconfigure` (see Breaking), and leaves
+  every other fact as it stands, a stop included; a failed preparation,
+  which fails before the gate is released, withdraws through the same
+  input. The caller still gets the reconfigure's error. Affects 0.6.0
+  through 0.9.10.
+
+- `meerkat-runtime`: a model switch that lasts until changed, requested
+  while another switch was pending, replaced the pending switch. A pending
+  until-changed switch could then neither complete nor be withdrawn, so its
+  caller got an error although its reconfigure had applied, and a finite
+  switch waiting for its next turn was dropped although its caller had been
+  told it applied. Such a request is now denied with
+  `SwitchTurnDenialReason::ScopedOverrideConflict`, as a finite switch
+  requested while another switch is pending already is, and so is a model
+  change a run requested when it is realized while a switch is pending. A
+  retry of a pending until-changed request itself (the same `request_id`)
+  is accepted, so a caller that dropped its request while the reconfigure
+  ran can finish it; an until-changed request that reuses the id of a
+  finite switch waiting for its turn is refused with an error and leaves
+  that switch in place. A request that reuses a pending switch's id and
+  cannot be accepted (a finite request, or an until-changed one that is not
+  approved or whose target cannot carry the session's transcript) is
+  likewise refused with an error and records nothing: before, it was
+  recorded as denied under that id, so the pending switch's own approved
+  retry was answered as denied too and the switch stayed pending, and a
+  retried finite switch was answered as denied although it still applied
+  at its turn. A denied `request_id` now stays denied: its retry is answered
+  with the recorded denial and stages nothing. Before, a retry sent after
+  the conflict that refused it had cleared was staged but answered as
+  denied: an until-changed switch then stayed pending without its
+  reconfigure, and a finite one still applied at its turn. Affects 0.6.0
+  through 0.9.10.
+
+- `meerkat-runtime`: a stop or a retirement that landed after an
+  until-changed model switch had reconfigured the session, but before the
+  switch finished, failed the switch: the caller got an error although the
+  reconfigure had applied, and the switch stayed pending. The switch now
+  finishes in a stopped or retired session as well. Affects 0.6.0 through
+  0.9.10.
 
 - Docs: the durable-runs guide and the platform skill's sessions reference
   said a run that resumes from a committed round still gets the

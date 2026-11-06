@@ -1564,13 +1564,14 @@ pub(super) enum MobCommand {
         >,
     },
     /// The adoption of one legacy member as an identity entry
-    /// (`MobHandle::adopt_legacy_identity_entry`). MobMachine decides it from
-    /// the handle's observation of the spawn row of the member's incarnation
-    /// at `generation`; an adoption's row is journaled before it commits.
+    /// (`MobHandle::adopt_legacy_identity_entry`, and a declared roster's
+    /// legacy members). MobMachine decides it from the handle's observation
+    /// of the member's incarnation at `generation`; an adoption's row is
+    /// journaled before it commits.
     AdoptLegacyIdentityEntry {
         agent_identity: crate::ids::AgentIdentity,
         generation: crate::ids::Generation,
-        legacy_roster_member: bool,
+        observation: super::identity_entry::LegacyMemberObservation,
         reply_tx:
             oneshot::Sender<Result<mob_dsl::LegacyIdentityEntryAdoptionKind, crate::MobError>>,
     },

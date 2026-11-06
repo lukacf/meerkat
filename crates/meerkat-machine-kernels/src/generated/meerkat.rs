@@ -19150,6 +19150,10 @@ pub mod inputs {
         pub open: std::collections::BTreeSet<ToolName>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AbortUntilChangedSwitchTurnReconfigure {
+        pub request_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SettleRetainedRun {
         pub run_id: Option<RunId>,
     }
@@ -19586,6 +19590,7 @@ pub enum Input {
     ReleaseInputController(inputs::ReleaseInputController),
     ReplaceToolGrantGate(inputs::ReplaceToolGrantGate),
     ApplyToolGrantOpenSet(inputs::ApplyToolGrantOpenSet),
+    AbortUntilChangedSwitchTurnReconfigure(inputs::AbortUntilChangedSwitchTurnReconfigure),
     SettleRetainedRun(inputs::SettleRetainedRun),
 }
 impl Input {
@@ -20184,6 +20189,9 @@ impl Input {
             Self::ReleaseInputController(_) => InputKind::ReleaseInputController,
             Self::ReplaceToolGrantGate(_) => InputKind::ReplaceToolGrantGate,
             Self::ApplyToolGrantOpenSet(_) => InputKind::ApplyToolGrantOpenSet,
+            Self::AbortUntilChangedSwitchTurnReconfigure(_) => {
+                InputKind::AbortUntilChangedSwitchTurnReconfigure
+            }
             Self::SettleRetainedRun(_) => InputKind::SettleRetainedRun,
         }
     }
@@ -20607,6 +20615,7 @@ pub enum InputKind {
     ReleaseInputController,
     ReplaceToolGrantGate,
     ApplyToolGrantOpenSet,
+    AbortUntilChangedSwitchTurnReconfigure,
     SettleRetainedRun,
 }
 
@@ -26148,6 +26157,16 @@ pub enum TransitionId {
     SuspendRunForStopFenceGapRunningToAttached,
     StopCurrentRunForRunResumableIdle,
     StopCurrentRunForRunResumableAttached,
+    AbortUntilChangedSwitchTurnReconfigureIdle,
+    AbortUntilChangedSwitchTurnReconfigureAttached,
+    AbortUntilChangedSwitchTurnReconfigureRunning,
+    AbortUntilChangedSwitchTurnReconfigureRetired,
+    AbortUntilChangedSwitchTurnReconfigureStopped,
+    RequestUntilChangedSwitchTurnPendingConflictIdle,
+    RequestUntilChangedSwitchTurnPendingConflictAttached,
+    RequestUntilChangedSwitchTurnPendingConflictRunning,
+    CompleteUntilChangedSwitchTurnReconfigureRetired,
+    CompleteUntilChangedSwitchTurnReconfigureStopped,
     SettleRetainedRunAcceptedIdle,
     SettleRetainedRunAcceptedAttached,
     SettleRetainedRunBusyRunCurrentInitializing,

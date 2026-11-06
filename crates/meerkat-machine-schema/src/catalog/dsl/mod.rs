@@ -3531,6 +3531,10 @@ runtime_internal_inputs!(
         // either.
         ReplaceToolGrantGate,
         ApplyToolGrantOpenSet,
+        // A failed until-changed switch-turn reconfigure withdraws the
+        // request it staged: the switch-turn chain applies it beside
+        // CompleteUntilChangedSwitchTurnReconfigure. No caller can ask for it.
+        AbortUntilChangedSwitchTurnReconfigure,
         // A host's settle of the run its session retained, applied directly
         // by `MeerkatMachine::settle_retained_run`, which answers the
         // machine's verdict.
@@ -4395,6 +4399,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "NotSeated",
                     "NonAuthoritative",
                     "MobNotRunning",
+                    "RetireUnadopted",
                 ],
             ),
             NamedTypeBinding::string_enum(

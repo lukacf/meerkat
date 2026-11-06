@@ -221,7 +221,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-kernels:meerkat_machine_kernels",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(

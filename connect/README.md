@@ -6,8 +6,8 @@ catalog. Describe a task, review the proposed access and let Connect guide setup
 
 ## Install and use
 
-Connect 0.9.4 supports Apple Silicon macOS 13.5 or later and Linux x86_64 with
-glibc 2.39. Install [Meerkat Core 0.9.4](https://github.com/lukacf/meerkat/releases/tag/v0.9.4)
+Connect 0.9.10 supports Apple Silicon macOS 13.5 or later and Linux x86_64 with
+glibc 2.39. Install [Meerkat Core 0.9.10](https://github.com/lukacf/meerkat/releases/tag/v0.9.10)
 for the ordinary `rkat` agent. Connect supplies its own Python, Node/npm,
 integration library and setup resources.
 
@@ -15,8 +15,8 @@ Download the complete Connect CLI archive and verify its checksum:
 
 ```sh
 platform=macos-arm64 # Use linux-x86_64 on Linux.
-archive="meerkat-connect-0.9.4-$platform.tar.gz"
-release=https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4
+archive="meerkat-connect-0.9.10-$platform.tar.gz"
+release=https://github.com/lukacf/meerkat/releases/download/connect-v0.9.10
 curl -fLO "$release/$archive"
 curl -fLO "$release/$archive.sha256"
 shasum -a 256 -c "$archive.sha256" # On Linux: sha256sum -c "$archive.sha256"
@@ -85,7 +85,7 @@ qualify the published release or a deployed provider flow.
 - REST and an outer MCP Connect entry point are deferred. MCP servers used as
   integrations are included.
 
-See [release notes](https://github.com/lukacf/meerkat-connect/releases/tag/v0.9.4) for platform assets and compatibility,
+See [release notes](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.10) for platform assets and compatibility,
 [BUILDING.md](BUILDING.md) to build from source, and
 [source provenance](SOURCE-PROVENANCE.md) for upstream attribution and catalog
 identity. The [documentation source](docs/site) contains the full contracts.

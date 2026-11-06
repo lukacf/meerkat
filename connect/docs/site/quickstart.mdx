@@ -6,7 +6,7 @@ icon: "rocket"
 
 <Note>
 Download the complete CLI archive from the
-[Connect 0.9.4 release](https://github.com/lukacf/meerkat-connect/releases/tag/v0.9.4).
+[Connect 0.9.10 release](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.10).
 Platforms: Apple Silicon macOS 13.5 or later and Linux x86_64
 with glibc 2.39. Verify the accompanying checksum before running it.
 See [platforms and installation options](/availability) for application integration.
@@ -14,7 +14,7 @@ See [platforms and installation options](/availability) for application integrat
 
 ## Standalone CLI
 
-Install [Meerkat Core 0.9.4](https://github.com/lukacf/meerkat/releases/tag/v0.9.4)
+Install [Meerkat Core 0.9.10](https://github.com/lukacf/meerkat/releases/tag/v0.9.10)
 for ordinary `rkat` agent work after setup. The Connect archive supplies its own Python, Node/npm, integration
 library and setup resources; you do not need to install those separately.
 
@@ -24,8 +24,8 @@ library and setup resources; you do not need to install those separately.
 
     ```sh
     platform=macos-arm64 # Use linux-x86_64 on Linux.
-    archive="meerkat-connect-0.9.4-$platform.tar.gz"
-    release=https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4
+    archive="meerkat-connect-0.9.10-$platform.tar.gz"
+    release=https://github.com/lukacf/meerkat/releases/download/connect-v0.9.10
     curl -fLO "$release/$archive"
     curl -fLO "$release/$archive.sha256"
     ```

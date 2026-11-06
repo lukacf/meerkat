@@ -95,6 +95,11 @@ them.
 
 ### Changed
 
+- `meerkat-anthropic`: a request with thinking on that replays a signed
+  thinking block now sets `thinking.block_binding.prefix_mismatch_behavior`
+  to `"drop_block"` and sends the `thinking-binding-controls-2026-08-01`
+  beta, so a resumed session whose tool list changed drops the stale block
+  instead of failing its turn with "bound to a different conversation".
 - `meerkat-sandbox`: on Linux, a read-only file grant may now name a symbolic
   link to a regular file (its parent directories still real, not links), and
   the confined process sees the target read-only at the link's own path, so a

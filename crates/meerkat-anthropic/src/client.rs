@@ -215,6 +215,22 @@ fn catalog_beta_value(
         .map(|header| header.header_value)
 }
 
+/// `anthropic-beta` value that enables `thinking.block_binding`.
+///
+/// Anthropic binds each signed `thinking` block to the conversation prefix it
+/// was produced under, the `tools` list included. A persisted session resumed
+/// with a different tool list (an MCP server added, a trusted project
+/// `mcp.toml`, a rebuild with other builtins) would otherwise fail its next
+/// turn with "Invalid `signature` in `thinking` block. The block is bound to
+/// a different conversation". With `prefix_mismatch_behavior: "drop_block"`
+/// the API drops such a block instead of rejecting the request.
+///
+/// This is an API-level request control, not a per-model capability: it
+/// applies to whatever model produced the replayed block, so it is a plain
+/// constant here rather than a `BetaFeature` row in the `meerkat-models`
+/// catalog.
+const THINKING_BINDING_CONTROLS_BETA: &str = "thinking-binding-controls-2026-08-01";
+
 fn catalog_context_beta_value(request: &LlmRequest) -> Option<&'static str> {
     let header = meerkat_models::capabilities_for(Provider::Anthropic, &request.model)?
         .context_window_beta?
@@ -1179,7 +1195,110 @@ impl AnthropicClient {
             }
         }
 
+        Self::apply_thinking_block_binding(&mut body);
+
         Ok(body)
+    }
+
+    /// Ask the API to drop, rather than reject, a replayed signed thinking
+    /// block whose bound prefix no longer matches (see
+    /// [`THINKING_BINDING_CONTROLS_BETA`]). Only a request that has thinking
+    /// on and replays at least one signed thinking block is changed.
+    fn apply_thinking_block_binding(body: &mut Value) {
+        let thinking_on = body
+            .get("thinking")
+            .and_then(|thinking| thinking.get("type"))
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind != "disabled");
+        if !thinking_on || !Self::replays_signed_thinking_block(body) {
+            return;
+        }
+        if let Some(thinking) = body.get_mut("thinking").and_then(Value::as_object_mut) {
+            thinking.insert(
+                "block_binding".to_string(),
+                serde_json::json!({"prefix_mismatch_behavior": "drop_block"}),
+            );
+        }
+    }
+
+    /// Whether the rendered `messages` carry a `thinking` block with a
+    /// `signature`, or a `redacted_thinking` block (its encrypted `data` is
+    /// bound to the conversation the same way).
+    fn replays_signed_thinking_block(body: &Value) -> bool {
+        body.get("messages")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|message| message.get("content").and_then(Value::as_array))
+            .flatten()
+            .any(|block| match block.get("type").and_then(Value::as_str) {
+                Some("thinking") => block.get("signature").and_then(Value::as_str).is_some(),
+                // A redacted block's encrypted `data` is bound the same way.
+                Some("redacted_thinking") => true,
+                _ => false,
+            })
+    }
+
+    /// The `anthropic-beta` values this request's body and model need,
+    /// before any the authorizer adds.
+    fn request_betas(request: &LlmRequest, body: &Value) -> Vec<String> {
+        let mut betas: Vec<String> = Vec::new();
+        let mut push = |beta: &str| {
+            if !betas.iter().any(|existing| existing == beta) {
+                betas.push(beta.to_string());
+            }
+        };
+
+        // Legacy thinking (type: "enabled") requires interleaved-thinking header
+        // Adaptive thinking does NOT need this header.
+        let thinking = body.get("thinking");
+        let thinking_type = thinking.and_then(|t| t.get("type")).and_then(Value::as_str);
+        if thinking_type == Some("enabled")
+            && let Some(beta) = catalog_beta_value(
+                request,
+                meerkat_core::model_profile::capabilities::BetaFeature::InterleavedThinking,
+            )
+        {
+            push(beta);
+        }
+
+        // Replayed signed thinking blocks drop on a prefix mismatch.
+        if thinking.and_then(|t| t.get("block_binding")).is_some() {
+            push(THINKING_BINDING_CONTROLS_BETA);
+        }
+
+        // Structured output format requires beta header
+        if body
+            .get("output_config")
+            .and_then(|c| c.get("format"))
+            .is_some()
+            && let Some(beta) = catalog_beta_value(
+                request,
+                meerkat_core::model_profile::capabilities::BetaFeature::StructuredOutput,
+            )
+        {
+            push(beta);
+        }
+
+        // 1M context window (opt-in via typed AnthropicProviderTag.context)
+        if anthropic_tag(request).and_then(|t| t.context)
+            == Some(AnthropicContextWindow::OneMegabyte)
+            && let Some(beta) = catalog_context_beta_value(request)
+        {
+            push(beta);
+        }
+
+        // Compaction API (beta)
+        if body.get("context_management").is_some()
+            && let Some(beta) = catalog_beta_value(
+                request,
+                meerkat_core::model_profile::capabilities::BetaFeature::Compaction,
+            )
+        {
+            push(beta);
+        }
+
+        betas
     }
 
     fn anthropic_ordered_system_value(
@@ -1765,52 +1884,9 @@ impl AnthropicClient {
                 Self::ensure_claude_ai_oauth_system_marker(&mut body);
             }
 
-            // Collect beta headers based on request features.
-            // Uses String (not &str) because authorizer-injected betas
-            // are split from a temporary String and need owned storage.
-            let mut betas: Vec<String> = Vec::new();
-
-            // Legacy thinking (type: "enabled") requires interleaved-thinking header
-            // Adaptive thinking does NOT need this header.
-            let thinking_type = body.get("thinking")
-                .and_then(|t| t.get("type"))
-                .and_then(|t| t.as_str());
-            if thinking_type == Some("enabled")
-                && let Some(beta) = catalog_beta_value(
-                    request,
-                    meerkat_core::model_profile::capabilities::BetaFeature::InterleavedThinking,
-                )
-            {
-                betas.push(beta.to_string());
-            }
-
-            // Structured output format requires beta header
-            if body.get("output_config").and_then(|c| c.get("format")).is_some()
-                && let Some(beta) = catalog_beta_value(
-                    request,
-                    meerkat_core::model_profile::capabilities::BetaFeature::StructuredOutput,
-                )
-            {
-                betas.push(beta.to_string());
-            }
-
-            // 1M context window (opt-in via typed AnthropicProviderTag.context)
-            if anthropic_tag(request).and_then(|t| t.context)
-                == Some(AnthropicContextWindow::OneMegabyte)
-                && let Some(beta) = catalog_context_beta_value(request)
-            {
-                betas.push(beta.to_string());
-            }
-
-            // Compaction API (beta)
-            if body.get("context_management").is_some()
-                && let Some(beta) = catalog_beta_value(
-                    request,
-                    meerkat_core::model_profile::capabilities::BetaFeature::Compaction,
-                )
-            {
-                betas.push(beta.to_string());
-            }
+            // Collect beta headers based on request features. Owned
+            // Strings because authorizer-injected betas are merged in later.
+            let betas = Self::request_betas(request, &body);
 
             let url = self.messages_endpoint();
             let has_images = request.has_images();
@@ -4044,6 +4120,119 @@ mod tests {
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 10000);
 
+        Ok(())
+    }
+
+    /// A conversation whose assistant turn replays a thinking block, signed
+    /// when `signed` is set.
+    fn replayed_thinking_conversation(signed: bool) -> Vec<Message> {
+        let meta = signed.then(|| {
+            Box::new(ProviderMeta::Anthropic {
+                signature: "sig_abc123".to_string(),
+            })
+        });
+        vec![
+            Message::User(UserMessage::text("What is 6 * 7?".to_string())),
+            Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![
+                    AssistantBlock::Reasoning {
+                        text: "Multiply.".to_string(),
+                        meta,
+                    },
+                    AssistantBlock::Text {
+                        text: "42.".to_string(),
+                        meta: None,
+                    },
+                ],
+                stop_reason: Some(StopReason::EndTurn),
+                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
+            }),
+            Message::User(UserMessage::text("Why?".to_string())),
+        ]
+    }
+
+    #[test]
+    fn test_signed_thinking_replay_requests_drop_block_binding()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        for (model, thinking) in [
+            ("claude-opus-4-8", AnthropicThinkingConfig::Adaptive),
+            (
+                "claude-sonnet-4-5",
+                AnthropicThinkingConfig::Enabled {
+                    budget_tokens: 10000,
+                },
+            ),
+        ] {
+            let request = LlmRequest::new(model, replayed_thinking_conversation(true))
+                .with_anthropic_tag_merge(|t| t.thinking = Some(thinking.clone()));
+            let body = client.build_request_body(&request)?;
+            assert_eq!(
+                body["thinking"]["block_binding"],
+                serde_json::json!({"prefix_mismatch_behavior": "drop_block"})
+            );
+            let betas = AnthropicClient::request_betas(&request, &body);
+            assert_eq!(
+                betas
+                    .iter()
+                    .filter(|beta| beta.as_str() == THINKING_BINDING_CONTROLS_BETA)
+                    .count(),
+                1,
+                "{betas:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_thinking_without_signed_replay_has_no_block_binding()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        for messages in [
+            replayed_thinking_conversation(false),
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        ] {
+            let request = LlmRequest::new("claude-opus-4-8", messages)
+                .with_anthropic_tag_merge(|t| t.thinking = Some(AnthropicThinkingConfig::Adaptive));
+            let body = client.build_request_body(&request)?;
+            assert_eq!(body["thinking"], serde_json::json!({"type": "adaptive"}));
+            let betas = AnthropicClient::request_betas(&request, &body);
+            assert!(
+                !betas
+                    .iter()
+                    .any(|beta| beta == THINKING_BINDING_CONTROLS_BETA),
+                "{betas:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_signed_thinking_replay_without_thinking_on_is_unchanged()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let disabled = LlmRequest::new("claude-sonnet-4-5", replayed_thinking_conversation(true))
+            .with_anthropic_tag_merge(|t| t.thinking = Some(AnthropicThinkingConfig::Disabled));
+        let body = client.build_request_body(&disabled)?;
+        assert_eq!(body["thinking"], serde_json::json!({"type": "disabled"}));
+        assert!(
+            !AnthropicClient::request_betas(&disabled, &body)
+                .iter()
+                .any(|beta| beta == THINKING_BINDING_CONTROLS_BETA)
+        );
+
+        let no_thinking =
+            LlmRequest::new("claude-sonnet-4-5", replayed_thinking_conversation(true));
+        let body = client.build_request_body(&no_thinking)?;
+        assert!(body.get("thinking").is_none());
+        assert_eq!(body["messages"][1]["content"][0]["signature"], "sig_abc123");
+        assert!(
+            !AnthropicClient::request_betas(&no_thinking, &body)
+                .iter()
+                .any(|beta| beta == THINKING_BINDING_CONTROLS_BETA)
+        );
         Ok(())
     }
 

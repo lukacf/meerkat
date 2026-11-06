@@ -105,18 +105,31 @@ them.
   meerkat-mob) gains `TakeOverIdentityEntry { agent_identity }`,
   `MobMachineSignal` gains `RecoverIdentityEntryAdopting`, and
   `MobMachineEffect` gains `IdentityEntryTakenOver`, whose `verdict` is the
-  new `HostAdoptionEntryVerdict`. The kernel `generated::mob` enums `Input`,
-  `InputKind`, `Signal`, `SignalKind`, `Effect` and `EffectKind` gain the
-  same variants, each appended last, and `TransitionId` gains the
-  takeover's twelve arms after every other variant, so no existing
-  variant's discriminant moves. The input `SealDeclaredRoster` (and the
-  kernel `generated::mob::inputs` struct) gains `intent_named` (a
+  new `HostAdoptionEntryVerdict`; meerkat-machine-schema's
+  `MobMachineInputVariant`, `MobMachineSignalVariant` and
+  `MobMachineEffectVariant` gain the same variants. The kernel
+  `generated::mob` enums `Input`, `InputKind`, `Signal`, `SignalKind`,
+  `Effect` and `EffectKind` gain the same variants, each appended last, and
+  `TransitionId` gains the takeover's twelve arms after every other variant
+  (`ObserveMemberRetirementArchivedLiveHostAdopted`,
+  `ObserveMemberRetirementArchivedRetiredHostAdopted`,
+  `TakeOverIdentityEntryAdopting`, `TakeOverIdentityEntryEnded`,
+  `TakeOverIdentityEntryDeferred`, `TakeOverIdentityEntryNotADeclaredEntry`,
+  `TakeOverIdentityEntryNonAuthoritative`,
+  `TakeOverIdentityEntryMobNotRunningStopped`,
+  `TakeOverIdentityEntryMobNotRunningCompleted`,
+  `TakeOverIdentityEntryMobNotRunningDestroyed`,
+  `RecoverIdentityEntryAdoptingMarkedRunning` and
+  `RecoverIdentityEntryAdoptingStaleRunning`), so no existing variant's
+  discriminant moves. The input `SealDeclaredRoster` (and the kernel
+  `generated::mob::inputs` struct) gains `intent_named` (a
   `BTreeSet<AgentIdentity>`: the entries whose identity a host's intent row
-  names, which the seal leaves alone), and the kernel
-  `generated::mob::State` gains the public field `identity_entry_adopting`.
-  Code that builds them literally must set the new fields (an empty set
-  keeps the previous seal), a serialized kernel input or state without them
-  no longer deserializes, and exhaustive matches must add the new variants.
+  names, which the seal leaves alone), and meerkat-machine-schema's
+  `MobMachineState` and the kernel `generated::mob::State` gain the public
+  field `identity_entry_adopting`. Code that builds them literally must set
+  the new fields (an empty set keeps the previous seal), a serialized kernel
+  input or state without them no longer deserializes, and exhaustive
+  matches must add the new variants.
 
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-runtime`: the
   MeerkatMachine gains the failure arm of an until-changed switch-turn

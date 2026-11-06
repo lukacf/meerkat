@@ -1375,6 +1375,60 @@ decide_href = "/host/../decide/{decision_id}"
     }
 
     #[test]
+    fn a_sign_out_link_must_be_a_same_origin_path() -> Result<(), ConsoleConfigError> {
+        let json_of = |toml_text: &str| -> Result<serde_json::Value, ConsoleConfigError> {
+            let config = load_console_ui_config_from_toml(toml_text)?;
+            serde_json::to_value(&config)
+                .map_err(|error| ConsoleConfigError::Invalid(error.to_string()))
+        };
+        // A front whose sign-out takes a POST names the method.
+        let posted = json_of("[sign_out]\nhref = \"/logout\"\nmethod = \"post\"\n")?;
+        assert_eq!(
+            posted["sign_out"],
+            serde_json::json!({ "href": "/logout", "method": "post" })
+        );
+        // A plain link is a GET.
+        let linked = json_of("[sign_out]\nhref = \"/oauth2/sign_out?rd=%2Fconsole\"\n")?;
+        assert_eq!(
+            linked["sign_out"],
+            serde_json::json!({ "href": "/oauth2/sign_out?rd=%2Fconsole", "method": "get" })
+        );
+        // Anything but a same-origin path drops the link, as an operator
+        // panel path would be.
+        for href in [
+            "https://evil.example/logout",
+            "//evil.example/logout",
+            "/a/../logout",
+            "logout",
+            "/log out",
+            "",
+        ] {
+            let dropped = json_of(&format!("[sign_out]\nhref = \"{href}\"\n"))?;
+            assert!(dropped.get("sign_out").is_none(), "{href:?} is not dropped");
+        }
+        // An unknown method fails the configuration instead of guessing one.
+        assert!(
+            load_console_ui_config_from_toml(
+                "[sign_out]\nhref = \"/logout\"\nmethod = \"delete\"\n"
+            )
+            .is_err()
+        );
+        // A realm can name its own sign-out.
+        let realm = load_console_ui_config_from_toml_for_realm(
+            "[sign_out]\nhref = \"/logout\"\n\n[realms.front.sign_out]\nhref = \"/front/logout\"\nmethod = \"post\"\n",
+            Some("front"),
+        )?;
+        assert_eq!(
+            serde_json::to_value(&realm)
+                .map_err(|error| ConsoleConfigError::Invalid(error.to_string()))?["sign_out"],
+            serde_json::json!({ "href": "/front/logout", "method": "post" })
+        );
+        // Absent: nothing is serialized.
+        assert!(json_of("title = \"Ops\"\n")?.get("sign_out").is_none());
+        Ok(())
+    }
+
+    #[test]
     fn attention_source_keys_are_required_and_an_empty_label_drops_the_source()
     -> Result<(), ConsoleConfigError> {
         assert!(

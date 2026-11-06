@@ -114,6 +114,9 @@ pub struct OpenAiCompatibleClient {
     /// ([`meerkat_core::provider_matrix::OpenAiBackendKind::admits_prompt_cache_fields`]),
     /// so a server outside the OpenAI backend matrix receives none.
     openai_backend: Option<meerkat_core::provider_matrix::OpenAiBackendKind>,
+    /// GitHub Copilot's Chat Completions stream discipline; see
+    /// [`Self::with_copilot_chat_stream`].
+    copilot_chat_stream: bool,
 }
 
 impl OpenAiCompatibleClient {
@@ -178,7 +181,21 @@ impl OpenAiCompatibleClient {
             post_finish_trailer_window: DEFAULT_POST_FINISH_TRAILER_WINDOW,
             static_credential: false,
             openai_backend: None,
+            copilot_chat_stream: false,
         }
+    }
+
+    /// For GitHub Copilot's Chat Completions routes only. A stream counts
+    /// as a completed turn only once a choice names a finish reason: one
+    /// that ends without it, at the end of the body or at `[DONE]`, fails
+    /// with the retryable [`LlmError::IncompleteResponse`] and commits
+    /// nothing. Only the first choice is read: a stream that carries another
+    /// choice index fails the same way, instead of having it merged into the
+    /// answer or dropped from it. Other routes are unchanged.
+    #[must_use]
+    pub fn with_copilot_chat_stream(mut self) -> Self {
+        self.copilot_chat_stream = true;
+        self
     }
 
     /// Declare the OpenAI backend this client speaks to (a GitHub Copilot
@@ -1164,6 +1181,19 @@ impl OpenAiCompatibleClient {
                             }
 
                             for choice in event.choices {
+                                // On Copilot only choice 0 (or a choice
+                                // without an index) is read, before and
+                                // after its finish reason: another one is
+                                // a shape this adapter does not merge.
+                                if self.copilot_chat_stream
+                                    && let Some(index) = choice.index.filter(|index| *index != 0)
+                                {
+                                    Err::<(), _>(LlmError::IncompleteResponse {
+                                        message: format!(
+                                            "GitHub Copilot chat stream carried choice {index}; only choice 0 is read"
+                                        ),
+                                    })?;
+                                }
                                 // The turn is terminal once a finish
                                 // reason has been latched. A compliant
                                 // server sends only usage and `[DONE]`
@@ -1322,6 +1352,19 @@ impl OpenAiCompatibleClient {
                                 ),
                             })?;
                         }
+                    }
+                    // On Copilot a turn completes only with a finish reason (a
+                    // streamed refusal ends it too): an upstream cut or idle
+                    // close, at a line boundary or at `[DONE]`, would otherwise
+                    // commit truncated text or drop a pending tool call.
+                    if self.copilot_chat_stream
+                        && latched_stop.is_none()
+                        && refusal_text.is_empty()
+                    {
+                        Err::<(), _>(LlmError::IncompleteResponse {
+                            message: "GitHub Copilot chat stream ended without a finish reason"
+                                .to_string(),
+                        })?;
                     }
                     if !reasoning_text.is_empty() {
                         yield LlmEvent::ReasoningComplete {
@@ -1569,6 +1612,10 @@ struct ChatCompletionsChunk {
 
 #[derive(Debug, Deserialize)]
 struct ChatChoice {
+    /// The choice's position among the completions a request asked for;
+    /// absent on endpoints that send a single choice without one.
+    #[serde(default)]
+    index: Option<u64>,
     #[serde(default)]
     delta: Option<ChatDelta>,
     #[serde(default)]

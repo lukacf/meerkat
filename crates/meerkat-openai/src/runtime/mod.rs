@@ -620,7 +620,8 @@ impl meerkat_copilot::CopilotChatCompletionsClientFactory
             )
             .with_image_input_support(supports_image_input)
             .with_authorizer(authorizer)
-            .with_provider(provider),
+            .with_provider(provider)
+            .with_copilot_chat_stream(),
         ))
     }
 }
@@ -671,7 +672,8 @@ pub(crate) fn copilot_openai_route_client(
             .with_image_input_support(target.supports_image_input)
             .with_authorizer(authorizer)
             .with_provider(Provider::OpenAI)
-            .with_openai_backend(OpenAiBackendKind::Copilot),
+            .with_openai_backend(OpenAiBackendKind::Copilot)
+            .with_copilot_chat_stream(),
         )),
         meerkat_copilot::CopilotEndpoint::Messages | meerkat_copilot::CopilotEndpoint::Unknown => {
             Err(ProviderClientError::ClientInit(

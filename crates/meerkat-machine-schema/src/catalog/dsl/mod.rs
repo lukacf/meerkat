@@ -4382,6 +4382,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "NotSeated",
                     "NonAuthoritative",
                     "MobNotRunning",
+                    "RetireUnadopted",
                 ],
             ),
             NamedTypeBinding::string_enum(

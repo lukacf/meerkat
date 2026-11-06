@@ -2355,6 +2355,135 @@
         "description": "Opaque identifier for an input accepted by the runtime layer.\n\nCore passes this through in `contributing_input_ids` on receipts and events\nbut NEVER interprets it. The runtime layer creates and manages these.",
         "type": "string"
       },
+      "InstructionActiveRef": {
+        "additionalProperties": false,
+        "description": "One slot of the active set an entry leaves in effect.",
+        "properties": {
+          "body_bytes": {
+            "description": "Length of the body in UTF-8 bytes: a snapshot reads each body at\nthis length.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision",
+          "content_sha256",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
+      "InstructionChange": {
+        "description": "One change a delta entry carries.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The body at `revision` applies from this entry on. `supersedes` is\nthe revision that was in effect for the slot, if one was.",
+            "properties": {
+              "body_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "change": {
+                "const": "activate",
+                "type": "string"
+              },
+              "content_sha256": {
+                "$ref": "#/$defs/InstructionContentDigest"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "supersedes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionRevision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "content_sha256",
+              "body_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The slot's body stops applying: `revokes` is the revision that was in\neffect.",
+            "properties": {
+              "change": {
+                "const": "revoke",
+                "type": "string"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "revokes": {
+                "$ref": "#/$defs/InstructionRevision"
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "revokes"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
       "InstructionKeyRef": {
         "description": "One instruction key a fork notice names.",
         "properties": {
@@ -2370,6 +2499,16 @@
           "key"
         ],
         "type": "object"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "InteractionFailureReason": {
         "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-carried field.\n\n[`Display`]: std::fmt::Display",
@@ -8136,6 +8275,59 @@
           "axis"
         ],
         "type": "object"
+      },
+      {
+        "description": "An operator-instruction entry of this session was applied: the delta\nentry a fresh run start appended, published once the run whose start\nappended it starts, or the snapshot entry a compaction folded the\nsession's entry rows into, published once that compaction commits.\n\nAn observation only, projected from the entry row's typed identity:\nthe session's operator-instruction status read is the authority on\nwhat is in effect. A run that never commits its entry leaves the\nchanges pending, and a later run start applies them again.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+        "properties": {
+          "active": {
+            "description": "The whole active set after the entry, sorted by slot.",
+            "items": {
+              "$ref": "#/$defs/InstructionActiveRef"
+            },
+            "type": "array"
+          },
+          "changes": {
+            "description": "A delta's changes, sorted by slot; empty for a snapshot.",
+            "items": {
+              "$ref": "#/$defs/InstructionChange"
+            },
+            "type": "array"
+          },
+          "entry_sequence": {
+            "description": "Strictly increasing per session, across deltas and snapshots.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/$defs/InstructionEntryKind"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The run whose start applied the entry; none for a snapshot of\nwhat was already in effect."
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "type": {
+            "const": "operator_instructions_applied",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "session_id",
+          "entry_sequence",
+          "kind"
+        ],
+        "type": "object"
       }
     ],
     "title": "AgentEvent"
@@ -10213,6 +10405,59 @@
               "axis"
             ],
             "type": "object"
+          },
+          {
+            "description": "An operator-instruction entry of this session was applied: the delta\nentry a fresh run start appended, published once the run whose start\nappended it starts, or the snapshot entry a compaction folded the\nsession's entry rows into, published once that compaction commits.\n\nAn observation only, projected from the entry row's typed identity:\nthe session's operator-instruction status read is the authority on\nwhat is in effect. A run that never commits its entry leaves the\nchanges pending, and a later run start applies them again.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "active": {
+                "description": "The whole active set after the entry, sorted by slot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionActiveRef"
+                },
+                "type": "array"
+              },
+              "changes": {
+                "description": "A delta's changes, sorted by slot; empty for a snapshot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionChange"
+                },
+                "type": "array"
+              },
+              "entry_sequence": {
+                "description": "Strictly increasing per session, across deltas and snapshots.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "$ref": "#/$defs/InstructionEntryKind"
+              },
+              "run_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The run whose start applied the entry; none for a snapshot of\nwhat was already in effect."
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "operator_instructions_applied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "entry_sequence",
+              "kind"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -12099,6 +12344,135 @@
         "description": "Opaque identifier for an input accepted by the runtime layer.\n\nCore passes this through in `contributing_input_ids` on receipts and events\nbut NEVER interprets it. The runtime layer creates and manages these.",
         "type": "string"
       },
+      "InstructionActiveRef": {
+        "additionalProperties": false,
+        "description": "One slot of the active set an entry leaves in effect.",
+        "properties": {
+          "body_bytes": {
+            "description": "Length of the body in UTF-8 bytes: a snapshot reads each body at\nthis length.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision",
+          "content_sha256",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
+      "InstructionChange": {
+        "description": "One change a delta entry carries.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The body at `revision` applies from this entry on. `supersedes` is\nthe revision that was in effect for the slot, if one was.",
+            "properties": {
+              "body_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "change": {
+                "const": "activate",
+                "type": "string"
+              },
+              "content_sha256": {
+                "$ref": "#/$defs/InstructionContentDigest"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "supersedes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionRevision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "content_sha256",
+              "body_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The slot's body stops applying: `revokes` is the revision that was in\neffect.",
+            "properties": {
+              "change": {
+                "const": "revoke",
+                "type": "string"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "revokes": {
+                "$ref": "#/$defs/InstructionRevision"
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "revokes"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
       "InstructionKeyRef": {
         "description": "One instruction key a fork notice names.",
         "properties": {
@@ -12114,6 +12488,16 @@
           "key"
         ],
         "type": "object"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "InteractionFailureReason": {
         "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-carried field.\n\n[`Display`]: std::fmt::Display",
@@ -16402,7 +16786,8 @@
       "live_channel_closed",
       "request_reasoning_lowered",
       "run_resumed",
-      "tool_results_bounded_for_request"
+      "tool_results_bounded_for_request",
+      "operator_instructions_applied"
     ],
     "known_payloads": {
       "tool_config_changed": {

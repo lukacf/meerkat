@@ -275,6 +275,24 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "InstructionActivationReadPage",
         ),
         RpcMethodDescriptor::typed(
+            "session/set_instruction",
+            "Record one session-owned operator instruction, applied at the session's next fresh run start",
+            "SetSessionInstructionParams",
+            "SessionInstructionWriteResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "session/revoke_instruction",
+            "Revoke one session-owned operator instruction at a higher revision",
+            "RevokeSessionInstructionParams",
+            "SessionInstructionWriteResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "session/instruction_status",
+            "Read a session's committed operator-instruction state without materializing it",
+            "SessionInstructionStatusParams",
+            "SessionInstructionStatusResult",
+        ),
+        RpcMethodDescriptor::typed(
             "session/transcript_revision",
             "Read a retained immutable transcript revision body",
             "ReadSessionTranscriptRevisionParams",
@@ -934,6 +952,24 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "Append system context for a mob member",
                 "MobAppendSystemContextParams",
                 "MobAppendSystemContextResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/set_instruction",
+                "Write one operator instruction for the members a target selects",
+                "MobSetInstructionParams",
+                "MobInstructionWriteResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/revoke_instruction",
+                "Revoke one operator instruction of a mob at a higher revision",
+                "MobRevokeInstructionParams",
+                "MobInstructionWriteResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/instruction_status",
+                "Read a mob's operator-instruction records and each member's delivery and slot state",
+                "MobInstructionStatusParams",
+                "MobInstructionStatusResult",
             ),
             RpcMethodDescriptor::typed(
                 "mob/flows",

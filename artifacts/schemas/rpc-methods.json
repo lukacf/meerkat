@@ -179,6 +179,24 @@
       "result_type": "InstructionActivationReadPage"
     },
     {
+      "description": "Record one session-owned operator instruction, applied at the session's next fresh run start",
+      "name": "session/set_instruction",
+      "params_type": "SetSessionInstructionParams",
+      "result_type": "SessionInstructionWriteResult"
+    },
+    {
+      "description": "Revoke one session-owned operator instruction at a higher revision",
+      "name": "session/revoke_instruction",
+      "params_type": "RevokeSessionInstructionParams",
+      "result_type": "SessionInstructionWriteResult"
+    },
+    {
+      "description": "Read a session's committed operator-instruction state without materializing it",
+      "name": "session/instruction_status",
+      "params_type": "SessionInstructionStatusParams",
+      "result_type": "SessionInstructionStatusResult"
+    },
+    {
       "description": "Read a retained immutable transcript revision body",
       "name": "session/transcript_revision",
       "params_type": "ReadSessionTranscriptRevisionParams",
@@ -785,6 +803,24 @@
       "name": "mob/append_system_context",
       "params_type": "MobAppendSystemContextParams",
       "result_type": "MobAppendSystemContextResult"
+    },
+    {
+      "description": "Write one operator instruction for the members a target selects",
+      "name": "mob/set_instruction",
+      "params_type": "MobSetInstructionParams",
+      "result_type": "MobInstructionWriteResult"
+    },
+    {
+      "description": "Revoke one operator instruction of a mob at a higher revision",
+      "name": "mob/revoke_instruction",
+      "params_type": "MobRevokeInstructionParams",
+      "result_type": "MobInstructionWriteResult"
+    },
+    {
+      "description": "Read a mob's operator-instruction records and each member's delivery and slot state",
+      "name": "mob/instruction_status",
+      "params_type": "MobInstructionStatusParams",
+      "result_type": "MobInstructionStatusResult"
     },
     {
       "description": "List flows defined for a mob",

@@ -2072,6 +2072,59 @@
               "axis"
             ],
             "type": "object"
+          },
+          {
+            "description": "An operator-instruction entry of this session was applied: the delta\nentry a fresh run start appended, published once the run whose start\nappended it starts, or the snapshot entry a compaction folded the\nsession's entry rows into, published once that compaction commits.\n\nAn observation only, projected from the entry row's typed identity:\nthe session's operator-instruction status read is the authority on\nwhat is in effect. A run that never commits its entry leaves the\nchanges pending, and a later run start applies them again.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "active": {
+                "description": "The whole active set after the entry, sorted by slot.",
+                "items": {
+                  "$ref": "#/components/schemas/InstructionActiveRef"
+                },
+                "type": "array"
+              },
+              "changes": {
+                "description": "A delta's changes, sorted by slot; empty for a snapshot.",
+                "items": {
+                  "$ref": "#/components/schemas/InstructionChange"
+                },
+                "type": "array"
+              },
+              "entry_sequence": {
+                "description": "Strictly increasing per session, across deltas and snapshots.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "$ref": "#/components/schemas/InstructionEntryKind"
+              },
+              "run_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The run whose start applied the entry; none for a snapshot of\nwhat was already in effect."
+              },
+              "session_id": {
+                "$ref": "#/components/schemas/SessionId"
+              },
+              "type": {
+                "const": "operator_instructions_applied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "entry_sequence",
+              "kind"
+            ],
+            "type": "object"
           }
         ]
       },

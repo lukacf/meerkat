@@ -158,6 +158,9 @@ import type {
   MobIdParams,
   MobIngressInteractionParams,
   MobIngressInteractionResult,
+  MobInstructionStatusParams,
+  MobInstructionStatusResult,
+  MobInstructionWriteResult,
   MobLifecycleParams,
   MobLifecycleResult,
   MobListMembersMatchingParams,
@@ -193,6 +196,7 @@ import type {
   MobRetireResult,
   MobRevokeHostParams,
   MobRevokeHostResult,
+  MobRevokeInstructionParams,
   MobRevokeScopesParams,
   MobRevokeScopesResult,
   MobRotateSupervisorResult,
@@ -200,6 +204,7 @@ import type {
   MobRunParams,
   MobRunResult,
   MobRunResultParams,
+  MobSetInstructionParams,
   MobSnapshotResult,
   MobSpawnHelperParams,
   MobSpawnManyParams,
@@ -235,6 +240,7 @@ import type {
   ReadyWorkFilter,
   RealmIdParams,
   RestoreSessionTranscriptRevisionParams,
+  RevokeSessionInstructionParams,
   RevokeToolGrantParams,
   RevokeToolGrantResult,
   RewriteSessionTranscriptParams,
@@ -254,12 +260,16 @@ import type {
   SessionForkResult,
   SessionInputStateParams,
   SessionInputStateResult,
+  SessionInstructionStatusParams,
+  SessionInstructionStatusResult,
+  SessionInstructionWriteResult,
   SessionPeerResponseTerminalParams,
   SessionStreamCloseParams,
   SessionStreamCloseResult,
   SessionStreamOpenParams,
   SessionStreamOpenResult,
   SessionTranscriptRewriteResult,
+  SetSessionInstructionParams,
   SkillListResponse,
   StopRunParams,
   StopRunResult,
@@ -419,6 +429,18 @@ export interface RpcMethodContracts {
   "session/instruction_activations": {
     params: ReadInstructionActivationsParams;
     result: (InstructionActivationReadPage) & Record<string, unknown>;
+  };
+  "session/set_instruction": {
+    params: SetSessionInstructionParams;
+    result: (SessionInstructionWriteResult) & Record<string, unknown>;
+  };
+  "session/revoke_instruction": {
+    params: RevokeSessionInstructionParams;
+    result: (SessionInstructionWriteResult) & Record<string, unknown>;
+  };
+  "session/instruction_status": {
+    params: SessionInstructionStatusParams;
+    result: (SessionInstructionStatusResult) & Record<string, unknown>;
   };
   "session/transcript_revision": {
     params: ReadSessionTranscriptRevisionParams;
@@ -831,6 +853,18 @@ export interface RpcMethodContracts {
   "mob/append_system_context": {
     params: MobAppendSystemContextParams;
     result: (MobAppendSystemContextResult) & Record<string, unknown>;
+  };
+  "mob/set_instruction": {
+    params: MobSetInstructionParams;
+    result: (MobInstructionWriteResult) & Record<string, unknown>;
+  };
+  "mob/revoke_instruction": {
+    params: MobRevokeInstructionParams;
+    result: (MobInstructionWriteResult) & Record<string, unknown>;
+  };
+  "mob/instruction_status": {
+    params: MobInstructionStatusParams;
+    result: (MobInstructionStatusResult) & Record<string, unknown>;
   };
   "mob/flows": {
     params: MobIdParams;

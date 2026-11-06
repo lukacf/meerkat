@@ -350,7 +350,57 @@ impl CustodyHandoff {
             return Err(PrivateOriginalError::Unavailable);
         }
         let value = bind()?;
-        let next = Arc::new(Self {
+        let next = self.next_attempt(state.review.take());
+        // This is a transfer of the same guard/attempt, not a terminal source
+        // decision. Old binder destruction cannot release the new invocation.
+        state.phase = HandoffPhase::Done;
+        Ok((value, next))
+    }
+
+    /// [`Self::rebind`] for a native binder inside Core's governed bind,
+    /// which must not wait. The next handoff is built first, without the
+    /// review, and given to `bind`, which rebinds the candidate and enrolls
+    /// that handoff in one owner change. Only once `bind` bound it does the
+    /// review move to it and this handoff end; a held or settling answer
+    /// leaves this handoff, its review and its candidate as they were.
+    pub(super) fn try_rebind<T>(
+        &self,
+        bind: impl FnOnce(
+            &Arc<Self>,
+        ) -> Result<crate::original_ingress::HeldOr<T>, PrivateOriginalError>,
+    ) -> Result<crate::original_ingress::HeldOr<(T, Arc<Self>)>, PrivateOriginalError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| PrivateOriginalError::Unavailable)?;
+        if !self.enrolled
+            || !state.definite_refusal
+            || state.native_box_live
+            || !matches!(
+                state.phase,
+                HandoffPhase::Foreground | HandoffPhase::Released
+            )
+        {
+            return Err(PrivateOriginalError::Unavailable);
+        }
+        let next = self.next_attempt(None);
+        let value = match bind(&next)? {
+            Ok(value) => value,
+            Err(held) => return Ok(Err(held)),
+        };
+        // This is the same attempt. Move its recovery hold only now, every
+        // try passed, without dropping or reacquiring review.
+        next.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .review = state.review.take();
+        state.phase = HandoffPhase::Done;
+        Ok(Ok((value, next)))
+    }
+
+    /// The next handoff of this same attempt, carrying `review`.
+    fn next_attempt(&self, review: Option<crate::review_custody::ReviewCustody>) -> Arc<Self> {
+        Arc::new(Self {
             enrolled: true,
             state: Mutex::new(HandoffState {
                 phase: HandoffPhase::Foreground,
@@ -358,9 +408,7 @@ impl CustodyHandoff {
                 foreground_live: true,
                 definite_refusal: false,
                 native_admitted: false,
-                // This is the same attempt. Move its recovery hold without
-                // dropping or reacquiring review while source locks are held.
-                review: state.review.take(),
+                review,
             }),
             canonical_readable: std::sync::atomic::AtomicBool::new(true),
             observation: Mutex::new(None),
@@ -381,11 +429,7 @@ impl CustodyHandoff {
                     .load(std::sync::atomic::Ordering::SeqCst),
             ),
             source: self.source.clone(),
-        });
-        // This is a transfer of the same guard/attempt, not a terminal source
-        // decision. Old binder destruction cannot release the new invocation.
-        state.phase = HandoffPhase::Done;
-        Ok((value, next))
+        })
     }
     // Explicit Meta transfer owns the Box even when its native outcome is
     // unresolved. It is distinct from destruction of a returned invocation.
@@ -537,6 +581,17 @@ const ROUND_PAUSE: Duration = Duration::from_secs(5);
 struct ControlState {
     admission_stopped: bool,
 }
+
+/// What a helper submission's binder met inside Core's governed bind, held
+/// by another actor or still settling, and refused with nothing staged: the
+/// submission waits for exactly that outside the bind and dispatches again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HeldAt {
+    /// One of the source owner's resources or states.
+    Source(crate::original_ingress::SourceHeld),
+    /// This source's custody recovery control.
+    RecoveryControl,
+}
 /// Whether this source's recovery is selected and whether it stopped, in one
 /// word. Each flag is set once and never cleared, only with `state` held
 /// (stop also inside an owner change of the source publication), so a native
@@ -616,8 +671,78 @@ impl CustodyRecovery {
         register(readiness.selected())
     }
 
+    /// [`Self::enroll`] for a native binder inside Core's governed bind,
+    /// which must not wait: `Ok(None)` when this control is held by a
+    /// recovery round or another enrollment, and nothing ran.
+    pub(super) fn try_enroll<T>(
+        &self,
+        register: impl FnOnce(bool) -> Result<T, PrivateOriginalError>,
+    ) -> Result<Option<T>, PrivateOriginalError> {
+        let control = match self.control.state.try_lock() {
+            Ok(control) => control,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(PrivateOriginalError::Unavailable);
+            }
+        };
+        let readiness = self.control.readiness();
+        if control.admission_stopped || readiness.stopped() {
+            return Err(PrivateOriginalError::Unavailable);
+        }
+        register(readiness.selected()).map(Some)
+    }
+
+    /// Wait, outside any bind and holding nothing, until this control is
+    /// free or `deadline` passed: one async loop of pauses of at most 1 ms
+    /// that checks the deadline on every iteration. True once free (a
+    /// poisoned control too: the enrollment made again answers it).
+    pub(super) async fn wait_for_control(&self, deadline: tokio::time::Instant) -> bool {
+        loop {
+            if !matches!(
+                self.control.state.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ) {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep_until(std::cmp::min(
+                deadline,
+                tokio::time::Instant::now() + Duration::from_millis(1),
+            ))
+            .await;
+        }
+    }
+
     pub(super) fn changed(&self) {
         self.control.wake.notify_one();
+    }
+
+    /// Test seam: this source's recovery control held for `hold` on a thread
+    /// of its own, as a recovery round or another enrollment holds it.
+    /// Returns once it is held; the returned thread releases it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn hold_control_for_test(
+        &self,
+        hold: std::time::Duration,
+    ) -> std::thread::JoinHandle<()> {
+        let control = self.control.clone();
+        let (held, holding) = std::sync::mpsc::sync_channel(0);
+        let thread = std::thread::spawn(move || {
+            let state = control
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = held.send(());
+            std::thread::sleep(hold);
+            drop(state);
+        });
+        assert!(
+            holding.recv().is_ok(),
+            "the control's recovery control hold began"
+        );
+        thread
     }
 
     pub(super) fn announce(&self) {

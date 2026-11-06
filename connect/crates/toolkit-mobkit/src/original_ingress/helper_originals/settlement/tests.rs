@@ -63,6 +63,58 @@ async fn delayed_acknowledgement_allows_the_same_strict_source_without_resubmiss
     assert_eq!(admitted.item_id(), &item);
 }
 
+// A contributor whose admission is still in flight (a candidate) is a
+// transitional state: the binder's non-waiting check answers it undecided,
+// as it answers a held collection, so the submission waits it out outside
+// Core's bind; once admitted the check passes.
+#[tokio::test]
+async fn binder_check_answers_a_candidate_contributor_undecided() {
+    let (_directory, owner, original, pending, admitted) = pending().await;
+    assert!(
+        matches!(owner.try_check_admitted_helper(&admitted), Ok(false)),
+        "a candidate contributor is undecided, not refused"
+    );
+    assert!(Arc::ptr_eq(&pending.admit().unwrap(), &original));
+    assert!(matches!(
+        owner.try_check_admitted_helper(&admitted),
+        Ok(true)
+    ));
+}
+
+// A contributor still a candidate is recognized as settling (undecided),
+// and when it settles into a genuine refusal (withdrawn) the binder's wait
+// outside the bind ends promptly with that refusal, not at its deadline.
+#[tokio::test]
+async fn a_settling_contributor_withdrawn_ends_the_wait_promptly_with_the_refusal() {
+    let (_directory, owner, _original, pending, admitted) = pending().await;
+    assert!(matches!(
+        owner.try_check_admitted_helper(&admitted),
+        Ok(false)
+    ));
+    let started = Instant::now();
+    let wait = owner.wait_admitted_helper(&admitted, started + Duration::from_secs(2));
+    tokio::pin!(wait);
+    assert!(wait.as_mut().now_or_never().is_none());
+    drop(pending);
+    assert!(matches!(wait.await, Err(OriginalWriterError::WrongOwner)));
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "the wait ended once the candidate was withdrawn: {:?}",
+        started.elapsed()
+    );
+}
+
+// Control: a withdrawn candidate is a genuine refusal, never undecided.
+#[tokio::test]
+async fn binder_check_refuses_a_withdrawn_candidate_contributor() {
+    let (_directory, owner, _original, pending, admitted) = pending().await;
+    drop(pending);
+    assert!(matches!(
+        owner.try_check_admitted_helper(&admitted),
+        Err(OriginalWriterError::WrongOwner)
+    ));
+}
+
 #[tokio::test]
 async fn withdrawn_retry_candidate_refuses_without_promoting_source() {
     let (_directory, owner, original, pending, admitted) = pending().await;

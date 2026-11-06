@@ -173,19 +173,35 @@ impl ToolkitOriginalOwner {
         &self,
         association: &InputAuthorityAssociation,
     ) -> Result<bool, OriginalWriterError> {
-        let originals = self
-            .originals
-            .try_lock()
-            .map_err(|_| OriginalWriterError::Unavailable)?;
+        match self.try_has_admitted_source(association)? {
+            Ok(admitted) => Ok(admitted),
+            Err(_) => Err(OriginalWriterError::Unavailable),
+        }
+    }
+
+    /// [`Self::has_admitted_source`] typed for a native binder: `Ok(Err(held))`
+    /// when the collection was held, or the source's own cancellation is
+    /// still pending, and nothing was decided.
+    pub(crate) fn try_has_admitted_source(
+        &self,
+        association: &InputAuthorityAssociation,
+    ) -> Result<HeldOr<bool>, OriginalWriterError> {
+        let originals = match self.originals.try_lock() {
+            Ok(originals) => originals,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(Err(SourceHeld::Collection)),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(OriginalWriterError::Unavailable);
+            }
+        };
         let claims = association.candidate();
         let Some(record) = originals
             .iter()
             .find(|row| row.names(&claims.ingress_namespace.realm, &claims.original_work))
         else {
-            return Ok(false);
+            return Ok(Ok(false));
         };
         let OriginalRecord::Bound(held) = record else {
-            return Ok(false);
+            return Ok(Ok(false));
         };
         if held.association() != association {
             return Err(OriginalWriterError::Conflict);
@@ -193,17 +209,16 @@ impl ToolkitOriginalOwner {
         match &held.operation {
             OriginalOperationDisposition::Open => (),
             OriginalOperationDisposition::CancellationPending => {
-                return Err(OriginalWriterError::Unavailable);
+                return Ok(Err(SourceHeld::SourceSettling));
             }
             OriginalOperationDisposition::Cancelled { .. } => {
                 return Err(OriginalWriterError::OperationCancelled);
             }
         }
-        Ok(held.source_custody == Some(SourceCustody::Admitted)
-            && held
-                .controller
-                .as_ref()
-                .is_some_and(|client| claims.controller_model.as_ref() == Some(client.selection())))
+        Ok(Ok(held.source_custody == Some(SourceCustody::Admitted)
+            && held.controller.as_ref().is_some_and(|client| {
+                claims.controller_model.as_ref() == Some(client.selection())
+            })))
     }
 
     /// Preserve restore_authenticated's task-child check, including the legacy
@@ -223,6 +238,21 @@ impl ToolkitOriginalOwner {
     ) -> Result<(), OriginalWriterError> {
         self.require_retained(original)?;
         self.refuse_cancelled_binding(original.association())
+    }
+
+    /// [`Self::check_bound_source`] where the caller must not wait (a native
+    /// binder inside Core's governed bind): `Ok(None)` when it passed; the
+    /// source collection held by another owner's short section, or the
+    /// source's own cancellation still pending, as what to wait for, and
+    /// nothing was decided.
+    pub(crate) fn try_bound_source(
+        &self,
+        original: &Arc<RetainedToolkitOriginal>,
+    ) -> Result<Option<SourceHeld>, OriginalWriterError> {
+        if !self.try_require_retained(original)? {
+            return Ok(Some(SourceHeld::Collection));
+        }
+        self.try_cancelled_binding(original.association())
     }
 
     /// Called only after the canonical approved B decision or selected setup A
@@ -457,6 +487,56 @@ impl ToolkitOriginalOwner {
         held.controller = Some(admitted.controller().clone());
         held.source_custody = Some(SourceCustody::Admitted);
         Ok(())
+    }
+
+    /// [`Self::recover_retained_custody`] typed for a native binder's cold
+    /// restoration: the owner change and the collection are only tried, and
+    /// a held one, a contributor or the source still settling, is what to
+    /// wait for, with nothing changed. Every other answer is
+    /// [`Self::recover_retained_custody`]'s.
+    pub(crate) fn try_recover_retained_custody(
+        &self,
+        original: &Arc<RetainedToolkitOriginal>,
+        admitted: &AdmittedOriginal<'_>,
+    ) -> Result<HeldOr<()>, OriginalWriterError> {
+        let _route = Self::admitted_controller_route(original.association(), admitted)?;
+        let Some(_publication) = self.try_owner_change()? else {
+            return Ok(Err(SourceHeld::Publication));
+        };
+        let mut originals = match self.originals.try_lock() {
+            Ok(originals) => originals,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(Err(SourceHeld::Collection)),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(OriginalWriterError::Unavailable);
+            }
+        };
+        let claims = original.association().candidate();
+        if let Some(settling) = super::contributors_settled(
+            &originals,
+            &claims.ingress_namespace,
+            &claims.contributing_work,
+            &claims.requester,
+            true,
+        )? {
+            return Ok(Err(settling));
+        }
+        let held = originals
+            .iter_mut()
+            .filter_map(OriginalRecord::bound_mut)
+            .find(|held| Arc::ptr_eq(&held.retained, original))
+            .ok_or(OriginalWriterError::WrongOwner)?;
+        match held.operation {
+            OriginalOperationDisposition::Open => {}
+            OriginalOperationDisposition::CancellationPending => {
+                return Ok(Err(SourceHeld::SourceSettling));
+            }
+            OriginalOperationDisposition::Cancelled { .. } => {
+                return Err(OriginalWriterError::OperationCancelled);
+            }
+        }
+        held.controller = Some(admitted.controller().clone());
+        held.source_custody = Some(SourceCustody::Admitted);
+        Ok(Ok(()))
     }
 
     /// Shared exact validation for publication-free replay and mutation passes.

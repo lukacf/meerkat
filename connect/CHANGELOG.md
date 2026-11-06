@@ -174,6 +174,15 @@ there are no Connect releases numbered 0.9.7 to 0.9.9.
   there it ends the Find as `retry_safe` (nothing admitted), as a change
   that outlasts the bound does.
 
+- A setup helper whose submission meets another owner's brief hold on the
+  shared source state, its source writer or its custody recovery, or a source
+  whose admission is still settling, now waits for it within the
+  submission's deadline instead of never starting, and never waits inside
+  the native bind. The same input is submitted again, never twice; a hold
+  that outlasts the deadline, or a source that settles into a refusal,
+  answers `retry_safe` with nothing admitted, and an expired source is still
+  refused as before.
+
 - A Find no longer fails as temporarily unavailable (`tool_unavailable`)
   while another original's Find is writing the shared source state. Its
   setup helper admission waits for that write within the owner-change bound;

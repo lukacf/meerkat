@@ -962,6 +962,11 @@ impl PrivateOriginals {
         review: crate::review_custody::ReviewCustody,
         dispatch: Option<&ToolDispatchContext>,
     ) -> Result<SetupHelperSubmission, PrivateOriginalError> {
+        // The submission's one deadline for every wait on a held source
+        // collection: computed once, here, and shared by the check before
+        // the first native call, the rebind's check after a settled change,
+        // and each wait after the binder met a held collection. It is never
+        // computed again for a retry, and never past the source deadline.
         let contended_until = std::cmp::min(
             source_deadline,
             tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
@@ -1023,6 +1028,7 @@ impl PrivateOriginals {
             source_deadline,
             pending: Mutex::new(Weak::new()),
             review_custody: review.clone(),
+            held_at: Mutex::new(None),
         });
         // Keep one raw input identity and event content. A definite policy
         // change rebuilds only the current binding, never the source/key: on
@@ -1040,6 +1046,7 @@ impl PrivateOriginals {
             if tokio::time::Instant::now() >= source_deadline {
                 return Err(PrivateOriginalError::Denied);
             }
+            binder.clear_held();
             let result = runtime
                 .dispatch_governed_with_turn_ticket(
                     &identity,
@@ -1048,6 +1055,13 @@ impl PrivateOriginals {
                     review.bind(binder.clone()),
                 )
                 .await;
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(hold) = crate::source_hold_probe::observe(
+                crate::source_hold_probe::Site::SubmitReturned,
+                &prepared.admitted.item_id().to_string(),
+            ) {
+                tokio::time::sleep(hold.duration).await;
+            }
             if result.as_ref().err().is_some_and(|error| {
                 helper_admission_reprepare_required(error, &prepared.session_id)
             }) {
@@ -1089,6 +1103,43 @@ impl PrivateOriginals {
                         }
                         reprepared = true;
                     }
+                }
+                continue;
+            }
+            // The binder met the source collection held by another owner's
+            // short section and refused before staging anything, so Core
+            // admitted no input. Only that typed mark retries, never another
+            // Bind refusal. The wait is outside the bind, holding nothing,
+            // until the submission's one deadline; then the same input is
+            // dispatched again, through Core's whole governed bind and every
+            // check of the binder. The deadlines are checked before the wait
+            // and again after it, before the next dispatch: an expired
+            // source is denied and never attempted again, and past the
+            // submission's deadline (a collection released only then
+            // included, since the wait reads the source once even late), or
+            // with the helper no longer current, nothing was admitted and the
+            // Find may retry.
+            if let Err(error) = &result
+                && let Some(at) = binder.held_at()
+                && retries_after_contention(error, Some(at))
+            {
+                if let Some(answer) = contention_retry_boundary(
+                    tokio::time::Instant::now(),
+                    source_deadline,
+                    contended_until,
+                ) {
+                    return answer;
+                }
+                let settled = self
+                    .wait_out_held(at, prepared, &binder.held, contended_until)
+                    .await;
+                if let Some(answer) = after_held_wait(
+                    tokio::time::Instant::now(),
+                    source_deadline,
+                    contended_until,
+                    settled,
+                ) {
+                    return answer;
                 }
                 continue;
             }
@@ -1304,10 +1355,172 @@ fn helper_admission_reprepare_required(
         } if session_id == expected_session))
 }
 
+// A dispatch whose binder refused because it met a held source collection:
+// only Core's Bind answer to the binder's own refusal, with the binder's
+// typed contention mark set during that dispatch. Never another Bind refusal,
+// and never its text.
+fn retries_after_contention(
+    error: &IdentityRuntimeError,
+    held: Option<custody_recovery::HeldAt>,
+) -> bool {
+    held.is_some()
+        && matches!(
+            error,
+            IdentityRuntimeError::GovernedInput(GovernedInputError::Bind(_))
+        )
+}
+
+// The submission's answer once its wait outside the bind ended, if it stops
+// there: the retry boundary first (an expired source is denied, then past
+// the submission's one deadline nothing was admitted), then a wait that did
+// not settle, or settled into a genuine refusal (withdrawn, cancelled, wrong
+// owner): nothing was admitted and nothing is dispatched again, and a later
+// Find meets that refusal in its own checks. `None`: the same input is
+// dispatched again.
+fn after_held_wait(
+    now: tokio::time::Instant,
+    source_deadline: tokio::time::Instant,
+    contended_until: tokio::time::Instant,
+    settled: bool,
+) -> Option<Result<SetupHelperSubmission, PrivateOriginalError>> {
+    contention_retry_boundary(now, source_deadline, contended_until)
+        .or_else(|| (!settled).then_some(Ok(SetupHelperSubmission::ReprepareRequired)))
+}
+
+impl PrivateOriginals {
+    /// Wait, outside Core's bind and holding nothing, for what the binder met
+    /// (`at`) to settle, until `deadline`: true once it settled; false once
+    /// the deadline passed or it settled into a genuine refusal.
+    async fn wait_out_held(
+        &self,
+        at: custody_recovery::HeldAt,
+        prepared: &PreparedHelperController,
+        held: &HeldSetupHelper,
+        deadline: tokio::time::Instant,
+    ) -> bool {
+        use crate::original_ingress::SourceHeld;
+        match at {
+            custody_recovery::HeldAt::Source(SourceHeld::Contributors) => self
+                .owner
+                .wait_admitted_helper(&prepared.admitted, deadline)
+                .await
+                .is_ok(),
+            custody_recovery::HeldAt::Source(source) => {
+                self.owner
+                    .wait_out_held(source, &held.source.original, deadline)
+                    .await
+            }
+            custody_recovery::HeldAt::RecoveryControl => {
+                self.custody_recovery.wait_for_control(deadline).await
+            }
+        }
+    }
+}
+
+// A submission's answer at its retry boundary after the binder met a held
+// collection, if it must stop there: an expired source is denied and never
+// attempted again, and this wins when both deadlines passed; past only the
+// submission's one deadline nothing was admitted, and the Find may retry.
+fn contention_retry_boundary(
+    now: tokio::time::Instant,
+    source_deadline: tokio::time::Instant,
+    contended_until: tokio::time::Instant,
+) -> Option<Result<SetupHelperSubmission, PrivateOriginalError>> {
+    if now >= source_deadline {
+        Some(Err(PrivateOriginalError::Denied))
+    } else if now >= contended_until {
+        Some(Ok(SetupHelperSubmission::ReprepareRequired))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod reprepare_tests {
     use super::*;
     use meerkat_runtime::traits::ControllerReadinessFailure;
+
+    #[test]
+    fn a_contention_retry_boundary_denies_an_expired_source_first() {
+        let start = tokio::time::Instant::now();
+        let second = std::time::Duration::from_secs(1);
+        // Both deadlines passed, the source's first or at once: a denial.
+        assert!(matches!(
+            contention_retry_boundary(start + second * 3, start + second, start + second * 2),
+            Some(Err(PrivateOriginalError::Denied))
+        ));
+        assert!(matches!(
+            contention_retry_boundary(start + second, start + second, start + second),
+            Some(Err(PrivateOriginalError::Denied))
+        ));
+        // Only the submission's deadline passed: nothing admitted, retry_safe.
+        assert!(matches!(
+            contention_retry_boundary(start + second * 2, start + second * 3, start + second),
+            Some(Ok(SetupHelperSubmission::ReprepareRequired))
+        ));
+        // Neither passed: the retry may go.
+        assert!(contention_retry_boundary(start, start + second * 3, start + second).is_none());
+    }
+
+    #[test]
+    fn only_a_contended_bind_refusal_is_retried() {
+        use crate::original_ingress::SourceHeld;
+        use custody_recovery::HeldAt;
+        let bind = || {
+            IdentityRuntimeError::GovernedInput(GovernedInputError::Bind(
+                "Toolkit helper source is unavailable".into(),
+            ))
+        };
+        let held = Some(HeldAt::Source(SourceHeld::Collection));
+        for at in [
+            HeldAt::Source(SourceHeld::Contributors),
+            HeldAt::Source(SourceHeld::Collection),
+            HeldAt::Source(SourceHeld::SourceSettling),
+            HeldAt::Source(SourceHeld::Publication),
+            HeldAt::Source(SourceHeld::Writer),
+            HeldAt::RecoveryControl,
+        ] {
+            assert!(retries_after_contention(&bind(), Some(at)), "{at:?}");
+        }
+        assert!(
+            !retries_after_contention(&bind(), None),
+            "a Bind refusal without the binder's mark answers as before"
+        );
+        assert!(!retries_after_contention(
+            &IdentityRuntimeError::GovernedInput(GovernedInputError::BindingChanged),
+            held
+        ));
+        assert!(!retries_after_contention(
+            &IdentityRuntimeError::GovernedInput(GovernedInputError::AdmissionUnresolved {
+                detail: "unknown".into(),
+            }),
+            held
+        ));
+    }
+
+    // A wait outside the bind that settled into a genuine refusal (a
+    // withdrawn or cancelled candidate contributor, a wrong owner) stops the
+    // submission at retry_safe, nothing admitted, and dispatches nothing
+    // again; only a settled wait dispatches again; the boundary rule (the
+    // expired source denied first) comes before either.
+    #[test]
+    fn a_held_wait_settled_into_a_refusal_dispatches_no_more() {
+        let start = tokio::time::Instant::now();
+        let second = std::time::Duration::from_secs(1);
+        assert!(matches!(
+            after_held_wait(start, start + second * 3, start + second, false),
+            Some(Ok(SetupHelperSubmission::ReprepareRequired))
+        ));
+        assert!(after_held_wait(start, start + second * 3, start + second, true).is_none());
+        assert!(matches!(
+            after_held_wait(start + second * 3, start + second, start + second * 2, true),
+            Some(Err(PrivateOriginalError::Denied))
+        ));
+        assert!(matches!(
+            after_held_wait(start + second * 2, start + second * 3, start + second, true),
+            Some(Ok(SetupHelperSubmission::ReprepareRequired))
+        ));
+    }
 
     #[test]
     fn reprepare_requires_exact_session_policy_changed_nonadmission() {
@@ -1465,6 +1678,38 @@ struct SubmitHelperBinder {
     // Shared source-owner locks separately exclude competing Candidates.
     pending: Mutex<Weak<PendingHelperAdmission>>,
     review_custody: crate::review_custody::ReviewCustody,
+    // Set when the bind met an owner resource held by another actor, or a
+    // source still settling, and refused before staging anything: what it
+    // met, typed. The submission waits for exactly that outside the bind
+    // and dispatches again. Reset before each dispatch.
+    held_at: Mutex<Option<custody_recovery::HeldAt>>,
+}
+
+impl SubmitHelperBinder {
+    /// Refuse a bind that met `at`: nothing is staged, and the mark tells
+    /// the submission what to wait for outside the bind.
+    fn held(&self, at: custody_recovery::HeldAt) -> String {
+        *self
+            .held_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(at);
+        "Toolkit helper source is held".to_owned()
+    }
+
+    /// The mark of the last dispatch's bind, if it refused held.
+    fn held_at(&self) -> Option<custody_recovery::HeldAt> {
+        *self
+            .held_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn clear_held(&self) {
+        *self
+            .held_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
 }
 
 impl Drop for SubmitHelperBinder {
@@ -1500,14 +1745,29 @@ impl GovernedInputBinder for SubmitHelperBinder {
             crate::aa1_failure("helper.bind.placement", "PlacementChanged");
             return Err("Toolkit helper native placement changed".into());
         }
-        self.source
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::SubmitBind,
+            &self.admitted.item_id().to_string(),
+        ) {
+            crate::source_hold_probe::retain(self.source.hold_sources_for_test(hold));
+        }
+        // Never wait inside Core's bind: a held collection refuses here, and
+        // the submission waits for it outside.
+        if !self
+            .source
             .owner
-            .check_admitted_helper(&self.admitted)
+            .try_check_admitted_helper(&self.admitted)
             .map_err(|_| {
                 #[cfg(test)]
                 crate::aa1_failure("helper.bind.source", "Unavailable");
                 "Toolkit helper source is unavailable"
-            })?;
+            })?
+        {
+            return Err(self.held(custody_recovery::HeldAt::Source(
+                crate::original_ingress::SourceHeld::Contributors,
+            )));
+        }
         self.source
             .require_helper_selection(self.admitted.selection())
             .map_err(|_| {
@@ -1515,17 +1775,27 @@ impl GovernedInputBinder for SubmitHelperBinder {
                 crate::aa1_failure("helper.bind.selection", "Unavailable");
                 "Toolkit helper selection is unavailable"
             })?;
-        self.source
-            .restore_promoted_custody(
+        let restore_held = Mutex::new(None);
+        let restored = self
+            .source
+            .restore_promoted_custody_observed(
                 &self.held.source.source_record.key,
                 &self.held.source.original,
+                None,
+                Some(&restore_held),
             )
-            .await
-            .map_err(|_| "Toolkit historical helper custody is unavailable")?;
-        let mut prepared = self
+            .await;
+        if let Some(at) = *restore_held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            return Err(self.held(at));
+        }
+        restored.map_err(|_| "Toolkit historical helper custody is unavailable")?;
+        let Some(mut prepared) = self
             .source
             .owner
-            .prepare_authenticated_input(
+            .try_prepare_authenticated_input(
                 &self.held.source.original,
                 &context.session_id,
                 input,
@@ -1537,10 +1807,26 @@ impl GovernedInputBinder for SubmitHelperBinder {
                 #[cfg(test)]
                 crate::aa1_failure("helper.bind.input", aa1_helper_runtime_variant(&_error));
                 "Toolkit helper input binding is unavailable"
-            })?;
-        let admitted = prepared
-            .admitted()
-            .map_err(|_| "Toolkit admitted helper is unavailable")?;
+            })?
+        else {
+            return Err(self.held(custody_recovery::HeldAt::Source(
+                crate::original_ingress::SourceHeld::Collection,
+            )));
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::SubmitAdmitted,
+            &self.admitted.item_id().to_string(),
+        ) {
+            crate::source_hold_probe::retain(self.source.hold_sources_for_test(hold));
+        }
+        let admitted = match prepared
+            .try_admitted()
+            .map_err(|_| "Toolkit admitted helper is unavailable")?
+        {
+            Ok(admitted) => admitted,
+            Err(held) => return Err(self.held(custody_recovery::HeldAt::Source(held))),
+        };
         if admitted.is_none() {
             if let Some(exact) = cold_service_admission::RetainedBoundInput::retain_for_attempt(
                 &self.held.first_input,
@@ -1548,10 +1834,17 @@ impl GovernedInputBinder for SubmitHelperBinder {
             )
             .map_err(|_| "Toolkit first helper input changed")?
             {
-                prepared = self
+                #[cfg(any(test, feature = "test-support"))]
+                if let Some(hold) = crate::source_hold_probe::observe(
+                    crate::source_hold_probe::Site::SubmitRebind,
+                    &self.admitted.item_id().to_string(),
+                ) {
+                    crate::source_hold_probe::retain(self.source.hold_sources_for_test(hold));
+                }
+                prepared = match self
                     .source
                     .owner
-                    .prepare_authenticated_input(
+                    .try_prepare_authenticated_input(
                         &self.held.source.original,
                         &context.session_id,
                         exact,
@@ -1559,11 +1852,20 @@ impl GovernedInputBinder for SubmitHelperBinder {
                         self.held.source.authentication.clone(),
                         context.controller.clone(),
                     )
-                    .map_err(|_| "Toolkit could not rebind the exact first helper input")?;
+                    .map_err(|_| "Toolkit could not rebind the exact first helper input")?
+                {
+                    Some(prepared) => prepared,
+                    None => {
+                        return Err(self.held(custody_recovery::HeldAt::Source(
+                            crate::original_ingress::SourceHeld::Collection,
+                        )));
+                    }
+                };
             }
-            self.source
+            if let Some(held) = self
+                .source
                 .owner
-                .persist_helper_custody_attempt(
+                .try_persist_helper_custody_attempt(
                     self.source.store.as_ref(),
                     &self.admitted,
                     &self.held.source,
@@ -1571,22 +1873,49 @@ impl GovernedInputBinder for SubmitHelperBinder {
                     prepared.input(),
                 )
                 .await
-                .map_err(|_| "Toolkit could not persist the first helper attempt")?;
+                .map_err(|_| "Toolkit could not persist the first helper attempt")?
+            {
+                return Err(self.held(custody_recovery::HeldAt::Source(held)));
+            }
         }
         if tokio::time::Instant::now() >= self.source_deadline {
             return Err("Toolkit helper submission deadline elapsed".into());
         }
-        self.source
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::SubmitFinalCheck,
+            &self.admitted.item_id().to_string(),
+        ) {
+            crate::source_hold_probe::retain(self.source.hold_sources_for_test(hold));
+        }
+        if !self
+            .source
             .owner
-            .check_admitted_helper(&self.admitted)
-            .map_err(|_| "Toolkit helper source is unavailable")?;
+            .try_check_admitted_helper(&self.admitted)
+            .map_err(|_| "Toolkit helper source is unavailable")?
+        {
+            return Err(self.held(custody_recovery::HeldAt::Source(
+                crate::original_ingress::SourceHeld::Contributors,
+            )));
+        }
         self.source
             .require_helper_selection(self.admitted.selection())
             .map_err(|_| "Toolkit helper selection is unavailable")?;
-        let (input, pending) = self
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::SubmitRecoveryControl,
+            &self.admitted.item_id().to_string(),
+        ) {
+            crate::source_hold_probe::retain(
+                self.source
+                    .custody_recovery
+                    .hold_control_for_test(hold.duration),
+            );
+        }
+        let enrolled = self
             .source
             .custody_recovery
-            .enroll(|selected| {
+            .try_enroll(|selected| {
                 // Refuse overlap before staging: dropping a newly staged guard
                 // must never withdraw the earlier invocation's Candidate.
                 let mut invocation = self
@@ -1624,33 +1953,67 @@ impl GovernedInputBinder for SubmitHelperBinder {
                             if prior.session != context.session_id {
                                 return Err(PrivateOriginalError::Conflict);
                             }
-                            let ((input, pending), handoff) = prior.handoff.rebind(|| {
+                            #[cfg(any(test, feature = "test-support"))]
+                            if let Some(hold) = crate::source_hold_probe::observe(
+                                crate::source_hold_probe::Site::SubmitPriorRebind,
+                                &self.admitted.item_id().to_string(),
+                            ) {
+                                crate::source_hold_probe::retain(
+                                    self.source.hold_sources_for_test(hold),
+                                );
+                            }
+                            // Every try passes before the retained
+                            // candidate's handoff and review move.
+                            let rebound = prior.handoff.try_rebind(|next| {
                                 prior
                                     .publication
                                     .lock()
                                     .map_err(|_| PrivateOriginalError::Unavailable)?
                                     .source
-                                    .rebind_candidate(prepared, &prior.input)
+                                    .try_rebind_enrolled(prepared, &prior.input, next)
                             })?;
-                            (input, pending, handoff)
+                            match rebound {
+                                Ok(((input, pending), handoff)) => (input, pending, handoff),
+                                Err(held) => {
+                                    self.held(custody_recovery::HeldAt::Source(held));
+                                    return Err(PrivateOriginalError::Unavailable);
+                                }
+                            }
                         }
                         None => {
-                            let (input, pending) = prepared
-                                .stage()
-                                .map_err(|_| PrivateOriginalError::Unavailable)?;
-                            let handoff = custody_recovery::CustodyHandoff::new(
-                                selected && pending.is_first_candidate(),
-                                &self.source,
-                                &self.review_custody,
-                            );
-                            (input, pending, handoff)
+                            #[cfg(any(test, feature = "test-support"))]
+                            if let Some(hold) = crate::source_hold_probe::observe(
+                                crate::source_hold_probe::Site::SubmitStage,
+                                &self.admitted.item_id().to_string(),
+                            ) {
+                                crate::source_hold_probe::retain(
+                                    self.source.hold_sources_for_test(hold),
+                                );
+                            }
+                            // The candidate and its settlement in one owner
+                            // change, only tried.
+                            match prepared
+                                .try_stage_enrolled(|first| {
+                                    custody_recovery::CustodyHandoff::new(
+                                        selected && first,
+                                        &self.source,
+                                        &self.review_custody,
+                                    )
+                                })
+                                .map_err(|_| PrivateOriginalError::Unavailable)?
+                            {
+                                Ok(staged) => staged,
+                                Err(held) => {
+                                    self.held(custody_recovery::HeldAt::Source(held));
+                                    return Err(PrivateOriginalError::Unavailable);
+                                }
+                            }
                         }
                     },
                 };
+                // The non-waiting staging and rebind enrolled the settlement
+                // in their own owner change; an admitted guard has none.
                 let enrolled = handoff.enrolled();
-                pending
-                    .enroll_settlement(&handoff)
-                    .map_err(|_| PrivateOriginalError::Unavailable)?;
                 let pending = Arc::new(PendingHelperAdmission {
                     handoff,
                     held: Arc::downgrade(&self.held),
@@ -1671,6 +2034,9 @@ impl GovernedInputBinder for SubmitHelperBinder {
                 Ok((input, pending))
             })
             .map_err(|_| "Toolkit helper recovery enrollment is unavailable")?;
+        let Some((input, pending)) = enrolled else {
+            return Err(self.held(custody_recovery::HeldAt::RecoveryControl));
+        };
         let settlement = HelperSettlement {
             pending,
             held: Arc::downgrade(&self.held),

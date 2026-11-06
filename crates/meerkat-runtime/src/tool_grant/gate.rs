@@ -4,12 +4,14 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use meerkat_core::RunId;
 use meerkat_core::tool_grant::{
     GatedToolTable, SessionToolGrants, ToolGrantCall, ToolGrantRefusal, ToolGrantSubject,
     ToolGrantSubjectKey,
 };
 use meerkat_core::types::{SessionId, ToolNameSet};
 
+use super::audit::ToolGrantExpiryDriver;
 use super::deadlines::ToolGrantDeadlines;
 use super::service::ToolGrantService;
 
@@ -20,7 +22,8 @@ use super::service::ToolGrantService;
 /// It adjudicates the session's own grants (the session subject). Each
 /// boundary arms the runtime's deadline driver with the earliest deadline of
 /// the grants it opened, so the session's grants expire on time while it is
-/// served; nothing here wakes or registers a session.
+/// served, and the end of each of its runs ends the grants scoped to that
+/// run; nothing here wakes or registers a session.
 pub struct RuntimeSessionToolGrants {
     service: Arc<ToolGrantService>,
     deadlines: ToolGrantDeadlines,
@@ -58,10 +61,14 @@ impl std::fmt::Debug for RuntimeSessionToolGrants {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl SessionToolGrants for RuntimeSessionToolGrants {
-    async fn open_names(&self, gated: &GatedToolTable) -> Result<ToolNameSet, ToolGrantRefusal> {
+    async fn open_names(
+        &self,
+        gated: &GatedToolTable,
+        run_id: Option<&RunId>,
+    ) -> Result<ToolNameSet, ToolGrantRefusal> {
         let adjudication = self
             .service
-            .adjudicate_boundary(&self.subjects, gated)
+            .adjudicate_boundary(&self.subjects, gated, run_id)
             .await?;
         if let Some(deadline_ms) = adjudication.next_deadline_ms {
             self.deadlines.arm(&self.session_id, deadline_ms);
@@ -79,5 +86,14 @@ impl SessionToolGrants for RuntimeSessionToolGrants {
             return Ok(());
         }
         self.service.admit_call(&self.subjects, call).await
+    }
+
+    async fn end_run(&self, run_id: &RunId) -> Result<(), ToolGrantRefusal> {
+        self.service
+            .end_run(&self.subjects, run_id, ToolGrantExpiryDriver::Run)
+            .await
+            .map_err(|error| ToolGrantRefusal::Unavailable {
+                detail: error.to_string(),
+            })
     }
 }

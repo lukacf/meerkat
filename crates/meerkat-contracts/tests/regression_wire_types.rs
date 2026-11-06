@@ -1348,8 +1348,9 @@ fn external_event_and_member_send_schemas_name_the_optional_key() {
 fn tool_grant_results_pin_their_field_names() {
     use meerkat_contracts::{
         ListToolGrantsResult, RevokeToolGrantResult, ToolGrantAuditResult, WireToolGrant,
-        WireToolGrantAuditEvent, WireToolGrantAuditRow, WireToolGrantIssuer, WireToolGrantStatus,
-        WireToolGrantSubject, WireToolGrantTarget, WireUnreadableToolGrantAuditRow,
+        WireToolGrantAuditEvent, WireToolGrantAuditRow, WireToolGrantIssuer, WireToolGrantScope,
+        WireToolGrantStatus, WireToolGrantSubject, WireToolGrantTarget,
+        WireUnreadableToolGrantAuditRow,
     };
     let grant = WireToolGrant {
         grant_id: "0b6f9f5e-8f3d-4a51-9a52-3c1f6d1e2a10".to_string(),
@@ -1366,6 +1367,7 @@ fn tool_grant_results_pin_their_field_names() {
         issued_at_ms: 1_000,
         expires_at_ms: 61_000,
         ended_at_ms: None,
+        scope: WireToolGrantScope::Window,
     };
     let revoked = serde_json::to_value(RevokeToolGrantResult {
         grant: grant.clone(),
@@ -1383,6 +1385,7 @@ fn tool_grant_results_pin_their_field_names() {
                 "status": "active",
                 "issued_at_ms": 1000,
                 "expires_at_ms": 61000,
+                "scope": {"kind": "window"},
             },
             "changed": true,
         })
@@ -1656,6 +1659,9 @@ fn a_0910_reader_reads_run_scope_and_run_ended_as_unknown() {
     };
 
     /// The 0.9.10 result shapes, frozen: what a released client decodes.
+    /// Their fields are decoded, not read: a required one that is missing
+    /// fails the decode.
+    #[allow(dead_code)]
     mod v0910 {
         use serde::Deserialize;
 

@@ -8,12 +8,13 @@
 //! authority, review, confinement) still applies on top.
 //!
 //! The canonical `ToolGrantLifecycleMachine` owns each grant's lifecycle
-//! (issuance, expiry at a supplied clock, revocation, use admission). The
-//! runtime implements [`SessionToolGrants`] over its store and hands it to
-//! the factory on the session's runtime bindings. Core never reads a grant's
-//! phase: it asks the seam for the open names at each model-request boundary,
-//! and for one call's admission immediately before the dispatcher hands the
-//! call on.
+//! (issuance, expiry at a supplied clock, revocation, the end of the run a
+//! run-scoped grant was issued for, use admission). The runtime implements
+//! [`SessionToolGrants`] over its store and hands it to the factory on the
+//! session's runtime bindings. Core never reads a grant's phase: it asks the
+//! seam for the open names at each model-request boundary of a run, for one
+//! call's admission immediately before the dispatcher hands the call on, and
+//! tells it when a run ends.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -449,8 +450,15 @@ pub struct ToolGrantCall<'a> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait SessionToolGrants: Send + Sync {
-    /// The names of `gated` that a live grant opens at this moment.
-    async fn open_names(&self, gated: &GatedToolTable) -> Result<ToolNameSet, ToolGrantRefusal>;
+    /// The names of `gated` that a live grant opens at this moment, in the
+    /// run `run_id` (a model-request boundary belongs to one run). A grant
+    /// scoped to another run opens nothing here, and is ended: the session's
+    /// run moved on.
+    async fn open_names(
+        &self,
+        gated: &GatedToolTable,
+        run_id: Option<&crate::RunId>,
+    ) -> Result<ToolNameSet, ToolGrantRefusal>;
 
     /// One call's admission. The clock is read after every await inside, so
     /// the caller hands the call on with no await in between.
@@ -459,6 +467,16 @@ pub trait SessionToolGrants: Send + Sync {
         gated: &GatedToolTable,
         call: ToolGrantCall<'_>,
     ) -> Result<(), ToolGrantRefusal>;
+
+    /// The run `run_id` of the session ended (completed, failed or
+    /// cancelled): end the grants scoped to it. Grants bounded by their
+    /// window only, and grants of another run, are left as they are.
+    ///
+    /// # Errors
+    /// `Unavailable` when the grants cannot be read or written. The ended
+    /// run's grants then admit no use of a later run either: the first such
+    /// use ends them.
+    async fn end_run(&self, run_id: &crate::RunId) -> Result<(), ToolGrantRefusal>;
 }
 
 /// A build's grant gate: the session's grants and what the build gated.
@@ -493,12 +511,16 @@ impl ToolGrantGate {
         self.table.is_gated(name)
     }
 
-    /// The gated names a live grant opens at this moment.
+    /// The gated names a live grant opens at this moment, in the run
+    /// `run_id`.
     ///
     /// # Errors
     /// The seam's refusal when the grants cannot be read.
-    pub async fn open_names(&self) -> Result<ToolNameSet, ToolGrantRefusal> {
-        self.grants.open_names(&self.table).await
+    pub async fn open_names(
+        &self,
+        run_id: Option<&crate::RunId>,
+    ) -> Result<ToolNameSet, ToolGrantRefusal> {
+        self.grants.open_names(&self.table, run_id).await
     }
 
     /// One call's admission.
@@ -507,6 +529,14 @@ impl ToolGrantGate {
     /// The refusal that closes the call.
     pub async fn admit_call(&self, call: ToolGrantCall<'_>) -> Result<(), ToolGrantRefusal> {
         self.grants.admit_call(&self.table, call).await
+    }
+
+    /// The run `run_id` ended: end the grants scoped to it.
+    ///
+    /// # Errors
+    /// The seam's refusal when the grants cannot be read or written.
+    pub async fn end_run(&self, run_id: &crate::RunId) -> Result<(), ToolGrantRefusal> {
+        self.grants.end_run(run_id).await
     }
 }
 

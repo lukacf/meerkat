@@ -524,16 +524,20 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "WireLoginCancelled",
     # Scoped tool grant vocabulary. Every alias the audit event union names
     # precedes it: the generated Python aliases evaluate in roster order. The
-    # request subject and target are closed; the result ones are tolerant.
+    # request subject, target and scope are closed; the result ones are
+    # tolerant; the error data is closed.
     "ToolGrantSubjectRequest",
     "ToolGrantTargetRequest",
+    "ToolGrantScopeRequest",
     "WireToolGrantSubject",
     "WireToolGrantTarget",
     "WireToolGrantIssuer",
+    "WireToolGrantScope",
     "WireToolGrantStatus",
     "WireToolGrantExpiryDriver",
     "WireToolGrantRefusalKind",
     "WireToolGrantAuditEvent",
+    "WireToolGrantErrorData",
     # Durable decision vocabulary. The request audience is closed; the result
     # vocabularies are tolerant; the refusal and the error data are closed.
     "DecisionAudienceRequest",
@@ -560,6 +564,7 @@ PARAMS_UNION_ALIAS_TYPES = {
     "LoginStartParams",
     "ToolGrantSubjectRequest",
     "ToolGrantTargetRequest",
+    "ToolGrantScopeRequest",
     "DecisionAudienceRequest",
 }
 

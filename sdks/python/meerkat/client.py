@@ -2647,15 +2647,20 @@ class MeerkatClient:
         duration_ms: int | None = None,
         expires_at_ms: int | None = None,
         reason: str | None = None,
+        scope: str | None = None,
     ) -> dict[str, Any]:
         """Grant one of a session's grant-gated tool names or tool families.
 
         Name exactly one of ``tool`` and ``family``: the session's build must
         gate it (``create_session(grant_gated_tools=...)``). Bound the grant
         by exactly one of ``duration_ms`` and ``expires_at_ms`` (UNIX ms), at
-        most the server's maximum lifetime. Returns the ``tool_grants/grant``
-        result, ``{"grant": {...}}``: a family grant's ``target.names`` are
-        the names the server took for it.
+        most the server's maximum lifetime. ``scope="current_run"`` also
+        scopes the grant to the run the session is running now: it opens the
+        target in that run only and ends with it, and a session that runs no
+        turn refuses it (error ``data`` ``{"kind": "run_not_active"}``).
+        Omitted, or ``"window"``, the grant lasts for its window. Returns the
+        ``tool_grants/grant`` result, ``{"grant": {...}}``: a family grant's
+        ``target.names`` are the names the server took for it.
         """
         if (tool is None) == (family is None):
             raise ValueError("exactly one of tool or family must be provided")
@@ -2663,6 +2668,8 @@ class MeerkatClient:
             raise ValueError(
                 "exactly one of duration_ms or expires_at_ms must be provided"
             )
+        if scope is not None and scope not in ("window", "current_run"):
+            raise ValueError('scope must be "window" or "current_run"')
         target: dict[str, Any] = (
             {"kind": "tool", "name": tool}
             if tool is not None
@@ -2678,6 +2685,8 @@ class MeerkatClient:
             params["expires_at_ms"] = expires_at_ms
         if reason is not None:
             params["reason"] = reason
+        if scope is not None:
+            params["scope"] = {"kind": scope}
         return await self._request("tool_grants/grant", params)
 
     async def revoke_tool_grant(
@@ -2699,7 +2708,7 @@ class MeerkatClient:
     ) -> dict[str, Any]:
         """List a session's scoped tool grants, each due one read as expired.
 
-        Ended (expired or revoked) grants are listed only with
+        Ended (expired, revoked or run-ended) grants are listed only with
         ``include_ended``. Returns ``{"grants": [...]}``, with an
         ``"unreadable"`` list naming any stored grant the server cannot read.
         """

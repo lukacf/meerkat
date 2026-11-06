@@ -1,16 +1,17 @@
 //! The audit rows of scoped tool grants.
 //!
 //! Each subject's grants append to one audit log, numbered 0, 1, 2, ... in
-//! append order. A lifecycle row (`granted`, `expired`, `revoked`) commits
-//! in the same store transaction as the grant row change it records. A
-//! `refused` row is appended after the refusal was decided: a failed append
-//! is logged and never turns a refusal into an admission.
+//! append order. A lifecycle row (`granted`, `expired`, `revoked`,
+//! `run_ended`) commits in the same store transaction as the grant row change
+//! it records. A `refused` row is appended after the refusal was decided: a
+//! failed append is logged and never turns a refusal into an admission.
 
+use meerkat_core::RunId;
 use meerkat_core::tool_grant::{ToolGrantId, ToolGrantIssuer, ToolGrantRefusal, ToolGrantTarget};
 use meerkat_core::types::ToolName;
 use serde::{Deserialize, Serialize};
 
-/// Which driver observed a grant's expiry.
+/// Which driver observed a grant's expiry, or the end of its run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolGrantExpiryDriver {
@@ -24,6 +25,10 @@ pub enum ToolGrantExpiryDriver {
     Read,
     /// A revoke at or after the deadline.
     Revoke,
+    /// The session runtime, at the end of the grant's run.
+    Run,
+    /// Durable-tail recovery, closing the run a stopped process left open.
+    Recovery,
 }
 
 /// Why a gated call was refused.
@@ -65,6 +70,10 @@ pub enum ToolGrantAuditEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
         expires_at_ms: u64,
+        /// The run a run-scoped grant was issued for; absent for a grant
+        /// bounded by its window only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_scope: Option<RunId>,
     },
     /// A grant was observed at or after its deadline.
     Expired {
@@ -92,6 +101,14 @@ pub enum ToolGrantAuditEvent {
         call_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<String>,
+    },
+    /// A run-scoped grant ended with its run, before its deadline.
+    RunEnded {
+        grant_id: ToolGrantId,
+        /// The run the grant was issued for.
+        run_id: RunId,
+        observed_at_ms: u64,
+        driver: ToolGrantExpiryDriver,
     },
 }
 

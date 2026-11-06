@@ -143,6 +143,7 @@ fn shell_grant(session_id: &SessionId, lifetime: Duration) -> ToolGrantRequest {
         },
         reason: Some("maintenance".to_string()),
         window: ToolGrantWindow::For(lifetime),
+        run_scope: None,
     }
 }
 
@@ -185,9 +186,10 @@ async fn serve(machine: &MeerkatMachine, session_id: &SessionId) -> Served {
 }
 
 impl Served {
-    /// One model-request boundary, as the agent runs it.
+    /// One model-request boundary, as the agent runs it, outside any run: a
+    /// window grant opens its names there, a run-scoped grant does not.
     async fn boundary(&self) -> Result<(), ToolGrantRefusal> {
-        match self.gate.open_names().await {
+        match self.gate.open_names(None).await {
             Ok(open) => {
                 self.scope
                     .apply_tool_grant_open_set(open.into_inner().into_iter().collect())

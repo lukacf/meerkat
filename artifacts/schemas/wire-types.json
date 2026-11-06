@@ -113406,6 +113406,13 @@
               "null"
             ]
           },
+          "scope": {
+            "$ref": "#/$defs/WireToolGrantScope",
+            "default": {
+              "kind": "window"
+            },
+            "description": "Its window only, or also its run. Absent from an older server: a\nwindow grant."
+          },
           "status": {
             "$ref": "#/$defs/WireToolGrantStatus"
           },
@@ -113481,6 +113488,54 @@
           }
         ]
       },
+      "WireToolGrantScope": {
+        "description": "How long a grant lasts beyond its window: for its window only, or also\nonly as long as one run of its subject session.",
+        "oneOf": [
+          {
+            "description": "The grant lasts for its window. A server that names no scope issued a\nwindow grant.",
+            "properties": {
+              "kind": {
+                "const": "window",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The grant admits uses of this run only, and ends when it ends.",
+            "properties": {
+              "kind": {
+                "const": "current_run",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: a scope kind this version does not know. The\nserver never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WireToolGrantStatus": {
         "description": "A grant's status.",
         "oneOf": [
@@ -113507,6 +113562,11 @@
           {
             "const": "declined",
             "description": "Requested through an approval and declined. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "run_ended",
+            "description": "Ended with the run it was scoped to, before its deadline. Terminal.\nA client older than this status reads it as `unknown`.",
             "type": "string"
           },
           {
@@ -117015,6 +117075,13 @@
               "null"
             ]
           },
+          "scope": {
+            "$ref": "#/$defs/WireToolGrantScope",
+            "default": {
+              "kind": "window"
+            },
+            "description": "Its window only, or also its run. Absent from an older server: a\nwindow grant."
+          },
           "status": {
             "$ref": "#/$defs/WireToolGrantStatus"
           },
@@ -117090,6 +117157,54 @@
           }
         ]
       },
+      "WireToolGrantScope": {
+        "description": "How long a grant lasts beyond its window: for its window only, or also\nonly as long as one run of its subject session.",
+        "oneOf": [
+          {
+            "description": "The grant lasts for its window. A server that names no scope issued a\nwindow grant.",
+            "properties": {
+              "kind": {
+                "const": "window",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The grant admits uses of this run only, and ends when it ends.",
+            "properties": {
+              "kind": {
+                "const": "current_run",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: a scope kind this version does not know. The\nserver never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WireToolGrantStatus": {
         "description": "A grant's status.",
         "oneOf": [
@@ -117116,6 +117231,11 @@
           {
             "const": "declined",
             "description": "Requested through an approval and declined. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "run_ended",
+            "description": "Ended with the run it was scoped to, before its deadline. Terminal.\nA client older than this status reads it as `unknown`.",
             "type": "string"
           },
           {
@@ -148607,6 +148727,13 @@
               "null"
             ]
           },
+          "scope": {
+            "$ref": "#/$defs/WireToolGrantScope",
+            "default": {
+              "kind": "window"
+            },
+            "description": "Its window only, or also its run. Absent from an older server: a\nwindow grant."
+          },
           "status": {
             "$ref": "#/$defs/WireToolGrantStatus"
           },
@@ -148682,6 +148809,54 @@
           }
         ]
       },
+      "WireToolGrantScope": {
+        "description": "How long a grant lasts beyond its window: for its window only, or also\nonly as long as one run of its subject session.",
+        "oneOf": [
+          {
+            "description": "The grant lasts for its window. A server that names no scope issued a\nwindow grant.",
+            "properties": {
+              "kind": {
+                "const": "window",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The grant admits uses of this run only, and ends when it ends.",
+            "properties": {
+              "kind": {
+                "const": "current_run",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: a scope kind this version does not know. The\nserver never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WireToolGrantStatus": {
         "description": "A grant's status.",
         "oneOf": [
@@ -148708,6 +148883,11 @@
           {
             "const": "declined",
             "description": "Requested through an approval and declined. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "run_ended",
+            "description": "Ended with the run it was scoped to, before its deadline. Terminal.\nA client older than this status reads it as `unknown`.",
             "type": "string"
           },
           {
@@ -159181,6 +159361,13 @@
                   "null"
                 ]
               },
+              "scope": {
+                "$ref": "#/$defs/WireToolGrantScope",
+                "default": {
+                  "kind": "window"
+                },
+                "description": "Its window only, or also its run. Absent from an older server: a\nwindow grant."
+              },
               "target": {
                 "$ref": "#/$defs/WireToolGrantTarget"
               }
@@ -159297,6 +159484,38 @@
             "type": "object"
           },
           {
+            "description": "A run-scoped grant ended with its run, before its deadline. A client\nolder than this event reads it as `unknown`.",
+            "properties": {
+              "driver": {
+                "$ref": "#/$defs/WireToolGrantExpiryDriver"
+              },
+              "grant_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "run_ended",
+                "type": "string"
+              },
+              "observed_at_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "run_id": {
+                "description": "The run the grant was scoped to.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "grant_id",
+              "run_id",
+              "observed_at_ms",
+              "driver"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forward compatibility: an event kind this version does not know. The\nserver never sends it.",
             "properties": {
               "kind": {
@@ -159337,7 +159556,7 @@
         "type": "object"
       },
       "WireToolGrantExpiryDriver": {
-        "description": "Which driver observed a grant's expiry.",
+        "description": "Which driver observed a grant's expiry or the end of its run.",
         "oneOf": [
           {
             "enum": [
@@ -159347,6 +159566,16 @@
               "read",
               "revoke"
             ],
+            "type": "string"
+          },
+          {
+            "const": "run",
+            "description": "The session runtime, at the end of the grant's run.",
+            "type": "string"
+          },
+          {
+            "const": "recovery",
+            "description": "Durable-tail recovery, closing the run a stopped process left open.",
             "type": "string"
           },
           {
@@ -159426,6 +159655,54 @@
             "const": "unknown",
             "description": "Forward compatibility: a refusal kind this version does not know.\nThe server never sends it.",
             "type": "string"
+          }
+        ]
+      },
+      "WireToolGrantScope": {
+        "description": "How long a grant lasts beyond its window: for its window only, or also\nonly as long as one run of its subject session.",
+        "oneOf": [
+          {
+            "description": "The grant lasts for its window. A server that names no scope issued a\nwindow grant.",
+            "properties": {
+              "kind": {
+                "const": "window",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The grant admits uses of this run only, and ends when it ends.",
+            "properties": {
+              "kind": {
+                "const": "current_run",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: a scope kind this version does not know. The\nserver never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -210318,6 +210595,54 @@
           }
         ]
       },
+      "WireToolGrantScope": {
+        "description": "How long a grant lasts beyond its window: for its window only, or also\nonly as long as one run of its subject session.",
+        "oneOf": [
+          {
+            "description": "The grant lasts for its window. A server that names no scope issued a\nwindow grant.",
+            "properties": {
+              "kind": {
+                "const": "window",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The grant admits uses of this run only, and ends when it ends.",
+            "properties": {
+              "kind": {
+                "const": "current_run",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: a scope kind this version does not know. The\nserver never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WireToolGrantStatus": {
         "description": "A grant's status.",
         "oneOf": [
@@ -210344,6 +210669,11 @@
           {
             "const": "declined",
             "description": "Requested through an approval and declined. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "run_ended",
+            "description": "Ended with the run it was scoped to, before its deadline. Terminal.\nA client older than this status reads it as `unknown`.",
             "type": "string"
           },
           {
@@ -210505,6 +210835,13 @@
           "null"
         ]
       },
+      "scope": {
+        "$ref": "#/$defs/WireToolGrantScope",
+        "default": {
+          "kind": "window"
+        },
+        "description": "Its window only, or also its run. Absent from an older server: a\nwindow grant."
+      },
       "status": {
         "$ref": "#/$defs/WireToolGrantStatus"
       },
@@ -210530,7 +210867,7 @@
   "WireToolGrantAuditEvent": {
     "$defs": {
       "WireToolGrantExpiryDriver": {
-        "description": "Which driver observed a grant's expiry.",
+        "description": "Which driver observed a grant's expiry or the end of its run.",
         "oneOf": [
           {
             "enum": [
@@ -210540,6 +210877,16 @@
               "read",
               "revoke"
             ],
+            "type": "string"
+          },
+          {
+            "const": "run",
+            "description": "The session runtime, at the end of the grant's run.",
+            "type": "string"
+          },
+          {
+            "const": "recovery",
+            "description": "Durable-tail recovery, closing the run a stopped process left open.",
             "type": "string"
           },
           {
@@ -210619,6 +210966,54 @@
             "const": "unknown",
             "description": "Forward compatibility: a refusal kind this version does not know.\nThe server never sends it.",
             "type": "string"
+          }
+        ]
+      },
+      "WireToolGrantScope": {
+        "description": "How long a grant lasts beyond its window: for its window only, or also\nonly as long as one run of its subject session.",
+        "oneOf": [
+          {
+            "description": "The grant lasts for its window. A server that names no scope issued a\nwindow grant.",
+            "properties": {
+              "kind": {
+                "const": "window",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The grant admits uses of this run only, and ends when it ends.",
+            "properties": {
+              "kind": {
+                "const": "current_run",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: a scope kind this version does not know. The\nserver never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -210707,6 +211102,13 @@
               "string",
               "null"
             ]
+          },
+          "scope": {
+            "$ref": "#/$defs/WireToolGrantScope",
+            "default": {
+              "kind": "window"
+            },
+            "description": "Its window only, or also its run. Absent from an older server: a\nwindow grant."
           },
           "target": {
             "$ref": "#/$defs/WireToolGrantTarget"
@@ -210824,6 +211226,38 @@
         "type": "object"
       },
       {
+        "description": "A run-scoped grant ended with its run, before its deadline. A client\nolder than this event reads it as `unknown`.",
+        "properties": {
+          "driver": {
+            "$ref": "#/$defs/WireToolGrantExpiryDriver"
+          },
+          "grant_id": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "run_ended",
+            "type": "string"
+          },
+          "observed_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "run_id": {
+            "description": "The run the grant was scoped to.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "grant_id",
+          "run_id",
+          "observed_at_ms",
+          "driver"
+        ],
+        "type": "object"
+      },
+      {
         "description": "Forward compatibility: an event kind this version does not know. The\nserver never sends it.",
         "properties": {
           "kind": {
@@ -210866,6 +211300,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "scope": {
+                "$ref": "#/$defs/WireToolGrantScope",
+                "default": {
+                  "kind": "window"
+                },
+                "description": "Its window only, or also its run. Absent from an older server: a\nwindow grant."
               },
               "target": {
                 "$ref": "#/$defs/WireToolGrantTarget"
@@ -210983,6 +211424,38 @@
             "type": "object"
           },
           {
+            "description": "A run-scoped grant ended with its run, before its deadline. A client\nolder than this event reads it as `unknown`.",
+            "properties": {
+              "driver": {
+                "$ref": "#/$defs/WireToolGrantExpiryDriver"
+              },
+              "grant_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "run_ended",
+                "type": "string"
+              },
+              "observed_at_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "run_id": {
+                "description": "The run the grant was scoped to.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "grant_id",
+              "run_id",
+              "observed_at_ms",
+              "driver"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forward compatibility: an event kind this version does not know. The\nserver never sends it.",
             "properties": {
               "kind": {
@@ -210998,7 +211471,7 @@
         ]
       },
       "WireToolGrantExpiryDriver": {
-        "description": "Which driver observed a grant's expiry.",
+        "description": "Which driver observed a grant's expiry or the end of its run.",
         "oneOf": [
           {
             "enum": [
@@ -211008,6 +211481,16 @@
               "read",
               "revoke"
             ],
+            "type": "string"
+          },
+          {
+            "const": "run",
+            "description": "The session runtime, at the end of the grant's run.",
+            "type": "string"
+          },
+          {
+            "const": "recovery",
+            "description": "Durable-tail recovery, closing the run a stopped process left open.",
             "type": "string"
           },
           {
@@ -211087,6 +211570,54 @@
             "const": "unknown",
             "description": "Forward compatibility: a refusal kind this version does not know.\nThe server never sends it.",
             "type": "string"
+          }
+        ]
+      },
+      "WireToolGrantScope": {
+        "description": "How long a grant lasts beyond its window: for its window only, or also\nonly as long as one run of its subject session.",
+        "oneOf": [
+          {
+            "description": "The grant lasts for its window. A server that names no scope issued a\nwindow grant.",
+            "properties": {
+              "kind": {
+                "const": "window",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The grant admits uses of this run only, and ends when it ends.",
+            "properties": {
+              "kind": {
+                "const": "current_run",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: a scope kind this version does not know. The\nserver never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -211176,9 +211707,29 @@
     "title": "WireToolGrantAuditRow",
     "type": "object"
   },
+  "WireToolGrantErrorData": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The typed `data` of a `tool_grants/*` refusal. Closed, like the refusals\nit names.",
+    "oneOf": [
+      {
+        "description": "A `current_run` grant names a session that runs no turn now (code\n-32602). Nothing was issued.",
+        "properties": {
+          "kind": {
+            "const": "run_not_active",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireToolGrantErrorData"
+  },
   "WireToolGrantExpiryDriver": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Which driver observed a grant's expiry.",
+    "description": "Which driver observed a grant's expiry or the end of its run.",
     "oneOf": [
       {
         "enum": [
@@ -211188,6 +211739,16 @@
           "read",
           "revoke"
         ],
+        "type": "string"
+      },
+      {
+        "const": "run",
+        "description": "The session runtime, at the end of the grant's run.",
+        "type": "string"
+      },
+      {
+        "const": "recovery",
+        "description": "Durable-tail recovery, closing the run a stopped process left open.",
         "type": "string"
       },
       {
@@ -211275,6 +211836,56 @@
     ],
     "title": "WireToolGrantRefusalKind"
   },
+  "WireToolGrantScope": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "How long a grant lasts beyond its window: for its window only, or also\nonly as long as one run of its subject session.",
+    "oneOf": [
+      {
+        "description": "The grant lasts for its window. A server that names no scope issued a\nwindow grant.",
+        "properties": {
+          "kind": {
+            "const": "window",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The grant admits uses of this run only, and ends when it ends.",
+        "properties": {
+          "kind": {
+            "const": "current_run",
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "run_id"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Forward compatibility: a scope kind this version does not know. The\nserver never sends it.",
+        "properties": {
+          "kind": {
+            "const": "unknown",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireToolGrantScope"
+  },
   "WireToolGrantStatus": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "A grant's status.",
@@ -211302,6 +211913,11 @@
       {
         "const": "declined",
         "description": "Requested through an approval and declined. Terminal.",
+        "type": "string"
+      },
+      {
+        "const": "run_ended",
+        "description": "Ended with the run it was scoped to, before its deadline. Terminal.\nA client older than this status reads it as `unknown`.",
         "type": "string"
       },
       {

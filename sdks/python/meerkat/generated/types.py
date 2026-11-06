@@ -1123,6 +1123,16 @@ class ToolGrantTargetFamily(TypedDict, total=False):
 
 ToolGrantTargetRequest = ToolGrantTargetTool | ToolGrantTargetFamily
 
+# How long a grant request asks a grant to last beyond its window. Closed: a
+# kind this version does not know is refused, never read as a window.
+class ToolGrantScopeWindow(TypedDict, total=False):
+    kind: Required[Literal['window']]
+
+class ToolGrantScopeCurrentRun(TypedDict, total=False):
+    kind: Required[Literal['current_run']]
+
+ToolGrantScopeRequest = ToolGrantScopeWindow | ToolGrantScopeCurrentRun
+
 # Whose grant a record names: a session, or (in a later version) a mob
 # member's identity.
 class WireToolGrantSubjectSession(TypedDict, total=False):
@@ -1169,11 +1179,25 @@ class WireToolGrantIssuerUnknown(TypedDict, total=False):
 
 WireToolGrantIssuer = WireToolGrantIssuerOperator | WireToolGrantIssuerApproval | WireToolGrantIssuerUnknown
 
-# A grant's status.
-WireToolGrantStatus = Literal['active', 'expired', 'revoked', 'requested', 'declined', 'unknown']
+# How long a grant lasts beyond its window: for its window only, or also
+# only as long as one run of its subject session.
+class WireToolGrantScopeWindow(TypedDict, total=False):
+    kind: Required[Literal['window']]
 
-# Which driver observed a grant's expiry.
-WireToolGrantExpiryDriver = Literal['timer', 'boundary', 'dispatch', 'read', 'revoke'] | Literal['unknown']
+class WireToolGrantScopeCurrentRun(TypedDict, total=False):
+    kind: Required[Literal['current_run']]
+    run_id: Required[str]
+
+class WireToolGrantScopeUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+WireToolGrantScope = WireToolGrantScopeWindow | WireToolGrantScopeCurrentRun | WireToolGrantScopeUnknown
+
+# A grant's status.
+WireToolGrantStatus = Literal['active', 'expired', 'revoked', 'requested', 'declined', 'run_ended', 'unknown']
+
+# Which driver observed a grant's expiry or the end of its run.
+WireToolGrantExpiryDriver = Literal['timer', 'boundary', 'dispatch', 'read', 'revoke'] | Literal['run'] | Literal['recovery'] | Literal['unknown']
 
 # Why a gated call was refused.
 WireToolGrantRefusalKind = Literal['required', 'expired', 'revoked', 'unavailable'] | Literal['unknown']
@@ -1185,6 +1209,7 @@ class WireToolGrantAuditEventGranted(TypedDict, total=False):
     issuer: Required[WireToolGrantIssuer]
     kind: Required[Literal['granted']]
     reason: NotRequired[Optional[str]]
+    scope: NotRequired[WireToolGrantScope]
     target: Required[WireToolGrantTarget]
 
 class WireToolGrantAuditEventExpired(TypedDict, total=False):
@@ -1209,10 +1234,24 @@ class WireToolGrantAuditEventRefused(TypedDict, total=False):
     run_id: NotRequired[Optional[str]]
     tool: Required[str]
 
+class WireToolGrantAuditEventRunEnded(TypedDict, total=False):
+    driver: Required[WireToolGrantExpiryDriver]
+    grant_id: Required[str]
+    kind: Required[Literal['run_ended']]
+    observed_at_ms: Required[int]
+    run_id: Required[str]
+
 class WireToolGrantAuditEventUnknown(TypedDict, total=False):
     kind: Required[Literal['unknown']]
 
-WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventUnknown
+WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventRunEnded | WireToolGrantAuditEventUnknown
+
+# The typed `data` of a `tool_grants/*` refusal. Closed, like the refusals
+# it names.
+class WireToolGrantErrorDataRunNotActive(TypedDict, total=False):
+    kind: Required[Literal['run_not_active']]
+
+WireToolGrantErrorData = WireToolGrantErrorDataRunNotActive
 
 # Who a presenter showed a rendering to. Closed.
 class DecisionAudienceApprover(TypedDict, total=False):
@@ -2156,6 +2195,7 @@ class WireToolGrant:
     target: WireToolGrantTarget
     ended_at_ms: Optional[int] = None
     reason: Optional[str] = None
+    scope: Optional[WireToolGrantScope] = None
 
 
 @dataclass
@@ -2186,12 +2226,15 @@ version, or damaged): its place in the subject's log."""
 @dataclass
 class GrantToolParams:
     """`tool_grants/grant` parameters. Exactly one of `expires_at_ms` and
-`duration_ms` bounds the grant, at most the host's maximum lifetime."""
+`duration_ms` bounds the grant, at most the host's maximum lifetime. A
+`current_run` scope also ends it with the run its session is running
+when it is issued."""
     subject: ToolGrantSubjectRequest
     target: ToolGrantTargetRequest
     duration_ms: Optional[int] = None
     expires_at_ms: Optional[int] = None
     reason: Optional[str] = None
+    scope: Optional[ToolGrantScopeRequest] = None
 
 
 @dataclass

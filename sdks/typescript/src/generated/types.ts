@@ -885,6 +885,16 @@ export interface ToolGrantTargetFamily {
 
 export type ToolGrantTargetRequest = ToolGrantTargetTool | ToolGrantTargetFamily;
 
+export interface ToolGrantScopeWindow {
+  kind: "window";
+}
+
+export interface ToolGrantScopeCurrentRun {
+  kind: "current_run";
+}
+
+export type ToolGrantScopeRequest = ToolGrantScopeWindow | ToolGrantScopeCurrentRun;
+
 export interface WireToolGrantSubjectSession {
   kind: "session";
   session_id: string;
@@ -935,9 +945,24 @@ export interface WireToolGrantIssuerUnknown {
 
 export type WireToolGrantIssuer = WireToolGrantIssuerOperator | WireToolGrantIssuerApproval | WireToolGrantIssuerUnknown;
 
-export type WireToolGrantStatus = "active" | "expired" | "revoked" | "requested" | "declined" | "unknown";
+export interface WireToolGrantScopeWindow {
+  kind: "window";
+}
 
-export type WireToolGrantExpiryDriver = "timer" | "boundary" | "dispatch" | "read" | "revoke" | "unknown";
+export interface WireToolGrantScopeCurrentRun {
+  kind: "current_run";
+  run_id: string;
+}
+
+export interface WireToolGrantScopeUnknown {
+  kind: "unknown";
+}
+
+export type WireToolGrantScope = WireToolGrantScopeWindow | WireToolGrantScopeCurrentRun | WireToolGrantScopeUnknown;
+
+export type WireToolGrantStatus = "active" | "expired" | "revoked" | "requested" | "declined" | "run_ended" | "unknown";
+
+export type WireToolGrantExpiryDriver = "timer" | "boundary" | "dispatch" | "read" | "revoke" | "run" | "recovery" | "unknown";
 
 export type WireToolGrantRefusalKind = "required" | "expired" | "revoked" | "unavailable" | "unknown";
 
@@ -947,6 +972,7 @@ export interface WireToolGrantAuditEventGranted {
   issuer: WireToolGrantIssuer;
   kind: "granted";
   reason?: string | null;
+  scope?: WireToolGrantScope;
   target: WireToolGrantTarget;
 }
 
@@ -975,11 +1001,25 @@ export interface WireToolGrantAuditEventRefused {
   tool: string;
 }
 
+export interface WireToolGrantAuditEventRunEnded {
+  driver: WireToolGrantExpiryDriver;
+  grant_id: string;
+  kind: "run_ended";
+  observed_at_ms: number;
+  run_id: string;
+}
+
 export interface WireToolGrantAuditEventUnknown {
   kind: "unknown";
 }
 
-export type WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventUnknown;
+export type WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventRunEnded | WireToolGrantAuditEventUnknown;
+
+export interface WireToolGrantErrorDataRunNotActive {
+  kind: "run_not_active";
+}
+
+export type WireToolGrantErrorData = WireToolGrantErrorDataRunNotActive;
 
 export interface DecisionAudienceApprover {
   approver_id: string;
@@ -1733,6 +1773,7 @@ export interface WireToolGrant {
   issued_at_ms: number;
   issuer: WireToolGrantIssuer;
   reason?: string | null;
+  scope?: WireToolGrantScope;
   status: WireToolGrantStatus;
   subject: WireToolGrantSubject;
   target: WireToolGrantTarget;
@@ -1758,6 +1799,7 @@ export interface GrantToolParams {
   duration_ms?: number | null;
   expires_at_ms?: number | null;
   reason?: string | null;
+  scope?: ToolGrantScopeRequest | null;
   subject: ToolGrantSubjectRequest;
   target: ToolGrantTargetRequest;
 }

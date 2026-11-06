@@ -5967,7 +5967,7 @@ mod scoped_tool_grants {
             BTreeMap::from([("shell".to_string(), shell_names())]),
             BTreeSet::new(),
         );
-        let open = grants.open_names(&table).await.expect("grants read");
+        let open = grants.open_names(&table, None).await.expect("grants read");
         agent
             .tool_scope()
             .apply_tool_grant_open_set(open.into_inner().into_iter().collect())
@@ -6023,6 +6023,7 @@ mod scoped_tool_grants {
                 issuer: ToolGrantIssuer::Operator { caller: None },
                 reason: None,
                 window: ToolGrantWindow::For(std::time::Duration::from_mins(10)),
+                run_scope: None,
             })
             .await
             .expect("grant");

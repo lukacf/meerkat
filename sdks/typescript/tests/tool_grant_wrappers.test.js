@@ -88,6 +88,39 @@ describe("scoped tool grant wrappers", () => {
     ]);
   });
 
+  it("grantTool sends a scope only when asked", async () => {
+    const { client, calls } = fakeClient({ "tool_grants/grant": { grant: GRANT } });
+
+    await client.grantTool(
+      SESSION_ID,
+      { tool: "deploy" },
+      { durationMs: 60000 },
+      { scope: "current_run" },
+    );
+    await client.grantTool(SESSION_ID, { tool: "deploy" }, { durationMs: 60000 }, { scope: "window" });
+
+    assert.deepEqual(calls, [
+      {
+        method: "tool_grants/grant",
+        params: {
+          subject: SUBJECT,
+          target: { kind: "tool", name: "deploy" },
+          duration_ms: 60000,
+          scope: { kind: "current_run" },
+        },
+      },
+      {
+        method: "tool_grants/grant",
+        params: {
+          subject: SUBJECT,
+          target: { kind: "tool", name: "deploy" },
+          duration_ms: 60000,
+          scope: { kind: "window" },
+        },
+      },
+    ]);
+  });
+
   it("grantTool refuses both or neither target and window forms", async () => {
     const { client, calls } = fakeClient({ "tool_grants/grant": { grant: GRANT } });
 

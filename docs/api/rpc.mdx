@@ -2095,7 +2095,8 @@ only: no method loads, registers or wakes the session.
       "reason": "incident response",
       "status": "active",
       "issued_at_ms": 1761735600000,
-      "expires_at_ms": 1761739200000
+      "expires_at_ms": 1761739200000,
+      "scope": {"kind": "window"}
     }
   }
 }
@@ -2107,6 +2108,12 @@ only: no method loads, registers or wakes the session.
   ...}`; the server fills in `names` with the names the family can provide, so
   omit them). Exactly one of `duration_ms` and `expires_at_ms` (UNIX ms)
   bounds the grant, at most the host's maximum lifetime (24 hours by default).
+  `scope` is `{"kind": "window"}` (the default) or `{"kind": "current_run"}`:
+  the grant then also admits only the calls of the run the session is running
+  now, and ends with that run (the grant's `scope` is `{"kind":
+  "current_run", "run_id": ...}`). A session that runs no turn refuses a
+  `current_run` grant with invalid params and `data` `{"kind":
+  "run_not_active"}`, and nothing is issued.
   A session before or during its first turn is granted from its staged build.
   A gate no grant could honour fails the session's build, which a deferred
   create reports at its first `turn/start`.
@@ -2115,33 +2122,40 @@ only: no method loads, registers or wakes the session.
   says whether this revoke ended it. A revoke at or after the deadline records
   the expiry instead.
 - **`tool_grants/list`** answers the session's grants, each due one settled as
-  `expired` first. Ended grants (`expired`, `revoked`) are listed only with
-  `include_ended`; `unreadable` names any stored grant this server cannot read
-  (written by a newer version, or damaged), which opens nothing.
-- **`tool_grants/audit`** answers a page of the session's audit log, `granted`,
-  `expired` (with the `driver` that observed it: `timer`, `boundary`,
-  `dispatch`, `read` or `revoke`), `revoked` and `refused` rows, in `sequence`
-  order after `after_sequence`. `limit` defaults to 100 rows and caps at 1000;
-  a full page carries `next_sequence`, the next page's `after_sequence`. A row
-  this server cannot read is named in `unreadable` with its `sequence`, and the
-  rest of the page is served.
+  `expired` first. Ended grants (`expired`, `revoked`, `run_ended`) are listed
+  only with `include_ended`; `unreadable` names any stored grant this server
+  cannot read (written by a newer version, or damaged), which opens nothing.
+- **`tool_grants/audit`** answers a page of the session's audit log, `granted`
+  (with the grant's `scope`), `expired` (with the `driver` that observed it:
+  `timer`, `boundary`, `dispatch`, `read`, `revoke`, or `run` and `recovery`
+  for a run that ended at or after the deadline), `revoked`, `run_ended` (with
+  the `run_id` and the `driver` that ended it: `run` at the run's end,
+  `recovery` when durable-tail recovery closed a run a stopped process left
+  open, or the `boundary` or `dispatch` of a later run) and `refused` rows, in
+  `sequence` order after `after_sequence`. `limit` defaults to 100 rows and
+  caps at 1000; a full page carries `next_sequence`, the next page's
+  `after_sequence`. A row this server cannot read is named in `unreadable`
+  with its `sequence`, and the rest of the page is served.
 
 List and audit read the session's grant rows without checking that the
 session exists: an archived session's grants stay listable and auditable, and
 a session id with no grants, or one no session has, answers empty.
 
-A grant's `status` is `active`, `expired` or `revoked`; `requested` and
-`declined` are reserved for grant requests. A request's `subject` and `target`
-refuse a kind or a field this server does not know (invalid params), so a
-request is never read as wider than it asked. Every vocabulary a result
-carries (subject and target kind, status, issuer, audit event kind, expiry
-driver, refusal reason) decodes a value a later version adds as `unknown`,
-which this server never sends.
+A grant's `status` is `active`, `expired`, `revoked` or `run_ended`;
+`requested` and `declined` are reserved for grant requests. A request's
+`subject`, `target` and `scope` refuse a kind or a field this server does not
+know (invalid params), so a request is never read as wider than it asked.
+Every vocabulary a result carries (subject, target and scope kind, status,
+issuer, audit event kind, expiry driver, refusal reason) decodes a value a
+later version adds as `unknown`, which this server never sends: a client
+older than run scopes reads `run_ended` as `unknown`.
 
 Errors use the standard codes: invalid params for a window that is past,
 empty, longer than the maximum or given twice or not at all, a target the
-session does not gate, family `names` in a request, and an unknown or
-malformed grant id; `SESSION_NOT_FOUND` for a grant to a session that does not
+session does not gate, family `names` in a request, an unknown or malformed
+grant id, and a `current_run` grant to a session that runs no turn (with
+`data` `{"kind": "run_not_active"}`); `SESSION_NOT_FOUND` for a grant to a
+session that does not
 exist or is archived; `SESSION_BUSY` when concurrent writers changed the grant
 under a grant or revoke twice, which a retry resolves; capability unavailable
 for an `identity` subject (this server grants to sessions only) or a store

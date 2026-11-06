@@ -2884,6 +2884,7 @@ pub(crate) mod tests {
         async fn open_names(
             &self,
             gated: &crate::tool_grant::GatedToolTable,
+            _run_id: Option<&crate::RunId>,
         ) -> Result<ToolNameSet, crate::tool_grant::ToolGrantRefusal> {
             Ok(if self.clock.load(Ordering::SeqCst) < self.deadline {
                 gated.gated_names().into_iter().collect()
@@ -2908,6 +2909,13 @@ pub(crate) mod tests {
                     expires_at_ms: self.deadline,
                 })
             }
+        }
+
+        async fn end_run(
+            &self,
+            _run_id: &crate::RunId,
+        ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+            Ok(())
         }
     }
 

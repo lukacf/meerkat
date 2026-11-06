@@ -623,23 +623,27 @@ if run_part audits-s; then
   TLC_WORKERS="${tlc_workers}" "${source_credential_publication_audit}" "${SOURCE_CREDENTIAL_PUBLICATION_AUDIT_MAX_STEPS:-5}"
 fi
 
-# Scoped tool grant expiry (the ToolGrantLifecycleMachine deadline guards,
-# the deadline timer, the boundary that shows a gated name, the dispatch
-# gate's fresh admission and the expiry write it makes after a refusal or
-# loses, revocation, reads that settle a due grant without loading the
-# session, crash, restart and one bounded clock rollback) spans the shell's
-# use of the machine, which the machine's own ci sweep cannot see. A
-# hand-written audit over the same generated model drives one grant with
-# deadline 2 on a clock in 0..3, under every generated invariant plus five
-# invariants and one action property (no call handed on at or after the
-# deadline or after the grant ended; a persisted end is latched across crash,
-# restart and rollback; expiry is never early; revocation precedes the
-# deadline; a visible name was shown before the deadline). It requires its
-# eight witnesses reached and refuses six seeded defects (--mutants): an
-# early expiry guard, an inclusive admission guard, a dispatch that reuses
-# the boundary's verdict, a restart that revives an ended grant, a revoked
-# grant handed on, and a boundary that trusts the stored phase. 6 steps reach
-# every witness.
+# Scoped tool grant expiry and run scope (the ToolGrantLifecycleMachine
+# deadline and run guards, the deadline timer, the boundary that shows a gated
+# name, the dispatch gate's fresh admission and the end it writes after a
+# refusal or loses, revocation, reads that settle a due grant without loading
+# the session, two runs and the runtime's signal of their ends, crash,
+# restart, recovery of the interrupted run and one bounded clock rollback)
+# spans the shell's use of the machine, which the machine's own ci sweep
+# cannot see. A hand-written audit over the same generated model drives one
+# grant with deadline 2 on a clock in 0..3, under every generated invariant
+# plus seven invariants and one action property (no call handed on at or
+# after the deadline or after the grant ended; a persisted end is latched
+# across crash, restart and rollback; expiry is never early; revocation
+# precedes the deadline; a visible name was shown before the deadline; a
+# run-scoped grant hands on calls of its own run only; it never ends with its
+# run while that run is current). It requires its twelve witnesses reached
+# and refuses nine seeded defects (--mutants): an early expiry guard, an
+# inclusive admission guard, an admission guard that ignores the run scope, a
+# dispatch that reuses the boundary's verdict, a restart that revives an
+# ended grant, a revoked grant handed on, a boundary that trusts the stored
+# phase, a call of another run handed on, and a run end signalled while the
+# run is current. 6 steps reach every witness.
 tool_grant_expiry_audit="${workspace_root}/specs/machines/tool_grant_lifecycle/tool_grant_expiry_audit.sh"
 if [[ ! -x "${tool_grant_expiry_audit}" ]]; then
   echo "error: tool grant expiry audit runner is missing from workspace runfiles: ${tool_grant_expiry_audit}" >&2

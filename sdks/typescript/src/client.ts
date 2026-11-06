@@ -2215,6 +2215,11 @@ export class MeerkatClient {
    * `{ expiresAtMs }` (UNIX ms), at most the server's maximum lifetime. The
    * session's build must gate the target (`SessionOptions.grantGatedTools`);
    * a family grant's `target.names` are the names the server took for it.
+   * `options.scope` `"current_run"` also scopes the grant to the run the
+   * session is running now: it opens the target in that run only and ends
+   * with it; a session that runs no turn refuses it (`data.kind`
+   * `"run_not_active"`). Omitted, or `"window"`, the grant lasts for its
+   * window.
    * Throws `INVALID_ARGS` unless the target names exactly one of `tool` and
    * `family`, and the window exactly one of `durationMs` and `expiresAtMs`.
    */
@@ -2224,7 +2229,7 @@ export class MeerkatClient {
     window:
       | { durationMs: number; expiresAtMs?: never }
       | { expiresAtMs: number; durationMs?: never },
-    options?: { reason?: string },
+    options?: { reason?: string; scope?: "window" | "current_run" },
   ): Promise<RpcGrantToolResult> {
     const { tool, family } = target as { tool?: string; family?: string };
     if ((tool === undefined) === (family === undefined)) {
@@ -2253,6 +2258,7 @@ export class MeerkatClient {
       params.expires_at_ms = expiresAtMs;
     }
     if (options?.reason !== undefined) params.reason = options.reason;
+    if (options?.scope !== undefined) params.scope = { kind: options.scope };
     return this.request("tool_grants/grant", params);
   }
 
@@ -2271,7 +2277,7 @@ export class MeerkatClient {
 
   /**
    * List a session's scoped tool grants, each due grant settled as expired
-   * first. Ended (expired or revoked) grants are listed only with
+   * first. Ended (expired, revoked or run-ended) grants are listed only with
    * `includeEnded`; `unreadable` names any stored grant the server cannot
    * read.
    */

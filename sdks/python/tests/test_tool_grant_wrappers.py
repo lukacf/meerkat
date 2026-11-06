@@ -92,6 +92,45 @@ async def test_grant_tool_sends_a_tool_target_with_an_absolute_deadline() -> Non
 
 
 @pytest.mark.asyncio
+async def test_grant_tool_sends_a_scope_only_when_asked() -> None:
+    client, calls = fake_client({"tool_grants/grant": {"grant": GRANT}})
+
+    await client.grant_tool(
+        SESSION_ID, tool="deploy", duration_ms=60_000, scope="current_run"
+    )
+    await client.grant_tool(SESSION_ID, tool="deploy", duration_ms=60_000, scope="window")
+
+    assert calls == [
+        (
+            "tool_grants/grant",
+            {
+                "subject": SUBJECT,
+                "target": {"kind": "tool", "name": "deploy"},
+                "duration_ms": 60_000,
+                "scope": {"kind": "current_run"},
+            },
+        ),
+        (
+            "tool_grants/grant",
+            {
+                "subject": SUBJECT,
+                "target": {"kind": "tool", "name": "deploy"},
+                "duration_ms": 60_000,
+                "scope": {"kind": "window"},
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_grant_tool_refuses_a_scope_it_does_not_know() -> None:
+    client, calls = fake_client({})
+    with pytest.raises(ValueError):
+        await client.grant_tool(SESSION_ID, tool="deploy", duration_ms=1, scope="turn")
+    assert calls == []
+
+
+@pytest.mark.asyncio
 async def test_grant_tool_needs_exactly_one_of_tool_and_family() -> None:
     client, calls = fake_client({})
     with pytest.raises(ValueError):

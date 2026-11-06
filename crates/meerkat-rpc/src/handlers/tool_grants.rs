@@ -4,7 +4,9 @@
 //! service only: it never loads, registers or wakes the subject's session.
 //! A grant reads the gate the session records (its staged build before or
 //! during its first turn, its persisted metadata after) and refuses a
-//! target the session does not gate.
+//! target the session does not gate. A `current_run` grant takes the run the
+//! runtime records for the session now; a session that runs none (idle, or
+//! not served here) refuses it as `run_not_active`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,7 +14,7 @@ use std::time::Duration;
 use meerkat_contracts::{
     GrantToolParams, GrantToolResult, ListToolGrantsParams, ListToolGrantsResult,
     RevokeToolGrantParams, RevokeToolGrantResult, ToolGrantAuditParams, ToolGrantAuditResult,
-    ToolGrantSubjectRequest, ToolGrantTargetRequest,
+    ToolGrantScopeRequest, ToolGrantSubjectRequest, ToolGrantTargetRequest, WireToolGrantErrorData,
 };
 use meerkat_core::SessionId;
 use meerkat_core::tool_grant::{
@@ -55,6 +57,23 @@ fn grant_error_to_response(id: Option<RpcId>, error_value: ToolGrantServiceError
         _ => error::INTERNAL_ERROR,
     };
     RpcResponse::error(id, code, error_value.to_string())
+}
+
+/// A typed `tool_grants/*` refusal: `code`, `message` and the typed `data`.
+fn refusal_with_data(
+    id: Option<RpcId>,
+    code: i32,
+    message: impl Into<String>,
+    data: WireToolGrantErrorData,
+) -> RpcResponse {
+    match serde_json::to_value(data) {
+        Ok(data) => RpcResponse::error_with_data(id, code, message, data),
+        Err(serialize_error) => RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            format!("failed to serialize tool grant error data: {serialize_error}"),
+        ),
+    }
 }
 
 /// The session a subject names. This server grants to sessions only.
@@ -158,12 +177,32 @@ pub async fn handle_grant(
         Ok(target) => target,
         Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
     };
+    let run_scope = match params.scope {
+        None | Some(ToolGrantScopeRequest::Window) => None,
+        Some(ToolGrantScopeRequest::CurrentRun) => {
+            match runtime.runtime_adapter().current_run(&session_id).await {
+                Some(run_id) => Some(run_id),
+                None => {
+                    return refusal_with_data(
+                        id,
+                        error::INVALID_PARAMS,
+                        format!(
+                            "the session {session_id} runs no turn now: a current_run grant \
+                             needs a run"
+                        ),
+                        WireToolGrantErrorData::RunNotActive,
+                    );
+                }
+            }
+        }
+    };
     let request = ToolGrantRequest {
         subject: ToolGrantSubject::session(session_id),
         target,
         issuer: ToolGrantIssuer::Operator { caller: None },
         reason: params.reason,
         window,
+        run_scope,
     };
     match runtime.runtime_adapter().grant_tool(request).await {
         Ok(grant) => RpcResponse::success(
@@ -214,7 +253,8 @@ pub async fn handle_revoke(
 }
 
 /// Handle `tool_grants/list`. Each due grant is settled as expired first;
-/// ended grants are listed only when the request asks for them.
+/// ended grants (expired, revoked, or ended with their run) are listed only
+/// when the request asks for them.
 pub async fn handle_list(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,

@@ -3835,7 +3835,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 "tool_grant_lifecycle",
                 "ToolGrantLifecycleMachine",
                 "crates/meerkat-runtime/src/tool_grant/dsl.rs",
-                "ToolGrantLifecycleMachine owns one scoped tool grant: issuance against a maximum lifetime, expiry at a supplied clock, revocation before the deadline, and the admission of each use; expired and revoked grants are terminal",
+                "ToolGrantLifecycleMachine owns one scoped tool grant: issuance against a maximum lifetime, expiry at a supplied clock, revocation before the deadline, the end of the run a run-scoped grant was issued for, and the admission of each use; expired, revoked and run-ended grants are terminal",
                 CoverageClaims::none()
                     .transitions(&[
                         "Issue",
@@ -3855,6 +3855,18 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "AdmitDue",
                         "AdmitEndedExpired",
                         "AdmitEndedRevoked",
+                        "AdmitEndedRunEnded",
+                        "AdmitOtherRun",
+                        "AdmitOutsideRun",
+                        "EndRunMatching",
+                        "EndRunAfterDeadline",
+                        "EndRunOther",
+                        "EndRunSettledExpired",
+                        "EndRunSettledRevoked",
+                        "EndRunSettledRunEnded",
+                        "IssueRefusedIssuedRunEnded",
+                        "ExpireSettledRunEnded",
+                        "RevokeSettledRunEnded",
                     ])
                     .effects(&[
                         "Issued",
@@ -3863,6 +3875,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "UseAdmitted",
                         "UseRefused",
                         "IssueRefused",
+                        "RunEnded",
                     ])
                     .invariants(&[
                         "unissued_is_empty",
@@ -3871,13 +3884,15 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "ended_grants_record_their_end",
                         "expiry_never_precedes_its_deadline",
                         "revocation_precedes_the_deadline",
+                        "run_ended_records_its_end",
+                        "run_scope_set_only_by_issue",
                     ]),
             ),
             machine_anchor(
                 "tool_grant_service",
                 "ToolGrantLifecycleMachine",
                 "crates/meerkat-runtime/src/tool_grant/service.rs",
-                "ToolGrantService rebuilds each grant's machine from its stored row, applies one input per adjudication at one clock reading and decides from the effects alone: issuance, revocation, settlement on list, audit read and timer fire, a boundary's open set, and each gated dispatch's admission",
+                "ToolGrantService rebuilds each grant's machine from its stored row, applies one input per adjudication at one clock reading and decides from the effects alone: issuance, revocation, settlement on list, audit read and timer fire, a boundary's open set in its run, each gated dispatch's admission in its run, and the end of a run",
                 CoverageClaims::none()
                     .transitions(&[
                         "Issue",
@@ -3894,6 +3909,17 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "AdmitDue",
                         "AdmitEndedExpired",
                         "AdmitEndedRevoked",
+                        "AdmitEndedRunEnded",
+                        "AdmitOtherRun",
+                        "AdmitOutsideRun",
+                        "EndRunMatching",
+                        "EndRunAfterDeadline",
+                        "EndRunOther",
+                        "EndRunSettledExpired",
+                        "EndRunSettledRevoked",
+                        "EndRunSettledRunEnded",
+                        "ExpireSettledRunEnded",
+                        "RevokeSettledRunEnded",
                     ])
                     .effects(&[
                         "Issued",
@@ -3902,6 +3928,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "UseAdmitted",
                         "UseRefused",
                         "IssueRefused",
+                        "RunEnded",
                     ])
                     .invariants(&[
                         "unissued_is_empty",
@@ -3910,6 +3937,8 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "ended_grants_record_their_end",
                         "expiry_never_precedes_its_deadline",
                         "revocation_precedes_the_deadline",
+                        "run_ended_records_its_end",
+                        "run_scope_set_only_by_issue",
                     ]),
             )],
             &[
@@ -3978,6 +4007,50 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "ended_grants_record_their_end",
                             "expiry_never_precedes_its_deadline",
                             "revocation_precedes_the_deadline",
+                        ]),
+                ),
+                scenario(
+                    "tool_grant_run_scope_admission",
+                    "tool_grant_run_scope.rs::machine_admits_a_run_scoped_use_only_in_its_run admits a run-scoped grant's use of its own run only, refuses a use outside any run without ending the grant, ends the grant at a use of another run, and admits any use of a window grant",
+                    CoverageClaims::none()
+                        .transitions(&["Issue", "AdmitLive", "AdmitOutsideRun", "AdmitOtherRun"])
+                        .effects(&["Issued", "UseAdmitted", "UseRefused", "RunEnded"])
+                        .invariants(&["run_ended_records_its_end"]),
+                ),
+                scenario(
+                    "tool_grant_run_end",
+                    "tool_grant_run_scope.rs::machine_ends_a_grant_only_at_the_end_of_its_own_run ends a run-scoped grant at the end of its own run before the deadline, records the expiry for a run end at or after the deadline, and leaves a window grant and a grant of another run unchanged",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "EndRunMatching",
+                            "EndRunAfterDeadline",
+                            "EndRunOther",
+                            "AdmitDue",
+                        ])
+                        .effects(&["RunEnded", "Expired", "UseRefused"])
+                        .invariants(&[
+                            "run_ended_records_its_end",
+                            "expiry_never_precedes_its_deadline",
+                        ]),
+                ),
+                scenario(
+                    "tool_grant_run_ended_latch",
+                    "tool_grant_run_scope.rs::a_run_ended_grant_is_terminal_and_latched and recover_from_state_rejects_torn_run_scope_rows keep a run-ended grant terminal under every input and a rolled-back clock, settle a run end on every ended grant, and refuse a recovered row with a torn run scope",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "AdmitEndedRunEnded",
+                            "EndRunSettledExpired",
+                            "EndRunSettledRevoked",
+                            "EndRunSettledRunEnded",
+                            "IssueRefusedIssuedRunEnded",
+                            "ExpireSettledRunEnded",
+                            "RevokeSettledRunEnded",
+                        ])
+                        .effects(&["UseRefused", "IssueRefused"])
+                        .invariants(&[
+                            "ended_grants_record_their_end",
+                            "run_ended_records_its_end",
+                            "run_scope_set_only_by_issue",
                         ]),
                 ),
             ],

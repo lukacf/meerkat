@@ -209,8 +209,17 @@ and confinement still applies to a call it opens.
   is `policy_denied` with the code `tool_grant_required`,
   `tool_grant_expired`, `tool_grant_revoked` or `tool_grant_unavailable`; a
   gate that cannot read its grants stays closed.
-- `ToolGrantLifecycleMachine` owns each grant (issued, then expired or
-  revoked, both terminal). Grants and their audit rows live in the runtime
+- A grant can also be scoped to one run of its session (0.9.11):
+  `ToolGrantRequest::run_scope`, or `scope: {"kind": "current_run"}` on
+  `tool_grants/grant` (Python `scope="current_run"`, TypeScript
+  `{ scope: "current_run" }`), which takes the run the session is running
+  now and is refused with `data.kind = "run_not_active"` when it runs none.
+  Such a grant opens its names only in that run and refuses a call outside
+  any run (`tool_grant_required`); it ends (`run_ended`) when the run
+  completes, fails or is cancelled, when durable-tail recovery closes it, or
+  at the first boundary or call of a later run.
+- `ToolGrantLifecycleMachine` owns each grant (issued, then expired, revoked
+  or ended with its run, all terminal). Grants and their audit rows live in the runtime
   store: on SQLite the `runtime-tool-grants` schema domain, created by the
   first grant or audit row; with the in-memory store, for the process. A
   binary older than 0.9.9 resumes a gated session with its gated tools

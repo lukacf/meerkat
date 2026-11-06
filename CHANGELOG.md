@@ -130,6 +130,62 @@ them.
   literals need it): only a catalog for a connection that delivers decision
   notices lists `decision/notice`.
 
+- `meerkat-core`: a scoped tool grant can be scoped to a run (see Added).
+  `SessionToolGrants::open_names` and `ToolGrantGate::open_names` take the
+  run of the model-request boundary that asks, `run_id: Option<&RunId>`,
+  and `SessionToolGrants` gains the required method
+  `end_run(&self, run_id: &RunId) -> Result<(), ToolGrantRefusal>`, so every
+  implementation needs it (`Ok(())` for a seam with no run-scoped grants).
+
+- `meerkat-runtime`, `meerkat-machine-schema`, `meerkat-machine-kernels`:
+  the `ToolGrantLifecycleMachine` (version 2) owns a grant's run scope (see
+  Added). Its state (`ToolGrantLifecycleMachineState` in meerkat-runtime
+  `tool_grant::dsl` and meerkat-machine-schema
+  `catalog::dsl::tool_grant_lifecycle`, and the kernel
+  `generated::tool_grant_lifecycle::State`) gains the public field
+  `run_scope: Option<ToolGrantRunId>`, the input `Issue` (kernel
+  `inputs::Issue`) gains `run_scope: Option<ToolGrantRunId>`, and the input
+  `AdmitUse` (kernel `inputs::AdmitUse`) gains
+  `run_id: Option<ToolGrantRunId>`, so code that builds them literally must
+  set them (`None` keeps the previous behaviour). The new key type
+  `ToolGrantRunId` names a run. Each appended last, so an exhaustive match
+  needs their arms: the input `EndRun { run_id, now_ms }`
+  (`ToolGrantLifecycleInput`, kernel `Input` and `InputKind`), the phase
+  `RunEnded` (`ToolGrantPhase`, kernel `Phase`), the effect
+  `RunEnded { grant_id, observed_at_ms }` (`ToolGrantLifecycleEffect`,
+  kernel `Effect` and `EffectKind`), `ToolGrantEndReason::RunEnded`,
+  `ToolGrantUseRefusal::RunEnded` and `ToolGrantUseRefusal::OutsideRun`,
+  and the kernel `generated::tool_grant_lifecycle::TransitionId` variants
+  `AdmitEndedRunEnded`, `AdmitOtherRun`, `AdmitOutsideRun`,
+  `EndRunMatching`, `EndRunAfterDeadline`, `EndRunOther`,
+  `EndRunSettledExpired`, `EndRunSettledRevoked`, `EndRunSettledRunEnded`,
+  `IssueRefusedIssuedRunEnded`, `ExpireSettledRunEnded` and
+  `RevokeSettledRunEnded`.
+
+- `meerkat-runtime`: run-scoped tool grants (see Added).
+  `tool_grant::ToolGrantRequest` and `tool_grant::StoredToolGrant` gain the
+  public field `run_scope: Option<RunId>` (struct literals need it; `None`
+  is a window grant), and `ToolGrantAuditEvent::Granted` gains the field
+  `run_scope: Option<RunId>`. `ToolGrantStatus` gains `RunEnded`,
+  `ToolGrantAuditEvent` gains
+  `RunEnded { grant_id, run_id, observed_at_ms, driver }` and
+  `ToolGrantExpiryDriver` gains `Run` and `Recovery`, each appended last, so
+  an exhaustive match needs their arms.
+
+- `meerkat-contracts`: run-scoped tool grants over JSON-RPC (see Added).
+  `GrantToolParams` gains `scope: Option<ToolGrantScopeRequest>` and
+  `WireToolGrant` gains `scope: WireToolGrantScope`, so struct literals need
+  them (`None` and `WireToolGrantScope::Window` keep the previous
+  behaviour), and `WireToolGrantAuditEvent::Granted` gains the field
+  `scope: WireToolGrantScope`. `WireToolGrantStatus` gains `RunEnded`,
+  `WireToolGrantAuditEvent` gains
+  `RunEnded { grant_id, run_id, observed_at_ms, driver }` and
+  `WireToolGrantExpiryDriver` gains `Run` and `Recovery`, each declared
+  directly before `Unknown` (which `#[serde(other)]` keeps last), so the
+  implicit discriminants of `WireToolGrantStatus::Unknown` and
+  `WireToolGrantExpiryDriver::Unknown` move, and an exhaustive match needs
+  the new arms; a 0.9.10 client decodes each of them as `unknown`.
+
 ### Added
 
 - `meerkat-runtime`: `decision::DecisionExecutorLoop`, the one executor of a
@@ -335,6 +391,41 @@ them.
   `meerkat_store::doctor::operator_instruction_mob_events` expose the
   doctor's operator-instruction census readers over a connection the caller
   opened read-only, so another storage doctor counts by the same rule.
+
+- `meerkat-core`, `meerkat-runtime`, `meerkat-machine-schema`,
+  `meerkat-machine-kernels`: run-scoped tool grants. A scoped tool grant can
+  also be scoped to one run of its session (`ToolGrantRequest::run_scope`):
+  it opens its names only at the model-request boundaries of that run and
+  admits only that run's calls. A call outside any run is refused
+  (`tool_grant_required`) and leaves the grant live for its run; a boundary
+  or call of a later run ends it. The grant ends with its run when the run
+  completes, fails or is cancelled (the session tells its grant seam,
+  `SessionToolGrants::end_run`, which `ToolGrantService::end_run` serves),
+  and when durable-tail recovery closes a run a stopped process left open;
+  at or after its deadline the run's end records the expiry instead. The
+  status `run_ended` and a `run_ended` audit row (with the run and the driver
+  that ended it) record the end, which stays across restarts and clock
+  rollbacks. The `ToolGrantLifecycleMachine` owns the run scope (`EndRun`,
+  the terminal phase `RunEnded`, the invariants `run_ended_records_its_end`
+  and `run_scope_set_only_by_issue`), and the bounded TLC audit
+  `tool_grant_expiry_audit` covers two runs of the session, run ends
+  signalled or lost, crash and recovery of the interrupted run, and stale
+  grants, with four more reachability witnesses and three more seeded
+  defects. A binary older than run scopes reads a run-scoped grant's row and
+  its `granted` and `run_ended` audit rows as rows it cannot read: it opens
+  nothing there.
+
+- `meerkat-rpc`, `meerkat-contracts`, Python and TypeScript SDKs:
+  run-scoped tool grants over JSON-RPC. `tool_grants/grant` takes
+  `scope` (`ToolGrantScopeRequest`, closed): `{"kind": "window"}`, the
+  default, or `{"kind": "current_run"}`, which scopes the grant to the run
+  the session is running now; a session that runs no turn refuses it with
+  invalid params whose data is `{"kind": "run_not_active"}`
+  (`WireToolGrantErrorData`), and nothing is issued. Every grant carries its
+  `scope` (`WireToolGrantScope`: `window`, or `current_run` with the
+  `run_id`), as does its `granted` audit row. Python `grant_tool` takes
+  `scope="current_run"` and TypeScript `grantTool` takes
+  `{ scope: "current_run" }`.
 
 ### Changed
 
@@ -572,6 +663,12 @@ them.
   states `[governance.decisions]`: 0.9.10 refuses a `[governance]` section
   with a `decisions` key, so a 0.9.10 process on the realm fails to load
   the realm's configuration document as a whole.
+
+- Run-scoped tool grants need no migration: window grants keep their rows.
+  A 0.9.10 binary on the same store reads a run-scoped grant's row as one it
+  cannot read, so it opens nothing there, and an `rkat-rpc` 0.9.10 refuses a
+  `tool_grants/grant` that names a `scope` (invalid params), so a request is
+  never read as a window grant.
 
 ### Known limitations
 

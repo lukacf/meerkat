@@ -4530,6 +4530,29 @@ where
         })
     }
 
+    /// A run's terminal effect (completed, failed or cancelled) ends the
+    /// run's run-scoped tool grants through the grant gate: the session's run
+    /// is over, so nothing may use them again. Best effort: a failure is
+    /// logged, and the grants still admit no use of a later run, whose first
+    /// use ends them.
+    async fn end_run_scoped_tool_grants(&self, effect: &TurnExecutionEffect) {
+        let (TurnExecutionEffect::RunCompleted { run_id }
+        | TurnExecutionEffect::RunFailed { run_id, .. }
+        | TurnExecutionEffect::RunCancelled { run_id }) = effect
+        else {
+            return;
+        };
+        let Some(gate) = self.tool_grant_gate.as_ref() else {
+            return;
+        };
+        if let Err(refusal) = gate.end_run(run_id).await {
+            tracing::warn!(
+                error = %refusal,
+                "the run's end could not end its run-scoped tool grants"
+            );
+        }
+    }
+
     /// Charge one compaction summary call to the session and the budget, and
     /// to the run's request rows when a provider request backs it. Its
     /// accounting identity is routed, not repaired: the counters are charged
@@ -4610,6 +4633,7 @@ where
     ) -> Result<(), AgentError> {
         for effect in &transition.effects {
             self.execute_turn_terminal_effect(effect)?;
+            self.end_run_scoped_tool_grants(effect).await;
             if let TurnExecutionEffect::CheckCompaction = effect {
                 let Some(current_boundary_index) = self.pending_compaction_boundary_index.take()
                 else {
@@ -7758,15 +7782,16 @@ where
         Ok(Some(async_ops))
     }
     /// Boundary step: the grant gate opens the gated names a live grant
-    /// admits now. A gate that cannot read its grants, or whose open set the
-    /// visibility owner refuses, closes every gated name and warns; the run
-    /// goes on with the gated names hidden until the next boundary.
+    /// admits now, in the run this boundary belongs to. A gate that cannot
+    /// read its grants, or whose open set the visibility owner refuses,
+    /// closes every gated name and warns; the run goes on with the gated
+    /// names hidden until the next boundary.
     async fn apply_tool_grant_open_set_at_boundary(
         &mut self,
         ctx: &mut CallingLlmTurnCtx<'_>,
         gate: &crate::tool_grant::ToolGrantGate,
     ) {
-        let failure = match gate.open_names().await {
+        let failure = match gate.open_names(Some(ctx.run_id)).await {
             Ok(open) => self
                 .tool_scope
                 .apply_tool_grant_open_set(open.into_inner().into_iter().collect())
@@ -22121,9 +22146,17 @@ mod tests {
             async fn open_names(
                 &self,
                 _gated: &crate::tool_grant::GatedToolTable,
+                _run_id: Option<&crate::RunId>,
             ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
             {
                 Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn end_run(
+                &self,
+                _run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Ok(())
             }
 
             async fn admit_call(
@@ -24062,9 +24095,17 @@ mod tests {
             async fn open_names(
                 &self,
                 _gated: &crate::tool_grant::GatedToolTable,
+                _run_id: Option<&crate::RunId>,
             ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
             {
                 Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn end_run(
+                &self,
+                _run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Ok(())
             }
 
             async fn admit_call(
@@ -24231,10 +24272,18 @@ mod tests {
             async fn open_names(
                 &self,
                 _gated: &crate::tool_grant::GatedToolTable,
+                _run_id: Option<&crate::RunId>,
             ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
             {
                 *self.boundaries.lock().unwrap() += 1;
                 Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn end_run(
+                &self,
+                _run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Ok(())
             }
 
             async fn admit_call(
@@ -28449,9 +28498,17 @@ mod tests {
             async fn open_names(
                 &self,
                 _gated: &crate::tool_grant::GatedToolTable,
+                _run_id: Option<&crate::RunId>,
             ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
             {
                 Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn end_run(
+                &self,
+                _run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Ok(())
             }
 
             async fn admit_call(

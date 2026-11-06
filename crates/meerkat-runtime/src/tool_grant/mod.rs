@@ -1,7 +1,8 @@
 //! Scoped tool grants.
 //!
 //! One grant opens tool names a session build marked grant-gated, for a
-//! bounded window. The canonical `ToolGrantLifecycleMachine` owns each
+//! bounded window, and, when it is scoped to a run of the session, only in
+//! that run and until it ends. The canonical `ToolGrantLifecycleMachine` owns each
 //! grant's lifecycle; see `dsl.rs` for its production instantiation and
 //! `crates/meerkat-machine-schema/src/catalog/dsl/tool_grant_lifecycle.rs`
 //! for the catalog body (the two must stay structurally identical; the
@@ -9,10 +10,12 @@
 //!
 //! - [`service`]: [`ToolGrantService`], stateless over a
 //!   [`RuntimeStore`](crate::store::RuntimeStore). It grants, revokes, lists
-//!   and reads the audit, and adjudicates a served session's model-request
-//!   boundary and each gated dispatch. Every answer rebuilds the generated
-//!   machine from the stored row, applies one input at the clock reading of
-//!   that answer and decides from the input's effects alone.
+//!   and reads the audit, adjudicates a served session's model-request
+//!   boundary and each gated dispatch, and ends the grants of a run that
+//!   ended (durable-tail recovery ends those of a run it closed). Every
+//!   answer rebuilds the generated machine from the stored row, applies one
+//!   input at the clock reading of that answer and decides from the input's
+//!   effects alone.
 //! - [`gate`]: [`RuntimeSessionToolGrants`], the core
 //!   [`SessionToolGrants`](meerkat_core::tool_grant::SessionToolGrants) seam
 //!   of one served session, carried on its runtime bindings.

@@ -40,9 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   connection. A request that names `approver_id` is refused (`-32602`), and
   a caller that is not a verified, current person (no token on an open
   console, a service token, a token that names no human, a shared-account
-  token, or a login that ended before the decision was applied) is refused
-  with the new refusal code `-32057`, kind `approver_unauthenticated`;
-  nothing is decided. The stdio RPC gateway still takes `approver_id`.
+  token, or a login that ended while the decision waited) is refused with
+  the new refusal code `-32057`, kind `approver_unauthenticated`; nothing is
+  decided. A login that ended before the console took the request up is
+  `-32056` `caller_not_current`. The stdio RPC gateway still takes
+  `approver_id`.
 - Console memory quarantine reviews (`meta/memory/quarantine/decide`) and
   WorkGraph goal confirmations (`meta/workgraph/goal/confirm`) follow the
   same rule: a caller that is not a verified, current person is refused
@@ -52,9 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   caller: the console sets the owner from the connection, an `owner` that
   names anyone else or carries a `display_name` is refused (`-32602`), and
   an open console's caller without a token is refused with `-32057`, kind
-  `person_authentication_required`. Only the claim's owner releases it
-  from the console (`meta/workgraph/release`; anyone else gets `-32030`
-  `access_denied`). The stdio RPC gateway is unchanged.
+  `person_authentication_required`. Only the claim's owner, or an access
+  admin, releases it from the console (`meta/workgraph/release`; anyone
+  else gets `-32030` `access_denied`). The stdio RPC gateway is unchanged.
 
 ### Security
 
@@ -81,6 +83,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   takes its owner from its caller. Before, an open console recorded a
   review with no reviewer and a claim with whatever owner a request named,
   and anyone who could manage the WorkGraph released anyone's claim.
+- A console quarantine review, goal confirmation and WorkGraph release read
+  the caller's grants again right before they are applied, as a gating
+  decision does: a grant withdrawn while they waited is refused (`-32030`).
 
 ### Upgrade
 
@@ -106,13 +111,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Console clients stop sending `approver_id` to `meta/gating/decide`.
   People who decide approvals in the console sign in as themselves (an OIDC
   issuer, or an `auth_config` with `"accounts": "personal"`); a host that
-  decides for someone else uses the stdio RPC gateway.
+  decides for someone else uses the stdio RPC gateway (`rpc_gateway`).
+  `meta_gateway` serves no stdio decide route, and the stock console sends
+  no `Authorization` header of its own, so a `meta_gateway` console decides
+  only behind a front that forwards a person's token to an OIDC or
+  `"accounts": "personal"` `auth_config`. A Forge console behind the stock
+  front signs everyone in as one shared account (`provider: "jwt"` without
+  `accounts`), so its approvals stay read-only until its front signs people
+  in with named accounts.
 - Console clients send WorkGraph claims without an `owner`. A claim made
   through an earlier console carries the owner that request named (the
   stock console named the signed-in subject, or `console-ops-lead`
-  without sign-in): only a caller with that principal releases it from
-  the console. Release any other from the stdio RPC gateway, or let its
-  lease end.
+  without sign-in): only a caller with that principal, or an access admin,
+  releases it from the console. Claims the stock console makes carry no
+  lease, so someone else's claim ends when an access admin releases it,
+  when the host releases it on its stdio RPC gateway (`rpc_gateway`;
+  `meta_gateway` serves none), or when its item is closed.
 
 ### Added
 
@@ -128,6 +142,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Console changes accept `expected_caller_scope` (the `caller_scope` read
   from `meta/console/whoami`), and a change made for another caller is
   refused with `caller_changed`.
+- An access admin releases anyone's WorkGraph claim from the console. The
+  release is bound to its revision, and the work graph's Released event
+  records the admin and the claim released (`break_glass`).
 
 ### Changed
 
@@ -139,7 +156,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The stock console offers memory quarantine decisions and WorkGraph goal
   confirmations only to a signed-in person, claims WorkGraph items as the
   signed-in caller (an open console's caller without a token gets no
-  Claim) and offers Release only on the caller's own claims.
+  Claim) and offers Release on the caller's own claims, and to an access
+  admin on any claim. Read-only approvals tell a caller who is not a
+  signed-in person to sign in as themselves to decide.
+- `meta/capabilities` on the console lists `meta/gating/decide`,
+  `meta/memory/quarantine/decide` and `meta/workgraph/goal/confirm` only
+  to a signed-in person, and `meta/workgraph/claim` and
+  `meta/workgraph/release` only to a caller with a principal: every other
+  caller is always refused them.
+- A gating decision made on the host's stdio RPC gateway, or by an
+  embedding host through the library, records `deciding_assurance`
+  `device_trusted` in its audit entry.
 
 ## [0.9.10] - 2026-11-04
 

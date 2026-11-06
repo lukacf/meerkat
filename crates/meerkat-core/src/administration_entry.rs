@@ -283,9 +283,10 @@ pub enum AdministeredChange {
     /// A patch of a realm's own configuration document, which the write
     /// publishes at `generation`. The patched values are not recorded.
     ConfigPatch {
-        /// The realm the document's store names, when it names one.
+        /// The realm the document's store names, when it names a valid
+        /// realm id.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        realm: Option<String>,
+        realm: Option<RealmId>,
         generation: u64,
     },
     /// A value set for one service-secret slot of an MCP stdio server that
@@ -551,5 +552,29 @@ mod tests {
         .unwrap();
         assert_eq!(secret_set["kind"], "mcp_service_secret_set");
         assert_eq!(secret_set["realm"], "team");
+
+        // A config patch names its realm as a realm id, like every change.
+        let config_patch = AdministeredChange::ConfigPatch {
+            realm: Some(RealmId::parse("team").unwrap()),
+            generation: 3,
+        };
+        let stored_patch = serde_json::to_value(&config_patch).unwrap();
+        assert_eq!(
+            stored_patch,
+            serde_json::json!({ "kind": "config_patch", "realm": "team", "generation": 3 })
+        );
+        assert_eq!(
+            serde_json::from_value::<AdministeredChange>(stored_patch).unwrap(),
+            config_patch
+        );
+        assert!(
+            serde_json::from_value::<AdministeredChange>(serde_json::json!({
+                "kind": "config_patch",
+                "realm": "not a realm",
+                "generation": 3,
+            }))
+            .is_err(),
+            "a stored realm that is not a realm id does not decode"
+        );
     }
 }

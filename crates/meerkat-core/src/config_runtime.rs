@@ -260,11 +260,18 @@ impl ConfigRuntime {
             ));
         }
         let next = current.saturating_add(1);
+        // The record names the store's realm as a realm id; a store that
+        // names none, or a name that is no realm id, names no realm.
+        let realm = self
+            .store
+            .metadata()
+            .and_then(|metadata| metadata.realm_id)
+            .and_then(|realm| crate::connection::RealmId::parse(realm).ok());
         let entered = entry
             .enter()
             .map_err(EnteredConfigWriteError::NotAdmitted)?
             .for_change(crate::AdministeredChange::ConfigPatch {
-                realm: self.store.metadata().and_then(|metadata| metadata.realm_id),
+                realm,
                 generation: next,
             });
 

@@ -1157,7 +1157,7 @@ async fn run_end_ends_the_grant() {
         served.boundary_in(Some(&run_1)).await.unwrap();
         assert_eq!(
             served.visible(),
-            ["read_file", "shell", "shell_job_status", "deploy"],
+            ["deploy", "read_file", "shell", "shell_job_status"],
             "{backend:?}"
         );
 
@@ -1197,7 +1197,7 @@ async fn run_end_ends_the_grant() {
 
         // The next run's first boundary shows only what the window grant opens.
         served.boundary_in(Some(&run_2)).await.unwrap();
-        assert_eq!(served.visible(), ["read_file", "deploy"], "{backend:?}");
+        assert_eq!(served.visible(), ["deploy", "read_file"], "{backend:?}");
 
         // Ending the run again changes nothing.
         served.gate.end_run(&run_1).await.unwrap();

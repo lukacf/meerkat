@@ -88,6 +88,36 @@ durable-identity marker.
 identity whose member you keep: a member with both legacy marks that the
 roster does not list is retired by that apply.
 
+### Decision executors claim each kind
+
+`DecisionExecutorLoop` claims the executor role of each decision kind it
+registers (`DecisionStore::claim_executor_kind`), where 0.9.10 claimed the
+whole store, so two runtimes on one store each execute their own kinds. A
+second loop of a kind no longer fails at start with
+`DecisionError::ExecutorHeld`: it starts, lists the kind in each pass's
+`DecisionExecutorPass::unclaimed`, reports the kind's decisions as
+`DecisionPassOutcome::KindNotClaimed` (the executor that holds the kind
+executes them), and claims the kind once the first executor of the kind
+ends. The SQLite store keeps one lock file per kind,
+`approval_decisions.executor.<kind>.lock`, beside
+`approval_decisions.executor.lock`, which every loop now holds shared.
+
+A 0.9.10 executor and a 0.9.11 executor never execute on one store at once.
+While a 0.9.10 executor runs, a 0.9.11 loop starts, executes nothing and
+lists every kind as unclaimed, and takes over when the 0.9.10 executor ends.
+While a 0.9.11 loop runs, a 0.9.10 executor is refused at start
+(`ExecutorHeld`).
+
+**Do:**
+
+- Forward `claim_executor_kind` in a `DecisionStore` wrapper. Its default
+  refuses, so no `DecisionExecutorLoop` starts over a wrapper without it
+  (`DecisionError::Unavailable`). `claim_executor` is deprecated; keep
+  forwarding it while code that calls it remains.
+- Upgrade every process that executes decisions on one store together.
+- A host that took a second loop's start refusal as the sign of another
+  executor reads `DecisionExecutorPass::unclaimed` instead.
+
 ## Upgrading to 0.9.10
 
 This section is for systems running 0.9.9. The full list of changes is in

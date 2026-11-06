@@ -388,7 +388,7 @@ counts.
 
 | Tab | What it shows |
 | --- | --- |
-| Pending | Current requests with Approve, Reject, and Escalate controls when decisions are available. |
+| Pending | Current requests, each marked **For you** or **Waiting for** its approver, with Approve, Reject, and Escalate controls when the caller can decide them; requests decided elsewhere stay, saying by whom. |
 | Auto | Recorded `evaluated` events whose outcome is `allowed` or `allowed_with_audit`. |
 | Audit | Read-only records with the requesting actor, event, decision, approver, and outcome when supplied. |
 | Policies | A placeholder; policy details and editing are not available in this console. |
@@ -411,6 +411,15 @@ no human, or a shared-account token), the inbox shows requests read-only and
 says to sign in as yourself to decide: such a caller can read them but not
 decide them. A request pinned to an approver id is decided by a person who
 holds that id through the access configuration's `approvers` bindings.
+
+Approval cards are personal. A request pinned to an approver id the caller does
+not hold reads **Waiting for** that approver and offers no decision; for a
+signed-in person, a request pinned to an id they hold, or pinned to no one,
+reads **For you**. **Needs you** counts only the requests that are not waiting
+for someone else (with any host items). A request for the caller that someone
+else decides keeps its card, which says how and by whom (for example
+"Approved by" the deciding person, read from the gating audit), or "Decided
+elsewhere" when the audit cannot say.
 
 The same holds for memory quarantine reviews and WorkGraph goal confirmations:
 the console offers them only to a signed-in person. A WorkGraph claim is owned

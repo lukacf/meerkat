@@ -285,13 +285,16 @@ comms = true
             .unwrap()
             .unwrap();
         let interaction = uuid::Uuid::new_v4();
+        // The host's human input to its identity, as the identity runtime
+        // delivers it: internal work (Core admits no external work to an
+        // identity entry).
         let turn = handle
             .start_host_human_input_bounded(
                 member.agent_runtime_id,
                 member.fence_token,
                 meerkat_mob::WorkSpec::new(
                     "Inspect peers then answer.",
-                    meerkat_mob::WorkOrigin::External,
+                    meerkat_mob::WorkOrigin::Internal,
                 )
                 .with_interaction_id(meerkat_core::interaction::InteractionId(interaction)),
                 meerkat_core::types::HandlingMode::Queue,

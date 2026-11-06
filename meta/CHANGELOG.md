@@ -175,6 +175,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A schedule fire's refusal class reads Core's entry of the identity: a
   member Core holds Broken ends the fire typed, and a read Core could not
   serve leaves it reclaimable.
+- `IdentityRuntime::send_governed_with_turn_ticket` delivers the governed
+  input to a name Core holds as an identity entry as internal work, through
+  the entry's host: Core admits no external work to an identity entry. The
+  external door keeps Core's addressability rule for the entry's member: a
+  member whose runtime admits no external work is refused
+  (`NotExternallyAddressable`) before anything is submitted, as Core refused
+  it, and an `InternalOnly` identity is refused as before. A name that is no
+  entry takes the external door as external work, as before.
+- The direct member doors (`send_message_on_mob`,
+  `send_message_on_mob_with_mode` and `UnifiedRuntime::start_member_turn`)
+  addressed to a name Core holds as an identity entry are refused
+  `MobRuntimeError::Mob(MobError::IdentityMember)`: Core admits no external
+  work to an entry. The identity runtime's doors reach the identity, and
+  `meta/send_message` routes a Core entry to them.
 
 - Registering an identity (`IdentityRuntime::register`) or updating its spec
   (`update_spec`) declares it in Core's mob as a one-identity roster: Core's

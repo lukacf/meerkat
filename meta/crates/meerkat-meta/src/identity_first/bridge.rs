@@ -4977,6 +4977,26 @@ fn member_standing_of(
     })
 }
 
+/// For a name Core holds as an identity entry, or reserves unreadable, with
+/// a member, whether that member's runtime admits external work (Core's
+/// machine fact); `None` otherwise: a name that is no entry, or holds no
+/// member, takes the external door as external work, and Core answers it.
+fn entry_member_externally_addressable(read: &meerkat_mob::IdentityEntryRead) -> Option<bool> {
+    let standing = match read {
+        meerkat_mob::IdentityEntryRead::Entry(view) => &view.standing,
+        meerkat_mob::IdentityEntryRead::Unreadable {
+            member: Some(standing),
+            ..
+        } => standing,
+        _ => return None,
+    };
+    match standing {
+        meerkat_mob::EntryStanding::Seated(member)
+        | meerkat_mob::EntryStanding::Retiring(member) => Some(member.externally_addressable),
+        _ => None,
+    }
+}
+
 /// Meta's [`CoreIdentityEntry`] of Core's read of one identity
 /// (`MobHandle::identity_entry`). The resume hold of a member Core holds
 /// Broken is not part of Core's read; [`MobSessionBridge`] adds it from
@@ -10492,6 +10512,29 @@ impl MobSessionBridge {
         if entry.bridge_session_id() != Some(session_id) {
             return Err(governed(GovernedInputError::BindingChanged));
         }
+        // External work never reaches an identity entry in Core: the entry's
+        // host, this identity runtime, delivers to it through its own door,
+        // as internal work. The external door keeps Core's addressability
+        // rule for the entry's member: a runtime that admits no external
+        // work is refused as Core refuses one, before anything is submitted.
+        let door = match door {
+            GovernedDoor::External => {
+                let read = self
+                    .handle
+                    .identity_entry(&mid)
+                    .map_err(|error| BridgeAdmissionError::Mob(error.to_string()))?;
+                match entry_member_externally_addressable(&read) {
+                    None => GovernedDoor::External,
+                    Some(true) => GovernedDoor::TrustedHostInternal,
+                    Some(false) => {
+                        return Err(governed(GovernedInputError::Mob(Box::new(
+                            meerkat_mob::MobError::NotExternallyAddressable(mid.clone()),
+                        ))));
+                    }
+                }
+            }
+            door => door,
+        };
         // Once submitted, native admission owns the custody's settlement, and
         // its answer is awaited to its definitive acknowledgement or error: no
         // observation deadline drops it, since native admission can still

@@ -818,16 +818,22 @@ async fn a_held_member_whose_publication_fails_starts_no_run_until_a_delivery_pu
         "the member stays held until its tools publish"
     );
 
-    // Work Core admits for the held member waits behind the hold.
-    let member = runtime
-        .mob_handle()
-        .member(&meerkat_meta::member_comms_id::mob_member_id(MEMBER))
+    // Work Core admits for the held member waits behind the hold. The
+    // member is an identity entry, so the work is the host's own (internal):
+    // Core admits no external work to an entry.
+    let handle = runtime.mob_handle();
+    let member = handle
+        .get_member(&meerkat_meta::member_comms_id::mob_member_id(MEMBER))
         .await
+        .expect("Core's roster read")
         .expect("Core holds the member");
     tokio::time::timeout(
         Duration::from_secs(10),
-        member.send(
-            meerkat_core::ContentInput::Text(QUEUED_WORK.to_string()),
+        handle.submit_work_with_mode(
+            member.agent_runtime_id,
+            member.fence_token,
+            meerkat_mob::WorkRef::new(),
+            meerkat_mob::WorkSpec::new(QUEUED_WORK, meerkat_mob::WorkOrigin::Internal),
             meerkat_core::types::HandlingMode::Queue,
         ),
     )

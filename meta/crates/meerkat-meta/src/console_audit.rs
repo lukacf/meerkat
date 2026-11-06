@@ -80,7 +80,7 @@ impl ConsoleAuditLimits {
 impl Default for ConsoleAuditLimits {
     /// 20000 rows, none older than 365 days.
     fn default() -> Self {
-        Self::new(20_000, Duration::from_secs(365 * 24 * 60 * 60))
+        Self::new(20_000, Duration::from_hours(365 * 24))
     }
 }
 
@@ -662,7 +662,7 @@ mod tests {
         let store = Arc::new(InMemoryMetadataStore::new());
         let log = audit_log(
             &store,
-            ConsoleAuditLimits::new(64, Duration::from_secs(365 * 24 * 60 * 60)),
+            ConsoleAuditLimits::new(64, Duration::from_hours(365 * 24)),
         );
         append_rows(&log, 4 * ROWS_PER_PAGE + 1, now_ms()).await;
 
@@ -691,7 +691,7 @@ mod tests {
         let store = Arc::new(InMemoryMetadataStore::new());
         let log = audit_log(
             &store,
-            ConsoleAuditLimits::new(20_000, Duration::from_secs(24 * 60 * 60)),
+            ConsoleAuditLimits::new(20_000, Duration::from_hours(24)),
         );
         let now = 100 * DAY_MS;
         append_rows(&log, ROWS_PER_PAGE, now - 3 * DAY_MS).await;

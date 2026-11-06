@@ -378,13 +378,28 @@ async fn submission_bind_held_past_the_bound_answers_retry_safe() {
         "{}",
         reply(first)
     );
+    // The submission answers at its one deadline, before the hold ended.
+    // The model sees the Find's result with the original's next model
+    // request, whose authorization reads the collector source and so waits
+    // out the held collection; only its lower bound is the Find's.
+    let submitted = found
+        .submission_answered_after
+        .expect("the helper submission answered");
     assert!(
-        found.answered_after >= OWNER_CHANGE_WAIT_BOUND - Duration::from_millis(500)
-            && found.answered_after < hold.duration,
-        "answered once the submission's deadline ran out, before the hold ended: {:?}",
+        submitted >= OWNER_CHANGE_WAIT_BOUND - Duration::from_millis(500)
+            && submitted < hold.duration,
+        "the submission answered once its deadline ran out, before the hold ended: {submitted:?}"
+    );
+    assert!(
+        found.answered_after >= OWNER_CHANGE_WAIT_BOUND - Duration::from_millis(500),
+        "the Find answered only once the submission's deadline ran out: {:?}",
         found.answered_after
     );
     assert_eq!(found.attempt_writes, 0, "no custody attempt was written");
+    assert_eq!(
+        found.site_hits, 1,
+        "the binder ran once: no dispatch past the deadline"
+    );
 }
 
 // The binder meets the held collection at its custody attempt's source

@@ -537,12 +537,17 @@ impl InstalledAcquisition {
                 review.clone(),
                 Some(context),
             )
-            .await
-            .map_err(|error| {
-                #[cfg(test)]
-                aa1_private_failure("advance.submit_helper", error);
-                source_error(error)
-            })?;
+            .await;
+        #[cfg(any(test, feature = "test-support"))]
+        let _ = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::SubmitAnswered,
+            call.id,
+        );
+        let submission = submission.map_err(|error| {
+            #[cfg(test)]
+            aa1_private_failure("advance.submit_helper", error);
+            source_error(error)
+        })?;
         let crate::private_originals::setup_helpers::SetupHelperSubmission::Native(submission) =
             submission
         else {

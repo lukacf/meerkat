@@ -50,6 +50,8 @@ pub(super) struct Found {
     pub(super) attempt_writes: usize,
     /// The hits of the control's site in the whole run.
     pub(super) site_hits: usize,
+    /// From the hold to the first Find's helper submission answering.
+    pub(super) submission_answered_after: Option<Duration>,
 }
 
 fn helper_scope(fixture: &Fixture) -> toolkit_store::StoreScope {
@@ -201,7 +203,17 @@ pub(super) async fn finds_with(
     let measured = concurrent.clone();
     let extra: Vec<(Site, usize, Hold)> = extra.to_vec();
     let extra_hits: Mutex<Vec<usize>> = Mutex::new(vec![0; extra.len()]);
+    // When the first Find's helper submission answered.
+    let answered_at: Arc<Mutex<Option<Instant>>> = Arc::default();
+    let submission_answered = answered_at.clone();
     source_hold_probe::install(Arc::new(move |at, _key| {
+        if at == Site::SubmitAnswered {
+            submission_answered
+                .lock()
+                .unwrap()
+                .get_or_insert_with(Instant::now);
+            return None;
+        }
         if let Some(index) = extra.iter().position(|(other, _, _)| *other == at) {
             let mut hits = extra_hits.lock().unwrap();
             hits[index] += 1;
@@ -309,6 +321,10 @@ pub(super) async fn finds_with(
                     .filter(|event| **event == "helper_custody_attempt_written")
                     .count(),
                 site_hits: reached.lock().unwrap().hits,
+                submission_answered_after: answered_at
+                    .lock()
+                    .unwrap()
+                    .map(|answered| answered.duration_since(start)),
             }
         }),
     ))

@@ -968,6 +968,10 @@ pub mod source_hold_probe {
         /// refusal, just before it rebinds its retained first candidate;
         /// keyed by work item.
         SubmitPriorRebind,
+        /// A Find's helper submission just answered, before its answer is
+        /// read: a control records when (no hold is made here); keyed by the
+        /// Find's call ID.
+        SubmitAnswered,
     }
     /// A control's answer at a site, given its key.
     pub type Probe = Arc<dyn Fn(Site, &str) -> Option<Hold> + Send + Sync>;

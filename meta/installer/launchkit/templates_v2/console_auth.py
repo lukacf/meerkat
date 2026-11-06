@@ -70,6 +70,10 @@ TOOLKIT_SETUP_POST_LIMITS = MappingProxyType({
     "/host/toolkit/setup/credentials": 64 * 1024,
     "/host/toolkit/setup/cancel-sign-in": 256,
     "/host/toolkit/setup/access/revoke": 1024,
+    # Native consent in the browser: the console decides as the signed-in
+    # person and refuses a shared account itself.
+    "/host/toolkit/consent/read": 4 * 1024,
+    "/host/toolkit/consent/decide": 32 * 1024,
 })
 TOOLKIT_LANDING_CSP = re.compile(
     r"default-src 'none'; script-src 'sha256-[A-Za-z0-9+/]{43}='; connect-src 'self'; "
@@ -1288,6 +1292,20 @@ class ConsoleFront:
                            or not isinstance(item["slot"], str) or not isinstance(item["value"], str)
                            for item in payload["credentials"]):
                         raise ValueError("Invalid Toolkit credentials request.")
+                elif path == "/host/toolkit/consent/read":
+                    if (not isinstance(payload, dict) or set(payload) != {"approval_id"}
+                            or not isinstance(payload["approval_id"], str)
+                            or len(payload["approval_id"].encode("utf-8")) > 512):
+                        raise ValueError("Invalid consent request.")
+                elif path == "/host/toolkit/consent/decide":
+                    if (not isinstance(payload, dict)
+                            or set(payload) not in ({"approval_id", "decision"}, {"approval_id", "decision", "reason"})
+                            or not isinstance(payload["approval_id"], str)
+                            or len(payload["approval_id"].encode("utf-8")) > 512
+                            or payload["decision"] not in ("approve", "deny")
+                            or "reason" in payload and (not isinstance(payload["reason"], str)
+                                                        or len(payload["reason"].encode("utf-8")) > 4096)):
+                        raise ValueError("Invalid consent decision.")
                 elif (not isinstance(payload, dict) or set(payload) != {"review_id", "approval_id", "decision"}
                         or type(payload["review_id"]) is not int or abs(payload["review_id"]) > 2**53 - 1
                         or not isinstance(payload["approval_id"], str) or len(payload["approval_id"].encode("utf-8")) > 512
@@ -1458,7 +1476,7 @@ class ConsoleFront:
                 or parsed.query or parsed.fragment or "%" in path or "//" in path
                 or any(part in (".", "..") for part in path.split("/"))
                 or path in ("/", "/login", "/logout", AVAILABILITY_PATH)
-                or path.startswith(("/console", "/blobs/", "/host/toolkit/setup"))):
+                or path.startswith(("/console", "/blobs/", "/host/toolkit/setup", "/host/toolkit/consent"))):
             raise ValueError("The native callback cannot be mounted on this Console.")
         if any(other is not attempt and other.client is not None and other.client.redirect_uri == redirect
                for other in login.mcp_attempts.values()):

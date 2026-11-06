@@ -406,6 +406,7 @@ impl SessionRuntime {
                 system_prompts: dispatch.system_prompt.into_iter().collect(),
                 transient_turn_context: dispatch.transient_turn_context,
                 transient_turn_context_appends: Vec::new(),
+                request_only_context: Vec::new(),
                 model: None,
                 provider: None,
                 self_hosted_server_id: None,

@@ -3849,6 +3849,7 @@ impl SessionRuntime {
             transient_turn_context: overrides
                 .and_then(|overrides| overrides.transient_turn_context.clone()),
             transient_turn_context_appends: Vec::new(),
+            request_only_context: Vec::new(),
             model: overrides
                 .and_then(|ov| ov.model.clone())
                 .map(meerkat_core::lifecycle::run_primitive::ModelId::new),

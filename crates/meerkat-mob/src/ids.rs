@@ -627,6 +627,15 @@ pub struct WorkSpec {
     /// [`Self::with_requester`]; never accepted from a wire.
     #[serde(skip)]
     pub(crate) requester: Option<meerkat_core::PrincipalRef>,
+    /// Request-only context for this member turn
+    /// ([`meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata::request_only_context`]):
+    /// projected into the turn's model requests and never stored, so only a
+    /// local session-backed member's runtime input carries it; remote,
+    /// peer-only and autonomous inbox delivery refuse it. Set only through
+    /// [`Self::with_request_only_context`]; never accepted from a wire.
+    #[serde(skip)]
+    pub(crate) request_only_context:
+        Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
 }
 
 impl WorkSpec {
@@ -644,7 +653,20 @@ impl WorkSpec {
             objective_id: None,
             request_reasoning: None,
             requester: None,
+            request_only_context: None,
         }
+    }
+
+    /// Carry request-only context for this member turn (see the
+    /// `request_only_context` field): its model requests see it, its
+    /// transcript and the stored input never hold it.
+    #[must_use]
+    pub fn with_request_only_context(
+        mut self,
+        context: meerkat_core::lifecycle::run_primitive::TurnRequestContext,
+    ) -> Self {
+        self.request_only_context = Some(context);
+        self
     }
 
     /// Carry the original requester the host authenticated for this work

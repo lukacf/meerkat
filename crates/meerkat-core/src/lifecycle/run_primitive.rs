@@ -1873,6 +1873,21 @@ pub struct RuntimeTurnMetadata {
     /// surface; runtime batch merge preserves admission order.
     #[serde(skip)]
     pub transient_turn_context_appends: Vec<TurnRequestContext>,
+    /// Request-only context that lives only in this process, for the turn of
+    /// the input that carries it (a host's per-requester recall, for one).
+    ///
+    /// It is never persisted: it is not serialized, so a stored input never
+    /// holds it and serialized metadata cannot install it. It is never part
+    /// of the prompt replay identity, so a retry that carries another value
+    /// is the same prompt. It is dropped at a restart and at a ledger resume:
+    /// an input recovered from the store, or a run resumed from its ledger,
+    /// carries none. It is projected like [`Self::transient_turn_context`]:
+    /// at the request tail of every foreground model request of the turn, in
+    /// the `InjectedContext` role, never as a Session row. A batch merge and
+    /// a durable join of a running turn accumulate distinct values in order,
+    /// and it never keeps an input from joining a running turn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_only_context: Vec<TurnRequestContext>,
     /// Override model for this turn (hot-swap on materialized sessions).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelId>,
@@ -1954,6 +1969,7 @@ impl RuntimeTurnMetadata {
             && self.system_prompts.is_empty()
             && self.transient_turn_context.is_none()
             && self.transient_turn_context_appends.is_empty()
+            && self.request_only_context.is_empty()
             && self.model.is_none()
             && self.provider.is_none()
             && self.self_hosted_server_id.is_none()
@@ -1978,13 +1994,15 @@ impl RuntimeTurnMetadata {
     ///
     /// Such a delivery writes only the input's typed conversation appends into
     /// the running turn; it honours the routing facts (`handling_mode`,
-    /// `execution_kind`) and the transcript identity it stamps on the rows,
-    /// and nothing else. Every other field is a turn-start directive that only
-    /// a fresh turn applies (System rows, skill activation, a tool overlay,
-    /// instructions, request-local context, model/provider/auth routing,
-    /// keep-alive, render metadata, a terminal peer-response intent, directed
-    /// interaction terminals). An input that carries one takes its follow-up
-    /// turn, so the two delivery paths can never write different rows.
+    /// `execution_kind`), the transcript identity it stamps on the rows and
+    /// the input's request-only context (added to the running turn's
+    /// requests, never a row), and nothing else. Every other field is a
+    /// turn-start directive that only a fresh turn applies (System rows,
+    /// skill activation, a tool overlay, instructions, request-local context,
+    /// model/provider/auth routing, keep-alive, render metadata, a terminal
+    /// peer-response intent, directed interaction terminals). An input that
+    /// carries one takes its follow-up turn, so the two delivery paths can
+    /// never write different rows.
     #[must_use]
     pub fn joins_running_turn(&self) -> bool {
         // Exhaustive destructuring: a new field must decide here whether a
@@ -1998,6 +2016,10 @@ impl RuntimeTurnMetadata {
             system_prompts,
             transient_turn_context,
             transient_turn_context_appends,
+            // Request-only context writes no row: a durable join carries it
+            // into the running turn's requests (distinct values, in order),
+            // so it never keeps an input from joining.
+            request_only_context: _,
             model,
             provider,
             self_hosted_server_id,
@@ -3004,6 +3026,71 @@ mod tests {
         let json = serde_json::to_value(&metadata).expect("serialize metadata");
         assert_eq!(json["transient_turn_context"], "caller");
         assert!(json.get("transient_turn_context_appends").is_none());
+    }
+    /// Request-only context lives in this process only: serialization (a
+    /// stored input, a wire value) never carries it, a round trip drops it,
+    /// and serialized metadata cannot install it.
+    #[test]
+    fn request_only_context_is_never_serialized() {
+        let context = |text| TurnRequestContext::new(text).expect("non-empty context");
+        let metadata = RuntimeTurnMetadata {
+            transient_turn_context: Some(context("caller")),
+            request_only_context: vec![context("operator section")],
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&metadata).expect("serialize metadata");
+        assert!(
+            json.get("request_only_context").is_none(),
+            "a serialized carrier never holds request-only context: {json}"
+        );
+        let round_trip =
+            serde_json::from_value::<RuntimeTurnMetadata>(json).expect("parse metadata");
+        assert!(round_trip.request_only_context.is_empty());
+        assert_eq!(
+            round_trip.transient_turn_context,
+            Some(context("caller")),
+            "the serialized fields survive the round trip"
+        );
+        assert!(
+            serde_json::from_value::<RuntimeTurnMetadata>(serde_json::json!({
+                "request_only_context": ["installed from outside"]
+            }))
+            .is_err(),
+            "serialized metadata cannot install request-only context"
+        );
+    }
+    /// A batch merge accumulates request-only context as distinct values in
+    /// order, and request-only context never keeps an input from joining a
+    /// running turn (it writes no row).
+    #[test]
+    fn request_only_context_merges_distinct_values_and_never_blocks_a_join() {
+        let context = |text| TurnRequestContext::new(text).expect("non-empty context");
+        let mut metadata = RuntimeTurnMetadata {
+            request_only_context: vec![context("first section")],
+            ..Default::default()
+        };
+        metadata
+            .merge(RuntimeTurnMetadata {
+                request_only_context: vec![context("first section"), context("second section")],
+                ..Default::default()
+            })
+            .expect("request-only context never conflicts");
+        assert_eq!(
+            metadata
+                .request_only_context
+                .iter()
+                .map(TurnRequestContext::as_str)
+                .collect::<Vec<_>>(),
+            ["first section", "second section"],
+            "distinct values accumulate in order"
+        );
+        let joining = RuntimeTurnMetadata {
+            handling_mode: Some(HandlingMode::Steer),
+            request_only_context: vec![context("first section")],
+            ..Default::default()
+        };
+        assert!(joining.joins_running_turn());
+        assert!(!joining.is_empty());
     }
     #[test]
     fn conversation_append_role_serde() {

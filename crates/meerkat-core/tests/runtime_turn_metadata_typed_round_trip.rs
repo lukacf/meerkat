@@ -55,6 +55,7 @@ fn sample_metadata() -> RuntimeTurnMetadata {
         ],
         transient_turn_context: None,
         transient_turn_context_appends: Vec::new(),
+        request_only_context: Vec::new(),
         model: Some(ModelId::new("test-anthropic-configured")),
         provider: Some(Provider::Anthropic),
         self_hosted_server_id: None,

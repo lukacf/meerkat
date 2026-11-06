@@ -1195,7 +1195,7 @@ impl AnthropicClient {
             }
         }
 
-        Self::apply_thinking_block_binding(&mut body);
+        Self::apply_thinking_block_binding(request, &mut body);
 
         Ok(body)
     }
@@ -1204,14 +1204,37 @@ impl AnthropicClient {
     /// block whose bound prefix no longer matches (see
     /// [`THINKING_BINDING_CONTROLS_BETA`]). Only a request that has thinking
     /// on and replays at least one signed thinking block is changed.
-    fn apply_thinking_block_binding(body: &mut Value) {
-        let thinking_on = body
+    fn apply_thinking_block_binding(request: &LlmRequest, body: &mut Value) {
+        if !Self::replays_signed_thinking_block(body) {
+            return;
+        }
+        match body
             .get("thinking")
             .and_then(|thinking| thinking.get("type"))
             .and_then(Value::as_str)
-            .is_some_and(|kind| kind != "disabled");
-        if !thinking_on || !Self::replays_signed_thinking_block(body) {
-            return;
+        {
+            Some("disabled") => return,
+            Some(_) => {}
+            // No `thinking` in the request, yet the history holds bound
+            // blocks: the model thinks by default (every model that does so
+            // runs adaptive thinking when the key is omitted), and the
+            // control has to sit beside a `type`. Name that default, unless
+            // the catalog says the model takes no adaptive thinking (an
+            // older model's blocks came from an explicit configuration this
+            // request no longer carries, and such a request is left alone).
+            None => {
+                let adaptive =
+                    meerkat_models::capabilities_for(Provider::Anthropic, &request.model)
+                        .is_none_or(|caps| {
+                            caps.thinking
+                                .anthropic_thinking_wire_types()
+                                .contains(&"adaptive")
+                        });
+                if !adaptive {
+                    return;
+                }
+                body["thinking"] = serde_json::json!({"type": "adaptive"});
+            }
         }
         if let Some(thinking) = body.get_mut("thinking").and_then(Value::as_object_mut) {
             thinking.insert(
@@ -4204,6 +4227,34 @@ mod tests {
                     .iter()
                     .any(|beta| beta == THINKING_BINDING_CONTROLS_BETA),
                 "{betas:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_signed_thinking_replay_with_thinking_omitted_names_adaptive_and_drops()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        // A catalogued model that thinks by default, and an endpoint-only
+        // id the catalog does not know: both run adaptive when the key is
+        // omitted, so the control is named beside it.
+        for model in ["claude-opus-5-5", "proxy:my-alias"] {
+            let request = LlmRequest::new(model, replayed_thinking_conversation(true));
+            let body = client.build_request_body(&request)?;
+            assert_eq!(
+                body["thinking"],
+                serde_json::json!({
+                    "type": "adaptive",
+                    "block_binding": {"prefix_mismatch_behavior": "drop_block"}
+                }),
+                "{model}"
+            );
+            assert!(
+                AnthropicClient::request_betas(&request, &body)
+                    .iter()
+                    .any(|beta| beta == THINKING_BINDING_CONTROLS_BETA),
+                "{model}"
             );
         }
         Ok(())

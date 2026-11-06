@@ -9,6 +9,14 @@
 //! dropped once the principal's fence covers it, and the fence of a login
 //! that is one token once that token expired.
 //!
+//! A principal keeps at most 64 login fences that only a fence of the
+//! principal ends (a `sid` login's, and a token's that never expires). One
+//! more folds the oldest into the principal's sign-out fence, a fence of
+//! every login of the principal: it refuses each token of the principal the
+//! folded fence refused, and the logins older than it are signed out with
+//! it. The sign-out fence is not a revocation: the principal's own fence,
+//! which also stops the schedules it defined before it, is untouched.
+//!
 //! The record belongs to the Console's authentication, not to access
 //! control. It exists whether or not an access controller is installed, and
 //! it lives in a file of its own in the gateway's state directory
@@ -56,6 +64,10 @@ pub const CONSOLE_SESSION_FENCES_FILE: &str = "console-session-fences.json";
 const RECORD_FORMAT: &str = "meerkat-meta.console-session-fences";
 /// The record format version this binary reads and writes.
 const RECORD_VERSION: u32 = 1;
+/// The most login fences a principal keeps that only a fence of the
+/// principal ends. One more folds the oldest into its sign-out fence
+/// ([`FenceRecordFile::fold_excess_sign_outs`]).
+const MAX_KEPT_SIGN_OUTS: usize = 64;
 
 /// The record as stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +86,11 @@ struct FenceRecordFile {
     /// shape; a binary without sign-out keeps the field as read.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     signed_out_logins: BTreeMap<String, BTreeMap<String, LoginFence>>,
+    /// Per principal, its sign-out fence: the fence of every login of the
+    /// principal, which its oldest sign-outs were folded into. Not written
+    /// while empty, as the sign-outs.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    folded_sign_outs: BTreeMap<String, PrincipalFence>,
     /// Fields this binary does not know, kept as read so a rewrite never
     /// drops them.
     #[serde(flatten)]
@@ -88,6 +105,7 @@ impl Default for FenceRecordFile {
             fences: BTreeMap::new(),
             non_expiring_principals: BTreeSet::new(),
             signed_out_logins: BTreeMap::new(),
+            folded_sign_outs: BTreeMap::new(),
             other: BTreeMap::new(),
         }
     }
@@ -95,15 +113,26 @@ impl Default for FenceRecordFile {
 
 impl FenceRecordFile {
     /// Drop the login fences that refuse nothing more: one at or before its
-    /// principal's fence (that fence refuses every token the login's fence
-    /// does), and the fence of a login that is one token once the verifier
-    /// refuses that token on its expiry (`now`, seconds since the epoch).
+    /// principal's fence or sign-out fence (each refuses every token of the
+    /// principal the login's fence does), and the fence of a login that is
+    /// one token once the verifier refuses that token on its expiry (`now`,
+    /// seconds since the epoch). A sign-out fence at or before its
+    /// principal's fence is dropped as well.
     fn drop_spent_login_fences(&mut self, now: u64) {
         let principal_fences = &self.fences;
+        self.folded_sign_outs.retain(|principal, folded| {
+            principal_fences.get(principal).is_none_or(|fence| {
+                folded.not_before_epoch_seconds > fence.not_before_epoch_seconds
+            })
+        });
+        let folded_sign_outs = &self.folded_sign_outs;
         self.signed_out_logins.retain(|principal, logins| {
             let covered_through = principal_fences
                 .get(principal)
-                .map(|fence| fence.not_before_epoch_seconds);
+                .into_iter()
+                .chain(folded_sign_outs.get(principal))
+                .map(|fence| fence.not_before_epoch_seconds)
+                .max();
             logins.retain(|_, login| {
                 let covered = covered_through
                     .is_some_and(|not_before| login.not_before_epoch_seconds <= not_before);
@@ -115,9 +144,43 @@ impl FenceRecordFile {
             !logins.is_empty()
         });
     }
+
+    /// Fold the oldest login fences of `principal` that only a fence of the
+    /// principal ends (those no token expiry drops) into its sign-out fence,
+    /// so it keeps at most [`MAX_KEPT_SIGN_OUTS`]: the sign-out fence moves
+    /// to the newest of the folded ones (it never moves back) and refuses
+    /// every token they refused. The folded fences are then dropped as
+    /// covered ([`Self::drop_spent_login_fences`]).
+    fn fold_excess_sign_outs(&mut self, principal: &str) {
+        let Some(logins) = self.signed_out_logins.get(principal) else {
+            return;
+        };
+        let mut kept: Vec<u64> = logins
+            .values()
+            .filter(|login| login.token_refused_from_epoch_seconds.is_none())
+            .map(|login| login.not_before_epoch_seconds)
+            .collect();
+        let excess = kept.len().saturating_sub(MAX_KEPT_SIGN_OUTS);
+        if excess == 0 {
+            return;
+        }
+        kept.sort_unstable();
+        let Some(&fold_to) = kept.get(excess - 1) else {
+            return;
+        };
+        let folded = self
+            .folded_sign_outs
+            .entry(principal.to_string())
+            .or_insert_with(|| PrincipalFence {
+                not_before_epoch_seconds: fold_to,
+                other: BTreeMap::new(),
+            });
+        folded.not_before_epoch_seconds = folded.not_before_epoch_seconds.max(fold_to);
+    }
 }
 
-/// One principal's fence as stored.
+/// One principal's fence as stored: the fence its sessions were revoked at,
+/// or its sign-out fence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PrincipalFence {
     /// Seconds since the epoch: tokens issued before this instant (and up to
@@ -391,8 +454,9 @@ impl ConsoleSessionFences {
     /// under this record ([`Self::observe_current_human`]) before its fence
     /// is visible.
     ///
-    /// A revocation also drops the principal's sign-outs of single logins at
-    /// or before its fence: the fence refuses every token they refused.
+    /// A revocation also drops the principal's sign-outs of single logins,
+    /// and its sign-out fence, at or before its fence: the fence refuses
+    /// every token they refused.
     pub fn revoke_sessions(
         &self,
         principal: &str,
@@ -451,15 +515,23 @@ impl ConsoleSessionFences {
         }
     }
 
-    /// The fence of one login of `principal` (the digest the Console's
-    /// verifier keys the login by), read now: seconds since the epoch, or
-    /// `None` when the login never signed out or its fence was dropped.
+    /// The fence one login of `principal` (the digest the Console's
+    /// verifier keys the login by) is under, read now: the later of the
+    /// login's own fence and the principal's sign-out fence, in seconds
+    /// since the epoch, or `None` when there is neither: the login never
+    /// signed out (or its fence was dropped), and no sign-out was folded.
     pub(crate) fn login_not_before(&self, principal: &str, login: &str) -> Option<u64> {
-        self.read()
+        let record = self.read();
+        let own = record
             .signed_out_logins
             .get(principal)
             .and_then(|logins| logins.get(login))
-            .map(|fence| fence.not_before_epoch_seconds)
+            .map(|fence| fence.not_before_epoch_seconds);
+        let folded = record
+            .folded_sign_outs
+            .get(principal)
+            .map(|fence| fence.not_before_epoch_seconds);
+        own.max(folded)
     }
 
     /// Sign one login of `principal` out: from then on the Console refuses
@@ -472,6 +544,14 @@ impl ConsoleSessionFences {
     /// is when the verifier refuses that token on its expiry, after which
     /// the fence is dropped. A later fence of the login replaces an earlier
     /// one; an earlier one never moves it back. Returns the login's fence.
+    ///
+    /// A principal keeps at most [`MAX_KEPT_SIGN_OUTS`] login fences that
+    /// only a fence of the principal ends (those without
+    /// `token_refused_from_epoch_seconds`). The sign-out that would keep one
+    /// more folds the oldest into the principal's sign-out fence
+    /// ([`FenceRecordFile::fold_excess_sign_outs`]), which then signs out
+    /// every login of the principal up to that fence. It revokes nothing:
+    /// the principal's own fence ([`Self::not_before`]) is untouched.
     ///
     /// Written, published and announced exactly as a revocation
     /// ([`Self::revoke_sessions`]), with the same failures: refused when the
@@ -513,7 +593,17 @@ impl ConsoleSessionFences {
         fence.not_before_epoch_seconds =
             fence.not_before_epoch_seconds.max(not_before_epoch_seconds);
         let not_before_epoch_seconds = fence.not_before_epoch_seconds;
+        next.fold_excess_sign_outs(principal);
         next.drop_spent_login_fences(now_epoch_seconds());
+        // The login's fence counts the sign-out fence a fold moved past it.
+        let not_before_epoch_seconds =
+            next.folded_sign_outs
+                .get(principal)
+                .map_or(not_before_epoch_seconds, |folded| {
+                    folded
+                        .not_before_epoch_seconds
+                        .max(not_before_epoch_seconds)
+                });
         let unconfirmed = self.commit_fence_change(path, next)?;
         tracing::info!(
             principal,

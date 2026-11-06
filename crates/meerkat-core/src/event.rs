@@ -3294,6 +3294,23 @@ pub struct BoundaryAppendsDiscarded {
 }
 
 impl AgentEvent {
+    /// The observation of an applied operator-instruction entry
+    /// ([`AgentEvent::OperatorInstructionsApplied`]), projected from the
+    /// entry row's typed identity.
+    pub(crate) fn operator_instructions_applied(
+        session_id: SessionId,
+        entry: &crate::InstructionEntryIdentity,
+    ) -> Self {
+        Self::OperatorInstructionsApplied {
+            session_id,
+            entry_sequence: entry.entry_sequence(),
+            kind: entry.kind(),
+            run_id: entry.run_id().cloned(),
+            active: entry.active().to_vec(),
+            changes: entry.changes().to_vec(),
+        }
+    }
+
     /// The assistant message this event belongs to or references, when the
     /// event carries one.
     ///

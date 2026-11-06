@@ -11981,6 +11981,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.acquire_canonical_runtime_adapter(None)
     }
 
+    /// Whether this service's runtime is governed: the runtime machine bound
+    /// to it has a native work authorization host. A service with no machine
+    /// bound yet is not: a governed composition binds its machine before it
+    /// hosts any session, and a service constructed directly creates an
+    /// ungoverned one on first use.
+    fn runtime_is_governed(&self) -> bool {
+        self.runtime_adapter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|machine| machine.has_native_work_authorization_host())
+    }
+
     /// Acquire this service's one runtime owner. Failed initialization leaves
     /// the service unbound; an explicit owner must share its physical store.
     pub fn acquire_canonical_runtime_adapter(
@@ -20795,6 +20808,14 @@ impl<B: SessionAgentBuilder + 'static> meerkat_core::service::SessionServiceInst
         meerkat_core::SessionInstructionReceipt,
         meerkat_core::service::SessionInstructionError,
     > {
+        // A governed runtime admits an operator-instruction write only with
+        // prepared authorization, which nothing mints for one yet: the write
+        // is refused before anything is read or written, as a plain System
+        // context append is refused there. The refusal is final for the
+        // write; a retry is refused the same way.
+        if self.runtime_is_governed() {
+            return Err(meerkat_core::InstructionWriteError::PreparedAuthorizationRequired.into());
+        }
         match self
             .operator_instruction_control(id, OperatorInstructionControl::Set(write))
             .await?

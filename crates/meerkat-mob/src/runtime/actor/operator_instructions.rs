@@ -59,12 +59,37 @@ enum WriteVerdict {
 }
 
 impl MobActor {
+    /// A governed runtime (its machine has a native work authorization host)
+    /// admits an operator-instruction write only with prepared
+    /// authorization, which nothing mints for one yet: a write or revoke is
+    /// refused before MobMachine sees it, so nothing is journaled and no
+    /// member is owed. The refusal is final; a retry is refused the same
+    /// way.
+    fn refuse_operator_instruction_write_on_governed_runtime(
+        &self,
+    ) -> Result<(), OperatorInstructionError> {
+        #[cfg(feature = "runtime-adapter")]
+        {
+            if self
+                .runtime_adapter
+                .as_ref()
+                .is_some_and(|runtime| runtime.has_native_work_authorization_host())
+            {
+                return Err(OperatorInstructionError::Refused(
+                    InstructionWriteError::PreparedAuthorizationRequired,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Commit one operator-instruction write (`SetOperatorInstruction`).
     pub(super) async fn set_operator_instruction(
         &mut self,
         write: OperatorInstructionWrite,
         digest: InstructionContentDigest,
     ) -> Result<OperatorInstructionReceipt, OperatorInstructionError> {
+        self.refuse_operator_instruction_write_on_governed_runtime()?;
         let key = write.slot.machine_key();
         let body_bytes = write.body.len() as u64;
         let (target_kind, target_profile, target_member) = write.target.machine_parts();
@@ -123,6 +148,7 @@ impl MobActor {
         slot: InstructionSlot,
         revision: InstructionRevision,
     ) -> Result<OperatorInstructionReceipt, OperatorInstructionError> {
+        self.refuse_operator_instruction_write_on_governed_runtime()?;
         let key = slot.machine_key();
         // The record keeps its target: the journal row carries it.
         let target = self.operator_instruction_target_of(&key);

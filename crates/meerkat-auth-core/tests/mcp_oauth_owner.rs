@@ -9682,6 +9682,118 @@ async fn client_profile_admission_settles_to_the_host_recorder() {
     );
 }
 
+/// A host's entry check that reports when the update's owner entered it,
+/// then waits (blocking, as an entry check that reads its state at once
+/// does) until it is released, and admits the host's administrator as
+/// [`StatingEntry`] does.
+struct HeldStatingEntry {
+    recorder: Arc<RecordedAdministrations>,
+    entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl meerkat_core::AdministrationEntry for HeldStatingEntry {
+    fn enter(
+        &self,
+    ) -> Result<meerkat_core::EnteredAdministration, meerkat_core::AdministrationEntryRefusal> {
+        let entered = self.entered.lock().take();
+        if let Some(entered) = entered {
+            let _ = entered.send(());
+        }
+        let release = self.release.lock().take();
+        if let Some(release) = release {
+            let _ = release.recv();
+        }
+        StatingEntry {
+            recorder: Arc::clone(&self.recorder),
+            login: "login-1",
+        }
+        .enter()
+    }
+}
+
+/// A caller that stops waiting while its profile update is at the update's
+/// entry does not lose the record: the credential mutation owner's own task
+/// admits the update, writes it, and hands the recorder exactly one record
+/// when it settles, committed. The entry check blocks the owner's task, so
+/// the runtime has more than one worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_profile_admission_settles_to_the_host_recorder_after_the_caller_stopped_waiting() {
+    let method = McpOAuthClientAuthMethod::ClientSecretPost;
+    let (base, state) = spawn_fixed_client_fixture(method).await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "fixed-abandoned");
+    let redirect = authority
+        .registered_redirect_uri(&target, &registered_base())
+        .unwrap();
+    let recorder = Arc::new(RecordedAdministrations::default());
+    let (entered, on_entered) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let entry = Arc::new(HeldStatingEntry {
+        recorder: Arc::clone(&recorder),
+        entered: Mutex::new(Some(entered)),
+        release: Mutex::new(Some(released)),
+    });
+    let caller = tokio::spawn({
+        let (authority, target) = (authority.clone(), target.clone());
+        let profile = McpOAuthClientProfile::new(
+            base.clone(),
+            "client-a",
+            redirect,
+            method,
+            McpOAuthClientSecret::new(FIXED_CLIENT_SECRET),
+        );
+        async move {
+            authority
+                .install_client_profile_entered(&target, profile, Some(&registered_base()), entry)
+                .await
+        }
+    });
+
+    // The owner's task is at the update's entry; the caller stops waiting.
+    on_entered.await.unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert!(
+        recorder.0.lock().is_empty(),
+        "nothing is recorded before the update settles"
+    );
+
+    // Released, the owner admits and writes the update, and the record
+    // arrives when it settles.
+    release.send(()).unwrap();
+    let records = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let records = std::mem::take(&mut *recorder.0.lock());
+            if !records.is_empty() {
+                return records;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the settled update is recorded");
+    assert_eq!(records.len(), 1, "one record for the update");
+    assert_eq!(records[0].administrator, fixture_administrator());
+    assert_eq!(
+        records[0].outcome,
+        meerkat_core::AdministrationOutcome::Committed
+    );
+    assert!(matches!(
+        records[0].change,
+        Some(meerkat_core::AdministeredChange::McpOauthClientProfileInstall { .. })
+    ));
+    assert_eq!(
+        installed_client_id(&authority, &target).await.as_deref(),
+        Some("client-a"),
+        "the owner wrote the update its caller stopped waiting for"
+    );
+    assert!(
+        recorder.0.lock().is_empty(),
+        "no other record arrives for the update"
+    );
+}
+
 /// Without a profile nothing changes: a dynamically registered credential
 /// stores no profile, and its token requests are a public client's. A
 /// profile installed later leaves it alone: it keeps refreshing as the

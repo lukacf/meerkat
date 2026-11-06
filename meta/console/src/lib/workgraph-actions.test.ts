@@ -7,7 +7,7 @@ import {
   resolveWorkGraphBindingRevision,
   resolveWorkGraphGoalItemRevision,
   resolveWorkGraphItemRevision,
-  workGraphClaimOwnerId,
+  workGraphClaimOwnedBy,
   workGraphConflictRefreshRequest,
   type WorkGraphCommandRunner,
 } from "./workgraph-actions";
@@ -27,13 +27,13 @@ function stubRunner(
   return { run, callCount: () => index };
 }
 
-test("claim owner id prefers the authenticated operator subject and falls back to the ops-lead id", () => {
-  assert.equal(workGraphClaimOwnerId("luka@example.com", "console-ops-lead"), "luka@example.com");
-  assert.equal(workGraphClaimOwnerId("  padded@example.com  ", "console-ops-lead"), "padded@example.com");
-  assert.equal(workGraphClaimOwnerId("", "console-ops-lead"), "console-ops-lead");
-  assert.equal(workGraphClaimOwnerId("   ", "console-ops-lead"), "console-ops-lead");
-  assert.equal(workGraphClaimOwnerId(null, "console-ops-lead"), "console-ops-lead");
-  assert.equal(workGraphClaimOwnerId(undefined, "console-ops-lead"), "console-ops-lead");
+test("a claim is owned only by the principal its owner key names, and no principal owns nothing", () => {
+  const claimed = (kind: string, id: string) => ({ claim: { owner: { key: { kind, id } } } });
+  assert.equal(workGraphClaimOwnedBy(claimed("principal", "ops@example.com"), "ops@example.com"), true);
+  assert.equal(workGraphClaimOwnedBy(claimed("principal", "ops@example.com"), "other@example.com"), false);
+  assert.equal(workGraphClaimOwnedBy(claimed("agent", "ops@example.com"), "ops@example.com"), false);
+  assert.equal(workGraphClaimOwnedBy({}, "ops@example.com"), false);
+  assert.equal(workGraphClaimOwnedBy(claimed("principal", "ops@example.com"), undefined), false);
 });
 
 test("item revision resolution reads meta/workgraph/get and returns the live CAS token", async () => {

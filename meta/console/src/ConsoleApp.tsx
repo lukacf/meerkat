@@ -109,7 +109,7 @@ import {
   resolveWorkGraphBindingRevision,
   resolveWorkGraphGoalItemRevision,
   resolveWorkGraphItemRevision,
-  workGraphClaimOwnerId,
+  workGraphClaimOwnedBy,
   workGraphConflictRefreshRequest,
   type WorkGraphCommandRunner,
 } from "./lib/workgraph-actions";
@@ -534,8 +534,6 @@ function agentWorkItems(
       priority: item.priority ?? null,
     }));
 }
-
-const DEFAULT_APPROVER_ID = "console-ops-lead";
 
 /// Live signals that should freshen a docked WorkGraph panel: dedicated
 /// workgraph.* timeline frames or workgraph_* tool completions in any turn.
@@ -2858,14 +2856,19 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   // so the inbox offers decisions only when whoami reports a person. A
   // transport without whoami, an older gateway or a failed read leaves the
   // approvals read-only.
-  const [approvalDecider, setApprovalDecider] = React.useState<{ scope: string; person: boolean }>();
+  // The same read names the principal the caller's WorkGraph claims are
+  // owned by: an identified caller claims as itself, and an open console's
+  // caller without a token claims nothing.
+  const [approvalDecider, setApprovalDecider] = React.useState<{ scope: string; person: boolean; claimant?: string }>();
   React.useEffect(() => {
     let active = true;
     const scope = sendScope;
     void Promise.resolve()
       .then(() => consoleTransport.whoami ? consoleTransport.whoami() : null)
       .then((whoami) => {
-        if (active) setApprovalDecider({ scope, person: whoami?.actorKind === "person" });
+        if (!active) return;
+        const claimant = whoami && whoami.actorKind !== "anonymous" ? whoami.principal : undefined;
+        setApprovalDecider({ scope, person: whoami?.actorKind === "person", ...(claimant ? { claimant } : {}) });
       })
       .catch(() => {
         if (active) setApprovalDecider({ scope, person: false });
@@ -2875,6 +2878,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     };
   }, [consoleTransport, sendScope]);
   const approvalsDecidable = approvalDecider?.scope === sendScope ? approvalDecider.person : undefined;
+  const workGraphClaimant = approvalDecider?.scope === sendScope ? approvalDecider.claimant : undefined;
   React.useEffect(() => {
     setApprovalSnapshot(undefined);
     setSelectedApprovalId(undefined);
@@ -5151,17 +5155,16 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         resolve: () => Promise<number>,
       ) => (revision !== undefined ? () => Promise.resolve(revision) : resolve);
       return {
-        onClaim: ({ itemId, revision }: { itemId: string; revision?: number }) =>
+        // The gateway owns a claim by the connection's caller, so the
+        // request names no owner. A caller who can own nothing is offered
+        // no claim, and only a signed-in person confirms a goal.
+        onClaim: workGraphClaimant === undefined ? undefined : ({ itemId, revision }: { itemId: string; revision?: number }) =>
           dispatch(
             revisionOr(revision, () => resolveWorkGraphItemRevision(runWorkGraphQuery, itemId)),
             (expectedRevision) =>
               runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphClaim, {
                 id: itemId,
                 expected_revision: expectedRevision,
-                owner: {
-                  kind: "principal",
-                  id: workGraphClaimOwnerId(experience?.access?.subject, DEFAULT_APPROVER_ID),
-                },
               }, cardIdentity),
           ),
         onClose: ({ itemId, revision }: { itemId: string; revision?: number }) =>
@@ -5173,7 +5176,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
                 expected_revision: expectedRevision,
               }, cardIdentity),
           ),
-        onGoalConfirm: ({ bindingId, revision }: { bindingId: string; revision?: number }) =>
+        onGoalConfirm: approvalsDecidable !== true ? undefined : ({ bindingId, revision }: { bindingId: string; revision?: number }) =>
           dispatch(
             revisionOr(revision, () => resolveWorkGraphGoalItemRevision(runWorkGraphQuery, bindingId)),
             (expectedRevision) =>
@@ -5222,7 +5225,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       };
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [runWorkGraphCommand, runWorkGraphQuery, experience?.access?.subject],
+    [runWorkGraphCommand, runWorkGraphQuery, workGraphClaimant, approvalsDecidable],
   );
 
   // Inline-card affordances: undefined when the caller lacks the manage
@@ -6249,6 +6252,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onLoadEvidence={loadMemoryEvidence}
           onDecideQuarantine={
             memoryData.canDecideQuarantine &&
+            approvalsDecidable === true &&
             !frontendReadOnly &&
             experience?.console_policy?.read_only !== true
               ? decideMemoryQuarantine
@@ -6274,6 +6278,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onRefresh={() => void refreshWorkGraphData()}
           onClaim={workGraphPanelHandlers.onClaim}
           onClose={workGraphPanelHandlers.onClose}
+          canRelease={(item) => workGraphClaimOwnedBy(item, workGraphClaimant)}
           onRelease={({ itemId, revision }) => {
             // Same CAS rule as the other item actions: an unobserved
             // revision is resolved live, never guessed.

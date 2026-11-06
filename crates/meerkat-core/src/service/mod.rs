@@ -3532,6 +3532,21 @@ pub enum DurableForkSourceAdmission {
     /// its ordinary meaning and is still refused when it splits a tool-use
     /// group.
     CallerTurn,
+    /// The fork takes no message of the source: only `message_count =
+    /// Some(0)` is admitted, and any other count is refused with
+    /// `SessionError::Unsupported` before anything is read. The child starts
+    /// with an empty transcript and the build of the source's last committed
+    /// snapshot.
+    ///
+    /// The owner takes no lock and refuses no running source: an empty
+    /// prefix observes none of the transcript a running turn is about to
+    /// extend, so it neither waits for that turn nor queues behind it. The
+    /// committed snapshot is read whole, through a running turn's provisional
+    /// tail when one stands, and the owner never writes the source from this
+    /// path (no replayed-projection persist, no audit receipt repair; a
+    /// missing receipt fails the fork closed), as for
+    /// [`Self::CallerTurn`].
+    EmptyPrefix,
 }
 
 /// Result of creating an edited transcript branch.

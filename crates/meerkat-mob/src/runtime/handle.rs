@@ -18756,6 +18756,32 @@ impl MobHandle {
         .await
     }
 
+    /// Fork `source_identity` at an empty prefix and seat the child as a new
+    /// member through the ordinary resume pipeline: the child has none of
+    /// the source's messages and the build of the source's last committed
+    /// snapshot (its [`super::ForkBuildInheritance`]).
+    ///
+    /// The source is admitted as
+    /// [`meerkat_core::DurableForkSourceAdmission::EmptyPrefix`]: a source
+    /// whose turn is running is neither refused nor waited for, since an
+    /// empty prefix observes nothing that turn could extend, and the fork
+    /// never writes the source. The host has an activation window on the
+    /// child before its first turn, as for [`Self::fork_member`].
+    pub async fn fork_member_at_empty_prefix(
+        &self,
+        source_identity: &AgentIdentity,
+        member: SpawnMemberSpec,
+    ) -> Result<ForkMemberResult, MobError> {
+        self.fork_member_with_source_admission(
+            source_identity,
+            member,
+            Some(0),
+            meerkat_core::DurableForkSourceAdmission::EmptyPrefix,
+            meerkat_core::ActivationWindow::HostDriven,
+        )
+        .await
+    }
+
     /// [`Self::fork_member`] for a caller that can wait for a running source.
     ///
     /// The source is not refused while mid-turn: the persistent fork owner
@@ -19221,12 +19247,15 @@ impl MobHandle {
         // verbatim), so the application context is then read back from the
         // committed child, under the same rule: a context the request states
         // wins.
-        let app_context_read =
-            if source_admission == meerkat_core::DurableForkSourceAdmission::CallerTurn {
-                ForkSourceAppContextRead::SourceSessionOrForkChild
-            } else {
-                ForkSourceAppContextRead::SourceSession
-            };
+        let app_context_read = if matches!(
+            source_admission,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn
+                | meerkat_core::DurableForkSourceAdmission::EmptyPrefix
+        ) {
+            ForkSourceAppContextRead::SourceSessionOrForkChild
+        } else {
+            ForkSourceAppContextRead::SourceSession
+        };
         let context_requested = member.context.is_some();
         let (inheritance, app_context_from_fork_child) = self
             .resolve_fork_build_inheritance(source_identity, &source_session_id, app_context_read)

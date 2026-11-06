@@ -189,6 +189,10 @@ them.
   member's status until the caller gave up, a kickoff wait until its timeout.
   The member's lifecycle is unchanged; only the wait ends.
 
+- `meerkat-core`: `DurableForkSourceAdmission` gains `EmptyPrefix`, appended
+  last, so an exhaustive match needs its arm: a durable fork that takes no
+  message of its source (see Added).
+
 ### Added
 
 - `meerkat-runtime`: `decision::DecisionExecutorLoop`, the one executor of a
@@ -422,6 +426,15 @@ them.
   non-exhaustive): a member status read whose session the store refuses
   until its realm is reopened. Its serialized and wire value is the existing
   `read_failed`, and nothing deserializes into it.
+
+- `meerkat-mob`: `MobHandle::fork_member_at_empty_prefix` forks a member at
+  an empty prefix and seats the child as a new member: the child has none of
+  the source's messages and the build of the source's last committed
+  snapshot. A source whose turn is running is neither refused nor waited
+  for, since an empty prefix observes nothing that turn could extend, and
+  the fork never writes the source. The durable fork owner admits it as
+  `DurableForkSourceAdmission::EmptyPrefix`, which refuses any message count
+  other than 0.
 
 ### Changed
 

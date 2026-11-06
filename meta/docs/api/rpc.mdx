@@ -762,7 +762,7 @@ profiles](/concepts/roster#ensure_member-gateway-profiles)).
 |-------|------|----------|-------------|
 | `role` | `string` | yes | Profile name to build the member from |
 | `agent_identity` | `string` | yes | Public member alias; encoded into a comms-safe roster id by the `mk--` codec when it contains `:` |
-| `labels` | `object` | no | String labels; `agent_identity` is runtime-authoritative and may not be supplied here |
+| `labels` | `object` | no | String labels; `agent_identity` is runtime-authoritative and may not be supplied here, and neither may the labels only Meta writes (`side_chat_of`, `side_chat_of_session`, `side_chat_creator`, `console.private_to`): each is refused as invalid params (`-32602`) naming it |
 | `context` | any | no | Host context attached to the spawn |
 | `resume_session_id` | `string` | no | Resume this bridge session instead of minting one |
 | `additional_instructions` | `string[]` | no | Standing instructions appended to the member's prompt |

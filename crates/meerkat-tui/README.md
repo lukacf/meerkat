@@ -108,7 +108,11 @@ re-evaluates flagged actions with reasoning and may read project files itself
 content is framed as untrusted evidence, files the agent wrote this session
 are named as the agent's, and environment files (`.env`, `.env.*`, `.envrc`)
 are never read. `auto.classifier_tools = false` makes stage 2 decide from the
-attached context alone.
+attached context alone. A call the classifier allowed shows one dim
+`allowed by classifier: <reason>` line under its tool block (tier-1/2 and rule
+allows show none), and a denial's `[classifier checked N files, M searches]`
+tag counts what the classifier itself read before deciding, not the session's
+reads.
 
 After **3 consecutive** or **20 total** classifier blocks, auto mode pauses
 and each tier-3 action opens a dialog: allow once, allow and add a narrow

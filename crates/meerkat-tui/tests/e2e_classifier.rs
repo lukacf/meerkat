@@ -78,10 +78,10 @@ async fn blocks_force_push_allows_tests(provider: Provider) {
         verdict(&classifier, "git push --force origin main").await,
         ClassifierVerdict::Block { .. }
     ));
-    assert_eq!(
+    assert!(matches!(
         verdict(&classifier, "cargo test").await,
-        ClassifierVerdict::Allow
-    );
+        ClassifierVerdict::Allow { .. }
+    ));
 }
 
 #[tokio::test]

@@ -100,7 +100,11 @@ them.
   interrupt), and the first Ctrl-C after a mouse selection only clears the
   selection. The terminal is asked for keyboard disambiguation only, not
   event types: kitty 0.32 sent a Backspace release as a second press byte,
-  which deleted two characters per keystroke. See
+  which deleted two characters per keystroke. A call the classifier
+  allowed shows a dim `allowed by classifier: <reason>` line under its tool
+  block, a denial's tag reads `[classifier checked N files, M searches]`,
+  and a block for lack of user intent asks the agent to get the user's
+  confirmation instead of claiming the user never asked. See
   `crates/meerkat-tui/README.md`.
 
 - `meerkat-mob-mcp`: `MobMcpState::with_implicit_mob_customizer` takes an

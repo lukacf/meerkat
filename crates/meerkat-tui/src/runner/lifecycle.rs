@@ -397,6 +397,7 @@ fn restored_tool_block(name: &str, args: serde_json::Value) -> Block {
         },
         result_preview: None,
         diff: None,
+        note: None,
         depth: 0,
         collapsed: true,
     }

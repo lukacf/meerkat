@@ -45,7 +45,7 @@ impl ActionClassifier for AllowAll {
         &self,
         _input: ClassifierInput<'_>,
     ) -> Result<ClassifierVerdict, ClassifierError> {
-        Ok(ClassifierVerdict::Allow)
+        Ok(ClassifierVerdict::allow("ok"))
     }
 }
 

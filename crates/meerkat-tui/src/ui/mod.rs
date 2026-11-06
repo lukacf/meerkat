@@ -292,6 +292,14 @@ pub enum Msg {
     EscalationResolved(EscalationId),
     /// An approval decision to log in the transcript.
     Approval(ApprovalNotice),
+    /// A dim one-line note under a tool call's block (a session call's or a
+    /// helper's), e.g. `allowed by classifier: <reason>`.
+    ToolNote {
+        /// Tool-use id of the call, as the model issued it.
+        tool_use_id: String,
+        /// The note.
+        text: String,
+    },
     /// One safety-classifier model call's usage: counted in the session's
     /// cost under the classifier model.
     ClassifierUsage {
@@ -1357,6 +1365,9 @@ impl App {
                     allowed: n.allowed,
                     reason: n.reason,
                 });
+            }
+            Msg::ToolNote { tool_use_id, text } => {
+                self.transcript.attach_note(&tool_use_id, text);
             }
             Msg::ClassifierUsage { model, usage } => {
                 self.status.cost.record(&model, &usage);

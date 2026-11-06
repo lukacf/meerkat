@@ -185,7 +185,7 @@ async fn a_classifier_allow_runs_the_call() {
     std::fs::create_dir_all(&outside).unwrap();
     let target = outside.join("allowed.txt");
     let path = leak(target.display().to_string());
-    let classifier = ScriptedClassifier::new(vec![Ok(ClassifierVerdict::Allow)]);
+    let classifier = ScriptedClassifier::new(vec![Ok(ClassifierVerdict::allow("ok"))]);
     let llm = ScriptedLlmClient::new(vec![
         Step::Tool {
             id: "w1",

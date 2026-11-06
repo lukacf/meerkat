@@ -19,7 +19,7 @@ use meerkat_llm_core::LlmClient;
 use meerkat_tui::approval::ApprovalEvent;
 use meerkat_tui::approval::classifier::{
     ActionClassifier, ClassifierError, ClassifierInput, ClassifierVerdict, Environment,
-    LlmClassifier, classifier_default_model, low_reasoning_params,
+    LlmClassifier, STAGE1_ALLOW_REASON, classifier_default_model, low_reasoning_params,
 };
 use meerkat_tui::approval::prompts::{
     STAGE2_TOOLS_INSTRUCTIONS, TOOL_BUDGET_EXHAUSTED, UNTRUSTED_TOOL_RESULT_PREFIX,
@@ -100,7 +100,7 @@ async fn stage1_allow_short_circuits_and_is_reasoning_blind() {
     let client = ScriptedLlmClient::new(vec![Step::Text("ALLOW")]);
     let fx = Fixture::new();
     let verdict = classifier(&client).classify(fx.input()).await.unwrap();
-    assert_eq!(verdict, ClassifierVerdict::Allow);
+    assert_eq!(verdict, ClassifierVerdict::allow(STAGE1_ALLOW_REASON));
     let requests = client.recorded();
     assert_eq!(requests.len(), 1);
     let stage1 = &requests[0];
@@ -125,7 +125,7 @@ async fn stage1_answer_is_normalized() {
     let client = ScriptedLlmClient::new(vec![Step::Text("  \n**allow**.\n")]);
     let fx = Fixture::new();
     let verdict = classifier(&client).classify(fx.input()).await.unwrap();
-    assert_eq!(verdict, ClassifierVerdict::Allow);
+    assert_eq!(verdict, ClassifierVerdict::allow(STAGE1_ALLOW_REASON));
     assert_eq!(client.recorded().len(), 1);
 }
 
@@ -139,7 +139,7 @@ async fn stage1_block_then_stage2_allow() {
     ]);
     let fx = Fixture::new();
     let verdict = classifier(&client).classify(fx.input()).await.unwrap();
-    assert_eq!(verdict, ClassifierVerdict::Allow);
+    assert_eq!(verdict, ClassifierVerdict::allow("requested"));
     let requests = client.recorded();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[1].max_tokens, 1024);
@@ -352,7 +352,7 @@ async fn stage2_reads_build_rs_then_decides() {
         verdict,
         ClassifierVerdict::Block {
             rule: Some("T2".into()),
-            reason: "build.rs runs code [read 1 file]".into(),
+            reason: "build.rs runs code [classifier checked 1 file]".into(),
         }
     );
     let requests = client.recorded();
@@ -410,7 +410,7 @@ async fn the_tool_loop_is_bounded_and_ends_with_a_toolless_call() {
     };
     assert_eq!(
         reason,
-        "unclear [read 0 files, 6 searches; tool budget exhausted]"
+        "unclear [classifier checked 0 files, 6 searches; tool budget exhausted]"
     );
     let requests = client.recorded();
     assert_eq!(requests.len(), 8);

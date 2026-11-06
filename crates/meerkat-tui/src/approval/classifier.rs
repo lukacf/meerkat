@@ -194,7 +194,11 @@ pub struct ClassifierInput<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClassifierVerdict {
     /// Allow the action.
-    Allow,
+    Allow {
+        /// The classifier's stated reason (stage 2), or
+        /// [`STAGE1_ALLOW_REASON`] when the fast first stage allowed it.
+        reason: String,
+    },
     /// Block the action.
     Block {
         /// Block-rule id (e.g. `D1`), if the classifier named one.
@@ -204,10 +208,24 @@ pub enum ClassifierVerdict {
     },
 }
 
+/// Reason recorded for an action the single-word first stage allowed (it
+/// states none of its own).
+pub const STAGE1_ALLOW_REASON: &str = "nothing flagged by the quick check";
+
+impl ClassifierVerdict {
+    /// An allow verdict with `reason`.
+    #[must_use]
+    pub fn allow(reason: impl Into<String>) -> Self {
+        Self::Allow {
+            reason: reason.into(),
+        }
+    }
+}
+
 impl fmt::Display for ClassifierVerdict {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Allow => f.write_str("ALLOW"),
+            Self::Allow { reason } => write!(f, "ALLOW: {reason}"),
             Self::Block {
                 rule: Some(rule),
                 reason,
@@ -511,7 +529,7 @@ impl LlmClassifier {
                     None => reason,
                 },
             },
-            ClassifierVerdict::Allow => ClassifierVerdict::Allow,
+            allow @ ClassifierVerdict::Allow { .. } => allow,
         };
         Ok(verdict)
     }
@@ -649,7 +667,7 @@ impl Stage2Run {
                 let plural = |n: usize, one: &str, many: &str| {
                     format!("{n} {}", if n == 1 { one } else { many })
                 };
-                let mut out = format!("[read {}", plural(stats.files, "file", "files"));
+                let mut out = format!("[classifier checked {}", plural(stats.files, "file", "files"));
                 if stats.searches > 0 {
                     out.push_str(", ");
                     out.push_str(&plural(stats.searches, "search", "searches"));
@@ -846,7 +864,7 @@ impl ActionClassifier for LlmClassifier {
         let stage1 = parse_stage1(answer.trim());
         tracing::debug!(model = %self.model, tool = input.tool, ?stage1, "classifier stage 1 verdict");
         if stage1 == Stage1::Allow {
-            return Ok(ClassifierVerdict::Allow);
+            return Ok(ClassifierVerdict::allow(STAGE1_ALLOW_REASON));
         }
 
         let verdict = self.stage2(&input).await?;
@@ -940,7 +958,27 @@ mod tests {
         };
         assert_eq!(
             Stage2Run::Tools(stats).suffix().as_deref(),
-            Some("[read 3 files, 1 search]")
+            Some("[classifier checked 3 files, 1 search]")
+        );
+        let one = ToolStats {
+            calls: 1,
+            files: 1,
+            searches: 0,
+            exhausted: false,
+        };
+        assert_eq!(
+            Stage2Run::Tools(one).suffix().as_deref(),
+            Some("[classifier checked 1 file]")
+        );
+        let none = ToolStats {
+            calls: 2,
+            files: 0,
+            searches: 2,
+            exhausted: false,
+        };
+        assert_eq!(
+            Stage2Run::Tools(none).suffix().as_deref(),
+            Some("[classifier checked 0 files, 2 searches]")
         );
     }
 
@@ -951,6 +989,9 @@ mod tests {
             reason: "force push".into(),
         };
         assert_eq!(v.to_string(), "BLOCK [D1]: force push");
-        assert_eq!(ClassifierVerdict::Allow.to_string(), "ALLOW");
+        assert_eq!(
+            ClassifierVerdict::allow("in-project cleanup").to_string(),
+            "ALLOW: in-project cleanup"
+        );
     }
 }

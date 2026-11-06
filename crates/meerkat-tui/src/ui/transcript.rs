@@ -27,6 +27,8 @@ pub const MAX_TOOL_RESULT_LINES: usize = 20;
 pub const MAX_TOOL_ARGS_PREVIEW: usize = 200;
 /// Maximum characters of a helper header's last-activity preview.
 pub const MAX_HELPER_PREVIEW: usize = 60;
+/// Most notes kept for tool calls whose block has not arrived yet.
+const MAX_PENDING_NOTES: usize = 64;
 
 /// Index of a block in the transcript.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -281,6 +283,9 @@ pub enum Block {
         result_preview: Option<String>,
         /// Attached file diff, if the tool edited a file.
         diff: Option<DiffView>,
+        /// One dim line under the header, shown even when collapsed (e.g.
+        /// `allowed by classifier: <reason>`).
+        note: Option<String>,
         /// Nesting depth (0 for the primary agent, >0 for sub-agents).
         depth: usize,
         /// Whether the result preview and diff are hidden behind the header.
@@ -340,6 +345,9 @@ pub struct Transcript {
     live_helpers: Vec<String>,
     /// How new helper headers start.
     helper_view: HelperView,
+    /// Notes for tool calls whose block has not arrived yet, by tool-use id
+    /// (at most [`MAX_PENDING_NOTES`], oldest dropped first).
+    pending_notes: IndexMap<String, String>,
     /// The spinner clock of running helper headers.
     helper_clock: Option<Instant>,
     /// Number of helper headers.
@@ -738,6 +746,37 @@ impl Transcript {
             .rev()
             .find(|(i, b)| tool_has_output(b) && !self.is_hidden(BlockId(*i)))
             .map(|(i, _)| BlockId(i))
+    }
+
+    /// The tool block of a call by its tool-use id as the model issued it: a
+    /// session call is keyed by that id, a helper's by `{scope}/{id}`.
+    fn tool_block_by_call_id(&self, tool_use_id: &str) -> Option<BlockId> {
+        self.tool_block(tool_use_id).or_else(|| {
+            self.by_tool_id
+                .iter()
+                .rev()
+                .find(|(key, _)| {
+                    key.rsplit_once('/')
+                        .is_some_and(|(_, call)| call == tool_use_id)
+                })
+                .map(|(_, id)| *id)
+        })
+    }
+
+    /// Attach a one-line note to the tool block of `tool_use_id` (a session
+    /// call's or a helper's), shown dim under its header. A note for a call
+    /// whose block has not arrived yet waits for it.
+    pub fn attach_note(&mut self, tool_use_id: &str, text: String) {
+        if let Some(id) = self.tool_block_by_call_id(tool_use_id)
+            && let Some(Block::Tool { note, .. }) = self.block_mut(id)
+        {
+            *note = Some(text);
+            return;
+        }
+        if self.pending_notes.len() >= MAX_PENDING_NOTES {
+            self.pending_notes.shift_remove_index(0);
+        }
+        self.pending_notes.insert(tool_use_id.to_string(), text);
     }
 
     /// Attach a diff to the tool block for `tool_use_id`. Returns whether the block was found.
@@ -1142,12 +1181,17 @@ impl Transcript {
     }
 
     fn request_tool(&mut self, key: String, name: String, args: Value, depth: usize) -> BlockId {
+        let note = self.pending_notes.shift_remove(&key).or_else(|| {
+            key.rsplit_once('/')
+                .and_then(|(_, call)| self.pending_notes.shift_remove(call))
+        });
         let id = self.push(Block::Tool {
             name,
             args,
             state: ToolState::Requested,
             result_preview: None,
             diff: None,
+            note,
             depth,
             collapsed: true,
         });
@@ -1734,6 +1778,77 @@ mod tests {
             Some(Block::Helper(fold)) => fold.clone(),
             other => panic!("not a helper header: {other:?}"),
         }
+    }
+
+    fn note_of(t: &Transcript, id: BlockId) -> Option<String> {
+        match t.block(id) {
+            Some(Block::Tool { note, .. }) => note.clone(),
+            other => panic!("not a tool block: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn notes_attach_to_tool_blocks_by_call_id() {
+        let mut t = Transcript::new();
+        t.apply_agent_event(&AgentEvent::ToolCallRequested {
+            id: "t1".into(),
+            name: "shell".into(),
+            args: test_args(json!({"command": "rm -rf scratch.txt"})),
+        });
+        t.attach_note("t1", "allowed by classifier: in-project cleanup".into());
+        assert_eq!(
+            note_of(&t, BlockId(0)).as_deref(),
+            Some("allowed by classifier: in-project cleanup")
+        );
+        // The note is one dim line under the header, shown while collapsed.
+        let lines = block_lines(t.block(BlockId(0)).unwrap(), 80);
+        let second: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(second, "  allowed by classifier: in-project cleanup");
+        let dim = |style: ratatui::style::Style| {
+            style
+                .add_modifier
+                .contains(ratatui::style::Modifier::DIM)
+        };
+        assert!(dim(lines[1].style) || lines[1].spans.iter().all(|s| dim(s.style)));
+        // A note that arrives before its call waits for the block.
+        t.attach_note("t2", "allowed by classifier: early".into());
+        t.apply_agent_event(&AgentEvent::ToolCallRequested {
+            id: "t2".into(),
+            name: "shell".into(),
+            args: test_args(json!({"command": "ls"})),
+        });
+        assert_eq!(
+            note_of(&t, BlockId(1)).as_deref(),
+            Some("allowed by classifier: early")
+        );
+        // A call without a note has none.
+        t.apply_agent_event(&AgentEvent::ToolCallRequested {
+            id: "t3".into(),
+            name: "read_file".into(),
+            args: test_args(json!({"path": "a.rs"})),
+        });
+        assert_eq!(note_of(&t, BlockId(2)), None);
+    }
+
+    #[test]
+    fn a_helper_calls_note_hides_with_its_fold() {
+        let mut t = Transcript::new();
+        t.push(Block::User { text: "go".into() });
+        t.apply_scoped_event(&helper_call(&["scout"], "h1", "shell", json!({"command": "make"})));
+        let tool = BlockId(2);
+        // The engine names the call by the id the helper's model issued.
+        t.attach_note("h1", "allowed by classifier: builds the project".into());
+        assert_eq!(
+            note_of(&t, tool).as_deref(),
+            Some("allowed by classifier: builds the project")
+        );
+        // Folded: the user block and the header only.
+        assert_eq!(t.ensure_layout(80), 2 + 2);
+        assert!(t.is_hidden(tool));
+        let header = t.helper_header("scout").unwrap();
+        assert!(t.set_helper_expanded(header, true));
+        // Expanded: the tool block shows header, note and spacer.
+        assert_eq!(t.ensure_layout(80), 2 + 2 + 3);
     }
 
     #[test]

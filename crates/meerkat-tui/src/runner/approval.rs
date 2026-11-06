@@ -20,7 +20,7 @@ use crate::approval::counters::{
     AutoModeState, MAX_CONSECUTIVE_DENIALS, MAX_TOTAL_DENIALS, PauseCause,
 };
 use crate::approval::escalation::{EscalationRequest, HumanDecision};
-use crate::approval::policy::{Tier, VerdictSummary};
+use crate::approval::policy::{Decider, Tier, VerdictSummary};
 use crate::approval::rules::{Rule, RuleId, RuleKind, RuleOrigin, RuleSet};
 use crate::approval::{ApprovalEngine, ApprovalEvent};
 use crate::ui::{
@@ -196,6 +196,7 @@ impl Runner {
         match event {
             ApprovalEvent::Decision {
                 agent,
+                tool_use_id,
                 tool,
                 tier,
                 verdict,
@@ -207,9 +208,19 @@ impl Runner {
                     None => tool,
                 };
                 let allowed = verdict.is_allowed();
-                // Tier-1/2 allows are routine; only reviewed or denied
-                // actions are worth a line.
-                if !allowed || tier == Tier::Classifier {
+                // Tier-1/2 allows are routine; a classifier allow is one dim
+                // line under its tool block; other reviewed or denied
+                // actions get a line of their own.
+                if let VerdictSummary::Allowed {
+                    by: Decider::Classifier,
+                    ..
+                } = verdict
+                {
+                    self.send(Msg::ToolNote {
+                        tool_use_id,
+                        text: classifier_allow_note(reason.as_deref()),
+                    });
+                } else if !allowed || tier == Tier::Classifier {
                     let decider = match verdict {
                         VerdictSummary::Allowed { by, .. } | VerdictSummary::Denied { by, .. } => {
                             by
@@ -359,10 +370,59 @@ fn describe_rule(rule: &Rule) -> String {
     }
 }
 
+/// Most characters of the classifier's reason in an allow note.
+const MAX_ALLOW_REASON_CHARS: usize = 100;
+
+/// The note under a tool block the classifier allowed:
+/// `allowed by classifier: <reason>`, the reason on one line and cut to
+/// [`MAX_ALLOW_REASON_CHARS`].
+fn classifier_allow_note(reason: Option<&str>) -> String {
+    let one_line = reason
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if one_line.is_empty() {
+        return "allowed by classifier".to_string();
+    }
+    let reason = if one_line.chars().count() > MAX_ALLOW_REASON_CHARS {
+        let kept: String = one_line.chars().take(MAX_ALLOW_REASON_CHARS - 1).collect();
+        format!("{kept}…")
+    } else {
+        one_line
+    };
+    format!("allowed by classifier: {reason}")
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifier_allow_note_is_one_short_line() {
+        assert_eq!(
+            classifier_allow_note(Some("in-project scratch file the user asked to clean up")),
+            "allowed by classifier: in-project scratch file the user asked to clean up"
+        );
+        assert_eq!(
+            classifier_allow_note(Some("  line one\n  line two ")),
+            "allowed by classifier: line one line two"
+        );
+        assert_eq!(classifier_allow_note(None), "allowed by classifier");
+        assert_eq!(classifier_allow_note(Some(" \n")), "allowed by classifier");
+        let exact = "x".repeat(MAX_ALLOW_REASON_CHARS);
+        assert_eq!(
+            classifier_allow_note(Some(&exact)),
+            format!("allowed by classifier: {exact}")
+        );
+        let long = "é".repeat(MAX_ALLOW_REASON_CHARS + 30);
+        let note = classifier_allow_note(Some(&long));
+        let reason = note.strip_prefix("allowed by classifier: ").unwrap();
+        assert_eq!(reason.chars().count(), MAX_ALLOW_REASON_CHARS);
+        assert!(reason.ends_with('…'));
+        assert!(!note.contains('\n'));
+    }
 
     #[test]
     fn rule_numbers_are_stable_across_removal() {

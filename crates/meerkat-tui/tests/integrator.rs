@@ -478,7 +478,7 @@ impl ActionClassifier for AllowAll {
         &self,
         _input: ClassifierInput<'_>,
     ) -> Result<ClassifierVerdict, ClassifierError> {
-        Ok(ClassifierVerdict::Allow)
+        Ok(ClassifierVerdict::allow("ok"))
     }
 }
 
@@ -548,6 +548,78 @@ async fn a_message_typed_while_a_slow_tool_runs_reaches_the_model_after_its_resu
             .any(|m| matches!(m, Message::SystemNotice(_))),
         "nothing was closed by recovery"
     );
+    rig.quit().await;
+}
+
+/// Allows every reviewed call with a stated reason.
+struct AllowBecause(&'static str);
+
+#[async_trait]
+impl ActionClassifier for AllowBecause {
+    async fn classify(
+        &self,
+        _input: ClassifierInput<'_>,
+    ) -> Result<ClassifierVerdict, ClassifierError> {
+        Ok(ClassifierVerdict::allow(self.0))
+    }
+}
+
+/// A call the classifier allowed gets a dim note under its tool block with
+/// the classifier's reason; a tier-1 call gets none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_classifier_allowed_call_gets_a_note_and_a_tier1_call_does_not() {
+    let ws = Workspace::new();
+    std::fs::write(ws.root.join("scratch.txt"), "x").unwrap();
+    let llm = ScriptedLlmClient::new(vec![
+        Step::Tools(vec![
+            ("tier1", "shell", json!({ "command": "ls" })),
+            (
+                "reviewed",
+                "shell",
+                json!({ "command": "rm -rf scratch.txt" }),
+            ),
+        ]),
+        Step::Text("cleaned up"),
+    ]);
+    let options = RigOptions {
+        approval: ApprovalOverrides {
+            classifier: Some(Arc::new(AllowBecause(
+                "removes an in-project scratch file\nthe user asked to clean up",
+            ))),
+            ..ApprovalOverrides::default()
+        },
+        ..RigOptions::default()
+    };
+    let mut rig = Rig::start_opts(&ws.root, &llm, Start::New, options).await;
+    rig.send(Effect::StartTurn("clean up the scratch file".into()));
+    let note = rig
+        .wait_for(
+            |msg| matches!(msg, Msg::ToolNote { tool_use_id, .. } if tool_use_id == "reviewed"),
+        )
+        .await;
+    let Msg::ToolNote { text, .. } = note else {
+        panic!("not a note: {note:?}");
+    };
+    assert_eq!(
+        text,
+        "allowed by classifier: removes an in-project scratch file the user asked to clean up"
+    );
+    assert_eq!(
+        rig.turn_finished().await.result.expect("turn").text,
+        "cleaned up"
+    );
+    assert!(
+        !ws.root.join("scratch.txt").exists(),
+        "the reviewed call ran"
+    );
+    let notes: Vec<&Msg> = rig
+        .seen
+        .iter()
+        .filter(|msg| matches!(msg, Msg::ToolNote { .. }))
+        .collect();
+    assert_eq!(notes.len(), 1, "only the reviewed call is noted: {notes:?}");
+    // The classifier allow no longer logs a separate approval line.
+    assert!(!rig.seen.iter().any(|msg| matches!(msg, Msg::Approval(_))));
     rig.quit().await;
 }
 

@@ -258,7 +258,8 @@ pub enum ApprovalEvent {
         tier: Tier,
         /// Outcome.
         verdict: VerdictSummary,
-        /// Why it was denied (the reason the model receives), if it was.
+        /// Why it was denied (the reason the model receives), or, for an
+        /// action the classifier allowed, the classifier's stated reason.
         reason: Option<String>,
     },
     /// Auto mode paused.

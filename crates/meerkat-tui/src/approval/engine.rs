@@ -630,6 +630,13 @@ impl ApprovalEngine {
         let facts = Facts { action, subjects };
         let verdict = self.evaluate(session_id, agent, call.id, &facts).await;
         let (tier, reason) = match &verdict {
+            // A classifier allow carries the classifier's stated reason;
+            // other allows carry none.
+            Verdict::Allow {
+                tier,
+                by: Decider::Classifier,
+                why,
+            } => (*tier, Some(why.clone())),
             Verdict::Allow { tier, .. } => (*tier, None),
             Verdict::Deny { tier, reason } => (*tier, Some(reason.to_string())),
         };
@@ -756,7 +763,7 @@ impl ApprovalEngine {
             && self.session(session_id).allow_cache.contains(key)
         {
             // A cache hit leaves the denial counters alone.
-            return allow3(Decider::Classifier, "previously allowed by the classifier");
+            return allow3(Decider::Classifier, "allowed earlier in this session");
         }
 
         let result = self.classify(session_id, &facts.action, &payload).await;
@@ -801,12 +808,12 @@ impl ApprovalEngine {
         key: Option<CacheKey>,
     ) -> Verdict {
         match verdict {
-            ClassifierVerdict::Allow => {
+            ClassifierVerdict::Allow { reason } => {
                 if let Some(key) = key {
                     self.session(session_id).allow_cache.insert(key);
                 }
                 self.auto.lock().record_allow();
-                allow3(Decider::Classifier, "allowed by the classifier")
+                allow3(Decider::Classifier, reason)
             }
             ClassifierVerdict::Block { rule, reason } => {
                 let paused = self.auto.lock().record_classifier_deny();
@@ -1432,7 +1439,7 @@ mod tests {
             self.seen.lock().push(input.transcript.render());
             let mut verdicts = self.verdicts.lock();
             if verdicts.is_empty() {
-                Ok(ClassifierVerdict::Allow)
+                Ok(ClassifierVerdict::allow("ok"))
             } else {
                 verdicts.remove(0)
             }

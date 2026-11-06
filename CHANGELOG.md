@@ -63,7 +63,10 @@ them.
   refuses the start with an explanation of what blocked it (on Linux the
   user-namespace switches, with the AppArmor profile or sysctl that fixes
   it) and how to run unconfined; `--confinement-read`/`--confinement-write`
-  add directories to the sandbox. User-global files live in `~/.rkat/tui`
+  add directories to the sandbox; a confined command inherits none of
+  `rkat-tui`'s environment but a curated set of it (`PATH`, `HOME`, locale,
+  TLS roots, proxies and a few tool directories; provider API keys stay
+  outside). User-global files live in `~/.rkat/tui`
   (`--config-dir` overrides; an existing `~/.config/rkat-tui` is used with a
   notice until the new directory exists). See `crates/meerkat-tui/README.md`.
 

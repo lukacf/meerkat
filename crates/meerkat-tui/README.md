@@ -142,6 +142,17 @@ home directory is there, and Unix sockets are refused. Why each grant:
 - `/etc/{passwd,group}`: user and group names (`ls -l`, `id`, `git`);
 - `/etc/gitconfig`: git's system defaults.
 
+**Environment.** A confined command does not inherit `rkat-tui`'s
+environment. It gets `PWD` and exactly these variables, when `rkat-tui` has
+them: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `TERM`,
+`COLORTERM`, `NO_COLOR`, `CARGO_HOME`, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`,
+`XDG_CACHE_HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `LANG`, `LANGUAGE`,
+`LC_*`, `TZ`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `CURL_CA_BUNDLE`, and the
+proxy variables `http_proxy`, `https_proxy`, `no_proxy`, `all_proxy` (in
+lower and upper case). Every other variable, provider API keys included,
+stays outside the sandbox. Helpers' shell commands get the same set.
+Unconfined commands (`off`) inherit the whole environment as before.
+
 The sandbox grants only directories and single regular files, at their own
 path, never through a symbolic link on the way and never overlapping each
 other or the baseline: that is why `/etc` is granted file by file, and a

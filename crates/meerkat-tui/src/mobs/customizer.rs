@@ -3,6 +3,7 @@
 //! the TUI's file tools and the helper instructions, and tells the
 //! [`super::follow`] task to observe it.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use meerkat_core::{AgentToolDispatcher, SessionId};
@@ -33,6 +34,9 @@ pub struct HelperCustomizer {
     registry: Arc<HelperRegistry>,
     engine: Arc<ApprovalEngine>,
     tools: HelperTools,
+    /// The environment of the helper's shell commands (the confined
+    /// shell's curated set), `None` when the shell runs unconfined.
+    shell_env: Option<HashMap<String, String>>,
     spawning: mpsc::UnboundedSender<Spawning>,
 }
 
@@ -43,18 +47,21 @@ impl std::fmt::Debug for HelperCustomizer {
 }
 
 impl HelperCustomizer {
-    /// A customizer gating helpers with `engine`.
+    /// A customizer gating helpers with `engine`; a helper's shell
+    /// commands get `shell_env` (see [`inherit_shell_env`]).
     #[must_use]
     pub fn new(
         registry: Arc<HelperRegistry>,
         engine: Arc<ApprovalEngine>,
         tools: HelperTools,
+        shell_env: Option<HashMap<String, String>>,
         spawning: mpsc::UnboundedSender<Spawning>,
     ) -> Self {
         Self {
             registry,
             engine,
             tools,
+            shell_env,
             spawning,
         }
     }
@@ -72,7 +79,18 @@ fn requested_model(spec: &SpawnMemberSpec) -> Option<String> {
     })
 }
 
-/// Apply the owner's gate, binding, tools and instructions to `spec`.
+/// Give `spec`'s shell commands `shell_env` (the confined shell's curated
+/// environment) unless the spawn already names one. A helper's shell runs
+/// under the same confinement as its owner's, so it needs the same
+/// environment.
+fn inherit_shell_env(spec: &mut SpawnMemberSpec, shell_env: Option<&HashMap<String, String>>) {
+    if spec.shell_env.is_none() {
+        spec.shell_env = shell_env.cloned();
+    }
+}
+
+/// Apply the owner's gate, binding, tools, instructions and the shell's
+/// environment to `spec`.
 fn shape(
     spec: &mut SpawnMemberSpec,
     owner: &Owner,
@@ -80,6 +98,7 @@ fn shape(
     model: &str,
     engine: &Arc<ApprovalEngine>,
     tools: &HelperTools,
+    shell_env: Option<&HashMap<String, String>>,
 ) {
     // A helper on its owner's model reaches it through the same endpoint;
     // a helper that asks for another model resolves that model's default
@@ -93,6 +112,7 @@ fn shape(
     if spec.external_tools.is_none() {
         spec.external_tools = Some(tools());
     }
+    inherit_shell_env(spec, shell_env);
     spec.additional_instructions
         .get_or_insert_with(Vec::new)
         .push(HELPER_PERSONA.to_string());
@@ -129,7 +149,15 @@ impl HelperCustomizer {
         if let Some(session) = session {
             self.registry.bind_session(&key, &tag, session);
         }
-        shape(spec, owner, &label, &model, &self.engine, &self.tools);
+        shape(
+            spec,
+            owner,
+            &label,
+            &model,
+            &self.engine,
+            &self.tools,
+            self.shell_env.as_ref(),
+        );
         let _ = self.spawning.send(Spawning { key, tag });
         Ok(())
     }
@@ -183,5 +211,28 @@ impl SpawnMemberCustomizer for HelperCustomizer {
         let key = HelperKey::new(ctx.mob_id.clone(), spec.identity.clone());
         let owner = self.persisted_owner(&key)?;
         self.admit(key, &owner, spec, Some(&durable.session_id))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_helper_gets_the_confined_shell_environment_unless_it_names_one() {
+        let curated = HashMap::from([("PATH".to_string(), "/home/u/.cargo/bin".to_string())]);
+        let mut spec = SpawnMemberSpec::new("delegate", "worker");
+        inherit_shell_env(&mut spec, Some(&curated));
+        assert_eq!(spec.shell_env.as_ref(), Some(&curated));
+
+        let own = HashMap::from([("PATH".to_string(), "/opt/bin".to_string())]);
+        let mut named = SpawnMemberSpec::new("delegate", "worker");
+        named.shell_env = Some(own.clone());
+        inherit_shell_env(&mut named, Some(&curated));
+        assert_eq!(named.shell_env, Some(own));
+
+        let mut unconfined = SpawnMemberSpec::new("delegate", "worker");
+        inherit_shell_env(&mut unconfined, None);
+        assert_eq!(unconfined.shell_env, None);
     }
 }

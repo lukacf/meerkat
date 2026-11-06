@@ -179,6 +179,29 @@ async fn workspace_mode_confines_writes_to_the_workspace() {
     );
 }
 
+/// A confined command gets rkat-tui's curated environment: `HOME` and
+/// `PATH` as rkat-tui has them (so `~/.cargo/bin` tools resolve), and none
+/// of the rest (the test runner's `CARGO_MANIFEST_DIR` stands in for a
+/// provider API key: set in rkat-tui's environment, not on the allowlist).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workspace_mode_passes_the_curated_environment() {
+    let ws = Workspace::new();
+    let command = "echo \"HOME=[$HOME]\"; echo \"PATH=[$PATH]\"; echo \"OUTSIDE=[${CARGO_MANIFEST_DIR:-unset}]\"; echo END";
+    let Some(output) = run_confined(&ws, "workspace", command).await else {
+        return;
+    };
+    assert!(output.contains("END"), "{output}");
+    if let Ok(home) = std::env::var("HOME") {
+        assert!(output.contains(&format!("HOME=[{home}]")), "{output}");
+    }
+    if let Ok(path) = std::env::var("PATH") {
+        assert!(output.contains(&format!("PATH=[{path}]")), "{output}");
+    }
+    if std::env::var_os("CARGO_MANIFEST_DIR").is_some() {
+        assert!(output.contains("OUTSIDE=[unset]"), "{output}");
+    }
+}
+
 /// Name resolution inside workspace mode, with this host's real system
 /// paths (`HostPaths::detect`): `localhost` resolves from the granted
 /// `/etc/hosts`, and a DNS name resolves through the stub resolver named in

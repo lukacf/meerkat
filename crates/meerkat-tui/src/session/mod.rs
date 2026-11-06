@@ -663,8 +663,11 @@ pub fn tool_access_policy() -> ToolAccessPolicy {
 
 /// Build options shared by fresh and resumed sessions: `instructions`, the
 /// external tools, the runtime's MCP servers, the compaction trigger, the
-/// tool access policy and (with the runtime's helper host) the mob tools
-/// enabled explicitly, which a resumed session's metadata alone never does.
+/// tool access policy, the confined shell's curated environment
+/// ([`crate::bootstrap::ConfinementPlan::shell_env`]; `None` when the shell
+/// runs unconfined and inherits rkat-tui's environment) and (with the
+/// runtime's helper host) the mob tools enabled explicitly, which a resumed
+/// session's metadata alone never does.
 fn build_options(
     options: SessionOptions,
     provider: Provider,
@@ -683,6 +686,7 @@ fn build_options(
         mcp_servers: runtime.mcp_servers.clone(),
         auto_compact_threshold_override: compaction.threshold_override(),
         tool_access_policy: Some(tool_access_policy()),
+        shell_env: runtime.confinement.shell_env.clone(),
         ..SessionBuildOptions::default()
     };
     if runtime.helpers.is_some() {

@@ -100,6 +100,10 @@ pub struct HelperHostParts {
     /// WorkGraph tools on gets its mob's scoped service and namespace grant
     /// from it (the factory refuses WorkGraph tools without a grant).
     pub workgraph: meerkat::WorkGraphService,
+    /// The environment of a helper's shell commands: the confined shell's
+    /// curated set ([`crate::bootstrap::ConfinementPlan::shell_env`]),
+    /// `None` when the shell runs unconfined.
+    pub shell_env: Option<std::collections::HashMap<String, String>>,
 }
 
 #[cfg(feature = "mob")]
@@ -122,6 +126,7 @@ impl Helpers {
             tools,
             llm_override,
             workgraph,
+            shell_env,
         } = parts;
         let (registry, updates) = HelperRegistry::persistent(&realm_root);
         let registry = Arc::new(registry);
@@ -133,8 +138,13 @@ impl Helpers {
             }
         }));
         let (spawning_tx, spawning_rx) = mpsc::unbounded_channel();
-        let customizer =
-            customizer::HelperCustomizer::new(Arc::clone(&registry), engine, tools, spawning_tx);
+        let customizer = customizer::HelperCustomizer::new(
+            Arc::clone(&registry),
+            engine,
+            tools,
+            shell_env,
+            spawning_tx,
+        );
         let state = MobMcpState::new_with_runtime_adapter(
             service as Arc<dyn meerkat_mob::MobSessionService>,
             Some(machine),

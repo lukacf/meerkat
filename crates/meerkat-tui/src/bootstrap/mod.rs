@@ -53,6 +53,7 @@ pub mod persona;
 pub mod realm_config;
 pub mod scope;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -454,6 +455,7 @@ pub async fn bootstrap_with(
         options.llm_override,
         &mob_tools_slot,
         workgraph,
+        confinement.shell_env.clone(),
     )?;
 
     let scope_workspace = scope.context_root.clone();
@@ -530,6 +532,7 @@ type MobToolsSlot = Arc<std::sync::RwLock<Option<Arc<dyn meerkat_core::service::
 /// Host helpers on the composed service and offer their tools to every
 /// session build (see [`crate::mobs`]).
 #[cfg(feature = "mob")]
+#[allow(clippy::too_many_arguments)]
 fn start_helpers(
     service: &Arc<TuiService>,
     machine: &Arc<MeerkatMachine>,
@@ -538,6 +541,7 @@ fn start_helpers(
     llm_override: Option<Arc<dyn LlmClient>>,
     slot: &MobToolsSlot,
     workgraph: meerkat::WorkGraphService,
+    shell_env: Option<HashMap<String, String>>,
 ) -> Result<Option<Arc<Helpers>>, TuiError> {
     let root = scope.project_root.clone();
     let tools: crate::mobs::customizer::HelperTools = Arc::new(move || {
@@ -551,6 +555,7 @@ fn start_helpers(
         tools,
         llm_override,
         workgraph,
+        shell_env,
     })?;
     *slot
         .write()
@@ -560,7 +565,7 @@ fn start_helpers(
 
 /// Without the `mob` feature no helpers are hosted.
 #[cfg(not(feature = "mob"))]
-#[allow(clippy::unnecessary_wraps)]
+#[allow(clippy::unnecessary_wraps, clippy::too_many_arguments)]
 fn start_helpers(
     _service: &Arc<TuiService>,
     _machine: &Arc<MeerkatMachine>,
@@ -569,6 +574,7 @@ fn start_helpers(
     _llm_override: Option<Arc<dyn LlmClient>>,
     _slot: &MobToolsSlot,
     _workgraph: meerkat::WorkGraphService,
+    _shell_env: Option<HashMap<String, String>>,
 ) -> Result<Option<Arc<Helpers>>, TuiError> {
     Ok(None)
 }

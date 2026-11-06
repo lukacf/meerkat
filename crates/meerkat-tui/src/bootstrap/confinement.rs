@@ -77,12 +77,24 @@
 //! A realm that states `trusted_host` (or nothing) for the shell leaves the
 //! command line in charge.
 //!
+//! **Environment.** A confined command inherits nothing of rkat-tui's
+//! environment: the backend clears it and sets only what the shell tool
+//! passes. rkat-tui therefore passes [`ConfinementPlan::shell_env`], a
+//! curated copy of its own environment ([`confined_environment`]): exactly
+//! the variables [`CONFINED_ENV_ALLOWLIST`] names plus the `LC_*` family
+//! (program lookup, home-relative tool directories, locale, TLS roots,
+//! proxies). Every other variable, provider API keys included, stays
+//! outside the sandbox. An unconfined command (`off`) inherits the whole
+//! environment as before.
+//!
 //! A mode this host's backend cannot enforce refuses the start (fail
 //! closed, no fallback) with [`ConfinementError::Unenforceable`], whose
 //! message explains what blocked it ([`HostUsernsStatus`]: on Linux the
 //! user-namespace switches under `/proc/sys`), how to make it work, and how
 //! to run without confinement.
 
+use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use meerkat_core::confinement::{
@@ -657,6 +669,83 @@ pub struct ConfinementPlan {
     pub shell: ShellConfinement,
     /// One-line start-up notices.
     pub notices: Vec<String>,
+    /// The environment of a shell command: `Some` curated set of
+    /// rkat-tui's own environment ([`confined_environment`]) when the shell
+    /// is [`ShellConfinement::Required`] (a confined command inherits
+    /// nothing, so rkat-tui passes this set), `None` when it is
+    /// [`ShellConfinement::TrustedHost`] (the command inherits the whole
+    /// environment, as before).
+    pub shell_env: Option<HashMap<String, String>>,
+}
+
+/// The host variables a confined command gets, by exact name (the `LC_*`
+/// family comes in through [`CONFINED_ENV_PREFIXES`]):
+///
+/// - program lookup and identity: `PATH` (so `~/.cargo/bin` and the like
+///   resolve), `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`;
+/// - terminal: `TERM`, `COLORTERM`, `NO_COLOR`;
+/// - home-relative tool directories: `CARGO_HOME`, `RUSTUP_HOME`,
+///   `RUSTUP_TOOLCHAIN`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`,
+///   `XDG_DATA_HOME`;
+/// - locale and time: `LANG`, `LANGUAGE`, `TZ`;
+/// - TLS roots: `SSL_CERT_FILE`, `SSL_CERT_DIR`, `CURL_CA_BUNDLE`;
+/// - proxies, in both spellings.
+///
+/// Provider API keys, cloud credentials, tokens and every other variable
+/// stay outside the sandbox on purpose: a confined command sees only what
+/// a build or a lookup needs.
+pub const CONFINED_ENV_ALLOWLIST: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TMPDIR",
+    "TERM",
+    "COLORTERM",
+    "NO_COLOR",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "LANG",
+    "LANGUAGE",
+    "TZ",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "CURL_CA_BUNDLE",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "all_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+];
+
+/// Name prefixes a confined command gets: the locale categories (`LC_ALL`,
+/// `LC_CTYPE`, ...).
+pub const CONFINED_ENV_PREFIXES: &[&str] = &["LC_"];
+
+/// The curated environment of a confined command: the variables of `vars`
+/// that [`CONFINED_ENV_ALLOWLIST`] names or [`CONFINED_ENV_PREFIXES`]
+/// covers. A name or value that is not UTF-8 is dropped.
+#[must_use]
+pub fn confined_environment(
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+) -> HashMap<String, String> {
+    vars.into_iter()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .filter(|(name, _)| {
+            CONFINED_ENV_ALLOWLIST.contains(&name.as_str())
+                || CONFINED_ENV_PREFIXES
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+        })
+        .collect()
 }
 
 impl ConfinementPlan {
@@ -893,6 +982,7 @@ pub fn plan(
             mode,
             shell: ShellConfinement::TrustedHost,
             notices,
+            shell_env: None,
         });
     };
     check(&requirement).map_err(|source| {
@@ -913,6 +1003,7 @@ pub fn plan(
         mode,
         shell: ShellConfinement::Required { requirement },
         notices,
+        shell_env: Some(confined_environment(std::env::vars_os())),
     })
 }
 
@@ -1006,7 +1097,10 @@ mod tests {
             // A host that cannot enforce it refuses the plan, naming the
             // refusal and the way out.
             match plan(mode, &f.ws, &Config::default(), &f.host, &none()) {
-                Ok(plan) => assert_eq!(plan.requirement(), Some(&requirement)),
+                Ok(plan) => {
+                    assert_eq!(plan.requirement(), Some(&requirement));
+                    assert!(plan.shell_env.is_some(), "{mode:?}");
+                }
                 Err(err @ ConfinementError::Unenforceable { .. }) => {
                     let refusal = check(&requirement).unwrap_err();
                     let reason = err.to_string();
@@ -1020,6 +1114,87 @@ mod tests {
         let off = plan(ConfinementArg::Off, &f.ws, &Config::default(), &f.host, &none()).unwrap();
         assert_eq!(off.shell, ShellConfinement::TrustedHost);
         assert_eq!(off.notices, vec![describe(ConfinementArg::Off).to_string()]);
+        assert_eq!(off.shell_env, None);
+    }
+
+    fn vars(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        pairs
+            .iter()
+            .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+            .collect()
+    }
+
+    #[test]
+    fn a_confined_command_gets_the_allowlist_and_nothing_else() {
+        let mut host = vars(&[
+            ("PATH", "/home/u/.cargo/bin:/usr/bin"),
+            ("HOME", "/home/u"),
+            ("LANG", "en_US.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+            ("LC_CTYPE", "en_US.UTF-8"),
+            ("https_proxy", "http://proxy:3128"),
+            ("SSL_CERT_FILE", "/etc/ssl/cert.pem"),
+            ("ANTHROPIC_API_KEY", "sk-ant"),
+            ("AWS_SECRET_ACCESS_KEY", "secret"),
+            ("GITHUB_TOKEN", "ghp"),
+            ("LD_PRELOAD", "/tmp/evil.so"),
+            ("BASH_ENV", "/tmp/rc"),
+            ("RUSTFLAGS", "-Dwarnings"),
+        ]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            host.push((
+                OsString::from("TERM"),
+                OsString::from_vec(vec![0xff, 0xfe]),
+            ));
+        }
+        let env = confined_environment(host);
+        for name in [
+            "PATH",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "https_proxy",
+            "SSL_CERT_FILE",
+        ] {
+            assert!(env.contains_key(name), "{name} kept");
+        }
+        assert_eq!(env["PATH"], "/home/u/.cargo/bin:/usr/bin");
+        for name in [
+            "ANTHROPIC_API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "GITHUB_TOKEN",
+            "LD_PRELOAD",
+            "BASH_ENV",
+            "RUSTFLAGS",
+            "TERM",
+        ] {
+            assert!(!env.contains_key(name), "{name} dropped");
+        }
+        assert_eq!(env.len(), 7, "{env:?}");
+    }
+
+    #[test]
+    fn no_allowlisted_name_is_one_the_sandbox_refuses() {
+        const REFUSED_PREFIXES: [&str; 5] = ["DYLD_", "LD_", "_RLD_", "__XPC_", "BASH_FUNC_"];
+        const REFUSED_KEYS: [&str; 6] = [
+            "ENV",
+            "BASH_ENV",
+            "SHELLOPTS",
+            "BASHOPTS",
+            "ZDOTDIR",
+            "GLIBC_TUNABLES",
+        ];
+        for name in CONFINED_ENV_ALLOWLIST.iter().chain(CONFINED_ENV_PREFIXES) {
+            assert!(!REFUSED_KEYS.contains(name), "{name}");
+            for prefix in REFUSED_PREFIXES {
+                assert!(!name.starts_with(prefix), "{name}");
+                // A prefix family must not overlap a refused family either.
+                assert!(!prefix.starts_with(name), "{name}");
+            }
+        }
     }
 
     #[test]
@@ -1163,6 +1338,7 @@ mod tests {
                 Ok(plan) => {
                     assert_eq!(plan.requirement(), Some(&requirement), "{mode:?}");
                     assert!(plan.notices[0].contains("realm's [confinement]"));
+                    assert!(plan.shell_env.is_some(), "{mode:?}");
                 }
                 Err(err @ ConfinementError::Unenforceable { floor: true, .. }) => {
                     let text = err.to_string();
@@ -1177,6 +1353,7 @@ mod tests {
         let off = plan(ConfinementArg::Off, &f.ws, &trusted, &f.host, &none()).unwrap();
         assert_eq!(off.shell, ShellConfinement::TrustedHost);
         assert!(off.notices.iter().any(|n| n.contains("does not confine the shell")));
+        assert_eq!(off.shell_env, None);
     }
 
     #[test]

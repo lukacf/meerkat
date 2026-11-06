@@ -225,9 +225,9 @@ async fn status_read_across_retirement_omits_review_and_replacement_still_refuse
 }
 
 // The read's view of one login's presentation slot, after its await.
-fn slot<'a>(
-    active: &'a Mutex<Option<Arc<&'static str>>>,
-) -> impl FnOnce() -> Result<Option<Arc<&'static str>>, ()> + 'a {
+fn slot<'a, T>(
+    active: &'a Mutex<Option<Arc<T>>>,
+) -> impl FnOnce() -> Result<Option<Arc<T>>, ()> + 'a {
     move || active.lock().map(|held| held.clone()).map_err(|_| ())
 }
 

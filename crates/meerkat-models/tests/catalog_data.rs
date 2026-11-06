@@ -527,6 +527,7 @@ fn gpt_6_sol_and_luna_are_cataloged_without_changing_the_openai_default() {
     for (id, name) in [
         ("gpt-6-sol", "GPT-6 Sol"),
         ("gpt-6.1-sol", "GPT-6.1 Sol"),
+        ("gpt-6.1-terra", "GPT-6.1 Terra"),
         ("gpt-6-luna", "GPT-6 Luna"),
     ] {
         let entry = entry_for(Provider::OpenAI, id)
@@ -1690,6 +1691,7 @@ mod schema {
             "gpt-6-astra",
             "gpt-6-sol",
             "gpt-6.1-sol",
+            "gpt-6.1-terra",
             "gpt-6-luna",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
@@ -1901,5 +1903,31 @@ fn gpt_6_1_sol_uses_the_astra_effort_ladder() {
         ]
     );
     assert_eq!(caps.max_input_tokens, Some(922_000));
+    assert!(caps.openai_responses_params.is_some());
+}
+
+/// GPT-6.1 Terra documents `none` through `max` (default `medium`), the Sol
+/// and Luna ladder rather than Astra's, plus text/image input and text
+/// output only. Source: https://developers.openai.com/api/docs/models/gpt-6.1-terra
+#[test]
+fn gpt_6_1_terra_uses_the_sol_luna_effort_ladder() {
+    let caps =
+        capabilities_for(Provider::OpenAI, "gpt-6.1-terra").expect("gpt-6.1-terra capabilities");
+    assert_eq!(
+        caps.effort_levels,
+        &[
+            EffortLevel::None,
+            EffortLevel::Low,
+            EffortLevel::Medium,
+            EffortLevel::High,
+            EffortLevel::Xhigh,
+            EffortLevel::Max,
+        ]
+    );
+    assert_eq!(caps.model_family, "gpt-6");
+    assert_eq!(caps.max_input_tokens, Some(922_000));
+    assert!(caps.vision && caps.image_tool_results);
+    assert!(!caps.inline_video && !caps.realtime && !caps.image_generation);
+    assert!(caps.supports_web_search && caps.supports_structured_output);
     assert!(caps.openai_responses_params.is_some());
 }

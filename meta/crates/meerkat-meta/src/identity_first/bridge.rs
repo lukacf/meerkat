@@ -3202,7 +3202,15 @@ impl GovernedDeliveryCustody {
     {
         self.custody.as_ref()?;
         if let Some((fence, record)) = self.entry.take() {
-            match fence.enter() {
+            // The final protected entry: the host's fence answers without
+            // waiting.
+            let entered = {
+                let _section = meerkat_core::protected_section::enter(
+                    meerkat_core::protected_section::ProtectedSection::GovernedEntry,
+                );
+                fence.enter()
+            };
+            match entered {
                 Ok(permit) => record.entered(permit),
                 Err(refusal) => {
                     record.refused(refusal);
@@ -3451,7 +3459,12 @@ impl GovernedEntryRecord {
     pub(crate) fn finish(&self, outcome: GovernedEntryOutcome) {
         let state = std::mem::replace(&mut *self.state(), GovernedEntryState::Finished);
         match state {
-            GovernedEntryState::Entered(permit) => permit.finish(outcome),
+            GovernedEntryState::Entered(permit) => {
+                let _section = meerkat_core::protected_section::enter(
+                    meerkat_core::protected_section::ProtectedSection::GovernedEntry,
+                );
+                permit.finish(outcome);
+            }
             other => *self.state() = other,
         }
     }

@@ -11011,13 +11011,18 @@ impl IdentityRuntime {
             spec,
         };
         // The trusted host binds for exactly this session, under the lease.
+        // The bind runs under the identity's lifecycle lock: a protected
+        // section, where the host never waits.
         let super::bridge::BoundGovernedInput {
             input: bound,
             settlement,
             entry_fence,
-        } = binder.bind(&context, input).await.map_err(|reason| {
-            IdentityRuntimeError::GovernedInput(GovernedInputError::Bind(reason))
-        })?;
+        } = meerkat_core::protected_section::within(
+            meerkat_core::protected_section::ProtectedSection::GovernedBind,
+            binder.bind(&context, input),
+        )
+        .await
+        .map_err(|reason| IdentityRuntimeError::GovernedInput(GovernedInputError::Bind(reason)))?;
         let header = bound.header();
         if header.authority_association.is_none() || header.ingress_context.is_none() {
             // Nothing was submitted: the custody is withdrawn.
@@ -11031,7 +11036,12 @@ impl IdentityRuntime {
         // operation: never left to a caller that may be gone, never dropped.
         let unresolved = |settlement: Box<dyn super::bridge::GovernedSettlement>,
                           detail: String| {
-            binder.retain_unresolved(settlement, &detail);
+            {
+                let _section = meerkat_core::protected_section::enter(
+                    meerkat_core::protected_section::ProtectedSection::GovernedEntry,
+                );
+                binder.retain_unresolved(settlement, &detail);
+            }
             IdentityRuntimeError::GovernedInput(GovernedInputError::AdmissionUnresolved { detail })
         };
         // The member session's native admission settles this custody; the
@@ -11133,6 +11143,9 @@ impl IdentityRuntime {
             drop(settlement);
             Ok(())
         } else {
+            let _section = meerkat_core::protected_section::enter(
+                meerkat_core::protected_section::ProtectedSection::GovernedEntry,
+            );
             settlement.accepted(&admission)
         };
         // The turn was admitted onto the bound session; it is never

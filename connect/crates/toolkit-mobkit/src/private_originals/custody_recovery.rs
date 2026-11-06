@@ -604,6 +604,7 @@ impl CustodyRecovery {
         &self,
         register: impl FnOnce(bool) -> Result<T, PrivateOriginalError>,
     ) -> Result<T, PrivateOriginalError> {
+        crate::no_wait::may_wait("custody_recovery.enroll");
         let control = self
             .control
             .state
@@ -1448,6 +1449,7 @@ impl PrivateOriginals {
                 &actor.executor_actor_identity(),
                 entry.input(),
                 |admitted| {
+                    crate::no_wait::may_wait("custody_recovery.recovered_publish");
                     let _control = self
                         .custody_recovery
                         .control

@@ -18,6 +18,9 @@ impl ToolkitOriginalOwner {
     /// Ordinary async membership changes use this same source writer. Native
     /// callbacks use the nonwaiting variant above and never wait for this guard.
     pub(crate) async fn source_writer(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        // Another writer holds this across its durable write: waiting for it
+        // inside a protected section is a violation.
+        crate::no_wait::may_wait("original_ingress.source_writer");
         // The actual async caller retains this wait. It checks source/grant
         // currentness after acquisition, and never enters a native callback
         // while waiting for recovery's entered canonical write.

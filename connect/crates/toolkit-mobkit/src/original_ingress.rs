@@ -568,14 +568,18 @@ impl toolkit_store::RecordChangePublication for ToolkitOriginalOwner {
                     .expect("test publication probe failed");
             }
         }
-        // The canonical SQLite owner invokes this before a validated UPDATE.
-        // This is the same publication used by native grants and source
-        // cancellation, not a second record or permission owner.
+        // The canonical SQLite owner invokes this before a validated UPDATE,
+        // inside its transaction: a protected section. This is the same
+        // publication used by native grants and source cancellation, not a
+        // second record or permission owner.
+        let _section = meerkat_core::protected_section::enter(
+            meerkat_core::protected_section::ProtectedSection::HostStoreTransaction,
+        );
         Ok(Box::new(RecordPublicationGuard {
-            _guard: self
-                .publication
-                .begin_owner_change()
-                .map_err(|_| toolkit_store::StoreError::Synchronization)?,
+            _guard: crate::no_wait::wait_at("store.begin_record_change", || {
+                self.publication.begin_owner_change()
+            })
+            .map_err(|_| toolkit_store::StoreError::Synchronization)?,
         }))
     }
 }
@@ -2680,6 +2684,7 @@ impl ToolkitOriginalOwner {
         // takes the publication writer before the collection and rechecks facts.
         let mut collection_unavailable = false;
         let admitted = self.publication.observe(|| {
+            crate::no_wait::may_wait("original_ingress.admitted_guard");
             let originals = match self.originals.lock() {
                 Ok(originals) => originals,
                 Err(_) => {
@@ -2711,10 +2716,12 @@ impl ToolkitOriginalOwner {
             Err(PublicationError::Changed) => {
                 // Preserve the old slow-path Admitted recheck. A changing
                 // observation is not proof that this is a first input.
-                let _publication = self
-                    .publication
-                    .begin_owner_change()
+                let _publication =
+                    crate::no_wait::wait_at("original_ingress.admitted_guard.change", || {
+                        self.publication.begin_owner_change()
+                    })
                     .map_err(|_| OriginalWriterError::Unavailable)?;
+                crate::no_wait::may_wait("original_ingress.admitted_guard.recheck");
                 let originals = self
                     .originals
                     .lock()
@@ -3126,6 +3133,7 @@ fn wait_for_lock<T>(
     deadline: std::time::Instant,
     mut pause: impl FnMut(std::time::Duration),
 ) -> Result<std::sync::MutexGuard<'_, T>, ControllerReadinessFailure> {
+    crate::no_wait::may_wait("original_ingress.wait_for_lock");
     let mut step = std::time::Duration::from_micros(20);
     loop {
         match lock.try_lock() {
@@ -3254,9 +3262,10 @@ impl ToolkitOriginalOwner {
             }
             first = false;
             {
-                let _publication = self
-                    .publication
-                    .begin_owner_change()
+                let _publication =
+                    crate::no_wait::wait_at("original_ingress.change_with_collection", || {
+                        self.publication.begin_owner_change()
+                    })
                     .map_err(|_| OriginalWriterError::Unavailable)?;
                 match self.originals.try_lock() {
                     Ok(mut originals) => return apply(&mut originals),

@@ -276,6 +276,7 @@ impl PrivateOriginals {
                 &input,
                 |admitted| {
                     observe!(17);
+                    crate::no_wait::may_wait("custody_recovery.cold_publish");
                     let _control = self
                         .custody_recovery
                         .control

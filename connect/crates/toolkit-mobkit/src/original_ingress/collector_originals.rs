@@ -139,6 +139,7 @@ impl ToolkitOriginalOwner {
         }
         // Original IDs are not reserved across the two durable record kinds.
         // An ordinary original always keeps its existing disposition owner.
+        crate::no_wait::may_wait("collector.disposition");
         let originals = self
             .originals
             .lock()
@@ -210,6 +211,7 @@ impl ToolkitOriginalOwner {
             return Ok(None);
         }
         // An admitted original is never reclassified as a service original.
+        crate::no_wait::may_wait("collector.current_original");
         let originals = self
             .originals
             .lock()

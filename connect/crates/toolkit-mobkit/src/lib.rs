@@ -18,6 +18,8 @@ pub mod host_gateway;
 #[cfg(all(feature = "native-host", unix))]
 pub mod installed_host;
 #[cfg(all(feature = "native-host", unix))]
+pub(crate) mod no_wait;
+#[cfg(all(feature = "native-host", unix))]
 pub mod original_ingress;
 #[cfg(all(feature = "native-host", unix))]
 pub mod private_host;

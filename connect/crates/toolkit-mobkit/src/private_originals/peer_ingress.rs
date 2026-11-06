@@ -943,10 +943,14 @@ impl PrivateOriginals {
             approved_login: None,
         });
         let offered = request.input;
-        let mut bound = binder
-            .bind(&context, offered.clone())
-            .await
-            .map_err(|_| unavailable())?;
+        // The shared binder's decision, as in a governed send's bind: a
+        // protected section, where it never waits.
+        let mut bound = meerkat_core::protected_section::within(
+            meerkat_core::protected_section::ProtectedSection::GovernedBind,
+            binder.bind(&context, offered.clone()),
+        )
+        .await
+        .map_err(|_| unavailable())?;
         if bound.entry_fence.is_some() {
             return Err(unavailable());
         }

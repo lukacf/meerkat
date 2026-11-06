@@ -143,7 +143,7 @@ export function remoteBrowserReplyOwned(value, receipt, state) {
       value.guide_version !== receipt.guide_version || value.build_id !== receipt.build_id || value.deployment_id !== receipt.deployment_id ||
       value.entry_id !== "native-console" || !STATUSES.has(value.status) || typeof value.native_ready !== "boolean" ||
       typeof value.cleanup_confirmed !== "boolean" ||
-      !["local-password", "loopback-only"].includes(value.scope?.authentication) ||
+      !["local-password", "local-accounts", "loopback-only"].includes(value.scope?.authentication) ||
       value.scope.health_scope !== "native-bootstrap-and-console" || value.scope.custom_interfaces_verified !== false ||
       typeof value.scope.requested_interfaces !== "string" || remoteBrowserObservedTime(value.observed_at) === null ||
       value.access_id !== null && !UUID.test(value.access_id || "")) return false;

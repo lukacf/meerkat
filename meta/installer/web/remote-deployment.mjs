@@ -106,8 +106,8 @@ export function remotePrivateOptions(receipt) {
       (field.description == null || typeof field.description === "string" && field.description.length <= 2000) &&
       (field.default == null || !field.secret && typeof field.default === "string" && field.default.length <= 32768))) return null;
   const authentication = receipt.console_scope?.authentication;
-  if (Object.hasOwn(receipt, "console_scope") && !["loopback-only", "local-password"].includes(authentication)) return null;
-  if (authentication === "local-password" &&
+  if (Object.hasOwn(receipt, "console_scope") && !["loopback-only", "local-password", "local-accounts"].includes(authentication)) return null;
+  if (["local-password", "local-accounts"].includes(authentication) &&
       ![["CONSOLE_USER_ID", false], ["CONSOLE_LOGIN_PASSWORD", true]].every(([key, secret]) =>
         receipt.fields.some((field) => field.key === key && field.required === true && field.secret === secret &&
           !Object.hasOwn(field, "default")))) return null;

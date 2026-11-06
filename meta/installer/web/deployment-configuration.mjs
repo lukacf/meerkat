@@ -53,7 +53,8 @@ export function deploymentFieldIssues(options, values = {}, removed = []) {
     }
     // Only a declared authenticated Console binds these runtime credentials.
     // Matching names in an unrelated application do not establish that contract.
-    if (!detail && options?.console_scope?.authentication === "local-password") {
+    // With named accounts they are the installation's own account.
+    if (!detail && ["local-password", "local-accounts"].includes(options?.console_scope?.authentication)) {
       if (field.key === "CONSOLE_USER_ID" && (length < 1 || length > 200 || /[^A-Za-z0-9_.@+-]/.test(value)))
         detail = "Use 1-200 letters, numbers, dots, underscores, @, + or hyphens.";
       else if (field.key === "CONSOLE_LOGIN_PASSWORD" && (length < 12 || length > 4096))

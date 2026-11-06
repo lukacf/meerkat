@@ -418,8 +418,14 @@ def recover_local_build(registry, guide_id, build_id):
             and (directory / "accepted-application-tool-policy.json").exists()):
         bind_accepted_build_inventory(registry, host, guide_id, build_id)
     access = tomllib.loads(selected_files.get("config/access.toml", b"").decode("utf-8"))
-    if (host._blueprint != blueprint
-            or access.get("enabled") is not True or access.get("admins") != [host._console_subject]
+    from .templates_v2.console_configuration import console_operator
+    try:
+        # The protected operator is the first admin; further admins are
+        # other people's accounts.
+        operator = console_operator(access)
+    except ValueError:
+        operator = None
+    if (host._blueprint != blueprint or operator != host._console_subject
             or selected_files.get("config/mob.toml") != host._definition.encode("utf-8")
             or any(selected_files.get(name) != pin.read() for name, pin in host._protected)):
         raise CustodyError("The original protected source differs from the independently accepted Build.")

@@ -17,6 +17,7 @@ import math
 import os
 from pathlib import Path
 import sys
+import tomllib
 from typing import TYPE_CHECKING
 
 from .blueprint import Blueprint
@@ -476,11 +477,28 @@ class ForgeApplicationHost:
             # Ordinary source publication honors the owner's private umask.
             if (path.lstat().st_uid != os.getuid() or installed.mode & ~0o644
                     or not installed.mode & 0o400
-                    or installed.content.encode("utf-8") != original):
+                    or (installed.content.encode("utf-8") != original and not (
+                        name == "config/access.toml" and self._console_access_kept(installed.content)))):
                 raise CustodyError("The installed viewer bytes or permissions changed before private settings validation.")
         self._validate_console_subject(settings)
         for pin in self._pins:
             pin.read()
+
+    def _console_access_kept(self, content):
+        """Whether an installed access file the console rewrote keeps the operator.
+
+        Once the application runs, the console's Access panel owns
+        `config/access.toml` (further admins, rules, groups). Forge keeps
+        only its own association: an enabled configuration that names the
+        selected operator an admin.
+        """
+        try:
+            access = tomllib.loads(content)
+        except (tomllib.TOMLDecodeError, ValueError):
+            return False
+        admins = access.get("admins")
+        return (access.get("enabled") is True and isinstance(admins, list)
+                and self._console_subject in admins)
 
     def require_current(self):
         self._require_owner_current()

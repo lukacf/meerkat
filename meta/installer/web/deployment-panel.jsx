@@ -1120,7 +1120,9 @@ export function DeploymentRuntimeDetails({ consoleUrl, scope, Icon, disabled = f
     {consoleUrl && <a className="setup-action" href={disabled ? undefined : consoleUrl} aria-disabled={disabled}
       tabIndex={disabled ? -1 : undefined} target="_blank" rel="noreferrer">Open native MobKit Console directly <Icon name="arrow" size={14} /></a>}
     {scope?.requested_interfaces && <p><strong>Requested experience:</strong> {scope.requested_interfaces}</p>}
-    {scope && <p>{scope.authentication === "local-password"
+    {scope && <p>{scope.authentication === "local-accounts"
+      ? "Sign in with your own account name and password. Leave the account name empty to use the installation's own account. Your provider API key is separate."
+      : scope.authentication === "local-password"
       ? "Sign in with the Console password you chose for this installation. Your configured user identity is applied automatically. Your provider API key is separate."
       : "This accepted package uses a loopback-only native Console without a separate Console login. Keep remote access inside an authenticated SSH or IAP tunnel."}</p>}
   </details>;

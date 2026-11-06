@@ -95,27 +95,87 @@ async function runIndexedDbStorageLock() {
     proof.concurrentCallbacks = count * 2;
     proof.counterAfterConcurrentCallbacks = 81;
 
+    // Alternating under same-origin storage load: each tab awaits each of
+    // its 200 increments while a third tab keeps the origin's localStorage
+    // busy with 128 KiB writes. The IndexedDB transaction orders the tabs,
+    // not their localStorage caches, so a holder could read the value from
+    // before the previous holder's write; one such phase caught that about
+    // 7 times in 12, three of them about 9 times in 10.
+    async function withStorageLoad(body) {
+      const loader = await context.newPage();
+      await loader.goto(origin);
+      await loader.evaluate(() => {
+        window.loadActive = true; window.loadWrites = 0;
+        const chunk = "x".repeat(128 * 1024);
+        const tick = () => {
+          if (!window.loadActive) return;
+          localStorage.setItem("ballast", chunk + (window.loadWrites += 1));
+          localStorage.setItem("ballast", chunk + (window.loadWrites += 1));
+          setTimeout(tick, 1);
+        };
+        tick();
+      });
+      try { return { result: await body() }; }
+      finally {
+        const writes = await loader.evaluate(() => { window.loadActive = false; localStorage.removeItem("ballast"); return window.loadWrites; });
+        await loader.close();
+        proof.loadWrites = [...(proof.loadWrites || []), writes];
+      }
+    }
+    async function settledCounter() {
+      // Cross-tab localStorage changes arrive later than the lock handoff.
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        const seen = await Promise.all([first, second].map(page => page.evaluate(() => Number(localStorage.getItem("counter")))));
+        if (seen[0] === seen[1]) return seen[0];
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      return Number.NaN;
+    }
+    let counter = 81;
+    const loadedPhases = [];
+    for (let phase = 1; phase <= 3; phase += 1) {
+      const perTab = 200;
+      const { result } = await withStorageLoad(() => Promise.all([first, second].map(page => page.evaluate(async perTab => {
+        const out = [];
+        for (let index = 0; index < perTab; index += 1) {
+          out.push(await QueueLock.withConsoleSendStorageLock("counter", () => {
+            const next = Number(localStorage.getItem("counter")) + 1;
+            localStorage.setItem("counter", String(next));
+            return next;
+          }));
+        }
+        return out;
+      }, perTab))));
+      const flat = result.flat().sort((a, b) => a - b);
+      loadedPhases.push({ phase, increments: flat.length, distinct: new Set(flat).size, max: flat[flat.length - 1] });
+      proof.loadedPhases = loadedPhases;
+      assert.deepEqual(flat, Array.from({ length: perTab * 2 }, (_, index) => counter + index + 1),
+        `alternating phase ${phase} under storage load: every cross-tab increment must be unique and retained`);
+      counter += perTab * 2;
+      assert.equal(await settledCounter(), counter, `alternating phase ${phase} under storage load ends at ${counter}`);
+    }
+
     const failed = await first.evaluate(async () => {
       try { await QueueLock.withConsoleSendStorageLock("counter", () => { throw new Error("intentional callback failure"); }); return null; }
       catch (error) { return error.message; }
     });
     assert.equal(failed, "intentional callback failure");
     await queueIncrement(second);
-    assert.equal(await completedIncrement(second), 82);
+    assert.equal(await completedIncrement(second), counter + 1);
     proof.failedCallbackReleased = true;
 
     await holdTransaction(first);
     await queueIncrement(second);
     assert.equal(await second.evaluate(() => window.queuedCallbackRan), false);
     await first.reload();
-    assert.equal(await completedIncrement(second), 83);
+    assert.equal(await completedIncrement(second), counter + 2);
     proof.reloadedTabReleased = true;
 
     await holdTransaction(first);
     await queueIncrement(second);
     assert.equal(await second.evaluate(() => window.queuedCallbackRan), false);
     await first.close();
-    assert.equal(await completedIncrement(second), 84);
+    assert.equal(await completedIncrement(second), counter + 3);
     proof.closedTabReleased = true;
     assert.deepEqual(errors, []);
     proof.errors = errors;

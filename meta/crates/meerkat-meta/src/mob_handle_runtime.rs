@@ -6924,6 +6924,11 @@ pub struct MobBootstrapSpec {
     /// session-service wrapper `Self::with_base_layer` installs; see
     /// [`Self::dispatch_taint_slot`].
     pub(crate) dispatch_taint_slot: crate::memory::dispatch_taint::DispatchTaintSlot,
+    /// Late-bound recorder source the base session-service wrapper binds a
+    /// console side chat's `memory` tool with, to the side chat's own
+    /// identity (`crate::memory::side_chat_memory`); see
+    /// [`Self::side_chat_memory_slot`].
+    pub(crate) side_chat_memory_slot: crate::memory::side_chat_memory::SideChatMemorySlot,
     /// The host's fork instruction policy for this mob's member forks
     /// ([`Self::with_fork_instruction_policy`]). The mob does not persist
     /// it, so bootstrap applies it on create and on resume.
@@ -7007,11 +7012,14 @@ impl MobBootstrapSpec {
         // constructors call it with their wrapped service), so this
         // is the ONE layer that carries the dispatch-time taint slot: each
         // member create passes it exactly once, and later `with_*` re-wraps
-        // never double-decorate.
+        // never double-decorate. Its hook also binds a side chat's `memory`
+        // tool to the side chat's own identity, after every hook of the
+        // layers around it.
         let dispatch_taint_slot = crate::memory::dispatch_taint::DispatchTaintSlot::default();
+        let side_chat_memory_slot = crate::memory::side_chat_memory::SideChatMemorySlot::default();
         let session_service = Arc::new(PreBuildMobSessionService {
             inner: session_service,
-            hook,
+            hook: side_chat_memory_slot.after_hook(hook),
             dispatch_taint: Some(dispatch_taint_slot.clone()),
             after_create_hook: None,
             runtime_adapter_override: None,
@@ -7088,6 +7096,7 @@ impl MobBootstrapSpec {
             committed_boundary_recoverer: None,
             controller_pin_source: None,
             dispatch_taint_slot,
+            side_chat_memory_slot,
             fork_instruction_policy: meerkat_core::ForkInstructionPolicy::default(),
             #[cfg(test)]
             member_provider_auth_persistence: None,
@@ -7103,6 +7112,17 @@ impl MobBootstrapSpec {
     /// [`crate::SessionTaintTracker`]; unfilled it costs nothing.
     pub fn dispatch_taint_slot(&self) -> crate::memory::dispatch_taint::DispatchTaintSlot {
         self.dispatch_taint_slot.clone()
+    }
+
+    /// The late-bound slot every member session create built from this
+    /// spec reads to bind a console side chat's `memory` tool to the side
+    /// chat's own identity (see `crate::memory::side_chat_memory`).
+    /// Compositions that attach an agent-memory recorder fill it with the
+    /// recorder's provider and configuration; unfilled it changes nothing.
+    pub(crate) fn side_chat_memory_slot(
+        &self,
+    ) -> crate::memory::side_chat_memory::SideChatMemorySlot {
+        self.side_chat_memory_slot.clone()
     }
 
     /// Bind the session builder's own default agent-LLM-client decorator

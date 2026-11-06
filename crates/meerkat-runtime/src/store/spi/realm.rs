@@ -39,7 +39,8 @@
 //!   before it does. Another live holder, or a foreign batch, poisons the
 //!   realm. Renews and re-acquires never overlap, and a re-acquire runs on
 //!   a task of its own, so a dropped caller never leaves a granted token
-//!   unrecorded.
+//!   unrecorded. A grant whose listing fails stays this writer's own: the
+//!   next re-acquire meets it as the holder and takes its lease over.
 //! - **An acquire the realm gave up on** (it runs under the realm's acquire
 //!   timeout) may still be granted by a store that completes a request its
 //!   caller dropped: a token this writer never recorded then holds the fence.
@@ -643,6 +644,12 @@ pub struct SpiRealm {
     /// The acquires this writer gave up on since its last grant, and the
     /// holder it waits out meanwhile.
     unanswered: StdMutex<UnansweredAcquires>,
+    /// The token of the last grant while it is not installed: a re-acquire
+    /// installs it only once a listing showed no batch this writer did not
+    /// write. A listing that fails leaves the store holding the grant's
+    /// lease, so the next re-acquire meets it as the holder and takes it
+    /// over as this writer's own lease, as it does the installed token's.
+    unproven_grant: StdMutex<Option<FenceToken>>,
     /// The version of every visible scope as this writer last saw or wrote
     /// it: a re-acquire compares a fresh listing with it to prove no other
     /// writer committed while this one was stopped.
@@ -898,6 +905,7 @@ impl SpiRealm {
             renew_gate: Mutex::new(()),
             reacquire_in_flight: StdMutex::new(None),
             unanswered: StdMutex::new(UnansweredAcquires::default()),
+            unproven_grant: StdMutex::new(None),
             known_heads: StdMutex::new(HashMap::new()),
             uncertain: StdMutex::new(HashMap::new()),
             realm_poison: StdMutex::new(None),
@@ -1214,8 +1222,9 @@ impl SpiRealm {
         .await;
         let grant = match acquired {
             Ok(Ok(grant)) => grant,
-            Ok(Err(HostStoreError::Held { holder, .. })) if holder == previous => {
-                // This writer's own lease is still recorded and nobody
+            Ok(Err(HostStoreError::Held { holder, .. })) if self.is_own(holder, previous) => {
+                // This writer's own lease is still recorded (its installed
+                // token, or a grant whose listing failed) and nobody
                 // acquired since: supersede it, with nothing to wait out.
                 match tokio::time::timeout(
                     self.config.renew_timeout,
@@ -1243,8 +1252,10 @@ impl SpiRealm {
             Err(_) => return Err(self.acquire_timed_out()),
         };
         // The grant's token is above every token acquired before it, a late
-        // grant of an acquire this writer gave up on included.
+        // grant of an acquire this writer gave up on included. It is this
+        // writer's own until the listing proves it, or fails to.
         *lock(&self.unanswered) = UnansweredAcquires::default();
+        *lock(&self.unproven_grant) = Some(grant.token);
         let listed = self.list_versions().await?;
         if !self.listing_matches(&listed) {
             return Err(self.poison_realm(
@@ -1252,6 +1263,7 @@ impl SpiRealm {
             ));
         }
         self.fence.store(grant.token.get(), Ordering::Release);
+        *lock(&self.unproven_grant) = None;
         *lock(&self.known_heads) = listed;
         lock(&self.uncertain).clear();
         // The listing may have outlasted the window counted from the
@@ -1281,6 +1293,13 @@ impl SpiRealm {
         self.stopped.store(false, Ordering::Release);
         tracing::info!(token = %grant.token, "host store writer re-acquired the fence and resumes");
         Ok(())
+    }
+
+    /// Whether `holder` is this writer's own lease: its installed token
+    /// (`installed`), or the last grant, whose listing failed before its
+    /// token was installed.
+    fn is_own(&self, holder: FenceToken, installed: FenceToken) -> bool {
+        holder == installed || *lock(&self.unproven_grant) == Some(holder)
     }
 
     /// The refusal of a re-acquire made before the recorded lease of the

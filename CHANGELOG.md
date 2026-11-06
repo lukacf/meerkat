@@ -129,6 +129,15 @@ them.
   acquire, a holder it does not know poisons the realm at once, as before.
   Affects 0.9.5 through 0.9.10.
 
+- `meerkat-runtime`: a stopped host store writer no longer poisons its realm
+  when the listing of a re-acquire fails after the store granted its
+  acquire. The writer installs a granted token only once that listing shows
+  no batch it did not write; a listing that failed left the old token
+  installed while the store held the grant's lease, and the next re-acquire
+  met the grant as another holder and poisoned the realm until a reopen.
+  The writer now keeps such a grant as its own and the next re-acquire
+  takes its lease over, then lists again. Affects 0.9.5 through 0.9.10.
+
 - `meerkat-mob-mcp`: `mob_check_member` no longer tells the model to check
   again later for a member whose session the store refuses until its realm
   is reopened. Such a member's status carried `read_failed` on the wire, so

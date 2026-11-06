@@ -402,7 +402,8 @@ The store relies on Core keeping these rules:
   over its own recorded lease (below), only an explicit takeover uses
   `AcquireMode::Takeover`. Core takes over its own recorded lease
   when a stopped holder re-acquires and an exclusive acquire answers `Held`
-  with its own token.
+  with its own token, or with the token of its own last grant whose listing
+  failed (Core installs a granted token only once the listing passed).
 - **Acquires Core gave up on.** Each acquire of a re-acquire runs under
   `SpiRealmConfig::renew_timeout`, and Core records no token for one that
   times out. If your store grants it anyway, its token holds the fence, and

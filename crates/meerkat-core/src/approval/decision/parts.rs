@@ -176,7 +176,9 @@ impl PresentationRecord {
     /// it showed of the rendering whose digest is `subject_digest`, split at
     /// `max_part_bytes`, in the channel and message it names, at the host
     /// clock reading `at_ms`. A decision counts it only when it shows every
-    /// canonical part of the held rendering ([`Self::shows_every_part_of`]).
+    /// canonical part of the held rendering ([`Self::shows_every_part_of`]),
+    /// or, for a summary given its link by [`Self::with_link`], when that
+    /// link served the held rendering ([`Self::is_complete_for`]).
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
@@ -198,6 +200,15 @@ impl PresentationRecord {
             message_ref,
             at_ms,
         }
+    }
+
+    /// This record with the link its summary carried to the full
+    /// presentation, and the digest of the rendering that link served, as
+    /// the presenter states them.
+    #[must_use]
+    pub fn with_link(mut self, link: PresentationLink) -> Self {
+        self.link = Some(link);
+        self
     }
 
     /// The record of a presentation that showed every canonical part of

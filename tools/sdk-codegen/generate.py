@@ -480,6 +480,7 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     # Durable decisions (`decision/*`). The records precede the params and
     # results that carry them.
     "WireCanonicalPart",
+    "WirePresentationLink",
     "WirePresentationRecord",
     "WireDecisionOutcome",
     "WireDecision",

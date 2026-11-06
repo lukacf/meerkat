@@ -7,6 +7,9 @@ use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use meerkat_contracts::{
+    DecisionAudienceRequest, DecisionPresentationRequest, WirePresentationLink,
+};
 use meerkat_core::approval::consent::{
     AuthenticatedApprover, ConsentEligibility, ConsentEligibilityAnswer, ConsentIneligible,
 };
@@ -29,6 +32,7 @@ use super::dsl::{
     DurableDecisionMachineMutator, DurableDecisionMachineState, DurableDecisionPhase,
 };
 use super::service::{issued_permit, machine_state};
+use super::wire::{presentation_from_wire, wire_decision};
 use super::{
     APPROVER_NOT_CURRENT_REFUSAL, DecisionClock, DecisionClockError, DecisionError,
     DecisionRefusal, DecisionWithdrawer, DecisionWriteMode, DurableDecisionService,
@@ -999,6 +1003,84 @@ fn a_link_to_a_changed_rendering_is_refused_presentation_incomplete() {
         .expect_err("a decision carrying the stale summary");
     assert_eq!(refusal(&refused), DecisionRefusal::PresentationIncomplete);
     assert_eq!(store.stored(&decision_id), held, "nothing is recorded");
+}
+
+/// The summary a host presenter states on the wire with its link.
+fn stated_summary(subject: &Sha256Digest, served: &str) -> DecisionPresentationRequest {
+    DecisionPresentationRequest {
+        audience: DecisionAudienceRequest::Approver {
+            approver_id: approver_id().to_string(),
+        },
+        subject_digest: subject.to_string(),
+        max_part_bytes: None,
+        parts_shown: Vec::new(),
+        link: Some(WirePresentationLink {
+            reference: "decision-page".into(),
+            served_digest: served.to_owned(),
+        }),
+        channel_ref: "chat".into(),
+        message_ref: "message-1".into(),
+        at_ms: PRESENTED_AT,
+    }
+}
+
+/// A host presenter states a summary and its link on the wire: the stated
+/// record carries the link, so it is complete when the link served the held
+/// rendering, and a read projects the link back. A stated link that served
+/// another rendering is refused `presentation_incomplete`, and one whose
+/// served digest is no digest is not read.
+#[test]
+fn a_summary_stated_on_the_wire_carries_its_link_both_ways() {
+    let (store, _clock, service) = fixture();
+    let rendering = rendering();
+    let digest = rendering.subject_digest();
+    let decision_id = service
+        .hold(hold_request(&rendering), true)
+        .expect("hold")
+        .decision_id;
+    let held = store.stored(&decision_id);
+
+    let record =
+        presentation_from_wire(&stated_summary(&digest, &digest.to_string())).expect("stated");
+    assert_eq!(
+        record,
+        linked_presentation_at(&rendering, digest.clone(), PRESENTED_AT),
+        "the stated summary is the record with its link"
+    );
+    let changed =
+        DecisionRendering::new("Release build 8 to the stable channel.").expect("rendering");
+    let stale = presentation_from_wire(&stated_summary(
+        &digest,
+        &changed.subject_digest().to_string(),
+    ))
+    .expect("stated");
+    let refused = service
+        .present(&decision_id, &stale)
+        .expect_err("a stated link that served a changed rendering");
+    assert_eq!(refusal(&refused), DecisionRefusal::PresentationIncomplete);
+    assert_eq!(store.stored(&decision_id), held, "nothing is recorded");
+
+    let presented = service
+        .present(&decision_id, &record)
+        .expect("the stated link served the held rendering");
+    assert_eq!(
+        presented.state.first_presented_to_approver_at_ms,
+        Some(PRESENTED_AT)
+    );
+    let projected = wire_decision(&presented, false);
+    assert_eq!(projected.presentations.len(), 1);
+    assert_eq!(
+        projected.presentations[0].link,
+        Some(WirePresentationLink {
+            reference: "decision-page".into(),
+            served_digest: digest.to_string(),
+        })
+    );
+
+    assert!(
+        presentation_from_wire(&stated_summary(&digest, "not-a-digest")).is_err(),
+        "a served digest that is no digest is invalid"
+    );
 }
 
 #[test]

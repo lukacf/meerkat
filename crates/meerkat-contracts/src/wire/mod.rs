@@ -93,7 +93,8 @@ pub use decision::{
     WireDecisionEvidence, WireDecisionNotice, WireDecisionNoticeEvent,
     WireDecisionNoticePresentation, WireDecisionNoticeState, WireDecisionOutcome,
     WireDecisionPhase, WireDecisionRefusal, WireDecisionReviewVerdict, WireDecisionStage,
-    WireDecisionTier, WirePresentationAudience, WirePresentationRecord, WireUnreadableDecision,
+    WireDecisionTier, WirePresentationAudience, WirePresentationLink, WirePresentationRecord,
+    WireUnreadableDecision,
 };
 pub use rpc_surface::{
     ArchiveSessionParams, BlobGetParams, CallbackToolDefinition, DeferredCreateResult,

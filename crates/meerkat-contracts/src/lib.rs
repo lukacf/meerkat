@@ -639,6 +639,7 @@ pub use wire::{
     WirePeerConnectivitySnapshot,
     WirePendingToolCall,
     WirePresentationAudience,
+    WirePresentationLink,
     WirePresentationRecord,
     WireProjectionProvenance,
     WirePromptInput,

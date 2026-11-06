@@ -178,6 +178,7 @@ pub fn wire_presentation(record: &PresentationRecord) -> WirePresentationRecord 
         subject_digest: record.subject_digest.to_string(),
         max_part_bytes: record.max_part_bytes.map(NonZeroU32::get),
         parts_shown: record.parts_shown.iter().map(wire_canonical_part).collect(),
+        link: None,
         channel_ref: record.channel_ref.to_string(),
         message_ref: record.message_ref.to_string(),
         at_ms: record.at_ms,

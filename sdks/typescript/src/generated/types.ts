@@ -1804,10 +1804,16 @@ export interface WireCanonicalPart {
   part_digest: string;
 }
 
+export interface WirePresentationLink {
+  reference: string;
+  served_digest: string;
+}
+
 export interface WirePresentationRecord {
   at_ms: number;
   audience: WirePresentationAudience;
   channel_ref: string;
+  link?: WirePresentationLink | null;
   max_part_bytes?: number | null;
   message_ref: string;
   parts_shown: WireCanonicalPart[];
@@ -1855,6 +1861,7 @@ export interface DecisionPresentationRequest {
   at_ms: number;
   audience: DecisionAudienceRequest;
   channel_ref: string;
+  link?: WirePresentationLink | null;
   max_part_bytes?: number | null;
   message_ref: string;
   parts_shown: WireCanonicalPart[];

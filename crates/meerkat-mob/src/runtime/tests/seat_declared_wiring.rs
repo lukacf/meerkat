@@ -1129,7 +1129,7 @@ async fn later_members_are_not_wired_to_an_exempt_member() {
     let exempt_worker = AgentIdentity::from("exempt-worker");
     let worker = AgentIdentity::from("bound-worker");
     let reviewer = AgentIdentity::from("bound-reviewer");
-    for member in [
+    for member in vec![
         spec("lead", &lead),
         exempt(spec("lead", &side_lead)),
         exempt(spec("worker", &exempt_worker)),

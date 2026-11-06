@@ -615,9 +615,13 @@ fn the_helper_panel_renders_under_the_input() {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let mut app = helper_app();
     let rows = render_sized(&mut app, Instant::now(), 70);
-    // Transcript (rows 0-7), the input's border and line, one panel line,
-    // the status bar.
-    assert!(rows[8].starts_with('─'), "{:?}", rows[8]);
+    // Transcript (rows 0-7), the input's border (naming the panel's keys
+    // while it lists something) and line, one panel line, the status bar.
+    assert!(
+        rows[8].contains("Ctrl+↑/↓ pick a helper · Enter opens it"),
+        "{:?}",
+        rows[8]
+    );
     assert_eq!(rows[9], "›");
     assert_eq!(
         rows[10],

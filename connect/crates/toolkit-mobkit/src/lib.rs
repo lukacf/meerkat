@@ -931,6 +931,17 @@ pub mod source_hold_probe {
         /// acquisition original, a result source), just before it takes the
         /// collection; keyed by the contributor's original work.
         BasisRead,
+        /// The shared original binder (an ordinary send, a launch, the
+        /// Console delegate, the peer bind), just before its input
+        /// preparation's retained-source check; keyed by the original work.
+        OriginalPrepare,
+        /// The shared original binder, just before its admitted-custody
+        /// check; keyed by the original work.
+        OriginalAdmitted,
+        /// The shared original binder answered "not now" at one of those
+        /// two checks; keyed by the condition's name. A control's hold
+        /// answer here is ignored.
+        OriginalNotNow,
     }
     /// A control's answer at a site, given its key.
     pub type Probe = Arc<dyn Fn(Site, &str) -> Option<Hold> + Send + Sync>;

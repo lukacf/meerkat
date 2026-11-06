@@ -914,6 +914,13 @@ impl OriginalBinder {
         // Console owns the raw input's key and canonical source bytes.
         // Keep that exact value before native adds its authority and custody.
         let console_input = self.console.as_ref().map(|_| input.clone());
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::OriginalPrepare,
+            self.original.original.as_str(),
+        ) {
+            crate::source_hold_probe::retain(self.source.hold_sources_for_test(hold));
+        }
         let mut prepared = self
             .source
             .owner
@@ -956,6 +963,13 @@ impl OriginalBinder {
                     context.controller.clone(),
                 )
                 .map_err(|_| "Toolkit could not rebind the exact first peer input")?;
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::OriginalAdmitted,
+            self.original.original.as_str(),
+        ) {
+            crate::source_hold_probe::retain(self.source.hold_sources_for_test(hold));
         }
         let admitted = prepared
             .admitted()

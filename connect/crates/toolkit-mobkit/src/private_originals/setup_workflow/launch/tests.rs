@@ -1963,6 +1963,9 @@ mod lifecycle_tests;
 #[path = "bind_tests.rs"]
 mod bind_tests;
 
+#[path = "first_send_not_now_tests.rs"]
+mod first_send_not_now_tests;
+
 #[path = "replay_tests.rs"]
 mod replay_tests;
 

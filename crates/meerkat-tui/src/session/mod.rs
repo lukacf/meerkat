@@ -68,6 +68,8 @@ use meerkat_core::{
 };
 use meerkat_runtime::completion::CompletionHandle;
 use meerkat_runtime::run_stop::RunStopReceipt;
+use meerkat_runtime::RuntimeDriverError;
+use meerkat_runtime::input_state::InputLifecycleState;
 use meerkat_runtime::{
     AcceptOutcome, CanonicalKeyTextError, InputAbandonReason, InputTerminalOutcome, IdempotencyKey, Input, MeerkatMachine, PromptInput,
     RejectReason, SessionLlmReconfigureRequest, SessionServiceRuntimeExt,
@@ -86,6 +88,9 @@ const SYSTEM_CONTEXT_SOURCE: &str = "rkat-tui";
 
 /// Reason recorded with every interrupt and cancellation the TUI requests.
 const INTERRUPT_REASON: &str = "rkat-tui: interrupted by the user";
+
+/// How many passes [`SessionHandle::interrupt`] makes at most.
+const INTERRUPT_PASSES: u32 = 3;
 
 /// Builtins every TUI session is denied through its tool access policy: the
 /// TUI owns model switching (`/model`, the picker) and file writes (its own
@@ -509,8 +514,8 @@ impl SessionHandle {
 
     /// Interrupt: cancel the session's running helpers, stop the current
     /// run, then cancel each of `outstanding` (oldest first) that has not
-    /// reached its terminal. Returns the inputs the runtime reports this
-    /// interrupt cancelled: the stop receipt's contributors whose committed
+    /// reached its terminal. Reports the inputs the runtime says this
+    /// interrupt cancelled: the stop receipts' contributors whose committed
     /// terminal is `Abandoned { reason: Cancelled }`, and each input a
     /// cancel found still pending.
     ///
@@ -519,32 +524,112 @@ impl SessionHandle {
     /// follow-up turn. A steer still queued is abandoned by the cancel; one a
     /// follow-up run already picked up has that run interrupted.
     ///
-    /// # Errors
-    ///
-    /// [`TuiError::Runtime`] when the runtime fails the stop or a cancel.
-    pub async fn interrupt(&self, outstanding: &[InputId]) -> Result<Vec<InputId>, TuiError> {
+    /// A steer admitted just before the stop is not bound to the stopped run
+    /// (the runtime keeps it queued for a follow-up run), and its cancel can
+    /// meet it between lifecycle steps. One failed step therefore never ends
+    /// the interrupt: up to [`INTERRUPT_PASSES`] passes stop the run that is
+    /// current (a follow-up run such a steer started included) and retry the
+    /// cancels that failed, and everything the earlier passes cancelled is
+    /// still reported. Failures that outlast the passes are reported in
+    /// [`Interrupted::errors`].
+    pub async fn interrupt(&self, outstanding: &[InputId]) -> Interrupted {
         if let Some(helpers) = &self.helpers {
             helpers.cancel_for(&self.id).await;
         }
-        let mut cancelled = Vec::new();
-        if let Some(run_id) = self.machine.current_run(&self.id).await {
-            let receipt = self
-                .machine
-                .stop_run(&self.id, &run_id, INTERRUPT_REASON)
-                .await?;
-            tracing::debug!(?receipt, "stopped the current run");
-            cancelled.extend(stopped_inputs(&receipt));
-        }
+        let mut report = Interrupted::default();
+        // Inputs still queued (a steer that has not reached a boundary of
+        // the running run) are abandoned before the run stops: once it has
+        // stopped, the runtime stages them into a follow-up run, which a
+        // cancel then races.
+        let mut pending: Vec<InputId> = Vec::with_capacity(outstanding.len());
         for input_id in outstanding {
-            if self
-                .machine
-                .cancel_input_if_present(&self.id, input_id, INTERRUPT_REASON)
-                .await?
+            if self.is_queued(input_id).await
+                && let Ok(true) = self
+                    .machine
+                    .cancel_input_if_present(&self.id, input_id, INTERRUPT_REASON)
+                    .await
             {
-                cancelled.push(input_id.clone());
+                report.extend([input_id.clone()]);
+            } else {
+                pending.push(input_id.clone());
             }
         }
-        Ok(cancelled)
+        for pass in 1..=INTERRUPT_PASSES {
+            let mut errors = Vec::new();
+            if let Some(run_id) = self.machine.current_run(&self.id).await {
+                match self
+                    .machine
+                    .stop_run(&self.id, &run_id, INTERRUPT_REASON)
+                    .await
+                {
+                    Ok(receipt) => {
+                        tracing::debug!(pass, ?receipt, "stopped the current run");
+                        report.extend(stopped_inputs(&receipt));
+                    }
+                    Err(err) => errors.push(format!("stopping run {run_id}: {err}")),
+                }
+            }
+            let mut retry = Vec::new();
+            for input_id in pending {
+                match self
+                    .machine
+                    .cancel_input_if_present(&self.id, &input_id, INTERRUPT_REASON)
+                    .await
+                {
+                    Ok(true) => report.extend([input_id]),
+                    Ok(false) => {}
+                    // The input was just staged into a follow-up run the
+                    // executor has not entered yet, so the cancel's run
+                    // interrupt could not be delivered. A stop is recorded
+                    // even then and ends that run before it serves.
+                    Err(RuntimeDriverError::InterruptDispatchOutcomeUnknown { run_id, .. }) => {
+                        match self
+                            .machine
+                            .stop_run(&self.id, &run_id, INTERRUPT_REASON)
+                            .await
+                        {
+                            Ok(receipt) => {
+                                tracing::debug!(pass, ?receipt, "stopped the input's run");
+                                let stopped: Vec<InputId> = stopped_inputs(&receipt).collect();
+                                if !stopped.contains(&input_id) {
+                                    retry.push(input_id);
+                                }
+                                report.extend(stopped);
+                            }
+                            Err(err) => {
+                                errors.push(format!("stopping run {run_id}: {err}"));
+                                retry.push(input_id);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(pass, %input_id, error = %err, "cancel failed");
+                        errors.push(format!("cancelling input {input_id}: {err}"));
+                        retry.push(input_id);
+                    }
+                }
+            }
+            pending = retry;
+            // Done once nothing is left to cancel and no run is current (a
+            // stop that failed for a run that has ended since is moot); a
+            // follow-up run one of our steers started while the cancels ran
+            // is stopped by the next pass.
+            if pending.is_empty() && self.machine.current_run(&self.id).await.is_none() {
+                report.errors.clear();
+                break;
+            }
+            report.errors = errors;
+        }
+        report
+    }
+
+    /// Whether the runtime holds `input_id` queued (admitted, not yet
+    /// staged into a run).
+    async fn is_queued(&self, input_id: &InputId) -> bool {
+        matches!(
+            SessionServiceRuntimeExt::input_state(&*self.machine, &self.id, input_id).await,
+            Ok(Some(stored)) if stored.seed.phase == InputLifecycleState::Queued
+        )
     }
 
     /// Append `text` to the live session as an ordinary durable System
@@ -642,6 +727,25 @@ fn stopped_inputs(receipt: &RunStopReceipt) -> impl Iterator<Item = InputId> + '
             )
         })
         .map(|contributor| contributor.input_id.clone())
+}
+
+/// What [`SessionHandle::interrupt`] did.
+#[derive(Debug, Default)]
+pub struct Interrupted {
+    /// The inputs the runtime reports this interrupt cancelled, each once.
+    pub cancelled: Vec<InputId>,
+    /// The stops and cancels that still failed on the last pass.
+    pub errors: Vec<String>,
+}
+
+impl Interrupted {
+    fn extend(&mut self, inputs: impl IntoIterator<Item = InputId>) {
+        for input_id in inputs {
+            if !self.cancelled.contains(&input_id) {
+                self.cancelled.push(input_id);
+            }
+        }
+    }
 }
 
 /// The identity `session`'s metadata records.

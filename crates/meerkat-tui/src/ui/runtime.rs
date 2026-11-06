@@ -151,6 +151,11 @@ pub fn after_buffered_events(msg: Msg, channels: &mut UiChannels) -> Vec<Msg> {
 }
 
 fn translate(event: Event, mouse: bool) -> Option<Msg> {
+    if let Event::Key(key) = &event {
+        // `RUST_LOG=meerkat_tui::ui::runtime=trace` shows every key event
+        // as the terminal reported it (kind included), for input bugs.
+        tracing::trace!(?key, "key event");
+    }
     match event {
         // Windows reports Press and Release; enhanced terminals also report Repeat.
         Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {

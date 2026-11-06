@@ -1,7 +1,8 @@
 //! The runner end to end, headless: effects in, UI messages out, through the
 //! real runtime-backed service (`PersistentSessionService` + `MeerkatMachine`)
 //! with a scripted LLM. Covers a turn, a queued turn, a steered message
-//! applied at a tool boundary, interrupt, resume by id and `last`, `-c`
+//! applied at a tool boundary (and one typed while a slow shell call runs),
+//! interrupt (also during a slow tool), resume by id and `last`, `-c`
 //! across process lifetimes, and a renamed workspace.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -10,8 +11,13 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{Rig, ScriptedLlmClient, Step, Workspace, copy_tree, user_texts};
+use async_trait::async_trait;
+use common::{Rig, RigOptions, ScriptedLlmClient, Step, Workspace, copy_tree, user_texts};
 use meerkat_core::{AgentEvent, Message};
+use meerkat_tui::approval::classifier::{
+    ActionClassifier, ClassifierError, ClassifierInput, ClassifierVerdict,
+};
+use meerkat_tui::bootstrap::ApprovalOverrides;
 use meerkat_tui::delivery::PendingId;
 use meerkat_tui::runner::Start;
 use meerkat_tui::session::resolve_session_ref;
@@ -458,6 +464,158 @@ async fn a_different_prompt_after_a_failed_turn_is_sent_as_written() {
             "run the tests instead".to_string(),
             "run the tests instead".to_string(),
         ]
+    );
+    rig.quit().await;
+}
+
+/// Allows every reviewed call: the slow-tool cases are about delivery, not
+/// the approval gate.
+struct AllowAll;
+
+#[async_trait]
+impl ActionClassifier for AllowAll {
+    async fn classify(
+        &self,
+        _input: ClassifierInput<'_>,
+    ) -> Result<ClassifierVerdict, ClassifierError> {
+        Ok(ClassifierVerdict::Allow)
+    }
+}
+
+fn allow_shell() -> RigOptions {
+    RigOptions {
+        approval: ApprovalOverrides {
+            classifier: Some(Arc::new(AllowAll)),
+            ..ApprovalOverrides::default()
+        },
+        ..RigOptions::default()
+    }
+}
+
+/// The dogfood case: a message typed while the model's shell call runs
+/// reaches the model after that call's result, and the call runs to its end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_message_typed_while_a_slow_tool_runs_reaches_the_model_after_its_result() {
+    let ws = Workspace::new();
+    let llm = ScriptedLlmClient::new(vec![
+        Step::Tool {
+            id: "slow",
+            name: "shell",
+            args: json!({ "command": "sleep 2; echo done sleeping", "timeout_secs": 30 }),
+        },
+        Step::Text("finished"),
+        Step::Text("follow-up answer"),
+    ]);
+    let mut rig = Rig::start_opts(&ws.root, &llm, Start::New, allow_shell()).await;
+    rig.send(Effect::StartTurn("do something for a while".into()));
+    tool_started(&rig, "slow").await;
+    rig.send(steer(1, "typed while it sleeps"));
+    let ack = rig
+        .wait_for(|msg| matches!(msg, Msg::SteerAck { .. }))
+        .await;
+    assert!(
+        matches!(ack, Msg::SteerAck { result: Ok(()), .. }),
+        "{ack:?}"
+    );
+
+    rig.wait_for(|msg| matches!(msg, Msg::SteerDelivered(PendingId(1))))
+        .await;
+    let outcome = rig.turn_finished().await;
+    assert_eq!(outcome.result.expect("turn succeeds").text, "finished");
+    assert!(outcome.undelivered.is_empty());
+    // One run: the shell ran to its end, its result reached the model, and
+    // the typed message followed it in the same request.
+    let requests = llm.requests();
+    assert_eq!(requests.len(), 2, "no follow-up turn");
+    let second = &requests[1];
+    let result_at = second
+        .iter()
+        .position(|m| {
+            matches!(m, Message::ToolResults { results, .. }
+            if results.iter().any(|r| !r.is_error && r.text_content().contains("done sleeping")))
+        })
+        .expect("the shell result reached the model");
+    let typed_at = second
+        .iter()
+        .position(|m| matches!(m, Message::User(u) if u.text_content() == "typed while it sleeps"))
+        .expect("the typed message reached the model");
+    assert!(typed_at > result_at);
+    let session = rig.session(&rig.first_session).await;
+    assert!(
+        !session
+            .messages()
+            .iter()
+            .any(|m| matches!(m, Message::SystemNotice(_))),
+        "nothing was closed by recovery"
+    );
+    rig.quit().await;
+}
+
+/// Waits until the tool call `id` has started executing.
+async fn tool_started(rig: &Rig, id: &str) {
+    common::within(async {
+        loop {
+            let started = rig.events.lock().iter().any(|event| {
+                matches!(event, AgentEvent::ToolExecutionStarted { id: started, .. } if started == id)
+            });
+            if started {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupting_a_slow_tool_returns_the_messages_typed_meanwhile() {
+    let ws = Workspace::new();
+    let llm = ScriptedLlmClient::new(vec![
+        Step::Tool {
+            id: "slow",
+            name: "shell",
+            args: json!({ "command": "sleep 20; echo done sleeping", "timeout_secs": 30 }),
+        },
+        Step::Text("after the interrupt"),
+    ]);
+    let mut rig = Rig::start_opts(&ws.root, &llm, Start::New, allow_shell()).await;
+    rig.send(Effect::StartTurn("do something for a while".into()));
+    tool_started(&rig, "slow").await;
+    rig.send(steer(1, "Test"));
+    rig.wait_for(|msg| matches!(msg, Msg::SteerAck { .. }))
+        .await;
+    rig.send(steer(2, "Hepp"));
+    rig.wait_for(|msg| matches!(msg, Msg::SteerAck { .. }))
+        .await;
+    rig.send(Effect::Interrupt);
+    let outcome = rig.turn_finished().await;
+    // Interrupted (not "failed: interrupted by the user"), and both typed
+    // messages come back: neither ran as a follow-up turn.
+    assert_eq!(outcome.result, Err(TurnFailure::Interrupted));
+    assert_eq!(outcome.undelivered, vec![PendingId(1), PendingId(2)]);
+    assert_eq!(
+        llm.requests().len(),
+        1,
+        "no follow-up turn after the interrupt"
+    );
+    // The interrupt closed the run through recovery: the call is answered
+    // as outcome unknown and the notice says the input was not requeued.
+    let session = rig.session(&rig.first_session).await;
+    assert!(session.messages().iter().any(|m| matches!(
+        m,
+        Message::ToolResults { results, .. }
+            if results.iter().any(|r| r.is_error && r.text_content().contains("outcome_uncertain"))
+    )));
+    assert!(
+        !user_texts(session.messages())
+            .iter()
+            .any(|t| t == "Test" || t == "Hepp")
+    );
+    // The session stays usable.
+    rig.send(Effect::StartTurn("Test\n\nHepp".into()));
+    assert_eq!(
+        rig.turn_finished().await.result.expect("turn").text,
+        "after the interrupt"
     );
     rig.quit().await;
 }

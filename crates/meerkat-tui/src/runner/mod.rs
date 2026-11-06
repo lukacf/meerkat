@@ -892,17 +892,16 @@ impl Runner {
         let ui_tx = self.ui_tx.clone();
         let stopped_tx = self.stopped_tx.clone();
         self.tasks.spawn(async move {
-            let cancelled = match session.interrupt(&outstanding).await {
-                Ok(cancelled) => cancelled,
-                Err(err) => {
-                    tracing::warn!(error = %err, "interrupt failed");
-                    let _ = ui_tx.send(Msg::Notice {
-                        level: NoticeLevel::Error,
-                        text: format!("interrupt failed: {err}"),
-                    });
-                    Vec::new()
-                }
-            };
+            let report = session.interrupt(&outstanding).await;
+            if !report.errors.is_empty() {
+                let errors = report.errors.join("; ");
+                tracing::warn!(%errors, "interrupt incomplete");
+                let _ = ui_tx.send(Msg::Notice {
+                    level: NoticeLevel::Error,
+                    text: format!("interrupt incomplete: {errors}"),
+                });
+            }
+            let cancelled = report.cancelled;
             let _ = stopped_tx.send(Stopped {
                 session: session.id().clone(),
                 cancelled,

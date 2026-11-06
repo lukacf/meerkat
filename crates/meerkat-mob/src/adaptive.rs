@@ -362,12 +362,20 @@ pub fn layer_decision_schema() -> Result<serde_json::Value, serde_json::Error> {
                 )
         });
     }
-    // Nor the tool bundle opt-in, which the released schema does not carry.
+    // Nor the tool bundle opt-in, which the released schema does not carry,
+    // nor the member tool grant gate and its definition.
     if let Some(properties) = schema
         .pointer_mut("/$defs/ToolConfig/properties")
         .and_then(serde_json::Value::as_object_mut)
     {
         properties.remove("bundles");
+        properties.remove("grant_gated");
+    }
+    if let Some(definitions) = schema
+        .pointer_mut("/$defs")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        definitions.remove("GrantGatedTools");
     }
     // Nor a stdio MCP server's working directory, which the released schema
     // does not carry.

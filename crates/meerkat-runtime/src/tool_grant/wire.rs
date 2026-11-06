@@ -67,8 +67,12 @@ pub fn wire_tool_grant_target(target: &ToolGrantTarget) -> WireToolGrantTarget {
 #[must_use]
 pub fn wire_tool_grant_issuer(issuer: &ToolGrantIssuer) -> WireToolGrantIssuer {
     match issuer {
-        ToolGrantIssuer::Operator { caller } => WireToolGrantIssuer::Operator {
+        ToolGrantIssuer::Operator {
+            caller,
+            decision_ref,
+        } => WireToolGrantIssuer::Operator {
             caller: caller.clone(),
+            decision_ref: decision_ref.as_ref().map(ToString::to_string),
         },
         ToolGrantIssuer::Approval { approval_id } => WireToolGrantIssuer::Approval {
             approval_id: approval_id.clone(),
@@ -212,6 +216,7 @@ mod tests {
                 },
                 issuer: ToolGrantIssuer::Operator {
                     caller: Some("ops".to_string()),
+                    decision_ref: None,
                 },
                 reason: Some("incident".to_string()),
             },

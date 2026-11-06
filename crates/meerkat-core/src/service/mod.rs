@@ -1363,9 +1363,10 @@ pub struct SessionBuildOptions {
     /// spawn, a restore or a wake): the incarnation of the mob the member is
     /// built in, as that runtime runs it. Set only by the mob runtime, from
     /// its own handle; `None` for every other build, and for a placed member
-    /// compiled on a host that does not run its mob. Never persisted. Not
-    /// consumed by the standard build pipeline: a host's member build hook
-    /// passes it to the mob operator grants
+    /// compiled on a host that does not run its mob. Never persisted. The
+    /// build forms the member's tool grant subject from it (its identity in
+    /// this incarnation, read before its session), and a host's member build
+    /// hook passes it to the mob operator grants
     /// (`meerkat_runtime::mob_operator_authority`) to mint the member's scope
     /// for the mob as it runs, without holding the mob's handle.
     pub mob_incarnation: Option<LiveMobIncarnation>,
@@ -1458,6 +1459,14 @@ pub struct SessionBuildOptions {
     /// Recorded in the session's tooling, so a resume that leaves this unset
     /// restores the recorded gate. A gate needs the runtime's grant service.
     pub grant_gated_tools: Option<crate::tool_grant::GrantGatedTools>,
+    /// The entries of a mob member's gate that come from its role's current
+    /// gate and that its own gate (`grant_gated_tools`) lacks. None ever
+    /// refuses the build: each is installed where the build can show it (a
+    /// tool name always, since it is gated from the moment it appears; a
+    /// family when the build mounts it), and a family the build does not
+    /// mount, or a name its tool policy refuses, is ignored. Set by the mob
+    /// runtime's member builds only.
+    pub grant_gated_tools_where_mounted: Option<crate::tool_grant::GrantGatedTools>,
     /// Stable application consequence-policy identity for this session.
     pub application_tool_policy: crate::ApplicationToolPolicyBinding,
     /// Host-scoped in-process registry. Executable policy is never serialized.
@@ -2464,6 +2473,7 @@ impl Default for SessionBuildOptions {
             declared_tool_restriction: None,
             tool_dispatch_admission: None,
             grant_gated_tools: None,
+            grant_gated_tools_where_mounted: None,
             application_tool_policy: crate::ApplicationToolPolicyBinding::Unmanaged,
             tool_consequence_policy_registry: None,
             shell_env: None,
@@ -2558,6 +2568,10 @@ impl std::fmt::Debug for SessionBuildOptions {
                 &self.tool_dispatch_admission.is_some(),
             )
             .field("grant_gated_tools", &self.grant_gated_tools)
+            .field(
+                "grant_gated_tools_where_mounted",
+                &self.grant_gated_tools_where_mounted,
+            )
             .field("shell_timeout_secs", &self.shell_timeout_secs)
             .field("call_timeout_override", &self.call_timeout_override)
             .field("resume_override_mask", &self.resume_override_mask)

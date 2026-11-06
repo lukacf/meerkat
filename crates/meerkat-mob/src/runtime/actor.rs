@@ -54219,6 +54219,21 @@ impl MobActor {
         let prepared = self
             .prepare_dsl_signal_transition(terminal_signal, "dispose_member_archive_completed")?;
         if !final_event_exists {
+            // An identity's tool grants end with the identity: a retirement
+            // that ends it ends them here, before its terminal row, so a name
+            // created again later inherits none. A failure fails the step,
+            // which keeps the retirement for its retry.
+            #[cfg(feature = "runtime-adapter")]
+            {
+                if super::identity_entry::retirement_ends_identity(
+                    self.dsl_authority.state(),
+                    &ctx.entry.agent_identity,
+                    &ctx.entry.agent_runtime_id,
+                ) {
+                    self.end_identity_tool_grants(&ctx.entry.agent_identity)
+                        .await?;
+                }
+            }
             let journal_session = if is_peer_only { None } else { session_id };
             Self::require_member_lifecycle_journal_effect(
                 &prepared.transition,
@@ -65065,6 +65080,36 @@ impl MobActor {
         let key = Self::retire_event_key(agent_identity, generation);
         let index = self.retired_event_index.read().await;
         Ok(index.contains(&key))
+    }
+
+    /// End every live scoped tool grant of `identity` in this mob
+    /// incarnation: its identity ended. Without a runtime there are no
+    /// grants.
+    #[cfg(feature = "runtime-adapter")]
+    async fn end_identity_tool_grants(&self, identity: &AgentIdentity) -> Result<(), MobError> {
+        let Some(runtime) = self.runtime_adapter.as_ref() else {
+            return Ok(());
+        };
+        let subject = meerkat_core::tool_grant::ToolGrantSubject::member(
+            self.definition.id.as_str(),
+            &self.incarnation,
+            identity.as_str(),
+        );
+        runtime
+            .end_tool_grants_of(
+                &subject,
+                meerkat_runtime::tool_grant::ToolGrantRevocation {
+                    actor: None,
+                    reason: Some(format!("the identity '{identity}' left the mob")),
+                },
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "ending the tool grants of the retiring identity '{identity}' failed: {error}"
+                ))
+            })
     }
 
     /// Append the terminal `MemberRetired` row of `entry`'s retirement.

@@ -8129,7 +8129,7 @@ mod tests {
                 .collect()
         }
 
-        /// MG P1t: a role's gate mounts its family closed for a member built
+        /// A role's gate mounts its family closed for a member built
         /// from the role, whose switch for it is off; a respawn keeps it.
         #[tokio::test]
         async fn a_role_gated_family_is_mounted_closed_for_its_member_across_respawn() {
@@ -8159,7 +8159,7 @@ mod tests {
             );
         }
 
-        /// MG P4t: the role's gate joins a member spawned with its own
+        /// The role's gate joins a member spawned with its own
         /// profile. A member whose own switch leaves the role-gated family
         /// off builds without it (the role entry is ignored, never refused);
         /// one whose own switch turns it on gets it closed.
@@ -8198,7 +8198,7 @@ mod tests {
             );
         }
 
-        /// MG S1w: an identity grant opens the gated family for the member at
+        /// An identity grant opens the gated family for the member at
         /// its next turn, and the refusal before it is audited under the
         /// identity; the grant survives a respawn to a new session, and
         /// matches nothing after the mob is destroyed and created again
@@ -8278,7 +8278,7 @@ mod tests {
             );
         }
 
-        /// MG S2w: an identity grant of a served, idle member expires on time
+        /// An identity grant of a served, idle member expires on time
         /// through the deadline timer, with no turn, list or audit read.
         #[tokio::test]
         async fn an_identity_grant_of_a_served_idle_member_expires_by_its_timer() {
@@ -8322,8 +8322,7 @@ mod tests {
             );
         }
 
-        /// MG R1w (its `gate` and `applies` halves land with the machine
-        /// gate): identity grant, list, audit and revoke, and every refusal
+        /// Identity grant, list, audit and revoke, and every refusal
         /// of the methods in the one typed shape. An absent session and an
         /// absent identity are both `subject_unknown`.
         #[tokio::test]
@@ -8498,7 +8497,7 @@ mod tests {
             .await;
         }
 
-        /// MG R4w: an operator grant records the decision its host made
+        /// An operator grant records the decision its host made
         /// before issuing it, in the grant's issuer, on the list and on the
         /// `granted` audit row; an invalid reference is refused, typed.
         #[tokio::test]
@@ -8571,7 +8570,7 @@ mod tests {
             }
         }
 
-        /// MG R5w: a renewal is a second grant of the same identity and
+        /// A renewal is a second grant of the same identity and
         /// target, issued while the first is live. Both list as active, a
         /// call is admitted throughout, and once both have ended the call is
         /// refused (the expired grant explains it first).
@@ -8629,7 +8628,7 @@ mod tests {
             );
         }
 
-        /// Review P3-2: an identity's grants end with the identity. A grant
+        /// An identity's grants end with the identity. A grant
         /// to a member that retires matches nothing when a new member takes
         /// the same name in the same mob incarnation.
         #[tokio::test]

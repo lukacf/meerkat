@@ -398,6 +398,36 @@ pub async fn build_agent_config(
     // recomposes them without the lossy in-process spawn overlay.
     config.mcp_servers = profile.tools.mcp_servers.clone();
 
+    // The member's tool grant gate: its own gate (from the profile this
+    // build runs on) joined with its role's current gate, at every build. A
+    // family of the member's own gate is mounted, closed by the gate, whatever
+    // its switch, so a resume over a session that recorded the family
+    // disabled still builds it closed (an explicit category on the build
+    // wins over the recorded one); the docs tell authors to leave the switch
+    // off, so a binary that drops the gate keeps the family off. The role
+    // entries the own gate lacks travel apart: the factory installs each
+    // where the build mounts it and never refuses for one. The build always
+    // names its gate, the empty gate included, so a member resume installs
+    // the gate its profiles define now, never an older recorded one.
+    let own_gate = profile.tools.grant_gated.clone();
+    for family in &own_gate.families {
+        let category = match family.as_str() {
+            "shell" => &mut config.override_shell,
+            "memory" => &mut config.override_memory,
+            "workgraph" => &mut config.override_workgraph,
+            "schedule" => &mut config.override_schedule,
+            "image_generation" => &mut config.override_image_generation,
+            _ => continue,
+        };
+        *category = meerkat_core::ToolCategoryOverride::Enable;
+    }
+    let role_entries = role_profile
+        .as_ref()
+        .map(|role| role.tools.grant_gated.without(&own_gate))
+        .unwrap_or_default();
+    config.grant_gated_tools_where_mounted = (!role_entries.is_empty()).then_some(role_entries);
+    config.grant_gated_tools = Some(own_gate);
+
     // Opaque application context passed through to the agent build pipeline
     config.app_context = context;
     config.additional_instructions = additional_instructions;
@@ -543,9 +573,11 @@ pub(crate) async fn current_role_profile(
 
 /// Conjoin the role's current tool restriction (`role`, from
 /// [`current_role_profile`]) into a profile's own: the role's deny entries
-/// are added and its read-only flag applies. A profile compiled for another
-/// host (a placed member's portable profile) carries the restriction this
-/// way, since that host has no definition to read it from.
+/// are added, its read-only flag applies and its tool grant gate joins the
+/// profile's. A profile compiled for another host (a placed member's
+/// portable profile) carries the restriction this way, since that host has
+/// no definition to read it from; a gate it carries then refuses the
+/// placement, so the role's gate is never dropped.
 pub(crate) fn conjoin_role_tool_restriction(
     tools: &mut crate::profile::ToolConfig,
     role: &crate::profile::ToolConfig,
@@ -556,6 +588,7 @@ pub(crate) fn conjoin_role_tool_restriction(
             tools.deny.push(name.clone());
         }
     }
+    tools.grant_gated.extend(&role.grant_gated);
 }
 
 /// The tool names a profile's deny list may name beyond the factory's
@@ -1344,6 +1377,7 @@ mod tests {
                     mcp_servers: vec![],
                     rust_bundles: vec![],
                     bundles: Vec::new(),
+                    grant_gated: Default::default(),
                 },
                 peer_description: "Orchestrates the mob".into(),
                 external_addressable: true,
@@ -1381,6 +1415,7 @@ mod tests {
                     mcp_servers: vec![],
                     rust_bundles: vec![],
                     bundles: Vec::new(),
+                    grant_gated: Default::default(),
                 },
                 peer_description: "Does work".into(),
                 external_addressable: false,

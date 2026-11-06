@@ -46,6 +46,26 @@ pub(crate) fn apply_tool_category_overrides(
     profile.tools.image_generation = overrides
         .image_generation
         .resolve(profile.tools.image_generation);
+    // A spawn that disables a category also drops its families from the
+    // member's own grant gate: an explicit disable still means no such
+    // tools, where the gate would mount a gated family closed.
+    let disabled = |category: meerkat_core::ToolCategoryOverride| {
+        matches!(category, meerkat_core::ToolCategoryOverride::Disable)
+    };
+    profile.tools.grant_gated.families.retain(|family| {
+        let category = match family.as_str() {
+            "shell" => overrides.shell,
+            "comms" => overrides.comms,
+            "memory" => overrides.memory,
+            "schedule" => overrides.schedule,
+            "workgraph" => overrides.workgraph,
+            "image_generation" => overrides.image_generation,
+            "web_search" => overrides.web_search,
+            "tasks" | "utility" => overrides.builtins,
+            _ => return true,
+        };
+        !disabled(category)
+    });
 }
 
 /// R3 case-3 base-prompt seam (ADJ-2): resolves the CONTROLLING host's
@@ -225,6 +245,11 @@ pub(crate) async fn compile_desired_member_material(
         }
         (None, Some(profile)) => {
             let mut profile = profile.clone();
+            // An identity's material carries no tool grant gate: a member
+            // built from it gets its role's current gate at every build, as
+            // role entries. A placement, which would drop the gate, refused a
+            // gated profile before this compile.
+            profile.tools.grant_gated = meerkat_core::tool_grant::GrantGatedTools::default();
             if let Some(model) = &declaration.model_override {
                 profile.model.clone_from(model);
             }
@@ -620,6 +645,16 @@ pub(crate) async fn compile_portable_member_spec(
                 agent_identity: agent_identity.clone(),
                 reason,
             })?;
+    }
+    // A member whose tool grant gate (its own, or its role's, which the
+    // placed profile carries) names anything is not placed: its grants live
+    // in this host's runtime store, which a member built on another host
+    // never reads, so the gate is never dropped silently.
+    if !profile.tools.grant_gated.is_empty() {
+        return Err(MobError::WiringError(format!(
+            "member '{agent_identity}' has a tool grant gate (its own or its role's), so it \
+             cannot be placed on another host"
+        )));
     }
 
     let system_prompt_override =

@@ -526,6 +526,16 @@ pub struct WireMobToolConfig {
     pub deny: Vec<String>,
     #[serde(default)]
     pub mcp: Vec<String>,
+    /// The member tool grant gate: the built-in tool families and tool
+    /// names members of the profile mount hidden and refused until a live
+    /// scoped tool grant opens them. Omitted when empty, for the same
+    /// compatibility reason as `read_only`: a gated profile sent to an older
+    /// server is refused there, never read ungated.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::wire::WireGrantGatedTools::is_empty"
+    )]
+    pub grant_gated: crate::wire::WireGrantGatedTools,
 }
 
 fn read_only_is_false(value: &bool) -> bool {
@@ -666,6 +676,16 @@ pub struct MobToolConfigInput {
     /// still offers and withholds the rest.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bundles: Vec<String>,
+    /// The member tool grant gate: the built-in tool families and tool
+    /// names members of the profile mount hidden and refused until a live
+    /// scoped tool grant opens them. A member's gate is its own profile's
+    /// joined with its role's current gate. Leave a gated family's switch
+    /// off: the gate mounts it, and an older server keeps it off.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::wire::WireGrantGatedTools::is_empty"
+    )]
+    pub grant_gated: crate::wire::WireGrantGatedTools,
 }
 
 /// Profile binding input: either an inline profile or a realm profile reference.

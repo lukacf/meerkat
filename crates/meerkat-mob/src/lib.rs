@@ -281,6 +281,7 @@ pub use runtime::DeliveryInputSettleTestRelease;
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::FactoryChainSpawnBasePromptSource;
 pub use runtime::HeldSpawnDeadline;
+pub use runtime::MemberGrantGate;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub use runtime::MemberInstructionActivationError;
 pub use runtime::RestoreIncompatible;

@@ -1,5 +1,5 @@
 //! The member grant gate, as a member build lowers it from its own profile
-//! and its role's current profile: MG rows P1 and P3, and the resume row.
+//! and its role's current profile, its placement refusal and its resume.
 //! Every definition here is read from TOML or JSON, as an author writes it.
 
 use super::*;
@@ -66,7 +66,7 @@ fn named_gate(config: &AgentBuildConfig) -> serde_json::Value {
     serde_json::to_value(&config.grant_gated_tools).expect("the gate serializes")
 }
 
-/// MG P1: every member build names its gate (the empty gate when its
+/// Every member build names its gate (the empty gate when its
 /// profiles gate nothing, so a member resume never restores an older
 /// recorded gate), and a gated family whose switch is off is mounted, closed
 /// by the gate, never disabled.
@@ -100,7 +100,7 @@ async fn a_member_build_names_its_gate_and_mounts_a_gated_family() {
     assert_eq!(config.override_shell, ToolCategoryOverride::Disable);
 }
 
-/// MG P1: a spawn-time category override that disables a gated family also
+/// A spawn-time category override that disables a gated family also
 /// removes it from the member's own gate, so an explicit disable still means
 /// no such tools.
 #[tokio::test]
@@ -207,7 +207,7 @@ fn json_profile(tools: serde_json::Value) -> Profile {
     .expect("the profile decodes")
 }
 
-/// MG P3: a profile that gates anything cannot be placed on another host
+/// A profile that gates anything cannot be placed on another host
 /// (its portable form carries no gate), and the role's current gate rides a
 /// placed member's own profile, so a member of a gated role is refused
 /// placement too, never placed without the role's gate.

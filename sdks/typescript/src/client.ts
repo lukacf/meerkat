@@ -713,6 +713,24 @@ export interface MobMemberLiveOpenOptions {
   executionIdentity?: RpcMobMemberLiveOpenParams["execution_identity"];
 }
 
+/**
+ * A mob member identity as the subject of its scoped tool grants: its grants
+ * apply to the member's builds in the mob's running incarnation.
+ */
+export interface ToolGrantMemberSubject {
+  mobId: string;
+  identity: string;
+}
+
+/** The `tool_grants/*` subject a session id or a member identity names. */
+function toolGrantSubject(
+  subject: string | ToolGrantMemberSubject,
+): RpcGrantToolParams["subject"] {
+  return typeof subject === "string"
+    ? { kind: "session", session_id: subject }
+    : { kind: "identity", mob_id: subject.mobId, identity: subject.identity };
+}
+
 interface WireSkillKey {
   [key: string]: string;
   source_uuid: string;
@@ -2201,21 +2219,26 @@ export class MeerkatClient {
   }
 
   /**
-   * Grant one of a session's grant-gated tool names, or a gated built-in tool
+   * Grant one of a subject's grant-gated tool names, or a gated built-in tool
    * family, for a bounded window: `{ durationMs }` from the server's clock or
    * `{ expiresAtMs }` (UNIX ms), at most the server's maximum lifetime. The
-   * session's build must gate the target (`SessionOptions.grantGatedTools`);
-   * a family grant's `target.names` are the names the server took for it.
-   * Throws `INVALID_ARGS` unless the target names exactly one of `tool` and
-   * `family`, and the window exactly one of `durationMs` and `expiresAtMs`.
+   * subject is a session id, or a mob member identity
+   * (`{ mobId, identity }`), whose grant applies to the member's builds in
+   * the mob's running incarnation, across respawns. The session's build, or
+   * the member's gate (its profile's joined with its role's), must gate the
+   * target; a family grant's `target.names` are the names the server took
+   * for it. `options.decisionRef` records the host's reference to the
+   * decision it made before issuing, as attribution. Throws `INVALID_ARGS`
+   * unless the target names exactly one of `tool` and `family`, and the
+   * window exactly one of `durationMs` and `expiresAtMs`.
    */
   async grantTool(
-    sessionId: string,
+    subject: string | ToolGrantMemberSubject,
     target: { tool: string; family?: never } | { family: string; tool?: never },
     window:
       | { durationMs: number; expiresAtMs?: never }
       | { expiresAtMs: number; durationMs?: never },
-    options?: { reason?: string },
+    options?: { reason?: string; decisionRef?: string },
   ): Promise<RpcGrantToolResult> {
     const { tool, family } = target as { tool?: string; family?: string };
     if ((tool === undefined) === (family === undefined)) {
@@ -2232,7 +2255,7 @@ export class MeerkatClient {
       );
     }
     const params: RpcGrantToolParams = {
-      subject: { kind: "session", session_id: sessionId },
+      subject: toolGrantSubject(subject),
       target:
         tool !== undefined
           ? { kind: "tool", name: tool }
@@ -2244,6 +2267,7 @@ export class MeerkatClient {
       params.expires_at_ms = expiresAtMs;
     }
     if (options?.reason !== undefined) params.reason = options.reason;
+    if (options?.decisionRef !== undefined) params.decision_ref = options.decisionRef;
     return this.request("tool_grants/grant", params);
   }
 
@@ -2261,34 +2285,36 @@ export class MeerkatClient {
   }
 
   /**
-   * List a session's scoped tool grants, each due grant settled as expired
-   * first. Ended (expired or revoked) grants are listed only with
-   * `includeEnded`; `unreadable` names any stored grant the server cannot
-   * read.
+   * List a subject's scoped tool grants (a session id, or a mob member
+   * identity `{ mobId, identity }`, whose retired history stays readable),
+   * each due grant settled as expired first. Ended (expired or revoked)
+   * grants are listed only with `includeEnded`; `unreadable` names any stored
+   * grant the server cannot read.
    */
   async listToolGrants(
-    sessionId: string,
+    subject: string | ToolGrantMemberSubject,
     options?: { includeEnded?: boolean },
   ): Promise<RpcListToolGrantsResult> {
     const params: RpcListToolGrantsParams = {
-      subject: { kind: "session", session_id: sessionId },
+      subject: toolGrantSubject(subject),
     };
     if (options?.includeEnded !== undefined) params.include_ended = options.includeEnded;
     return this.request("tool_grants/list", params);
   }
 
   /**
-   * Read a page of the audit log of a session's scoped tool grants, in
-   * sequence order. While the result carries `next_sequence`, pass it as the
-   * next page's `afterSequence`. A row the server cannot read is named in
+   * Read a page of the audit log of a subject's scoped tool grants (a
+   * session id, or a mob member identity `{ mobId, identity }`), in sequence
+   * order. While the result carries `next_sequence`, pass it as the next
+   * page's `afterSequence`. A row the server cannot read is named in
    * `unreadable`.
    */
   async toolGrantAudit(
-    sessionId: string,
+    subject: string | ToolGrantMemberSubject,
     options?: { afterSequence?: number; limit?: number },
   ): Promise<RpcToolGrantAuditResult> {
     const params: RpcToolGrantAuditParams = {
-      subject: { kind: "session", session_id: sessionId },
+      subject: toolGrantSubject(subject),
     };
     if (options?.afterSequence !== undefined) params.after_sequence = options.afterSequence;
     if (options?.limit !== undefined) params.limit = options.limit;

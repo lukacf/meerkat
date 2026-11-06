@@ -1860,6 +1860,7 @@ pub fn profile_to_wire(profile: &crate::Profile) -> meerkat_contracts::WireMobPr
             read_only: tools.read_only,
             deny: tools.deny.clone(),
             mcp: tools.mcp.clone(),
+            grant_gated: (&tools.grant_gated).into(),
         },
         peer_description: profile.peer_description.clone(),
         external_addressable: profile.external_addressable,

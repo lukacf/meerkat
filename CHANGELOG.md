@@ -35,6 +35,93 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- Scoped tool grants (their types shipped in 0.9.9): grants to a mob member
+  identity, the member grant gate and the issuer's decision reference change
+  these signatures:
+  - `meerkat_core::tool_grant::ToolGrantIssuer::Operator` gains
+    `decision_ref: Option<DecisionReference>`;
+    `meerkat_contracts::WireToolGrantIssuer::Operator` gains
+    `decision_ref: Option<String>`; `meerkat_contracts::GrantToolParams`
+    gains `decision_ref: Option<String>`.
+  - `meerkat_runtime::MeerkatMachine::grant_tool` and
+    `MeerkatMachine::list_tool_grants` take the session that serves the
+    subject here (`serving: Option<&SessionId>`), so the deadline timer of
+    an idle served member expires its identity grants.
+  - `meerkat_runtime::tool_grant::ToolGrantDeadlines::arm` and
+    `ToolGrantDeadlines::armed_deadline` take the subject key a deadline
+    settles beside the session it is armed for.
+  - `meerkat_mob::ToolConfig` gains `grant_gated: GrantGatedTools`;
+    `meerkat_contracts::WireMobToolConfig` and
+    `meerkat_contracts::wire::MobToolConfigInput` gain
+    `grant_gated: WireGrantGatedTools` (omitted when empty).
+  - `meerkat_core::service::SessionBuildOptions` and
+    `meerkat::AgentBuildConfig` gain `grant_gated_tools_where_mounted`.
+- Behaviour: `tool_grants/grant`, `tool_grants/revoke`, `tool_grants/list`
+  and `tool_grants/audit` answer every refusal of a request as invalid
+  params carrying `data.kind = "tool_grant_request_refused"` and the typed
+  `tool_grant_request_refusal`; before, these refusals carried no data. An
+  absent or unparseable session subject answers `subject_unknown`, not
+  `-32001 SESSION_NOT_FOUND` (grant) or invalid params without data. A mob
+  member's build installs the gate its profile and its role declare (it
+  installed none), so a member resume never restores an older recorded
+  gate. A member whose own gate or role gate names anything is refused
+  placement on another host.
+
+### Added
+
+- Member grant gate: a mob profile declares `tools.grant_gated`
+  (`grant_gated = { families = [...], tools = [...] }` in TOML; on
+  `mob/create`, realm profiles and a `mob/spawn` profile override). Every
+  member build, resume included, gates the union of the member's own gate
+  and its role's current gate. A family of the member's own gate is mounted,
+  closed by the gate, whatever its switch. A role entry never fails the
+  build: a role tool name is gated from the moment it appears, a role family
+  is installed where the member mounts it, and a role family the member does
+  not mount, or a role name the build's tool policy refuses, is ignored. The
+  TOML parser warns on an unknown key inside the gate.
+- `tool_grants/grant`, `tool_grants/list` and `tool_grants/audit` accept a
+  mob member identity subject, `{"kind": "identity", "mob_id", "identity"}`.
+  A grant needs the identity in the mob's roster and a target the gate of
+  its next build names; list and audit resolve the mob only, so a retired
+  identity's history stays readable. An identity grant opens its names for
+  the member's builds while the mob runs at the incarnation it was issued in,
+  across respawns and restarts; the member's refusals are audited under its
+  identity. An identity's grants end, revoked, when the identity ends: a
+  plain retire of its member, or the end of its identity entry; a respawn
+  keeps them.
+- `tool_grants/grant` takes `decision_ref`, the host's opaque reference to
+  the decision it made before issuing (non-empty, at most 1024 bytes, no
+  control character): the grant's issuer, its listing and its `granted`
+  audit row carry it, as attribution only.
+- Rust: `meerkat_core::tool_grant::ToolGrantRequestRefusal` (`subject_unknown`,
+  `target_not_gated`, `invalid_window`, `empty_target`, `not_found`,
+  `invalid_decision_ref`, `invalid_page_limit`) and
+  `TOOL_GRANT_REQUEST_REFUSED_KIND`; `ToolGrantSubject::member`;
+  `ToolGrantIssuer::operator`; `GrantGatedTools::FIELD_NAMES`, `extend` and
+  `without`; the defaulted `SessionToolGrants::for_member`;
+  `meerkat::resolve_grant_target`; `meerkat_mob::MobHandle::member_grant_gate`
+  and `MemberGrantGate`; `MeerkatMachine::tool_grant` and
+  `MeerkatMachine::end_tool_grants_of`; `ToolGrantService::load` and
+  `ToolGrantService::revoke_subject`;
+  `RuntimeSessionToolGrants::for_member_subject`.
+- Python and TypeScript SDKs: `grant_tool` / `grantTool`, `list_tool_grants`
+  / `listToolGrants` and `tool_grant_audit` / `toolGrantAudit` take a mob
+  member identity subject (`mob_id` and `identity`; `{ mobId, identity }`),
+  and the grant takes `decision_ref` / `decisionRef`.
+
+### Upgrade notes
+
+- Downgrade: an older binary drops `tools.grant_gated` (a profile's tool
+  table refuses no unknown key). Leave a gated family's switch off, as the
+  docs say, and an older binary keeps the family off. An older binary also
+  loses the role gate: a member whose own profile switches on a family its
+  role gates runs that family with no grant there. A grant whose issuer
+  carries a `decision_ref` is unreadable to an older binary: it opens
+  nothing there and is listed as unreadable. Revoke such grants, or let them
+  expire, before a rollback.
+
 ## [0.9.10] - 2026-11-04
 
 ### Highlights

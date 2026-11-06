@@ -6078,6 +6078,7 @@ async fn create_session_inner(
         initial_turn_metadata: None,
         initial_work_authorization: None,
         grant_gated_tools: None,
+        grant_gated_tools_where_mounted: None,
     };
     build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::from_override(
         req.enable_mob,
@@ -7383,6 +7384,7 @@ async fn continue_session_inner(
             initial_turn_metadata: None,
             initial_work_authorization: None,
             grant_gated_tools: None,
+            grant_gated_tools_where_mounted: None,
         };
         build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::Inherit);
         let model = match req.model.clone() {

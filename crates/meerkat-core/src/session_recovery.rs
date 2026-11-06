@@ -712,9 +712,11 @@ pub fn resolve_effective_turn_config(
         initial_work_authorization: None,
         // The grant gate is durable session truth, like the access policy:
         // a recovered session keeps its gated names closed until a live
-        // grant opens them.
+        // grant opens them. The recorded gate holds every entry the last
+        // build installed, a member's role entries included.
         grant_gated_tools: (!metadata.tooling.grant_gated.is_empty())
             .then(|| metadata.tooling.grant_gated.clone()),
+        grant_gated_tools_where_mounted: None,
     };
     if let Some(override_mob) = overrides.override_mob {
         build.apply_generated_create_only_mob_operator_access(

@@ -38,7 +38,7 @@ fn wire_mob_tool_config_deny_roundtrips_and_is_omitted_when_empty() -> serde_jso
     Ok(())
 }
 
-/// MG P1/P4t: a wire profile's tool config carries its tool grant gate, and
+/// A wire profile's tool config carries its tool grant gate, and
 /// omits the empty gate, so an ungated profile keeps the bytes an older
 /// client parses; a gated profile sent to an older server is refused there,
 /// never read ungated.

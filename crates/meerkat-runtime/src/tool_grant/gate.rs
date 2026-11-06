@@ -4,6 +4,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use meerkat_core::MobMemberBinding;
+use meerkat_core::service::LiveMobIncarnation;
 use meerkat_core::tool_grant::{
     GatedToolTable, SessionToolGrants, ToolGrantCall, ToolGrantRefusal, ToolGrantSubject,
     ToolGrantSubjectKey,
@@ -17,14 +19,18 @@ use super::service::ToolGrantService;
 /// service. The runtime hands it to the factory on the session's runtime
 /// bindings.
 ///
-/// It adjudicates the session's own grants (the session subject). Each
-/// boundary arms the runtime's deadline driver with the earliest deadline of
-/// the grants it opened, so the session's grants expire on time while it is
-/// served; nothing here wakes or registers a session.
+/// It adjudicates the grants of its subjects: the session's own, and for a
+/// mob member's build ([`SessionToolGrants::for_member`]) the member's
+/// identity first, then the session. The subjects are fixed per build. Each
+/// boundary arms the runtime's deadline driver, per subject, with the
+/// earliest deadline of the grants it opened, so they expire on time while
+/// the session is served; nothing here wakes or registers a session.
 pub struct RuntimeSessionToolGrants {
     service: Arc<ToolGrantService>,
     deadlines: ToolGrantDeadlines,
     session_id: SessionId,
+    /// The subjects read, in order: a member's identity first, then the
+    /// session. A refusal no grant explains is audited under the first.
     subjects: Vec<ToolGrantSubjectKey>,
 }
 
@@ -45,12 +51,40 @@ impl RuntimeSessionToolGrants {
             subjects,
         }
     }
+
+    /// The grants of a mob member's build served by `session_id`: the
+    /// identity `member` first, then the session.
+    #[must_use]
+    pub fn for_member_subject(
+        service: Arc<ToolGrantService>,
+        deadlines: ToolGrantDeadlines,
+        session_id: SessionId,
+        member: &ToolGrantSubject,
+    ) -> Self {
+        let subjects = vec![
+            member.key(),
+            ToolGrantSubject::session(session_id.clone()).key(),
+        ];
+        Self {
+            service,
+            deadlines,
+            session_id,
+            subjects,
+        }
+    }
+
+    /// The subjects this seam reads, in order.
+    #[must_use]
+    pub fn subjects(&self) -> &[ToolGrantSubjectKey] {
+        &self.subjects
+    }
 }
 
 impl std::fmt::Debug for RuntimeSessionToolGrants {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RuntimeSessionToolGrants")
             .field("session_id", &self.session_id)
+            .field("subjects", &self.subjects)
             .finish_non_exhaustive()
     }
 }
@@ -63,8 +97,8 @@ impl SessionToolGrants for RuntimeSessionToolGrants {
             .service
             .adjudicate_boundary(&self.subjects, gated)
             .await?;
-        if let Some(deadline_ms) = adjudication.next_deadline_ms {
-            self.deadlines.arm(&self.session_id, deadline_ms);
+        for (subject, deadline_ms) in &adjudication.next_deadlines {
+            self.deadlines.arm(&self.session_id, subject, *deadline_ms);
         }
         Ok(adjudication.open)
     }
@@ -79,5 +113,20 @@ impl SessionToolGrants for RuntimeSessionToolGrants {
             return Ok(());
         }
         self.service.admit_call(&self.subjects, call).await
+    }
+
+    fn for_member(
+        &self,
+        member: &MobMemberBinding,
+        incarnation: &LiveMobIncarnation,
+    ) -> Option<Arc<dyn SessionToolGrants>> {
+        let subject =
+            ToolGrantSubject::member(member.mob_id.as_str(), incarnation, member.member.as_str());
+        Some(Arc::new(Self::for_member_subject(
+            Arc::clone(&self.service),
+            self.deadlines.clone(),
+            self.session_id.clone(),
+            &subject,
+        )))
     }
 }

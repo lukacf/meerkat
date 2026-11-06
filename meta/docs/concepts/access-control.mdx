@@ -76,6 +76,18 @@ A Console with no local runtime (one that serves its runtimes through the aggreg
 
 The relation is runtime-derived, from Meerkat's durable record of the fork, so unlike the spawn registry it survives a restart, and it holds after the agent is respawned or retired. A `side_chat_of` claim in caller-controlled labels (spawn specs, roster labels, an identity's declaration) is stripped like `spawned_by`. A multi-runtime Console names the agent with its runtime's prefix, as it names the side chat, so a rule on the prefixed agent (`b/ops-lead`) reaches its side chats and one on the bare name does not.
 
+#### Private side chats
+
+On a Console with sign-in, a side chat is **private to the person who opened it**. The fork records that person in the side chat's `console.private_to` label: the opaque caller scope `meta/console/whoami` reports to them (`caller_scope`), a digest of their sign-in issuer and subject that carries no personal data. Before any rule, and whether access control is installed, enabled or neither:
+
+- an agent whose labels, or the labels of any link of its lineage, name a private owner other than the caller is denied for every agent action (`agent.view`, `agent.send`, `agent.retire`, the memory actions, ...), unless the caller is an admin (`admins`);
+- such an agent is on no surface the caller reads, and a request that names it is answered as for an agent the Console does not hold (`-32001` `unknown identity: <id>`, `404` `unknown_identity` from `POST /console/send`), never `access_denied`, so its existence does not show;
+- the private side chat's own audience is otherwise its agent's, so a rule that denies the agent still hides it from its owner, and helpers it spawns follow it as any spawned member follows its spawner.
+
+Only a person who signed in owns private side chats: on a Console without sign-in every caller is the same anonymous caller, so side chats forked there stay shared (their label is empty), and so do side chats forked by a service token or a token that names no person. A side chat forked before side chats were private carries no label and keeps its agent's audience. A private side chat carried over from a Console with sign-in stays hidden from the anonymous callers of a Console without it.
+
+The label is Meta's to write at the fork and nowhere else: member creation (`meta/ensure_member`, `mob/spawn_member`, the host spawn API) refuses it as invalid params, and every projection drops it from a member that is not a side chat Meerkat's fork record verifies, so a forged label hides nothing.
+
 <Warning>
 Upgrading changes what existing rules grant: an operator holding `agent.view`/`agent.send` on a coordinator now also holds those actions on every member that coordinator spawns. This is the intended default — agent-spawned workers are part of the parent's work — but deployments with tight per-agent rules should review coordinator grants, and can add member-specific `deny` rules where inheritance is unwanted.
 </Warning>

@@ -36,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `caller_changed`, and a call whose caller's login ended while it ran gets
   the route's `403` `mcp_app_unavailable`.
 
+- `console.private_to` is a reserved label: member creation
+  (`meta/ensure_member`, `mob/spawn_member`, `UnifiedRuntime::spawn` and
+  `spawn_many`) refuses it as invalid params, and a member that carries it
+  from anywhere but a console side chat fork has no private owner (every
+  projection drops it).
+- A console member hidden from the caller by its private owner answers as
+  an unknown member on every console surface: `-32001`
+  `unknown identity: <id>` with no data, `404` `unknown_identity` from
+  `POST /console/send`, `member_not_found` from the agent event stream.
+
 ### Security
 
 - Tokens minted with an `auth_config` shared secret no longer count as a
@@ -51,6 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - An open console refuses requests addressed to a host it does not serve,
   so a page that rebinds its own name to the console's address cannot
   drive it.
+
+- A console side chat's `memory` tool writes to the side chat's own
+  identity: it no longer writes to the agent it was forked from, whose
+  tools it inherits.
 
 ### Upgrade
 
@@ -87,6 +101,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Console changes accept `expected_caller_scope` (the `caller_scope` read
   from `meta/console/whoami`), and a change made for another caller is
   refused with `caller_changed`.
+
+- The console experience's side chat rows carry `side_chat_audience`:
+  `private_to_you`, `private_to_creator` (an access admin viewing another
+  person's) or `shared`; the side chat's header names it.
+- Rust: `PRIVATE_TO_LABEL`, `AccessController::view_for_caller`,
+  `AccessView::hides_agent` and `AccessView::private_owner_key`;
+  `ConsoleSendGateRefusal::UnknownIdentity`.
+
+### Changed
+
+- On a console with sign-in, a side chat is private to the person who
+  opened it; access admins can also see it. It holds with or without an
+  access configuration, on every surface that shows an agent. Its memory
+  stays its own: the memory distiller never reads a private side chat.
+  Side chats opened before this release keep their audience, and consoles
+  without sign-in keep side chats shared.
 
 ## [0.9.10] - 2026-11-04
 

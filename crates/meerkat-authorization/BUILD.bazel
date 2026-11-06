@@ -63,7 +63,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-authorization",
     },
     proc_macro_deps = [
@@ -103,7 +103,7 @@ rust_library(
         "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-authorization",
     },
     proc_macro_deps = [
@@ -144,7 +144,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-authorization",
     },
     tags = [
@@ -170,7 +170,6 @@ rust_test(
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_anthropic_agent_factory_build",
         "//crates/meerkat:meerkat_auth_core_agent_factory_build",
-        "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
         "//crates/meerkat:meerkat_core_agent_factory_build",
         "//crates/meerkat:meerkat_llm_core_agent_factory_build",
@@ -211,7 +210,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "native_cost",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-authorization",
     },
@@ -298,7 +297,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "native_governed_loop",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-authorization",
     },

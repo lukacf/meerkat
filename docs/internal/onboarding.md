@@ -93,11 +93,30 @@ make test
 
 For the tests a change affects, see [Affected Tests](#affected-tests).
 
-Use the repository wrapper for a targeted Cargo command:
+Use the repository wrapper for a targeted Cargo command. A test command passes
+the crate's test features, which
+`node scripts/core-workspace-args.mjs --tests -p <crate>` prints:
 
 ```bash
-./scripts/repo-cargo test -p meerkat-core session
+./scripts/repo-cargo test $(node scripts/core-workspace-args.mjs --tests -p meerkat-core) session
 ```
+
+Pass the same flags to a run narrowed to one integration target
+(`--test <target>`): it builds no lib test, so the crate's test-feature check
+does not stop it, and without them it compiles the gated tests out without a
+word. Add any feature the target's own `#![cfg(feature = ...)]` names
+(meerkat-core's `wholeblob_compaction_media_guard` needs `test-support`; a
+second `--features` adds it).
+
+For rust-analyzer, set `rust-analyzer.cargo.features` to `"all"` (in VS Code,
+the `rust-analyzer.cargo.features` setting). Without features it treats the
+code the test features gate, such as the `workspace-tests` test modules, as
+inactive, and its Run test lens stops on the test-feature check. A
+package-qualified list does not work: Cargo refuses a feature of a package the
+command does not select, and rust-analyzer's runnables select one package.
+`"all"` also turns on every other feature (the live, realtime and GPT Live
+ones, and the products'), so the editor's check compiles more than a default
+build does; it is still the one global value that works.
 
 Avoid raw `cargo` and raw `bb` for normal repository work. The wrapper keeps
 multi-worktree and multi-agent build outputs isolated. In one checkout, give
@@ -181,7 +200,8 @@ plan selects:
 
 A change that only touches a crate's `tests/*.rs` targets runs just those
 targets, with the features they need (cargo's `required-features`, or a
-crate-level `#![cfg(feature = "...")]`). A target that needs live provider
+crate-level `#![cfg(feature = "...")]`), and again with the features of an
+integration suite that CI runs them in. A target that needs live provider
 credentials, or whose tests are all `#[ignore]`d for a lane, is named on stderr
 with that lane instead of run. The summary names what CI runs beyond the list
 (governance gates, rustdoc, feature-combination checks and so on), so a green

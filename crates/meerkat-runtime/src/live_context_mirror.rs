@@ -622,8 +622,8 @@ fn causal_context_projection(message: &Message) -> Result<Option<String>, String
     .map_err(|error| error.to_string())
 }
 
-// These tests exercise the live-only classification path. The crate's
-// self dev-dependency enables `live`, so package-scoped test lanes run them.
+// These tests exercise the live-only classification path. `live` is one of
+// the crate's test features, so package-scoped test lanes run them.
 #[cfg(all(test, feature = "live"))]
 mod tests {
     use super::*;

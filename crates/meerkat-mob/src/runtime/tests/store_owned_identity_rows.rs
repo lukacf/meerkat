@@ -3541,6 +3541,7 @@ fn answer_kind(outcome: &crate::runtime::DeclaredEntryOutcome) -> &'static str {
         Outcome::PreparationPending => "preparation_pending",
         Outcome::HostedOnFirstUse => "hosted_on_first_use",
         Outcome::Deferred { .. } => "deferred",
+        Outcome::BuildRequired => "build_required",
         Outcome::Refused { .. } => "refused",
         Outcome::Noted { .. } => "noted",
         Outcome::Failed { .. } => "failed",

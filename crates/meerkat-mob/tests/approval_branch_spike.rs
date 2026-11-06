@@ -90,7 +90,7 @@ const APPROVED_PROMPT: &str = "Approved access: run exactly this operation once"
 const APPROVED_CALL: &str = "approved-operation";
 const BRANCH_ANSWER: &str = "the approved operation ran";
 const DECISION: &str = "decision-1";
-const BOUND: Duration = Duration::from_secs(60);
+const BOUND: Duration = Duration::from_mins(1);
 
 fn id(value: &str) -> EvidenceId {
     EvidenceId::new(value).expect("bounded fixture identifier")

@@ -236,7 +236,7 @@ impl Fixture {
             parent: Some(parent.id.clone()),
             issuer: parent.grantee.clone(),
             grantee: GrantPrincipal::new(who("branch")).expect("branch"),
-            represented_subject: parent.represented_subject.clone(),
+            represented_subject: parent.represented_subject,
             issued_revision: 0,
             restrictions: derived.effective().clone(),
             child_approval: None,
@@ -287,7 +287,7 @@ impl Fixture {
         let before = owner.state().clone();
         let accepted = owner
             .apply(dsl::GrantAuthorityInput::IssueChild {
-                actor: parent.grantee.clone(),
+                actor: parent.grantee,
                 record,
                 derived,
                 chain,
@@ -432,7 +432,7 @@ fn operator_device_trusted_decision_cannot_issue_a_child_under_an_owner_rule() {
         fixture.issue(&parent, "approval-child", device.clone()),
         Err(ApprovalChildRefusal::BelowRule)
     );
-    assert!(!fixture.machine_accepts_child(&parent, device.clone()));
+    assert!(!fixture.machine_accepts_child(&parent, device));
     // Under a rule that accepts device trust, the same decision is issued.
     let accepting = Fixture::new();
     let parent = accepting.ruled_parent(rule(GrantDeviceTrust::Accepted));
@@ -836,7 +836,7 @@ fn resolve_refuses_another_requester_another_work_or_another_digest() {
     let child = fixture
         .issue(&parent, "approval-child", approval)
         .expect("bound child");
-    let lineage = vec![parent.clone(), child];
+    let lineage = vec![parent, child];
     let requester = who("requester");
     let approved = work("approved-work-1");
     let resolve = |requester: &PrincipalRef,

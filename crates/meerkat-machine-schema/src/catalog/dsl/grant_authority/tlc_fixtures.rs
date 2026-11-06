@@ -578,7 +578,7 @@ mod tests {
                 .apply(issue_child(
                     &plain_child.issuer,
                     &plain_child,
-                    vec![rule_root.clone()]
+                    vec![rule_root]
                 ))
                 .is_err()
         );

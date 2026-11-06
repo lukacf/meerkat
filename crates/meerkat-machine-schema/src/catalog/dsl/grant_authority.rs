@@ -751,7 +751,7 @@ mod present_record_projection_tests {
     #[test]
     fn present_record_projection_is_the_exact_record() {
         let value = Some(record());
-        assert!(value.get("value") == record());
+        assert_eq!(value.get("value"), record());
     }
 
     #[test]
@@ -774,7 +774,7 @@ mod present_record_projection_tests {
         let fields = encoded.as_object().expect("a record is an object");
         assert!(!fields.contains_key("child_approval") && !fields.contains_key("approval"));
         let decoded: GrantRecord = serde_json::from_value(encoded).expect("record decodes");
-        assert!(decoded == record());
+        assert_eq!(decoded, record());
     }
 
     #[test]

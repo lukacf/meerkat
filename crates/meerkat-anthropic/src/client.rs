@@ -1812,7 +1812,10 @@ impl AnthropicClient {
             let url = self.messages_endpoint();
             let content = meerkat_core::HttpAuthorizationContent {
                 has_images: request.has_images(),
-                ..Default::default()
+                initiator: prepared.map_or_else(
+                    || request.initiator(),
+                    meerkat_llm_core::PreparedLlmRequest::initiator,
+                ),
             };
             let mut diagnostics = Vec::new();
             let response_with_receipt =

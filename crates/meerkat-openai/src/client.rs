@@ -2806,7 +2806,7 @@ impl OpenAiClient {
             let mut diagnostics = Vec::new();
             let content = meerkat_core::HttpAuthorizationContent {
                 has_images: request.has_images(),
-                ..Default::default()
+                initiator: prepared.map_or_else(|| request.initiator(), PreparedLlmRequest::initiator),
             };
             let response = self
                 .responses_response_with_fallback(

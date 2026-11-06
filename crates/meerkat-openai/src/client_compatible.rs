@@ -910,7 +910,10 @@ impl OpenAiCompatibleClient {
                     let body = self.build_chat_completions_body(&projected_request)?;
                     let content = meerkat_core::HttpAuthorizationContent {
                         has_images: projected_request.has_images(),
-                        ..Default::default()
+                        initiator: prepared.map_or_else(
+                            || projected_request.initiator(),
+                            PreparedLlmRequest::initiator,
+                        ),
                     };
                     let url = self.chat_completions_endpoint();
                     let mut diagnostics = Vec::new();

@@ -3103,6 +3103,10 @@ impl HttpAuthorizer for CopilotAuthorizer {
         crate::GITHUB_COPILOT_AUTHORIZER_LABEL
     }
 
+    /// `Copilot-Vision-Request` on a request with images, and `X-Initiator`:
+    /// `agent` when the request continues the agent's own work (its last
+    /// input is a tool result or the assistant's own output, or it is a
+    /// request-local call such as a compaction summary), `user` otherwise.
     fn append_content_headers(
         &self,
         content: meerkat_core::HttpAuthorizationContent,
@@ -3111,6 +3115,11 @@ impl HttpAuthorizer for CopilotAuthorizer {
         if content.has_images {
             headers.push(("Copilot-Vision-Request".to_string(), "true".to_string()));
         }
+        let initiator = match content.initiator {
+            meerkat_core::HttpRequestInitiator::User => "user",
+            meerkat_core::HttpRequestInitiator::Agent => "agent",
+        };
+        headers.push(("X-Initiator".to_string(), initiator.to_string()));
         Ok(())
     }
 

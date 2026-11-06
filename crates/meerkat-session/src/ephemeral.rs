@@ -11526,6 +11526,7 @@ async fn session_task<A: SessionAgent>(
                         metadata
                             .transient_turn_context
                             .iter()
+                            .chain(metadata.request_only_context.iter())
                             .chain(metadata.transient_turn_context_appends.iter())
                             .cloned()
                             .collect()

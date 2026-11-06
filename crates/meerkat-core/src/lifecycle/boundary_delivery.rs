@@ -284,6 +284,7 @@ impl DurableTurnBoundaryAppends {
             model_projection: self.model_projection,
             peer_ingested_events: self.peer_ingested_events,
             peer_reply_capabilities: self.peer_reply_capabilities,
+            request_only_context: self.request_only_context,
         }
     }
 }
@@ -295,6 +296,7 @@ pub(crate) struct DurableTurnBoundaryAppendParts {
     pub(crate) model_projection: ContentInput,
     pub(crate) peer_ingested_events: Vec<crate::event::AgentEvent>,
     pub(crate) peer_reply_capabilities: Vec<crate::comms::PeerReplyCapability>,
+    pub(crate) request_only_context: Vec<super::run_primitive::TurnRequestContext>,
 }
 
 /// What became of one durable boundary delivery, as observed by the runtime

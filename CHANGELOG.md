@@ -175,6 +175,14 @@ them.
   `MobError::UnsupportedForMode` unless it is host human input to a local
   runtime-backed member, so the requester is never dropped on the way.
 
+- `meerkat-core`: `RuntimeTurnMetadata` gains the public field
+  `request_only_context` (`Vec<TurnRequestContext>`, empty by default):
+  request-only context that lives only in the process that admitted it (see
+  Added). Code that builds `RuntimeTurnMetadata` with a full struct literal
+  must add it (`Vec::new()`) or use `..Default::default()`, and a pattern
+  that lists every field must add it or `..`. The field is never
+  serialized, so no wire shape and no stored row changes.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -347,6 +355,22 @@ them.
   directly, never one carried across a peer hop). `Input::requester` is the
   one accessor: a governed input's requester is its work association's, any
   other input's is the one its host supplied.
+
+- `meerkat-core`, `meerkat-runtime`, `meerkat-session`, `meerkat-mob`:
+  request-only turn context that never leaves the process that admitted it
+  (`RuntimeTurnMetadata::request_only_context`). Every foreground model
+  request of the turn ends with it as injected context, exactly like
+  `transient_turn_context`, and no Session row, stored input, wire value or
+  prompt replay identity holds it: a retry of the same input with another
+  value replays the original, and an input recovered after a restart or a
+  run resumed from its ledger carries none. A batch keeps each distinct
+  value once, in order, and a durable steer that joins a running turn adds
+  its values to that turn's later requests
+  (`DurableTurnBoundaryAppends::with_request_only_context`). A mob member's
+  work carries it with `WorkSpec::with_request_only_context` into a local
+  session-backed member's runtime input; remote, peer-only and autonomous
+  inbox delivery refuse it with `MobError::UnsupportedForMode`. See the
+  session contracts reference, "Request-only turn context".
 
 ### Changed
 

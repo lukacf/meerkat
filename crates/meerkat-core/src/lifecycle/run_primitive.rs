@@ -25,10 +25,12 @@ use crate::types::{
 /// runtime-owned logical turn.
 ///
 /// This is deliberately not a [`crate::types::Message`]: it cannot be appended
-/// to a [`crate::Session`] or acquire durable transcript semantics. Runtime
-/// input persistence owns the bytes until the input reaches a terminal state;
-/// the agent only borrows this clone-cheap value while composing foreground
-/// provider requests for that turn.
+/// to a [`crate::Session`] or acquire durable transcript semantics. As a
+/// [`RuntimeTurnMetadata::transient_turn_context`], runtime input persistence
+/// owns the bytes until the input reaches a terminal state; as a
+/// [`RuntimeTurnMetadata::request_only_context`] value, it lives only in the
+/// process that admitted the input. The agent only borrows this clone-cheap
+/// value while composing foreground provider requests for that turn.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnRequestContext(#[cfg_attr(feature = "schema", schemars(length(min = 1)))] Arc<str>);
@@ -1886,7 +1888,7 @@ pub struct RuntimeTurnMetadata {
     /// the `InjectedContext` role, never as a Session row. A batch merge and
     /// a durable join of a running turn accumulate distinct values in order,
     /// and it never keeps an input from joining a running turn.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip)]
     pub request_only_context: Vec<TurnRequestContext>,
     /// Override model for this turn (hot-swap on materialized sessions).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2087,6 +2089,12 @@ impl RuntimeTurnMetadata {
         )?;
         self.transient_turn_context_appends
             .extend(other.transient_turn_context_appends);
+        // Request-only context keeps each distinct value once, in order.
+        for context in other.request_only_context {
+            if !self.request_only_context.contains(&context) {
+                self.request_only_context.push(context);
+            }
+        }
         merge_scalar(&mut self.provider, other.provider, "provider")?;
         merge_scalar(
             &mut self.self_hosted_server_id,

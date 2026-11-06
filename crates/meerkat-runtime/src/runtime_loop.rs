@@ -8084,6 +8084,10 @@ fn resumed_run_primitive(
     };
     let metadata = staged.turn_metadata.get_or_insert_with(Default::default);
     metadata.work_authorization = work_authorization;
+    // Request-only context lives only with the admission that carried it: a
+    // resumed run carries none, even while this process still holds the
+    // input, so it recalls nothing rather than replay a stale value.
+    metadata.request_only_context.clear();
     if from_tail {
         metadata.execution_kind = Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun);
     }

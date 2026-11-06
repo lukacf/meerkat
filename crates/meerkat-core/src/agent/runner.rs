@@ -1777,11 +1777,14 @@ where
     /// delivery, so the write itself cannot fail. The delivery's peer reply
     /// capabilities join the running turn's dispatch context in the same
     /// segment (typed, so that cannot fail either), so `reply_to_peer` can
-    /// answer it from the next tool call on. Returns the events to
-    /// publish when the appends were written (`BoundaryAppendApplied`, then
-    /// one `PeerContentIngested` per incoming comms block, exactly as the
-    /// turn-start path publishes them); `None` when the delivery was withdrawn
-    /// first (the actor was revoked), in which case nothing is written.
+    /// answer it from the next tool call on, and its request-only context
+    /// joins the turn's own: the values the turn does not carry yet reach
+    /// this request and every later one of the run, never as a row. Returns
+    /// the events to publish when the appends were written
+    /// (`BoundaryAppendApplied`, then one `PeerContentIngested` per incoming
+    /// comms block, exactly as the turn-start path publishes them); `None`
+    /// when the delivery was withdrawn first (the actor was revoked), in which
+    /// case nothing is written.
     pub(crate) fn apply_durable_boundary_appends(
         &mut self,
         run_id: &crate::lifecycle::RunId,
@@ -1801,6 +1804,7 @@ where
             model_projection,
             peer_ingested_events,
             peer_reply_capabilities,
+            request_only_context,
         } = appends.into_parts();
         let append_count = u32::try_from(messages.len()).unwrap_or(u32::MAX);
         let transcript_start = self.session.messages().len() as u64;
@@ -1822,6 +1826,11 @@ where
         self.round_commits.bind_input(input_id.clone());
         self.tool_dispatch_context
             .record_boundary_peer_replies(peer_reply_capabilities);
+        for context in request_only_context {
+            if !self.active_turn_request_contexts.contains(&context) {
+                self.active_turn_request_contexts.push(context);
+            }
+        }
         let mut events = Vec::with_capacity(1 + peer_ingested_events.len());
         events.push(AgentEvent::BoundaryAppendApplied {
             run_id: run_id.clone(),

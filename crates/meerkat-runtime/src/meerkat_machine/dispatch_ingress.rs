@@ -1067,14 +1067,20 @@ impl MeerkatMachine {
                 // transcript identity so both paths produce the same rows.
                 // A peer message keeps the reply capability its follow-up
                 // turn would carry, so `reply_to_peer` can answer it in the
-                // run it joins.
+                // run it joins, and the input's request-only context (held
+                // in this process only) joins the running turn's requests.
                 let persisted_input = driver
                     .as_driver()
                     .input_state(input_id)
                     .and_then(|state| state.persisted_input.as_ref());
-                let transcript_identity = persisted_input.map(|input| {
-                    crate::runtime_loop::for_input(input, semantics).transcript_identity
-                });
+                let stamped =
+                    persisted_input.map(|input| crate::runtime_loop::for_input(input, semantics));
+                let transcript_identity = stamped
+                    .as_ref()
+                    .map(|metadata| metadata.transcript_identity.clone());
+                let request_only_context = stamped
+                    .map(|metadata| metadata.request_only_context)
+                    .unwrap_or_default();
                 let reply_capabilities = persisted_input
                     .and_then(crate::input::peer_reply_capability)
                     .into_iter()
@@ -1084,7 +1090,11 @@ impl MeerkatMachine {
                     crate::input::projection_durable_boundary_appends(&projection),
                     transcript_identity,
                 )
-                .map(|appends| appends.with_peer_reply_capabilities(reply_capabilities));
+                .map(|appends| {
+                    appends
+                        .with_peer_reply_capabilities(reply_capabilities)
+                        .with_request_only_context(request_only_context)
+                });
                 match appends {
                     Ok(appends) => (run_id, LiveBoundaryDeliveryPlan::Durable(appends)),
                     Err(error) => {

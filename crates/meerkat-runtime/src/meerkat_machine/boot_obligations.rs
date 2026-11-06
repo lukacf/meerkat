@@ -51,7 +51,7 @@ pub enum SessionWorkState {
     /// authority is what counts (a run it marked resumable, the holds on its
     /// run starts and its queues live only there): read it live.
     Registered,
-    /// The store holds no durable work for the session's runtime: no
+    /// The store holds no work a start wakes the session's runtime for: no
     /// recovery work and no pending delivery.
     Idle,
     /// The store holds durable work for the session's runtime.
@@ -146,8 +146,11 @@ impl MeerkatMachine {
 
     /// What `session_id`'s runtime holds durably, read cold: whether a
     /// session nothing in this process has registered (a mob member a host
-    /// holds dormant, say) holds work its next registration would pick up,
-    /// read without registering it.
+    /// holds dormant, say) holds the work a start wakes a member for
+    /// (recovery work or pending deliveries), read without registering it.
+    /// A compaction projection the session still owes is not reported: a
+    /// start does not wake a member for it, and the member's next wake
+    /// finalizes it before its binding.
     ///
     /// A session registered in this process answers
     /// [`SessionWorkState::Registered`]: its live authority is what counts

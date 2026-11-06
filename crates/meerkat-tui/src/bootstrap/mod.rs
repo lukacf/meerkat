@@ -135,7 +135,7 @@ pub struct Runtime {
     /// The effective config as of the last profile change: the model
     /// registry the context gauge and the compaction policy read windows
     /// from.
-    pub effective: parking_lot::RwLock<Config>,
+    pub effective: Arc<parking_lot::RwLock<Config>>,
     /// Bumped whenever [`Runtime::ensure_profile`] adds a profile. An agent
     /// captures its model registry when it is built, so a session built at
     /// an older generation is rebuilt before it can switch to a new model.
@@ -447,7 +447,9 @@ pub async fn bootstrap_with(
     approval
         .engine
         .set_tool_origins(Arc::new(crate::approval::ServiceToolOrigins::new(&service)));
+    let effective = Arc::new(parking_lot::RwLock::new(effective));
     let helpers = start_helpers(
+        &effective,
         &service,
         &machine,
         &scope,
@@ -464,7 +466,7 @@ pub async fn bootstrap_with(
         scope,
         config,
         realm_config,
-        effective: parking_lot::RwLock::new(effective),
+        effective,
         profile_generation: Arc::new(AtomicU64::new(0)),
         choice,
         endpoints,
@@ -534,6 +536,7 @@ type MobToolsSlot = Arc<std::sync::RwLock<Option<Arc<dyn meerkat_core::service::
 #[cfg(feature = "mob")]
 #[allow(clippy::too_many_arguments)]
 fn start_helpers(
+    effective: &Arc<parking_lot::RwLock<Config>>,
     service: &Arc<TuiService>,
     machine: &Arc<MeerkatMachine>,
     scope: &RuntimeScope,
@@ -556,6 +559,7 @@ fn start_helpers(
         llm_override,
         workgraph,
         shell_env,
+        profiles: model_profiles(effective),
     })?;
     *slot
         .write()
@@ -563,10 +567,26 @@ fn start_helpers(
     Ok(Some(helpers))
 }
 
+/// The providers of the realm's `[models.<id>]` profiles as of the last
+/// profile change ([`Runtime::ensure_profile`] refreshes `effective`).
+#[cfg(feature = "mob")]
+fn model_profiles(effective: &Arc<parking_lot::RwLock<Config>>) -> crate::mobs::ModelProfiles {
+    let effective = Arc::clone(effective);
+    Arc::new(move |model: &str| {
+        effective
+            .read()
+            .models
+            .custom
+            .get(model)
+            .map(|profile| profile.provider)
+    })
+}
+
 /// Without the `mob` feature no helpers are hosted.
 #[cfg(not(feature = "mob"))]
 #[allow(clippy::unnecessary_wraps, clippy::too_many_arguments)]
 fn start_helpers(
+    _effective: &Arc<parking_lot::RwLock<Config>>,
     _service: &Arc<TuiService>,
     _machine: &Arc<MeerkatMachine>,
     _scope: &RuntimeScope,

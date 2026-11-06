@@ -247,8 +247,9 @@ config instead.
 
 The agent can hand self-contained subtasks to helper agents with `delegate`
 (Meerkat mobs: each helper is a mob member). A helper runs on the session's
-model and endpoint, with the TUI's file tools and a helper persona, does one
-turn and returns its final text. Its tool calls pass the **delegating
+model and endpoint (a model only an endpoint lists included), with the
+TUI's file tools and a helper persona, does one turn and returns its final
+text. Its tool calls pass the **delegating
 session's** gate (same rules, counters and Stop; escalations name the
 helper), so delegating never unlocks an action. The transcript nests helper
 activity under `[label · model]`, the status bar counts running helpers, and

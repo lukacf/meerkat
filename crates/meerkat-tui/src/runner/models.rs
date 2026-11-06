@@ -250,6 +250,23 @@ impl Runner {
         match self.session.switch_model(&choice).await {
             Ok(()) => {
                 self.refresh_identity().await;
+                // The agent's mob tools name the model `delegate` helpers run
+                // on as of its build: rebuild it, with the new model's
+                // trigger, so they follow the switch.
+                let trigger = if self.compact_now_pending {
+                    self.session.compaction()
+                } else {
+                    self.session_trigger()
+                };
+                if let Err(err) = self
+                    .rebuild_session_workaround(RebuildReason::ModelSwitch, trigger)
+                    .await
+                {
+                    self.notice(
+                        NoticeLevel::Warn,
+                        format!("helpers keep the previous model until the session is rebuilt: {err}"),
+                    );
+                }
                 self.send(Msg::Status(StatusUpdate::Model {
                     provider: self.current_endpoint_name().to_string(),
                     model: self.identity.model.clone(),

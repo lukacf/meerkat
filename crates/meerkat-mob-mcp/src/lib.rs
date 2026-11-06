@@ -18,6 +18,7 @@ pub(crate) mod detached_completion_sink;
 pub(crate) mod detached_completion_sink;
 pub mod detached_delivery;
 pub mod fork_relink;
+mod implicit_mob;
 #[cfg(all(feature = "openai-live", not(target_arch = "wasm32")))]
 pub mod live_delegation;
 mod public_definition;
@@ -41,6 +42,7 @@ pub use detached_delivery::{
     DetachedCompletionDelivered, DetachedCompletionError, DetachedDeliveryUnavailable,
     DetachedOwnerError, DetachedOwnerHost, detached_completion_notice,
 };
+pub use implicit_mob::{ImplicitMobContext, ImplicitMobDefinitionCustomizer};
 pub use public_definition::{decode_public_mob_definition, decode_public_profile};
 pub use public_mcp::{
     handle_public_tools_call, public_tool_names, public_tools_list,
@@ -1303,6 +1305,8 @@ pub struct MobMcpState {
     /// The host's spawn customizer for child mob members, run before the
     /// internal child policy customizer.
     child_spawn_member_customizer: Option<Arc<dyn meerkat_mob::SpawnMemberCustomizer>>,
+    /// The host's hook over every implicit delegation mob definition.
+    implicit_mob_definition_customizer: Option<Arc<dyn ImplicitMobDefinitionCustomizer>>,
     persistent_storage_root: Option<PathBuf>,
     /// Legacy infallible persistent-root construction records setup failure so
     /// every managed-mob operation fails closed rather than using ephemeral
@@ -1561,6 +1565,7 @@ impl MobMcpState {
             tool_consequence_policy_registry: None,
             child_application_tool_policy: None,
             child_spawn_member_customizer: None,
+            implicit_mob_definition_customizer: None,
             persistent_storage_root: None,
             persistent_storage_setup_error: None,
             mobs: Arc::new(RwLock::new(BTreeMap::new())),
@@ -3377,6 +3382,36 @@ impl MobMcpState {
         customizer: Arc<dyn meerkat_mob::SpawnMemberCustomizer>,
     ) -> Self {
         self.child_spawn_member_customizer = Some(customizer);
+        self
+    }
+
+    /// A host [`ImplicitMobDefinitionCustomizer`] over the definition of
+    /// every implicit delegation mob (the mob `delegate` helpers run in)
+    /// this state creates, asked between [`MobDefinition::implicit`] and the
+    /// create, so before the definition is validated.
+    ///
+    /// It is for a host whose sessions run on models outside the static
+    /// catalog (self-hosted or gateway endpoints): the default definition's
+    /// `delegate` profile names the owner's model with no provider and the
+    /// definition has no `models` table, so validation refuses such a model.
+    /// The customizer sets the `delegate` profile's `provider` (for a model
+    /// the host's own config profiles: a definition entry for the same id
+    /// would collide with it when the member is built) or adds a
+    /// `models[<id>]` entry (for a model the host's config does not
+    /// define).
+    ///
+    /// Opt-in: without one, the definition is exactly
+    /// [`MobDefinition::implicit`]. The engine keeps the invariants it
+    /// reuses an implicit mob by: a customizer that changes the definition's
+    /// id or the `delegate` profile's model refuses the create with a
+    /// [`MobError::Internal`] naming the change. A customized mob is reused
+    /// on later calls for the same owner and model like any other implicit
+    /// mob (the customizer is not asked again until the model changes).
+    pub fn with_implicit_mob_definition_customizer(
+        mut self,
+        customizer: Arc<dyn ImplicitMobDefinitionCustomizer>,
+    ) -> Self {
+        self.implicit_mob_definition_customizer = Some(customizer);
         self
     }
 
@@ -8041,9 +8076,15 @@ impl MobMcpState {
                 "invalid implicit mob owner bridge session id '{bridge_session_id}': {error}"
             ))
         })?;
+        let definition = implicit_mob::implicit_mob_definition(
+            bridge_session_id,
+            &owner_bridge_session_id,
+            model,
+            self.implicit_mob_definition_customizer.as_deref(),
+        )?;
         let mob_id = self
             .mob_create_definition_with_owner_bridge_session(
-                MobDefinition::implicit(bridge_session_id, model),
+                definition,
                 owner_bridge_session_id,
                 true,
                 true,
@@ -16407,6 +16448,146 @@ mod tests {
                 .unwrap()
                 .model,
             "gpt-5.4"
+        );
+    }
+
+    /// Adds a `models[<id>]` entry for its uncatalogued model and counts its
+    /// calls.
+    #[derive(Default)]
+    struct EndpointModelCustomizer {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ImplicitMobDefinitionCustomizer for EndpointModelCustomizer {
+        fn customize_implicit_mob(
+            &self,
+            ctx: &ImplicitMobContext,
+            definition: &mut MobDefinition,
+        ) -> Result<(), MobError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            definition.models.insert(
+                ctx.model.clone(),
+                meerkat_core::config::CustomModelConfig {
+                    provider: meerkat_core::Provider::OpenAI,
+                    display_name: None,
+                    context_window: Some(32_000),
+                    max_input_tokens: None,
+                    max_output_tokens: None,
+                    vision: None,
+                    web_search: None,
+                    call_timeout_secs: None,
+                },
+            );
+            Ok(())
+        }
+    }
+
+    fn in_memory_state_with_implicit_customizer(
+        customizer: Arc<dyn ImplicitMobDefinitionCustomizer>,
+    ) -> Arc<MobMcpState> {
+        let service = Arc::new(LocalSessionService::new());
+        let runtime_adapter = Some(Arc::clone(&service.runtime_adapter));
+        MobMcpState::from_acquired_runtime_adapter(
+            service,
+            runtime_adapter,
+            MobControlPrincipal::Owner,
+        )
+        .with_implicit_mob_definition_customizer(customizer)
+        .into_shared()
+    }
+
+    #[tokio::test]
+    async fn implicit_mob_for_an_uncatalogued_model_is_refused_without_a_customizer() {
+        let state = MobMcpState::new_in_memory();
+        let sid = SessionId::new().to_string();
+        let err = state
+            .get_or_create_implicit_mob_for_bridge_session(&sid, "endpoint-only-model")
+            .await
+            .expect_err("an uncatalogued delegate model does not validate");
+        assert!(err.to_string().contains("endpoint-only-model"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn implicit_mob_customizer_makes_an_uncatalogued_model_validate_and_is_reused() {
+        let customizer = Arc::new(EndpointModelCustomizer::default());
+        let state = in_memory_state_with_implicit_customizer(customizer.clone());
+        let sid = SessionId::new().to_string();
+
+        let (mob_id, created) = state
+            .ensure_implicit_mob_for_model(&sid, "endpoint-only-model", None)
+            .await
+            .expect("the customized definition validates");
+        assert!(created);
+        let handle = state
+            .handle_for(&mob_id)
+            .await
+            .expect("implicit mob handle");
+        let definition = handle.definition();
+        assert_eq!(
+            definition.models["endpoint-only-model"].provider,
+            meerkat_core::Provider::OpenAI
+        );
+        let mut expected = MobDefinition::implicit(&sid, "endpoint-only-model");
+        expected.models = definition.models.clone();
+        assert_eq!(*definition, expected, "the customizer only added the model");
+
+        let (again, created) = state
+            .ensure_implicit_mob_for_model(&sid, "endpoint-only-model", Some(&mob_id))
+            .await
+            .expect("reuse");
+        assert_eq!(again, mob_id);
+        assert!(!created, "the customized mob is reused");
+        let (again, created) = state
+            .ensure_implicit_mob_for_model(&sid, "endpoint-only-model", None)
+            .await
+            .expect("reuse without a cached id");
+        assert_eq!(again, mob_id);
+        assert!(!created);
+        assert_eq!(
+            customizer.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a reused mob does not ask the customizer again"
+        );
+    }
+
+    /// Changes the delegate profile's model.
+    struct RemodellingCustomizer;
+
+    impl ImplicitMobDefinitionCustomizer for RemodellingCustomizer {
+        fn customize_implicit_mob(
+            &self,
+            _ctx: &ImplicitMobContext,
+            definition: &mut MobDefinition,
+        ) -> Result<(), MobError> {
+            for binding in definition.profiles.values_mut() {
+                if let meerkat_mob::ProfileBinding::Inline(profile) = binding {
+                    profile.model = "gpt-5.4".to_string();
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn implicit_mob_customizer_that_changes_the_delegate_model_is_refused() {
+        let state = in_memory_state_with_implicit_customizer(Arc::new(RemodellingCustomizer));
+        let sid = SessionId::new().to_string();
+        let err = state
+            .get_or_create_implicit_mob_for_bridge_session(&sid, "claude-sonnet-4-5")
+            .await
+            .expect_err("a remodelled delegate profile is refused");
+        assert!(
+            err.to_string().contains(
+                "changed the delegate profile's model from 'claude-sonnet-4-5' to 'gpt-5.4'"
+            ),
+            "{err}"
+        );
+        assert!(
+            state
+                .find_implicit_mob_for_bridge_session(&sid)
+                .await
+                .is_none(),
+            "nothing was created"
         );
     }
 

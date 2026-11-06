@@ -46,7 +46,8 @@ them.
   `ToolDispatchAdmission`; the shell runs under OS confinement by default
   (`--confinement workspace|strict|off`, `--no-confinement`); models come
   from live endpoint lists with hot swap and a per-model cost readout;
-  `delegate` runs helpers as mob members; instruction files (user-global
+  `delegate` runs helpers as mob members, on models only an endpoint lists
+  too and on the model a `/model` switch chose; instruction files (user-global
   `SYSTEM.md`/`AGENTS.md`, ancestor `AGENTS.md`, `AGENTS.local.md`),
   `/remember`, notes (`note_*` tools, indexed as untrusted context), native
   semantic memory, MCP servers from `mcp.toml` (the project file's only once
@@ -73,6 +74,16 @@ them.
   and any allow rule), and `fork_off` is denied to sessions and helpers (a
   fork child would seat outside the approval gate). See
   `crates/meerkat-tui/README.md`.
+
+- `meerkat-mob-mcp`: `MobMcpState::with_implicit_mob_definition_customizer`
+  takes an `ImplicitMobDefinitionCustomizer`, asked with an
+  `ImplicitMobContext` (owner bridge session, model) for the definition of
+  every implicit delegation mob before it is created and validated. A host
+  whose sessions run on models outside the static catalog sets the
+  `delegate` profile's `provider` or adds a `models[<id>]` entry, so
+  `delegate` works on them. A customizer that changes the mob id or the `delegate`
+  profile's model refuses the create. Opt-in: without one the definition is
+  `MobDefinition::implicit` as before.
 
 ### Changed
 

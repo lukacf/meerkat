@@ -15,7 +15,8 @@
 //! resume it with the new trigger. It runs only on what the user does: a
 //! model switch or a resume that moves the trigger ([`Runner::ensure_trigger`]),
 //! `/compact now` (a one-turn trigger, then back to the policy's after that
-//! turn), and a model switch that needed a new profile. A background list
+//! turn), a model switch that needed a new profile, and every model switch
+//! (the mob tools capture the model helpers run on). A background list
 //! fetch never rebuilds. The upstream asks (an on-demand compaction call, a
 //! live trigger update) are recorded in `.rct/rkat-tui/evidence.md`.
 
@@ -41,6 +42,10 @@ pub(super) enum RebuildReason {
     /// The agent's model registry predates a profile the switch needs.
     /// Upstream ask: profiles read at reconfigure time.
     ModelProfile,
+    /// A model switch: the agent's mob tools captured the model `delegate`
+    /// helpers run on at build. Upstream ask: the mob tools read the
+    /// session's current model.
+    ModelSwitch,
 }
 
 impl Runner {

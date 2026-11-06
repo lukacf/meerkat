@@ -276,9 +276,7 @@ async fn an_interrupt_leaves_no_running_helper() {
     rig.quit().await;
 }
 
-/// An Anthropic-dialect gateway serving a catalogued model id. (A model id
-/// only the gateway knows cannot be delegated from: upstream validates the
-/// implicit delegate mob's profile model against the catalog alone.)
+/// An Anthropic-dialect gateway serving a catalogued model id.
 fn proxy_options() -> RigOptions {
     let lister: ModelLister = Arc::new(|endpoints: Vec<Endpoint>| {
         Box::pin(async move {
@@ -358,6 +356,120 @@ async fn a_configured_endpoints_helper_uses_the_same_binding() {
     let binding = meta.auth_binding.expect("the proxy's binding");
     assert_eq!(binding.realm.as_str(), ENDPOINT_REALM);
     assert_eq!(binding.binding.as_str(), "proxy");
+    rig.quit().await;
+}
+
+/// The gateway of [`proxy_options`] listing `ENDPOINT_MODEL`, a model id
+/// only it knows, with the session started on it.
+const ENDPOINT_MODEL: &str = "my-alias";
+
+fn endpoint_model_options() -> RigOptions {
+    let lister: ModelLister = Arc::new(|endpoints: Vec<Endpoint>| {
+        Box::pin(async move {
+            endpoints
+                .into_iter()
+                .map(|e| {
+                    let models = if e.name == "proxy" {
+                        vec![ModelEntry {
+                            id: ENDPOINT_MODEL.into(),
+                            display_name: None,
+                            source: ModelSource::Provider,
+                            context_window: Some(50_000),
+                            max_output_tokens: Some(4_096),
+                        }]
+                    } else {
+                        Vec::new()
+                    };
+                    (
+                        e.name,
+                        Ok(EndpointListing {
+                            models,
+                            prices: Vec::new(),
+                        }),
+                    )
+                })
+                .collect()
+        })
+    });
+    let mut options = proxy_options();
+    *options.args.last_mut().unwrap() = format!("proxy:{ENDPOINT_MODEL}");
+    options.lister = Some(lister);
+    options
+}
+
+/// The helper session a `delegate` call `id` reports in `recorded`.
+async fn helper_meta(rig: &Rig, messages: &[Message], id: &str) -> meerkat_core::SessionMetadata {
+    let result = tool_result(messages, id);
+    let value: Value = serde_json::from_str(&result.text_content())
+        .unwrap_or_else(|_| panic!("delegate failed: {}", result.text_content()));
+    let helper_session =
+        meerkat_core::SessionId::parse(value["session_id"].as_str().unwrap()).unwrap();
+    rig.session(&helper_session)
+        .await
+        .session_metadata()
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_on_an_endpoint_only_model_delegates_on_it() {
+    let ws = Workspace::new();
+    let llm = ScriptedLlmClient::new(vec![
+        delegate("d1", "scout", "say hi"),
+        Step::Text("hi"),
+        Step::Text("done"),
+    ]);
+    let mut rig = Rig::start_opts(&ws.root, &llm, Start::New, endpoint_model_options()).await;
+    rig.send(Effect::StartTurn("delegate".into()));
+    rig.turn_finished().await;
+    let recorded = llm.recorded();
+    assert_eq!(recorded[0].model, ENDPOINT_MODEL);
+    assert_eq!(
+        recorded.len(),
+        3,
+        "{}",
+        tool_result(&recorded[1].messages, "d1").text_content()
+    );
+    let meta = helper_meta(&rig, &recorded[2].messages, "d1").await;
+    assert_eq!(
+        recorded[1].model, ENDPOINT_MODEL,
+        "the helper runs on the session's model"
+    );
+    assert_eq!(meta.model, ENDPOINT_MODEL);
+    let binding = meta.auth_binding.expect("the proxy's binding");
+    assert_eq!(binding.realm.as_str(), ENDPOINT_REALM);
+    assert_eq!(binding.binding.as_str(), "proxy");
+    rig.quit().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_helper_delegated_after_a_model_switch_runs_on_the_new_model() {
+    const SWITCHED: &str = "claude-opus-4-8";
+    let ws = Workspace::new();
+    let llm = ScriptedLlmClient::new(vec![
+        Step::Text("one"),
+        delegate("d1", "scout", "say hi"),
+        Step::Text("hi"),
+        Step::Text("done"),
+    ]);
+    let mut rig = Rig::start(&ws.root, &llm, Start::New).await;
+    rig.send(Effect::StartTurn("first".into()));
+    rig.turn_finished().await;
+    rig.send(Effect::SetModel(format!("anthropic:{SWITCHED}")));
+    rig.wait_for(
+        |m| matches!(m, Msg::Status(StatusUpdate::Model { model, .. }) if model == SWITCHED),
+    )
+    .await;
+    rig.send(Effect::StartTurn("delegate".into()));
+    rig.turn_finished().await;
+    let recorded = llm.recorded();
+    assert_eq!(recorded[0].model, common::MODEL);
+    assert_eq!(recorded[1].model, SWITCHED);
+    let meta = helper_meta(&rig, &recorded[3].messages, "d1").await;
+    assert_eq!(
+        recorded[2].model, SWITCHED,
+        "the helper runs on the new model"
+    );
+    assert_eq!(meta.model, SWITCHED);
     rig.quit().await;
 }
 

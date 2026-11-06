@@ -223,7 +223,22 @@ timestamp, and output excerpts.
   1. `MobDefinition::implicit(session, model)` carries no provider/self-hosted id and `validate` accepts only catalogued
      or `[models.<id>]`-in-definition models, so a session on an endpoint-only model id (e.g. `proxy:my-alias`) cannot
      `delegate` ("unknown_model: profiles.delegate model … neither catalogued …", returned to the model as the tool
-     error). Ask: let the implicit mob inherit the delegator's provider / custom model profile.
+     error). Ask: let the implicit mob inherit the delegator's provider / custom model profile. **Resolved on-branch**
+     (2026-11-06, engine change in `meerkat-mob-mcp`): `MobMcpState::with_implicit_mob_definition_customizer` takes an
+     `ImplicitMobDefinitionCustomizer`, asked with an `ImplicitMobContext` (owner bridge session, model) between
+     `MobDefinition::implicit` and the create; the engine refuses a customizer that changes the mob id or the delegate
+     profile's model (`implicit_mob::implicit_mob_definition`). Opt-in; no other surface installs one. The TUI's
+     `mobs::endpoint_models::EndpointModels` sets the delegate profile's `provider` from the realm's `[models.<id>]`
+     profile (read from `Runtime::effective`); a `models[<id>]` definition entry would collide with the realm's entry
+     at the member build ("model id … must be unique across built-in, custom, and self-hosted entries"). Unit:
+     `implicit_mob::tests::*`, `tests::implicit_mob_for_an_uncatalogued_model_is_refused_without_a_customizer`,
+     `tests::implicit_mob_customizer_makes_an_uncatalogued_model_validate_and_is_reused`,
+     `tests::implicit_mob_customizer_that_changes_the_delegate_model_is_refused`; TUI:
+     `mobs::a_session_on_an_endpoint_only_model_delegates_on_it`. Found with it: the agent's mob tools capture the
+     model at build (`AgentMobToolSurface.model`), so after a hot `/model` switch `delegate` helpers ran on the old
+     model. The TUI now rebuilds the session after every switch
+     (`RebuildReason::ModelSwitch`); `mobs::a_helper_delegated_after_a_model_switch_runs_on_the_new_model`. Ask: the
+     mob tools read the session's current model.
   2. `fork_off` requires the caller to be a durable mob member; the TUI's primary session is not one and delegate
      helpers are `durable: false`, so only `delegate` (and the `mob_*` tools) are usable from the TUI.
   3. Hook inheritance for members: not used (the TUI gates via admission, hooks only observe); not verified.
@@ -499,7 +514,7 @@ The A4 regression (Tier-1 `read_file`/`memory_search` reaching the classifier) w
 - DNS: `/etc/{host.conf,gai.conf,services,protocols}` added as file grants. A symlinked `/etc/resolv.conf`
   (systemd-resolved) could not be granted, and granting its target's parent (`/run/systemd/resolve`) would not help
   (glibc reads only `/etc/resolv.conf`; nss-resolve needs `AF_UNIX`). Upstream ask: the Linux backend binding a
-  symlink's target at the link's path. **Resolved on-branch** (2026-11-06, the branch's one engine change):
+  symlink's target at the link's path. **Resolved on-branch** (2026-11-06, the branch's first engine change):
   `meerkat-sandbox`'s Linux `Mount::capture` accepts a read-only file grant whose final component is a symlink to a
   regular file (ancestors real directories) and binds the pinned canonical target at the link's path; `validate()`
   still re-resolves the link to the pinned target, so a retargeted link fails closed. Unit:

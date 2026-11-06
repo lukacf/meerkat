@@ -17,7 +17,17 @@ function sendObservations(fixture) {
   return fixture.observations.filter(item => item.method === "POST" &&
     (item.path.endsWith("/send") || item.request.includes('"method":"meta/console/send"')));
 }
+/** A send's own envelope, as the gateway's send reads it: the gateway takes
+ * the console's `expected_caller_scope` (whom it sends for) out first. */
 function wireEnvelope(observation) {
+  const { expected_caller_scope: _caller, ...envelope } = wireBody(observation);
+  return envelope;
+}
+/** The caller a send named (`expected_caller_scope`). */
+function wireCaller(observation) {
+  return wireBody(observation).expected_caller_scope;
+}
+function wireBody(observation) {
   const body = JSON.parse(observation.request);
   return body.method === "meta/console/send" ? body.params : body;
 }
@@ -406,6 +416,7 @@ async function lostAcknowledgement(withQuote = false, { host = "stock" } = {}) {
     assert.equal(saved.text, text);
     const envelope = JSON.parse(saved.envelopeJson);
     assert.deepEqual(wireEnvelope(dropped), envelope, "persisted frozen envelope equals actual outgoing request");
+    assert(typeof wireCaller(dropped) === "string" && wireCaller(dropped).trim(), "the send names the caller the console acts as");
     assert.equal(envelope.idempotency_key, saved.idempotencyKey);
     const content = withQuote ? [{ type: "text", text }, expectedContextBlock(saved.contexts[0])] : text;
     assert.deepEqual(envelope.content, content);

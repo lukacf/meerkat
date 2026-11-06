@@ -85,7 +85,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// The realm's clock: the lease window, the re-acquire's anchors and the
+// commit retry budget. Tokio's instant is the system's monotonic clock, and
+// the clock of the realm's own timers, so a test that pauses tokio's clock
+// sees the window close and the budget run out as its timers advance.
+use tokio::time::Instant;
 
 use meerkat_core::host_store::{
     AcquireMode, CommitBatch, CommitId, FenceTiming, FenceToken, HostStore, HostStoreError,

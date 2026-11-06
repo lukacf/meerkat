@@ -571,6 +571,27 @@ the realm opens; a section that cannot be read or is malformed refuses the
 realm's governed work. Unknown or misspelled fields are refused, including
 inside the reviewer's identity.
 
+`[governance.decisions]` names the approver ids the operator of an `rkat-rpc`
+stdio connection acts for when the connection presents and decides
+[durable decisions](/api/rpc#the-operator-of-a-stdio-connection):
+
+```toml
+[governance.decisions]
+operator_approver_ids = ["operator", "team:owners"]
+```
+
+- `operator_approver_ids`: each entry an approver id (non-empty, at most 256
+  bytes, no whitespace or control characters). Without the key the operator
+  acts for `["operator"]`; an explicit empty list makes it act for none, so
+  the connection presents nothing and refuses every decide.
+
+A plain stdio connection reads the list from the realm's effective
+configuration each time it presents or decides, so a change applies to the
+next `decision/list` and `decision/decide`; a decision already presented is
+refused once its approver id is no longer listed. The stock governed pipe
+reads its host's configuration as the pipe started, so a change reaches it at
+its next start.
+
 Governance is administered by the realm's trusted host in the realm's own
 config document. An ordinary config write (`config/set`, `config/patch`,
 `PUT`/`PATCH /config`, the MCP config tool or the CLI) cannot change,

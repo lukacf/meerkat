@@ -129,6 +129,18 @@ them.
   running loop. Upgrade every process that executes decisions on one store
   together. See Changed.
 
+- `meerkat-core`, `meerkat-contracts`: the operator of an `rkat-rpc` stdio
+  connection decides durable decisions (see Added). `GovernanceConfig`
+  gains the public field `decisions: DecisionGovernanceConfig`, so code
+  that builds it literally must set it (`decisions: Default::default()` or
+  `..Default::default()` states the default list, `["operator"]`).
+  `GovernanceConfig::is_empty` is true only while the list is that default
+  too: a section that lists other operator approver ids is no longer empty
+  (see Upgrade notes).
+  `RpcMethodCatalogOptions` gains `decision_notices_enabled` (struct
+  literals need it): only a catalog for a connection that delivers decision
+  notices lists `decision/notice`.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -220,6 +232,71 @@ them.
   another executor holds the kind or the whole store), and
   `DecisionPassOutcome::KindNotClaimed`, the outcome of a decision of such a
   kind, which another executor executes.
+
+- Durable decisions on the RPC wire: `decision/list` (one page in decision
+  id order, filtered by kind, phase, approver id or requester, at most 500
+  decisions), `decision/get` (one decision, the held request when asked
+  for), `decision/rendering` (the rendering and its canonical parts for a
+  part size), `decision/present` (a host presenter's presentation, counted
+  only when it shows every canonical part to the party that decides now)
+  and `decision/withdraw` (as the host). A runtime whose persistence keeps
+  no durable decisions answers them capability unavailable
+  (`data.kind = "no_decision_store"`); a refusal is invalid params with
+  `data.kind = "decision_refused"` and its typed kind; store faults use the
+  approval store codes. `meerkat-contracts`: `WireDecision` and its
+  vocabularies (`WireDecisionPhase`, `WireDecisionStage`,
+  `WireDecisionNoticeState`, `WireDecisionTier`, `WireDecisionAssurance`,
+  `WireDecisionReviewVerdict`, `WirePresentationAudience`,
+  `WirePresentationRecord`, `WireCanonicalPart`, `WireDecisionEvidence`,
+  `WireDecisionOutcome`, `WireUnreadableDecision`), the closed
+  `WireDecisionRefusal` and `WireDecisionErrorData`, and the params and
+  results of the methods (`DecisionListParams`, `DecisionListResult`,
+  `DecisionGetParams`, `DecisionResult`, `DecisionRenderingParams`,
+  `DecisionRenderingResult`, `DecisionPresentParams`,
+  `DecisionPresentationRequest`, `DecisionAudienceRequest`,
+  `DecisionWithdrawParams`, `DecisionDecideParams`). The Python SDK wraps
+  the methods as `list_decisions`, `get_decision`, `decision_rendering`,
+  `present_decision` and `withdraw_decision`, the TypeScript SDK as
+  `listDecisions`, `getDecision`, `decisionRendering`, `presentDecision` and
+  `withdrawDecision`; neither decides a decision. The wrappers need a 0.9.11
+  or newer server: an older one answers method not found (`-32601`), which
+  both SDKs raise as an error that names the method.
+- Host-adapter decide: `meerkat-rpc`:
+  `MethodRouter::dispatch_with_decision_event` decides `decision/decide`
+  (`DECISION_DECIDE_METHOD`) with an `AuthenticatedDecisionEvent` the host
+  built from the human's authenticated event; the request names only the
+  decision, the answer, the presented digest and a reason, and must equal
+  what the event binds. Plain dispatch has no route to `decision/decide`.
+  `meerkat-core`: `AuthenticatedDecisionEvent`, `CanonicalPart::new` and
+  `PresentationRecord::new`. `meerkat-runtime`:
+  `DurableDecisionService::is_available` and the `decision::wire`
+  projection.
+- The operator of an `rkat-rpc` stdio connection decides durable decisions
+  (Unix builds with local authorization): the operating-system user who
+  started it, device trusted, in an authentication scope of the
+  connection's own. When its client lists (`decision/list`), the connection
+  presents each decision of the returned page that is open, waits for a
+  human and is addressed to an approver id the operator acts for, once per
+  connection, in page order: it writes a `decision/notice` notification
+  with the whole rendering, records the presentation once the notice is on
+  the pipe, and answers the page as recorded. Starting a connection
+  presents nothing. `decision/decide` on the connection decides as the
+  operator (ingress `rkat-rpc-stdio`): the request names only the decision,
+  the answer, the presented digest and a reason, and only a decision the
+  connection presented, whose approver id the configuration still lists,
+  is eligible, and only while the connection is open; any other decide is
+  refused `not_eligible`. A TCP
+  connection, plain dispatch and other builds keep answering
+  `decision/decide` method not found. The stock governed stdio pipe serves
+  both methods for its operator, in its consent surface's scope, with its
+  host's configuration as the pipe started. `meerkat-core`:
+  `[governance.decisions] operator_approver_ids`
+  (`DecisionGovernanceConfig`) names the approver ids the operator acts for,
+  `["operator"]` when absent; it is administered by the host like the rest
+  of `[governance]`. `meerkat-contracts`: `DECISION_NOTICE_NOTIFICATION`,
+  `WireDecisionNotice`, `WireDecisionNoticeEvent` (an event this version
+  does not know reads as `unknown`) and `WireDecisionNoticePresentation`,
+  and the `decision/notice` entry of the RPC notification catalog.
 
 ### Changed
 
@@ -340,6 +417,11 @@ them.
 - A `CommsRuntime` wrapper that overrides `send` should also forward
   `send_with_governed_origin`. Otherwise its governed in-process sends carry
   no origin, and Core's binder refuses them (`origin_unverifiable`).
+
+- Upgrade every process that shares a realm before its configuration
+  states `[governance.decisions]`: 0.9.10 refuses a `[governance]` section
+  with a `decisions` key, so a 0.9.10 process on the realm fails to load
+  the realm's configuration document as a whole.
 
 ### Known limitations
 

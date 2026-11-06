@@ -344,8 +344,8 @@ pub use exact_operation::{
 };
 pub use gateway::{DynamicToolComposite, ToolGateway, ToolGatewayBuilder};
 pub use governance_config::{
-    GovernanceConfig, StockConsentAssurance, StockReviewConfig, StockReviewRule, StockReviewTarget,
-    StockReviewTier, StockReviewerSelection,
+    DecisionGovernanceConfig, GovernanceConfig, StockConsentAssurance, StockReviewConfig,
+    StockReviewRule, StockReviewTarget, StockReviewTier, StockReviewerSelection,
 };
 pub use handles::{
     AuthLeasePhase, CommsDrainHandle, DrainExitReason, DrainMode, DslRejectionKind,

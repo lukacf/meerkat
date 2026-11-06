@@ -881,6 +881,7 @@ test_suite(
         "//crates/meerkat-rpc:regression_rpc_test",
         "//crates/meerkat-rpc:rpc_auth_methods_test",
         "//crates/meerkat-rpc:runtime_backed_ingress_test",
+        "//crates/meerkat-rpc:stdio_operator_decisions_test",
         "//crates/meerkat-rpc:tool_process_custody_rpc_attach_test",
         "//crates/meerkat-runtime:auth_reauth_notice_test",
         "//crates/meerkat-runtime:bounded_submit_contract_test",

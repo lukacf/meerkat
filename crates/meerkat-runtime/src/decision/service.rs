@@ -727,6 +727,14 @@ impl DurableDecisionService {
         self.mode
     }
 
+    /// Whether this owner has a decision store. The owner of a persistence
+    /// with none ([`Self::unavailable`], an ephemeral host's) refuses every
+    /// call as [`DecisionError::Unavailable`].
+    #[must_use]
+    pub fn is_available(&self) -> bool {
+        matches!(self.backing, Backing::Store(_))
+    }
+
     /// Whether decisions survive a restart.
     #[must_use]
     pub fn is_persistent(&self) -> bool {

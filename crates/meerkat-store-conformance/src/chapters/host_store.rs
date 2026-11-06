@@ -45,6 +45,7 @@ pub async fn host_store(factory: &dyn HostStoreFactory) -> Result<(), Conformanc
     };
     let writer = chapter.acquire_on_empty_realm().await?;
     reopen(&mut chapter, &writer).await?;
+    let writer = token_order(&mut chapter, writer).await?;
     let writer = kill(&mut chapter, writer).await?;
     let writer = stale_fence(&mut chapter, writer).await?;
     let writer = takeover_unknown_commit(&mut chapter, writer).await?;
@@ -372,6 +373,38 @@ async fn reopen(chapter: &mut Chapter<'_>, writer: &Writer) -> Result<(), Confor
         "a scope never created loads nothing",
     )
     .await
+}
+
+/// Every grant answers a token above every earlier grant of the realm,
+/// whatever its mode and caller: a takeover of the holder's own recorded
+/// lease through the handle that holds it (as Core's re-acquire after a
+/// failed renew makes), the same again, and a takeover by a new process. A
+/// grant at or below an earlier one would let two writers carry one token,
+/// or a later writer a lower one; Core loses the realm when it meets one.
+async fn token_order(
+    chapter: &mut Chapter<'_>,
+    writer: Writer,
+) -> Result<Writer, ConformanceFailure> {
+    const STEP: &str = "token_order";
+    let steps = chapter.steps;
+    let mut highest = writer.token;
+    for round in ["first", "second"] {
+        let grant = steps.wrap(
+            STEP,
+            writer.store.acquire_fence(AcquireMode::Takeover).await,
+        )?;
+        steps.ensure(
+            STEP,
+            grant.token > highest,
+            format!(
+                "the {round} takeover of the holder's own lease must answer a token above {highest}, got {}",
+                grant.token
+            ),
+        )?;
+        highest = grant.token;
+    }
+    drop(writer);
+    chapter.takeover(STEP, highest).await
 }
 
 /// Where a writer dies relative to its commit.

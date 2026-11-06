@@ -63,7 +63,7 @@ pub trait HostStore: Send + Sync {
 
 | Operation | What it does |
 |-----------|--------------|
-| `acquire_fence(mode)` | Answers a token higher than any acquired before in the realm, durably, and records the new holder's lease. With `AcquireMode::Exclusive`, a live holder makes it answer `Held`. With `AcquireMode::Takeover`, it supersedes any holder and reports what remained of that holder's lease in `FenceGrant::superseded_lease` (zero when no holder was live) |
+| `acquire_fence(mode)` | Answers a token higher than any acquired before in the realm, in either mode and to any caller (a takeover of the caller's own recorded lease included), durably, and records the new holder's lease. With `AcquireMode::Exclusive`, a live holder makes it answer `Held`. With `AcquireMode::Takeover`, it supersedes any holder and reports what remained of that holder's lease in `FenceGrant::superseded_lease` (zero when no holder was live) |
 | `renew_fence(token)` | Confirms that no token higher than `token` exists, and records a new lease for its holder from now, also when that holder's last lease has lapsed. Answers `FencedOut` when a higher token exists |
 | `fence_timing()` | The renew interval and the lease this store records (see [Fence Leases](#fence-leases)). Defaults to `FenceTiming::default()` |
 | `load_head(scope)` | The scope's visible head as a `VersionedHead { version, commit_id, head }`, or `None` when the scope was never created or was deleted |
@@ -691,6 +691,7 @@ Its rows run in order:
 |-----|----------------|
 | Acquire on an empty realm | An exclusive acquire supersedes no lease |
 | Reopen | A new process loads what an earlier one committed: heads, versions, commit ids and rows |
+| Token order | Every grant answers a token above every earlier grant: two takeovers of the holder's own lease through the handle that holds it, then a takeover by a new process |
 | Kill | A writer dies before, during or after a batch over two scopes; the next writer sees it in both or neither, and settles an unknown batch the way Core does |
 | Stale fence | The current holder's first renew succeeds, even if its lease lapsed during the rows before; a superseded writer can neither keep the fence nor make a batch visible; an exclusive acquire waits out a live holder's lease and no longer |
 | Takeover with a commit in flight | The old writer's in-flight commit shows wholly or never, the same to every load |

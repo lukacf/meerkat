@@ -4831,6 +4831,30 @@ pub trait SessionBridge: Send + Sync {
         Ok(())
     }
 
+    /// The members whose run starts the mob holds for unpublished customizer
+    /// tools (`ToolsNotPublished`), in identity order: Core's read
+    /// (`MobHandle::members_holding_run_starts`), from its published state,
+    /// with no actor command. The members a composition publishes and
+    /// releases. Bridges without run-start holds hold none.
+    fn members_holding_run_starts_for_published_tools(
+        &self,
+    ) -> Result<Vec<MobAgentIdentity>, BridgeError> {
+        Ok(Vec::new())
+    }
+
+    /// Retry the build preparation the host asked to retry for a member
+    /// (`MobHandle::resolve_member_build_preparation`): Core ends the cause
+    /// it recorded, which refused the member's wakes
+    /// (`MemberWakeRefusal::BuildPreparationRetry`), so the member's next
+    /// wake asks the host's build preparer again. A member with no such cause
+    /// is a no-op. Bridges without build preparation record no cause.
+    async fn resolve_member_build_preparation(
+        &self,
+        _member_id: &MobAgentIdentity,
+    ) -> Result<(), BridgeError> {
+        Ok(())
+    }
+
     /// meerkat's durability verdict for the member's live registration
     /// (`MeerkatMachine::durability_reload_required`, 0.8.34), or `None` when
     /// this bridge cannot observe it.
@@ -8426,6 +8450,35 @@ impl SessionBridge for MobSessionBridge {
         }
     }
 
+    fn members_holding_run_starts_for_published_tools(
+        &self,
+    ) -> Result<Vec<MobAgentIdentity>, BridgeError> {
+        self.handle
+            .members_holding_run_starts(meerkat_mob::HostRunStartHoldReason::ToolsNotPublished)
+            .map_err(|error| {
+                BridgeError::Mob(format!(
+                    "reading the members held for unpublished customizer tools failed: {error}"
+                ))
+            })
+    }
+
+    async fn resolve_member_build_preparation(
+        &self,
+        member_id: &MobAgentIdentity,
+    ) -> Result<(), BridgeError> {
+        match self
+            .handle
+            .resolve_member_build_preparation(member_id)
+            .await
+        {
+            // Not a member of this mob: no cause is recorded for it.
+            Ok(()) | Err(meerkat_mob::MobError::MemberNotFound(_)) => Ok(()),
+            Err(error) => Err(BridgeError::Mob(format!(
+                "retrying the build preparation of {member_id} failed: {error}"
+            ))),
+        }
+    }
+
     async fn member_durability(
         &self,
         session_id: &meerkat_core::types::SessionId,
@@ -10463,6 +10516,21 @@ impl SessionBridge for super::PublicSessionBridge {
     ) -> Result<(), BridgeError> {
         self.bridge
             .release_member_run_starts_for_published_tools(member_id)
+            .await
+    }
+
+    fn members_holding_run_starts_for_published_tools(
+        &self,
+    ) -> Result<Vec<MobAgentIdentity>, BridgeError> {
+        self.bridge.members_holding_run_starts_for_published_tools()
+    }
+
+    async fn resolve_member_build_preparation(
+        &self,
+        member_id: &MobAgentIdentity,
+    ) -> Result<(), BridgeError> {
+        self.bridge
+            .resolve_member_build_preparation(member_id)
             .await
     }
 

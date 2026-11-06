@@ -365,18 +365,19 @@ impl InstalledAccountRequests {
         bridge: PromptBridge,
         refresh: &console::Refresh<'_>,
         decision: &console::CaptureDecision<'_>,
+        answerer: &console::CaptureAnswerer<'_>,
         closed: F,
     ) -> Result<bool, ConnectError> {
         match request {
             InstalledPublicRequest::Single(request) => {
                 self.present_public_single_console(
-                    *request, presenter, bridge, refresh, decision, closed,
+                    *request, presenter, bridge, refresh, decision, answerer, closed,
                 )
                 .await
             }
             InstalledPublicRequest::Batch(request) => {
                 self.present_public_batch_console(
-                    *request, presenter, bridge, refresh, decision, closed,
+                    *request, presenter, bridge, refresh, decision, answerer, closed,
                 )
                 .await
             }
@@ -390,6 +391,7 @@ impl InstalledAccountRequests {
         bridge: PromptBridge,
         refresh: &console::Refresh<'_>,
         decision: &console::CaptureDecision<'_>,
+        answerer: &console::CaptureAnswerer<'_>,
         closed: F,
     ) -> Result<bool, ConnectError> {
         let owner_closed = AtomicBool::new(false);
@@ -476,6 +478,7 @@ impl InstalledAccountRequests {
                     presenter,
                     &bridge,
                     refresh,
+                    answerer,
                     &mut request.response,
                     closing.as_mut(),
                     Some(&login),

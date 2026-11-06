@@ -304,3 +304,139 @@ fn final_status_disclosure_preserves_unavailable_without_authorizing_a_response(
         );
     }
 }
+
+/// Real Console viewers: the Console's own resolver over an empty runtime,
+/// verifying this fixture issuer's tokens. The issuer is a development host,
+/// the only kind the Console accepts HS256 tokens from.
+mod viewers {
+    use super::*;
+    use base64::Engine as _;
+    use hmac::Mac as _;
+
+    const ISSUER: &str = "http://setup-answers.localhost";
+    const AUDIENCE: &str = "setup-answers";
+    const SUBJECT: &str = "setup-answer-subject";
+    const EMAIL: &str = "person@setup-answers.invalid";
+    const LOGIN: &str = "setup-answer-login";
+    // Public fixture material only, never a deployed key or credential.
+    const KEY: &str = "setup-answers-fixture-key-only";
+
+    fn token() -> String {
+        let part = |value: serde_json::Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(&value).unwrap())
+        };
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 600;
+        let unsigned = format!(
+            "{}.{}",
+            part(json!({"alg":"HS256","typ":"JWT"})),
+            part(
+                json!({"iss":ISSUER,"aud":AUDIENCE,"sub":SUBJECT,"email":EMAIL,
+                "email_verified":true,"sid":LOGIN,"exp":expires})
+            )
+        );
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(KEY.as_bytes()).unwrap();
+        mac.update(unsigned.as_bytes());
+        format!(
+            "Bearer {unsigned}.{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+        )
+    }
+
+    pub(super) struct Console(meerkat_mobkit::UnifiedRuntime);
+    impl Console {
+        pub(super) async fn start(mob: &str) -> Self {
+            let definition = meerkat_mob::MobDefinition::from_toml(&format!(
+                "[mob]\nid = \"{mob}\"\n\n[profiles.worker]\nmodel = \"gpt-5.5\"\n"
+            ))
+            .unwrap();
+            Self(
+                meerkat_mobkit::UnifiedRuntime::builder()
+                    .definition(definition)
+                    .build()
+                    .await
+                    .unwrap(),
+            )
+        }
+        /// The viewer the Console resolves for this fixture's token, under
+        /// an `auth_config` that states `accounts` (none: the shared-secret
+        /// default, a shared account).
+        pub(super) fn viewer(&self, accounts: Option<&str>) -> Option<ConsoleViewerContext> {
+            let mut config = json!({"provider":"jwt","shared_secret":KEY,"issuer":ISSUER,
+                "audience":AUDIENCE,"email_allowlist":[EMAIL]});
+            if let Some(accounts) = accounts {
+                config["accounts"] = json!(accounts);
+            }
+            let decisions =
+                meerkat_mobkit::console_auth_config::parse_console_auth_config(&config).unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert(axum::http::header::AUTHORIZATION, token().parse().unwrap());
+            self.0
+                .console_viewer_resolver(&decisions)
+                .resolve(&headers, &Uri::from_static("/host/toolkit/setup/answer"))
+        }
+        pub(super) async fn stop(self) {
+            self.0.shutdown().await;
+        }
+    }
+}
+
+/// MU-11 row 5: every setup answer route (start, answer, credentials, cancel
+/// sign-in, callback) passes one gate, and the gate refuses every caller that
+/// is not a verified, current person with the Console's shared refusal
+/// `approver_unauthenticated`: a shared-account token, an open Console's
+/// caller without a token, a service token, and (after an await) a token that
+/// stopped verifying. A signed-in person passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn setup_answers_refuse_a_caller_that_is_not_a_person_with_approver_unauthenticated() {
+    let console = viewers::Console::start("setup-answer-gate").await;
+    let person = console
+        .viewer(Some("personal"))
+        .expect("a person's token verifies");
+    assert!(person.human.is_some(), "the person's token names a human");
+    assert_eq!(http::answering_person(Some(&person)), Ok(()));
+    let shared = console
+        .viewer(None)
+        .expect("a shared-account token verifies");
+    assert!(
+        shared.human.is_none() && shared.principal.is_some(),
+        "a shared-account token names no person"
+    );
+    let anonymous = ConsoleViewerContext {
+        principal: None,
+        service_identity: false,
+        access_view: None,
+        human: None,
+    };
+    let service = ConsoleViewerContext {
+        principal: Some("svc:setup-answers-fixture".into()),
+        service_identity: true,
+        access_view: None,
+        human: None,
+    };
+    for (caller, viewer) in [
+        ("a shared-account token", Some(&shared)),
+        ("an open Console's caller without a token", Some(&anonymous)),
+        ("a service token", Some(&service)),
+        ("a token that stopped verifying", None),
+    ] {
+        let refusal = http::answering_person(viewer).expect_err(caller);
+        let response = refusal.into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{caller}");
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            body["error"], "approver_unauthenticated",
+            "{caller} answered: {body}"
+        );
+    }
+    console.stop().await;
+}

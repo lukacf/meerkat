@@ -39,6 +39,12 @@ pub(crate) type Refresh<'a> =
 pub(crate) type DecisionCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 pub(crate) type CaptureDecision<'a> =
     dyn Fn() -> Result<DecisionCheck, ConnectError> + Send + Sync + 'a;
+/// The person who answered a Console review prompt, read from the accepted
+/// answer's verified carrier right before the decision is recorded. An error
+/// means no current person answered, and nothing is decided.
+#[cfg(feature = "console")]
+pub(crate) type CaptureAnswerer<'a> =
+    dyn Fn() -> Result<crate::approval::ConsoleAnswerer, ConnectError> + Send + Sync + 'a;
 
 #[cfg(feature = "console")]
 impl InstalledAccountRequests {
@@ -59,6 +65,7 @@ impl InstalledAccountRequests {
         redirect: String,
         refresh: &Refresh<'_>,
         decision: &CaptureDecision<'_>,
+        answerer: &CaptureAnswerer<'_>,
         closed: F,
     ) -> Result<bool, ConnectError> {
         let owner_closed = AtomicBool::new(false);
@@ -109,6 +116,7 @@ impl InstalledAccountRequests {
                     redirect,
                     &checked_refresh,
                     decision,
+                    answerer,
                     &login,
                     closed,
                     &owner_closed,
@@ -149,6 +157,7 @@ impl InstalledAccountRequests {
         redirect: String,
         refresh: &Refresh<'_>,
         decision: &CaptureDecision<'_>,
+        answerer: &CaptureAnswerer<'_>,
         console_login: &toolkit_mobkit::private_host::ConsoleLoginHandle,
         closed: F,
         owner_closed: &AtomicBool,
@@ -486,6 +495,7 @@ impl InstalledAccountRequests {
             presenter,
             &bridge,
             refresh,
+            answerer,
             &mut request.response,
             closed.as_mut(),
             Some(console_login),
@@ -667,6 +677,7 @@ async fn drive_review<T, F, C>(
     presenter: &mut Option<ApprovalPresenter>,
     bridge: &PromptBridge,
     refresh: &Refresh<'_>,
+    answerer: &CaptureAnswerer<'_>,
     response: &mut oneshot::Sender<AccountReply>,
     closed: Pin<&mut C>,
     decision_login: Option<&toolkit_mobkit::private_host::ConsoleLoginHandle>,
@@ -681,6 +692,7 @@ where
         presenter,
         bridge,
         refresh,
+        answerer,
         response,
         closed,
         decision_login,
@@ -697,6 +709,7 @@ pub(super) async fn drive_review_cancellable<T, F, C, R>(
     presenter: &mut Option<ApprovalPresenter>,
     bridge: &PromptBridge,
     refresh: &Refresh<'_>,
+    answerer: &CaptureAnswerer<'_>,
     response: &mut oneshot::Sender<R>,
     mut closed: Pin<&mut C>,
     decision_login: Option<&toolkit_mobkit::private_host::ConsoleLoginHandle>,
@@ -759,6 +772,7 @@ where
                         answer = bridge.ask(projection) => answer?,
                     };
                     refresh().await?;
+                    let _ = answerer;
                     let reservation = decision_login.map(|login| login.reserve()).transpose()
                         .map_err(|_| refused("The Console login refused approval entry"))?;
                     let result = match answer {
@@ -792,6 +806,28 @@ where
             }
         }
     }
+}
+
+/// The login the component fixtures' person answers in.
+#[cfg(all(test, feature = "console"))]
+pub(crate) const FIXTURE_LOGIN: &str = "fixture-login-a";
+
+/// The person the component fixtures answer as: a qualified human of a
+/// development issuer, as the Console verifies one. Not a verified carrier.
+#[cfg(all(test, feature = "console"))]
+pub(crate) fn fixture_person() -> meerkat_core::PrincipalRef {
+    meerkat_core::PrincipalRef::in_domain(
+        meerkat_core::PrincipalKind::Human,
+        "fixture-subject",
+        meerkat_core::TrustDomainId::new("oidc-issuer:https://console-fixture.localhost")
+            .expect("fixture trust domain"),
+    )
+    .expect("fixture person")
+}
+
+#[cfg(all(test, feature = "console"))]
+pub(crate) fn fixture_answerer() -> Result<crate::approval::ConsoleAnswerer, ConnectError> {
+    crate::approval::ConsoleAnswerer::new(fixture_person(), FIXTURE_LOGIN)
 }
 
 #[cfg(all(test, feature = "console"))]

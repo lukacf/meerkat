@@ -65,6 +65,7 @@ async fn console_answer_consumes_only_the_exact_retained_native_prompt_once() {
             &mut presenter,
             &bridge,
             &refresh,
+            &fixture_answerer,
             &mut response,
             closed.as_mut(),
             None,
@@ -132,6 +133,7 @@ async fn console_refresh_after_browser_wait_refuses_only_this_request_and_allows
             &mut presenter,
             &bridge,
             &refresh,
+            &fixture_answerer,
             &mut response,
             closed.as_mut(),
             None,
@@ -177,6 +179,7 @@ async fn console_refresh_after_browser_wait_refuses_only_this_request_and_allows
                 &mut presenter,
                 &bridge,
                 &refresh,
+                &fixture_answerer,
                 &mut response,
                 closed.as_mut(),
                 None,
@@ -411,6 +414,7 @@ async fn console_caller_loss_at_the_prompt_preserves_the_presenter_and_next_revi
             &mut presenter,
             &bridge,
             &refresh,
+            &fixture_answerer,
             &mut response,
             closed.as_mut(),
             None,
@@ -606,6 +610,7 @@ async fn caller_loss_before_account_approval_preserves_a_queued_live_sibling() {
                 &mut presenter,
                 &bridge,
                 &refresh,
+                &fixture_answerer,
                 &mut response,
                 closed.as_mut(),
                 None,
@@ -876,4 +881,129 @@ async fn provider_sign_in_owner_closure_is_not_an_explicit_cancel_request() {
             .await
             .is_err()
     );
+}
+
+// Drive one Console review on the Console setup owner (as the installed
+// Console composes it) and answer it once with `decision`. The answerer is
+// what the Console read from the accepted answer's verified carrier.
+async fn answer_console_review(
+    answerer: &CaptureAnswerer<'_>,
+) -> (
+    Result<Option<meerkat_core::ApprovalRecord>, ConnectError>,
+    LocalApprovals,
+    String,
+    tempfile::TempDir,
+) {
+    let root = tempfile::tempdir().unwrap();
+    let (approvals, presenter) = LocalApprovals::create_console_setup(root.path()).unwrap();
+    let session = SessionId::new();
+    approvals.bind_session(&session).unwrap();
+    let review = approvals.review_access(request(session));
+    let mut presenter = Some(presenter);
+    let (bridge, mut prompts, _retire) = PromptBridge::channel();
+    let (mut response, _receive) = oneshot::channel();
+    let closed = std::future::pending();
+    tokio::pin!(closed);
+    let refresh = || -> BoxFuture<'static, Result<(), ConnectError>> { Box::pin(async { Ok(()) }) };
+    let driver = drive_review(
+        review,
+        &approvals,
+        &mut presenter,
+        &bridge,
+        &refresh,
+        answerer,
+        &mut response,
+        closed.as_mut(),
+        None,
+    );
+    let answer = async {
+        let mut exchange = Some(prompts.recv().await.unwrap());
+        let id = exchange.as_ref().unwrap().prompt["approval_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        answer_retained(
+            9,
+            &mut exchange,
+            &serde_json::to_vec(&json!({"review_id":9,"approval_id":id,"decision":"approve"}))
+                .unwrap(),
+        )
+        .unwrap();
+        id
+    };
+    let (result, id) = tokio::join!(driver, answer);
+    drop(presenter);
+    (result, approvals, id, root)
+}
+
+/// MU-11 row 2: a Console setup review records the person who answered it,
+/// not the presenter's construction label: Core's qualified principal key as
+/// the decision's actor, and as its provenance the approver as Core's
+/// consent records name one (principal, assurance, a digest of the login).
+/// The login itself is never recorded.
+#[tokio::test]
+async fn console_review_records_the_answering_person() {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let (result, approvals, id, _root) = answer_console_review(&fixture_answerer).await;
+        let record = result.unwrap().unwrap();
+        assert_eq!(record.status, ApprovalStatus::Approved);
+        let person = fixture_person();
+        let decision = record.decision.clone().unwrap();
+        assert_eq!(
+            decision.actor.as_str(),
+            meerkat_core::approval::decision::DecisionPrincipalKey::of(&person)
+                .unwrap()
+                .as_str(),
+            "the person who answered decided, not the presenter"
+        );
+        let approver = &decision
+            .provenance
+            .as_ref()
+            .expect("the decision names its approver")["approver"];
+        assert_eq!(
+            approver["principal"],
+            serde_json::to_value(&person).unwrap()
+        );
+        assert_eq!(approver["assurance"], "person_authenticated");
+        assert_eq!(
+            approver["authentication_scope_digest"],
+            format!(
+                "sha256:{:x}",
+                <sha2::Sha256 as sha2::Digest>::digest(FIXTURE_LOGIN.as_bytes())
+            )
+        );
+        // The native owner keeps the same decision, and no copy of the login.
+        let store = meerkat_store::FileApprovalStore::open(approvals.store_path()).unwrap();
+        let service = meerkat_core::ApprovalService::with_store(Arc::new(store)).unwrap();
+        let stored = service.get(&id.parse().unwrap()).unwrap();
+        assert_eq!(stored.decision, record.decision);
+        assert!(
+            !serde_json::to_string(&stored)
+                .unwrap()
+                .contains(FIXTURE_LOGIN),
+            "the login itself is never recorded"
+        );
+    })
+    .await
+    .expect("the Console review did not settle");
+}
+
+/// MU-11 row 2: when the accepted answer no longer names a current person
+/// (its login ended, or its token stopped verifying), the review decides
+/// nothing: the approval stays pending and the request fails.
+#[tokio::test]
+async fn console_review_without_a_current_answerer_decides_nothing() {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let lapsed = || -> Result<crate::approval::ConsoleAnswerer, ConnectError> {
+            Err(refused("fixture Console login ended"))
+        };
+        let (result, approvals, id, _root) = answer_console_review(&lapsed).await;
+        assert!(
+            result.is_err(),
+            "an answer without a current person decided: {result:?}"
+        );
+        assert_pending(&approvals, &id);
+    })
+    .await
+    .expect("the Console review did not settle");
 }

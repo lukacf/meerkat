@@ -1334,6 +1334,42 @@ pub struct ApprovalPrompt {
     retired: watch::Receiver<bool>,
 }
 
+/// The person who answered a Console setup prompt, as the Console verified
+/// them on the accepted answer: a qualified human principal (the token's
+/// issuer and subject) and a digest of the login the answer was made in.
+/// Only the Console's verified carrier builds one, never request bytes, and
+/// it keeps neither the token nor the login itself. It records who decided;
+/// eligibility remains the existing currentness checks.
+#[cfg(feature = "console")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ConsoleAnswerer {
+    principal: meerkat_core::PrincipalRef,
+    authentication_scope_digest: meerkat_core::approval::decision::Sha256Digest,
+}
+
+#[cfg(feature = "console")]
+impl ConsoleAnswerer {
+    /// `principal` must be a qualified human and `login_scope` the verified
+    /// login association the answer was authenticated in.
+    pub(crate) fn new(
+        principal: meerkat_core::PrincipalRef,
+        login_scope: &str,
+    ) -> Result<Self, ConnectError> {
+        if principal.kind != meerkat_core::PrincipalKind::Human
+            || principal.validate_qualified().is_err()
+            || login_scope.trim().is_empty()
+        {
+            return Err(invalid("The Console answer names no verified person"));
+        }
+        Ok(Self {
+            principal,
+            authentication_scope_digest: meerkat_core::approval::decision::Sha256Digest::of(
+                login_scope.as_bytes(),
+            ),
+        })
+    }
+}
+
 impl ApprovalPrompt {
     pub fn record(&self) -> &ApprovalRecord {
         &self.record
@@ -1357,10 +1393,12 @@ impl ApprovalPrompt {
         &mut self,
         decision: ApprovalDecision,
         current: crate::installed_service_review::account_request::console::DecisionCheck,
+        answerer: &ConsoleAnswerer,
     ) -> Result<(), ConnectError> {
         if self.console_task().is_none() {
             return Err(invalid("The software prompt has no Console task"));
         }
+        let _ = answerer;
         self.decide_current(decision, Some(current))
     }
     fn decide_current(

@@ -261,6 +261,20 @@ impl Action {
                 .map_err(|_| unavailable())?
         }))
     }
+    /// The person this accepted answer was made by: the verified human its
+    /// retained carrier names now (its current login and access included),
+    /// with the login the answer was authenticated in. No current person
+    /// answers nothing.
+    fn answerer(&self) -> Result<crate::approval::ConsoleAnswerer, ConnectError> {
+        let viewer = self.current().ok_or_else(unavailable)?;
+        if viewer.service_identity {
+            return Err(unavailable());
+        }
+        let human = viewer.human.as_ref().ok_or_else(unavailable)?;
+        let principal = human.principal().map_err(|_| unavailable())?;
+        let scope = human.login_scope().ok_or_else(unavailable)?;
+        crate::approval::ConsoleAnswerer::new(principal, scope)
+    }
     fn decision_check(&self) -> Result<DecisionCheck, ConnectError> {
         let identity = self.identity.get().cloned().ok_or_else(unavailable)?;
         let viewer = self.current().ok_or_else(unavailable)?;
@@ -313,6 +327,15 @@ impl Active {
             .as_ref()
             .ok_or_else(unavailable)?
             .decision_check()
+    }
+    /// The person the last accepted answer was made by.
+    fn answerer(&self) -> Result<crate::approval::ConsoleAnswerer, ConnectError> {
+        self.action
+            .lock()
+            .map_err(|_| unavailable())?
+            .as_ref()
+            .ok_or_else(unavailable)?
+            .answerer()
     }
     fn administration_check(&self) -> Result<crate::installed_service_review::account_request::credentials::administration::AdministrationCheck, ConnectError>{
         self.action
@@ -494,11 +517,17 @@ impl ConsoleSetup {
                 Ok(current) => current,
                 Err(error) => return Ok(ApprovalPromptOutcome::Refused(error)),
             };
+            // The person the accepted answer's verified carrier names, read
+            // after the last await. No current person decides nothing.
+            let answerer = match action.answerer() {
+                Ok(answerer) => answerer,
+                Err(error) => return Ok(ApprovalPromptOutcome::Refused(error)),
+            };
             let PromptAnswer::Approval { decision } = answer else { return Ok(ApprovalPromptOutcome::Refused(unavailable())); };
             if let Err(error) = prompt.decide_console(match decision {
                 crate::stdio::wire::Decision::Approve => meerkat_core::ApprovalDecision::Approve,
                 crate::stdio::wire::Decision::Deny => meerkat_core::ApprovalDecision::Deny,
-            }, current) {
+            }, current, &answerer) {
                 // A native write error can follow a recorded decision. Keep
                 // its existing owner and never claim that no effect occurred.
                 return Ok(ApprovalPromptOutcome::Refused(error));
@@ -642,22 +671,23 @@ impl ConsoleSetup {
             };
             let decision = || active.decision_check();
             let administration = || active.administration_check();
+            let answerer = || active.answerer();
             let driver: BoxFuture<'_, Result<bool, ConnectError>> = match request {
                 crate::installed_service_review::account_request::InstalledRequest::Account(request) =>
                     Box::pin(accounts.present_console(*request, presenter, bridge, callbacks,
-                        self.0.selection.callback(), &refresh, &decision, closed.wait_closed())),
+                        self.0.selection.callback(), &refresh, &decision, &answerer, closed.wait_closed())),
                 crate::installed_service_review::account_request::InstalledRequest::Credentials(request) => Box::pin(async {
                     let _unused_callbacks = callbacks;
                     accounts.present_credentials_console(*request, presenter, bridge,
                         values.take().ok_or_else(unavailable)?, &refresh, &decision, &administration,
-                        closed.wait_closed()).await
+                        &answerer, closed.wait_closed()).await
                 }),
                 crate::installed_service_review::account_request::InstalledRequest::Public(request) => Box::pin(async {
                     // Keep the shared presentation loop's callback sender alive;
                     // this typed branch never produces a callback or starts auth.
                     let _unused_callbacks = callbacks;
                     accounts.present_public_console(request, presenter, bridge,
-                        &refresh, &decision, closed.wait_closed()).await
+                        &refresh, &decision, &answerer, closed.wait_closed()).await
                 }),
             };
             tokio::pin!(driver);

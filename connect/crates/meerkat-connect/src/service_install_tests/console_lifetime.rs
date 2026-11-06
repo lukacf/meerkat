@@ -240,7 +240,12 @@ async fn exact_decision_refusal_does_not_record_or_wake_software_dispatch() {
     #[cfg(feature = "console")]
     assert!(
         prompt
-            .decide_console(ApprovalDecision::Approve, Arc::new(|| true))
+            .decide_console(
+                ApprovalDecision::Approve,
+                Arc::new(|| true),
+                &crate::installed_service_review::account_request::console::fixture_answerer()
+                    .unwrap()
+            )
             .is_err()
     );
     assert_eq!(

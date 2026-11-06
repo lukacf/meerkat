@@ -202,6 +202,7 @@ impl InstalledAccountRequests {
         bridge: PromptBridge,
         refresh: &console::Refresh<'_>,
         decision: &console::CaptureDecision<'_>,
+        answerer: &console::CaptureAnswerer<'_>,
         closed: F,
     ) -> Result<bool, ConnectError> {
         let owner_closed = AtomicBool::new(false);
@@ -237,7 +238,7 @@ impl InstalledAccountRequests {
                 let reviewed = console::drive_review_cancellable(
                     self.review.review_public_batch(&request.members, request.expires_in_ms, request.policy,
                         task, &request.current, refresh, decision, cancellation),
-                    &self.review.approvals, presenter, &bridge, refresh, &mut request.response,
+                    &self.review.approvals, presenter, &bridge, refresh, answerer, &mut request.response,
                     closing.as_mut(), Some(&login), Some(cancel_review), Some(&owner_closed),
                 ).await?;
                 let Some(reply) = reviewed else { return Ok(request.response.is_closed()); };

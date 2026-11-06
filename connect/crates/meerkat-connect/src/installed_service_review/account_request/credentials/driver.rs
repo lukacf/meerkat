@@ -21,6 +21,7 @@ impl InstalledAccountRequests {
         refresh: &console::Refresh<'_>,
         decision: &console::CaptureDecision<'_>,
         administration: &CaptureAdministration<'_>,
+        answerer: &console::CaptureAnswerer<'_>,
         closed: F,
     ) -> Result<bool, ConnectError> {
         let owner_closed = AtomicBool::new(false);
@@ -105,6 +106,7 @@ impl InstalledAccountRequests {
                     presenter,
                     &bridge,
                     refresh,
+                    answerer,
                     &mut request.response,
                     closing.as_mut(),
                     Some(&login),

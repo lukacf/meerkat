@@ -47,26 +47,81 @@ fn failure(status: StatusCode) -> Response {
         "{\"error\":\"Protected setup is unavailable\"}",
     )
 }
+/// Why a setup answer route refused its request.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Refusal {
+    /// A protected setup failure status.
+    Status(StatusCode),
+    /// The caller is not a verified, current person: nothing was answered.
+    ApproverUnauthenticated,
+}
+impl From<StatusCode> for Refusal {
+    fn from(status: StatusCode) -> Self {
+        Self::Status(status)
+    }
+}
+impl Refusal {
+    pub(super) fn into_response(self) -> Response {
+        match self {
+            Self::Status(status) => failure(status),
+            Self::ApproverUnauthenticated => response(
+                StatusCode::FORBIDDEN,
+                "application/json",
+                json!({
+                    "error": meerkat_mobkit::http_console::CONSOLE_APPROVER_UNAUTHENTICATED_KIND,
+                    "message": "Setup answers are made only by a signed-in person; nothing was answered",
+                })
+                .to_string(),
+            ),
+        }
+    }
+}
+/// A setup answer is made only by a verified, current person: the human the
+/// request's verified token names, as the Console resolves it. A caller
+/// without a token on an open Console, a service token, a token that names
+/// no human and a shared-account token answer nothing, and so does a person
+/// whose token no longer verifies (`None`, after an await).
+pub(super) fn answering_person(viewer: Option<&ConsoleViewerContext>) -> Result<(), Refusal> {
+    let person = viewer.is_some_and(|viewer| {
+        !viewer.service_identity
+            && viewer
+                .human
+                .as_ref()
+                .is_some_and(|human| human.current().is_ok())
+    });
+    if person {
+        Ok(())
+    } else {
+        Err(Refusal::Status(StatusCode::FORBIDDEN))
+    }
+}
 fn response(status: StatusCode, content_type: &'static str, body: impl Into<String>) -> Response {
     (status, [("content-type", content_type), ("cache-control", "no-store"),
         ("referrer-policy", "no-referrer"), ("x-content-type-options", "nosniff"),
         ("content-security-policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'"
     )], body.into()).into_response()
 }
+fn resolve_viewer(
+    panel: &ConsoleSetup,
+    headers: &HeaderMap,
+    uri: &Uri,
+) -> Result<ConsoleViewerContext, StatusCode> {
+    if uri.query().is_some() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    panel
+        .0
+        .viewer
+        .get()
+        .and_then(|resolver| resolver.resolve(headers, uri))
+        .ok_or(StatusCode::UNAUTHORIZED)
+}
 fn viewer(
     panel: &ConsoleSetup,
     headers: &HeaderMap,
     uri: &Uri,
 ) -> Result<(ConsoleViewerContext, ConsoleLoginHandle), StatusCode> {
-    if uri.query().is_some() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let viewer = panel
-        .0
-        .viewer
-        .get()
-        .and_then(|resolver| resolver.resolve(headers, uri))
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let viewer = resolve_viewer(panel, headers, uri)?;
     let login = panel
         .0
         .binding
@@ -94,9 +149,16 @@ fn selected(
     panel: &ConsoleSetup,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<(Arc<Active>, Action), StatusCode> {
+) -> Result<(Arc<Active>, Action), Refusal> {
     mutation(panel, &headers, &uri)?;
-    let (_, login) = viewer(panel, &headers, &uri)?;
+    let viewer = resolve_viewer(panel, &headers, &uri)?;
+    // Only a verified, current person answers a setup prompt.
+    answering_person(Some(&viewer))?;
+    let login = panel
+        .0
+        .binding
+        .current_login(&viewer)
+        .map_err(|_| StatusCode::FORBIDDEN)?;
     let active = panel
         .0
         .active
@@ -105,7 +167,7 @@ fn selected(
         .clone()
         .ok_or(StatusCode::CONFLICT)?;
     if !active.login.same_owner(&login) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(StatusCode::FORBIDDEN.into());
     }
     let action = Action {
         viewer: panel
@@ -123,11 +185,19 @@ fn selected(
     };
     Ok((active, action))
 }
+/// After the route's awaits: the answer's carrier must still name a verified,
+/// current person (a login that ended answers nothing), then the action's own
+/// check (`checked`) and its exact presentation must still hold.
 fn still_selected(
     panel: &ConsoleSetup,
     active: &Arc<Active>,
     action: &Action,
-) -> Result<(), StatusCode> {
+    checked: bool,
+) -> Result<(), Refusal> {
+    answering_person(action.viewer.resolve(&action.headers, &action.uri).as_ref())?;
+    if !checked {
+        return Err(StatusCode::FORBIDDEN.into());
+    }
     action.current().ok_or(StatusCode::FORBIDDEN)?;
     if !panel
         .0
@@ -137,7 +207,7 @@ fn still_selected(
         .as_ref()
         .is_some_and(|current| Arc::ptr_eq(current, active))
     {
-        return Err(StatusCode::CONFLICT);
+        return Err(StatusCode::CONFLICT.into());
     }
     Ok(())
 }
@@ -582,17 +652,17 @@ async fn start(
     };
     let (active, action) = match selected(&panel, headers, uri) {
         Ok(value) => value,
-        Err(status) => return failure(status),
+        Err(refusal) => return refusal.into_response(),
     };
     if request.review_id != active.id || active.software {
         return failure(StatusCode::CONFLICT);
     }
-    if action.check().await.is_err() {
-        let _ = panel.reclaim_terminal().await;
-        return failure(StatusCode::FORBIDDEN);
-    }
-    if let Err(status) = still_selected(&panel, &active, &action) {
-        return failure(status);
+    let checked = action.check().await.is_ok();
+    if let Err(refusal) = still_selected(&panel, &active, &action, checked) {
+        if !checked {
+            let _ = panel.reclaim_terminal().await;
+        }
+        return refusal.into_response();
     }
     let mut start = match active.start.lock() {
         Ok(start) => start,
@@ -626,13 +696,11 @@ async fn answer(
 ) -> Response {
     let (active, action) = match selected(&panel, headers, uri) {
         Ok(value) => value,
-        Err(status) => return failure(status),
+        Err(refusal) => return refusal.into_response(),
     };
-    if action.check().await.is_err() {
-        return failure(StatusCode::FORBIDDEN);
-    }
-    if let Err(status) = still_selected(&panel, &active, &action) {
-        return failure(status);
+    let checked = action.check().await.is_ok();
+    if let Err(refusal) = still_selected(&panel, &active, &action, checked) {
+        return refusal.into_response();
     }
     // Credential approvals use one combined protected answer. The generic
     // prompt carrier never accepts, records or forwards submitted values.
@@ -662,13 +730,11 @@ async fn credentials(
 ) -> Response {
     let (active, action) = match selected(&panel, headers, uri) {
         Ok(value) => value,
-        Err(status) => return failure(status),
+        Err(refusal) => return refusal.into_response(),
     };
-    if action.check().await.is_err() {
-        return failure(StatusCode::FORBIDDEN);
-    }
-    if let Err(status) = still_selected(&panel, &active, &action) {
-        return failure(status);
+    let checked = action.check().await.is_ok();
+    if let Err(refusal) = still_selected(&panel, &active, &action, checked) {
+        return refusal.into_response();
     }
     let result = {
         let mut credentials = match active.credentials.lock() {
@@ -701,13 +767,11 @@ async fn cancel_sign_in(
 ) -> Response {
     let (active, action) = match selected(&panel, headers, uri) {
         Ok(value) => value,
-        Err(status) => return failure(status),
+        Err(refusal) => return refusal.into_response(),
     };
-    if action.check().await.is_err() {
-        return failure(StatusCode::FORBIDDEN);
-    }
-    if let Err(status) = still_selected(&panel, &active, &action) {
-        return failure(status);
+    let checked = action.check().await.is_ok();
+    if let Err(refusal) = still_selected(&panel, &active, &action, checked) {
+        return refusal.into_response();
     }
     // Serialize with callback delivery. A completed delivery remains owned by
     // the account driver; cancellation can only signal its retained notice.
@@ -742,13 +806,11 @@ async fn callback(
 ) -> Response {
     let (active, action) = match selected(&panel, headers, uri) {
         Ok(value) => value,
-        Err(status) => return failure(status),
+        Err(refusal) => return refusal.into_response(),
     };
-    if action.check().await.is_err() {
-        return failure(StatusCode::FORBIDDEN);
-    }
-    if let Err(status) = still_selected(&panel, &active, &action) {
-        return failure(status);
+    let checked = action.check().await.is_ok();
+    if let Err(refusal) = still_selected(&panel, &active, &action, checked) {
+        return refusal.into_response();
     }
     let received = {
         let mut slot = match active.callback.lock() {

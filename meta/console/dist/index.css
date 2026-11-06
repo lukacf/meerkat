@@ -6684,6 +6684,16 @@ button.topo-roletree__agent:focus-visible {
 .cc-approval__risk {
   flex: none;
 }
+.cc-approval__audience {
+  flex: none;
+}
+.cc-approval--departed {
+  background: var(--_cc-surface-soft);
+  color: var(--_cc-foreground-muted);
+}
+.cc-approval--departed .cc-approval__title {
+  color: var(--_cc-foreground-muted);
+}
 .cc-approval__deadline {
   flex: none;
   margin-top: 1px;

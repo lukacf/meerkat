@@ -26755,6 +26755,10 @@ function isNamespacedKind(kind) {
 
 // ../packages/console-core/src/pending-approvals.ts
 var APPROVAL_ACTIONS = ["approve", "reject", "escalate"];
+function approvalAudience(request, viewer) {
+  const approver = request.requestedApprover;
+  return !approver || viewer.approverIds.includes(approver) ? { kind: "you" } : { kind: "other", approver };
+}
 var POLL_MS = 15e3;
 var STALE_MS = 2 * POLL_MS;
 var text2 = (value) => typeof value === "string" && value.trim() ? value : void 0;
@@ -26840,6 +26844,28 @@ var isDenied = (error48) => {
   const record10 = error48;
   return record10?.httpStatus === 403 || record10?.rpcError?.code === -32030 || record10?.rpcError?.data?.kind === "access_denied";
 };
+var DEPARTED_LIMIT = 20;
+var DECIDED_EVENTS = {
+  approval_decided: "approve",
+  rejection_decided: "reject",
+  escalation_decided: "escalate",
+  timeout_fallback: "expired"
+};
+function recordedDecisions(value) {
+  const payload = value && typeof value === "object" ? value : void 0;
+  const entries = Array.isArray(value) ? value : Array.isArray(payload?.entries) ? payload.entries : [];
+  const found = /* @__PURE__ */ new Map();
+  for (const entry of entries) {
+    const record10 = entry && typeof entry === "object" ? entry : null;
+    const pendingId = text2(record10?.pending_id);
+    const action = typeof record10?.event_type === "string" ? DECIDED_EVENTS[record10.event_type] : void 0;
+    if (!pendingId || !action || found.has(pendingId)) continue;
+    const detail = record10?.detail && typeof record10.detail === "object" ? record10.detail : {};
+    const by = action === "expired" ? void 0 : text2(detail.deciding_principal) || text2(detail.approver_id);
+    found.set(pendingId, { action, ...by ? { by } : {} });
+  }
+  return found;
+}
 function createPendingApprovalResource(input) {
   const env2 = input.environment || browserEnvironment();
   let snapshot = {
@@ -26847,6 +26873,7 @@ function createPendingApprovalResource(input) {
     status: "loading",
     requests: [],
     decisions: {},
+    departed: [],
     readOnly: input.readOnly === true,
     ...input.readOnly === true && input.readOnlyReason ? { readOnlyReason: input.readOnlyReason } : {}
   };
@@ -26867,6 +26894,14 @@ function createPendingApprovalResource(input) {
   };
   const stale = () => {
     if (snapshot.status === "ready" && snapshot.updatedAtMs !== void 0 && env2.now() - snapshot.updatedAtMs >= STALE_MS) publish({ status: "stale" });
+  };
+  const readDecisions = async () => {
+    try {
+      const found = recordedDecisions(await input.loadDecisions(lifetime.signal));
+      if (disposed || denied || !found.size) return;
+      publish({ departed: (snapshot.departed ?? []).map((item) => item.decided || !found.has(item.request.pendingId) ? item : { ...item, decided: found.get(item.request.pendingId) }) });
+    } catch {
+    }
   };
   const schedule = () => {
     if (timer3 !== void 0) env2.clearTimeout(timer3);
@@ -26907,13 +26942,19 @@ function createPendingApprovalResource(input) {
             requests.push(request);
           }
         }
-        publish({ requests, status: "ready", updatedAtMs: env2.now(), error: void 0 });
+        const left = snapshot.status === "loading" ? [] : snapshot.requests.filter((old) => old.status === "pending" && !ids.has(old.pendingId) && snapshot.decisions[old.pendingId]?.phase !== "settled" && snapshot.decisions[old.pendingId]?.phase !== "submitting");
+        const departed = [
+          ...left.map((request) => ({ request, departedAtMs: env2.now() })),
+          ...(snapshot.departed ?? []).filter((old) => !ids.has(old.request.pendingId) && !left.some((request) => request.pendingId === old.request.pendingId))
+        ].slice(0, DEPARTED_LIMIT);
+        publish({ requests, departed, status: "ready", updatedAtMs: env2.now(), error: void 0 });
+        if (left.length && input.loadDecisions) void readDecisions();
       } catch (error48) {
         if (disposed || denied) return;
         const unsupported = unavailableCapability(error48)?.method === CONSOLE_RPC_METHODS.gatingPending;
         if (isDenied(error48) || unsupported) {
           denied = true;
-          publish({ requests: [], decisions: {}, status: isDenied(error48) ? "forbidden" : "unsupported", readOnly: true, error: errorText(error48) });
+          publish({ requests: [], decisions: {}, departed: [], status: isDenied(error48) ? "forbidden" : "unsupported", readOnly: true, error: errorText(error48) });
           lifetime.abort();
         } else if (generation === decisionGeneration) {
           publish({ status: snapshot.updatedAtMs === void 0 ? "unavailable" : "stale", error: errorText(error48) });
@@ -26992,7 +27033,7 @@ function createPendingApprovalResource(input) {
             });
           } else if (isDenied(error48) || capability?.method === CONSOLE_RPC_METHODS.gatingDecide) {
             denied = true;
-            publish({ requests: [], decisions: {}, status: isDenied(error48) ? "forbidden" : "unsupported", readOnly: true, error: errorText(error48) });
+            publish({ requests: [], decisions: {}, departed: [], status: isDenied(error48) ? "forbidden" : "unsupported", readOnly: true, error: errorText(error48) });
             lifetime.abort();
           } else {
             const refusal = approvalRefusal(error48);
@@ -27014,7 +27055,7 @@ function createPendingApprovalResource(input) {
       if (timer3 !== void 0) env2.clearTimeout(timer3);
       unsubscribeVisibility();
       listeners2.clear();
-      snapshot = { scopeKey: input.scopeKey, status: "unavailable", requests: [], decisions: {}, readOnly: true };
+      snapshot = { scopeKey: input.scopeKey, status: "unavailable", requests: [], decisions: {}, departed: [], readOnly: true };
     }
   };
   schedule();
@@ -32046,6 +32087,15 @@ var HostDecideSourcesProvider = HostDecideSourcesContext.Provider;
 function useHostDecideSources() {
   return React3.useContext(HostDecideSourcesContext);
 }
+var ApprovalViewerContext = React3.createContext(void 0);
+var ApprovalViewerProvider = ApprovalViewerContext.Provider;
+function useApprovalViewer() {
+  return React3.useContext(ApprovalViewerContext);
+}
+function useApprovalAudience(request) {
+  const viewer = useApprovalViewer();
+  return viewer ? approvalAudience(request, viewer) : null;
+}
 var STATE_WORDS = {
   pending: { text: "Approval needed", tone: "warn" },
   submitting: { text: "Submitting decision", tone: "info" },
@@ -32143,6 +32193,10 @@ function ApprovalCard({ request, resourceStatus, decision, readOnly = false, rea
   const pending = request.status === "pending" && decision?.phase !== "settled";
   const submitting = decision?.phase === "submitting";
   const stale = resourceStatus !== "ready";
+  const viewer = useApprovalViewer();
+  const audience = useApprovalAudience(request);
+  const waitingFor = pending && audience?.kind === "other" ? audience.approver : null;
+  const forYou = pending && audience?.kind === "you" && viewer?.decides === true;
   const hostDecide = readOnly && pending && decideLinks?.length ? decideLinks : null;
   const state = submitting ? "submitting" : decision?.phase === "failed" ? "failed" : request.status === "expired" ? "expired" : !pending ? "settled" : stale ? "stale" : decision?.phase === "refused" ? "refused" : decision?.phase === "unavailable" ? "unavailable" : "pending";
   const words2 = STATE_WORDS[state];
@@ -32166,7 +32220,8 @@ function ApprovalCard({ request, resourceStatus, decision, readOnly = false, rea
         /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("header", { className: "cc-approval__header", children: [
           /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("div", { className: "cc-approval__heading", children: [
             /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("strong", { className: "cc-approval__title", title: titleIsId ? request.actionId : void 0, children: title }),
-            risk ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { tone: riskTone(request.riskTier), mark: true, title: risk.title, className: "cc-approval__risk", children: risk.text }) : null
+            risk ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { tone: riskTone(request.riskTier), mark: true, title: risk.title, className: "cc-approval__risk", children: risk.text }) : null,
+            forYou ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { tone: "info", className: "cc-approval__audience", testId: "gating-for-you:".concat(request.pendingId), children: "For you" }) : waitingFor ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { className: "cc-approval__audience", title: "This request asks ".concat(waitingFor, " to decide it"), testId: "gating-waiting-for:".concat(request.pendingId), children: "Waiting for ".concat(waitingFor) }) : null
           ] }),
           deadline !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(DeadlineChip, { deadlineAtMs: deadline, now: now3, testId: "gating-countdown:".concat(request.pendingId) }) : null
         ] }),
@@ -32220,7 +32275,7 @@ function ApprovalCard({ request, resourceStatus, decision, readOnly = false, rea
               ]
             },
             link3.sourceId
-          )) }) : pending ? /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("div", { className: "cc-approval__actions", children: [
+          )) }) : pending && !waitingFor ? /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("div", { className: "cc-approval__actions", children: [
             shownActions.map((action) => {
               const noRoute = action === "escalate" && noEscalationRoute;
               return /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(
@@ -32266,6 +32321,23 @@ function ApprovalCard({ request, resourceStatus, decision, readOnly = false, rea
     }
   );
 }
+var DECIDED_WORDS = {
+  approve: { text: "Approved", tone: "ok" },
+  reject: { text: "Rejected", tone: "warn" },
+  escalate: { text: "Escalated", tone: "info" },
+  expired: { text: "Expired before anyone decided", tone: "neutral" }
+};
+function DepartedApprovalCard({ departed }) {
+  const { request, decided } = departed;
+  const titleIsId = request.action === request.actionId;
+  const title = titleIsId ? humanizeEnum(request.actionId) || request.action : request.action;
+  const words2 = decided ? DECIDED_WORDS[decided.action] : { text: "Decided elsewhere", tone: "neutral" };
+  const text14 = decided && decided.action !== "expired" ? "".concat(words2.text, " ").concat(decided.by ? "by ".concat(decided.by) : "elsewhere") : words2.text;
+  return /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("article", { className: "cc-approval cc-approval--departed", "data-state": "departed", "data-testid": "gating-departed:".concat(request.pendingId), children: [
+    /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("header", { className: "cc-approval__header", children: /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("div", { className: "cc-approval__heading", children: /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("strong", { className: "cc-approval__title", title: titleIsId ? request.actionId : void 0, children: title }) }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("footer", { className: "cc-approval__footer", children: /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("span", { className: "cc-approval__status", role: "status", children: /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { tone: words2.tone, mark: true, children: text14 }) }) })
+  ] });
+}
 function HostAttentionCard({ item }) {
   const source = item.sourceLabel ? "From ".concat(item.sourceLabel) : "";
   return /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)(
@@ -32304,8 +32376,9 @@ function HostAttentionCard({ item }) {
 }
 function ApprovalAttention({ snapshot, onOpen, hostItems = 0 }) {
   const approvalsShown = Boolean(snapshot) && snapshot?.status !== "forbidden" && snapshot?.status !== "unsupported";
+  const viewer = useApprovalViewer();
   if (!approvalsShown && hostItems === 0) return null;
-  const requests = approvalsShown && snapshot ? snapshot.requests.filter((request) => request.status === "pending" && snapshot.decisions[request.pendingId]?.phase !== "settled") : [];
+  const requests = approvalsShown && snapshot ? snapshot.requests.filter((request) => request.status === "pending" && snapshot.decisions[request.pendingId]?.phase !== "settled" && (!viewer || approvalAudience(request, viewer).kind === "you")) : [];
   const ready = !approvalsShown || snapshot?.status === "ready";
   const approvalStatus = !approvalsShown ? "" : ready ? "".concat(requests.length, " pending approval").concat(requests.length === 1 ? "" : "s") : snapshot?.status === "loading" ? "Checking approvals" : snapshot?.status === "stale" ? "Approvals may be out of date" : "Approvals unavailable";
   const hostStatus = hostItems ? "".concat(hostItems, " item").concat(hostItems === 1 ? "" : "s", " from the host") : "";
@@ -67447,6 +67520,7 @@ function GatingInboxPanel({
   showPending
 }) {
   const [tab2, setTab] = import_react63.default.useState("pending");
+  const viewer = useApprovalViewer();
   const tabIds = import_react63.default.useId();
   const [selectedId, setSelectedId] = import_react63.default.useState(null);
   const [expandedId, setExpandedId] = import_react63.default.useState(null);
@@ -67505,6 +67579,7 @@ function GatingInboxPanel({
   if (tab2 === "pending" && resource) {
     const state = resource.status === "ready" ? null : RESOURCE_STATE[resource.status];
     const cards = byDeadline(resource.requests);
+    const departed = (resource.departed ?? []).filter((item) => !viewer || approvalAudience(item.request, viewer).kind === "you");
     content3 = /* @__PURE__ */ (0, import_jsx_runtime90.jsxs)(import_jsx_runtime90.Fragment, { children: [
       state && resource.requests.length === 0 ? resource.status === "loading" ? /* @__PURE__ */ (0, import_jsx_runtime90.jsx)(LoadingState, { variant: "cards", rows: 2, label: state.text }) : /* @__PURE__ */ (0, import_jsx_runtime90.jsx)(EmptyState, { kind: state.empty, role: "status", title: state.text, inline: hostShown }) : state ? /* @__PURE__ */ (0, import_jsx_runtime90.jsx)(Notice, { tone: state.tone, role: "status", children: state.text }) : null,
       resource.status === "ready" && pendingRequests?.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime90.jsx)(
@@ -67538,6 +67613,7 @@ function GatingInboxPanel({
         },
         request.pendingId
       )) }) : null,
+      departed.length ? /* @__PURE__ */ (0, import_jsx_runtime90.jsx)("div", { className: "gating-inbox__cards gating-inbox__departed", "data-testid": "gating-departed-list", children: departed.map((item) => /* @__PURE__ */ (0, import_jsx_runtime90.jsx)(DepartedApprovalCard, { departed: item }, item.request.pendingId)) }) : null,
       hostList
     ] });
   } else if (tab2 === "policies") {
@@ -93412,6 +93488,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   callerScopeRef.current = caller?.callerScope;
   const approvalsDecidable = caller === void 0 ? void 0 : caller?.actorKind === "person";
   const signInToDecide = Boolean(caller) && caller?.actorKind !== "person";
+  const approvalViewer = import_react103.default.useMemo(
+    () => caller ? { decides: caller.actorKind === "person", approverIds: caller.approverIds } : void 0,
+    [caller]
+  );
   const workGraphClaimant = caller && caller.actorKind !== "anonymous" ? caller.principal : void 0;
   const workGraphAdmin = caller?.canAdminister === true;
   const signOutOfConsole = import_react103.default.useCallback(() => {
@@ -93443,6 +93523,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         target,
         signal,
         params: { pending_id: pendingId, decision, reason: "console_".concat(decision) }
+      })).result,
+      // Who decided a request that left the list elsewhere: the gating audit.
+      loadDecisions: async (signal) => (await consoleController.commands.execute({
+        command: CONSOLE_COMMAND_NAMES2.listGatingAudit,
+        target,
+        signal,
+        params: { limit: GATING_AUDIT_LIMIT }
       })).result
     });
     approvalResourceRef.current = resource;
@@ -96155,7 +96242,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       );
     return /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(PanelShell, { children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(EmptyState, { kind: "unavailable", title: "This panel isn't available in this console" }) });
   }
-  return /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConsoleMcpAppsProvider, { value: effectiveMcpAppsHost ? { host: effectiveMcpAppsHost, authority: sendScope, readOnly: consoleReadOnly } : null, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConsolePanelsProvider, { value: panelProvider, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(AgentDirectoryProvider, { directory: agentDirectory, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ActivityLedgerProvider, { ledger: timelineScope.ledger, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConsoleNavigationProvider, { value: consoleNavigation, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(NavigationFocusProvider, { value: navigationFocus.value, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(PanelPreferencesProvider, { scope: sidebarPreferenceScope, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(HostDecideSourcesProvider, { value: hostAttentionSources, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsxs)(
+  return /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConsoleMcpAppsProvider, { value: effectiveMcpAppsHost ? { host: effectiveMcpAppsHost, authority: sendScope, readOnly: consoleReadOnly } : null, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConsolePanelsProvider, { value: panelProvider, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(AgentDirectoryProvider, { directory: agentDirectory, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ActivityLedgerProvider, { ledger: timelineScope.ledger, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConsoleNavigationProvider, { value: consoleNavigation, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(NavigationFocusProvider, { value: navigationFocus.value, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(PanelPreferencesProvider, { scope: sidebarPreferenceScope, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(HostDecideSourcesProvider, { value: hostAttentionSources, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ApprovalViewerProvider, { value: approvalViewer, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsxs)(
     "div",
     {
       className: "cc-theme-scope meta-shell".concat(display.settings.motion === "reduced" ? " reduced-motion" : ""),
@@ -96309,7 +96396,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         )
       ]
     }
-  ) }) }) }) }) }) }) }) });
+  ) }) }) }) }) }) }) }) }) });
 }
 
 // src/index.tsx

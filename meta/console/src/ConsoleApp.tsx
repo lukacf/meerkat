@@ -106,6 +106,7 @@ import {
   type MetaConsoleTransport,
 } from "./lib/headless";
 import { announceConsoleCaller, consoleCallerFailure, subscribeConsoleCaller } from "./lib/console-caller";
+import { adoptSharedSectionPreferences, rememberPreferenceScope, useBrowserPreference } from "./lib/preference-scope";
 import {
   WORKGRAPH_CONFLICT_CODE,
   resolveWorkGraphBindingRevision,
@@ -249,6 +250,7 @@ import {
   normalizeNavKind,
   pruneStaleSidebarStorage,
   readSidebarPins,
+  readSidebarStringSet,
   sidebarAgentPinId,
   sidebarAgentsWithLineage,
   sidebarPinnedFamilyPinIds,
@@ -275,7 +277,7 @@ import { QuoteContextChips } from "../../packages/console-components/src/convers
 import { HostDecideSourcesProvider } from "../../packages/console-components/src/conversation/approval-card";
 import { editConsoleContextQuote } from "../../packages/console-core/src/context-edit";
 import type { ConsoleQuoteSelection } from "../../packages/console-components/src/conversation/context-selection";
-import { consoleSendStorageKey, loadConsoleSendAttempts, saveConsoleSendAttempts, readLegacyConsoleQueue, readPredecessorConsoleQueue, consoleLegacyQueueImported, consoleComposerTabId, loadConsoleComposerDraft, saveConsoleComposerDraft } from "./lib/send-attempt-storage";
+import { consoleSendStorageKey, loadConsoleSendAttempts, saveConsoleSendAttempts, readLegacyConsoleQueue, readPredecessorConsoleQueue, consoleLegacyQueueImported, consoleComposerTabId, loadConsoleComposerDraft, saveConsoleComposerDraft, legacyConsoleQueueKey, purgeConsoleSendScope, removeOlderConsoleQueues } from "./lib/send-attempt-storage";
 
 import { VoiceBar } from "./panels/VoiceBar";
 import { useVoiceController } from "./lib/use-voice-controller";
@@ -555,6 +557,9 @@ function isWorkGraphSignalFrame(frame: ConsoleFrame): boolean {
   return name.startsWith("workgraph_");
 }
 const DOCK_LAYOUT_STORAGE_PREFIX = "meta-console-dock-state";
+/** The sidebar's and the activity rail's collapse (per-user preferences). */
+const SIDEBAR_COLLAPSED_PREFERENCE = "meta-console-sidebar-collapsed";
+const RAIL_COLLAPSED_PREFERENCE = "meta-console-rail-collapsed";
 // A fork's side chat is listed once the console's read model has walked it;
 // the refreshes right after the fork may predate that walk.
 const SIDE_CHAT_LIST_ATTEMPTS = 6;
@@ -930,10 +935,18 @@ interface ConsoleCallerHandlers {
   observeScope: (scope: string | undefined) => boolean;
   /** The caller this instance acts as (`meta/console/whoami`'s `caller_scope`). */
   onCaller: (callerScope: string) => void;
+  /** Where this instance keeps its user's queued messages and drafts. */
+  onStorageScope: (namespace: string | null) => void;
   /** A console request said the login ended (a 401, a sign-in redirect). */
   onSignInRequired: () => void;
   /** The gateway serves another caller than this instance acts for. */
   onCallerChanged: () => void;
+  /** The person signs out (the identity chip's Sign out), right before the
+   * browser goes to the host's sign-out. */
+  onSignOut: () => void;
+  /** Whether this browser is signing out of this console: nothing more of
+   * the signed-out user's is kept (a draft flushed on the way out included). */
+  signingOut: () => boolean;
   /** The instance's lifetime, so a switch can end it at once. */
   registerLifetime: (lifetime: { active: boolean; generation: number }) => void;
 }
@@ -950,6 +963,10 @@ function ConsoleAppAuthority(props: ConsoleAppProps): React.JSX.Element {
   const callerRef = React.useRef<string | undefined>(undefined);
   const lastCallerRef = React.useRef<string | undefined>(undefined);
   const lifetimeRef = React.useRef<{ active: boolean; generation: number } | null>(null);
+  // The current instance's storage namespace, and whether this browser is
+  // signing out of this console.
+  const storageScopeRef = React.useRef<string | null>(null);
+  const signingOutRef = React.useRef(false);
   // Ends the current instance's work now, before React unmounts it: its
   // requests, locks and queue drains stop with its lifetime.
   const retireInstance = React.useCallback(() => {
@@ -960,6 +977,14 @@ function ConsoleAppAuthority(props: ConsoleAppProps): React.JSX.Element {
     }
     callerRef.current = undefined;
   }, []);
+  // Signing out: the signed-out user's queued messages and this tab's
+  // drafts leave this browser. Preferences stay.
+  const forgetSignedOutUser = React.useCallback(() => {
+    signingOutRef.current = true;
+    retireInstance();
+    const namespace = storageScopeRef.current;
+    if (namespace) purgeConsoleSendScope(browserLocalStorage(), browserComposerStorage(), namespace);
+  }, [retireInstance]);
   const restart = React.useCallback((callerChanged: boolean) => {
     // A same-URL account switch ends all old subscriptions, locks, drafts
     // and transcript state before the replacement authority loads. The
@@ -967,6 +992,7 @@ function ConsoleAppAuthority(props: ConsoleAppProps): React.JSX.Element {
     retireInstance();
     if (callerChanged) forgetOwnSends();
     observedScope.current = null;
+    signingOutRef.current = false;
     setSignedOut(null);
     setGeneration(current => current + 1);
   }, [retireInstance]);
@@ -988,20 +1014,32 @@ function ConsoleAppAuthority(props: ConsoleAppProps): React.JSX.Element {
       lastCallerRef.current = callerScope;
       announceConsoleCaller(browserLocalStorage(), props.baseUrl, callerScope);
     },
+    onStorageScope: (namespace) => { storageScopeRef.current = namespace; },
     onSignInRequired: () => {
       if (signedOutRef.current) return;
       retireInstance();
       setSignedOut("ended");
     },
     onCallerChanged: () => restart(true),
+    onSignOut: () => {
+      forgetSignedOutUser();
+      // The console's other tabs leave their views and forget their drafts.
+      announceConsoleCaller(browserLocalStorage(), props.baseUrl, null);
+      // The browser is on its way to the host's sign-out. A host that answers
+      // without leaving the page finds the signed-out state here; it shows
+      // only after the navigation began, so the sign-out form stays in place
+      // until the browser submitted it.
+      window.setTimeout(() => setSignedOut("signed_out"), 100);
+    },
+    signingOut: () => signingOutRef.current,
     registerLifetime: (lifetime) => { lifetimeRef.current = lifetime; },
-  }), [observeScope, props.baseUrl, restart, retireInstance]);
+  }), [forgetSignedOutUser, observeScope, props.baseUrl, restart, retireInstance]);
   // Another tab of this gateway's console learned who it acts as, or signed
   // out: a different caller reloads this tab's authority at once, a sign-out
   // leaves its views, and a sign-in after this tab's login ended brings it back.
   React.useEffect(() => subscribeConsoleCaller(props.baseUrl, (announcement) => {
     if (announcement.caller === null) {
-      retireInstance();
+      forgetSignedOutUser();
       setSignedOut("signed_out");
       return;
     }
@@ -1010,7 +1048,7 @@ function ConsoleAppAuthority(props: ConsoleAppProps): React.JSX.Element {
       return;
     }
     if (callerRef.current !== undefined && announcement.caller !== callerRef.current) restart(true);
-  }), [props.baseUrl, restart, retireInstance]);
+  }), [forgetSignedOutUser, props.baseUrl, restart]);
   // While signed out, coming back to the tab tries the login again.
   React.useEffect(() => {
     if (!signedOut) return undefined;
@@ -1025,8 +1063,9 @@ function ConsoleAppAuthority(props: ConsoleAppProps): React.JSX.Element {
 /** The one sign-in state: the login ended (an expired login, a sign-out in
  * another tab, a front's sign-in redirect), so no view of it stays. */
 function ConsoleSignInState({ reason, onRetry }: { reason: "ended" | "signed_out"; onRetry: () => void }): React.JSX.Element {
-  // The browser's own display choices; there is no caller to read others for.
-  const display = useConsoleDisplay();
+  // No caller is signed in: the display choices of the last user of this
+  // browser's console stand in.
+  const display = useConsoleDisplay({}, null);
   return (
     <div
       className="cc-theme-scope console-sign-in"
@@ -1039,7 +1078,7 @@ function ConsoleSignInState({ reason, onRetry }: { reason: "ended" | "signed_out
       <h1 className="console-sign-in__title">{reason === "signed_out" ? "You signed out of this console" : "Your console sign-in ended"}</h1>
       <p className="console-sign-in__text">
         {reason === "signed_out"
-          ? "Sign in to use the console again. Other tabs of this console signed out too."
+          ? "Your queued messages and drafts were removed from this browser, and other tabs of this console signed out too. Sign in to use the console again."
           : "Sign in again to continue. Nothing from the ended sign-in is shown, and messages you queued stay saved in this browser."}
       </p>
       <div className="console-sign-in__actions">
@@ -1154,8 +1193,16 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [experience, setExperience] = React.useState<ConsoleExperience | null>(
     null,
   );
-  const persistentSendScope = storageNamespace?.trim() || (experience?.storage_scope?.trim()
-    ? JSON.stringify([baseUrl, experience.storage_scope]) : null);
+  // The browser storage of this signed-in user: the server's per-user
+  // `storage_scope`, combined with the host's namespace when one is given
+  // (the host's namespace alone would be every user's). Before the
+  // experience names the scope nothing is kept. A gateway that names no
+  // scope keeps the host's namespace alone, as before.
+  const serverStorageScope = experience?.storage_scope?.trim() ? experience.storage_scope : undefined;
+  const hostStorageNamespace = storageNamespace?.trim() || null;
+  const persistentSendScope = serverStorageScope
+    ? JSON.stringify([hostStorageNamespace ?? baseUrl, serverStorageScope])
+    : experience && hostStorageNamespace ? hostStorageNamespace : null;
   const savedPanelRuntimeSelection = React.useMemo(
     () => loadPanelRuntimeSelection(browserLocalStorage(), persistentSendScope),
     [persistentSendScope],
@@ -1276,15 +1323,6 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     phase: "connecting", stale: true, freshness: "unknown",
   });
   const [transportRetry, setTransportRetry] = React.useState(0);
-  // Display settings (B21): the user's own choices, else the configured
-  // appearance defaults (applied while the user has made no choice, never
-  // written), else the console's defaults.
-  const display = useConsoleDisplay({
-    theme: normalizeConsoleTheme(experience?.console_config?.appearance?.default_theme) ?? undefined,
-    variant: normalizeConsoleVariant(experience?.console_config?.appearance?.default_variant) ?? undefined,
-  });
-  const theme = display.settings.theme;
-  const variant = display.settings.variant;
   const sidebarStorageScope = React.useMemo(
     () => sidebarPreferencesScope(baseUrl, experience),
     [baseUrl, experience],
@@ -1308,52 +1346,57 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     () => sidebarStorageKey(SIDEBAR_AGENT_PINS_STORAGE_PREFIX, sidebarPreferenceScope),
     [sidebarPreferenceScope],
   );
+  // The roster's section and subgroup order and collapse: per user too,
+  // within the agent-list configuration they were arranged for. What an
+  // earlier console kept for every user of the runtime is read once.
+  const sidebarSectionNamespace = React.useMemo(() => {
+    if (!persistentSendScope) return sidebarStorageNamespace;
+    const own = [persistentSendScope, sidebarAgentListConfigIdentity(experience)]
+      .map((part) => encodeURIComponent(part))
+      .join(":");
+    adoptSharedSectionPreferences(browserLocalStorage(), sidebarStorageNamespace, own);
+    return own;
+  }, [experience, persistentSendScope, sidebarStorageNamespace]);
   React.useEffect(() => {
     pruneStaleSidebarStorage(browserLocalStorage(), sidebarStorageScope, sidebarStorageNamespace);
-  }, [sidebarStorageScope, sidebarStorageNamespace]);
+    if (persistentSendScope) pruneStaleSidebarStorage(browserLocalStorage(), persistentSendScope, sidebarSectionNamespace);
+  }, [persistentSendScope, sidebarSectionNamespace, sidebarStorageScope, sidebarStorageNamespace]);
+  // The scope of this user's display settings and the sidebar's and rail's
+  // collapse: unknown (`null`) until the experience loads, while the last
+  // scope of this browser stands in.
+  const browserPreferenceScope = experience ? sidebarPreferenceScope : null;
+  React.useEffect(() => {
+    if (browserPreferenceScope) rememberPreferenceScope(browserLocalStorage(), browserPreferenceScope);
+  }, [browserPreferenceScope]);
+  // Display settings (B21): the user's own choices, else the configured
+  // appearance defaults (applied while the user has made no choice, never
+  // written), else the console's defaults.
+  const display = useConsoleDisplay({
+    theme: normalizeConsoleTheme(experience?.console_config?.appearance?.default_theme) ?? undefined,
+    variant: normalizeConsoleVariant(experience?.console_config?.appearance?.default_variant) ?? undefined,
+  }, browserPreferenceScope);
+  const theme = display.settings.theme;
+  const variant = display.settings.variant;
 
-  const [sidebarCollapsed, setSidebarCollapsed] = React.useState<boolean>(
-    () => {
-      try {
-        return localStorage.getItem("meta-console-sidebar-collapsed") === "1";
-      } catch {
-        return false;
-      }
-    },
-  );
+  // The sidebar's and the rail's collapse: the user's own choice, else the
+  // configured default (never written), else expanded.
+  const [sidebarCollapseChoice, chooseSidebarCollapse] = useBrowserPreference(SIDEBAR_COLLAPSED_PREFERENCE, browserPreferenceScope);
+  const configuredSidebarCollapsed = experience?.console_config?.layout?.sidebar_collapsed;
+  const sidebarCollapsed = sidebarCollapseChoice !== null
+    ? sidebarCollapseChoice === "1"
+    : configuredSidebarCollapsed === true;
   const toggleSidebarCollapsed = React.useCallback(() => {
-    setSidebarCollapsed((c) => {
-      const next = !c;
-      try {
-        localStorage.setItem(
-          "meta-console-sidebar-collapsed",
-          next ? "1" : "0",
-        );
-      } catch {
-        /* ignore */
-      }
-      return next;
-    });
-  }, []);
+    chooseSidebarCollapse(sidebarCollapsed ? "0" : "1");
+  }, [chooseSidebarCollapse, sidebarCollapsed]);
 
-  const [railCollapsed, setRailCollapsed] = React.useState<boolean>(() => {
-    try {
-      return localStorage.getItem("meta-console-rail-collapsed") === "1";
-    } catch {
-      return false;
-    }
-  });
+  const [railCollapseChoice, chooseRailCollapse] = useBrowserPreference(RAIL_COLLAPSED_PREFERENCE, browserPreferenceScope);
+  const configuredRailCollapsed = experience?.console_config?.rail?.collapsed;
+  const railCollapsed = railCollapseChoice !== null
+    ? railCollapseChoice === "1"
+    : configuredRailCollapsed === true;
   const toggleRailCollapsed = React.useCallback(() => {
-    setRailCollapsed((c) => {
-      const next = !c;
-      try {
-        localStorage.setItem("meta-console-rail-collapsed", next ? "1" : "0");
-      } catch {
-        /* ignore */
-      }
-      return next;
-    });
-  }, []);
+    chooseRailCollapse(railCollapsed ? "0" : "1");
+  }, [chooseRailCollapse, railCollapsed]);
 
   const defaultPinnedAgentIdsKey = React.useMemo(
     () => JSON.stringify(experience?.console_config?.agent_list?.default_pinned_agent_ids || []),
@@ -1370,11 +1413,23 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       experience?.console_config?.agent_list?.default_pinned_agent_ids || [],
     ));
   }, [defaultPinnedAgentIdsKey, experience?.console_config?.agent_list, sidebarAgentPinsStorageKey, sidebarPinsStorageKey]);
+  // This tab follows the pins another tab of the same user stores.
+  React.useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== sidebarAgentPinsStorageKey) return;
+      const stored = readSidebarStringSet(browserLocalStorage(), sidebarAgentPinsStorageKey);
+      if (stored) setPinnedAgentIds(stored);
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [sidebarAgentPinsStorageKey]);
 
   const togglePinnedAgent = React.useCallback((agent: ConsoleAgent, renderedFamilyPinIds?: Set<string>) => {
     const pinId = sidebarAgentPinId(agent);
     setPinnedAgentIds((current) => {
-      const next = new Set(current);
+      // Read, change and write under one storage read: a pin another tab of
+      // this user stored since this tab last read is kept.
+      const next = new Set(readSidebarStringSet(browserLocalStorage(), sidebarAgentPinsStorageKey) ?? current);
       const familyPinIds = renderedFamilyPinIds && renderedFamilyPinIds.size > 0
         ? renderedFamilyPinIds
         : sidebarPinnedFamilyPinIds(agent, agents);
@@ -2321,7 +2376,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   }
   function persistComposerDraft(identity: string, panelKey: string, text: string, contexts: ConsoleContextRecord[]): boolean {
     // The pane flushes its debounced draft while unmounting. Its captured
-    // namespace/composer still owns this write even after outbound work stops.
+    // namespace/composer still owns this write even after outbound work stops,
+    // unless its user signed out: then nothing of theirs is kept.
+    if (callerHandlersRef.current.signingOut()) return true;
     const namespace = persistentSendScopeRef.current;
     try {
       validateConsoleContexts(contexts);
@@ -2359,6 +2416,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     setDeliveredNotices({});
   }, [sendScope]);
   persistentSendScopeRef.current = persistentSendScope;
+  React.useEffect(() => {
+    callerHandlersRef.current.onStorageScope(persistentSendScope);
+  }, [persistentSendScope]);
+  // Where an earlier console kept every user's queue under the host's
+  // namespace alone; this user may import it once (importLegacyPending).
+  const hostOnlyQueueNamespaceRef = React.useRef<string | null>(null);
+  hostOnlyQueueNamespaceRef.current = serverStorageScope && hostStorageNamespace ? hostStorageNamespace : null;
   const scopedDraftKey = (panelKey: string) => `${sendScopeRef.current}:${panelKey}`;
 
   function loadPendingStack(identity: string): PendingItem[] {
@@ -2512,6 +2576,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const dockLayoutHydrated = React.useRef(false);
   const dockLayoutRestored = React.useRef(false);
   const dockLayoutRestoring = React.useRef(false);
+  /** The layout this tab last restored or stored, under its key. */
+  const dockLayoutWritten = React.useRef<{ key: string; layout: string } | null>(null);
 
   // =========================================================================
   // DOCK CONTROLLER
@@ -2565,13 +2631,17 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     if (!experience || !dockLayoutHydrated.current) return;
     if (dockLayoutRestoring.current) {
       dockLayoutRestoring.current = false;
+      dockLayoutWritten.current = { key: currentDockLayoutStorageKey, layout: JSON.stringify(dock.state) };
       return;
     }
+    // Written only when this tab's layout changed: an experience reload
+    // alone leaves what another tab of this user arranged in place.
+    const layout = JSON.stringify(dock.state);
+    const written = dockLayoutWritten.current;
+    if (written?.key === currentDockLayoutStorageKey && written.layout === layout) return;
     try {
-      localStorage.setItem(
-        currentDockLayoutStorageKey,
-        JSON.stringify(dock.state),
-      );
+      localStorage.setItem(currentDockLayoutStorageKey, layout);
+      dockLayoutWritten.current = { key: currentDockLayoutStorageKey, layout };
     } catch {
       /* ignore storage failures */
     }
@@ -2915,32 +2985,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     return () => window.clearInterval(timer);
   }, [loadExperience]);
 
-  // The configured appearance applies through useConsoleDisplay: a default
-  // the user has not overridden, never written to storage.
-
-  React.useEffect(() => {
-    const configured = experience?.console_config?.layout?.sidebar_collapsed;
-    if (typeof configured !== "boolean") return;
-    try {
-      if (localStorage.getItem("meta-console-sidebar-collapsed") !== null)
-        return;
-    } catch {
-      /* ignore */
-    }
-    setSidebarCollapsed(configured);
-  }, [experience?.console_config?.layout?.sidebar_collapsed]);
-
-  React.useEffect(() => {
-    const configured = experience?.console_config?.rail?.collapsed;
-    if (typeof configured !== "boolean") return;
-    try {
-      if (localStorage.getItem("meta-console-rail-collapsed") !== null)
-        return;
-    } catch {
-      /* ignore */
-    }
-    setRailCollapsed(configured);
-  }, [experience?.console_config?.rail?.collapsed]);
+  // The configured appearance applies through useConsoleDisplay, and the
+  // configured sidebar and rail collapse through their preferences: a
+  // default the user has not overridden, never written to storage.
 
   const hasMobControlSurface = experience?.runtime_id !== SHARED_CONSOLE_RUNTIME_ID;
   const frontendReadOnly = React.useMemo(() => resolveConsoleReadOnlyOverride(), []);
@@ -3037,11 +3084,12 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   callerScopeRef.current = caller?.callerScope;
   const approvalsDecidable = caller === undefined ? undefined : caller?.actorKind === "person";
   const workGraphClaimant = caller && caller.actorKind !== "anonymous" ? caller.principal : undefined;
-  // Signing out: this browser's other tabs of the console leave their views
-  // at once, then the browser goes to the host's sign-out.
+  // Signing out: this browser forgets what this user queued and drafted
+  // here, the console's other tabs leave at once, then the browser goes to
+  // the host's sign-out.
   const signOutOfConsole = React.useCallback(() => {
-    announceConsoleCaller(browserLocalStorage(), baseUrl, null);
-  }, [baseUrl]);
+    callerHandlersRef.current.onSignOut();
+  }, []);
   const signOutHref = experience?.console_config?.sign_out?.href;
   const signOutMethod = experience?.console_config?.sign_out?.method === "post" ? "post" : "get";
   const identityChip = React.useMemo<TopbarIdentity | undefined>(() => (caller ? {
@@ -4910,6 +4958,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
 
   async function importLegacyPending(identity: string) {
     const namespace = persistentSendScopeRef.current;
+    const hostOnlyNamespace = hostOnlyQueueNamespaceRef.current;
     const storage = browserLocalStorage();
     if (!namespace || !storage) return;
     try {
@@ -4917,12 +4966,18 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       const legacy = readLegacyConsoleQueue(storage, identity);
       const predecessor = readPredecessorConsoleQueue(storage, namespace, identity);
       if (predecessor.kind === "blocked") throw new Error(predecessor.reason);
+      const hostOnly = hostOnlyNamespace ? loadConsoleSendAttempts(storage, hostOnlyNamespace, identity) : null;
+      if (hostOnly?.kind === "blocked") throw new Error(hostOnly.reason);
       const imported = [...legacy.map((item) => createConsoleSendAttempt({
         id: `legacy:${item.id}`, scope: namespace, destination: identity, origin: "console:legacy-import",
         idempotencyKey: createIdempotencyKey(), text: item.text, now: item.addedAt,
-      })), ...predecessor.attempts];
-      await setPendingStack(identity, (previous) => [...previous, ...imported.filter((item) => !previous.some((old) => old.id === item.id))], true);
-      // Original legacy and predecessor bytes are preserved, including after a successful import.
+      })), ...predecessor.attempts,
+      // The same messages, now kept in this user's scope.
+      ...(hostOnly?.attempts ?? []).map((attempt) => ({ ...attempt, scope: namespace }))];
+      const saved = await setPendingStack(identity, (previous) => [...previous, ...imported.filter((item) => !previous.some((old) => old.id === item.id))], true);
+      // Imported once: the older copies go, so no other user of this browser
+      // is offered them. A queue that could not be saved keeps them.
+      if (saved) removeOlderConsoleQueues(storage, namespace, identity, hostOnlyNamespace);
     } catch (error) { setActionError(errorMessage(error)); }
   }
 
@@ -5784,8 +5839,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     try {
       const storage = browserLocalStorage();
       const namespace = persistentSendScopeRef.current;
+      const hostOnlyNamespace = hostOnlyQueueNamespaceRef.current;
       hasLegacyQueue = Boolean(storage && namespace && !consoleLegacyQueueImported(storage, namespace, identity)
-        && (Boolean(storage.getItem(`mobkit-pending-stack:${identity}`)) || readPredecessorConsoleQueue(storage, namespace, identity).attempts.length > 0));
+        && (Boolean(storage.getItem(legacyConsoleQueueKey(identity)))
+          || readPredecessorConsoleQueue(storage, namespace, identity).attempts.length > 0
+          || (hostOnlyNamespace !== null && loadConsoleSendAttempts(storage, hostOnlyNamespace, identity).attempts.length > 0)));
     } catch { /* Queue reader reports preserved invalid bytes separately. */ }
     const agentBusy = isIdentityBusy(identity);
     // Side chats: this pane may fork its agent, or be a side chat itself.
@@ -6574,7 +6632,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           customPanels={customPanels}
           onOpenCustomPanel={openCustomPanel}
           grouping={experience?.console_config?.agent_list}
-          storageNamespace={sidebarStorageNamespace}
+          storageNamespace={sidebarSectionNamespace}
           preferenceScope={sidebarPreferenceScope}
           pinnedAgentIds={pinnedAgentIds}
           onSelect={selectSidebarAgent}

@@ -188,7 +188,7 @@ describe("stock durable queue integration", () => {
     expect(screen.queryByText("Agent busy")).toBeNull();
   });
 
-  it("persists default embedded drafts and legacy queues in the server-owned scope", async () => {
+  it("persists default embedded drafts and imports a legacy queue once, in the server-owned scope", async () => {
     const send = vi.fn(async (input) => ({ interaction_id: "accepted", identity: input.identity }));
     const fake = transport(send);
     const experience = await fake.loadExperience();
@@ -217,7 +217,8 @@ describe("stock durable queue integration", () => {
     await waitFor(() => expect((screen.getByTestId(`chat-composer:${identity}`) as HTMLTextAreaElement).value).toBe("Unsent default embedded draft"));
     await screen.findByTestId("pending-stack");
     expect(screen.queryByRole("button", { name: "Import and send older queued messages" })).toBeNull();
-    expect(window.localStorage.getItem(`mobkit-pending-stack:${identity}`)).toBe(legacy);
+    // Imported once: the unscoped bytes are gone, so no other account is offered them.
+    expect(window.localStorage.getItem(`mobkit-pending-stack:${identity}`)).toBeNull();
     expect(send).not.toHaveBeenCalled();
   });
 

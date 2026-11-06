@@ -22,10 +22,62 @@ export function loadConsoleSendAttempts(storage: ConsoleSendStorage, namespace: 
 /**
  * The queue the predecessor (pre-0.9) console saved for this scope, read only
  * for the explicit "Older queued messages" import. Never consulted by
- * {@link loadConsoleSendAttempts}; its bytes are preserved after import.
+ * {@link loadConsoleSendAttempts}; an import removes its bytes
+ * ({@link removeOlderConsoleQueues}).
  */
 export function readPredecessorConsoleQueue(storage: ConsoleSendStorage, namespace: string, destination: string, now = Date.now()): ConsoleSendLoad {
   return parseConsoleSendDocument(storage.getItem(predecessorConsoleSendStorageKey(namespace, destination)), namespace, destination, now);
+}
+
+/** The key of the unscoped queue the first console kept for every user. */
+export const legacyConsoleQueueKey = (destination: string): string => `mobkit-pending-stack:${destination}`;
+
+export interface ConsoleRemovableStorage {
+  removeItem(key: string): void;
+}
+
+/**
+ * Removes the older queues an import moved into `namespace`, so they are
+ * offered once and no other user of this browser is offered them: the
+ * unscoped queue, the predecessor console's queue of this scope, and a queue
+ * kept under the host's namespace alone (`hostOnlyNamespace`, before the
+ * console combined it with the user's scope).
+ */
+export function removeOlderConsoleQueues(storage: ConsoleRemovableStorage, namespace: string, destination: string, hostOnlyNamespace: string | null): void {
+  storage.removeItem(legacyConsoleQueueKey(destination));
+  storage.removeItem(predecessorConsoleSendStorageKey(namespace, destination));
+  if (hostOnlyNamespace && hostOnlyNamespace !== namespace) storage.removeItem(consoleSendStorageKey(hostOnlyNamespace, destination));
+}
+
+export interface ConsoleEnumerableStorage extends ConsoleRemovableStorage {
+  readonly length: number;
+  key(index: number): string | null;
+}
+
+function removeKeysWithPrefixes(storage: ConsoleEnumerableStorage | null, prefixes: readonly string[]): void {
+  if (!storage) return;
+  try {
+    const doomed: string[] = [];
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (key && prefixes.some((prefix) => key.startsWith(prefix))) doomed.push(key);
+    }
+    for (const key of doomed) storage.removeItem(key);
+  } catch {
+    // Storage denied: nothing could have been kept there either.
+  }
+}
+
+/**
+ * Signing out: removes what this browser keeps for one user's console scope,
+ * the queued messages of every agent (this console's and the predecessor
+ * console's keys) from `local`, and the composer drafts from this tab's
+ * `session` storage. Preferences stay.
+ */
+export function purgeConsoleSendScope(local: ConsoleEnumerableStorage | null, session: ConsoleEnumerableStorage | null, namespace: string): void {
+  const scope = encodeURIComponent(namespace);
+  removeKeysWithPrefixes(local, [`meta-send-attempts:v1:${scope}:`, `mobkit-send-attempts:v1:${scope}:`]);
+  removeKeysWithPrefixes(session, [`meta-composer-draft:v1:${scope}:`, `meta-composer-draft:v2:${scope}:`]);
 }
 
 function parseConsoleSendDocument(raw: string | null, namespace: string, destination: string, now: number): ConsoleSendLoad {
@@ -102,7 +154,7 @@ export function consoleLegacyQueueImported(storage: ConsoleSendStorage, namespac
 }
 
 export function readLegacyConsoleQueue(storage: ConsoleSendStorage, destination: string): Array<{ id: string; text: string; addedAt: number }> {
-  const raw = storage.getItem(`mobkit-pending-stack:${destination}`);
+  const raw = storage.getItem(legacyConsoleQueueKey(destination));
   if (!raw) return [];
   const data: unknown = JSON.parse(raw);
   if (!Array.isArray(data) || data.some((item) => !item || typeof item.id !== "string" || typeof item.text !== "string" || !Number.isFinite(item.addedAt))) {

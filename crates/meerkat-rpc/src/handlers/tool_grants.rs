@@ -483,6 +483,7 @@ pub async fn handle_audit(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 

@@ -7912,7 +7912,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
         /// Bounds a failure only; a passing row never waits for it.
-        const PROBE_BOUND: Duration = Duration::from_secs(60);
+        const PROBE_BOUND: Duration = Duration::from_mins(1);
 
         /// The host clock reading the clocked rows start at, in UNIX ms.
         const T0: u64 = 1_800_000_000_000;

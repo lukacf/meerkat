@@ -5139,6 +5139,8 @@ mod tests {
         + 6 * (ACTION_HEAD_CHARS + 3)
         + SUMMARY_TRIGGER_BYTES
         + SUMMARY_TARGET_KEYS.len() * (24 + 6 * (SUMMARY_ID_CHARS + 3));
+    // The bound is at most 16 KiB a row.
+    const _: () = assert!(SUMMARY_ROW_MAX_BYTES <= 16 * 1024);
 
     /// Every summary row stays within `SUMMARY_ROW_MAX_BYTES` whatever its
     /// schedule carries: a long name and a 40 KB prompt of characters JSON
@@ -5147,10 +5149,6 @@ mod tests {
     /// So a page of `limit` rows stays within `limit` times the bound.
     #[tokio::test]
     async fn a_schedule_summary_row_has_a_byte_bound() -> Result<(), String> {
-        assert!(
-            SUMMARY_ROW_MAX_BYTES <= 16 * 1024,
-            "{SUMMARY_ROW_MAX_BYTES}"
-        );
         let worst = "\u{1}".repeat(40_000);
         let long_id = "\u{1}".repeat(5_000);
         let prompt = || ScheduledSessionAction::Prompt {

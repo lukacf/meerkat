@@ -1246,7 +1246,7 @@ mod tests {
     fn long_prompt(index: usize, marker: &str) -> String {
         let mut prompt = format!("{index:03} ");
         while prompt.len() < 40_000 {
-            prompt.push_str("Kontrollera veckans schema, jämför med förra veckan och svara kort. ");
+            prompt.push_str("Review the week's plan, compare it with last week (naïve café über) and reply briefly. ");
         }
         prompt.push_str(marker);
         prompt

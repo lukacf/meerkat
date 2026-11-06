@@ -211,6 +211,14 @@ them.
   Core journaled it. The struct is `#[non_exhaustive]`, so the field is
   additive.
 
+- `meerkat-mob`: `SeatedMember::externally_addressable`, whether the
+  member's runtime admits external work by its profile (or its host's
+  override at spawn), as MobMachine records it. For an identity entry it is
+  the rule the entry's host applies to the external work it delivers on the
+  entry's behalf, since MobMachine admits no external work to an entry
+  itself (see Changed). The struct is `#[non_exhaustive]`, so the field is
+  additive.
+
 ### Changed
 
 - `meerkat-mob`: external work (a member send from outside the mob,

@@ -440,7 +440,9 @@ fn addressable_spec(name: &str) -> SpawnMemberSpec {
 /// `MobError::IdentityMember` before any delivery, whatever the member's
 /// addressability: the entry's host reaches it through its own door, as
 /// internal work. External work still reaches an externally addressable
-/// worker.
+/// worker. Core's read of the entry carries its member's addressability,
+/// the rule the entry's host applies to the external work it delivers on
+/// the entry's behalf.
 ///
 /// RED: drop the `not_an_identity_entry` guard of MobMachine's
 /// `SubmitWorkRunningExternal` (with its rejection arm): the external send
@@ -453,22 +455,33 @@ async fn external_work_to_an_identity_entry_is_refused_identity_member() {
         .await
         .expect("the host declares its entry");
     mob.handle
+        .spawn_spec(entry_spec("closed-entry"))
+        .await
+        .expect("the host declares an entry whose profile admits no external work");
+    mob.handle
         .spawn_spec(addressable_spec("door-worker"))
         .await
         .expect("an externally addressable worker");
 
-    let error = mob
-        .handle
-        .member(&id("door-entry"))
-        .await
-        .expect("the entry's member")
-        .send(
-            "hello from outside the mob".to_string(),
-            meerkat_core::types::HandlingMode::Queue,
-        )
-        .await
-        .expect_err("external work does not reach an identity entry");
-    assert!(is_identity_member(&error, "door-entry"), "{error:?}");
+    for (name, addressable) in [("door-entry", true), ("closed-entry", false)] {
+        let error = mob
+            .handle
+            .member(&id(name))
+            .await
+            .expect("the entry's member")
+            .send(
+                "hello from outside the mob".to_string(),
+                meerkat_core::types::HandlingMode::Queue,
+            )
+            .await
+            .expect_err("external work does not reach an identity entry");
+        assert!(is_identity_member(&error, name), "{name}: {error:?}");
+        let standing = mob.standing(name);
+        let Some(EntryStanding::Seated(member)) = &standing else {
+            panic!("{name}: the entry's member is seated: {standing:?}");
+        };
+        assert_eq!(member.externally_addressable, addressable, "{name}");
+    }
 
     mob.handle
         .member(&id("door-worker"))

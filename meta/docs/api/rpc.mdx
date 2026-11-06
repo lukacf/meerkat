@@ -3116,7 +3116,11 @@ or that has no `iat`, and ends every event stream and console voice session
 such a token opened. The caller's other logins and the schedules it defined
 are untouched: a schedule keeps the mandate it was defined with. Revoking the
 principal (`meta/console/revoke_sessions`) still ends every login and stops
-its earlier schedules.
+its earlier schedules. A principal keeps at most 64 sign-outs of `session`
+logins and of tokens without `exp`: the 65th folds the oldest into a fence of
+every login of the principal, so each token of the principal issued before
+that sign-out's instant plus 30 seconds is refused, whatever its login. The
+fold revokes nothing and stops no schedule.
 
 | Result field | Type | Description |
 |--------------|------|-------------|

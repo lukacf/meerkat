@@ -102,8 +102,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   login its token belongs to (the issuer's `sid`, or the token alone when it
   carries none). The Console refuses that login's tokens from then on and
   ends the streams and voice sessions they opened; the caller's other logins
-  and its schedules are untouched. Revoking a principal still ends every
-  login of that principal.
+  and its schedules are untouched. A principal keeps at most 64 sign-outs,
+  and the next folds the oldest into one fence of all its logins older than
+  that sign-out, which stops no schedule. Revoking a principal still ends
+  every login of that principal.
 
 - The Flow Editor RPC on the console's listener takes
   `expected_caller_scope` on its changes (draft writes, deploys with

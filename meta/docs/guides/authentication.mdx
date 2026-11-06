@@ -385,9 +385,14 @@ written and synced the same way, and a console without a durable state
 directory refuses `meta/console/sign_out` (`-32004`). The file keys a login
 by an opaque digest, never the `sid` or the token. A revocation of the
 principal drops the sign-outs it covers, and the sign-out of a token without
-`sid` is dropped once that token expired. A binary without sign-out keeps the
-sign-outs in the file but does not enforce them while it runs; they apply
-again after the upgrade.
+`sid` is dropped once that token expired. A principal keeps at most 64 other
+sign-outs (of `sid` logins, and of tokens without `exp`): the 65th folds the
+oldest into one fence of all the principal's logins, so each login of that
+principal with tokens issued before the folded sign-out plus 30 seconds is
+signed out too, and a login signed in after it keeps working. The fold
+revokes nothing: the principal's schedules keep firing. A binary without
+sign-out keeps the sign-outs in the file but does not enforce them while it
+runs; they apply again after the upgrade.
 
 ### Human consent decisions by Console humans
 

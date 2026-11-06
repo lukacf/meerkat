@@ -214,6 +214,51 @@ async fn principal_revoke_ends_all_logins() {
     assert!(accepted(&app, &robot).await, "another principal");
 }
 
+/// A person keeps at most 64 sign-outs of logins that only a fence of the
+/// person ends: the 65th folds the oldest into a fence of every login of the
+/// person. A login of the person older than the folded sign-out is signed
+/// out with it, the folded login stays refused, the kept sign-outs still
+/// refuse their logins, and a login newer than the fold keeps working. The
+/// fold revokes nothing: the person's own fence is untouched.
+#[tokio::test]
+async fn the_sign_out_cap_folds_the_oldest_login() {
+    let (_dir, fences, app) = signed_in_console();
+    let older = login_token(Some("older"), now_seconds() - 60);
+    assert!(accepted(&app, &older).await, "an older login is signed in");
+    // Each login's token says it was issued a second after the one before,
+    // later than the test's clock, so each sign-out fences its login at a
+    // second of its own (a sign-out fences at the token's `iat` when that is
+    // later than now).
+    let first_fence = now_seconds() + 1_000;
+    let mut tokens = Vec::new();
+    for login in 0..65_u64 {
+        let token = login_token(Some(&format!("login-{login}")), first_fence + login);
+        let (status, signed_out) = console_answer(&app, Some(&token), SIGN_OUT, json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{signed_out}");
+        assert!(signed_out["error"].is_null(), "{signed_out}");
+        tokens.push(token);
+    }
+
+    assert!(
+        !accepted(&app, &older).await,
+        "an older login is signed out with the folded sign-out"
+    );
+    assert!(
+        !accepted(&app, &tokens[0]).await,
+        "the folded login stays refused"
+    );
+    assert!(
+        !accepted(&app, &tokens[64]).await,
+        "a kept sign-out still refuses its login"
+    );
+    let newer = login_token(
+        Some("newer"),
+        crate::runtime::session_fence_first_accepted_iat(first_fence),
+    );
+    assert!(accepted(&app, &newer).await, "a newer login keeps working");
+    assert_eq!(fences.not_before(BOB), None, "the fold revokes nothing");
+}
+
 /// A sign-out needs a login, a durable record and the caller it was made
 /// for: an open console's caller without a token has none and is answered
 /// 401; a console whose session fence record has no file refuses it, as it

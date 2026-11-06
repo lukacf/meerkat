@@ -2050,8 +2050,10 @@ async fn mutation_rechecks_caller_after_await() -> TestResult {
 
 /// Signing out of one console login ends that login only: the schedule its
 /// caller defined keeps firing as that caller, since a schedule holds the
-/// mandate it was defined with, not a login. Revoking the caller's
-/// principal still stops it.
+/// mandate it was defined with, not a login. A sign-out that folds the
+/// person's oldest sign-outs into a fence of every login of the person (the
+/// 65th kept sign-out) stops no schedule either: the fold revokes nothing.
+/// Revoking the caller's principal still stops it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sign_out_keeps_schedules() -> TestResult {
     use super::console_human_admission_tests::{BOB, state};
@@ -2082,6 +2084,24 @@ async fn sign_out_keeps_schedules() -> TestResult {
     assert!(
         !accepted(&router, &login).await,
         "the login that signed out is refused"
+    );
+    // 64 more sign-outs, each fenced at a second of its own after this one
+    // (their tokens say they were issued then): the last folds the oldest,
+    // this login's, into a fence of every login of the person.
+    let later = now_seconds() + 1_000;
+    for other in 0..64_u64 {
+        let token = login_token(Some(&format!("later-login-{other}")), later + other);
+        let (_, signed_out) =
+            console_answer(&router, Some(&token), "meta/console/sign_out", json!({})).await;
+        assert!(signed_out["error"].is_null(), "{signed_out:#?}");
+    }
+    assert!(
+        !accepted(
+            &router,
+            &login_token(Some("another-login"), now_seconds() - 60)
+        )
+        .await,
+        "the fold signed out every older login of the person"
     );
 
     let doors = doors(

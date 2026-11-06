@@ -1616,6 +1616,60 @@ mod tests {
         );
     }
 
+    /// The thinking-block binding control reaches the wire only through
+    /// backends whose documentation lists Anthropic's preserved thinking: the
+    /// Claude API, Claude Models on Google Cloud and Microsoft Foundry. The
+    /// preserved-thinking page does not list Amazon Bedrock, so a Bedrock
+    /// client sends no control and leaves omitted thinking omitted.
+    /// <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn thinking_binding_control_follows_the_documented_backends() {
+        use meerkat_core::{Message, UserMessage};
+        use meerkat_llm_core::LlmRequest;
+
+        let request = LlmRequest::new(
+            "claude-opus-5-5",
+            vec![Message::User(UserMessage::text("hello"))],
+        );
+        for (backend, base_url, documented) in [
+            (AnthropicBackendKind::AnthropicApi, None, true),
+            (
+                AnthropicBackendKind::Vertex,
+                Some("https://us-east5-aiplatform.googleapis.com"),
+                true,
+            ),
+            (
+                AnthropicBackendKind::Foundry,
+                Some("https://example.services.ai.azure.com/anthropic"),
+                true,
+            ),
+            (
+                AnthropicBackendKind::Bedrock,
+                Some("https://bedrock-runtime.us-east-1.amazonaws.com"),
+                false,
+            ),
+        ] {
+            let client = build_anthropic_client(inline_secret_connection(backend, base_url))
+                .unwrap_or_else(|error| panic!("{backend:?} client: {error}"));
+            let body = client
+                .build_request_body(&request)
+                .unwrap_or_else(|error| panic!("{backend:?} request body: {error}"));
+            if documented {
+                assert_eq!(
+                    body["thinking"],
+                    serde_json::json!({
+                        "type": "adaptive",
+                        "block_binding": {"prefix_mismatch_behavior": "drop_block"}
+                    }),
+                    "{backend:?}: {body}"
+                );
+            } else {
+                assert!(body.get("thinking").is_none(), "{backend:?}: {body}");
+            }
+        }
+    }
+
     #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
     #[tokio::test]
     async fn claude_ai_oauth_authorizer_sets_bearer_and_beta_headers() {

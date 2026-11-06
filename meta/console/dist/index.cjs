@@ -21899,7 +21899,7 @@ function normalizeGatingAuditEntry(value) {
     approverId: trimString(detail.approver_id),
     decidingPrincipal: trimString(detail.deciding_principal),
     approverBinding: trimString(detail.approver_binding),
-    deciderAssurance: trimString(detail.assurance),
+    deciderAssurance: trimString(detail.deciding_assurance),
     automaticAllowance: record10.event_type === "evaluated" && (record10.outcome === "allowed" || record10.outcome === "allowed_with_audit")
   };
 }

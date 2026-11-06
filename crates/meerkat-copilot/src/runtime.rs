@@ -5627,6 +5627,55 @@ mod tests {
         );
     }
 
+    /// Inference names who initiated each request in `X-Initiator`: `agent`
+    /// when the agent continues its own work, `user` otherwise. An image
+    /// request still names vision.
+    #[tokio::test]
+    async fn inference_names_who_initiated_the_request() {
+        use meerkat_core::HttpAuthorizationContent;
+        use meerkat_core::HttpRequestInitiator::{Agent, User};
+        let (auth_binding, binding) = validated_binding();
+        let (env, _auth_lease) = resolver_environment(&auth_binding).await;
+        let authorizer = CopilotAuthorizer {
+            state: Arc::new(CopilotAccountState::new(
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::DeviceSignIn,
+            )),
+            binding,
+            env,
+            transport: Arc::new(ScriptedTransport::new(Vec::new())),
+        };
+        let headers_for = |has_images, initiator| {
+            let mut headers = Vec::new();
+            authorizer
+                .append_content_headers(
+                    HttpAuthorizationContent {
+                        has_images,
+                        initiator,
+                    },
+                    &mut headers,
+                )
+                .expect("content headers");
+            headers
+        };
+        let header = |name: &str, value: &str| (name.to_string(), value.to_string());
+        assert_eq!(
+            headers_for(false, Agent),
+            vec![header("X-Initiator", "agent")]
+        );
+        assert_eq!(
+            headers_for(false, User),
+            vec![header("X-Initiator", "user")]
+        );
+        assert_eq!(
+            headers_for(true, Agent),
+            vec![
+                header("Copilot-Vision-Request", "true"),
+                header("X-Initiator", "agent")
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn concurrent_authorization_uses_one_derived_token_flight() {
         let (auth_binding, binding) = validated_binding();

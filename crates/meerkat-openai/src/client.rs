@@ -4805,6 +4805,182 @@ mod tests {
         }
     }
 
+    /// Records the content facts every request hands it, signs with a fixed
+    /// bearer and answers a 401 with a retry.
+    #[derive(Default)]
+    struct ContentRecordingAuthorizer {
+        contents: Mutex<Vec<meerkat_core::HttpAuthorizationContent>>,
+    }
+
+    impl ContentRecordingAuthorizer {
+        fn initiators(&self) -> Vec<meerkat_core::HttpRequestInitiator> {
+            self.contents
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|content| content.initiator)
+                .collect()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::HttpAuthorizer for ContentRecordingAuthorizer {
+        async fn authorize(
+            &self,
+            request: &mut meerkat_core::HttpAuthorizationRequest<'_>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            request
+                .headers
+                .push(("Authorization".to_string(), "Bearer recorded".to_string()));
+            Ok(())
+        }
+
+        async fn observe_response(
+            &self,
+            response: &meerkat_core::HttpAuthorizationResponse<'_>,
+        ) -> Result<meerkat_core::HttpAuthorizationResponseAction, meerkat_core::AuthError>
+        {
+            Ok(if response.status == 401 {
+                meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
+            } else {
+                meerkat_core::HttpAuthorizationResponseAction::Propagate
+            })
+        }
+
+        fn label(&self) -> &'static str {
+            "content-recording"
+        }
+
+        fn append_content_headers(
+            &self,
+            content: meerkat_core::HttpAuthorizationContent,
+            _headers: &mut Vec<(String, String)>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            self.contents.lock().unwrap().push(content);
+            Ok(())
+        }
+    }
+
+    /// A conversation whose last input is `last`: a user turn, then the
+    /// assistant's tool call and its result, then `last` when given.
+    fn conversation_ending_with(last: Option<Message>) -> Vec<Message> {
+        let mut messages = vec![
+            Message::User(UserMessage::text("look it up")),
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "lookup".to_string(),
+                    args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+            )),
+            Message::tool_results(vec![ToolResult::new(
+                "call_1".to_string(),
+                "found".to_string(),
+                false,
+            )]),
+        ];
+        messages.extend(last);
+        messages
+    }
+
+    /// A Responses request tells its authorizer who initiated it, from its
+    /// last input: the agent after a tool result or its own output, the
+    /// user after a user message; a 401 retry tells the same.
+    #[tokio::test]
+    async fn responses_requests_name_who_initiated_them_on_every_attempt() {
+        use meerkat_core::HttpRequestInitiator::{Agent, User};
+        let assistant_output = Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "Partial answer".to_string(),
+                meta: None,
+            }],
+            StopReason::MaxTokens,
+        ));
+        let cases = [
+            (
+                "a user message",
+                vec![Message::User(UserMessage::text("hello"))],
+                User,
+            ),
+            ("a tool result", conversation_ending_with(None), Agent),
+            (
+                "the assistant's own output",
+                conversation_ending_with(Some(assistant_output)),
+                Agent,
+            ),
+            (
+                "a user message after a tool result",
+                conversation_ending_with(Some(Message::User(UserMessage::text("thanks")))),
+                User,
+            ),
+        ];
+        for (case, messages, initiator) in cases {
+            let (base_url, calls, server) = spawn_auth_retry_server(false).await;
+            let authorizer = Arc::new(ContentRecordingAuthorizer::default());
+            let client = OpenAiClient::new_with_base_url("unused".to_string(), base_url)
+                .with_authorizer(authorizer.clone());
+            let request = LlmRequest::new("gpt-5.5", messages);
+            let _ = client.stream(&request).collect::<Vec<_>>().await;
+            server.abort();
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "{case}: the 401 is retried once"
+            );
+            assert_eq!(
+                authorizer.initiators(),
+                vec![initiator; 2],
+                "{case}: both attempts name the same initiator"
+            );
+        }
+    }
+
+    /// A request-local call that commits no transcript message (a
+    /// compaction summary, a tool's own model call) is the agent's own work
+    /// whatever its last input is; a transcript turn is not.
+    #[tokio::test]
+    async fn request_local_calls_are_agent_initiated() {
+        use meerkat_core::AgentLlmClient as _;
+        use meerkat_core::HttpRequestInitiator::{Agent, User};
+        let messages = vec![Message::User(UserMessage::text("summarize the work"))];
+
+        let (base_url, _calls, server) = spawn_auth_retry_server(false).await;
+        let authorizer = Arc::new(ContentRecordingAuthorizer::default());
+        let client = OpenAiClient::new_with_base_url("unused".to_string(), base_url)
+            .with_authorizer(authorizer.clone());
+        let adapter = LlmClientAdapter::new(Arc::new(client), "gpt-5.5".into());
+        let _ = adapter
+            .stream_response_authorized(&messages, &[], 256, None, None, None)
+            .await;
+        server.abort();
+        assert_eq!(
+            authorizer.initiators(),
+            vec![Agent; 2],
+            "a request-local call is the agent's own work on every attempt"
+        );
+
+        let (base_url, _calls, server) = spawn_auth_retry_server(false).await;
+        let authorizer = Arc::new(ContentRecordingAuthorizer::default());
+        let client = OpenAiClient::new_with_base_url("unused".to_string(), base_url)
+            .with_authorizer(authorizer.clone());
+        let adapter = Arc::new(LlmClientAdapter::new(Arc::new(client), "gpt-5.5".into()));
+        let attempt = adapter
+            .prepare_request_attempt(Arc::new(messages), Arc::from([]), 256, None, None)
+            .expect("prepare the transcript turn");
+        let turn =
+            serde_json::from_value(serde_json::json!("0190f5c2-4a1e-7c3d-8e2f-00000000cc01"))
+                .expect("assistant message id");
+        let _ = attempt.stream_response(turn).await;
+        server.abort();
+        assert_eq!(
+            authorizer.initiators(),
+            vec![User; 2],
+            "a transcript turn after a user message is the user's"
+        );
+    }
+
     async fn spawn_auth_retry_server(
         always_unauthorized: bool,
     ) -> (

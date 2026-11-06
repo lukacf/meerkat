@@ -3569,6 +3569,8 @@ impl crate::runtime::PersistentMetadataStore for RotationReadsFail {
 /// retryable, because they could not be read.
 #[tokio::test]
 async fn rotation_survives_an_unreadable_meta_record_store() {
+    use crate::runtime::PersistentMetadataStore as _;
+
     let alice = identity("personal:alice");
     let core = Arc::new(SeatCore::default());
     let runtime = runtime_over(None, &core);

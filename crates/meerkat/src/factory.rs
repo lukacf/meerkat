@@ -2756,7 +2756,7 @@ fn model_aware_compaction_config(
     provider: Provider,
     model: &str,
     build_threshold_override: Option<std::num::NonZeroU64>,
-    _account_prompt_token_limit: Option<u32>,
+    account_prompt_token_limit: Option<u32>,
 ) -> meerkat_core::CompactionConfig {
     let mut compaction: meerkat_core::CompactionConfig = config.compaction.clone().into();
     // Keep only an explicit host cap here. Built-in clients attach the current
@@ -2775,7 +2775,7 @@ fn model_aware_compaction_config(
         return compaction;
     }
 
-    if let Some(context_window) = registry
+    let registry_bound = registry
         .entry_for_provider(provider, model)
         .and_then(|entry| {
             entry.context_window.map(|window| {
@@ -2783,8 +2783,15 @@ fn model_aware_compaction_config(
                     .max_input_tokens
                     .map_or(window, |input| input.min(window))
             })
-        })
-    {
+        });
+    // The selected account's own prompt limit (a Copilot account model's
+    // `max_prompt_tokens`) bounds it as well: the account refuses a longer
+    // prompt whatever the model's own window.
+    let bound = match (registry_bound, account_prompt_token_limit) {
+        (Some(registry), Some(account)) => Some(registry.min(account)),
+        (registry, account) => registry.or(account),
+    };
+    if let Some(context_window) = bound {
         // The static default is intentionally conservative for unknown models.
         // Compact before the tighter of the shared window and separate input
         // ceiling, leaving headroom for the active turn.
@@ -4540,7 +4547,14 @@ impl AgentFactory {
                 "failed to resolve web-search auth binding for provider {search_provider:?}"
             ));
         };
-        let mut env = self.host_resolver_environment();
+        // The helper reads none of the account's stated limits (its route
+        // takes the account's model list once it loads, as the session's own
+        // does), so its resolution admits an account whose limits are pending,
+        // such as one whose credential exchange is temporarily unavailable;
+        // the first search completes it.
+        let mut env = self
+            .host_resolver_environment()
+            .admitting_pending_account_limits();
         // A faulted credential backend is a hard typed fault, never folded
         // into the inherit-mode `Ok(None)` degradation.
         if let Some(persistence) = self
@@ -8349,6 +8363,15 @@ impl AgentFactory {
                 .as_ref()
                 .and_then(|client| client.output_token_limit()),
         };
+        // Its own prompt limit, likewise: the session's default compaction
+        // threshold stays below it.
+        #[cfg(feature = "session-compaction")]
+        let account_prompt_token_limit = match prepared_controller.as_deref() {
+            Some(graph) => graph.account_prompt_token_limit,
+            None => llm_client
+                .as_ref()
+                .and_then(|client| client.prompt_token_limit()),
+        };
         let resolved_auth_credential_identity = resolved_llm_client_phase.credential_identity;
         let prompt_cache_backend = resolved_llm_client_phase.prompt_cache_backend;
         #[cfg(not(target_arch = "wasm32"))]
@@ -10254,7 +10277,7 @@ impl AgentFactory {
                     provider,
                     &model,
                     build_config.auto_compact_threshold_override,
-                    None,
+                    account_prompt_token_limit,
                 ),
             ));
             builder = builder.compactor(compactor);
@@ -10969,6 +10992,8 @@ impl AgentFactory {
             )
         })?;
         let account_output_token_limit = llm_client.output_token_limit();
+        #[cfg(feature = "session-compaction")]
+        let account_prompt_token_limit = llm_client.prompt_token_limit();
         let identity = SessionLlmIdentity {
             model: build_config.model.clone(),
             provider,
@@ -11001,6 +11026,8 @@ impl AgentFactory {
             event_tap,
             late_event,
             account_output_token_limit,
+            #[cfg(feature = "session-compaction")]
+            account_prompt_token_limit,
             credential_identity: phase.credential_identity,
             auto_image_generation_executor: phase.auto_image_generation_executor,
             resolved_model: identity.model,

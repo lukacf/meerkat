@@ -773,11 +773,24 @@ impl CopilotRouteResolution {
         model: &str,
         endpoint: CopilotEndpoint,
     ) -> String {
-        let mut message = format!(
-            "Copilot account does not expose {} for {} model '{model}'",
-            endpoint.path(),
-            provider.as_str(),
-        );
+        // A model the account lists under a policy that is not `enabled` is
+        // refused by naming the state the account states.
+        let refusing_state = self
+            .available_models
+            .as_ref()
+            .and_then(|snapshot| snapshot.model(model))
+            .and_then(|offering| offering.refusing_policy_state());
+        let mut message = match refusing_state {
+            Some(state) => format!(
+                "Copilot account policy state for {} model '{model}' is '{state}', not 'enabled'",
+                provider.as_str(),
+            ),
+            None => format!(
+                "Copilot account does not expose {} for {} model '{model}'",
+                endpoint.path(),
+                provider.as_str(),
+            ),
+        };
         if let Some(snapshot) = self.available_models.as_ref() {
             let mut ids = snapshot.available_model_ids(provider).peekable();
             if ids.peek().is_some() {
@@ -1439,8 +1452,15 @@ impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
             .or_else(|| self.inner.output_token_limit())
     }
 
+    /// The account model's own prompt limit: the tighter of its prompt
+    /// limit and its context window, either alone when only one is stated.
     fn prompt_token_limit(&self) -> Option<u32> {
-        self.inner.prompt_token_limit()
+        let limits = &self.capabilities.limits;
+        match (limits.max_prompt_tokens, limits.max_context_window_tokens) {
+            (Some(prompt), Some(window)) => Some(prompt.min(window)),
+            (prompt, window) => prompt.or(window),
+        }
+        .or_else(|| self.inner.prompt_token_limit())
     }
 
     fn project_replay_messages(
@@ -1472,14 +1492,15 @@ impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
                         .map(|context| context.saturating_sub(request.max_tokens))
                 })
                 .map(u64::from);
+            // A prompt the provider measured over the account's limit is a
+            // context refusal, the class the agent compacts on. Copilot's own
+            // answer to such a prompt is not known, so none is assumed.
             if let Some(limit) = prompt_limit
                 && measured.0 > limit
             {
-                return Err(meerkat_llm_core::LlmError::InvalidRequest {
-                    message: format!(
-                        "Copilot account model '{}' allows at most {limit} prompt tokens, measured {}",
-                        request.model, measured.0
-                    ),
+                return Err(meerkat_llm_core::LlmError::ContextLengthExceeded {
+                    max: usize::try_from(limit).unwrap_or(usize::MAX),
+                    requested: usize::try_from(measured.0).unwrap_or(usize::MAX),
                 });
             }
         }
@@ -5294,8 +5315,8 @@ mod tests {
                 Arc::new(NoopLlmClient),
                 Some(crate::CopilotModelCapabilities {
                     limits: crate::CopilotModelLimits {
-                        max_prompt_tokens,
                         max_context_window_tokens,
+                        max_prompt_tokens,
                         ..Default::default()
                     },
                     supports: Default::default(),

@@ -128,8 +128,8 @@ pub enum AccountModelRefusal {
         model: String,
     },
     /// The account does not offer the model: its model list does not name
-    /// it, or the account's policy disables it. `available` lists the ids
-    /// the account offers on a protocol Meerkat speaks.
+    /// it. `available` lists the ids the account offers on a protocol
+    /// Meerkat speaks.
     #[error(
         "credential '{credential}' does not offer model '{model}'{}",
         offered_models_suffix(.available)

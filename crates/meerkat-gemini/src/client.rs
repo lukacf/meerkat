@@ -916,7 +916,8 @@ impl GeminiClient {
     }
 
     /// `request` signed for `url`: the authorizer's headers when the client
-    /// has one, else the API key (`x-goog-api-key`).
+    /// has one, else the API key (`x-goog-api-key`), every value marked
+    /// sensitive ([`http::sensitive_header_value`]).
     async fn sign_request(
         &self,
         request: reqwest::RequestBuilder,
@@ -927,7 +928,10 @@ impl GeminiClient {
             Some(authorizer) => {
                 Self::authorizer_signed(authorizer.as_ref(), request, method, url).await
             }
-            None => Ok(request.header("x-goog-api-key", &self.api_key)),
+            None => Ok(request.header(
+                "x-goog-api-key",
+                http::sensitive_header_value(&self.api_key)?,
+            )),
         }
     }
 
@@ -950,7 +954,7 @@ impl GeminiClient {
                 message: format!("gemini authorizer failed: {e}"),
             })?;
         for (name, value) in extra {
-            request = request.header(name, value);
+            request = request.header(name, http::sensitive_header_value(&value)?);
         }
         Ok(request)
     }

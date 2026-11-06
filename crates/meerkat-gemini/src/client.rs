@@ -3121,6 +3121,57 @@ mod tests {
         }
     }
 
+    /// The credential header values a Gemini request carries are marked
+    /// sensitive, as on the other provider clients: an authorizer's
+    /// (`Authorization: Bearer ...`) and the static API key's
+    /// `x-goog-api-key`. The request's `Debug` output, and HTTP/2 header
+    /// compression, never keep the credential.
+    #[tokio::test]
+    async fn credential_header_values_are_sensitive() {
+        const KEY_CANARY: &str = "c4n4ryGeminiApiKey";
+        let url = "http://127.0.0.1:9/v1beta/models/gemini-test:streamGenerateContent";
+
+        let authorized =
+            GeminiClient::new(String::new()).with_authorizer(Arc::new(TestBearerAuthorizer));
+        let request = authorized
+            .sign_request(reqwest::Client::new().post(url), "POST", url)
+            .await
+            .expect("the authorizer signs the request")
+            .build()
+            .expect("the request builds");
+        let authorization = request
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .expect("an Authorization header");
+        assert_eq!(authorization.to_str().ok(), Some("Bearer test-token"));
+        assert!(
+            authorization.is_sensitive(),
+            "the authorizer's Authorization value must be marked sensitive"
+        );
+        assert!(
+            !format!("{request:?}").contains("test-token"),
+            "{request:?}"
+        );
+
+        let keyed = GeminiClient::new(KEY_CANARY.to_string());
+        let request = keyed
+            .sign_request(reqwest::Client::new().post(url), "POST", url)
+            .await
+            .expect("the key signs the request")
+            .build()
+            .expect("the request builds");
+        let key = request
+            .headers()
+            .get("x-goog-api-key")
+            .expect("an x-goog-api-key header");
+        assert_eq!(key.to_str().ok(), Some(KEY_CANARY));
+        assert!(
+            key.is_sensitive(),
+            "the API key's x-goog-api-key value must be marked sensitive"
+        );
+        assert!(!format!("{request:?}").contains(KEY_CANARY), "{request:?}");
+    }
+
     async fn gemini_image_stub(
         State(state): State<GeminiImageStubState>,
         Json(body): Json<Value>,

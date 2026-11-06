@@ -5282,6 +5282,177 @@ mod tests {
         );
     }
 
+    /// The account model's prompt limit is the most input one request may
+    /// carry on the route: the gate states it to the factory (the tighter of
+    /// the prompt limit and the context window, either alone when only one is
+    /// stated), which keeps the session's default compaction threshold below
+    /// it.
+    #[test]
+    fn account_capability_gate_states_the_account_prompt_limit() {
+        let gated = |max_prompt_tokens, max_context_window_tokens| {
+            capability_gated_client(
+                Arc::new(NoopLlmClient),
+                Some(crate::CopilotModelCapabilities {
+                    limits: crate::CopilotModelLimits {
+                        max_prompt_tokens,
+                        max_context_window_tokens,
+                        ..Default::default()
+                    },
+                    supports: Default::default(),
+                }),
+            )
+        };
+        assert_eq!(
+            gated(Some(64_000), Some(128_000)).prompt_token_limit(),
+            Some(64_000)
+        );
+        assert_eq!(
+            gated(Some(200_000), Some(128_000)).prompt_token_limit(),
+            Some(128_000)
+        );
+        assert_eq!(gated(Some(64_000), None).prompt_token_limit(), Some(64_000));
+        assert_eq!(
+            gated(None, Some(128_000)).prompt_token_limit(),
+            Some(128_000)
+        );
+        assert_eq!(gated(None, None).prompt_token_limit(), None);
+        assert_eq!(
+            capability_gated_client(Arc::new(NoopLlmClient), None).prompt_token_limit(),
+            None
+        );
+    }
+
+    /// A client that states the provider's own input-token count for every
+    /// request, as a provider with a counting endpoint would.
+    struct MeasuredInputClient {
+        input_tokens: u64,
+    }
+
+    #[async_trait]
+    impl meerkat_llm_core::LlmClient for MeasuredInputClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_llm_core::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn request_pressure(
+            &self,
+            _request: &meerkat_llm_core::LlmRequest,
+        ) -> Result<Option<meerkat_core::ProviderRequestPressure>, meerkat_llm_core::LlmError>
+        {
+            Ok(Some(
+                meerkat_core::ProviderRequestPressure::new(1, None)
+                    .with_provider_issued_input_tokens(self.input_tokens),
+            ))
+        }
+
+        fn stream<'a>(
+            &'a self,
+            _request: &'a meerkat_llm_core::LlmRequest,
+        ) -> meerkat_llm_core::LlmStream<'a> {
+            Box::pin(futures::stream::empty())
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_llm_core::LlmError> {
+            Ok(())
+        }
+    }
+
+    /// A prompt the provider measured over the account model's prompt limit
+    /// is a context refusal (`ContextLengthExceeded`), the class the agent
+    /// compacts on, not an invalid request; one at the limit goes out. No
+    /// Copilot error body is assumed: the gate decides from the stated limit
+    /// and the provider's own count.
+    #[test]
+    fn a_prompt_measured_over_the_account_limit_is_a_context_refusal() {
+        let gated = |input_tokens| {
+            capability_gated_client(
+                Arc::new(MeasuredInputClient { input_tokens }),
+                Some(crate::CopilotModelCapabilities {
+                    limits: crate::CopilotModelLimits {
+                        max_prompt_tokens: Some(64_000),
+                        ..Default::default()
+                    },
+                    supports: Default::default(),
+                }),
+            )
+        };
+        let request = meerkat_llm_core::LlmRequest::new("gpt-test", Vec::new());
+        let refused = gated(64_001).request_pressure(&request);
+        assert!(
+            matches!(
+                refused,
+                Err(meerkat_llm_core::LlmError::ContextLengthExceeded {
+                    max: 64_000,
+                    requested: 64_001,
+                })
+            ),
+            "{refused:?}"
+        );
+        assert!(gated(64_000).request_pressure(&request).is_ok());
+    }
+
+    /// A model the account lists with a policy state other than `enabled`
+    /// is unavailable on the account's routes, and the refusal names the
+    /// state the account states, with the models the account does offer.
+    #[test]
+    fn an_unavailable_route_names_the_policy_state() {
+        let listed =
+            |id: &str, policy: Option<crate::CopilotModelPolicyState>| crate::CopilotModel {
+                id: id.to_string(),
+                vendor: None,
+                name: None,
+                version: None,
+                model_picker_enabled: None,
+                capabilities: Default::default(),
+                policy: policy.map(|state| crate::CopilotModelPolicy { state }),
+                supported_endpoints: vec![CopilotEndpoint::Responses],
+            };
+        let snapshot = CopilotModelSnapshot::from_models(vec![
+            listed(
+                "gpt-test",
+                Some(crate::CopilotModelPolicyState::Other(
+                    "unconfigured".to_string(),
+                )),
+            ),
+            listed("gpt-other", None),
+        ])
+        .expect("model snapshot");
+        let state = Arc::new(CopilotAccountState::new(
+            CopilotBackendConfig::default(),
+            CopilotCredentialMode::DeviceSignIn,
+        ));
+        *state.cache.write() = Some(CachedCopilotToken {
+            generation: 1,
+            token: "derived".to_string(),
+            source_generation: 1,
+            source_expires_at: None,
+            refresh_at: Utc::now() + Duration::hours(1),
+            expires_at: Utc::now() + Duration::hours(2),
+            api_base: "https://copilot.example.test".to_string(),
+            models: Some(Arc::new(snapshot)),
+            model_discovery_refresh_at: None,
+            identity: None,
+            exchange_unavailable: None,
+        });
+        let route =
+            resolve_route_for_state(&state, Provider::OpenAI, "gpt-test").expect("a cached route");
+        assert_eq!(route.access, CopilotModelAccess::Unavailable);
+        let message =
+            route.unavailable_message(Provider::OpenAI, "gpt-test", CopilotEndpoint::Responses);
+        assert!(
+            message.contains("policy state for openai model 'gpt-test' is 'unconfigured'"),
+            "{message}"
+        );
+        assert!(message.contains("gpt-other"), "{message}");
+    }
+
     #[test]
     fn shared_account_rejects_conflicting_backend_options() {
         let runtime = CopilotRuntime::new();

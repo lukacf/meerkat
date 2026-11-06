@@ -13248,6 +13248,43 @@ mod tests {
         );
     }
 
+    /// The selected account's prompt limit (a Copilot account model's
+    /// `max_prompt_tokens`) bounds the model-aware default threshold the way
+    /// the registry's input ceiling does: the tighter one wins, and an
+    /// explicit threshold or a per-build override keeps its value.
+    #[test]
+    fn account_prompt_limit_bounds_the_model_aware_compaction_threshold() {
+        let mut config = Config::default();
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .expect("registry");
+        let threshold = |config: &Config, account, build_override| {
+            model_aware_compaction_config(
+                config,
+                &registry,
+                Provider::OpenAI,
+                "gpt-5.5",
+                build_override,
+                account,
+            )
+            .auto_compact_threshold
+        };
+        assert_eq!(threshold(&config, Some(128_000), None), 102_400);
+        assert_eq!(
+            threshold(&config, Some(2_000_000), None),
+            840_000,
+            "the registry's ceiling is the tighter one"
+        );
+        assert_eq!(threshold(&config, None, None), 840_000);
+        assert_eq!(
+            threshold(&config, Some(128_000), std::num::NonZeroU64::new(9_000)),
+            9_000
+        );
+        config.compaction.auto_compact_threshold = 42_000;
+        config.compaction.auto_compact_threshold_explicit = true;
+        assert_eq!(threshold(&config, Some(128_000), None), 42_000);
+    }
+
     #[test]
     fn explicit_compaction_threshold_is_preserved() {
         let mut config = Config::default();
@@ -19265,6 +19302,34 @@ mod tests {
             build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
             build
         }
+    }
+
+    /// A web-search helper on an account whose limits are pending (its
+    /// credential exchange is temporarily unavailable) builds like the session
+    /// it serves: the helper reads none of the account's limits, so its
+    /// resolution admits the pending ones, and an explicit web search is
+    /// provisioned instead of failing the build.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_web_search_helper_builds_while_the_account_limits_are_pending() {
+        let stand_in = PendingLimitsFactory::new();
+        stand_in.begin_outage();
+        let config = Config::default();
+        let registry = stand_in.factory.model_registry(&config).expect("registry");
+        let executor = stand_in
+            .factory
+            .build_web_search_executor(
+                &config,
+                &registry,
+                Provider::OpenAI,
+                &PendingLimitsFactory::request(),
+                meerkat_core::new_event_tap(),
+                true,
+            )
+            .await
+            .expect("an explicit web search is provisioned during the outage");
+        assert!(executor.is_some());
+        assert_eq!(stand_in.admissions(), [true]);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

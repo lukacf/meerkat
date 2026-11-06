@@ -1279,4 +1279,89 @@ mod tests {
             })
         );
     }
+
+    /// A model whose entry advertises no endpoint is served on Chat
+    /// Completions by the OpenAI and Gemini families, the endpoint both
+    /// speak; the Anthropic family needs Messages advertised. A model that
+    /// advertises only endpoints Meerkat does not speak gets no default.
+    #[test]
+    fn a_model_without_supported_endpoints_is_served_on_chat_completions() {
+        let listed: CopilotModelsEnvelope = serde_json::from_value(serde_json::json!({
+            "data": [
+                {"id": "no-endpoints"},
+                {"id": "empty-endpoints", "supported_endpoints": []},
+                {"id": "unspoken-endpoints", "supported_endpoints": ["/v1/embeddings"]}
+            ]
+        }))
+        .expect("model list");
+        let snapshot = CopilotModelSnapshot::from_models(listed.data).expect("unique model ids");
+        for id in ["no-endpoints", "empty-endpoints"] {
+            let offering = snapshot.model(id).expect("listed model");
+            assert_eq!(
+                offering.route_for(Provider::OpenAI),
+                Some(CopilotEndpoint::ChatCompletions),
+                "{id}"
+            );
+            assert_eq!(
+                offering.route_for(Provider::Gemini),
+                Some(CopilotEndpoint::ChatCompletions),
+                "{id}"
+            );
+            assert_eq!(offering.route_for(Provider::Anthropic), None, "{id}");
+            assert_eq!(offering.protocol_provider(), Some(Provider::OpenAI), "{id}");
+        }
+        let unspoken = snapshot.model("unspoken-endpoints").expect("listed model");
+        assert_eq!(unspoken.route_for(Provider::OpenAI), None);
+        assert_eq!(unspoken.protocol_provider(), None);
+    }
+
+    /// A policy state other than `enabled` keeps its value: the account's
+    /// model list refuses the model naming the state (`disabled`, or one
+    /// Meerkat does not know such as `unconfigured`), and the state
+    /// round-trips as the account stated it.
+    #[test]
+    fn a_policy_state_other_than_enabled_is_refused_by_name() {
+        use meerkat_llm_core::provider_runtime::{AccountModelLookup, AccountModelRefusal};
+        let listed: CopilotModelsEnvelope = serde_json::from_value(serde_json::json!({
+            "data": [
+                {"id": "enabled-model", "policy": {"state": "enabled"}, "supported_endpoints": ["/responses"]},
+                {"id": "disabled-model", "policy": {"state": "disabled"}, "supported_endpoints": ["/responses"]},
+                {"id": "unconfigured-model", "policy": {"state": "unconfigured"}, "supported_endpoints": ["/responses"]}
+            ]
+        }))
+        .expect("model list");
+        let states: Vec<_> = listed
+            .data
+            .iter()
+            .map(|model| model.policy.as_ref().map(|policy| policy.state.as_str()))
+            .collect();
+        assert_eq!(
+            states,
+            [Some("enabled"), Some("disabled"), Some("unconfigured")]
+        );
+        assert_eq!(
+            serde_json::to_value(&listed.data[2].policy).expect("serializes"),
+            serde_json::json!({"state": "unconfigured"})
+        );
+        let snapshot = CopilotModelSnapshot::from_models(listed.data).expect("unique model ids");
+        let credential = github_copilot_credential();
+        assert!(matches!(
+            snapshot.account_model(&credential, "enabled-model"),
+            AccountModelLookup::Offered(_)
+        ));
+        for (model, state) in [
+            ("disabled-model", "disabled"),
+            ("unconfigured-model", "unconfigured"),
+        ] {
+            assert_eq!(
+                snapshot.account_model(&credential, model),
+                AccountModelLookup::Refused(AccountModelRefusal::PolicyNotEnabled {
+                    credential: credential.clone(),
+                    model: model.to_string(),
+                    state: state.to_string(),
+                }),
+                "{model}"
+            );
+        }
+    }
 }

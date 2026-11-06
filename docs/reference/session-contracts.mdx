@@ -203,8 +203,10 @@ snapshot of the instructions in effect after the leading System prefix, and
 no summary request, host curator window or compactor input carries an
 instruction body. Each applied entry is published as an
 `operator_instructions_applied` event: a delta once the run whose start
-appended it starts, a snapshot once its compaction commits. The event is an
-observation; the status read is the authority. A stale or conflicting revision, a slot that instruction
+appended it starts, a snapshot once its compaction's rewrite is in the
+session. The event reports what is now in effect for the live session, not
+durability: a restart before the entry is durable applies the changes again
+and publishes the event again. The status read is the authority. A stale or conflicting revision, a slot that instruction
 activations manage, more than 64 slots, a body over 256 KiB and more than
 1 MiB of Active bodies are refused typed (`InstructionSetErrorCode`), and so
 is a model change onto a target that cannot carry the entry rows the session

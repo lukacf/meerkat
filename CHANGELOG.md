@@ -99,11 +99,14 @@ them.
 - `meerkat-core`: `AgentEvent::OperatorInstructionsApplied` (wire
   `operator_instructions_applied`), appended last. A session publishes it
   for each operator-instruction entry it applies: a delta once the run whose
-  start appended it starts, a snapshot once the compaction that folded it
-  commits. It carries the session, the entry sequence, the kind, the
-  applying run, the active set after the entry and a delta's changes. An
-  observation only: the status read is the authority. The Python,
-  TypeScript and Web SDKs know the event type and keep its payload whole.
+  start appended it starts, a snapshot once the rewrite of the compaction
+  that folded it is in the session. It reports the instructions now in
+  effect for the live session, not durability: a restart before the entry is
+  durable applies the changes again and publishes the event again. It
+  carries the session, the entry sequence, the kind, the applying run, the
+  active set after the entry and a delta's changes. An observation only: the
+  status read is the authority. The Python, TypeScript and Web SDKs know the
+  event type and keep its payload whole.
 
 ### Changed
 

@@ -3198,15 +3198,20 @@ pub enum AgentEvent {
         /// The limit that set how much of each result the request kept.
         axis: ToolResultBoundAxis,
     },
-    /// An operator-instruction entry of this session was applied: the delta
-    /// entry a fresh run start appended, published once the run whose start
-    /// appended it starts, or the snapshot entry a compaction folded the
-    /// session's entry rows into, published once that compaction commits.
+    /// An operator-instruction entry of this session was applied. It reports
+    /// the instructions now in effect for the live session, not their
+    /// durability: the delta entry a fresh run start appended is published
+    /// once the run whose start appended it starts, and the snapshot entry a
+    /// compaction folded the session's entry rows into once that compaction's
+    /// rewrite is in the session (for a staged memory projection, before the
+    /// runtime commits it). A restart before the entry is durable (the run's
+    /// first checkpoint, or the projection's commit) applies the changes
+    /// again at the next fresh run start and publishes this event again.
     ///
     /// An observation only, projected from the entry row's typed identity:
     /// the session's operator-instruction status read is the authority on
-    /// what is in effect. A run that never commits its entry leaves the
-    /// changes pending, and a later run start applies them again.
+    /// what is in effect. A run that never starts takes its entry back, so
+    /// the changes stay pending and a later run start applies them again.
     ///
     /// Appended after every released variant: declaration order is the
     /// implicit discriminant (the xtask `released_enum_ordinals` test).

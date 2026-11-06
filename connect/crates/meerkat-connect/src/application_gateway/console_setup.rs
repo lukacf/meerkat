@@ -814,6 +814,132 @@ fn unavailable() -> ConnectError {
     ConnectError::InvalidInput("The protected Console setup interaction is unavailable".into())
 }
 
+/// The presentations a panel holds, each with the exact login owner that
+/// started the request it shows. Presentation custody only: holding one is
+/// never a grant or a decision. A presentation is held while the panel
+/// holds no other.
+pub(crate) struct Presentations<T> {
+    held: Mutex<Vec<(ConsoleLoginHandle, Arc<T>)>>,
+}
+
+impl<T> Default for Presentations<T> {
+    fn default() -> Self {
+        Self {
+            held: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl<T> Presentations<T> {
+    /// Hold `value` for `login`; refused while the panel holds one.
+    pub(crate) fn claim(
+        &self,
+        login: &ConsoleLoginHandle,
+        value: Arc<T>,
+    ) -> Result<(), ConnectError> {
+        let mut held = self.held.lock().map_err(|_| unavailable())?;
+        if !held.is_empty() {
+            return Err(unavailable());
+        }
+        held.push((login.clone(), value));
+        Ok(())
+    }
+
+    /// The presentation `login` holds, if any.
+    pub(crate) fn of(&self, login: &ConsoleLoginHandle) -> Result<Option<Arc<T>>, ConnectError> {
+        Ok(self
+            .held
+            .lock()
+            .map_err(|_| unavailable())?
+            .iter()
+            .find(|(owner, _)| owner.same_owner(login))
+            .map(|(_, value)| value.clone()))
+    }
+
+    /// Every presentation held now.
+    pub(crate) fn all(&self) -> Result<Vec<Arc<T>>, ConnectError> {
+        Ok(self
+            .held
+            .lock()
+            .map_err(|_| unavailable())?
+            .iter()
+            .map(|(_, value)| value.clone())
+            .collect())
+    }
+
+    /// Release exactly `value`, if it is still held.
+    pub(crate) fn release(&self, value: &Arc<T>) -> Result<(), ConnectError> {
+        self.held
+            .lock()
+            .map_err(|_| unavailable())?
+            .retain(|(_, held)| !Arc::ptr_eq(held, value));
+        Ok(())
+    }
+}
+
+/// The Console presenter loop's turns over requests and the login each one
+/// belongs to: one presentation at a time, whatever its login.
+pub(crate) struct LoginTurns<T> {
+    running: Vec<Option<ConsoleLoginHandle>>,
+    waiting: std::collections::VecDeque<(Option<ConsoleLoginHandle>, T)>,
+}
+
+impl<T> Default for LoginTurns<T> {
+    fn default() -> Self {
+        Self {
+            running: Vec::new(),
+            waiting: std::collections::VecDeque::new(),
+        }
+    }
+}
+
+impl<T> LoginTurns<T> {
+    /// A request of `login` arrived: it starts now (returned) or waits for
+    /// its turn.
+    pub(crate) fn offer(&mut self, login: Option<ConsoleLoginHandle>, request: T) -> Option<T> {
+        if !self.running.is_empty() {
+            self.waiting.push_back((login, request));
+            return None;
+        }
+        self.running.push(login);
+        Some(request)
+    }
+
+    /// A presentation of `login` ended. Returns the waiting request whose
+    /// turn came, if any; it starts now.
+    pub(crate) fn finished(
+        &mut self,
+        login: Option<&ConsoleLoginHandle>,
+    ) -> Option<(Option<ConsoleLoginHandle>, T)> {
+        if let Some(index) = self
+            .running
+            .iter()
+            .position(|running| same_login(running.as_ref(), login))
+        {
+            self.running.remove(index);
+        }
+        if !self.running.is_empty() {
+            return None;
+        }
+        let (login, request) = self.waiting.pop_front()?;
+        self.running.push(login.clone());
+        Some((login, request))
+    }
+
+    /// Drop every waiting request.
+    pub(crate) fn clear(&mut self) {
+        self.waiting.clear();
+    }
+}
+
+fn same_login(left: Option<&ConsoleLoginHandle>, right: Option<&ConsoleLoginHandle>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.same_owner(right),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 async fn wait_for_start(
     started: oneshot::Receiver<StartDisposition>,
     request_closed: impl std::future::Future<Output = ()>,

@@ -440,3 +440,127 @@ async fn setup_answers_refuse_a_caller_that_is_not_a_person_with_approver_unauth
     }
     console.stop().await;
 }
+
+/// Two actual logins of one person, enrolled on a real private pipe: the
+/// exact login owners presentations are kept by. No verified Human.
+async fn two_logins() -> (
+    toolkit_mobkit::private_host::PrivateHostConnection,
+    (tokio::fs::File, tokio::io::BufReader<tokio::fs::File>),
+    [ConsoleLoginHandle; 2],
+) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    const ISSUER: &str = "http://setup-logins.localhost";
+    let (connection, mut commands, mut responses) =
+        super::super::setup_presenter::tests::presentation_pipe().await;
+    let expires = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 60_000;
+    let mut logins = Vec::new();
+    for (id, scope) in [(2_u64, "setup-login-a"), (3, "setup-login-b")] {
+        let mut command = serde_json::to_vec(&json!({"version":1,"id":id,
+            "command":{"kind":"enroll_console_login","login":{"issuer":ISSUER,
+                "subject":"setup-person","login_scope_id":scope,"expires_at_ms":expires}}}))
+        .unwrap();
+        command.push(b'\n');
+        commands.write_all(&command).await.unwrap();
+        commands.flush().await.unwrap();
+        let mut line = String::new();
+        assert!(responses.read_line(&mut line).await.unwrap() > 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap()["result"]["enrollment_id"],
+            id
+        );
+        logins.push(
+            connection
+                .console_logins()
+                .resolve(ISSUER, "setup-person", scope)
+                .unwrap(),
+        );
+    }
+    let second = logins.pop().unwrap();
+    let first = logins.pop().unwrap();
+    assert!(!first.same_owner(&second));
+    (connection, (commands, responses), [first, second])
+}
+
+/// MU-11 row 3: two logins each hold their own setup prompt at once, and a
+/// login holds one prompt at a time.
+#[tokio::test]
+async fn two_logins_hold_their_setup_prompts_at_once() {
+    let (connection, pipe, [a, b]) = two_logins().await;
+    let presentations = Presentations::default();
+    let (first, second) = (Arc::new("login A's prompt"), Arc::new("login B's prompt"));
+    presentations.claim(&a, first.clone()).unwrap();
+    assert!(
+        presentations.claim(&b, second.clone()).is_ok(),
+        "login A's open prompt held login B's prompt back"
+    );
+    assert!(
+        presentations
+            .of(&a)
+            .unwrap()
+            .is_some_and(|held| Arc::ptr_eq(&held, &first))
+    );
+    assert!(
+        presentations
+            .of(&b)
+            .unwrap()
+            .is_some_and(|held| Arc::ptr_eq(&held, &second))
+    );
+    assert_eq!(presentations.all().unwrap().len(), 2);
+    let again = Arc::new("login A's next prompt");
+    assert!(
+        presentations.claim(&a, again.clone()).is_err(),
+        "one login holds one prompt at a time"
+    );
+    presentations.release(&first).unwrap();
+    assert!(presentations.of(&a).unwrap().is_none());
+    assert!(
+        presentations.of(&b).unwrap().is_some(),
+        "releasing login A's prompt keeps login B's"
+    );
+    presentations.claim(&a, again).unwrap();
+    connection.finish().await.unwrap();
+    drop(pipe);
+}
+
+/// MU-11 row 3: the Console presenter loop starts a second login's request
+/// while the first login's prompt waits for its answer, and one login's
+/// requests take turns in the order they arrived.
+#[tokio::test]
+async fn the_presenter_loop_takes_two_logins_at_once() {
+    let (connection, pipe, [a, b]) = two_logins().await;
+    let mut turns = LoginTurns::default();
+    assert_eq!(turns.offer(Some(a.clone()), "A1"), Some("A1"));
+    assert_eq!(
+        turns.offer(Some(b.clone()), "B1"),
+        Some("B1"),
+        "login B's request waited for login A's presentation"
+    );
+    assert_eq!(turns.offer(Some(a.clone()), "A2"), None, "A2 waits for A1");
+    assert_eq!(
+        turns.offer(Some(a.clone()), "A3"),
+        None,
+        "A3 waits behind A2"
+    );
+    assert_eq!(
+        turns.offer(None, "no login"),
+        Some("no login"),
+        "a request without a login is refused at once, so it never waits"
+    );
+    assert!(turns.finished(None).is_none());
+    assert!(
+        turns.finished(Some(&b)).is_none(),
+        "no request of login B waits"
+    );
+    let (login, next) = turns.finished(Some(&a)).unwrap();
+    assert_eq!(next, "A2");
+    assert!(login.is_some_and(|login| login.same_owner(&a)));
+    let (_, next) = turns.finished(Some(&a)).unwrap();
+    assert_eq!(next, "A3");
+    assert!(turns.finished(Some(&a)).is_none());
+    connection.finish().await.unwrap();
+    drop(pipe);
+}

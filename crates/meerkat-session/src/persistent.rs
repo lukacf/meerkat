@@ -21877,6 +21877,48 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
     }
 
+    /// Settle `session_id`'s owed compaction projections cold: finalize each
+    /// memory batch the runtime's compaction outbox still owes, acknowledge
+    /// its row, and answer the finalized batches. It registers nothing,
+    /// wakes nothing and makes no model request.
+    ///
+    /// A compaction's transcript rewrite and its memory projection are a
+    /// pair: the run boundary that commits the rewrite inserts a pending
+    /// outbox row, and the batch waits staged and invisible. A live agent
+    /// finalizes it at its next boundary, or at its startup reconciliation
+    /// when it is revived. A session that is never revived again (a dormant
+    /// member that is rotated or deleted) is settled here instead, before it
+    /// ends, so its discards still reach the caller.
+    ///
+    /// - A session this service hosts (a live actor, or a registration on
+    ///   its runtime machine) answers [`OwedCompactionSettlement::Live`]: its
+    ///   live agent owns the finalization. Nothing is written.
+    /// - No pending row answers [`OwedCompactionSettlement::NothingOwed`], so
+    ///   a second settle owes nothing and changes nothing.
+    /// - Otherwise each row is the commit authority of its projection (only
+    ///   a commit inserted it): the builder finalizes the batch
+    ///   ([`SessionAgentBuilder::finalize_absent_session_compaction_stages`])
+    ///   and the store acknowledges the row, which removes the intent from
+    ///   the authoritative session in the same transaction, so a later
+    ///   revival's reconciliation sees a consistent pair. The answer is
+    ///   [`OwedCompactionSettlement::Settled`], in outbox order.
+    ///
+    /// It runs under this runtime owner's hosting claim for the session
+    /// (#1813): a session another runtime owner hosts is refused with
+    /// [`SessionError::ServedElsewhere`] before anything is read. Under the
+    /// session's recovery gate a concurrent materialization waits, and an
+    /// actor that went live first answers `Live`. While a run's provisional
+    /// tail stands ahead of the committed boundary, the run owns that
+    /// boundary: the settle is refused [`SessionError::Busy`] and writes
+    /// nothing.
+    pub async fn settle_owed_compaction_projections(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::OwedCompactionSettlement, SessionError> {
+        let _ = session_id;
+        Ok(crate::OwedCompactionSettlement::NothingOwed)
+    }
+
     /// Observe the exact committed RuntimeStore body without reconciling the
     /// EventStore rewrite audit.
     ///

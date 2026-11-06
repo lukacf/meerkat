@@ -4630,6 +4630,25 @@ pub trait SessionBridge: Send + Sync {
         )))
     }
 
+    /// Settle the owed compaction projections of `identity`'s current
+    /// session cold (`MobHandle::settle_member_owed_compaction_projections`),
+    /// before a verb asks Core to end that session: Core finalizes each
+    /// memory batch its runtime still owes for the session, and answers the
+    /// finalized batches, whose discards the caller harvests. A session Core
+    /// hosts live answers `Live` (its live agent finalizes, and its
+    /// `CompactionCompleted` triggers the harvest); nothing owed answers
+    /// `NothingOwed`. Nothing is woken.
+    ///
+    /// The default settles nothing: the bridge cannot reach Core's settle.
+    async fn settle_owed_compaction_projections(
+        &self,
+        _identity: &AgentIdentity,
+    ) -> Result<meerkat_session::OwedCompactionSettlement, BridgeError> {
+        Err(BridgeError::Unsupported {
+            operation: "settle_owed_compaction_projections",
+        })
+    }
+
     /// Release `identity`'s live materialization (`MobHandle::release_member`):
     /// the member stays seated, on the same session and generation, and Core
     /// materializes it again on its next delivery. A member Core holds
@@ -9833,6 +9852,15 @@ impl SessionBridge for super::PublicSessionBridge {
         draft: &AgentBuildDraft,
     ) -> Result<meerkat_core::types::SessionId, BridgeError> {
         self.bridge.rotate_member(identity, spec, draft).await
+    }
+
+    async fn settle_owed_compaction_projections(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<meerkat_session::OwedCompactionSettlement, BridgeError> {
+        self.bridge
+            .settle_owed_compaction_projections(identity)
+            .await
     }
 
     async fn release_member(&self, identity: &AgentIdentity) -> Result<(), BridgeError> {

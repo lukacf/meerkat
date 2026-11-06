@@ -137,10 +137,20 @@ async fn post(
     bearer: &str,
     member: &str,
 ) -> (u16, serde_json::Value) {
+    post_keyed(address, bearer, member, "controlled-verifier-input").await
+}
+
+// The same request with the send's own idempotency key.
+async fn post_keyed(
+    address: std::net::SocketAddr,
+    bearer: &str,
+    member: &str,
+    key: &str,
+) -> (u16, serde_json::Value) {
     tokio::time::timeout(WAIT, async {
         let body = serde_json::to_vec(&serde_json::json!({
             "identity": member, "content": "Answer this retained Console input",
-            "origin": "console", "origin_kind": "operator", "idempotency_key": "controlled-verifier-input",
+            "origin": "console", "origin_kind": "operator", "idempotency_key": key,
         })).unwrap();
         let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let request = format!("POST /console/send HTTP/1.1\r\nHost: {address}\r\nAuthorization: {bearer}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
@@ -750,4 +760,364 @@ async fn tampered_signature_never_selects_installed_console_ingress() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wrong_issuer_never_selects_installed_console_ingress() {
     controlled_console(Case::WrongIssuer).await;
+}
+
+/// The owner's record changes, until the first one made once a Console
+/// original holds its login (the Original binder retains it right after the
+/// binding, before the first custody attempt's write): inside that write the
+/// Console human's send permission is revoked. Every earlier change arms the
+/// next one. No store read is made here: the change holds the store's one
+/// connection.
+struct RevokeAtFirstAttemptWrite {
+    me: std::sync::Weak<Self>,
+    owner: std::sync::Weak<crate::original_ingress::ToolkitOriginalOwner>,
+    source: std::sync::Weak<PrivateOriginals>,
+    access: AccessController,
+    revoked: AccessControlConfig,
+    fired: std::sync::atomic::AtomicBool,
+}
+struct RevokeGuard;
+impl toolkit_store::RecordChangeGuard for RevokeGuard {}
+impl toolkit_store::RecordChangePublication for RevokeAtFirstAttemptWrite {
+    fn begin_record_change(
+        &self,
+    ) -> toolkit_store::StoreResult<Box<dyn toolkit_store::RecordChangeGuard + '_>> {
+        let login_held = self.source.upgrade().is_some_and(|source| {
+            source.retained.try_lock().is_ok_and(|retained| {
+                retained
+                    .iter()
+                    .any(|held| held.console_login.get().is_some())
+            })
+        });
+        if login_held {
+            self.access.replace_config(self.revoked.clone()).unwrap();
+            self.fired.store(true, Ordering::SeqCst);
+        } else if let (Some(me), Some(owner)) = (self.me.upgrade(), self.owner.upgrade()) {
+            owner.observe_next_record_change_for_test(me);
+        }
+        Ok(Box::new(RevokeGuard))
+    }
+}
+
+// A control of the shipped first-attempt window, not a fix: the Original
+// binder writes a Console send's first custody attempt, and its Console entry
+// check right after that write refuses (the human's send permission is
+// revoked inside the write). Nothing is admitted and no custody is enrolled:
+// the written attempt stays pending with no observation spent, and the bind's
+// login reservation ends uncertain, which the login's retirement reports. A
+// later send runs every check again: while the permission is revoked it is
+// refused before anything is reserved or retained; once allowed again it is a
+// new input and original of its own, admitted once, and the refused input is
+// never admitted. Nothing in this process visits the refused attempt again
+// (the cold census skips a live first binding); after a restart the cold
+// census withdraws it without submitting anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn console_send_refused_after_its_first_attempt_write_admits_nothing() {
+    use crate::original_ingress::custody_attempt::CustodyDecision;
+    use meerkat_runtime::SessionServiceRuntimeExt;
+    let mut fixture = ContinuationFixture::for_console_input(selected_human()).await;
+    let observation = Arc::new(RouteObservation::new(false));
+    let mut server = None;
+    let result = AssertUnwindSafe(Box::pin(async {
+        let native = fixture
+            .lifetime()
+            .selected_policy()
+            .native_host
+            .as_ref()
+            .unwrap();
+        let member = native.members[0].member.member.clone();
+        let (connection, logins) = ConsoleLogins::fixture_owner();
+        let expires = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 600;
+        let login = logins
+            .fixture_enroll(
+                1,
+                crate::private_host::ConsoleLoginSelection {
+                    issuer: ISSUER.into(),
+                    subject: SUBJECT.into(),
+                    login_scope_id: SCOPE.into(),
+                    expires_at_ms: expires * 1000,
+                },
+            )
+            .unwrap();
+        login.check().unwrap();
+        let bearer = signed_fixture(ISSUER, SCOPE, expires);
+        let decisions =
+            meerkat_mobkit::console_auth_config::parse_console_auth_config(&serde_json::json!({
+                "provider": "jwt", "shared_secret": std::str::from_utf8(KEY).unwrap(),
+                "issuer": ISSUER, "audience": AUDIENCE, "email_allowlist": [EMAIL],
+            }))
+            .unwrap();
+        let config = |actions: &[&str]| AccessControlConfig {
+            enabled: true,
+            admins: vec!["unrelated-fixture-admin".into()],
+            rules: vec![AccessRule {
+                id: "controlled-console-send".into(),
+                subjects: vec![EMAIL.into()],
+                actions: actions.iter().map(|action| (*action).to_owned()).collect(),
+                agents: vec![member.clone()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let allowed = config(&["agent.view", "agent.send"]);
+        let access = AccessController::new(allowed.clone()).unwrap();
+        access
+            .join_authorization_publication(fixture.source.authorization_publication())
+            .unwrap();
+        let ingress = fixture
+            .source
+            .console_ingress(logins.clone(), Some(access.clone()))
+            .await
+            .unwrap();
+        let runtime = fixture.native_for_console_mut();
+        runtime.set_access_controller(access.clone());
+        let observed: Arc<dyn ConsoleGovernedIngress> = Arc::new(ObserveInstalledIngress {
+            inner: ingress,
+            observation: observation.clone(),
+        });
+        runtime.set_console_governed_ingress(
+            crate::host_gateway::PreparedGatewayRuntime::console_ingress_for_test(Some(observed)),
+        );
+        let app = runtime.build_reference_app_router(decisions);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, stopped) = oneshot::channel();
+        server = Some((
+            stop,
+            tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = stopped.await;
+                    })
+                    .await
+            }),
+        ));
+        let before_rows = fixture
+            .store
+            .list_records(&fixture.scope, None, 100)
+            .await
+            .unwrap();
+        assert_eq!(fixture.inputs().await, Ok(0));
+
+        // The send's first custody attempt is written; its entry check after
+        // the write refuses.
+        let probe = Arc::new_cyclic(|me| RevokeAtFirstAttemptWrite {
+            me: me.clone(),
+            owner: Arc::downgrade(&fixture.source.owner),
+            source: Arc::downgrade(&fixture.source),
+            access: access.clone(),
+            revoked: config(&["agent.view"]),
+            fired: std::sync::atomic::AtomicBool::new(false),
+        });
+        fixture
+            .source
+            .owner
+            .observe_next_record_change_for_test(probe.clone());
+        let reply = post_keyed(address, &bearer, &member, "refused-after-its-first-attempt").await;
+        require_queued_reply(&reply, &observation);
+        tokio::time::timeout(WAIT, observation.finished.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        assert!(
+            probe.fired.load(Ordering::SeqCst),
+            "the permission was revoked inside the first attempt's write"
+        );
+        assert_eq!(
+            observation.failure.lock().unwrap().as_deref(),
+            Some("The Console human may no longer send to this agent"),
+            "the Console entry check after the write refused"
+        );
+        assert!(observation.bound.lock().unwrap().is_none());
+        let raw = observation.raw.lock().unwrap().clone().unwrap();
+        let held = fixture
+            .source
+            .retained
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|held| held.console_login.get().is_some())
+            .cloned()
+            .expect("the Console original is held");
+        assert!(
+            !held.retain_bound_input,
+            "the attempt is the first write once the login is held"
+        );
+        assert!(
+            held.first_custody.lock().unwrap().is_none(),
+            "no custody was enrolled"
+        );
+        let key = fixture.source.key(&held.reference).unwrap();
+        let row = fixture.store.get(&key).await.unwrap().unwrap();
+        let attempt = fixture
+            .source
+            .decode_record(&row, &held.reference)
+            .unwrap()
+            .custody_attempt
+            .expect("the binder wrote the first attempt");
+        assert!(
+            attempt.decision() == CustodyDecision::Pending,
+            "the attempt stays pending"
+        );
+        assert!(
+            !attempt.observation_entered(),
+            "no observation was spent on it"
+        );
+        assert_eq!(
+            attempt.input_id(),
+            raw.id(),
+            "the attempt names the refused input"
+        );
+        assert_eq!(fixture.inputs().await, Ok(0), "nothing was admitted");
+        assert_eq!(fixture.model_requests(), 0);
+        assert!(
+            fixture
+                .machine
+                .input_state(&fixture.session, attempt.input_id())
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // While the permission is revoked a later send is refused at its
+        // checks, before anything is reserved or retained.
+        let refused = post_keyed(address, &bearer, &member, "sent-again-while-revoked").await;
+        assert!(
+            (400..500).contains(&refused.0),
+            "a later send is refused at its checks: {}",
+            refused.0
+        );
+        assert_eq!(fixture.inputs().await, Ok(0));
+        assert_eq!(
+            fixture
+                .store
+                .list_records(&fixture.scope, None, 100)
+                .await
+                .unwrap()
+                .len(),
+            before_rows.len() + 1,
+            "only the refused send's source is retained"
+        );
+        assert!(
+            fixture.store.get(&key).await.unwrap().unwrap() == row,
+            "the refused attempt is unchanged"
+        );
+
+        // Allowed again, a later send is a new input and original of its
+        // own, admitted once; the refused input is never admitted.
+        access.replace_config(allowed).unwrap();
+        let mut completion = fixture
+            .service
+            .subscribe_session_events(&fixture.session)
+            .await
+            .unwrap();
+        let accepted = post_keyed(address, &bearer, &member, "sent-again-once-allowed").await;
+        require_queued_reply(&accepted, &observation);
+        tokio::time::timeout(WAIT, observation.finished.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        let bound = observation
+            .bound
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the later send was bound");
+        assert_ne!(bound.id(), raw.id(), "a later send is a new input");
+        let completed_run = tokio::time::timeout(WAIT, async {
+            loop {
+                let event = completion
+                    .next()
+                    .await
+                    .expect("native Console completion stream");
+                match event.payload {
+                    meerkat_core::AgentEvent::RunCompleted {
+                        session_id,
+                        identity,
+                        result,
+                        ..
+                    } => {
+                        assert_eq!(session_id, fixture.session);
+                        assert_eq!(result, "The original request completed");
+                        break identity.run_id.expect("native completion run identity");
+                    }
+                    meerkat_core::AgentEvent::StreamTruncated { .. } => {
+                        panic!("native Console completion observation truncated");
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the later send's turn completed");
+        tokio::time::timeout(
+            WAIT,
+            fixture
+                .machine
+                .wait_run_settled(&fixture.session, &completed_run),
+        )
+        .await
+        .expect("native Console run settlement");
+        assert_eq!(
+            fixture.inputs().await,
+            Ok(1),
+            "the later send alone was admitted"
+        );
+        assert!(
+            fixture.store.get(&key).await.unwrap().unwrap() == row,
+            "the refused attempt is unchanged"
+        );
+        assert!(
+            fixture
+                .machine
+                .input_state(&fixture.session, attempt.input_id())
+                .await
+                .unwrap()
+                .is_none(),
+            "the refused input was never admitted"
+        );
+        let retired = tokio::time::timeout(WAIT, logins.fixture_retire(1).unwrap())
+            .await
+            .expect("bounded Console login retirement")
+            .unwrap();
+        assert!(
+            retired.fenced && retired.reservations_drained,
+            "nothing holds the login"
+        );
+        assert!(
+            retired.uncertain,
+            "the refused bind's login reservation ended uncertain"
+        );
+        drop(connection);
+    }))
+    .catch_unwind()
+    .await;
+
+    let server_cleanup = if let Some((stop, mut task)) = server {
+        let _ = stop.send(());
+        match tokio::time::timeout(WAIT, &mut task).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(error))) => Err(format!("Console fixture server cleanup: {error}")),
+            Ok(Err(error)) => Err(format!("Console fixture server join: {error}")),
+            Err(_) => {
+                task.abort();
+                let _ = task.await;
+                Err("Console fixture server cleanup timed out".to_owned())
+            }
+        }
+    } else {
+        Ok(())
+    };
+    let native_cleanup = fixture.shutdown().await;
+    assert!(server_cleanup.is_ok(), "{server_cleanup:?}");
+    assert!(native_cleanup.is_ok(), "{native_cleanup:?}");
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
 }

@@ -327,3 +327,119 @@ async fn helper_preparation_held_past_the_bound_is_refused_typed() {
     assert_refused_at_the_bound(&found, hold.duration);
     assert!(found.issued.is_empty(), "nothing was issued");
 }
+
+// A control of the shipped first-attempt window, not a fix: the helper
+// binder writes the helper's first custody attempt and is refused before its
+// enrollment. Another writer holds the source writer from the submission's
+// source check (`Submit`) past the helper's source deadline, so the attempt's
+// write waits, lands, and the binder's deadline check after it refuses.
+// Nothing is admitted: the Find answers native_outcome_unavailable, the
+// helper's native session holds no input, no custody is enrolled and no
+// settlement is retained. The written attempt stays pending with no
+// observation spent. Nothing in this process visits it again (the cold census
+// skips a live first binding); a send of the same input runs every check
+// again before it could adopt it, and after a restart the cold census
+// withdraws it without submitting anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn helper_first_attempt_refused_after_its_write_admits_nothing() {
+    use super::{Fixture, Report, acquisition_denial};
+    use crate::original_ingress::custody_attempt::{CustodyAttempt, CustodyDecision};
+    use futures::FutureExt;
+    use meerkat_runtime::SessionServiceRuntimeExt;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use toolkit_store::ToolkitStore;
+
+    const SETUP_TIMEOUT_MS: u64 = 5_000;
+    let script = acquisition_denial::Script::for_expiring_setup(SETUP_TIMEOUT_MS);
+    let report = Report::new(script.tools().result_tool());
+    let (fixture, _runtime_store) =
+        Fixture::for_configured_helper_report(script.clone(), report.clone()).await;
+    let owner = fixture.source.owner.clone();
+    let submissions = Arc::new(AtomicUsize::new(0));
+    let seen = submissions.clone();
+    crate::source_hold_probe::install(Arc::new(move |at, _key| {
+        if at == Site::Submit && seen.fetch_add(1, Ordering::SeqCst) == 0 {
+            crate::source_hold_probe::retain(
+                owner.hold_writer_for_test(Duration::from_millis(SETUP_TIMEOUT_MS + 1_000)),
+            );
+        }
+        None
+    }));
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        Duration::from_secs(30),
+        Box::pin(async {
+            let first = fixture.submit().await;
+            // The Find answers once its helper's bind was refused.
+            while script.observations().0.is_empty() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let finished = fixture.finish(&first).await;
+            assert!(
+                finished.is_ok(),
+                "the original's turn completed: {finished:?}"
+            );
+            assert_eq!(
+                submissions.load(Ordering::SeqCst),
+                1,
+                "one helper submission"
+            );
+            let (feedback, _, _) = script.observations();
+            assert_eq!(feedback.len(), 1, "{feedback:?}");
+            let answer = reply(&feedback[0]);
+            assert_eq!(
+                answer["worker"]["state"], "native_outcome_unavailable",
+                "the helper did not start: {answer}"
+            );
+            let helpers = fixture.source.helper_sources.lock().unwrap().clone();
+            assert_eq!(helpers.len(), 1, "the helper's source was retained once");
+            let held = &helpers[0];
+            assert!(
+                held.first_custody.lock().unwrap().is_none(),
+                "no custody was enrolled"
+            );
+            assert!(
+                held.handoffs_for_test().is_empty(),
+                "no settlement was retained"
+            );
+            let row = fixture
+                .store
+                .get(&held.source_record().key)
+                .await
+                .unwrap()
+                .unwrap();
+            let attempt: CustodyAttempt =
+                serde_json::from_value(row.data.body["custody_attempt"].clone())
+                    .expect("the binder wrote the helper's first attempt");
+            assert!(
+                attempt.decision() == CustodyDecision::Pending,
+                "the attempt stays pending"
+            );
+            assert!(
+                !attempt.observation_entered(),
+                "no observation was spent on it"
+            );
+            assert!(
+                fixture
+                    .machine
+                    .input_state(attempt.session(), attempt.input_id())
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "native never received the helper's input"
+            );
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    crate::source_hold_probe::clear();
+    report.release();
+    report.leaf.context.lock().unwrap().take();
+    let cleanup = fixture.shutdown().await;
+    assert!(cleanup.is_ok(), "{cleanup:?}");
+    match checked {
+        Ok(Ok(())) => (),
+        Ok(Err(_)) => panic!("the Find did not settle before the fixture deadline"),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}

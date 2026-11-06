@@ -10812,6 +10812,518 @@ mod tests {
         assert_eq!(appended["status"], "applied");
     }
 
+    /// The closed operator-instruction refusal code a response carries in
+    /// its error data, when it carries one.
+    #[cfg(feature = "mob")]
+    fn instruction_set_code(response: &RpcResponse) -> Option<String> {
+        response
+            .error
+            .as_ref()
+            .and_then(|error| error.data.as_ref())
+            .and_then(|data| data.get("instruction_set_code"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    }
+
+    /// Read `mob/instruction_status` until `done` holds for its result: a
+    /// mob records its members' targets asynchronously.
+    #[cfg(feature = "mob")]
+    async fn poll_mob_instruction_status(
+        router: &MethodRouter,
+        params: serde_json::Value,
+        done: impl Fn(&serde_json::Value) -> bool,
+    ) -> serde_json::Value {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let response = router
+                .dispatch(make_request("mob/instruction_status", params.clone()))
+                .await
+                .unwrap();
+            let status = result_value(&response);
+            if done(&status) {
+                return status;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "mob/instruction_status never reached the expected state: {status}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Create a mob with one `worker` profile and spawn `worker-1` in it.
+    #[cfg(feature = "mob")]
+    async fn mob_with_one_worker(router: &MethodRouter, mob_id: &str) {
+        let create = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": mob_id,
+                        "profiles": { "worker": { "model": "claude-sonnet-4-5" } }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&create)["mob_id"], mob_id);
+        let spawn = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "agent_identity": "worker-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&spawn)["agent_identity"], "worker-1");
+    }
+
+    /// The mob operator-instruction verbs over JSON-RPC: a profile write
+    /// commits and answers its receipt, an exact repeat is a duplicate, the
+    /// same revision with other content, a lower revision and an unknown
+    /// slot are refused with their closed code, the status read reports the
+    /// record and the member's recorded target, and a revoke commits at a
+    /// higher revision.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_instruction_verbs_round_trip_over_rpc() {
+        let (router, _notif_rx) = test_router().await;
+        let mob_id = "mob-operator-instructions";
+        mob_with_one_worker(&router, mob_id).await;
+
+        let write = serde_json::json!({
+            "mob_id": mob_id,
+            "namespace": "host",
+            "key": "tone",
+            "revision": 1,
+            "body": "Answer formally.",
+            "target": { "kind": "profile", "profile": "worker" }
+        });
+        let committed = result_value(
+            &router
+                .dispatch(make_request("mob/set_instruction", write.clone()))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(committed["mob_id"], mob_id);
+        assert_eq!(committed["namespace"], "host");
+        assert_eq!(committed["key"], "tone");
+        assert_eq!(committed["revision"], 1);
+        assert_eq!(committed["disposition"], "committed");
+        assert_eq!(committed["generation"], 1);
+        assert_eq!(committed["matched_members"], 1);
+
+        let repeated = result_value(
+            &router
+                .dispatch(make_request("mob/set_instruction", write.clone()))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(repeated["disposition"], "duplicate");
+        assert_eq!(repeated["generation"], 1);
+
+        let mut conflicting = write.clone();
+        conflicting["body"] = serde_json::json!("Answer casually.");
+        let conflict = router
+            .dispatch(make_request("mob/set_instruction", conflicting))
+            .await
+            .unwrap();
+        assert_eq!(
+            conflict.error.as_ref().map(|error| error.code),
+            Some(error::INVALID_PARAMS)
+        );
+        assert_eq!(
+            instruction_set_code(&conflict).as_deref(),
+            Some("revision_conflict")
+        );
+
+        let status = poll_mob_instruction_status(
+            &router,
+            serde_json::json!({ "mob_id": mob_id }),
+            |status| status["members"][0]["delivery"]["state"]["state"] == "current",
+        )
+        .await;
+        assert_eq!(status["mob_id"], mob_id);
+        assert_eq!(status["generation"], 1);
+        let record = &status["desired"][0];
+        assert_eq!(record["namespace"], "host");
+        assert_eq!(record["key"], "tone");
+        assert_eq!(record["revision"], 1);
+        assert_eq!(record["effect"], "active");
+        assert_eq!(
+            record["target"],
+            serde_json::json!({ "kind": "profile", "profile": "worker" })
+        );
+        assert_eq!(record["body_bytes"], 16);
+        let member = &status["members"][0];
+        assert_eq!(member["agent_identity"], "worker-1");
+        assert_eq!(member["profile"], "worker");
+        assert_eq!(
+            member["effective_read"],
+            serde_json::json!({ "status": "ok" })
+        );
+        assert_eq!(member["delivery"]["recorded_generation"], 1);
+        assert_eq!(member["live_channel_open"], false);
+        let slot = &member["slots"][0];
+        assert_eq!(
+            slot["desired"],
+            serde_json::json!({ "revision": 1, "effect": "active" })
+        );
+        assert_eq!(
+            slot["recorded"],
+            serde_json::json!({ "revision": 1, "effect": "active" })
+        );
+        assert_eq!(slot["state"]["state"], "pending");
+        assert!(
+            slot["state"]["reason"].is_string(),
+            "a pending slot names why: {slot}"
+        );
+        assert!(status.get("next_offset").is_none());
+
+        let revoked = result_value(
+            &router
+                .dispatch(make_request(
+                    "mob/revoke_instruction",
+                    serde_json::json!({
+                        "mob_id": mob_id,
+                        "namespace": "host",
+                        "key": "tone",
+                        "revision": 2
+                    }),
+                ))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(revoked["disposition"], "committed");
+        assert_eq!(revoked["revision"], 2);
+        assert_eq!(revoked["generation"], 2);
+
+        let stale = router
+            .dispatch(make_request("mob/set_instruction", write))
+            .await
+            .unwrap();
+        assert_eq!(
+            instruction_set_code(&stale).as_deref(),
+            Some("stale_revision")
+        );
+
+        let unknown = router
+            .dispatch(make_request(
+                "mob/revoke_instruction",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "namespace": "host",
+                    "key": "missing",
+                    "revision": 1
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            instruction_set_code(&unknown).as_deref(),
+            Some("unknown_slot")
+        );
+
+        let zero_revision = router
+            .dispatch(make_request(
+                "mob/set_instruction",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "namespace": "host",
+                    "key": "tone",
+                    "revision": 0,
+                    "body": "x",
+                    "target": { "kind": "mob" }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            zero_revision.error.as_ref().map(|error| error.code),
+            Some(error::INVALID_PARAMS)
+        );
+    }
+
+    /// A member whose session the mob cannot read keeps its row with the
+    /// reason, and the page still answers: an in-memory mob's member sessions
+    /// keep no durable document, so each member reads as unreadable and its
+    /// delivery is blocked `durability_unavailable`.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_instruction_status_marks_unreadable_members_and_still_answers() {
+        let (router, _notif_rx) =
+            test_router_with_mob_state(meerkat_mob_mcp::MobMcpState::new_in_memory()).await;
+        let mob_id = "mob-operator-instructions-unreadable";
+        mob_with_one_worker(&router, mob_id).await;
+
+        let committed = result_value(
+            &router
+                .dispatch(make_request(
+                    "mob/set_instruction",
+                    serde_json::json!({
+                        "mob_id": mob_id,
+                        "namespace": "host",
+                        "key": "tone",
+                        "revision": 1,
+                        "body": "Answer formally.",
+                        "target": { "kind": "mob" }
+                    }),
+                ))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(committed["disposition"], "committed");
+
+        let status = poll_mob_instruction_status(
+            &router,
+            serde_json::json!({ "mob_id": mob_id }),
+            |status| status["members"][0]["delivery"]["state"]["state"] == "blocked",
+        )
+        .await;
+        assert_eq!(status["generation"], 1);
+        assert_eq!(status["desired"][0]["key"], "tone");
+        let member = &status["members"][0];
+        assert_eq!(member["agent_identity"], "worker-1");
+        assert_eq!(member["effective_read"]["status"], "unreadable");
+        assert!(
+            member["effective_read"]["reason"]
+                .as_str()
+                .is_some_and(|reason| !reason.is_empty()),
+            "an unreadable member names its reason: {member}"
+        );
+        assert_eq!(
+            member["delivery"]["state"],
+            serde_json::json!({ "state": "blocked", "reason": "durability_unavailable" })
+        );
+        let slot = &member["slots"][0];
+        assert!(slot.get("recorded").is_none(), "{slot}");
+        assert!(slot.get("effective").is_none(), "{slot}");
+        assert_eq!(
+            slot["state"],
+            serde_json::json!({ "state": "blocked", "reason": "durability_unavailable" })
+        );
+    }
+
+    /// The session operator-instruction verbs over JSON-RPC: a write records
+    /// the session-owned target, an exact repeat is a duplicate, a revoke
+    /// records at a higher revision, a lower revision is refused with its
+    /// closed code, and the status read reports the owner, the recorded
+    /// target and each slot's state.
+    #[tokio::test]
+    async fn session_instruction_verbs_round_trip_over_rpc() {
+        let (router, _notif_rx) = test_router().await;
+        let created = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({ "prompt": "Hello" }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&created)["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        let write = serde_json::json!({
+            "session_id": session_id,
+            "namespace": "host",
+            "key": "tone",
+            "revision": 1,
+            "body": "Answer formally."
+        });
+        let recorded = result_value(
+            &router
+                .dispatch(make_request("session/set_instruction", write.clone()))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(recorded["session_id"], session_id);
+        assert_eq!(recorded["namespace"], "host");
+        assert_eq!(recorded["key"], "tone");
+        assert_eq!(recorded["revision"], 1);
+        assert_eq!(recorded["disposition"], "recorded");
+        assert_eq!(recorded["target_generation"], 1);
+
+        let repeated = result_value(
+            &router
+                .dispatch(make_request("session/set_instruction", write.clone()))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(repeated["disposition"], "duplicate");
+        assert_eq!(repeated["target_generation"], 1);
+
+        let status = result_value(
+            &router
+                .dispatch(make_request(
+                    "session/instruction_status",
+                    serde_json::json!({ "session_id": session_id }),
+                ))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(status["session_id"], session_id);
+        assert_eq!(status["owner"], serde_json::json!({ "kind": "session" }));
+        assert_eq!(status["target_generation"], 1);
+        let slot = &status["slots"][0];
+        assert_eq!(slot["namespace"], "host");
+        assert_eq!(slot["key"], "tone");
+        assert_eq!(
+            slot["recorded"],
+            serde_json::json!({ "revision": 1, "effect": "active" })
+        );
+        assert!(slot.get("effective").is_none(), "{slot}");
+        assert_eq!(slot["state"]["state"], "pending");
+
+        let revoked = result_value(
+            &router
+                .dispatch(make_request(
+                    "session/revoke_instruction",
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "namespace": "host",
+                        "key": "tone",
+                        "revision": 2
+                    }),
+                ))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(revoked["disposition"], "recorded");
+        assert_eq!(revoked["revision"], 2);
+        assert_eq!(revoked["target_generation"], 2);
+
+        let stale = router
+            .dispatch(make_request("session/set_instruction", write))
+            .await
+            .unwrap();
+        assert_eq!(
+            stale.error.as_ref().map(|error| error.code),
+            Some(error::INVALID_PARAMS)
+        );
+        assert_eq!(
+            stale
+                .error
+                .as_ref()
+                .and_then(|error| error.data.as_ref())
+                .and_then(|data| data.get("instruction_set_code"))
+                .and_then(serde_json::Value::as_str),
+            Some("stale_revision")
+        );
+
+        let after_revoke = result_value(
+            &router
+                .dispatch(make_request(
+                    "session/instruction_status",
+                    serde_json::json!({ "session_id": session_id }),
+                ))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            after_revoke["slots"][0]["recorded"],
+            serde_json::json!({ "revision": 2, "effect": "absent" })
+        );
+        assert_eq!(
+            after_revoke["slots"][0]["state"],
+            serde_json::json!({ "state": "not_targeted" })
+        );
+
+        let missing = router
+            .dispatch(make_request(
+                "session/instruction_status",
+                serde_json::json!({ "session_id": SessionId::new() }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            missing.error.as_ref().map(|error| error.code),
+            Some(error::SESSION_NOT_FOUND)
+        );
+    }
+
+    /// A mob member's session takes no session-level write: the session
+    /// verb answers `owned_by_mob` (write through `mob/set_instruction`),
+    /// while the session read reports the mob's recorded target.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn session_instruction_verbs_refuse_mob_owned_sessions() {
+        let (router, _notif_rx) = test_router().await;
+        let mob_id = "mob-operator-instructions-member-session";
+        mob_with_one_worker(&router, mob_id).await;
+        let session_id = resolve_mob_bridge_session_id(&router, mob_id, "worker-1").await;
+
+        let refused = router
+            .dispatch(make_request(
+                "session/set_instruction",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "namespace": "host",
+                    "key": "tone",
+                    "revision": 1,
+                    "body": "Answer formally."
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            refused.error.as_ref().map(|error| error.code),
+            Some(error::INVALID_PARAMS)
+        );
+        assert_eq!(
+            instruction_set_code(&refused).as_deref(),
+            Some("owned_by_mob")
+        );
+
+        result_value(
+            &router
+                .dispatch(make_request(
+                    "mob/set_instruction",
+                    serde_json::json!({
+                        "mob_id": mob_id,
+                        "namespace": "host",
+                        "key": "tone",
+                        "revision": 1,
+                        "body": "Answer formally.",
+                        "target": { "kind": "member", "agent_identity": "worker-1" }
+                    }),
+                ))
+                .await
+                .unwrap(),
+        );
+        poll_mob_instruction_status(&router, serde_json::json!({ "mob_id": mob_id }), |status| {
+            status["members"][0]["delivery"]["state"]["state"] == "current"
+        })
+        .await;
+
+        let status = result_value(
+            &router
+                .dispatch(make_request(
+                    "session/instruction_status",
+                    serde_json::json!({ "session_id": session_id }),
+                ))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            status["owner"],
+            serde_json::json!({
+                "kind": "mob",
+                "mob_id": mob_id,
+                "agent_identity": "worker-1"
+            })
+        );
+        assert_eq!(status["target_generation"], 1);
+        assert_eq!(
+            status["slots"][0]["recorded"],
+            serde_json::json!({ "revision": 1, "effect": "active" })
+        );
+    }
+
     #[cfg(feature = "mob")]
     #[tokio::test]
     async fn mob_member_send_host_route_targets_canonical_member_path() {

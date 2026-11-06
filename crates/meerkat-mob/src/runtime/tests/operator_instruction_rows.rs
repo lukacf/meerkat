@@ -1676,3 +1676,71 @@ async fn a_dormant_resume_seat_binds_the_hosts_session_at_the_seat() {
         "nothing built the member's session"
     );
 }
+
+/// On a governed runtime (a native work authorization host is installed) a
+/// mob's operator-instruction write needs prepared authorization, which this
+/// release does not mint: the write and the revoke are refused typed, a
+/// retry is refused the same way, and nothing is journaled, so no member is
+/// ever owed a snapshot nothing authorized.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn governed_realm_mob_write_requires_prepared_authorization() {
+    let service = Arc::new(MockSessionService::new());
+    service.set_runtime_adapter(Arc::new(
+        meerkat_runtime::MeerkatMachine::persistent_with_unavailable_scoped_governance(
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            None,
+        )
+        .expect("a governed machine"),
+    ));
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "oi-governed"),
+        storage,
+    )
+    .with_session_service(service.clone())
+    .create()
+    .await
+    .expect("create the mob");
+
+    for attempt in 0..2 {
+        let refused = handle
+            .set_operator_instruction(write("tone", 1, FORMAL, OperatorInstructionTarget::Mob))
+            .await
+            .expect_err("a governed runtime refuses an unauthorized write");
+        assert!(
+            matches!(
+                refused,
+                OperatorInstructionError::Refused(
+                    meerkat_core::InstructionWriteError::PreparedAuthorizationRequired
+                )
+            ),
+            "attempt {attempt}: {refused:?}"
+        );
+        assert_eq!(
+            refused.code(),
+            Some(InstructionSetErrorCode::PreparedAuthorizationRequired)
+        );
+    }
+    let revoke = handle
+        .revoke_operator_instruction(slot("tone"), revision(2))
+        .await
+        .expect_err("a governed runtime refuses an unauthorized revoke");
+    assert_eq!(
+        revoke.code(),
+        Some(InstructionSetErrorCode::PreparedAuthorizationRequired)
+    );
+    assert_eq!(
+        status(&handle).await.generation,
+        0,
+        "no refused write moved the generation"
+    );
+    let journaled = events
+        .replay_all()
+        .await
+        .expect("the mob's journal reads")
+        .iter()
+        .filter(|event| event.kind.journals_operator_instructions())
+        .count();
+    assert_eq!(journaled, 0, "nothing was journaled");
+}

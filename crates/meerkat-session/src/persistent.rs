@@ -58939,6 +58939,71 @@ mod tests {
             assert_eq!(error.code(), Some(InstructionSetErrorCode::OwnedByMob));
         }
 
+        /// On a governed runtime (the service's runtime owner has a native
+        /// work authorization host installed) a host's session-level write
+        /// needs prepared authorization, which this release does not mint:
+        /// the write is refused typed, live or dormant, a retry is refused the
+        /// same way, and nothing is recorded. The same write records on an
+        /// ungoverned service.
+        #[tokio::test]
+        async fn governed_realm_write_requires_prepared_authorization() {
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let (service, _builds) = counting_service(Arc::clone(&runtime_store));
+            let service = Arc::new(service);
+            let governed =
+                meerkat_runtime::MeerkatMachine::persistent_with_unavailable_scoped_governance(
+                    Arc::clone(&runtime_store),
+                    None,
+                )
+                .expect("a governed machine over the service's store");
+            service
+                .acquire_canonical_runtime_adapter(Some(Arc::new(governed)))
+                .expect("the service's runtime owner is the governed machine");
+            let live = service
+                .create_session(create_request("hello", InitialTurnPolicy::Defer))
+                .await
+                .expect("create_session should succeed")
+                .session_id;
+            let dormant = dormant_session(service.as_ref()).await;
+
+            for id in [&live, &dormant] {
+                for attempt in 0..2 {
+                    let error = Arc::clone(&service)
+                        .set_session_instruction(id, write("tone", 1, "Answer formally."))
+                        .await
+                        .expect_err("a governed runtime refuses an unauthorized write");
+                    assert!(
+                        matches!(
+                            error,
+                            SessionInstructionError::Refused(
+                                meerkat_core::InstructionWriteError::PreparedAuthorizationRequired
+                            )
+                        ),
+                        "attempt {attempt}: {error:?}"
+                    );
+                    assert_eq!(
+                        error.code(),
+                        Some(InstructionSetErrorCode::PreparedAuthorizationRequired)
+                    );
+                }
+                let read = service
+                    .read_session_instructions(id)
+                    .await
+                    .expect("the committed read");
+                assert_eq!(read.target, None, "nothing was recorded");
+            }
+
+            let ungoverned_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let (ungoverned, _builds) = counting_service(ungoverned_store);
+            let ungoverned = Arc::new(ungoverned);
+            let id = dormant_session(ungoverned.as_ref()).await;
+            let receipt = Arc::clone(&ungoverned)
+                .set_session_instruction(&id, write("tone", 1, "Answer formally."))
+                .await
+                .expect("an ungoverned runtime records the write");
+            assert_eq!(receipt.disposition, InstructionWriteDisposition::Recorded);
+        }
+
         #[tokio::test]
         async fn dormant_session_target_record_registers_nothing_and_wakes_nothing() {
             let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());

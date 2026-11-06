@@ -1538,6 +1538,90 @@ mod tests {
         );
     }
 
+    /// The operator-instruction verbs: three mob verbs on the mob surface and
+    /// three session verbs, each with its typed request and result contract.
+    #[test]
+    fn operator_instruction_methods_advertise_typed_contracts() {
+        let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());
+        for (name, params_type, result_type) in [
+            (
+                "mob/set_instruction",
+                "MobSetInstructionParams",
+                "MobInstructionWriteResult",
+            ),
+            (
+                "mob/revoke_instruction",
+                "MobRevokeInstructionParams",
+                "MobInstructionWriteResult",
+            ),
+            (
+                "mob/instruction_status",
+                "MobInstructionStatusParams",
+                "MobInstructionStatusResult",
+            ),
+            (
+                "session/set_instruction",
+                "SetSessionInstructionParams",
+                "SessionInstructionWriteResult",
+            ),
+            (
+                "session/revoke_instruction",
+                "RevokeSessionInstructionParams",
+                "SessionInstructionWriteResult",
+            ),
+            (
+                "session/instruction_status",
+                "SessionInstructionStatusParams",
+                "SessionInstructionStatusResult",
+            ),
+        ] {
+            let descriptors: Vec<_> = methods
+                .iter()
+                .filter(|method| method.name == name)
+                .collect();
+            assert_eq!(
+                descriptors.len(),
+                1,
+                "missing or duplicated descriptor for {name}"
+            );
+            assert_eq!(
+                descriptors[0].params_type,
+                Some(params_type),
+                "{name} params"
+            );
+            assert_eq!(
+                descriptors[0].result_type,
+                Some(result_type),
+                "{name} result"
+            );
+            assert_eq!(
+                descriptors[0].request_lifecycle.resolve(None),
+                RequestLifecycle::InlineObservation,
+                "{name} answers inline"
+            );
+        }
+        let without_mob = rpc_method_names(RpcMethodCatalogOptions {
+            mob_enabled: false,
+            ..RpcMethodCatalogOptions::documented_surface()
+        });
+        for name in [
+            "mob/set_instruction",
+            "mob/revoke_instruction",
+            "mob/instruction_status",
+        ] {
+            assert!(
+                !without_mob.iter().any(|method| method == name),
+                "{name} rides the mob surface"
+            );
+        }
+        assert!(
+            without_mob
+                .iter()
+                .any(|name| name == "session/set_instruction"),
+            "the session instruction verbs do not need the mob surface"
+        );
+    }
+
     #[test]
     fn external_event_catalog_owns_the_complete_request_payload() {
         let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());

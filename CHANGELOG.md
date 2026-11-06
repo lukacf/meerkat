@@ -146,6 +146,12 @@ them.
   `authentication_scope_digest: Option<Sha256Digest>`, so code that builds
   it literally must set it (`None` records no login, as before).
 
+- `meerkat-core`: durable decisions keep the login they were decided in as
+  its digest (see Changed). `DecisionEvidence::Human` gains the field
+  `authentication_scope_digest: Option<Sha256Digest>`, so code that builds
+  the variant literally, or matches it without `..`, must name it (`None`
+  records no login).
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -358,6 +364,15 @@ them.
   domains that issue the same id; `decision.actor` stays the bare id. A row
   decided earlier reads with no digest (see Upgrade notes).
 
+- Durable decisions record a digest of the login they were decided in, and
+  no longer the login itself: a human decision's evidence
+  (`DecisionEvidence::Human`) keeps `authentication_scope_digest`, the
+  digest of the decision event's `HostAuthenticationScope`, and
+  `AttestedDecision::evidence` no longer writes `authentication_scope`.
+  Evidence recorded before keeps that field: it decodes, and keeps its bytes
+  and the digest its decision binds, so the decision reads and executes as
+  before (see Upgrade notes for a rollback).
+
 ### Deprecated
 
 - `meerkat-core`, `meerkat-runtime`: `DecisionStore::claim_executor` and
@@ -478,6 +493,15 @@ them.
   writes lack the field, and `FileApprovalStore` rewrites every row on each
   write, so its first write drops the login digests recorded until then.
   Nothing else changes for it.
+
+- Durable decisions and a rollback: a Core that predates the decision login
+  digest (0.9.9 and 0.9.10) reads a decision decided in a login since as
+  torn. It decodes the evidence without the digest, a field it does not
+  know, so the evidence no longer hashes to the digest the decision's state
+  binds: it lists the decision as unreadable, never executes it and leaves
+  the row as stored. Back on this release the decision reads again, and
+  executes before its deadline. A decision decided with no login, and every
+  decision decided before the upgrade, read as before.
 
 ### Known limitations
 
@@ -656,12 +680,6 @@ them.
   `SessionError::Store` source, with no new error code. They polled that
   member's status until the caller gave up, a kickoff wait until its timeout.
   The member's lifecycle is unchanged; only the wait ends.
-
-- `meerkat-core`: durable decisions keep the login they were decided in as
-  its digest (see Changed). `DecisionEvidence::Human` gains the field
-  `authentication_scope_digest: Option<Sha256Digest>`, so code that builds
-  the variant literally, or matches it without `..`, must name it (`None`
-  records no login).
 
 ### Added
 
@@ -871,15 +889,6 @@ them.
   so the host is asked again. The hand-written audit checks
   `AuditPermitOnlyForCurrentApprover` with two new witnesses and three new
   mutants.
-
-- Durable decisions record a digest of the login they were decided in, and
-  no longer the login itself: a human decision's evidence
-  (`DecisionEvidence::Human`) keeps `authentication_scope_digest`, the
-  digest of the decision event's `HostAuthenticationScope`, and
-  `AttestedDecision::evidence` no longer writes `authentication_scope`.
-  Evidence recorded before keeps that field: it decodes, and keeps its bytes
-  and the digest its decision binds, so the decision reads and executes as
-  before (see Upgrade notes for a rollback).
 
 ### Fixed
 
@@ -1192,15 +1201,6 @@ them.
   `McpRouter::retry_authorized` can now return `McpError::AttachmentRefused`
   (`McpAttachmentRefusal::Mismatch`) for a governed server without a matching
   control; nothing is staged then.
-
-- Durable decisions and a rollback: a Core that predates the decision login
-  digest (0.9.9 and 0.9.10) reads a decision decided in a login since as
-  torn. It decodes the evidence without the digest, a field it does not
-  know, so the evidence no longer hashes to the digest the decision's state
-  binds: it lists the decision as unreadable, never executes it and leaves
-  the row as stored. Back on this release the decision reads again, and
-  executes before its deadline. A decision decided with no login, and every
-  decision decided before the upgrade, read as before.
 
 ### Known limitations
 

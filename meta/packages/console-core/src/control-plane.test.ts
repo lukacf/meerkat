@@ -364,7 +364,7 @@ test("gating audit reads the decider, the binding and the assurance a decision r
     event_type: "approval_decided", risk_tier: "r3", outcome: "allowed",
     detail: {
       decision: "approve", approver_id: "release-manager", deciding_principal: " alice@example.test ",
-      approver_binding: "held", assurance: "person_authenticated",
+      approver_binding: "held", deciding_assurance: "person_authenticated",
     },
   });
   assert.equal(record.decidingPrincipal, "alice@example.test");

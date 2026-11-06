@@ -90,12 +90,15 @@ impl TerminalGuard {
         let mut out = io::stdout();
         execute!(out, EnterAlternateScreen, EnableBracketedPaste)?;
         if matches!(supports_keyboard_enhancement(), Ok(true)) {
+            // Disambiguation only: it tells Esc from Alt sequences and
+            // Shift/Ctrl+Enter from Enter. Event types are not requested:
+            // under them kitty 0.32 sends the release of a legacy-encoded
+            // key (Backspace, Enter, Tab) as a second press byte, which
+            // deleted two characters per Backspace; the spec says those keys
+            // get no release event, and the UI needs none.
             execute!(
                 out,
-                PushKeyboardEnhancementFlags(
-                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                )
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
             )?;
             KEYBOARD_ENHANCED.store(true, Ordering::SeqCst);
         }
@@ -157,7 +160,8 @@ fn translate(event: Event, mouse: bool) -> Option<Msg> {
         tracing::trace!(?key, "key event");
     }
     match event {
-        // Windows reports Press and Release; enhanced terminals also report Repeat.
+        // Windows reports Press and Release; a terminal asked for event types
+        // would report Repeat and Release too (none is asked today).
         Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
             Some(Msg::Key(key))
         }

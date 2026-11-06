@@ -692,3 +692,20 @@ The A4 regression (Tier-1 `read_file`/`memory_search` reaching the classifier) w
   instead of `InterruptDispatchOutcomeUnknown` (`meerkat-runtime/src/meerkat_machine/runtime_control.rs`
   `cancel_input_if_present_owned_before`, `user_interrupt.rs:164`). The TUI's queued-first ordering narrows but
   does not close the window between its state read and the cancel.
+- UI follow-up (same day): Esc while a turn runs no longer interrupts while anything can be pulled back.
+  `SessionHandle::recall_queued(&[InputId]) -> Recalled { recalled, errors }` abandons each outstanding input the
+  runtime still holds `Queued` (`cancel_input_if_present`, reason `rkat-tui: recalled by the user`) and never touches
+  the run; `Effect::RecallQueued` runs it in the runner loop (awaited, so the recalled steers' completions find them
+  marked: no turn result, not `undelivered`, removed from the classifier transcript) and answers `Msg::Recalled`. The
+  UI sends the recall when an admitted (or unacknowledged) steer is pending, returns the recalled and held messages to
+  the editor oldest first, and marks the admitted ones left as reached ("your messages already reached the agent; Esc
+  again interrupts"); only then, or with nothing pending, does Esc interrupt. The first Ctrl-C with a mouse selection
+  only clears it. Tests: `integrator::{recalling_a_message_typed_during_a_slow_tool_leaves_the_run_alone,
+  recalling_a_steer_that_already_joined_the_run_leaves_it_delivered}` (5 repeated runs clean),
+  `ui::tests::{esc_with_an_admitted_message_recalls_it_without_interrupting,
+  esc_when_the_messages_already_reached_the_agent_notices_then_interrupts,
+  esc_recalls_only_held_messages_and_otherwise_interrupts, esc_and_other_keys_clear_the_selection}`. Remaining
+  window (same as the interrupt's): a steer staged into the run between the `Queued` read and the cancel meets a
+  cancel of a staged input, which the runtime may answer by interrupting that run or with an error (shown as
+  "could not recall: …"); the engine ask above (abandon-if-still-queued as one operation) closes it.
+- Backspace deleted two characters in kitty 0.32.2: with `DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES` kitty sent one tap as two `\x7f` bytes (captured with `printf '\e[>3u'; kitty +kitten show_key -m unchanged`), the release of a legacy-encoded key emitted as a second press, which the protocol says must not be sent. The TUI now requests disambiguation only (`src/ui/runtime.rs`); the modal key-repeat guard stays but sees only presses. Kitty's changelog 0.33–0.50 names no fix.

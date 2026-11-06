@@ -4526,6 +4526,37 @@ mod tests {
         )
     }
 
+    /// Let work the code under test started in the background (a model
+    /// discovery off the request path) run until `done` holds.
+    async fn settle(done: impl Fn() -> bool) {
+        for _ in 0..10_000 {
+            if done() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("the background work did not settle");
+    }
+
+    /// A model listing of `gpt-test` and `later_id`.
+    fn models_listing_with(later_id: &str) -> CopilotHttpResponse {
+        json_response(
+            200,
+            serde_json::json!({
+                "data": [
+                    {
+                        "id": "gpt-test",
+                        "supported_endpoints": ["/responses", "/chat/completions"]
+                    },
+                    {
+                        "id": later_id,
+                        "supported_endpoints": ["/chat/completions"]
+                    }
+                ]
+            }),
+        )
+    }
+
     fn validated_binding() -> (AuthBindingRef, ValidatedBinding) {
         let auth_binding = AuthBindingRef {
             realm: RealmId::global(),
@@ -8876,6 +8907,46 @@ mod tests {
             );
         }
 
+        /// A token route's model list is refreshed off the request path too:
+        /// a request that finds it due goes out on the account it holds, even
+        /// when the listing then refuses the token; the next request reads
+        /// the token again and looks the account up, which decides.
+        #[tokio::test]
+        async fn operator_model_discovery_runs_off_the_request_path() {
+            let token = user_token("primary");
+            let harness = Harness::new([
+                Ok(svc_bot()),
+                Ok(models_response()),
+                Ok(json_response(
+                    403,
+                    serde_json::json!({"message": "Copilot is not enabled for this organization"}),
+                )),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            harness.operator.set("COPILOT_GITHUB_TOKEN", &token);
+            let resolved = harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("the operator token resolves");
+            let authorizer = resolved.concrete_authorizer();
+
+            // The model list is due again after five minutes.
+            harness.operator.advance(301);
+            authorizer
+                .prepare_request()
+                .await
+                .expect("a request neither waits for nor fails on the account's model discovery");
+            settle(|| harness.transport.request_count() == 3).await;
+            authorizer
+                .prepare_request()
+                .await
+                .expect("the account is built again through the identity lookup");
+            assert_eq!(harness.transport.request_count(), 5);
+            assert_eq!(harness.transport.urls()[3], GITHUB_COPILOT_USER_URL);
+            assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
+        }
+
         /// GitHub's answer when its identity lookup does not answer a token:
         /// what a fine-grained personal access token can get from
         /// `copilot_internal/user`.
@@ -10758,6 +10829,23 @@ mod tests {
                     .map(|unavailable| unavailable.retryable.clone())
             }
 
+            /// Whether the account's current model list names `model`.
+            fn lists_model(&self, model: &str) -> bool {
+                self.runtime
+                    .accounts
+                    .lock()
+                    .values()
+                    .find_map(Weak::upgrade)
+                    .is_some_and(|state| {
+                        state.cache.read().as_ref().is_some_and(|cached| {
+                            cached
+                                .models
+                                .as_ref()
+                                .is_some_and(|models| models.model(model).is_some())
+                        })
+                    })
+            }
+
             /// A new sign-in on the account: another GitHub token, expiring
             /// at `expires_at`, published through AuthMachine and stored, as
             /// a new login does.
@@ -11174,6 +11262,183 @@ mod tests {
             );
             assert_eq!(transport.request_count(), 6);
             assert_eq!(session.bearers(), ["Bearer derived-two"]);
+        }
+
+        /// A model listing 403 that asks for an account action:
+        /// `error_details.notification_id`, as the token exchange reads it.
+        fn listing_needs_an_account_action() -> CopilotHttpResponse {
+            json_response(
+                403,
+                serde_json::json!({
+                    "message": "Copilot access needs an action on the account",
+                    "error_details": {"notification_id": "copilot_account_action"}
+                }),
+            )
+        }
+
+        /// The account's model list is refreshed off the request path: a turn
+        /// that finds the list due goes out on the token and the list the
+        /// account holds while one discovery runs for the account, and the
+        /// list it brings serves the turns after it.
+        #[tokio::test]
+        async fn periodic_model_discovery_runs_off_the_request_path() {
+            let clock = TestClock::new();
+            let transport = Arc::new(HeldTransport {
+                inner: ScriptedTransport::new([
+                    token_response("derived-one"),
+                    models_response(),
+                    models_listing_with("gpt-later"),
+                ]),
+                hold_at: 2,
+                calls: AtomicU64::new(0),
+                held: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            });
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.session([]).await;
+
+            // Model discovery is due again (300 s); the token is still fresh.
+            clock.set(301);
+            for turn in ["first", "second"] {
+                let events = tokio::time::timeout(StdDuration::from_secs(5), session.turn())
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!("the {turn} turn must not wait for the account's model discovery")
+                    });
+                assert!(events.is_empty(), "{turn} turn: {events:?}");
+            }
+            transport.held.notified().await;
+            assert_eq!(
+                transport.calls.load(Ordering::SeqCst),
+                3,
+                "one discovery runs for the account"
+            );
+            assert!(!account.lists_model("gpt-later"));
+
+            transport.release.notify_one();
+            settle(|| account.lists_model("gpt-later")).await;
+            assert_eq!(
+                session.bearers(),
+                ["Bearer derived-one", "Bearer derived-one"]
+            );
+            assert_eq!(
+                account.source_phase(),
+                Some(meerkat_core::handles::AuthLeasePhase::Valid)
+            );
+        }
+
+        /// A model listing 403 that asks for no account action (a policy, an
+        /// integration the account does not allow) is a discovery failure:
+        /// the token keeps serving, the sign-in stays valid, and the list is
+        /// asked for again after the retry delay.
+        #[tokio::test]
+        async fn a_discovery_403_without_an_account_action_keeps_the_route() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_response("derived-one"),
+                models_response(),
+                json_response(
+                    403,
+                    serde_json::json!({"message": "Copilot model listing is not allowed"}),
+                ),
+                models_listing_with("gpt-later"),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.session([]).await;
+
+            clock.set(301);
+            let events = session.turn().await;
+            assert!(
+                events.is_empty(),
+                "a model listing 403 without an account action fails no turn: {events:?}"
+            );
+            settle(|| transport.request_count() == 3).await;
+            assert_eq!(
+                account.source_phase(),
+                Some(meerkat_core::handles::AuthLeasePhase::Valid),
+                "a model listing 403 without an account action needs no new sign-in"
+            );
+
+            // Within the 30 s retry delay nothing lists the models again.
+            clock.set(320);
+            assert!(session.turn().await.is_empty());
+            assert_eq!(transport.request_count(), 3);
+
+            clock.set(332);
+            assert!(session.turn().await.is_empty());
+            settle(|| account.lists_model("gpt-later")).await;
+            assert_eq!(transport.request_count(), 4);
+            assert_eq!(session.bearers(), ["Bearer derived-one"; 3]);
+        }
+
+        /// A model listing 403 that asks for an account action refuses the
+        /// token: the turn that found the list due is served, and the next
+        /// one mints a new token, whose listing decides: the account needs a
+        /// new sign-in.
+        #[tokio::test]
+        async fn a_discovery_403_that_asks_for_an_account_action_needs_a_new_sign_in() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_response("derived-one"),
+                models_response(),
+                listing_needs_an_account_action(),
+                token_response("derived-two"),
+                listing_needs_an_account_action(),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.session([]).await;
+
+            clock.set(301);
+            let events = session.turn().await;
+            assert!(
+                events.is_empty(),
+                "the turn that found the list due is served while the list is asked for: {events:?}"
+            );
+            settle(|| transport.request_count() == 3).await;
+
+            let events = session.turn().await;
+            let [Err(error)] = events.as_slice() else {
+                panic!("the next turn fails once: {events:?}");
+            };
+            assert!(
+                matches!(
+                    error.failure_reason(),
+                    meerkat_core::error::LlmFailureReason::AuthError
+                ) && !retried(error),
+                "an account action is an auth failure: {error:?}"
+            );
+            assert_eq!(
+                account.source_phase(),
+                Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired)
+            );
+            assert_eq!(transport.request_count(), 5);
+            assert_eq!(session.bearers(), ["Bearer derived-one"]);
+        }
+
+        /// A mint whose model listing answers a 403 that asks for no account
+        /// action resolves without the account's list, as for any other
+        /// discovery failure: the sign-in stays valid and the token serves.
+        #[tokio::test]
+        async fn a_mint_whose_model_listing_answers_403_resolves_without_the_list() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_response("derived-one"),
+                json_response(
+                    403,
+                    serde_json::json!({"message": "Copilot model listing is not allowed"}),
+                ),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.try_session([]).await.expect(
+                "a model listing 403 without an account action is a discovery failure, not a new sign-in",
+            );
+            assert_eq!(
+                account.source_phase(),
+                Some(meerkat_core::handles::AuthLeasePhase::Valid)
+            );
+            assert!(session.turn().await.is_empty());
+            assert_eq!(session.bearers(), ["Bearer derived-one"]);
+            assert_eq!(transport.request_count(), 2);
         }
 
         /// The retryable class of the exchange failure the account recorded.

@@ -2071,6 +2071,9 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
     "meta/access/groups/set",
     "meta/access/groups/delete",
     CONSOLE_REVOKE_SESSIONS_METHOD,
+    // A person's dismissal of one of their attention items, in the realm's
+    // metadata store the authoritative launch reads.
+    CONSOLE_ATTENTION_DISMISS_METHOD,
     "meta/blob/upload",
     "meta/cancel_flow",
     "jobs/cancel",

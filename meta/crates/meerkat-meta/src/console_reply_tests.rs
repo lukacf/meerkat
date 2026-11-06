@@ -733,3 +733,12 @@ async fn only_the_addressee_dismisses_an_attention_item() -> TestResult {
     fixture.stop().await;
     Ok(())
 }
+
+/// A candidate launch refuses a dismissal, which writes the metadata store
+/// the authoritative launch reads, and still answers the list.
+#[test]
+fn a_candidate_launch_refuses_an_attention_dismissal() {
+    let refused = crate::rpc::CANDIDATE_LAUNCH_REFUSED_METHODS;
+    assert!(refused.contains(&crate::rpc::CONSOLE_ATTENTION_DISMISS_METHOD));
+    assert!(!refused.contains(&crate::rpc::CONSOLE_ATTENTION_METHOD));
+}

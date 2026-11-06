@@ -5177,7 +5177,7 @@ mod tests {
             skill_refs: Vec::new(),
             additional_instructions: Vec::new(),
         };
-        let targets = vec![
+        let targets = [
             TargetBinding::session(SessionTargetBinding::ExactSession {
                 session_id: SessionId::new(),
                 action: prompt(),

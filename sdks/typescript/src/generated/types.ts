@@ -921,6 +921,7 @@ export type WireToolGrantTarget = WireToolGrantTargetTool | WireToolGrantTargetF
 
 export interface WireToolGrantIssuerOperator {
   caller?: string | null;
+  decision_ref?: string | null;
   kind: "operator";
 }
 
@@ -1755,6 +1756,7 @@ export interface WireUnreadableToolGrantAuditRow {
 }
 
 export interface GrantToolParams {
+  decision_ref?: string | null;
   duration_ms?: number | null;
   expires_at_ms?: number | null;
   reason?: string | null;
@@ -2391,10 +2393,16 @@ export interface WireMemberCustodyDeferral {
   restore: WireMemberCustodyRestore;
 }
 
+export interface WireGrantGatedTools {
+  families?: string[];
+  tools?: string[];
+}
+
 export interface WireMobToolConfig {
   builtins?: boolean;
   comms?: boolean;
   deny?: string[];
+  grant_gated?: WireGrantGatedTools;
   image_generation?: boolean;
   mcp?: string[];
   memory?: boolean;
@@ -3311,6 +3319,7 @@ export interface MobToolConfigInput {
   bundles?: string[];
   comms?: boolean;
   deny?: string[];
+  grant_gated?: WireGrantGatedTools;
   image_generation?: boolean;
   mcp?: string[];
   memory?: boolean;

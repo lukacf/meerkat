@@ -488,9 +488,9 @@ impl ToolGrantRefusal {
 /// [`ToolGrantRequestRefusal`].
 pub const TOOL_GRANT_REQUEST_REFUSED_KIND: &str = "tool_grant_request_refused";
 
-/// Why a request to a grant surface (grant, revoke, list, audit) was
-/// refused: one closed vocabulary for every surface that serves grants,
-/// answered as invalid params carrying the refusal under
+/// Why a request to a grant surface (grant, revoke, list, audit, a host's
+/// live attach) was refused: one closed vocabulary for every surface that
+/// serves grants, answered as invalid params carrying the refusal under
 /// [`TOOL_GRANT_REQUEST_REFUSED_KIND`]. A sibling of [`GrantGateRefusal`],
 /// which refuses a build, not a request.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -505,6 +505,18 @@ pub enum ToolGrantRequestRefusal {
     /// gate its next build resolves.
     #[error("the subject's grant gate does not name the target")]
     TargetNotGated,
+    /// A server target that no installed or configured server provides: a
+    /// host that keeps an installation list checks it.
+    #[error("no installed or configured MCP server is named '{server}'")]
+    ServerNotInstalled { server: String },
+    /// A live attach of a server that no live grant of the identity covers,
+    /// from a host that attaches granted servers live.
+    #[error("no live grant covers the MCP server '{server}'")]
+    NoLiveGrant { server: String },
+    /// A live attach wait that is not a whole number of milliseconds within
+    /// the host surface's bound.
+    #[error("the attach wait is not a whole number of milliseconds within the bound")]
+    InvalidWait,
     /// A window that is past, empty or longer than the maximum lifetime, or
     /// not bounded by exactly one of a duration and a deadline.
     #[error("the grant window is past, empty, too long, or not bounded exactly once")]

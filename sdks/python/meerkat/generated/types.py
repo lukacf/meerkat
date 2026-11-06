@@ -1158,6 +1158,7 @@ WireToolGrantTarget = WireToolGrantTargetTool | WireToolGrantTargetFamily | Wire
 # Who issued a grant.
 class WireToolGrantIssuerOperator(TypedDict, total=False):
     caller: NotRequired[Optional[str]]
+    decision_ref: NotRequired[Optional[str]]
     kind: Required[Literal['operator']]
 
 class WireToolGrantIssuerApproval(TypedDict, total=False):
@@ -2189,6 +2190,7 @@ class GrantToolParams:
 `duration_ms` bounds the grant, at most the host's maximum lifetime."""
     subject: ToolGrantSubjectRequest
     target: ToolGrantTargetRequest
+    decision_ref: Optional[str] = None
     duration_ms: Optional[int] = None
     expires_at_ms: Optional[int] = None
     reason: Optional[str] = None
@@ -3043,11 +3045,23 @@ not know instead of refusing it."""
 
 
 @dataclass
+class WireGrantGatedTools:
+    """A scoped tool grant gate: the built-in tool families and the tool names a
+build mounts hidden and refuses at dispatch until a live grant opens them.
+A session's build takes it on `session/create` (`grant_gated_tools`); a
+mob profile declares its members' (`tools.grant_gated`). A field this
+version does not know is refused, never ignored."""
+    families: Optional[list[str]] = None
+    tools: Optional[list[str]] = None
+
+
+@dataclass
 class WireMobToolConfig:
     """Tool configuration embedded in a wire mob profile override."""
     builtins: Optional[bool] = None
     comms: Optional[bool] = None
     deny: Optional[list[str]] = None
+    grant_gated: Optional[WireGrantGatedTools] = None
     image_generation: Optional[bool] = None
     mcp: Optional[list[str]] = None
     memory: Optional[bool] = None
@@ -4331,6 +4345,7 @@ class MobToolConfigInput:
     bundles: Optional[list[str]] = None
     comms: Optional[bool] = None
     deny: Optional[list[str]] = None
+    grant_gated: Optional[WireGrantGatedTools] = None
     image_generation: Optional[bool] = None
     mcp: Optional[list[str]] = None
     memory: Optional[bool] = None

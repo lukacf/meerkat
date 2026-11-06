@@ -12,10 +12,11 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A session build's scoped tool grant gate (`session/create`
-/// `grant_gated_tools`): the built-in tool families and the tool names the
+/// A scoped tool grant gate: the built-in tool families and the tool names a
 /// build mounts hidden and refuses at dispatch until a live grant opens them.
-/// A field this version does not know is refused, never ignored.
+/// A session's build takes it on `session/create` (`grant_gated_tools`); a
+/// mob profile declares its members' (`tools.grant_gated`). A field this
+/// version does not know is refused, never ignored.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]

@@ -355,8 +355,10 @@ them.
   control character): the grant's issuer, its listing and its `granted`
   audit row carry it, as attribution only.
 - Rust: `meerkat_core::tool_grant::ToolGrantRequestRefusal` (`subject_unknown`,
-  `target_not_gated`, `invalid_window`, `empty_target`, `not_found`,
-  `invalid_decision_ref`, `invalid_page_limit`) and
+  `target_not_gated`, `server_not_installed`, `no_live_grant`,
+  `invalid_wait`, `invalid_window`, `empty_target`, `not_found`,
+  `invalid_decision_ref`, `invalid_page_limit`; the three server and attach
+  kinds are for host surfaces, and `rkat-rpc` never sends them) and
   `TOOL_GRANT_REQUEST_REFUSED_KIND`; `ToolGrantSubject::member`;
   `ToolGrantIssuer::operator`; `GrantGatedTools::FIELD_NAMES`, `extend` and
   `without`; the defaulted `SessionToolGrants::for_member`;
@@ -368,7 +370,9 @@ them.
 - Python and TypeScript SDKs: `grant_tool` / `grantTool`, `list_tool_grants`
   / `listToolGrants` and `tool_grant_audit` / `toolGrantAudit` take a mob
   member identity subject (`mob_id` and `identity`; `{ mobId, identity }`),
-  and the grant takes `decision_ref` / `decisionRef`.
+  and the grant takes `decision_ref` / `decisionRef`. The generated
+  `WireMobToolConfig` and `MobToolConfigInput` carry `grant_gated` as the
+  generated `WireGrantGatedTools`.
 
 ### Changed
 

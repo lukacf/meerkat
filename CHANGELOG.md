@@ -326,6 +326,13 @@ them.
   `HostAuthenticationScope::digest` is the one login digest form (`sha256:`
   and the lowercase hex SHA-256 of the scope's text).
 
+- `meerkat-schedule`: `dispatch_schedule_list_where`, the
+  `meerkat_schedule_list` tool's own listing over only the schedules a
+  predicate admits, for a host that hides some of a realm's schedules from
+  its agents. The predicate is applied before the creation order, the cursor
+  and the page cut, so pages stay full and every row is the tool's bounded
+  summary. The `meerkat` facade re-exports it.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
@@ -435,6 +442,12 @@ them.
   reconfigure had applied, and the switch stayed pending. The switch now
   finishes in a stopped or retired session as well. Affects 0.6.0 through
   0.9.10.
+
+- `meerkat-schedule`: a `meerkat_schedule_list` row for a schedule whose
+  trigger is too large to keep whole cuts the trigger's timezone to 200
+  characters like an id. A stored timezone is validated only when
+  occurrences are planned, so a paused schedule could hold a very long one,
+  and every listing carried it whole.
 
 ### Upgrade notes
 

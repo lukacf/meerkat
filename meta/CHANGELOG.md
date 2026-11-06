@@ -88,6 +88,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   from `meta/console/whoami`), and a change made for another caller is
   refused with `caller_changed`.
 
+### Fixed
+
+- `meerkat_schedule_list` called by an agent of a Meta gateway now returns the
+  tool's advertised page: at most `limit` rows (default 50, at most 200) of
+  bounded schedule summaries, with `page.has_more` and `page.next_cursor`.
+  The console gate that leaves console schedules out of the listing answered
+  the call itself: it ignored `limit` and `cursor` and returned every
+  non-console schedule whole (machine state, superseded acknowledgements and
+  the full action), so one list call could return hundreds of kilobytes. The
+  gate now lists through Core's page builder with console schedules filtered
+  out before the order, the cursor and the page cut, so pages stay full and a
+  cursor never lands on a console schedule. `meerkat_schedule_get` is
+  unchanged and still returns the whole schedule.
+
 ## [0.9.10] - 2026-11-04
 
 Meta 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10 and Connect

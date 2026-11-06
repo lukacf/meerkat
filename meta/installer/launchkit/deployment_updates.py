@@ -367,6 +367,41 @@ def _console_presentation_only(previous, candidate):
         return False
 
 
+CONSOLE_AUTHENTICATION_PATH = "application/console.json"
+MAX_CONSOLE_AUTHENTICATION_BYTES = 4096
+
+
+def _console_named_accounts_transition(previous, candidate):
+    """The one Console authentication change an update may make.
+
+    An installation built with one shared account (`local-password`) moves to
+    named accounts (`local-accounts`). The declared private fields and the
+    access file stay byte for byte, so the installation's own account, its
+    private values and its operator are the same; nothing else about the
+    Console's authentication changes in an update.
+    """
+    def choice(files):
+        entry = files.get(CONSOLE_AUTHENTICATION_PATH)
+        if (not isinstance(entry, tuple) or len(entry) != 2 or not isinstance(entry[0], bytes)
+                or type(entry[1]) is not int or len(entry[0]) > MAX_CONSOLE_AUTHENTICATION_BYTES):
+            return None
+        def unique(pairs):
+            if len({key for key, _ in pairs}) != len(pairs):
+                raise ValueError("Duplicate Console authentication keys.")
+            return dict(pairs)
+        try:
+            return json.loads(entry[0].decode("utf-8"), object_pairs_hook=unique), entry[1]
+        except (ValueError, UnicodeError, RecursionError):
+            return None
+    before, after = choice(previous), choice(candidate)
+    return (before is not None and after is not None and before[1] == after[1] == 0o644
+            and before[0] == {"authentication": "local-password"}
+            and after[0] == {"authentication": "local-accounts"}
+            and "application/configuration.json" in previous
+            and all(previous.get(name) == candidate.get(name)
+                    for name in ("application/configuration.json", "config/access.toml")))
+
+
 def _parsed_config(files, name):
     entry = files.get(name)
     if (not isinstance(entry, tuple) or len(entry) != 2 or not isinstance(entry[0], bytes)
@@ -2068,6 +2103,8 @@ def compatibility(previous, candidate, receipt, *, runtime_target=None, reads=No
             "README.md", "acceptance-report.json", "implementation-report.json", "SHA256SUMS"}
         if name == "config/console.toml":
             allowed = _console_presentation_only(previous.get(name), candidate.get(name))
+        elif name == CONSOLE_AUTHENTICATION_PATH:
+            allowed = _console_named_accounts_transition(previous, candidate)
         elif name in INSTRUCTION_CONFIG_PATHS:
             allowed = instruction_update and current_host
         elif name == "app.py":

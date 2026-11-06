@@ -3829,6 +3829,7 @@ async fn requeue_shutdown_does_not_keep_a_queued_event_or_a_directed_step() {
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         event_type: "build".into(),
         payload: serde_json::json!({ "status": KEPT_OUT_EVENT }),

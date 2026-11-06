@@ -19640,6 +19640,7 @@ comms = true
                         turn_tool_overlay: None,
                         typed_turn_appends: Vec::new(),
                         turn_metadata: None,
+                        requester: None,
                     },
                 };
                 let (sender, mut admitted) = tokio::sync::oneshot::channel();
@@ -22973,6 +22974,7 @@ image_generation = true
                         ..Default::default()
                     },
                 ),
+                requester: None,
             },
         };
 

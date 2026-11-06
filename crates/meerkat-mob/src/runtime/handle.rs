@@ -3714,6 +3714,7 @@ impl MemberTurnOptions {
                 objective_id: self.objective_id,
                 run_id: None,
                 turn_input: None,
+                requester: None,
             },
             ..Default::default()
         }

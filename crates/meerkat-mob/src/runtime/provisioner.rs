@@ -7090,6 +7090,7 @@ impl SessionBackend {
                 idempotency_key,
                 supersession_key: None,
                 correlation_id,
+                requester: None,
             },
             content: prompt,
             typed_turn_appends: req.runtime.typed_turn_appends.clone(),
@@ -21560,6 +21561,7 @@ mod bridge_rejection_tests {
                         run_id: None,
                         objective_id: Some(objective_id),
                         turn_input: None,
+                        requester: None,
                     },
                     ..Default::default()
                 },

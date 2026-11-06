@@ -2816,6 +2816,7 @@ impl MobActor {
                 )),
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             content: state.prompt.clone(),
             typed_turn_appends: Vec::new(),

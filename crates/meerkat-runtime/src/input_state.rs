@@ -2026,6 +2026,7 @@ impl PromptReplayIdentity {
             idempotency_key: _,
             supersession_key,
             correlation_id,
+            requester: _,
         } = header;
         let bytes = serde_json::to_vec(&(
             authority_association,
@@ -2203,6 +2204,7 @@ impl ExternalEventReplayIdentity {
             idempotency_key: _,
             supersession_key,
             correlation_id,
+            requester: _,
         } = header;
         let bytes = serde_json::to_vec(&(
             authority_association,
@@ -2297,6 +2299,12 @@ pub struct InputState {
     pub directed_run_started_attribution: Option<DirectedRunStartedAttribution>,
     pub durability: Option<crate::input::InputDurability>,
     pub idempotency_key: Option<crate::identifiers::IdempotencyKey>,
+    /// The requester the host supplied for this ungoverned input
+    /// ([`crate::input::InputHeader::requester`]), kept on the row so it
+    /// outlives the retired payload. A governed row keeps none here: its
+    /// requester is its retained association's. Read it through
+    /// [`InputState::requester()`].
+    pub(crate) requester: Option<meerkat_core::PrincipalRef>,
     /// Runtime-issued exact prompt witness; absent for non-prompt and older
     /// admissions. Absence never authorizes a new prompt's replay claim.
     pub prompt_replay_identity: Option<PromptReplayIdentity>,
@@ -2356,6 +2364,7 @@ impl InputState {
             directed_run_started_attribution: None,
             durability: None,
             idempotency_key: None,
+            requester: None,
             prompt_replay_identity: None,
             external_event_replay_identity: None,
             recovery_count: 0,
@@ -2368,6 +2377,25 @@ impl InputState {
             stop_requeue: None,
             created_at: now,
             result_payload_withheld: false,
+        }
+    }
+
+    /// The original requester of this input, read from the row: a governed
+    /// row's retained association names it (its own original, or a retained
+    /// resume's canonical original); any other row keeps the requester its
+    /// host supplied. This is the receipt's requester: it outlives the
+    /// input's retired payload and a restart.
+    pub fn requester(&self) -> Option<&meerkat_core::PrincipalRef> {
+        let governed = if self.retained_resume.is_some() {
+            self.authority_contributors.first()
+        } else {
+            self.authority_contributors
+                .iter()
+                .find(|original| original.input_id() == &self.input_id)
+        };
+        match governed {
+            Some(original) => Some(&original.association().candidate().requester),
+            None => self.requester.as_ref(),
         }
     }
 
@@ -2746,6 +2774,7 @@ impl<'de> Deserialize<'de> for StoredInputState {
             directed_run_started_attribution,
             durability: helper.durability,
             idempotency_key: helper.idempotency_key,
+            requester: None,
             prompt_replay_identity: helper.prompt_replay_identity,
             external_event_replay_identity: helper.external_event_replay_identity,
             recovery_count: helper.recovery_count,
@@ -2853,6 +2882,7 @@ mod tests {
                     ingress_context: None,
                     retained_resume: None,
                     authority_association: None,
+                    requester: None,
                 },
                 event_type: "build".into(),
                 payload,
@@ -4375,6 +4405,7 @@ mod tests {
                         idempotency_key: None,
                         supersession_key: None,
                         correlation_id: None,
+                        requester: None,
                     },
                     operation_id: OperationId::new(),
                     event: OpEvent::Cancelled {

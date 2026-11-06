@@ -9927,6 +9927,7 @@ impl SessionRuntime {
                 idempotency_key: context.idempotency_key,
                 supersession_key: None,
                 correlation_id: context.correlation_id,
+                requester: None,
             },
             event_type,
             payload,
@@ -24793,6 +24794,7 @@ mod tests {
                         idempotency_key: None,
                         supersession_key: None,
                         correlation_id: None,
+                        requester: None,
                     },
                     convention: Some(meerkat_runtime::PeerConvention::ResponseTerminal {
                         request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
@@ -24915,6 +24917,7 @@ mod tests {
                         idempotency_key: None,
                         supersession_key: None,
                         correlation_id: None,
+                        requester: None,
                     },
                     convention: Some(meerkat_runtime::PeerConvention::ResponseTerminal {
                         request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
@@ -25093,6 +25096,7 @@ mod tests {
                         idempotency_key: None,
                         supersession_key: None,
                         correlation_id: None,
+                        requester: None,
                     },
                     convention: Some(meerkat_runtime::PeerConvention::ResponseTerminal {
                         request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
@@ -25217,6 +25221,7 @@ mod tests {
                         idempotency_key: None,
                         supersession_key: None,
                         correlation_id: None,
+                        requester: None,
                     },
                     convention: Some(meerkat_runtime::PeerConvention::ResponseTerminal {
                         request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
@@ -30974,6 +30979,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(meerkat_runtime::PeerConvention::ResponseProgress {
                 request_id: uuid::Uuid::new_v4().to_string(),
@@ -31049,6 +31055,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             operation_id: operation_id.clone(),
             event: meerkat_core::OpEvent::Cancelled { id: operation_id },

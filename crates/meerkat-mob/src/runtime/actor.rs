@@ -4372,6 +4372,7 @@ fn submit_work_turn_metadata(
                         run_id: None,
                         objective_id,
                         turn_input: None,
+                        requester: None,
                     },
                     ..Default::default()
                 },
@@ -4788,6 +4789,7 @@ fn kept_kickoff_reattach_input(agent_runtime_id: &AgentRuntimeId) -> meerkat_run
             idempotency_key: Some(local_kickoff_idempotency_key(agent_runtime_id)),
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         content: ContentInput::Text("re-attach the kept kickoff".to_string()),
         typed_turn_appends: Vec::new(),

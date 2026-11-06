@@ -2013,6 +2013,41 @@ pub(crate) mod tests {
         assert!(verify_retained_replay(&decoded.state, &altered).is_err());
     }
 
+    /// One requester concept: a governed input's requester is its work
+    /// association's. An input that also carries a host-supplied requester
+    /// must name the same principal. Another principal is refused before
+    /// admission and nothing is admitted; the same one is admitted, and its
+    /// receipt names the association's requester.
+    #[tokio::test]
+    async fn an_input_carrying_two_different_requesters_is_refused() {
+        let mut driver = driver(true);
+        let carrying = |host_requester: &str| {
+            let mut input = driver.input("caller-a");
+            input.header_mut().ingress_context = None;
+            input.header_mut().requester = Some(principal(host_requester));
+            attach_ingress(input, "caller-a", "host-supplied-requester")
+        };
+        let conflicting = carrying("caller-b");
+        let agreeing = carrying("caller-a");
+        let conflicting_id = conflicting.id().clone();
+        assert!(
+            driver.accept_input(conflicting).await.is_err(),
+            "an input whose host-supplied requester differs from its association's is refused"
+        );
+        assert!(
+            driver.input_state(&conflicting_id).is_none(),
+            "the refused input is not admitted"
+        );
+        let AcceptOutcome::Accepted { state, .. } = driver
+            .accept_input(agreeing)
+            .await
+            .expect("an agreeing requester is admitted")
+        else {
+            panic!("agreeing admission");
+        };
+        assert_eq!(state.requester(), Some(&principal("caller-a")));
+    }
+
     /// The driver resolves its native replay lookup before the host
     /// authenticates, and hands the host the verdict on the ingress context:
     /// the first admission is a first authentication, and an exact retry

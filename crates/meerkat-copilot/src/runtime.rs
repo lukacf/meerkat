@@ -43,6 +43,11 @@ const CAPI_EXPIRY_SKEW_SECONDS: i64 = 300;
 const MODEL_DISCOVERY_RETRY_SECONDS: u64 = 30;
 const MODEL_DISCOVERY_REFRESH_SECONDS: u64 = 300;
 const MODEL_DISCOVERY_MAX_RETRY_SECONDS: u64 = 3600;
+/// How long a model discovery a request started off the request path holds
+/// the account's next one off: the listing's own HTTP bound with a margin.
+/// The discovery sets the next deadline when it ends, so one that never ends
+/// (its runtime stopped) is tried again after this.
+const MODEL_DISCOVERY_CLAIM_SECONDS: u64 = 60;
 /// After a token exchange that failed transiently while the current token
 /// still serves, the next attempt waits this long unless the exchange sent
 /// its own `Retry-After`.
@@ -135,6 +140,9 @@ enum CopilotModelDiscoveryError {
         rate_limited: bool,
         /// `x-ratelimit-reset`: the epoch second the primary limit resets.
         rate_limit_reset: Option<u64>,
+        /// Whether the answer asks for an action on the account
+        /// ([`github_account_action`]).
+        account_action: bool,
     },
     #[error("invalid Copilot model-discovery request headers")]
     Header(#[source] ProviderAuthError),
@@ -149,6 +157,26 @@ impl CopilotModelDiscoveryError {
         match self {
             Self::Http { status, .. } => Some(*status),
             Self::Transport(_) | Self::Header(_) | Self::Decode(_) | Self::Protocol(_) => None,
+        }
+    }
+
+    /// Whether this listing answer refuses a device sign-in's derived token:
+    /// a 401, or a 403 that asks for an account action. Any other answer, a
+    /// 403 for a policy or a rate limit included, is a discovery failure the
+    /// account retries later.
+    fn refuses_derived_token(&self) -> bool {
+        match self {
+            Self::Http { status: 401, .. } => true,
+            Self::Http {
+                status: 403,
+                account_action,
+                ..
+            } => *account_action,
+            Self::Http { .. }
+            | Self::Transport(_)
+            | Self::Header(_)
+            | Self::Decode(_)
+            | Self::Protocol(_) => false,
         }
     }
 
@@ -1882,17 +1910,25 @@ impl CopilotAuthorizer {
                         )
                     })?;
                     let now = (self.env.now)();
-                    if let Some(cached) = self.fresh_cached(source_generation, now)
-                        && !cached.model_discovery_due
-                    {
+                    if let Some(cached) = self.fresh_cached(source_generation, now) {
+                        if cached.model_discovery_due {
+                            self.refresh_models_off_the_request_path(&cached, source_generation)
+                                .await;
+                        }
                         return Ok(cached);
                     }
                     (source_generation, LeaderTask::Device(source))
                 }
                 CopilotCredentialMode::OperatorToken => match self.observe_operator_lease()? {
-                    OperatorObservation::Cached(cached) => return Ok(cached),
-                    OperatorObservation::Flight { generation, flight } => {
-                        (generation, LeaderTask::Operator(flight))
+                    OperatorObservation::Cached { cached, generation } => {
+                        if cached.model_discovery_due {
+                            self.refresh_models_off_the_request_path(&cached, generation)
+                                .await;
+                        }
+                        return Ok(cached);
+                    }
+                    OperatorObservation::Flight { generation } => {
+                        (generation, LeaderTask::Operator)
                     }
                 },
             };
@@ -1933,8 +1969,8 @@ impl CopilotAuthorizer {
                     self.refresh_token_as_leader(source, source_generation)
                         .await
                 }
-                LeaderTask::Operator(flight) => self
-                    .refresh_operator_token_as_leader(*flight, source_generation)
+                LeaderTask::Operator => self
+                    .refresh_operator_token_as_leader()
                     .await
                     .map_err(CopilotTokenError::from),
             };
@@ -1943,11 +1979,9 @@ impl CopilotAuthorizer {
             // generation it ended on, the one its waiters observe next.
             let outcome_generation = match task {
                 LeaderTask::Device(_) => source_generation,
-                LeaderTask::Operator(_) => {
-                    self.auth_lease().map_or(source_generation, |auth_lease| {
-                        auth_lease.snapshot(&self.lease_key()).generation
-                    })
-                }
+                LeaderTask::Operator => self.auth_lease().map_or(source_generation, |auth_lease| {
+                    auth_lease.snapshot(&self.lease_key()).generation
+                }),
             };
             *self.state.last_refresh_outcome.lock() = Some(CopilotRefreshOutcome {
                 flight_id,
@@ -1965,54 +1999,10 @@ impl CopilotAuthorizer {
     ) -> Result<CachedTokenView, CopilotTokenError> {
         let now = (self.env.now)();
         if let Some(cached) = self.fresh_cached(source_generation, now) {
+            // Another flight minted the token this caller waited for.
             if cached.model_discovery_due {
-                let models = self.fetch_models(&cached.api_base, &cached.token).await;
-                let discovery_now = (self.env.now)();
-                let remint = models
-                    .as_ref()
-                    .is_err_and(|error| error.status() == Some(401));
-                let reauth = models
-                    .as_ref()
-                    .is_err_and(|error| error.status() == Some(403));
-                {
-                    let mut cache = self.state.cache.write();
-                    if let Some(current) = cache.as_mut()
-                        && current.source_generation == source_generation
-                        && current.token == cached.token
-                    {
-                        match models {
-                            Ok(snapshot) => {
-                                current.models = Some(Arc::new(snapshot));
-                                current.model_discovery_refresh_at =
-                                    Some(model_discovery_deadline(
-                                        discovery_now,
-                                        StdDuration::from_secs(MODEL_DISCOVERY_REFRESH_SECONDS),
-                                    ));
-                            }
-                            Err(error) if !remint && !reauth => {
-                                let retry_delay = error.retry_delay();
-                                tracing::warn!(
-                                    credential_identity = %self.binding.credential_identity(),
-                                    error = %error,
-                                    "Copilot account model discovery retry failed"
-                                );
-                                current.model_discovery_refresh_at =
-                                    Some(model_discovery_deadline(discovery_now, retry_delay));
-                            }
-                            // Copilot refused the token for discovery: it is
-                            // minted anew (401) or the account needs a new
-                            // login (403).
-                            Err(_) => current.refuse(),
-                        }
-                    }
-                }
-                if reauth {
-                    self.mark_account_reauth_required()?;
-                    return Err(ProviderAuthError::Auth(AuthError::UserReauthRequired).into());
-                }
-                if remint {
-                    return self.remint(source, source_generation).await;
-                }
+                self.refresh_models_off_the_request_path(&cached, source_generation)
+                    .await;
             }
             return Ok(cached);
         }
@@ -2117,9 +2107,13 @@ impl CopilotAuthorizer {
             api_base = resolve_api_base(&token)?;
             models_result = self.fetch_models(&api_base, &token.token).await;
         }
+        // A listing that refuses the new token (a 401 again, or a 403 that
+        // asks for an account action) needs a new sign-in; any other failure,
+        // a 403 for a policy or a rate limit included, leaves the token
+        // serving without the list until the next discovery.
         if models_result
             .as_ref()
-            .is_err_and(|error| matches!(error.status(), Some(401 | 403)))
+            .is_err_and(CopilotModelDiscoveryError::refuses_derived_token)
         {
             self.mark_account_reauth_required()?;
             return Err(ProviderAuthError::Auth(AuthError::UserReauthRequired).into());
@@ -2376,6 +2370,7 @@ async fn fetch_copilot_models(
             retry_after: response.retry_after,
             rate_limited: response.rate_limited,
             rate_limit_reset: response.rate_limit_reset,
+            account_action: github_account_action(&response.body),
         });
     }
     let body: CopilotModelsEnvelope =
@@ -2438,9 +2433,10 @@ impl CopilotAuthorizer {
     /// The fast path, with no I/O. A cache exists only after a flight
     /// published or restored the account lease, so without one the flight
     /// reads the source. With one the AuthMachine decides: `Authorized` uses
-    /// the cache built for the current lease generation, and any other
-    /// verdict has the flight read the source again (through the paced check
-    /// for a source that runs something). `ReauthRequired` first drops the
+    /// the cache built for the current lease generation (a model list that
+    /// is due is refreshed off the request path), and any other verdict has
+    /// the flight read the source again (through the paced check for a
+    /// source that runs something). `ReauthRequired` first drops the
     /// cache built for the refused publication: the refusal may have come
     /// from another account state on the same lease (another provider
     /// registry, another credential store), and this one must still read its
@@ -2451,30 +2447,26 @@ impl CopilotAuthorizer {
         if self.state.cache.read().is_none() {
             return Ok(OperatorObservation::Flight {
                 generation: auth_lease.snapshot(&lease_key).generation,
-                flight: OperatorFlight::Reload,
             });
         }
         let now = (self.env.now)();
         let disposition = observe_credential_use(auth_lease, &lease_key, now)?;
         let generation = auth_lease.snapshot(&lease_key).generation;
-        let flight = match disposition {
-            CredentialUseDisposition::Authorized => match self.fresh_cached(generation, now) {
-                Some(cached) if !cached.model_discovery_due => {
-                    return Ok(OperatorObservation::Cached(cached));
+        match disposition {
+            CredentialUseDisposition::Authorized => {
+                if let Some(cached) = self.fresh_cached(generation, now) {
+                    return Ok(OperatorObservation::Cached { cached, generation });
                 }
-                Some(_) => OperatorFlight::Rediscover,
-                None => OperatorFlight::Reload,
-            },
+            }
             CredentialUseDisposition::ReauthRequired => {
                 self.drop_cache_for_source_generation(generation);
-                OperatorFlight::Reload
             }
             CredentialUseDisposition::RefreshRequired
             | CredentialUseDisposition::RefreshDisallowed
             | CredentialUseDisposition::LeaseAbsent
-            | CredentialUseDisposition::AlreadyRefreshing => OperatorFlight::Reload,
-        };
-        Ok(OperatorObservation::Flight { generation, flight })
+            | CredentialUseDisposition::AlreadyRefreshing => {}
+        }
+        Ok(OperatorObservation::Flight { generation })
     }
 
     /// Drop the cached account built for the lease's publication
@@ -2489,30 +2481,17 @@ impl CopilotAuthorizer {
         }
     }
 
-    async fn refresh_operator_token_as_leader(
-        &self,
-        flight: OperatorFlight,
-        generation: u64,
-    ) -> Result<CachedTokenView, ProviderAuthError> {
-        if flight == OperatorFlight::Rediscover
-            && let Some(cached) = self.fresh_cached(generation, (self.env.now)())
-        {
-            if !cached.model_discovery_due {
-                return Ok(cached);
-            }
-            return self.rediscover_operator_models(cached, generation).await;
-        }
+    async fn refresh_operator_token_as_leader(&self) -> Result<CachedTokenView, ProviderAuthError> {
         let material = self.load_operator_token().await?;
         if let Some(cached) = self.fresh_cached(material.generation, (self.env.now)())
             && cached.token == material.token
         {
             // Another flight already built the account for this token.
-            if !cached.model_discovery_due {
-                return Ok(cached);
+            if cached.model_discovery_due {
+                self.refresh_models_off_the_request_path(&cached, material.generation)
+                    .await;
             }
-            return self
-                .rediscover_operator_models(cached, material.generation)
-                .await;
+            return Ok(cached);
         }
         self.discover_operator_account(material).await
     }
@@ -2807,69 +2786,6 @@ impl CopilotAuthorizer {
         Ok(view)
     }
 
-    /// Refresh the cached account's model list. A 401 or 403 drops the cache:
-    /// for an installation token a 401 is GitHub refusing the token itself;
-    /// for a user token, a token the identity lookup did not answer
-    /// included, the account is rebuilt through the identity lookup, which
-    /// tells a revoked token from a Copilot refusal.
-    async fn rediscover_operator_models(
-        &self,
-        cached: CachedTokenView,
-        generation: u64,
-    ) -> Result<CachedTokenView, ProviderAuthError> {
-        let installation = cached
-            .identity
-            .as_deref()
-            .is_some_and(|identity| identity.installation);
-        let models = self.fetch_models(&cached.api_base, &cached.token).await;
-        let discovery_now = (self.env.now)();
-        let status = models
-            .as_ref()
-            .err()
-            .and_then(CopilotModelDiscoveryError::status);
-        let refusal = models
-            .as_ref()
-            .err()
-            .and_then(|error| models_refusal(error, installation));
-        {
-            let mut cache = self.state.cache.write();
-            if let Some(current) = cache.as_mut()
-                && current.source_generation == generation
-                && current.token == cached.token
-            {
-                match models {
-                    Ok(snapshot) => {
-                        current.models = Some(Arc::new(snapshot));
-                        current.model_discovery_refresh_at = Some(model_discovery_deadline(
-                            discovery_now,
-                            StdDuration::from_secs(MODEL_DISCOVERY_REFRESH_SECONDS),
-                        ));
-                    }
-                    Err(error) if refusal.is_none() => {
-                        tracing::warn!(
-                            credential_identity = %self.binding.credential_identity(),
-                            error = %error,
-                            "Copilot account model discovery retry failed"
-                        );
-                        current.model_discovery_refresh_at =
-                            Some(operator_models_retry_at(&error, discovery_now));
-                    }
-                    Err(_) => {
-                        *cache = None;
-                    }
-                }
-            }
-        }
-        let Some(refusal) = refusal else {
-            return Ok(cached);
-        };
-        if status == Some(401) && !installation {
-            let material = self.load_operator_token().await?;
-            return self.discover_operator_account(material).await;
-        }
-        Err(self.operator_refusal(refusal, &cached.token, generation))
-    }
-
     /// Publish GitHub's refusal of `token`, admitted at lease `generation`,
     /// to the account lease (`MarkPublicationRefused`), and return the lease
     /// generation the lease withdraws, or `None` when it carries a newer
@@ -3130,6 +3046,57 @@ impl HttpAuthorizer for CopilotAuthorizer {
 }
 
 impl CopilotAuthorizer {
+    /// Start the account's due model discovery for `cached`, the token of
+    /// source generation `source_generation`, off the request path. One
+    /// request claims it (the next discovery then waits
+    /// [`MODEL_DISCOVERY_CLAIM_SECONDS`] while this one runs), and every
+    /// request goes on with the token and the model list the account holds
+    /// ([`BackgroundModelDiscovery`]). Without a Tokio runtime to run on, the
+    /// discovery runs before the request goes on.
+    async fn refresh_models_off_the_request_path(
+        &self,
+        cached: &CachedTokenView,
+        source_generation: u64,
+    ) {
+        let now = (self.env.now)();
+        {
+            let mut cache = self.state.cache.write();
+            let Some(current) = cache.as_mut() else {
+                return;
+            };
+            if current.source_generation != source_generation
+                || current.token != cached.token
+                || !current
+                    .model_discovery_refresh_at
+                    .is_some_and(|refresh_at| now >= refresh_at)
+            {
+                return;
+            }
+            current.model_discovery_refresh_at = Some(model_discovery_deadline(
+                now,
+                StdDuration::from_secs(MODEL_DISCOVERY_CLAIM_SECONDS),
+            ));
+        }
+        let discovery = BackgroundModelDiscovery {
+            state: Arc::clone(&self.state),
+            transport: Arc::clone(&self.transport),
+            env: self.env.clone(),
+            credential_identity: self.binding.credential_identity().clone(),
+            source_generation,
+            token: cached.token.clone(),
+            api_base: cached.api_base.clone(),
+            installation: cached
+                .identity
+                .as_deref()
+                .is_some_and(|identity| identity.installation),
+        }
+        .run();
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => std::mem::drop(runtime.spawn(discovery)),
+            Err(_) => discovery.await,
+        }
+    }
+
     async fn authorize_attempt(
         &self,
         request: &mut HttpAuthorizationRequest<'_>,
@@ -3196,34 +3163,113 @@ struct CachedTokenView {
     identity: Option<Arc<CopilotAccountIdentity>>,
 }
 
+/// One refresh of an account's model list that runs off the request path,
+/// for the token a request found fresh. Its answer applies only while the
+/// account still holds that token: a newer token's own mint listed its
+/// models.
+///
+/// A list replaces the account's, and the next refresh is due five minutes
+/// later. A listing that refuses the token has the next request authorize
+/// again: a device sign-in's derived token is refused, so that request mints
+/// a new one, whose own listing decides (a 401 again, or a 403 that asks for
+/// an account action, needs a new sign-in); a token route's account is
+/// dropped, so that request reads the token and looks the account up again,
+/// and the lookup decides. Any other failure leaves the account's list
+/// serving and schedules the next try.
+struct BackgroundModelDiscovery {
+    state: Arc<CopilotAccountState>,
+    transport: Arc<dyn CopilotHttpTransport>,
+    env: ResolverEnvironment,
+    credential_identity: AuthCredentialIdentity,
+    source_generation: u64,
+    token: String,
+    api_base: String,
+    /// Token mode: the token is a GitHub App installation token.
+    installation: bool,
+}
+
+impl BackgroundModelDiscovery {
+    async fn run(self) {
+        let models = fetch_copilot_models(
+            self.transport.as_ref(),
+            &self.state.config,
+            &self.api_base,
+            &self.token,
+        )
+        .await;
+        let now = (self.env.now)();
+        let mut cache = self.state.cache.write();
+        let current = match cache.as_mut() {
+            Some(current)
+                if current.source_generation == self.source_generation
+                    && current.token == self.token =>
+            {
+                current
+            }
+            _ => return,
+        };
+        let error = match models {
+            Ok(snapshot) => {
+                current.models = Some(Arc::new(snapshot));
+                current.model_discovery_refresh_at = Some(model_discovery_deadline(
+                    now,
+                    StdDuration::from_secs(MODEL_DISCOVERY_REFRESH_SECONDS),
+                ));
+                return;
+            }
+            Err(error) => error,
+        };
+        let refused = match self.state.mode {
+            CopilotCredentialMode::DeviceSignIn => error.refuses_derived_token(),
+            CopilotCredentialMode::OperatorToken => {
+                models_refusal(&error, self.installation).is_some()
+            }
+        };
+        if !refused {
+            tracing::warn!(
+                credential_identity = %self.credential_identity,
+                error = %error,
+                "Copilot account model discovery failed; the account's last model list keeps serving"
+            );
+            current.model_discovery_refresh_at = Some(match self.state.mode {
+                CopilotCredentialMode::DeviceSignIn => {
+                    model_discovery_deadline(now, error.retry_delay())
+                }
+                CopilotCredentialMode::OperatorToken => operator_models_retry_at(&error, now),
+            });
+            return;
+        }
+        tracing::warn!(
+            credential_identity = %self.credential_identity,
+            error = %error,
+            "Copilot refused the account's token for its model list; the next request authorizes again"
+        );
+        match self.state.mode {
+            CopilotCredentialMode::DeviceSignIn => current.refuse(),
+            CopilotCredentialMode::OperatorToken => *cache = None,
+        }
+    }
+}
+
 /// The work an elected leader runs, by the account's credential mode.
 enum LeaderTask {
     /// Device sign-in: derive a Copilot token from this stored GitHub token.
     Device(PersistedTokens),
-    /// Operator token: the flight the fast path asked for.
-    Operator(OperatorFlight),
-}
-
-/// The operator-token flight the fast path asks for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OperatorFlight {
-    /// The cache is admitted for the current lease generation and only its
-    /// model list is due.
-    Rediscover,
-    /// Read the source token again: there is no cache for the current lease
-    /// generation, or the AuthMachine did not admit the lease as it is.
-    Reload,
+    /// Operator token: read the source token again.
+    Operator,
 }
 
 /// What one pass of the operator-token fast path decided.
 enum OperatorObservation {
-    /// The cache is admitted for the current lease generation and current.
-    Cached(CachedTokenView),
-    /// A flight must run for the lease generation observed.
-    Flight {
+    /// The cache is admitted for the current lease generation `generation`
+    /// and its token is fresh.
+    Cached {
+        cached: CachedTokenView,
         generation: u64,
-        flight: OperatorFlight,
     },
+    /// A flight must read the source token for the lease generation
+    /// observed.
+    Flight { generation: u64 },
 }
 
 /// An operator token read from its source and admitted by the AuthMachine.
@@ -3768,14 +3814,14 @@ fn api_base_from_proxy_token(token: &str) -> Option<String> {
 }
 
 fn token_exchange_requires_account_action(status: u16, body: &[u8]) -> bool {
-    if status == 401 {
-        return true;
-    }
-    if status != 403 {
-        return false;
-    }
-    let envelope = serde_json::from_slice::<CopilotTokenErrorEnvelope>(body).unwrap_or_default();
-    envelope
+    status == 401 || (status == 403 && github_account_action(body))
+}
+
+/// Whether a GitHub answer asks for an action on the account: it names an
+/// `error_details.notification_id`.
+fn github_account_action(body: &[u8]) -> bool {
+    serde_json::from_slice::<CopilotTokenErrorEnvelope>(body)
+        .unwrap_or_default()
         .error_details
         .and_then(|details| details.notification_id)
         .is_some()
@@ -4748,6 +4794,7 @@ mod tests {
             retry_after: Some(StdDuration::from_secs(u64::MAX)),
             rate_limited: true,
             rate_limit_reset: None,
+            account_action: false,
         };
 
         let delay = error.retry_delay();
@@ -5942,17 +5989,19 @@ mod tests {
                 headers: &mut headers,
             })
             .await
-            .expect("discovery retry succeeds");
+            .expect("the request goes out while the discovery is retried");
 
+        // The retry runs off the request path.
+        settle(|| {
+            authorizer
+                .model_snapshot()
+                .is_some_and(|snapshot| snapshot.model("gpt-test").is_some())
+        })
+        .await;
         assert_eq!(
             transport.request_count(),
             3,
             "discovery retry must reuse the derived token"
-        );
-        assert!(
-            authorizer
-                .model_snapshot()
-                .is_some_and(|snapshot| snapshot.model("gpt-test").is_some())
         );
     }
 
@@ -8711,8 +8760,8 @@ mod tests {
 
         /// A rate-limited model listing (a 403 with `Retry-After`, GitHub's
         /// secondary limit) is no refusal: the account resolves without its
-        /// model list, which is asked again only after GitHub's stated time,
-        /// with no identity lookup in between.
+        /// model list, which is asked again (off the request path) only after
+        /// GitHub's stated time, with no identity lookup in between.
         #[tokio::test]
         async fn models_rate_limit_waits_for_githubs_time() {
             let harness = Harness::new([
@@ -8742,13 +8791,13 @@ mod tests {
 
             harness.operator.advance(2);
             authorize_once(&authorizer, &url).await;
+            settle(|| authorizer.model_snapshot().is_some()).await;
             assert_eq!(harness.transport.request_count(), 3);
             assert_eq!(
                 harness.transport.urls()[2],
                 format!("{BUSINESS_API}/models"),
                 "only the listing runs again"
             );
-            assert!(authorizer.model_snapshot().is_some());
         }
 
         /// Two authorizers of one operator-token account, as two routes or two
@@ -8862,17 +8911,20 @@ mod tests {
 
         /// T8: a GitHub App installation token (server-to-server) has no
         /// user: it skips the identity lookup and lists models on the default
-        /// host. A later 401 there is GitHub refusing the token itself.
+        /// host. A later 401 there (off the request path) has the next
+        /// request list the models again, and that 401 is GitHub refusing the
+        /// token itself.
         #[tokio::test]
         async fn installation_token_skips_identity_lookup() {
             let installation = format!("ghs_{CANARY}{}", "x".repeat(500));
-            let harness = Harness::new([
-                Ok(models_response()),
+            let bad_credentials = || {
                 Ok(json_response(
                     401,
                     serde_json::json!({"message": "Bad credentials"}),
-                )),
-            ]);
+                ))
+            };
+            let harness =
+                Harness::new([Ok(models_response()), bad_credentials(), bad_credentials()]);
             harness.operator.set("GITHUB_TOKEN", &installation);
 
             let resolved = harness
@@ -8894,8 +8946,15 @@ mod tests {
             assert!(identity.installation);
             assert_eq!(identity.login, None);
 
-            // The model list is due again after five minutes.
+            // The model list is due again after five minutes: the request
+            // that finds it due goes out on the account it holds, and the
+            // listing's 401 drops the account.
             harness.operator.advance(301);
+            authorizer
+                .prepare_request()
+                .await
+                .expect("the request that finds the list due goes out on the account it holds");
+            settle(|| harness.transport.request_count() == 2).await;
             let refused = authorizer
                 .prepare_request()
                 .await
@@ -8905,6 +8964,7 @@ mod tests {
                 harness.operator.lease().phase,
                 Some(AuthLeasePhase::ReauthRequired)
             );
+            assert_eq!(harness.transport.request_count(), 3);
         }
 
         /// A token route's model list is refreshed off the request path too:
@@ -9065,9 +9125,10 @@ mod tests {
         /// the lookup did not answer is Copilot refusing it (`refresh_failed`
         /// with Copilot's message, the lease untouched), and the same token is
         /// not asked about again for a minute; after it, the same token works
-        /// once Copilot accepts it. A 401 from a later listing runs the
-        /// identity lookup again, whose own 401 decides that the token is
-        /// revoked. The CLI's check reports the same Copilot refusal.
+        /// once Copilot accepts it. A 401 from a later listing (off the
+        /// request path) has the next request run the identity lookup again,
+        /// whose own 401 decides that the token is revoked. The CLI's check
+        /// reports the same Copilot refusal.
         #[tokio::test]
         async fn an_unanswered_lookup_then_a_rejected_model_list_refuses_the_token() {
             let permission = || -> Outcome {
@@ -9139,10 +9200,17 @@ mod tests {
                 .resolve(CopilotProviderRoute::OpenAi)
                 .await
                 .expect("the token is used on the default host");
-            // The model list is due again after five minutes.
+            // The model list is due again after five minutes: the request
+            // that finds it due goes out on the account it holds, and the
+            // listing's 401 drops the account.
             later.operator.advance(301);
-            let refused = resolved
-                .concrete_authorizer()
+            let authorizer = resolved.concrete_authorizer();
+            authorizer
+                .prepare_request()
+                .await
+                .expect("the request that finds the list due goes out on the account it holds");
+            settle(|| later.transport.request_count() == 3).await;
+            let refused = authorizer
                 .prepare_request()
                 .await
                 .expect_err("GitHub's identity lookup refused the token");
@@ -9154,7 +9222,7 @@ mod tests {
             assert_eq!(
                 later.transport.request_count(),
                 4,
-                "the later listing's 401 runs the identity lookup again, and its 401 decides"
+                "the later listing's 401 has the next request run the identity lookup again, and its 401 decides"
             );
 
             let check = OutcomeTransport::new([Ok(unanswered_lookup(403)), permission()]);
@@ -11196,6 +11264,9 @@ mod tests {
             assert_eq!(transport.inner.request_count(), 4);
         }
 
+        /// A discovery 403 that asks for an account action refuses the
+        /// token; once the new token's own listing asks for it again, every
+        /// turn reports the reauthorization the account needs.
         #[tokio::test]
         async fn a_turn_after_a_discovery_403_reports_the_reauthorization_instead_of_a_lost_route()
         {
@@ -11203,35 +11274,33 @@ mod tests {
             let transport = Arc::new(ScriptedTransport::new([
                 token_response("derived-one"),
                 models_response(),
-                json_response(403, serde_json::json!({"message": "forbidden"})),
+                listing_needs_an_account_action(),
+                token_response("derived-two"),
+                listing_needs_an_account_action(),
             ]));
             let account = RouteAccount::new(transport.clone(), &clock).await;
             let session = account.session([]).await;
 
             // Model discovery is due again (300 s); the token is still fresh.
             clock.set(301);
-            let events = session.turn().await;
-            assert!(
-                matches!(
-                    events.as_slice(),
-                    [Err(meerkat_llm_core::LlmError::AuthenticationFailed { .. })]
-                ),
-                "{events:?}"
-            );
+            assert!(session.turn().await.is_empty());
+            settle(|| transport.request_count() == 3).await;
+
+            for turn in ["first", "second"] {
+                let events = session.turn().await;
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [Err(meerkat_llm_core::LlmError::AuthenticationFailed { .. })]
+                    ),
+                    "the {turn} turn after the refusal must report the reauthorization the account needs, not a lost route: {events:?}"
+                );
+            }
             assert_eq!(
                 account.source_phase(),
                 Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired)
             );
-
-            let events = session.turn().await;
-            assert!(
-                matches!(
-                    events.as_slice(),
-                    [Err(meerkat_llm_core::LlmError::AuthenticationFailed { .. })]
-                ),
-                "the next turn must report the reauthorization the account needs, not a lost route: {events:?}"
-            );
-            assert_eq!(transport.request_count(), 3);
+            assert_eq!(transport.request_count(), 5);
         }
 
         #[tokio::test]
@@ -11248,9 +11317,12 @@ mod tests {
             let account = RouteAccount::new(transport.clone(), &clock).await;
             let session = account.session([]).await;
 
-            // Model discovery is due again (300 s) and refuses the token;
-            // the token exchange is unavailable for the new one.
+            // Model discovery is due again (300 s): the turn goes out on the
+            // token while the listing refuses it; the token exchange is then
+            // unavailable for the new one.
             clock.set(301);
+            assert!(session.turn().await.is_empty());
+            settle(|| transport.request_count() == 3).await;
             let events = session.turn().await;
             assert!(matches!(events.as_slice(), [Err(_)]), "{events:?}");
             assert_eq!(transport.request_count(), 4);
@@ -11261,7 +11333,10 @@ mod tests {
                 "the next turn must mint a new token, not fail before it reaches the network: {events:?}"
             );
             assert_eq!(transport.request_count(), 6);
-            assert_eq!(session.bearers(), ["Bearer derived-two"]);
+            assert_eq!(
+                session.bearers(),
+                ["Bearer derived-one", "Bearer derived-two"]
+            );
         }
 
         /// A model listing 403 that asks for an account action:

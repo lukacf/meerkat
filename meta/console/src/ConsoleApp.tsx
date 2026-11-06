@@ -109,7 +109,7 @@ import {
   resolveWorkGraphBindingRevision,
   resolveWorkGraphGoalItemRevision,
   resolveWorkGraphItemRevision,
-  workGraphClaimOwnedBy,
+  workGraphMayRelease,
   workGraphConflictRefreshRequest,
   type WorkGraphCommandRunner,
 } from "./lib/workgraph-actions";
@@ -2853,13 +2853,21 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const approvalScope = `${sendScope}:${experience?.runtime_id || "loading"}`;
   // The gateway decides approvals only as the signed-in person the
   // connection names (anyone else is refused as approver_unauthenticated),
-  // so the inbox offers decisions only when whoami reports a person. A
+  // so the inbox offers decisions only when whoami reports a person, and
+  // tells any other caller whoami names to sign in as themselves. A
   // transport without whoami, an older gateway or a failed read leaves the
   // approvals read-only.
   // The same read names the principal the caller's WorkGraph claims are
   // owned by: an identified caller claims as itself, and an open console's
-  // caller without a token claims nothing.
-  const [approvalDecider, setApprovalDecider] = React.useState<{ scope: string; person: boolean; claimant?: string }>();
+  // caller without a token claims nothing. The claim's owner releases it,
+  // and so does an access admin, whose release the gateway records.
+  const [approvalDecider, setApprovalDecider] = React.useState<{
+    scope: string;
+    person: boolean;
+    answered?: boolean;
+    claimant?: string;
+    canAdminister?: boolean;
+  }>();
   React.useEffect(() => {
     let active = true;
     const scope = sendScope;
@@ -2868,7 +2876,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       .then((whoami) => {
         if (!active) return;
         const claimant = whoami && whoami.actorKind !== "anonymous" ? whoami.principal : undefined;
-        setApprovalDecider({ scope, person: whoami?.actorKind === "person", ...(claimant ? { claimant } : {}) });
+        setApprovalDecider({
+          scope,
+          person: whoami?.actorKind === "person",
+          answered: Boolean(whoami),
+          ...(claimant ? { claimant } : {}),
+          canAdminister: whoami?.canAdminister === true,
+        });
       })
       .catch(() => {
         if (active) setApprovalDecider({ scope, person: false });
@@ -2877,8 +2891,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       active = false;
     };
   }, [consoleTransport, sendScope]);
-  const approvalsDecidable = approvalDecider?.scope === sendScope ? approvalDecider.person : undefined;
-  const workGraphClaimant = approvalDecider?.scope === sendScope ? approvalDecider.claimant : undefined;
+  const currentDecider = approvalDecider?.scope === sendScope ? approvalDecider : undefined;
+  const approvalsDecidable = currentDecider?.person;
+  // whoami named a caller who is no signed-in person: only signing in as
+  // themselves lets them decide.
+  const signInToDecide = currentDecider?.answered === true && !currentDecider.person;
+  const workGraphClaimant = currentDecider?.claimant;
+  const workGraphAdmin = currentDecider?.canAdminister === true;
   React.useEffect(() => {
     setApprovalSnapshot(undefined);
     setSelectedApprovalId(undefined);
@@ -2887,6 +2906,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     const resource = createPendingApprovalResource({
       scopeKey: approvalScope,
       readOnly: consoleReadOnly || !approvalsDecidable,
+      ...(!consoleReadOnly && signInToDecide ? { readOnlyReason: "sign_in" as const } : {}),
       load: async signal => (await consoleController.commands.execute({
         command: CONSOLE_COMMAND_NAMES.listGatingPending, target, signal,
       })).result,
@@ -2904,7 +2924,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       unsubscribe(); resource.dispose();
       if (approvalResourceRef.current === resource) approvalResourceRef.current = null;
     };
-  }, [approvalScope, Boolean(experience), hasMobControlSurface, consoleReadOnly, approvalsDecidable, consoleController]);
+  }, [approvalScope, Boolean(experience), hasMobControlSurface, consoleReadOnly, approvalsDecidable, signInToDecide, consoleController]);
   // Scope changes hide the previous principal's snapshot before effects run.
   const activeApprovals = approvalSnapshot?.owner === consoleController && approvalSnapshot.snapshot.scopeKey === approvalScope
     ? approvalSnapshot.snapshot : undefined;
@@ -6278,7 +6298,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onRefresh={() => void refreshWorkGraphData()}
           onClaim={workGraphPanelHandlers.onClaim}
           onClose={workGraphPanelHandlers.onClose}
-          canRelease={(item) => workGraphClaimOwnedBy(item, workGraphClaimant)}
+          canRelease={(item) => workGraphMayRelease(item, { principal: workGraphClaimant, canAdminister: workGraphAdmin })}
           onRelease={({ itemId, revision }) => {
             // Same CAS rule as the other item actions: an unobserved
             // revision is resolved live, never guessed.

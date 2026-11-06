@@ -9,6 +9,7 @@ import {
   resolveWorkGraphItemRevision,
   workGraphClaimOwnedBy,
   workGraphConflictRefreshRequest,
+  workGraphMayRelease,
   type WorkGraphCommandRunner,
 } from "./workgraph-actions";
 
@@ -34,6 +35,15 @@ test("a claim is owned only by the principal its owner key names, and no princip
   assert.equal(workGraphClaimOwnedBy(claimed("agent", "ops@example.com"), "ops@example.com"), false);
   assert.equal(workGraphClaimOwnedBy({}, "ops@example.com"), false);
   assert.equal(workGraphClaimOwnedBy(claimed("principal", "ops@example.com"), undefined), false);
+});
+
+test("a claim is released by its owner or by an access admin with a principal, and nothing unclaimed is", () => {
+  const claimed = { claim: { owner: { key: { kind: "principal", id: "ops@example.com" } } } };
+  assert.equal(workGraphMayRelease(claimed, { principal: "ops@example.com" }), true);
+  assert.equal(workGraphMayRelease(claimed, { principal: "admin@example.com", canAdminister: true }), true);
+  assert.equal(workGraphMayRelease(claimed, { principal: "other@example.com" }), false);
+  assert.equal(workGraphMayRelease(claimed, { canAdminister: true }), false);
+  assert.equal(workGraphMayRelease({}, { principal: "admin@example.com", canAdminister: true }), false);
 });
 
 test("item revision resolution reads meta/workgraph/get and returns the live CAS token", async () => {

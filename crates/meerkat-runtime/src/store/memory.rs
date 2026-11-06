@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use indexmap::IndexMap;
@@ -761,11 +761,11 @@ impl ToolGrantTables {
 /// Test support: the self-fence an [`InMemoryRuntimeStore`] reports
 /// ([`InMemoryRuntimeStore::set_self_fence_for_test`]), shared by every clone
 /// of the store.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Default)]
 struct SelfFenceForTest(Arc<StdMutex<Option<Arc<dyn meerkat_core::host_store::SelfFence>>>>);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl std::fmt::Debug for SelfFenceForTest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SelfFenceForTest").finish_non_exhaustive()
@@ -827,7 +827,7 @@ pub struct InMemoryRuntimeStore {
     machine_lifecycle_cas_conflicts_remaining: Arc<AtomicUsize>,
     #[cfg(test)]
     machine_lifecycle_observe_errors_remaining: Arc<AtomicUsize>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     machine_lifecycle_commit_errors_remaining: Arc<AtomicUsize>,
     #[cfg(test)]
     machine_lifecycle_commit_ack_losses_remaining: Arc<AtomicUsize>,
@@ -838,7 +838,7 @@ pub struct InMemoryRuntimeStore {
     #[cfg(test)]
     snapshot_byte_probe_bytes: Arc<std::sync::atomic::AtomicU64>,
     /// The self-fence a row set for the store to report.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     self_fence_for_test: SelfFenceForTest,
 }
 
@@ -1025,8 +1025,9 @@ impl InMemoryRuntimeStore {
     /// again: a store whose writes hold a host store fence, for rows of the
     /// runtime's waits at a store fence gap. The store's own writes do not
     /// consult it.
-    #[cfg(test)]
-    pub(crate) fn set_self_fence_for_test(
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn set_self_fence_for_test(
         &self,
         fence: Option<Arc<dyn meerkat_core::host_store::SelfFence>>,
     ) {
@@ -1135,7 +1136,7 @@ impl InMemoryRuntimeStore {
             machine_lifecycle_cas_conflicts_remaining: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             machine_lifecycle_observe_errors_remaining: Arc::new(AtomicUsize::new(0)),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             machine_lifecycle_commit_errors_remaining: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             machine_lifecycle_commit_ack_losses_remaining: Arc::new(AtomicUsize::new(0)),
@@ -1143,7 +1144,7 @@ impl InMemoryRuntimeStore {
             direct_member_high_water_before: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
             snapshot_byte_probe_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             self_fence_for_test: SelfFenceForTest::default(),
         }
     }
@@ -1254,8 +1255,12 @@ impl InMemoryRuntimeStore {
             .fetch_add(1, Ordering::SeqCst);
     }
 
-    #[cfg(test)]
-    pub(crate) fn fail_next_machine_lifecycle_commit(&self) {
+    /// Test support: fail the store's next machine lifecycle commit (every
+    /// clone of the store shares the count) with a write failure, and write
+    /// nothing.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn fail_next_machine_lifecycle_commit(&self) {
         self.machine_lifecycle_commit_errors_remaining
             .fetch_add(1, Ordering::SeqCst);
     }
@@ -3079,7 +3084,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
     /// Test support: the self-fence a row set
     /// ([`InMemoryRuntimeStore::set_self_fence_for_test`]); none otherwise,
     /// as the trait's default.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn self_fence(&self) -> Option<Arc<dyn meerkat_core::host_store::SelfFence>> {
         self.self_fence_for_test
             .0
@@ -4757,7 +4762,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         commit: MachineLifecycleCommit,
         input_states: &[InputStatePersistenceRecord],
     ) -> Result<(), RuntimeStoreError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if self
             .machine_lifecycle_commit_errors_remaining
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {

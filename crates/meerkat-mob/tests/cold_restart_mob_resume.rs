@@ -13517,6 +13517,67 @@ async fn a_host_settle_retried_after_a_lost_reply_answers_not_retained() {
     let _ = held.handle.shutdown().await;
 }
 
+/// A host that retires a member it holds for its recovery leaves no
+/// `HostRecovery` staged for the member's session: once the member left the
+/// roster, the host can no longer release the hold through the mob, so the
+/// retire drops it, as it drops a mob Stop's `MobStop`, and a later
+/// registration of that session id is not held for it. RED before: the
+/// retire dropped only `MobStop`.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retire_drops_the_departed_members_host_recovery_hold() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let run = stop_gracefully_over_an_open_member_run(&paths, runtime_store.clone(), true).await;
+    let held = start_held_for_recovery(&paths, runtime_store.clone(), &run).await;
+    let settled = tokio::time::timeout(
+        Duration::from_secs(30),
+        held.handle.settle_member_retained_run(&held.worker),
+    )
+    .await
+    .expect("the settle answers once the run's input has ended")
+    .expect("the settle is accepted");
+    assert!(
+        matches!(
+            settled,
+            meerkat_runtime::RetainedRunSettlement::Settled { .. }
+        ),
+        "the member's kept run is settled, not {settled:?}"
+    );
+    assert!(
+        held.runtime.registration_run_start_hold_staged(
+            &run.w1_sid,
+            meerkat_runtime::RunStartHoldReason::HostRecovery
+        ),
+        "the host's hold stays staged until its release"
+    );
+
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        held.handle.retire(held.worker.clone()),
+    )
+    .await
+    .expect("the retire settles")
+    .expect("the held member retires");
+    assert!(
+        !held.runtime.registration_run_start_hold_staged(
+            &run.w1_sid,
+            meerkat_runtime::RunStartHoldReason::HostRecovery
+        ),
+        "the retire drops the departed member's recovery hold"
+    );
+    assert_eq!(
+        held.client
+            .loop_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no model request"
+    );
+    let _ = held.handle.shutdown().await;
+}
+
 /// A host's graceful shutdown with a requeue bound suspends a member's run
 /// at its last round commit, and the next start comes after the bound has
 /// passed. The start settles the kept run as expired instead of resuming it

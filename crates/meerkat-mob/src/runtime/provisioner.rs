@@ -10808,6 +10808,90 @@ pub(super) async fn prepare_prepared_runtime_session_state(
 mod tests {
     use super::session_turn_error_to_mob_error;
 
+    /// A runtime refusal of a member's retained-run settle maps to a typed
+    /// mob refusal: a registration that is gone, draining for its unregister
+    /// or owing one answers `MemberSessionNotLive`, and one that needs a
+    /// durability reload (its settlement's write failed, say) answers
+    /// `MemberReloadRequired`. Any other refusal stays internal. RED before:
+    /// only the absent registration was typed, and the rest were
+    /// `MobError::Internal` text a host cannot branch on.
+    #[cfg(feature = "runtime-adapter")]
+    #[test]
+    fn the_retained_run_settle_answers_typed_mob_refusals() {
+        use super::retained_run_settle_refusal;
+        use crate::{AgentIdentity, MobError};
+        use meerkat_runtime::RuntimeDriverError;
+        let identity = AgentIdentity::from("w-1");
+        let session_id = meerkat_core::types::SessionId::new();
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        for (error, unregister_owed) in [
+            (
+                RuntimeDriverError::NotReady {
+                    state: meerkat_runtime::RuntimeState::Destroyed,
+                },
+                false,
+            ),
+            (
+                RuntimeDriverError::UnregisterInProgress { runtime_id },
+                false,
+            ),
+            (
+                RuntimeDriverError::UnregisterFinalizationOutcomeUnknown {
+                    reason: "the unregister's final transition is staged".to_string(),
+                },
+                true,
+            ),
+            (
+                RuntimeDriverError::ValidationFailed {
+                    reason: "the teardown-only anchor".to_string(),
+                },
+                true,
+            ),
+        ] {
+            let refusal = error.to_string();
+            let mapped =
+                retained_run_settle_refusal(error, &identity, session_id.clone(), unregister_owed);
+            assert!(
+                matches!(
+                    &mapped,
+                    MobError::MemberSessionNotLive { agent_identity, session_id: refused }
+                        if agent_identity == &identity && refused == &session_id
+                ),
+                "{refusal} answers MemberSessionNotLive, not {mapped:?}"
+            );
+        }
+        let reload = retained_run_settle_refusal(
+            RuntimeDriverError::RecoveryRepairBlocked {
+                evidence_digest: None,
+                reason: "durability reload required".to_string(),
+            },
+            &identity,
+            session_id.clone(),
+            false,
+        );
+        assert!(
+            matches!(
+                &reload,
+                MobError::MemberReloadRequired { member_id, reason }
+                    if member_id == &identity && reason == "durability reload required"
+            ),
+            "a reload refusal answers MemberReloadRequired, not {reload:?}"
+        );
+        let other = retained_run_settle_refusal(
+            RuntimeDriverError::ValidationFailed {
+                reason: "not an unregister".to_string(),
+            },
+            &identity,
+            session_id,
+            false,
+        );
+        assert!(
+            matches!(other, MobError::Internal(_)),
+            "a validation failure of a registration that owes no unregister stays internal, \
+             not {other:?}"
+        );
+    }
+
     /// A retirement stage carries the runtime's repair-blocked refusal of a
     /// member reload as typed data, which the retirement maps to
     /// `MobError::MemberReloadRepairBlocked` for that session only; any other
@@ -15106,6 +15190,32 @@ pub(crate) mod provision_finish_test_hooks {
     }
 }
 
+/// The mob's refusal for a runtime refusal of a member's retained-run settle
+/// ([`MobProvisioner::settle_member_retained_run`]). `unregister_owed` is
+/// the runtime's [`MeerkatMachine::unregister_owed`] for the member's
+/// session, read after the refusal.
+#[cfg(feature = "runtime-adapter")]
+fn retained_run_settle_refusal(
+    error: meerkat_runtime::RuntimeDriverError,
+    member_identity: &AgentIdentity,
+    session_id: SessionId,
+    unregister_owed: bool,
+) -> MobError {
+    // RED stub: only the absent registration is typed.
+    let _ = unregister_owed;
+    match error {
+        meerkat_runtime::RuntimeDriverError::NotReady {
+            state: meerkat_runtime::RuntimeState::Destroyed,
+        } => MobError::MemberSessionNotLive {
+            agent_identity: member_identity.clone(),
+            session_id,
+        },
+        error => MobError::Internal(format!(
+            "settling the retained run of '{session_id}' failed: {error}"
+        )),
+    }
+}
+
 /// One fresh member, provisioned and held before its publication.
 ///
 /// Its agent is built and finished, under the selection its host made from
@@ -15934,17 +16044,15 @@ impl MobProvisioner for SessionBackend {
         };
         match adapter.settle_retained_run(&session_id).await {
             Ok(settlement) => Ok(settlement),
-            // No registration of the session in this process: the member's
-            // session has no live runtime here, and nothing wakes it.
-            Err(meerkat_runtime::RuntimeDriverError::NotReady {
-                state: meerkat_runtime::RuntimeState::Destroyed,
-            }) => Err(MobError::MemberSessionNotLive {
-                agent_identity: member_identity.clone(),
-                session_id,
-            }),
-            Err(error) => Err(MobError::Internal(format!(
-                "settling the retained run of '{session_id}' failed: {error}"
-            ))),
+            Err(error) => {
+                let unregister_owed = adapter.unregister_owed(&session_id).await;
+                Err(retained_run_settle_refusal(
+                    error,
+                    member_identity,
+                    session_id,
+                    unregister_owed,
+                ))
+            }
         }
     }
 

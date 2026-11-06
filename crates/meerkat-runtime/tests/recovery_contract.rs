@@ -6697,6 +6697,18 @@ async fn a_runtime_held_for_recovery(
         session_id,
         meerkat_runtime::RunStartHoldReason::HostRecovery,
     );
+    let executor = a_registration_held_for_recovery(&machine, session_id, run_id).await;
+    (machine, executor)
+}
+
+/// Register `session_id` on `machine`, whose host staged its recovery hold,
+/// with `run_id` kept resumable, and attach an executor whose runtime loop
+/// parks on the hold.
+async fn a_registration_held_for_recovery(
+    machine: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    run_id: &RunId,
+) -> PublishingRuns {
     machine
         .register_session(session_id.clone())
         .await
@@ -6711,6 +6723,7 @@ async fn a_runtime_held_for_recovery(
         .await
         .expect("bind the runtime placement");
     let mut parks = machine.run_start_held_parks();
+    let parked_before = *parks.borrow();
     let executor = PublishingRuns::new();
     machine
         .ensure_session_with_executor(session_id.clone(), Box::new(executor.clone()))
@@ -6718,12 +6731,12 @@ async fn a_runtime_held_for_recovery(
         .expect("attach the executor");
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        parks.wait_for(|parks| *parks >= 1),
+        parks.wait_for(|parks| *parks > parked_before),
     )
     .await
     .expect("the runtime loop parks on the host's hold")
     .expect("the park counter stays open");
-    (machine, executor)
+    executor
 }
 
 /// A host that holds a session's run starts for its recovery settles the
@@ -7074,6 +7087,186 @@ async fn a_host_recovery_hold_is_released_only_by_its_own_reason() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert_eq!(executor.runs.applied(), vec![input.id().clone()]);
+}
+
+/// A host's settle whose settlement never commits is not answered
+/// `Settled`. The runtime loop's write of the settlement fails, so the
+/// registration needs a durability reload, which loses the stop the machine
+/// recorded: the call answers the registration's reload refusal, the run's
+/// input keeps no terminal and its tail stands, and nothing runs, since the
+/// host's hold keeps the run from resuming. After the reload, which applies
+/// the staged hold again, a settle settles the run. RED before: the call
+/// answered `Settled` from the waiters' wake-up, with no terminal.
+#[tokio::test]
+async fn a_host_settle_whose_settlement_write_fails_is_refused_until_the_reload() {
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let (session_id, run_id, input) = a_kept_run(&store, InputLifecycleState::Staged).await;
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let (machine, executor) = a_runtime_held_for_recovery(&store, &session_id, &run_id).await;
+
+    // The runtime loop's write of the settlement fails.
+    store.fail_next_machine_lifecycle_commit();
+    let refused = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        machine.settle_retained_run(&session_id),
+    )
+    .await
+    .expect("the settle answers once its settlement ended");
+    assert!(
+        matches!(
+            refused,
+            Err(meerkat_runtime::RuntimeDriverError::RecoveryRepairBlocked { .. })
+        ),
+        "a settlement that did not commit answers the registration's reload refusal, not \
+         {refused:?}"
+    );
+    assert!(
+        machine
+            .durability_reload_required(&session_id)
+            .await
+            .is_some(),
+        "the registration needs a durability reload"
+    );
+    assert!(
+        matches!(
+            stored_terminal(&store, &runtime_id, input.id()).await,
+            Some((_, None))
+        ),
+        "the run's input keeps no terminal"
+    );
+    assert!(
+        store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .expect("read the provisional tail")
+            .is_some(),
+        "the kept run's tail stands"
+    );
+    assert!(executor.runs.applied().is_empty(), "nothing runs");
+
+    // The reload: the degraded registration is discarded, and the session
+    // registers again from the store, under the host's staged hold.
+    let witness = machine
+        .current_session_registration_witness(&session_id)
+        .await
+        .expect("the degraded registration");
+    machine
+        .recover_or_discard_reload_required_registration_if_current(&witness)
+        .await
+        .expect("the reload discards the degraded registration");
+    let executor = a_registration_held_for_recovery(&machine, &session_id, &run_id).await;
+    let settled = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        machine.settle_retained_run(&session_id),
+    )
+    .await
+    .expect("the settle after the reload answers")
+    .expect("the settle after the reload is accepted");
+    let meerkat_runtime::RetainedRunSettlement::Settled {
+        run_id: settled_run,
+        inputs,
+    } = settled
+    else {
+        panic!("after the reload the kept run is settled, not {settled:?}");
+    };
+    assert_eq!(settled_run, run_id, "the settle names the kept run");
+    assert_eq!(
+        inputs
+            .iter()
+            .map(|input| input.terminal.clone())
+            .collect::<Vec<_>>(),
+        vec![Some(InputTerminalOutcome::Abandoned {
+            reason: meerkat_runtime::input_state::InputAbandonReason::Cancelled,
+        })],
+        "the receipt carries the input's committed terminal"
+    );
+    assert_eq!(
+        stored_terminal(&store, &runtime_id, input.id()).await,
+        SETTLED_ROW,
+        "the run's input ends cancelled"
+    );
+    assert!(
+        store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .expect("read the provisional tail")
+            .is_none(),
+        "the kept run's provisional tail is closed"
+    );
+    assert!(executor.runs.applied().is_empty(), "nothing runs");
+}
+
+/// A store fence another writer took: its window still reads open, and it
+/// is lost for good.
+struct LostFence;
+
+#[async_trait::async_trait]
+impl meerkat_core::host_store::SelfFence for LostFence {
+    fn window(&self) -> meerkat_core::host_store::SelfFenceWindow {
+        meerkat_core::host_store::SelfFenceWindow {
+            elapsed: std::time::Duration::from_secs(1),
+            window: std::time::Duration::from_secs(2),
+            renew_failed: false,
+        }
+    }
+
+    fn lost(&self) -> bool {
+        true
+    }
+}
+
+/// A host's settle on a writer whose store fence another writer took is not
+/// answered `Settled`: the runtime loop meets the lost fence before it
+/// settles anything, tells the run's waiters that their inputs stay queued
+/// for the new owner, and tears the session down. The call answers the
+/// refusal of a session that leaves this process, the run's input keeps no
+/// terminal and its tail stands for the new owner, and nothing runs here.
+/// RED before: the call answered `Settled` from the waiters' wake-up, with no
+/// terminal.
+#[tokio::test]
+async fn a_host_settle_on_a_writer_that_lost_its_store_fence_is_refused() {
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let (session_id, run_id, input) = a_kept_run(&store, InputLifecycleState::Staged).await;
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let (machine, executor) = a_runtime_held_for_recovery(&store, &session_id, &run_id).await;
+
+    // Another writer takes the session store's fence.
+    store.set_self_fence_for_test(Some(Arc::new(LostFence)));
+    let refused = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        machine.settle_retained_run(&session_id),
+    )
+    .await
+    .expect("the settle answers once the session's waiters were told");
+    assert!(
+        matches!(
+            refused,
+            Err(meerkat_runtime::RuntimeDriverError::NotReady { .. }
+                | meerkat_runtime::RuntimeDriverError::UnregisterInProgress { .. }
+                | meerkat_runtime::RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { .. })
+        ),
+        "a settle on a writer that lost its store fence answers the refusal of a session that \
+         leaves this process, not {refused:?}"
+    );
+    assert!(
+        matches!(
+            stored_terminal(&store, &runtime_id, input.id()).await,
+            Some((_, None))
+        ),
+        "the run's input stays queued for the new owner, with no terminal"
+    );
+    assert!(
+        store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .expect("read the provisional tail")
+            .is_some(),
+        "the kept run's tail stands for the new owner"
+    );
+    assert!(
+        executor.runs.applied().is_empty(),
+        "nothing runs in this process"
+    );
 }
 
 /// Completes every run it is asked to apply, as [`RecordedRuns`] does, but

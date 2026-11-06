@@ -115,6 +115,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   password hashes and managed with the application's setup. At sign-in an
   empty account name is the installation's own account. Each person is
   their own principal in the console, its access rules and its records.
+- Forge: the front forwards native consent reads and decisions
+  (`/host/toolkit/consent/read` and `/decide`) under the setup routes'
+  rules, so people decide native consent in the console as themselves.
 
 ### Fixed
 

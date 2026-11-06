@@ -75,6 +75,10 @@ pub const CONSOLE_REVOKE_SESSIONS_METHOD: &str = "meta/console/revoke_sessions";
 /// accepted, and the caller scope a client sends back with a change. Served
 /// on the Console route only; the stdin host is not a Console caller.
 pub const CONSOLE_WHOAMI_METHOD: &str = "meta/console/whoami";
+/// The console audit log: one row per console change, naming who made it and
+/// how it ended, read a page at a time after a cursor. Served on the Console
+/// route only, under the `audit.view` access action.
+pub const CONSOLE_AUDIT_METHOD: &str = "meta/console/audit";
 /// `meta/capabilities.feature_capabilities` name of a keyed `meta/send` that
 /// takes `handling_mode`; a gateway without it ignores the mode and queues.
 pub(crate) const KEYED_SEND_HANDLING_MODE_FEATURE: &str = "keyed_send_handling_mode";
@@ -1281,6 +1285,7 @@ pub fn handle_meta_rpc_json(
                         entries,
                         gap,
                         params.after_audit_id.as_deref(),
+                        runtime.gating_retention(),
                     )),
                     error: None,
                 }
@@ -3797,6 +3802,7 @@ async fn handle_unified_rpc_json_inner(
                     }
                     None => (runtime.gating_audit_entries(params.limit).await, false),
                 };
+                let retention = runtime.gating_retention().await;
                 JsonRpcResponse {
                     jsonrpc: JSONRPC_VERSION.to_string(),
                     id: response_id,
@@ -3804,6 +3810,7 @@ async fn handle_unified_rpc_json_inner(
                         entries,
                         gap,
                         params.after_audit_id.as_deref(),
+                        retention,
                     )),
                     error: None,
                 }

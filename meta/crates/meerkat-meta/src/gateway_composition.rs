@@ -325,6 +325,10 @@ impl GatewayComposition<PreparedGateway> {
             )
         })
         .await?;
+        // The stock gateways keep the gating owner's state in the realm's
+        // metadata store across restarts, restored here, before anything
+        // can evaluate a gating action.
+        runtime.keep_gating_state_in_realm().await;
         Ok(GatewayComposition {
             profile: self.profile,
             state: BootstrappedGateway { runtime },

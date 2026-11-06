@@ -616,6 +616,7 @@ mod tests {
             job_health_projection: None,
             governed_ingress: Default::default(),
             mob_announcements: Default::default(),
+            console_audit: None,
         }
     }
 

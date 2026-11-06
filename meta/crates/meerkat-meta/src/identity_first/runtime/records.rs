@@ -10,15 +10,15 @@
 //!   and read by `meta/identity/resolved_tools` for a member Core holds
 //!   Dormant, which no read materializes;
 //! - the rotation intent: a fresh life (`reset`, `delete_identity`) Meta
-//!   asked Core to start, recorded before Core is asked and removed once
-//!   Core answers. Core finishes a rotation a crash interrupted from its own
-//!   record, and no roster pass reads this one: it stays written for a
-//!   rollback, whose roster pass drives the rotation it names to its end, or
-//!   settles it when Core already did.
+//!   asked Core to start, a mirror written for a rollback to 0.9.10, whose
+//!   roster pass drives the rotation it names to its end, or settles it when
+//!   Core already did (O3, until 0.9.12). It is written after Core's answer
+//!   and never read: Core finishes a rotation a crash interrupted from its
+//!   own record.
 //!
 //! Without a durable store both are kept for this process only.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use meerkat_core::types::SessionId;
@@ -136,17 +136,22 @@ impl IdentityRuntime {
         }
     }
 
-    /// Record `identity`'s rotation before Core is asked for it. Refused
-    /// typed when the record cannot be written: a rotation a crash
-    /// interrupted with no record would be left half done, so none starts.
+    /// Write `identity`'s rotation record after Core's answer to a rotation
+    /// that may have started (`verb`, from `from_generation`), as 0.9.10
+    /// leaves its record at rest: a rollback to 0.9.10 drives that rotation
+    /// to its end, or settles it when Core already did. Nothing reads it
+    /// here. A process that stops after Core journaled the rotation and
+    /// before this write leaves no record: a rollback's Core 0.9.10 finishes
+    /// that rotation from its own record (RecoverMemberRotationIntent), as
+    /// this Core does. A failed write is logged.
     pub(super) async fn record_rotation_intent(
         &self,
         identity: &AgentIdentity,
         verb: &'static str,
         from_generation: Option<u64>,
-    ) -> Result<(), IdentityRuntimeError> {
+    ) {
         let (store, mob_id) = self.identity_record_store();
-        store
+        if let Err(error) = store
             .set_identity_rotation_intent(&IdentityRotationIntent {
                 mob_id,
                 identity: identity.as_str().to_string(),
@@ -155,18 +160,19 @@ impl IdentityRuntime {
                 recorded_at_ms: unix_ms_now(),
             })
             .await
-            .map_err(|error| IdentityRuntimeError::IdentityWakeRetryable {
-                identity: identity.clone(),
-                session_id: None,
-                detail: format!(
-                    "the {verb} was not started: its rotation could not be recorded ({error})"
-                ),
-            })
+        {
+            tracing::warn!(
+                %identity,
+                %error,
+                "the record of a rotation that may have started could not be written; Core \
+                 finishes the rotation from its own record"
+            );
+        }
     }
 
-    /// Remove `identity`'s rotation intent once Core answered its rotation.
-    /// A failed removal is logged: the record stays until the identity's next
-    /// rotation replaces it.
+    /// Remove `identity`'s rotation record once Core carried its rotation out,
+    /// as 0.9.10 leaves it at rest. A failed removal is logged: the record
+    /// stays until the identity's next rotation replaces or removes it.
     pub(super) async fn clear_rotation_intent(&self, identity: &AgentIdentity) {
         let (store, mob_id) = self.identity_record_store();
         if let Err(error) = store
@@ -180,63 +186,6 @@ impl IdentityRuntime {
                  identity's next rotation replaces the record"
             );
         }
-    }
-
-    /// Put `identity`'s rotation record back as it was before a rotation
-    /// Core refused before any of it started: `earlier`, the record an
-    /// earlier call left, or none. A failed write is logged: the record of
-    /// the refused rotation then stays, and a rollback's roster pass may
-    /// carry that rotation out.
-    pub(super) async fn restore_rotation_intent(
-        &self,
-        identity: &AgentIdentity,
-        earlier: Option<IdentityRotationIntent>,
-    ) {
-        let (store, mob_id) = self.identity_record_store();
-        let restored = match &earlier {
-            Some(earlier) => store.set_identity_rotation_intent(earlier).await,
-            None => {
-                store
-                    .clear_identity_rotation_intent(&mob_id, identity.as_str())
-                    .await
-            }
-        };
-        if let Err(error) = restored {
-            tracing::warn!(
-                %identity,
-                %error,
-                "the record of a rotation Core refused could not be taken back; a rollback's \
-                 roster pass may carry that rotation out"
-            );
-        }
-    }
-
-    /// The rotation intents recorded for this runtime's identities, by
-    /// identity. A record naming no valid identity is skipped and logged.
-    pub(crate) async fn pending_rotation_intents(
-        &self,
-    ) -> Result<BTreeMap<AgentIdentity, IdentityRotationIntent>, IdentityRuntimeError> {
-        let (store, mob_id) = self.identity_record_store();
-        let intents = store
-            .load_identity_rotation_intents(&mob_id)
-            .await
-            .map_err(|error| IdentityRuntimeError::MemberHistoryUnavailable {
-                detail: format!("reading the identities' rotation records: {error}"),
-            })?;
-        Ok(intents
-            .into_iter()
-            .filter_map(|intent| match AgentIdentity::parse(&intent.identity) {
-                Ok(identity) => Some((identity, intent)),
-                Err(error) => {
-                    tracing::warn!(
-                        identity = %intent.identity,
-                        %error,
-                        "a rotation record names no valid identity; it is skipped"
-                    );
-                    None
-                }
-            })
-            .collect())
     }
 
     /// Record the visible tools of `identity`'s member as of the build Core

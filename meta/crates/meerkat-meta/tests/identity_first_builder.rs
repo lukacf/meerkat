@@ -7121,8 +7121,9 @@ async fn an_interrupted_rotation_of_a_listed_identity_never_leaves_its_wakes_ref
             .map(meerkat_mob::Generation::get);
         drop(identities);
         // What a reset leaves behind when the process ends inside its
-        // rotation: Meta's record of the rotation, written before Core was
-        // asked.
+        // rotation: Meta's record of the rotation (as Meta 0.9.10 writes it
+        // before Core is asked, or this Meta after an answer that may have
+        // started it).
         let recorded_at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("the clock reads")

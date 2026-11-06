@@ -784,12 +784,12 @@ impl FreshLife {
 }
 
 /// What a fresh life's rotation that Core did not carry out leaves to settle
-/// ([`IdentityRuntime::refused_rotation`]): the rotation record an earlier
-/// call left, the retirement the call prepared, the head of Core's journal
-/// the call read before it asked Core, and the fact the rotation journals
-/// first.
+/// ([`IdentityRuntime::refused_rotation`]): the generation the rotation
+/// rotates from (its rotation record's, should the rotation have started),
+/// the retirement the call prepared, the head of Core's journal the call
+/// read before it asked Core, and the fact the rotation journals first.
 struct RefusedRotation {
-    earlier: Option<crate::runtime::IdentityRotationIntent>,
+    from_generation: Option<u64>,
     retiring: Option<lifecycle_projection::PreparedRetirement>,
     asked_after: Option<u64>,
     first: lifecycle_projection::StepFirstFact,
@@ -14236,18 +14236,25 @@ impl IdentityRuntime {
     /// exactly once. Inputs still queued on the retired incarnation end with
     /// it, typed. Never composed from a spawn and a retire.
     ///
-    /// The rotation is recorded durably before Core is asked and removed
-    /// once Core answers; Core finishes a rotation a crash interrupted from
-    /// its own record. A rotation Core refuses before any of it
-    /// starts takes its record back and answers the refusal, and so does one
-    /// whose fresh life the launch's member auth binding refuses at its
-    /// build (Core spawns the fresh life of an identity it does not hold
-    /// that owes a kickoff live; answered final, `HostRejectedBuild`), so no
-    /// later compile or restart carries it out. Returns the fresh session.
+    /// Core finishes a rotation a crash interrupted from its own record. A
+    /// rotation Core refuses before any of it starts answers the refusal,
+    /// and so does one whose fresh life the launch's member auth binding
+    /// refuses at its build (Core spawns the fresh life of an identity it
+    /// does not hold that owes a kickoff live; answered final,
+    /// `HostRejectedBuild`), so no later compile or restart carries it out.
+    /// Returns the fresh session.
+    ///
+    /// The rotation record is a mirror written for a rollback to 0.9.10,
+    /// whose roster pass drives the rotation a record names to its end (O3,
+    /// until 0.9.12). It is written after Core's answer and never read: a
+    /// rotation Core carried out removes the identity's record, one that
+    /// may have started writes it (its verb and the generation it rotates
+    /// from), as 0.9.10 leaves its record at rest, and one Core refused
+    /// before any of it started leaves the records as they were.
     ///
     /// What the retirement of the live incarnation owes (`life`'s side
     /// effects, run by the lifecycle projection once Core journaled it) is
-    /// recorded before Core is asked too, with the incarnation as the
+    /// recorded before Core is asked, with the incarnation as the
     /// retirement hook reads it and the build the customizer is told of.
     /// `last` is Core's binding of the identity as the verb read it, before
     /// the build: Core's binding is read again once the head of Core's
@@ -14293,20 +14300,6 @@ impl IdentityRuntime {
         let (draft, customizer) = self
             .fresh_life_draft(identity, &spec, foreground_shutdown, operation)
             .await?;
-        // A rotation an earlier call left recorded, which Core may have
-        // started, stays recorded whatever this call's answer.
-        let earlier_rotation = self
-            .pending_rotation_intents()
-            .await
-            .map_err(|error| IdentityRuntimeError::IdentityWakeRetryable {
-                identity: identity.clone(),
-                session_id: None,
-                detail: format!(
-                    "the {operation} was not started: the identity's rotation records could not \
-                     be read ({error})"
-                ),
-            })?
-            .remove(identity);
         // The head of Core's journal before Core is asked: after a failure,
         // the fact the rotation journals first, past it, says the rotation
         // reached Core. A head that does not read refuses the step here.
@@ -14344,16 +14337,11 @@ impl IdentityRuntime {
         let retiring = self
             .prepare_lifecycle_retirement_of(identity, last, life.effect_verb(), asked_after)
             .await?;
+        // The generation the rotation rotates from, which its rotation
+        // record names should the rotation have started.
         let from_generation = retiring
             .as_ref()
             .and_then(lifecycle_projection::PreparedRetirement::live_generation);
-        if let Err(error) = self
-            .record_rotation_intent(identity, operation, from_generation)
-            .await
-        {
-            self.abandon_lifecycle_retirement(retiring).await;
-            return Err(error);
-        }
         // The customizer that built the fresh life is told of its session
         // once the lifecycle projection reaches its seat.
         if customizer.is_some() {
@@ -14367,7 +14355,7 @@ impl IdentityRuntime {
                         identity,
                         operation,
                         RefusedRotation {
-                            earlier: earlier_rotation,
+                            from_generation,
                             retiring,
                             asked_after,
                             first,
@@ -14379,6 +14367,8 @@ impl IdentityRuntime {
         };
         self.run_fresh_life_answered_hook().await;
         self.bind_lifecycle_build(identity, &session_id);
+        // Core carried the rotation out: the mirror holds no record of the
+        // identity, as 0.9.10 leaves it at rest once Core answers.
         self.clear_rotation_intent(identity).await;
         self.settle_lifecycle_retirement(retiring).await;
         // Core's rotation ends the identity's wiring with its incarnation:
@@ -14401,15 +14391,16 @@ impl IdentityRuntime {
     /// what the call recorded. Core's journal says whether any of the
     /// rotation reached Core ([`Self::lifecycle_step_reach`]): when the fact
     /// the rotation journals first does not follow the head the call read
-    /// before it asked Core, nothing of it reached Core, so the rotation
-    /// record this call wrote is taken back, an earlier call's put back as
-    /// it was, and so is what the retirement it prepared would owe
-    /// (`retiring`): no later compile or restart carries the rotation out,
-    /// and the bridge's error picks the answer. Otherwise (the fact follows,
-    /// or the journal does not read) the rotation may have started, so its
-    /// records stay: Core finishes it when the mob next starts, and the same
-    /// verb asked again while it stands finishes it now. The answer says so,
-    /// whatever the error.
+    /// before it asked Core, nothing of it reached Core, so what the
+    /// retirement it prepared would owe (`retiring`) is taken back and the
+    /// rotation records stay as they were: no later compile or restart
+    /// carries the rotation out, and the bridge's error picks the answer.
+    /// Otherwise (the fact follows, or the journal does not read) the
+    /// rotation may have started, so what the retirement owes stays, and
+    /// its rotation record is written, as 0.9.10 leaves it at rest: Core
+    /// finishes it when the mob next starts, and the same verb asked again
+    /// while it stands finishes it now. The answer says so, whatever the
+    /// error.
     async fn refused_rotation(
         &self,
         identity: &AgentIdentity,
@@ -14418,7 +14409,7 @@ impl IdentityRuntime {
         error: BridgeError,
     ) -> IdentityRuntimeError {
         let RefusedRotation {
-            earlier,
+            from_generation,
             retiring,
             asked_after,
             first,
@@ -14428,6 +14419,12 @@ impl IdentityRuntime {
             .await
             != lifecycle_projection::StepReach::NotReached
         {
+            // The rollback mirror, written after Core's answer. A process
+            // that stops after Core journaled the rotation and before this
+            // write leaves no record: a rollback's Core 0.9.10 finishes that
+            // rotation from its own record (RecoverMemberRotationIntent).
+            self.record_rotation_intent(identity, operation, from_generation)
+                .await;
             return IdentityRuntimeError::Internal(format!(
                 "{operation} of identity {identity}: Core's rotation failed ({error}); it may \
                  have started: Core finishes it when the mob next starts, and the {operation} \
@@ -14436,7 +14433,6 @@ impl IdentityRuntime {
         }
         self.forget_lifecycle_build(identity);
         self.abandon_lifecycle_retirement(retiring).await;
-        self.restore_rotation_intent(identity, earlier).await;
         match error {
             BridgeError::RotationRefused { detail, .. } => {
                 IdentityRuntimeError::IdentityWakeRetryable {

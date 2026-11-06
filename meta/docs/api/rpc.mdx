@@ -1205,6 +1205,19 @@ Submit an identity-addressed console interaction through the console aggregator.
 persisted on the `user_input` frame so the console transcript labels the
 turn from typed data.
 
+The `user_input` frame of a console caller's send also records the send's
+thread, `thread`, which the console sets from the caller and the agent and
+no param names. `thread.audience` is `person` when the agent is private to
+the sender (their own side chat on a console with sign-in, or a member such
+a side chat created) and `shared` otherwise. The console keeps, for itself,
+the person the replies to the send are for: the sender, when the sender is
+a verified person on a console with sign-in (a schedule's fire: the
+schedule's sender). A reply meant for that person alone reaches them in that
+thread when it is `person`, and as an item of their attention list when it
+is `shared` (see `meta/console/attention`); nothing is appended to a shared
+conversation. A send that names no person (an open console's caller, a
+service, a token that names no person) has no private reply route.
+
 The response includes `interaction_id` and `identity`. The multipart JSON-RPC endpoint also accepts this method when `content` contains `image_upload` placeholders.
 
 `origin` and `idempotency_key` are required, non-empty strings after trimming.
@@ -1330,6 +1343,58 @@ realm, and for the process on `meta_gateway`, which keeps its metadata in
 memory. It keeps at most 20000 rows, none older than 365 days, each bound
 give or take one page of 64 rows; an embedder sets other bounds with
 `UnifiedRuntimeBuilder::console_audit_limits`.
+
+### `meta/console/attention`
+
+The caller's own attention items: replies meant for the caller alone that
+no private thread of theirs took, such as an answer to a request the caller
+made in a shared agent (see `meta/console/send`). Takes no params.
+Read-only, and served on the console route only. Only a verified person
+holds items, and reads them by its own identity (issuer and subject); every
+other caller (an open console's caller without a token, a service, a token
+that names no person) reads none, and no param names whose items are read.
+A console that keeps no attention list (a router built without a runtime)
+answers `-32601`.
+
+| Result field | Type | Description |
+|--------------|------|-------------|
+| `items` | `object[]` | The caller's items not dismissed, newest first, at most 100 (below) |
+| `retention` | `string` | How long the items are kept, from the metadata store the gateway opened: `durable` (across restarts) or `process` (for the life of the gateway process) |
+
+An item:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `string` | Opaque and stable; names the item to dismiss it |
+| `created_at_ms` | `integer` | When the item was delivered, in milliseconds since the epoch |
+| `kind` | `string` | `private_reply`: a reply to the caller's own request, made in a conversation that is not private to them. Other kinds may be added; a client shows what it knows and skips the rest |
+| `text` | `string` | The reply |
+| `origin.identity` | `string` | The agent the request was sent to |
+| `origin.interaction_id` | `string` | The request's interaction |
+| `origin.input_frame_id` | `string` | The request's `user_input` frame |
+
+A reply to a request made in the caller's own private thread is appended to
+that thread instead, as a `private_reply` frame (`payload.text`, and
+`payload.in_reply_to` with the request's `interaction_id` and
+`input_frame_id`; the frame's `caused_by_frame_id` is the request's frame),
+which only the caller and the access admins see. A reply is delivered once:
+the same reply again changes nothing. The items are kept in the realm's
+metadata store, as the console audit log is.
+
+### `meta/console/attention/dismiss`
+
+Dismiss one of the caller's own attention items. A console change: it takes
+`expected_caller_scope`, checks its caller again right before it is made,
+and a read-only console refuses it (`-32010`).
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `item_id` | `string` | The item's `id` |
+
+The result is `{ "item_id": ..., "dismissed": true }` when the item is the
+caller's (dismissed now or before), and `"dismissed": false` when the
+caller holds no such item, another person's included. A dismissed item is
+no longer listed; the reply stays delivered.
 
 ### `meta/console/recover_send`
 

@@ -133,6 +133,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   no realm documents unless it implements them, so it has no console audit
   log and keeps gating in memory.
 
+- A reply meant for one person (for example an answer released after a
+  review) reaches only that person: in their own private conversation when
+  they asked there, else as an item of their own attention list, never in
+  a shared conversation or on another viewer's stream. A console send's
+  `user_input` frame records its `thread` (who may read the replies to it:
+  `person` or `shared`). `meta/console/attention` lists the caller's own
+  items and `meta/console/attention/dismiss` dismisses one; a reply in a
+  private conversation is a `private_reply` frame there. A request from an
+  open console, a service or a token that names no person has no private
+  reply route.
+- Rust: `ConsoleLogStore` gains the provided
+  `send_frame_by_interaction`. A store outside Meta answers none unless it
+  implements it, so no reply reaches the senders of the sends it holds
+  privately.
+
 ### Changed
 
 - On a console with sign-in, a side chat is private to the person who

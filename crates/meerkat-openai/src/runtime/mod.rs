@@ -2225,10 +2225,12 @@ mod tests {
         async fn respond(State(payload): State<String>) -> impl IntoResponse {
             ([("content-type", "text/event-stream")], payload)
         }
-        let payload: String = data
-            .iter()
-            .map(|line| format!("data: {line}\n\n"))
-            .collect();
+        let payload = data.iter().fold(String::new(), |mut payload, line| {
+            payload.push_str("data: ");
+            payload.push_str(line);
+            payload.push_str("\n\n");
+            payload
+        });
         let app = Router::new()
             .route("/chat/completions", post(respond))
             .with_state(payload);

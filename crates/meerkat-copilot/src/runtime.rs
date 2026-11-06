@@ -3107,9 +3107,9 @@ impl CopilotAuthorizer {
             };
             if current.source_generation != source_generation
                 || current.token != cached.token
-                || !current
+                || current
                     .model_discovery_refresh_at
-                    .is_some_and(|refresh_at| now >= refresh_at)
+                    .is_none_or(|refresh_at| now < refresh_at)
             {
                 return;
             }

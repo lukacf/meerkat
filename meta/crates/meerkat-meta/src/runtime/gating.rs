@@ -879,8 +879,9 @@ impl MetaRuntimeHandle {
         self.gating_escalation_routes = routes;
     }
 
-    /// Decide as `request.approver_id`. For trusted embedding hosts and
-    /// unauthenticated local consoles, where the caller vouches for that id.
+    /// Decide as `request.approver_id`. For trusted embedding hosts and the
+    /// host's stdio RPC gateway, where the caller vouches for that id; the
+    /// decision records device trust.
     pub fn decide_gating_action(
         &mut self,
         request: GatingDecideRequest,
@@ -894,7 +895,8 @@ impl MetaRuntimeHandle {
     /// ignored. A requested approver must be the principal or an approver id
     /// the principal holds, and the decision records both. The generic gate
     /// keeps its self-approval prohibition, checked against the principal and
-    /// every held id.
+    /// every held id. The host vouches for the principal, so the decision
+    /// records device trust.
     pub fn decide_gating_action_for(
         &mut self,
         request: GatingDecideRequest,
@@ -913,7 +915,8 @@ impl MetaRuntimeHandle {
     /// Hold the fence that `authorize` reads
     /// across this whole call so revocation cannot land between the check
     /// and the mutation. Resolution notices are returned undelivered:
-    /// deliver them after releasing the fence and the owner.
+    /// deliver them after releasing the fence and the owner. Without the
+    /// console's attestation the decision records device trust.
     pub fn decide_gating_action_authorized<E>(
         &mut self,
         request: GatingDecideRequest,
@@ -1110,9 +1113,17 @@ impl MetaRuntimeHandle {
             "next_pending_id": next_pending_id,
             "origin": pending_entry.origin,
         });
-        if let Some(evidence) = evidence {
-            detail["deciding_assurance"] = serde_json::json!(evidence.assurance);
-            detail["login_scope_digest"] = serde_json::json!(evidence.login_scope_digest);
+        match evidence {
+            Some(evidence) => {
+                detail["deciding_assurance"] = serde_json::json!(evidence.assurance);
+                detail["login_scope_digest"] = serde_json::json!(evidence.login_scope_digest);
+            }
+            // A decision no console attested is the host's own (its stdio
+            // RPC gateway, an embedding host): device trust, never a person.
+            None => {
+                detail["deciding_assurance"] =
+                    serde_json::json!(meerkat_core::ApprovalAssurance::DeviceTrusted);
+            }
         }
         self.append_gating_audit(GatingAuditEntry {
             audit_id: String::new(),

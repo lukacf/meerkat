@@ -846,8 +846,9 @@ async fn claim_owner_is_caller() {
     assert!(accepted["error"].is_null(), "{accepted}");
 }
 
-/// Row 9. Only a claim's owner releases it from the Console: another caller
-/// is refused and the claim stays; the owner releases it.
+/// Row 9. A claim's owner releases it from the Console: a caller who is
+/// neither its owner nor an access admin is refused and the claim stays; the
+/// owner releases it.
 #[tokio::test]
 async fn release_by_non_owner_refused() {
     let console =

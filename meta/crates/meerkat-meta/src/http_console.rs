@@ -5152,9 +5152,23 @@ fn console_announcement_member_refusal(method: &str, params: &Value) -> Option<J
     })
 }
 
+/// [`console_rpc_access_violation`] under the access configuration committed
+/// now: a change that waited after the request's own access check re-reads
+/// its caller's grants right before it is handed to its owner, so a grant
+/// withdrawn meanwhile is honored. Without a controller there is nothing to
+/// re-read.
+pub(crate) fn live_access_violation(
+    view: Option<&AccessView>,
+    method: &str,
+    params: &Value,
+) -> Option<JsonRpcError> {
+    let live = view.map(AccessView::refreshed)?;
+    console_rpc_access_violation(Some(&live), method, params)
+}
+
 /// Returns the denial error when the caller's view forbids the method.
 /// Every mapped requirement must pass; the first failing one is reported.
-fn console_rpc_access_violation(
+pub(crate) fn console_rpc_access_violation(
     view: Option<&AccessView>,
     method: &str,
     params: &Value,
@@ -6575,10 +6589,13 @@ async fn handle_memory_quarantine_decide(
     )
     .await;
     // Right before the decision is handed to the store: a person, still
-    // current.
-    let Some(decider) = decider.filter(ConsoleApprovalDecider::still_current) else {
+    // current, under the grants the access configuration holds now.
+    let Some(decider) = decider else {
         return approver_unauthenticated_rpc_error(response_id);
     };
+    if let Err(error) = decider.recheck("meta/memory/quarantine/decide", params) {
+        return response_value(response_id, None, Some(error));
+    }
     let realm = request.realm.clone();
     let reviewer = crate::memory::review::QuarantineReviewer::Operator {
         principal: Some(decider.principal.clone()),
@@ -10404,6 +10421,9 @@ fn console_aggregator_unavailable(response_id: Value) -> Value {
 pub(crate) struct ConsoleApprovalDecider {
     human: crate::runtime::AuthenticatedConsoleHuman,
     principal: String,
+    /// The request's access view: its configuration is the one the request
+    /// started under, re-read when the decision is handed to its owner.
+    access: Option<AccessView>,
 }
 
 impl std::fmt::Debug for ConsoleApprovalDecider {
@@ -10419,6 +10439,7 @@ impl ConsoleApprovalDecider {
     fn of(
         governance: &ConsoleSendGovernance,
         authenticated_principal: Option<&str>,
+        access: Option<&AccessView>,
     ) -> Option<Self> {
         let human = governance.human.clone()?;
         let principal = authenticated_principal
@@ -10427,6 +10448,7 @@ impl ConsoleApprovalDecider {
         Some(Self {
             human,
             principal: principal.to_string(),
+            access: access.cloned(),
         })
     }
 
@@ -10442,6 +10464,21 @@ impl ConsoleApprovalDecider {
         self.human
             .current()
             .is_ok_and(|principal| principal == self.principal)
+    }
+
+    /// After the route's last await, right before the decision of `method`
+    /// is handed to its owner: the person is still current
+    /// (`approver_unauthenticated` otherwise), and the access configuration
+    /// committed now still grants the route's requirements (`access_denied`
+    /// otherwise), so a grant withdrawn while the request waited is honored.
+    pub(crate) fn recheck(&self, method: &str, params: &Value) -> Result<(), JsonRpcError> {
+        if !self.still_current() {
+            return Err(approver_unauthenticated_error());
+        }
+        match live_access_violation(self.access.as_ref(), method, params) {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// What the decision's audit records of the person's authentication.
@@ -10678,6 +10715,15 @@ async fn handle_console_runtime_rpc_with_visibility(
 
     match request.method.as_str() {
         "meta/capabilities" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+            // A decision (a gate, a quarantine review, a goal confirmation)
+            // is listed only to a signed-in person, as `whoami` reports one,
+            // and a claim and its release only to a caller with a principal
+            // to own it: every other caller is always refused them.
+            let decides = governance.human.is_some();
+            let owns = crate::rpc::workgraph_methods::console_trusted_principal(
+                authenticated_principal,
+            )
+            .is_some();
             let mut methods = vec![
                 "meta/status",
                 "meta/capabilities",
@@ -10756,7 +10802,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                     "meta/gating/pending",
                     "meta/gating/audit",
                 ]);
-                if can_mutate {
+                if can_mutate && decides {
                     methods.push("meta/gating/decide");
                 }
             }
@@ -10831,7 +10877,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                     "meta/memory/panel/harvests",
                     "meta/memory/panel/quarantine",
                 ]);
-                if can_mutate {
+                if can_mutate && decides {
                     // The operator half of quarantine review; the probe below
                     // strips it for callers without the reviewer grant.
                     methods.push("meta/memory/quarantine/decide");
@@ -10855,8 +10901,16 @@ async fn handle_console_runtime_rpc_with_visibility(
             if workgraph.is_some() {
                 methods.extend_from_slice(crate::rpc::workgraph_methods::WORKGRAPH_READ_METHODS);
                 if can_mutate {
-                    methods
-                        .extend_from_slice(crate::rpc::workgraph_methods::WORKGRAPH_MUTATE_METHODS);
+                    methods.extend(
+                        crate::rpc::workgraph_methods::WORKGRAPH_MUTATE_METHODS
+                            .iter()
+                            .copied()
+                            .filter(|method| match *method {
+                                "meta/workgraph/goal/confirm" => decides,
+                                "meta/workgraph/claim" | "meta/workgraph/release" => owns,
+                                _ => true,
+                            }),
+                    );
                     methods.extend_from_slice(
                         crate::rpc::workgraph_methods::WORKGRAPH_CONSOLE_MUTATE_METHODS,
                     );
@@ -11379,7 +11433,7 @@ async fn handle_console_runtime_rpc_with_visibility(
         "meta/memory/quarantine/decide" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             handle_memory_quarantine_decide(
                 memory_panel,
-                ConsoleApprovalDecider::of(governance, authenticated_principal),
+                ConsoleApprovalDecider::of(governance, authenticated_principal, access_view),
                 &request.params,
                 response_id,
             )
@@ -13065,7 +13119,8 @@ async fn handle_console_runtime_rpc_with_visibility(
                     );
                 }
             }
-            let Some(decider) = ConsoleApprovalDecider::of(governance, authenticated_principal)
+            let Some(decider) =
+                ConsoleApprovalDecider::of(governance, authenticated_principal, access_view)
             else {
                 return approver_unauthenticated_rpc_error(response_id);
             };
@@ -15043,20 +15098,24 @@ async fn handle_console_runtime_rpc_with_visibility(
             // The read-only gate and the workgraph.view/manage ABAC checks
             // already ran above; the surface carries the authenticated
             // console principal, which owns the caller's claims and which
-            // break_glass_reassign records as the audited operator, and the
-            // signed-in person, the only caller goal/confirm accepts. The
+            // break_glass_reassign records as the audited operator, the
+            // signed-in person, the only caller goal/confirm accepts, and
+            // the request's access view, which a confirmation and a release
+            // re-read after their last await. The
             // admission always comes from the runtime (never a parameter):
             // whatever constructed the service, the unified stdin surface
             // acquires the runtime's admission, so the console must acquire
             // that same one.
             let admission = runtime.workgraph_admission();
-            let person = ConsoleApprovalDecider::of(governance, authenticated_principal);
+            let person =
+                ConsoleApprovalDecider::of(governance, authenticated_principal, access_view);
             match crate::rpc::workgraph_methods::handle_workgraph_method(
                 workgraph,
                 &admission,
                 crate::rpc::workgraph_methods::WorkgraphSurface::Console {
                     authenticated_principal,
                     person: person.as_ref(),
+                    access: access_view,
                 },
                 method,
                 &request.params,

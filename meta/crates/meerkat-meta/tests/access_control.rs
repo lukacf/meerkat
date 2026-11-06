@@ -4819,8 +4819,10 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
             .iter()
             .any(|method| method == "meta/memory/quarantine/decide")
     };
+    // The decide is listed only to a signed-in person, and to one only once
+    // the reviewer grant exists.
     assert!(
-        !advertised(&rpc(&app, "meta/capabilities", json!({})).await),
+        !advertised(&rpc_as(&app, &reviewer, "meta/capabilities", json!({})).await),
         "decide needs the reviewer grant before it is advertised"
     );
 
@@ -4831,7 +4833,13 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
             ..AccessRule::default()
         })
         .expect("reviewer grant");
-    assert!(advertised(&rpc(&app, "meta/capabilities", json!({})).await));
+    assert!(advertised(
+        &rpc_as(&app, &reviewer, "meta/capabilities", json!({})).await
+    ));
+    assert!(
+        !advertised(&rpc(&app, "meta/capabilities", json!({})).await),
+        "a caller without a token reviews nothing, so it is never offered the decide"
+    );
 
     let decide = |verdict: &str, identity: &str, memory_id: &str, hash: &str| {
         json!({

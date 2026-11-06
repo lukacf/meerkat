@@ -104,6 +104,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   there it ends the Find as `retry_safe` (nothing admitted), as a change
   that outlasts the bound does.
 
+- A setup helper whose first submission meets another owner's brief hold on
+  the shared source state now waits for it within the submission's deadline
+  instead of never starting. The same input is submitted again, never twice;
+  a hold that outlasts the deadline answers `retry_safe` with nothing
+  admitted, and an expired source is still refused as before.
+
 - A Find no longer fails as temporarily unavailable (`tool_unavailable`)
   while another original's Find is writing the shared source state. Its
   setup helper admission waits for that write within the owner-change bound;

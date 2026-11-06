@@ -136,6 +136,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `expected_revision`, the stock Console sends the revision it showed, and
   a change made from an older read is refused with
   `schedule_revision_conflict`.
+- A Console WorkGraph action acts on the revision its card or row showed,
+  never on one read at the click; an action whose card showed none changes
+  nothing, says so, and reads the item again.
 
 ## [0.9.10] - 2026-11-04
 

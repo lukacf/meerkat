@@ -4,28 +4,10 @@ import test from "node:test";
 import { CONSOLE_COMMAND_NAMES, consoleCommandMethod } from "./headless";
 import {
   WORKGRAPH_CONFLICT_CODE,
-  resolveWorkGraphBindingRevision,
-  resolveWorkGraphGoalItemRevision,
-  resolveWorkGraphItemRevision,
+  WORKGRAPH_UNOBSERVED_REVISION_MESSAGE,
   workGraphClaimOwnerId,
   workGraphConflictRefreshRequest,
-  type WorkGraphCommandRunner,
 } from "./workgraph-actions";
-
-function stubRunner(
-  expectations: Array<{ command: string; params: Record<string, unknown>; result: unknown }>,
-): { run: WorkGraphCommandRunner; callCount: () => number } {
-  let index = 0;
-  const run: WorkGraphCommandRunner = async (command, params) => {
-    const expected = expectations[index];
-    assert.ok(expected, `unexpected extra command ${command}`);
-    index += 1;
-    assert.equal(command, expected.command);
-    assert.deepEqual(params, expected.params);
-    return expected.result;
-  };
-  return { run, callCount: () => index };
-}
 
 test("claim owner id prefers the authenticated operator subject and falls back to the ops-lead id", () => {
   assert.equal(workGraphClaimOwnerId("luka@example.com", "console-ops-lead"), "luka@example.com");
@@ -36,86 +18,20 @@ test("claim owner id prefers the authenticated operator subject and falls back t
   assert.equal(workGraphClaimOwnerId(undefined, "console-ops-lead"), "console-ops-lead");
 });
 
-test("item revision resolution reads meta/workgraph/get and returns the live CAS token", async () => {
-  const { run, callCount } = stubRunner([
-    {
-      command: CONSOLE_COMMAND_NAMES.workgraphGet,
-      params: { id: "item-1" },
-      result: { item: { id: "item-1", revision: 7, status: "open" } },
-    },
-  ]);
-  assert.equal(await resolveWorkGraphItemRevision(run, "item-1"), 7);
-  assert.equal(callCount(), 1);
-});
-
-test("item revision resolution fails loudly instead of guessing when the result carries no revision", async () => {
-  const { run } = stubRunner([
-    {
-      command: CONSOLE_COMMAND_NAMES.workgraphGet,
-      params: { id: "item-1" },
-      result: { item: { id: "item-1" } },
-    },
-  ]);
-  await assert.rejects(
-    () => resolveWorkGraphItemRevision(run, "item-1"),
-    /could not resolve the current revision of work item item-1/,
-  );
-});
-
-test("item revision resolution propagates transport errors so nothing is sent", async () => {
-  const run: WorkGraphCommandRunner = async () => {
-    throw new Error("workgraph is not configured on this runtime");
-  };
-  await assert.rejects(
-    () => resolveWorkGraphItemRevision(run, "item-1"),
-    /not configured/,
-  );
-});
-
-test("goal item revision resolution reads goal/status and CASes against the goal WORK ITEM", async () => {
-  const { run } = stubRunner([
-    {
-      command: CONSOLE_COMMAND_NAMES.workgraphGoalStatus,
-      params: { binding_id: "b-1" },
-      result: {
-        item: { id: "goal-1", revision: 4 },
-        attention: { binding_id: "b-1", machine_state: { revision: 9 } },
-      },
-    },
-  ]);
-  assert.equal(await resolveWorkGraphGoalItemRevision(run, "b-1"), 4);
-});
-
-test("binding revision resolution reads goal/status and CASes against the binding machine state", async () => {
-  const { run } = stubRunner([
-    {
-      command: CONSOLE_COMMAND_NAMES.workgraphGoalStatus,
-      params: { binding_id: "b-1" },
-      result: {
-        item: { id: "goal-1", revision: 4 },
-        attention: { binding_id: "b-1", machine_state: { revision: 9 } },
-      },
-    },
-  ]);
-  assert.equal(await resolveWorkGraphBindingRevision(run, "b-1"), 9);
-});
-
-test("binding revision resolution fails loudly when the machine state is absent", async () => {
-  const { run } = stubRunner([
-    {
-      command: CONSOLE_COMMAND_NAMES.workgraphGoalStatus,
-      params: { binding_id: "b-1" },
-      result: { item: { id: "goal-1", revision: 4 }, attention: { binding_id: "b-1" } },
-    },
-  ]);
-  await assert.rejects(
-    () => resolveWorkGraphBindingRevision(run, "b-1"),
-    /could not resolve the machine revision of attention binding b-1/,
-  );
-});
-
 test("conflict code pins the wire contract for the retryable workgraph CAS class", () => {
   assert.equal(WORKGRAPH_CONFLICT_CODE, -32042);
+});
+
+test("an action whose card showed no revision says nothing was changed, and its entity plans the conflict path's re-read", () => {
+  assert.match(WORKGRAPH_UNOBSERVED_REVISION_MESSAGE, /nothing was changed/);
+  assert.deepEqual(
+    workGraphConflictRefreshRequest({ id: "item-1" }),
+    { command: CONSOLE_COMMAND_NAMES.workgraphGet, params: { id: "item-1" } },
+  );
+  assert.deepEqual(
+    workGraphConflictRefreshRequest({ binding_id: "b-1" }),
+    { command: CONSOLE_COMMAND_NAMES.workgraphGoalStatus, params: { binding_id: "b-1" } },
+  );
 });
 
 test("conflict refresh planning routes item mutations to get and binding mutations to goal/status", () => {

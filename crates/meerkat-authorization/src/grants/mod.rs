@@ -1475,6 +1475,8 @@ pub(crate) mod test_boundary {
 }
 
 #[cfg(test)]
+mod approval_tests;
+#[cfg(test)]
 mod publication_tests;
 #[cfg(test)]
 mod tests;

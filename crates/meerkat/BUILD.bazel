@@ -5716,7 +5716,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "governed_peer_binder",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -5849,7 +5849,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.9",
+        "CARGO_PKG_VERSION": "0.9.10",
         "CARGO_BIN_NAME": "governed_peer_requester",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },

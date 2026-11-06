@@ -26,6 +26,13 @@
 //! 3. Otherwise the matching rules decide: any matching `deny` rule denies,
 //!    else any matching `allow` rule allows, else the check denies.
 //!
+//! One rule holds before all of these and needs no configuration: an agent
+//! private to one person ([`PRIVATE_TO_LABEL`], a side chat opened on a
+//! console with sign-in) is denied for every agent action to everyone but
+//! that person and the `admins`, with the config disabled or enabled, and
+//! [`AccessView::hides_agent`] says so, so the console answers as for an
+//! unknown agent.
+//!
 //! # Live configuration
 //!
 //! [`AccessController`] is the shared handle: it holds the current config
@@ -46,6 +53,7 @@ pub(crate) use controller::{
     MAX_LINEAGE_DEPTH,
 };
 pub use engine::{AccessDecision, AccessPrincipal, AccessResource, evaluate_access};
+pub(crate) use model::private_owner;
 pub use model::{
     ACCESS_ACTIONS, ACTION_ACCESS_ADMIN, ACTION_AGENT_MEMORY_ADMIN, ACTION_AGENT_MEMORY_DELETE,
     ACTION_AGENT_MEMORY_READ, ACTION_AGENT_MEMORY_WRITE, ACTION_AGENT_RESET, ACTION_AGENT_RESPAWN,
@@ -57,5 +65,5 @@ pub use model::{
     ACTION_TOPOLOGY_CROSS_AUTHORITY, ACTION_TOPOLOGY_DISCONNECT, ACTION_TOPOLOGY_RECONNECT,
     ACTION_TOPOLOGY_VIEW, ACTION_WORKGRAPH_MANAGE, ACTION_WORKGRAPH_VIEW, AccessApprover,
     AccessConfigError, AccessControlConfig, AccessEffect, AccessGroup, AccessRule,
-    normalize_access_config_for_memory_actions, validate_access_config,
+    PRIVATE_TO_LABEL, normalize_access_config_for_memory_actions, validate_access_config,
 };

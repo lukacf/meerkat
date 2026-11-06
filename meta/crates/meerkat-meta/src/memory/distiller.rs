@@ -606,6 +606,18 @@ pub trait TranscriptSource: Send + Sync {
         session_key: &str,
         from_index: u64,
     ) -> Result<Option<TranscriptSlice>, DistillerError>;
+
+    /// Whether the session belongs to a member private to one person: the
+    /// member labels its build recorded carry a private owner
+    /// ([`crate::access::PRIVATE_TO_LABEL`], a console side chat opened on a
+    /// console with sign-in). Such a transcript is that person's alone, and
+    /// the engine never distills it, whatever the cause. `false` for a
+    /// session the store does not hold. A source that cannot tell answers
+    /// `false`, the default.
+    async fn private_to_a_person(&self, session_key: &str) -> Result<bool, DistillerError> {
+        let _ = session_key;
+        Ok(false)
+    }
 }
 
 /// Reads the persistent session store (`SessionStore::load`, the same
@@ -670,6 +682,21 @@ impl TranscriptSource for SessionStoreTranscriptSource {
             messages,
             head_revision,
         }))
+    }
+
+    async fn private_to_a_person(&self, session_key: &str) -> Result<bool, DistillerError> {
+        let session_id = meerkat_core::types::SessionId::parse(session_key).map_err(|err| {
+            DistillerError::Transcript(format!("invalid session key '{session_key}': {err}"))
+        })?;
+        let session = self
+            .store
+            .load(&session_id)
+            .await
+            .map_err(|err| DistillerError::Transcript(err.to_string()))?;
+        Ok(session
+            .and_then(|session| session.session_metadata())
+            .and_then(|metadata| metadata.peer_meta)
+            .is_some_and(|peer_meta| crate::access::private_owner(&peer_meta.labels).is_some()))
     }
 }
 
@@ -1238,18 +1265,26 @@ pub enum DistillOutcome {
 /// strings cannot drift apart.
 pub(crate) const SKIP_NO_DISCARD_SOURCE: &str = "no compaction discard source wired";
 pub(crate) const SKIP_NO_DISCARDS: &str = "no compaction discards to harvest";
+/// The skip of a session private to one person, which no run distills
+/// (any cause). For the §8.6 ordering check its compaction boundary has
+/// nothing to harvest: the distiller never reads it.
+pub(crate) const SKIP_PRIVATE_SESSION: &str =
+    "the session is private to one person; its transcript is never distilled";
 
 impl DistillOutcome {
     /// §8.6 ordering invariant input: whether a compaction-cause run left
     /// the boundary's evidence harvested (completed) or provably empty
-    /// (nothing to harvest). Budget denials, read failures, and extraction
-    /// failures are NOT satisfied — hygiene must not discard material the
-    /// distiller never saw.
+    /// (nothing to harvest, or a private session the distiller never reads).
+    /// Budget denials, read failures, and extraction failures are NOT
+    /// satisfied: hygiene must not discard material the distiller never
+    /// saw.
     pub fn compaction_harvest_satisfied(&self) -> bool {
         match self {
             Self::Completed { .. } => true,
             Self::Skipped { reason } => {
-                reason == SKIP_NO_DISCARDS || reason == SKIP_NO_DISCARD_SOURCE
+                reason == SKIP_NO_DISCARDS
+                    || reason == SKIP_NO_DISCARD_SOURCE
+                    || reason == SKIP_PRIVATE_SESSION
             }
         }
     }
@@ -1545,6 +1580,23 @@ impl DistillerEngine {
         session_key: &str,
         cause: DistillCause,
     ) -> DistillOutcome {
+        // A transcript private to one person is never distilled, whatever
+        // the cause: its memory would reach no one else, but nothing in it
+        // may leave it. A session whose privacy cannot be read is not
+        // distilled either.
+        match self.transcripts.private_to_a_person(session_key).await {
+            Ok(false) => {}
+            Ok(true) => {
+                return DistillOutcome::Skipped {
+                    reason: SKIP_PRIVATE_SESSION.to_string(),
+                };
+            }
+            Err(err) => {
+                return DistillOutcome::Skipped {
+                    reason: format!("whether the session is private could not be read: {err}"),
+                };
+            }
+        }
         let (cursor, recorder_wrote, generation) =
             self.with_window(identity, session_key, |state| {
                 (state.cursor, state.recorder_wrote, state.generation)
@@ -3438,6 +3490,119 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .len(),
             1
+        );
+    }
+
+    /// A stored member session whose build recorded `labels` as its member
+    /// labels, with a short transcript to distill.
+    async fn member_session(
+        store: &Arc<meerkat::MemoryStore>,
+        labels: &[(&str, &str)],
+    ) -> meerkat_core::types::SessionId {
+        let mut session = meerkat_core::Session::new();
+        session
+            .set_session_metadata(meerkat_core::SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: "gpt-5.5".to_string(),
+                model_fallback: None,
+                max_tokens: 1024,
+                structured_output_retries: meerkat_core::config::default_structured_output_retries(
+                ),
+                provider: meerkat_core::Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: meerkat_core::SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: Some(meerkat_core::PeerMeta {
+                    description: None,
+                    labels: labels
+                        .iter()
+                        .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                        .collect(),
+                }),
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                auth_binding: None,
+                mob_member_binding: None,
+            })
+            .expect("record the member labels");
+        session.push(Message::User(UserMessage::text("use the wrapper")));
+        session.push(Message::User(UserMessage::text(
+            "always ./scripts/repo-cargo, never raw cargo",
+        )));
+        meerkat::SessionStore::save(&**store, &session)
+            .await
+            .expect("store the session");
+        session.id().clone()
+    }
+
+    /// A side chat that is private to a person is never distilled, whatever
+    /// asks for it: its transcript is that person's alone. A side chat that is
+    /// private to nobody (forked on a console without sign-in) is distilled
+    /// into its own memory, as any member is.
+    #[tokio::test]
+    async fn distiller_skips_private_side_chats() {
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let private = member_session(
+            &store,
+            &[
+                ("side_chat_of", "alpha"),
+                ("console.private_to", "console-caller:v1:owner"),
+            ],
+        )
+        .await;
+        let shared = member_session(
+            &store,
+            &[("side_chat_of", "alpha"), ("console.private_to", "")],
+        )
+        .await;
+        let provider = Arc::new(CapturingProvider::default());
+        let client = Arc::new(ScriptedLlm::new(vec![ONE_OP_REPLY, ONE_OP_REPLY]));
+        let engine = Arc::new(DistillerEngine::new(
+            DistillerProfile::embedded_default(),
+            enabled_config(),
+            Arc::new(ScriptedHandle {
+                client: client.clone(),
+            }),
+            provider.clone(),
+            Arc::new(StaticTombstones(Vec::new())),
+            Arc::new(SessionStoreTranscriptSource::new(store.clone())),
+            None,
+            None,
+            "team",
+        ));
+
+        for cause in [
+            DistillCause::Interactions,
+            DistillCause::Retire,
+            DistillCause::Compaction,
+        ] {
+            let outcome = engine
+                .distill_now("alpha-side", &private.to_string(), cause)
+                .await;
+            assert!(
+                matches!(&outcome, DistillOutcome::Skipped { reason } if reason.contains("private")),
+                "{cause:?}: {outcome:?}"
+            );
+        }
+        assert!(
+            provider.remembers.lock().unwrap().is_empty(),
+            "nothing is remembered from a private side chat"
+        );
+
+        let outcome = engine
+            .distill_now(
+                "alpha-side-shared",
+                &shared.to_string(),
+                DistillCause::Retire,
+            )
+            .await;
+        assert!(
+            matches!(outcome, DistillOutcome::Completed { written: 1, .. }),
+            "{outcome:?}"
         );
     }
 }

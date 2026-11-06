@@ -159,6 +159,13 @@ struct ConsoleHttpAuthContext {
     send_scope: ConsoleSendScope,
     /// Per-request access snapshot when an [`AccessController`] is wired.
     access_view: Option<AccessView>,
+    /// The caller's agent audience, always present: the access snapshot
+    /// when an [`AccessController`] is wired (the same view as
+    /// `access_view`), else a view with no access configuration. Both hide
+    /// the agents private to another person
+    /// ([`crate::access::PRIVATE_TO_LABEL`]); every agent-scoped read and
+    /// check of the console decides with it.
+    audience: AccessView,
     /// The verified human behind the request's token, when there is one.
     human: Option<crate::runtime::AuthenticatedConsoleHuman>,
     /// The verification the request's token passed, when a token identified
@@ -909,6 +916,7 @@ async fn console_gating_stream_handler(
 ) -> axum::response::Response {
     let crate::http_sse::SseCaller {
         access_view,
+        audience,
         mut authentication,
     } = match crate::http_sse::sse_access_context(
         Some(&state.decisions),
@@ -943,18 +951,18 @@ async fn console_gating_stream_handler(
         )
             .into_response();
     };
-    let subject = access_view
-        .as_ref()
-        .and_then(|view| view.subject().map(ToString::to_string));
-    // Keep an installed controller even while it is disabled: enabling a
-    // policy later must reach this stream. Priming is a no-op while it is
-    // disabled.
-    let access = state.access.clone();
+    let subject = audience.subject().map(ToString::to_string);
+    let private_owner_key = audience.private_owner_key().map(ToString::to_string);
+    // The caller's audience controller: an installed access controller, kept
+    // even while it is disabled (enabling a policy later must reach this
+    // stream), else the stream's own. Either is primed: the private-owner
+    // rule hides an origin whether or not access is enforced.
+    let access = audience.controller();
     let runtime = state.runtime.clone();
     // Resolve origin labels and roles from the live roster before any
     // visibility decision, exactly as the other console streams do.
-    if let (Some(runtime), Some(controller)) = (&runtime, &access) {
-        prime_access_cache_from_runtime(runtime, controller).await;
+    if let Some(runtime) = &runtime {
+        prime_access_cache_from_runtime(runtime, &access).await;
     }
     let (mut receiver, mut cursor) = {
         let mut owner = owner.lock().await;
@@ -998,15 +1006,15 @@ async fn console_gating_stream_handler(
                 break;
             }
             let page = owner.lock().await.gating_audit_after(cursor.as_deref());
-            if let (Some(runtime), Some(controller)) = (&runtime, &access) {
-                let probe = controller.view_for_subject(subject.as_deref());
+            if let Some(runtime) = &runtime {
+                let probe = access.view_for_caller(subject.as_deref(), private_owner_key.as_deref());
                 if page
                     .entries
                     .iter()
                     .filter_map(gating_audit_entry_origin)
                     .any(|identity| !probe.knows_agent(identity))
                 {
-                    prime_access_cache_from_runtime(runtime, controller).await;
+                    prime_access_cache_from_runtime(runtime, &access).await;
                 }
             }
             if !crate::http_sse::still_authenticated(authentication.as_mut()) {
@@ -1014,13 +1022,8 @@ async fn console_gating_stream_handler(
             }
             // The view is derived after the last await, from the live
             // configuration and attribute cache.
-            let view = access
-                .as_ref()
-                .map(|controller| controller.view_for_subject(subject.as_deref()));
-            if view
-                .as_ref()
-                .is_some_and(|view| view.enforced() && !view.allows(ACTION_GATING_VIEW))
-            {
+            let view = access.view_for_caller(subject.as_deref(), private_owner_key.as_deref());
+            if view.enforced() && !view.allows(ACTION_GATING_VIEW) {
                 yield Ok(axum::response::sse::Event::default()
                     .event("gating.access_revoked")
                     .data("{}"));
@@ -1039,7 +1042,7 @@ async fn console_gating_stream_handler(
             if page
                 .entries
                 .iter()
-                .any(|entry| gating_audit_entry_visible(entry, view.as_ref()))
+                .any(|entry| gating_audit_entry_visible(entry, Some(&view)))
             {
                 yield Ok(axum::response::sse::Event::default()
                     .event("gating.changed")
@@ -1133,6 +1136,13 @@ pub async fn console_json_handler(
     // served request needs are skipped for a refused one.
     let authorized =
         authorize_console_rest_json_route(&state.decisions, &state.session_fences, &request);
+    // The caller as the Console's other routes resolve it: its agent
+    // audience decides the experience's rows, and its principal names the
+    // experience's storage scope.
+    let caller = authorized
+        .is_ok()
+        .then(|| console_request_auth_context(&state, &headers, &uri))
+        .flatten();
 
     let config_module_ids: Vec<String> = state
         .decisions
@@ -1234,6 +1244,7 @@ pub async fn console_json_handler(
             resolved_auth.as_ref(),
             live_snapshot.as_ref(),
             state.access.as_ref(),
+            caller.as_ref().map(|caller| &caller.audience),
             memory_available,
             workgraph_available,
             &pending_identities,
@@ -1242,7 +1253,7 @@ pub async fn console_json_handler(
     };
     if response.status == 200
         && uri.path() == "/console/experience"
-        && let Some(auth) = console_request_auth_context(&state, &headers, &uri)
+        && let Some(auth) = caller.as_ref()
     {
         attach_console_storage_scope(&mut response.body, auth.principal.as_deref());
     }
@@ -1263,14 +1274,13 @@ pub async fn console_json_handler(
         && uri.path() == "/console/experience"
         && !state.decisions.console.read_only
         && let Some(voice) = voice
+        && voice.0.configured()
+        && caller.as_ref().is_some_and(|auth| auth.principal.is_some())
     {
-        let auth = console_request_auth_context(&state, &headers, &uri);
-        if voice.0.configured() && auth.as_ref().is_some_and(|auth| auth.principal.is_some()) {
-            response.body["voice"] = json!({
-                "available": false,
-                "readiness_method": crate::console_voice::VOICE_READINESS_METHOD
-            });
-        }
+        response.body["voice"] = json!({
+            "available": false,
+            "readiness_method": crate::console_voice::VOICE_READINESS_METHOD
+        });
     }
     let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     (status, Json::<Value>(response.body))
@@ -1516,7 +1526,7 @@ pub async fn console_rpc_handler(
             is_authenticated,
             read_only,
             state.access.as_ref(),
-            auth_context.access_view.as_ref(),
+            Some(&auth_context.audience),
             &auth_context.send_scope(),
         ))
         .await;
@@ -1542,7 +1552,7 @@ pub async fn console_rpc_handler(
         read_only,
         auth_context.principal.as_deref(),
         state.access.as_ref(),
-        auth_context.access_view.as_ref(),
+        Some(&auth_context.audience),
         state.memory_panel.as_deref(),
         state.identity_roster.clone(),
         state.workgraph.as_ref(),
@@ -1594,14 +1604,16 @@ struct ReadinessAnswer {
 
 /// Start or join the readiness check and bound it by `budget`. On expiry
 /// the hold is dropped; the shared check is cancelled once nobody holds it.
+/// The caller owns the agents private to `private_owner_key`.
 async fn readiness_within_budget(
     controller: &crate::console_voice::ConsoleVoiceController,
     principal: &str,
+    private_owner_key: Option<&str>,
     identity: &str,
     budget: Duration,
 ) -> ReadinessAnswer {
     let started = std::time::Instant::now();
-    let flight = match controller.readiness_flight(principal, identity) {
+    let flight = match controller.readiness_flight(principal, private_owner_key, identity) {
         Ok(flight) => flight,
         Err(failure) => {
             return ReadinessAnswer {
@@ -1759,9 +1771,14 @@ mod voice_readiness_budget_tests {
     async fn an_expired_budget_names_the_active_stage_answers_typed_and_cancels_the_check() {
         let host = ParkedReadyHost::new(VoiceReadinessStage::DurableSource);
         let controller = host.controller();
-        let answer =
-            readiness_within_budget(&controller, "alice", "agent-a", Duration::from_millis(50))
-                .await;
+        let answer = readiness_within_budget(
+            &controller,
+            "alice",
+            None,
+            "agent-a",
+            Duration::from_millis(50),
+        )
+        .await;
         assert!(
             matches!(answer.outcome, ReadinessOutcome::TimedOut),
             "{answer:?}"
@@ -1803,8 +1820,14 @@ mod voice_readiness_budget_tests {
         let host = ParkedReadyHost::new(VoiceReadinessStage::Credential);
         host.release.add_permits(1);
         let controller = host.controller();
-        let answer =
-            readiness_within_budget(&controller, "alice", "agent-a", Duration::from_secs(5)).await;
+        let answer = readiness_within_budget(
+            &controller,
+            "alice",
+            None,
+            "agent-a",
+            Duration::from_secs(5),
+        )
+        .await;
         assert!(
             matches!(&answer.outcome, ReadinessOutcome::Answered(Ok(report)) if report.available),
             "{answer:?}"
@@ -1906,17 +1929,12 @@ async fn handle_console_voice_rpc_inner(
         {
             return console_read_only_rpc_error(id);
         }
-        if let (Some(runtime), Some(access)) = (
-            state.runtime.as_ref(),
-            state.access.as_ref().filter(|access| access.enabled()),
-        ) {
-            prime_access_cache_from_runtime(runtime, access).await;
+        if let Some(runtime) = state.runtime.as_ref() {
+            prime_access_cache_from_runtime(runtime, &auth.audience.controller()).await;
         }
-        if let Some(denial) = console_rpc_access_violation(
-            auth.access_view.as_ref(),
-            &request.method,
-            &request.params,
-        ) {
+        if let Some(denial) =
+            console_rpc_access_violation(Some(&auth.audience), &request.method, &request.params)
+        {
             return response_value(id, None, Some(denial));
         }
     }
@@ -1939,6 +1957,7 @@ async fn handle_console_voice_rpc_inner(
         let answer = readiness_within_budget(
             controller,
             principal,
+            auth.audience.private_owner_key(),
             &parsed.identity,
             VOICE_READINESS_SERVER_BUDGET,
         )
@@ -2037,6 +2056,7 @@ async fn handle_console_voice_rpc_inner(
         VOICE_OPEN_METHOD => match controller
             .open_while_authenticated(
                 principal,
+                auth.audience.private_owner_key(),
                 parsed,
                 auth.verification
                     .clone()
@@ -2159,9 +2179,16 @@ async fn console_identities_handler(
         );
     };
     let aggregator = aggregator.clone();
+    // The records' lineage ancestors resolve through the caller's audience,
+    // primed from the Console's runtimes.
+    Box::pin(prime_access_cache_from_aggregator(
+        &aggregator,
+        &auth_context.audience.controller(),
+    ))
+    .await;
     match Box::pin(visible_identity_records(
         &aggregator,
-        auth_context.access_view.as_ref(),
+        Some(&auth_context.audience),
     ))
     .await
     {
@@ -2203,14 +2230,14 @@ async fn console_timeline_handler(
     };
     // Prime the attribute cache from the live roster so label/role rules
     // resolve when filtering frames by `agent.view` — the timeline REST
-    // surface must not depend on a prior `/console/experience` call.
-    if let Some(runtime) = &state.runtime
-        && let Some(controller) = state.access.as_ref().filter(|c| c.enabled())
-    {
-        prime_access_cache_from_runtime(runtime, controller).await;
+    // surface must not depend on a prior `/console/experience` call. The
+    // caller's audience is primed whether or not access is enforced: the
+    // private-owner rule reads it too.
+    if let Some(runtime) = &state.runtime {
+        prime_access_cache_from_runtime(runtime, &auth_context.audience.controller()).await;
     }
     let timeline_query = timeline_query_from_http(query, None);
-    let decider = timeline_frame_decider(auth_context.access_view.as_ref());
+    let decider = timeline_frame_decider(Some(&auth_context.audience));
     let frame_filter = decider.as_ref().map(timeline_frame_filter);
     match Box::pin(aggregator.query_timeline_windowed_for(timeline_query, frame_filter.as_deref()))
         .await
@@ -2254,7 +2281,7 @@ async fn console_send_handler(
     let governance = ConsoleSendGovernance::for_request(&state, &auth_context);
     match Box::pin(send_as_admitted_console_caller(
         &ConsoleSendPath::of_state(&state),
-        auth_context.access_view.as_ref(),
+        Some(&auth_context.audience),
         &governance,
         request,
     ))
@@ -2506,7 +2533,7 @@ async fn console_send_recover_handler(
         state.runtime.as_ref(),
         state.console_aggregator.as_ref(),
         state.access.as_ref(),
-        auth_context.access_view.as_ref(),
+        Some(&auth_context.audience),
         identity.as_str(),
     )
     .await
@@ -2690,6 +2717,11 @@ pub enum ConsoleSendGateRefusal {
     /// The Console's access policy does not let the caller send to the
     /// target (`agent.send`).
     AccessDenied,
+    /// The target is a member the caller may not know of: it is private to
+    /// another person ([`crate::access::PRIVATE_TO_LABEL`]). Answered as a
+    /// send to a member the Console does not hold; the detail is that
+    /// answer's message.
+    UnknownIdentity(String),
 }
 
 impl ConsoleSendGateRefusal {
@@ -2698,6 +2730,7 @@ impl ConsoleSendGateRefusal {
         match self {
             Self::ReadOnly | Self::AccessDenied => StatusCode::FORBIDDEN,
             Self::InvalidTarget(_) => StatusCode::BAD_REQUEST,
+            Self::UnknownIdentity(_) => StatusCode::NOT_FOUND,
         }
     }
 
@@ -2707,6 +2740,7 @@ impl ConsoleSendGateRefusal {
             Self::ReadOnly => "read_only",
             Self::InvalidTarget(_) => "invalid_request",
             Self::AccessDenied => "access_denied",
+            Self::UnknownIdentity(_) => "unknown_identity",
         }
     }
 
@@ -2714,7 +2748,7 @@ impl ConsoleSendGateRefusal {
     pub fn message(&self) -> &str {
         match self {
             Self::ReadOnly => "console is read-only",
-            Self::InvalidTarget(message) => message,
+            Self::InvalidTarget(message) | Self::UnknownIdentity(message) => message,
             Self::AccessDenied => "you are not allowed to send to this agent",
         }
     }
@@ -2726,10 +2760,12 @@ impl ConsoleSendGateRefusal {
 
 /// The Console's stock send gate, the one implementation `/console/send` and
 /// [`ConsoleSendPrecheck`] run: the Console is writable, the target is a
-/// valid public member alias, and the caller's access view allows
-/// `agent.send` to it, decided after the attribute cache is primed from the
-/// live roster: the local runtime's, else the runtimes of the Console's
-/// aggregator, each in its identity namespace.
+/// valid public member alias, it is no member the caller may not know of
+/// ([`AccessView::hides_agent`], answered as an unknown member, enforced
+/// access or not), and the caller's access view allows `agent.send` to it,
+/// decided after the attribute cache is primed from the live roster: the
+/// local runtime's, else the runtimes of the Console's aggregator, each in
+/// its identity namespace.
 ///
 /// A Console with no local runtime refuses, under enforced access, a target
 /// the primed cache still does not know while the aggregator's record of it
@@ -2755,15 +2791,25 @@ async fn console_send_gate(
     // rule scoped by `roles`/`match_labels` would not match, so a scripted
     // caller hitting `/console/send` as its first request could reach a
     // member the rule was meant to exclude (fail-closed requires the
-    // attributes to be present when the rule is evaluated).
-    if let Some(controller) = access.filter(|c| c.enabled()) {
+    // attributes to be present when the rule is evaluated). The caller's
+    // view is primed whether or not access is enforced: the private-owner
+    // rule reads it too.
+    if let Some(controller) = access_view
+        .map(AccessView::controller)
+        .or_else(|| access.filter(|c| c.enabled()).cloned())
+    {
         match (runtime, aggregator) {
-            (Some(runtime), _) => prime_access_cache_from_runtime(runtime, controller).await,
+            (Some(runtime), _) => prime_access_cache_from_runtime(runtime, &controller).await,
             (None, Some(aggregator)) => {
-                prime_access_cache_from_aggregator(aggregator, controller).await;
+                prime_access_cache_from_aggregator(aggregator, &controller).await;
             }
             (None, None) => {}
         }
+    }
+    if access_view.is_some_and(|view| view.hides_agent(identity)) {
+        return Err(ConsoleSendGateRefusal::UnknownIdentity(
+            ConsoleSendError::UnknownIdentity(identity.to_string()).to_string(),
+        ));
     }
     if let Some(view) = access_view.filter(|view| view.enforced()) {
         if runtime.is_none()
@@ -2905,6 +2951,12 @@ pub(crate) struct ConsoleSendGovernance {
     /// The verification the caller's token passed, when a token identified
     /// the caller: a change checks it again before it commits.
     pub(crate) verification: Option<crate::runtime::ConsoleCallerVerification>,
+    /// The private owner a console side chat this caller forks records
+    /// ([`crate::access::PRIVATE_TO_LABEL`]): the caller's private-owner key
+    /// when the caller is a verified person on a console with sign-in, else
+    /// none, and the side chat stays shared (an open console, a service or
+    /// a token that names no person).
+    pub(crate) side_chat_owner: Option<String>,
 }
 
 impl ConsoleSendGovernance {
@@ -2919,6 +2971,17 @@ impl ConsoleSendGovernance {
                 .is_some_and(MobRuntime::native_work_governed),
             access: state.access.clone(),
             verification: auth_context.verification.clone(),
+            side_chat_owner: state
+                .decisions
+                .console
+                .require_app_auth
+                .then(|| {
+                    auth_context
+                        .human
+                        .as_ref()
+                        .map(console_person_private_owner_key)
+                })
+                .flatten(),
         }
     }
 
@@ -3045,7 +3108,8 @@ impl crate::identity_first::GovernedInputBinder for CurrentHumanBinder {
 
 /// The Console human is still authenticated (its retained token still
 /// verifies with the same issuer, subject and login association) and the
-/// Console's live access policy still lets it send to `identity`.
+/// Console's live access policy still lets it send to `identity`, decided as
+/// that person, who owns the agents private to them.
 fn human_still_sends(
     human: &crate::runtime::AuthenticatedConsoleHuman,
     access: Option<&AccessController>,
@@ -3053,7 +3117,10 @@ fn human_still_sends(
 ) -> Result<(), String> {
     let access_subject = human.current().map_err(|error| error.to_string())?;
     if let Some(controller) = access.filter(|c| c.enabled()) {
-        let view = controller.view_for_subject(Some(access_subject.as_str()));
+        let view = controller.view_for_caller(
+            Some(access_subject.as_str()),
+            Some(console_person_private_owner_key(human).as_str()),
+        );
         if view.enforced() && !view.allows_agent(ACTION_AGENT_SEND, identity.as_str()) {
             return Err("the Console human may no longer send to this agent".to_string());
         }
@@ -3175,6 +3242,10 @@ mod console_experience_binding_tests;
 #[cfg(test)]
 #[path = "console_side_chat_tests.rs"]
 mod console_side_chat_tests;
+
+#[cfg(test)]
+#[path = "console_private_side_chat_tests.rs"]
+mod console_private_side_chat_tests;
 
 #[cfg(test)]
 #[path = "console_schedule_tests.rs"]
@@ -3627,8 +3698,12 @@ async fn console_timeline_stream_handler(
     };
     // The stream filters under the policy committed before each frame, not
     // the one it opened with, and ends once the verifier no longer accepts
-    // the token its caller opened it with.
-    let mut live_view = auth_context.access_view.map(LiveAccessView::new);
+    // the token its caller opened it with. Every caller's stream decides each
+    // frame: a view that enforces nothing still hides the agents private to
+    // another person. Only a Console with an access controller names its
+    // access revision on the stream.
+    let configured = auth_context.access_view.is_some();
+    let mut live_view = Some(LiveAccessView::new(auth_context.audience));
     let mut authentication = auth_context
         .verification
         .map(crate::http_sse::StreamAuthentication::new);
@@ -3640,13 +3715,8 @@ async fn console_timeline_stream_handler(
     // the cache does not know, so a member that joined while the stream was
     // open is judged by its own labels and role.
     let reprime_runtime = state.runtime.clone();
-    let reprime_access = state.access.clone();
-    if live_view
-        .as_ref()
-        .is_some_and(|live| live.enforced().is_some())
-    {
-        reprime_stream_access_cache(reprime_runtime.as_ref(), reprime_access.as_ref()).await;
-    }
+    let reprime_access = live_view.as_ref().map(|live| live.view().controller());
+    reprime_stream_access_cache(reprime_runtime.as_ref(), reprime_access.as_ref()).await;
     let Some(aggregator) = &state.console_aggregator else {
         return console_json_error(
             StatusCode::NOT_FOUND,
@@ -3669,8 +3739,7 @@ async fn console_timeline_stream_handler(
     // response, so a cursor the log cannot replay from is answered with its
     // HTTP status; every later page is read as the stream sends, so the
     // first bytes follow one page, not the whole log.
-    let snapshot_decider =
-        timeline_frame_decider(live_view.as_ref().and_then(LiveAccessView::enforced));
+    let snapshot_decider = timeline_frame_decider(live_view.as_ref().map(LiveAccessView::view));
     let mut snapshot = TimelineSnapshotPages::new(timeline_query.clone());
     let first_page =
         match Box::pin(snapshot.next_page(&aggregator, snapshot_decider.as_ref())).await {
@@ -3682,6 +3751,9 @@ async fn console_timeline_stream_handler(
     let snapshot_after = timeline_query.after.clone();
     // The owner's access revision this stream last named (access_changed).
     let mut signalled_revision: Option<u64> = None;
+    // The members a view that enforces nothing read the roster for once,
+    // when their live frame arrived unknown.
+    let mut primed_unknown = std::collections::HashSet::<String>::new();
     let mut shutdown = shutdown.map(|axum::Extension(shutdown)| shutdown);
     let stream = stream! {
         if let Some(event) = sse_event_from_timeline_event(&ConsoleTimelineEvent::SnapshotStarted { after: snapshot_after }) {
@@ -3697,7 +3769,7 @@ async fn console_timeline_stream_handler(
                 last_snapshot_cursor = Some(frame.cursor.clone());
                 if live_view
                     .as_ref()
-                    .and_then(LiveAccessView::enforced)
+                    .map(LiveAccessView::view)
                     .is_some_and(|view| !view.knows_agent(frame.identity.as_str()))
                     && priming.primes_for(&frame.identity)
                 {
@@ -3717,7 +3789,7 @@ async fn console_timeline_stream_handler(
                 }
                 if live_view
                     .as_ref()
-                    .and_then(LiveAccessView::enforced)
+                    .map(LiveAccessView::view)
                     .is_some_and(|view| !timeline_frame_visible_to(view, &frame))
                 {
                     continue;
@@ -3771,7 +3843,10 @@ async fn console_timeline_stream_handler(
         }
         // The access revision as the stream goes live, then each newer one
         // the owner commits: the Console reads its Access view again on it.
-        if let Some(event) = access_changed_event(live_view.as_ref(), &mut signalled_revision) {
+        if let Some(event) = access_changed_event(
+            live_view.as_ref().filter(|_| configured),
+            &mut signalled_revision,
+        ) {
             yield Ok::<Event, Infallible>(event);
         }
         loop {
@@ -3796,7 +3871,10 @@ async fn console_timeline_stream_handler(
                         .await;
                 }
             }
-            if let Some(event) = access_changed_event(live_view.as_ref(), &mut signalled_revision) {
+            if let Some(event) = access_changed_event(
+                live_view.as_ref().filter(|_| configured),
+                &mut signalled_revision,
+            ) {
                 if !crate::http_sse::still_authenticated(authentication.as_mut()) {
                     break;
                 }
@@ -3819,12 +3897,22 @@ async fn console_timeline_stream_handler(
                     // know joined after the roster was last read. A frame no
                     // roster read resolves (the runtime's own `_system` and
                     // `__console__` frames, a member of another registered
-                    // runtime) costs one roster read each time it arrives.
+                    // runtime) costs one roster read each time it arrives
+                    // under enforced access. A view that enforces nothing
+                    // decides only the private-owner rule, which no
+                    // runtime-plane identity is under: it reads the roster
+                    // once for each member it does not know.
                     if let Some(frame_identity) = timeline_event_identity(&event)
                         && live_view
                             .as_ref()
-                            .and_then(LiveAccessView::enforced)
-                            .is_some_and(|view| !view.knows_agent(frame_identity))
+                            .map(LiveAccessView::view)
+                            .is_some_and(|view| {
+                                !view.knows_agent(frame_identity)
+                                    && (view.enforced()
+                                        || (!crate::console_contracts::is_runtime_plane_identity(
+                                            frame_identity,
+                                        ) && primed_unknown.insert(frame_identity.to_string())))
+                            })
                     {
                         reprime_stream_access_cache(
                             reprime_runtime.as_ref(),
@@ -3846,12 +3934,15 @@ async fn console_timeline_stream_handler(
                     if !crate::http_sse::still_authenticated(authentication.as_mut()) {
                         break;
                     }
-                    if let Some(signal) = access_changed_event(live_view.as_ref(), &mut signalled_revision) {
+                    if let Some(signal) = access_changed_event(
+                        live_view.as_ref().filter(|_| configured),
+                        &mut signalled_revision,
+                    ) {
                         yield Ok::<Event, Infallible>(signal);
                     }
                     // Decided on the broadcast frame as stored, with its
                     // captured member provenance, before it is projected.
-                    if let Some(view) = live_view.as_ref().and_then(LiveAccessView::enforced)
+                    if let Some(view) = live_view.as_ref().map(LiveAccessView::view)
                         && !timeline_event_visible_to(view, &event)
                     {
                         continue;
@@ -4555,12 +4646,11 @@ fn console_rpc_unauthenticated_response(response_id: Value) -> (StatusCode, Json
     )
 }
 
-/// One request's `agent.view` decider for timeline frames, when the view
-/// enforces anything.
+/// One request's `agent.view` decider for timeline frames. Every view
+/// decides: one that enforces nothing still hides the agents private to
+/// another person.
 fn timeline_frame_decider(view: Option<&AccessView>) -> Option<TimelineFrameDecider> {
-    view.filter(|view| view.enforced())
-        .cloned()
-        .map(TimelineFrameDecider::new)
+    view.cloned().map(TimelineFrameDecider::new)
 }
 
 /// The decider as the aggregator's in-scan frame filter.
@@ -4681,14 +4771,15 @@ async fn listed_side_chat_lineages(
 /// with `runtime`'s spawn registry and the side chat lineages of `entries`,
 /// the roster rows the rows were serialized from
 /// ([`listed_side_chat_lineages`]). Field names cover both the meerkat
-/// roster entry shape and the console projection shape.
+/// roster entry shape and the console projection shape. A view that
+/// enforces nothing still hides the agents private to another person.
 async fn retain_visible_member_rows(
     rows: &mut Vec<Value>,
     runtime: &MobRuntime,
     entries: &[meerkat_mob::runtime::MobMemberListEntry],
     view: Option<&AccessView>,
 ) {
-    let Some(view) = view.filter(|view| view.enforced()) else {
+    let Some(view) = view else {
         return;
     };
     // Keyed by console identity, as the console's member projection reads it.
@@ -4745,13 +4836,14 @@ fn console_identity_record_role(labels: &BTreeMap<String, String>) -> &str {
 /// `meta/console/list_identities`) the caller may view, each by
 /// [`listed_member_visible`] with the record's role, the spawn registry of
 /// the record's own runtime and the side chat lineage its roster's fork
-/// facts verify.
+/// facts verify. A view that enforces nothing still hides the agents
+/// private to another person.
 async fn visible_identity_records(
     aggregator: &MetaConsoleAggregator,
     view: Option<&AccessView>,
 ) -> ConsoleLogResult<Vec<ConsoleIdentityRecord>> {
     let mut identities = Box::pin(aggregator.list_identities()).await?;
-    let Some(view) = view.filter(|view| view.enforced()) else {
+    let Some(view) = view else {
         return Ok(identities);
     };
     let registered = aggregator
@@ -5103,16 +5195,39 @@ fn console_announcement_member_refusal(method: &str, params: &Value) -> Option<J
 
 /// Returns the denial error when the caller's view forbids the method.
 /// Every mapped requirement must pass; the first failing one is reported.
+///
+/// Before any rule, and whether or not the view enforces them, a request
+/// that names a member the caller may not know of
+/// ([`AccessView::hides_agent`]: it is private to another person), in a
+/// member target field or as a member a requirement targets (a flow's bound
+/// members), is answered as a request naming an unknown member.
 fn console_rpc_access_violation(
     view: Option<&AccessView>,
     method: &str,
     params: &Value,
 ) -> Option<JsonRpcError> {
-    let view = view.filter(|view| view.enforced())?;
-    let requirements = console_rpc_access_requirements(method, params)?;
+    let view = view?;
+    let subjects = console_rpc_member_targets(params);
+    let requirements = console_rpc_access_requirements(method, params);
+    if let Some(hidden) = subjects
+        .iter()
+        .map(|(_, subject)| subject.as_str())
+        .chain(
+            requirements
+                .iter()
+                .flatten()
+                .filter_map(|(_, target)| target.as_deref()),
+        )
+        .find(|subject| view.hides_agent(subject))
+    {
+        return Some(unknown_identity_rpc_error(hidden));
+    }
+    if !view.enforced() {
+        return None;
+    }
+    let requirements = requirements?;
     // Every member the request names is judged, not only the field the
     // requirement picked: a handler may act on another target field.
-    let subjects = console_rpc_member_targets(params);
     for (action, target) in requirements {
         let (allowed, target) = match target {
             Some(target) => std::iter::once(target)
@@ -5339,6 +5454,15 @@ impl<'a> MemoryPanelCaller<'a> {
     fn enforced(self) -> Option<&'a AccessView> {
         self.view.filter(|view| view.enforced())
     }
+
+    /// Whether the caller may not know of the agent `identity` names, as the
+    /// console names it ([`AccessView::hides_agent`]): it is private to
+    /// another person. Holds with access enforced or not.
+    fn hides_identity(self, identity: &str) -> bool {
+        self.view.is_some_and(|view| {
+            view.hides_agent(&namespace_console_identity(identity, self.namespace))
+        })
+    }
 }
 
 /// Per-row visibility for panel reads. Identity-scope rows require the
@@ -5350,14 +5474,12 @@ impl<'a> MemoryPanelCaller<'a> {
 /// require the unscoped read grant. Quarantine evidence is additionally
 /// reviewer-only (its bodies are exactly the content the quarantine gate
 /// exists for), including after a review or forget tombstones it. The scope
-/// half is [`memory_panel_scope_visible`].
+/// half is [`memory_panel_scope_visible`]. The identity scope of an agent
+/// private to another person is never visible, enforced access or not.
 fn memory_panel_record_visible(
     caller: MemoryPanelCaller<'_>,
     record: &crate::memory::records::MemoryRecord,
 ) -> bool {
-    if caller.enforced().is_none() {
-        return true;
-    }
     if !memory_panel_scope_visible(caller, &record.scope) {
         return false;
     }
@@ -5389,19 +5511,15 @@ fn memory_panel_scope_visible(
     caller: MemoryPanelCaller<'_>,
     scope: &crate::memory::records::MemoryScope,
 ) -> bool {
-    let Some(view) = caller.enforced() else {
-        return true;
-    };
-    match scope {
+    let action = match scope {
         crate::memory::records::MemoryScope::Identity { identity, .. } => {
-            memory_panel_identity_visible(caller, identity)
+            return memory_panel_identity_visible(caller, identity);
         }
-        crate::memory::records::MemoryScope::Mob { .. } => view.allows(ACTION_MOB_MEMORY_READ),
-        crate::memory::records::MemoryScope::Operator { .. } => {
-            view.allows(ACTION_OPERATOR_MEMORY_READ)
-        }
-        crate::memory::records::MemoryScope::Realm { .. } => view.allows(ACTION_AGENT_MEMORY_READ),
-    }
+        crate::memory::records::MemoryScope::Mob { .. } => ACTION_MOB_MEMORY_READ,
+        crate::memory::records::MemoryScope::Operator { .. } => ACTION_OPERATOR_MEMORY_READ,
+        crate::memory::records::MemoryScope::Realm { .. } => ACTION_AGENT_MEMORY_READ,
+    };
+    caller.enforced().is_none_or(|view| view.allows(action))
 }
 
 /// Whether the caller may read an identity's memory scope: the per-scope
@@ -5411,8 +5529,12 @@ fn memory_panel_scope_visible(
 /// are kept by this rule. An identity the access cache does not know is
 /// decided by its bare name, which a deny scoped by a role, a label or a
 /// lineage ancestor cannot match, so such an identity is withheld while a
-/// deny of that kind applies to either action (fails closed).
+/// deny of that kind applies to either action (fails closed). An agent
+/// private to another person is withheld, enforced access or not.
 fn memory_panel_identity_visible(caller: MemoryPanelCaller<'_>, identity: &str) -> bool {
+    if caller.hides_identity(identity) {
+        return false;
+    }
     let Some(view) = caller.enforced() else {
         return true;
     };
@@ -5435,6 +5557,7 @@ fn memory_panel_identity_visible(caller: MemoryPanelCaller<'_>, identity: &str) 
 /// instead of carrying it (injection-ledger rows, audit verdicts). The
 /// records are read from `realm` once per call. Under enforcement a row
 /// whose record the store does not hold is withheld: its scope is unknown.
+/// Without it, only the rows of an agent private to another person go.
 async fn memory_panel_retain_readable_records<T>(
     store: &dyn crate::memory::capabilities::MemoryPanelStore,
     caller: MemoryPanelCaller<'_>,
@@ -5442,20 +5565,25 @@ async fn memory_panel_retain_readable_records<T>(
     rows: &mut Vec<T>,
     record_id: impl Fn(&T) -> &str,
 ) -> Result<(), crate::identity_first::agent_memory::AgentMemoryError> {
-    if caller.enforced().is_none() || rows.is_empty() {
+    if caller.view.is_none() || rows.is_empty() {
         return Ok(());
     }
     let mut ids: Vec<String> = rows.iter().map(|row| record_id(row).to_string()).collect();
     ids.sort_unstable();
     ids.dedup();
-    let readable: BTreeSet<String> = store
-        .records_by_ids(realm, &ids)
-        .await?
-        .into_iter()
-        .filter(|record| memory_panel_record_visible(caller, record))
-        .map(|record| record.id)
-        .collect();
-    rows.retain(|row| readable.contains(record_id(row)));
+    let mut held = BTreeSet::new();
+    let mut readable = BTreeSet::new();
+    for record in store.records_by_ids(realm, &ids).await? {
+        if memory_panel_record_visible(caller, &record) {
+            readable.insert(record.id.clone());
+        }
+        held.insert(record.id);
+    }
+    let enforced = caller.enforced().is_some();
+    rows.retain(|row| {
+        let id = record_id(row);
+        readable.contains(id) || (!enforced && !held.contains(id))
+    });
     Ok(())
 }
 
@@ -5487,14 +5615,15 @@ fn memory_panel_identity_denied(
 /// [`memory_panel_record_visible`], or, for a promotion the steward made from
 /// a proposal, that proposal, judged by its scope
 /// ([`memory_panel_scope_visible`]). Under enforcement a promotion whose
-/// source resolves as neither is withheld.
+/// source resolves as neither is withheld; without it, only the promotions
+/// of an agent private to another person go.
 async fn memory_panel_retain_readable_promotion_sources(
     store: &dyn crate::memory::capabilities::MemoryPanelStore,
     caller: MemoryPanelCaller<'_>,
     realm: &str,
     promotions: &mut Vec<crate::memory::capabilities::PendingPromotion>,
 ) -> Result<(), crate::identity_first::agent_memory::AgentMemoryError> {
-    if caller.enforced().is_none() || promotions.is_empty() {
+    if caller.view.is_none() || promotions.is_empty() {
         return Ok(());
     }
     let mut ids: Vec<String> = promotions
@@ -5515,14 +5644,20 @@ async fn memory_panel_retain_readable_promotion_sources(
         .into_iter()
         .filter(|id| !resolved.contains(id))
         .collect();
+    let mut unscoped: BTreeSet<String> = unresolved.iter().cloned().collect();
     if !unresolved.is_empty() {
         for (proposal_id, scope) in store.proposal_scopes(realm, &unresolved).await? {
             if memory_panel_scope_visible(caller, &scope) {
-                readable.insert(proposal_id);
+                readable.insert(proposal_id.clone());
             }
+            unscoped.remove(&proposal_id);
         }
     }
-    promotions.retain(|promotion| readable.contains(&promotion.record_id));
+    let enforced = caller.enforced().is_some();
+    promotions.retain(|promotion| {
+        readable.contains(&promotion.record_id)
+            || (!enforced && unscoped.contains(&promotion.record_id))
+    });
     Ok(())
 }
 
@@ -5539,13 +5674,15 @@ async fn memory_panel_retain_readable_promotion_sources(
 /// can describe quarantined content), so its runs are listed only to such a
 /// caller. Call it after reading the runs: once a realm is open the bundled
 /// store deletes none of those rows, so every scope a run read before named
-/// is then among the realm's scopes, and quarantine evidence stays.
+/// is then among the realm's scopes, and quarantine evidence stays. Without
+/// enforced access only the identity scope of an agent private to another
+/// person counts.
 async fn memory_panel_realm_fully_readable(
     store: &dyn crate::memory::capabilities::MemoryPanelStore,
     caller: MemoryPanelCaller<'_>,
     realm: &str,
 ) -> Result<bool, crate::identity_first::agent_memory::AgentMemoryError> {
-    if caller.enforced().is_none() {
+    if caller.view.is_none() {
         return Ok(true);
     }
     let every_scope = store
@@ -5589,16 +5726,14 @@ fn memory_panel_promotion_visible(
     scope_kind: &str,
     scope_key: &str,
 ) -> bool {
-    let Some(view) = caller.enforced() else {
-        return true;
+    let action = match scope_kind {
+        "identity" => return memory_panel_identity_visible(caller, scope_key),
+        "mob" => ACTION_MOB_MEMORY_READ,
+        "operator" => ACTION_OPERATOR_MEMORY_READ,
+        "realm" => ACTION_AGENT_MEMORY_READ,
+        _ => return caller.enforced().is_none(),
     };
-    match scope_kind {
-        "identity" => memory_panel_identity_visible(caller, scope_key),
-        "mob" => view.allows(ACTION_MOB_MEMORY_READ),
-        "operator" => view.allows(ACTION_OPERATOR_MEMORY_READ),
-        "realm" => view.allows(ACTION_AGENT_MEMORY_READ),
-        _ => false,
-    }
+    caller.enforced().is_none_or(|view| view.allows(action))
 }
 
 /// Serialize a record for the panel. List rows are body-free (`body_bytes`
@@ -7697,13 +7832,11 @@ pub async fn console_rpc_multipart_handler(
             // side effect / storage-amplification vector) — the send is denied
             // later, but the blob write already happened. Prime the attribute
             // cache first so role/label-scoped deny rules resolve fail-closed.
-            if let Some(runtime) = &state.runtime
-                && let Some(controller) = state.access.as_ref().filter(|c| c.enabled())
-            {
-                prime_access_cache_from_runtime(runtime, controller).await;
+            if let Some(runtime) = &state.runtime {
+                prime_access_cache_from_runtime(runtime, &auth_context.audience.controller()).await;
             }
             if let Some(violation) = console_rpc_access_violation(
-                auth_context.access_view.as_ref(),
+                Some(&auth_context.audience),
                 "meta/console/send",
                 &parsed_request.params,
             ) {
@@ -7817,7 +7950,7 @@ pub async fn console_rpc_multipart_handler(
             true,
             state.decisions.console.read_only,
             state.access.as_ref(),
-            auth_context.access_view.as_ref(),
+            Some(&auth_context.audience),
             &auth_context.send_scope(),
         ))
         .await
@@ -7851,7 +7984,7 @@ pub async fn console_rpc_multipart_handler(
             state.decisions.console.read_only,
             auth_context.principal.as_deref(),
             state.access.as_ref(),
-            auth_context.access_view.as_ref(),
+            Some(&auth_context.audience),
             state.memory_panel.as_deref(),
             state.identity_roster.clone(),
             state.workgraph.as_ref(),
@@ -8002,8 +8135,10 @@ fn console_request_auth_context_for(
             crate::runtime::resolve_authorized_console_caller_from_token(decisions, fences, &token)
         });
         let Some(caller) = caller else {
+            let audience = console_audience_view(access, None, None);
             return Some(ConsoleHttpAuthContext {
-                access_view: access.map(|controller| controller.view_for_subject(None)),
+                access_view: access.map(|_| audience.clone()),
+                audience,
                 principal: None,
                 service_identity: false,
                 send_scope: ConsoleSendScope::Anonymous,
@@ -8019,11 +8154,47 @@ fn console_request_auth_context_for(
     Some(console_caller_auth_context(caller, access))
 }
 
+/// The agent audience of a console caller: `access`'s view of `subject`
+/// when the console has an access controller, else a view with no access
+/// configuration (one per request, primed by the request that reads it).
+/// The caller owns the agents private to `private_owner_key`
+/// ([`crate::access::PRIVATE_TO_LABEL`]).
+fn console_audience_view(
+    access: Option<&AccessController>,
+    subject: Option<&str>,
+    private_owner_key: Option<&str>,
+) -> AccessView {
+    access
+        .cloned()
+        .unwrap_or_else(AccessController::audience_only)
+        .view_for_caller(subject, private_owner_key)
+}
+
+/// The private-owner key of a verified person
+/// ([`crate::access::PRIVATE_TO_LABEL`]): the opaque caller scope
+/// `meta/console/whoami` reports to them, derived from the OIDC issuer and
+/// subject alone. Stable per person, and it carries no personal data.
+pub(crate) fn console_person_private_owner_key(
+    human: &crate::runtime::AuthenticatedConsoleHuman,
+) -> String {
+    console_caller_scope(&ConsoleSendScope::Human {
+        issuer: human.issuer().to_string(),
+        subject: human.subject().to_string(),
+    })
+}
+
+/// The private-owner key of the caller whose sends are deduplicated in
+/// `scope`: a verified person's ([`console_person_private_owner_key`]);
+/// every other caller owns no private agent.
+pub(crate) fn private_owner_key_of_send_scope(scope: &ConsoleSendScope) -> Option<String> {
+    matches!(scope, ConsoleSendScope::Human { .. }).then(|| console_caller_scope(scope))
+}
+
 /// The request context of a caller the Console resolved from a verified
 /// token. Its send scope is fixed here, from that verification: the verified
 /// human (issuer and subject) when there is one, else the principal with
 /// the provider its token was classified as and the issuer the token
-/// verified against.
+/// verified against. A verified human owns the agents private to them.
 fn console_caller_auth_context(
     caller: crate::runtime::ResolvedConsoleCaller,
     access: Option<&AccessController>,
@@ -8045,9 +8216,15 @@ fn console_caller_auth_context(
             issuer,
         },
     };
+    let private_owner_key = human.as_ref().map(console_person_private_owner_key);
+    let audience = console_audience_view(
+        access,
+        Some(auth.email.as_str()),
+        private_owner_key.as_deref(),
+    );
     ConsoleHttpAuthContext {
-        access_view: access
-            .map(|controller| controller.view_for_subject(Some(auth.email.as_str()))),
+        access_view: access.map(|_| audience.clone()),
+        audience,
         service_identity: auth.provider == crate::AuthProvider::ServiceIdentity,
         principal: Some(auth.email),
         send_scope,
@@ -8867,9 +9044,15 @@ fn member_access_denied(action: &str, resource: Option<String>) -> JsonRpcError 
 /// A fork carries its source member's conversation into the helper, so
 /// under enforced access rules the source is judged as read access to that
 /// member. Judged here rather than in the requirements map, which would
-/// also judge read access to the new helper's id.
+/// also judge read access to the new helper's id. A source the caller may
+/// not know of ([`AccessView::hides_agent`]) is answered as an unknown
+/// member, enforced or not.
 fn fork_source_access_violation(view: Option<&AccessView>, source: &str) -> Option<JsonRpcError> {
-    let view = view.filter(|view| view.enforced())?;
+    let view = view?;
+    if view.hides_agent(source) {
+        return Some(unknown_identity_rpc_error(source));
+    }
+    let view = Some(view).filter(|view| view.enforced())?;
     (!view.allows_agent(ACTION_AGENT_VIEW, source))
         .then(|| member_access_denied(ACTION_AGENT_VIEW, Some(source.to_string())))
 }
@@ -8880,6 +9063,8 @@ fn fork_source_access_violation(view: Option<&AccessView>, source: &str) -> Opti
 /// source: a caller who may only read the source can neither fork it nor
 /// drive its tools through a side chat. Judged here rather than in the
 /// requirements map, which judges `agent.spawn` on the side chat's own name.
+/// A source the caller may not know of ([`AccessView::hides_agent`]) is
+/// answered as an unknown member, enforced or not.
 ///
 /// A side chat's lineage is its source's and one link more, so a source whose
 /// lineage already fills the access rules' walk (the agent and seven
@@ -8890,7 +9075,11 @@ fn side_chat_source_access_violation(
     view: Option<&AccessView>,
     source: &str,
 ) -> Option<JsonRpcError> {
-    let view = view.filter(|view| view.enforced())?;
+    let view = view?;
+    if view.hides_agent(source) {
+        return Some(unknown_identity_rpc_error(source));
+    }
+    let view = Some(view).filter(|view| view.enforced())?;
     if let Some(action) = [ACTION_AGENT_VIEW, ACTION_AGENT_SEND]
         .into_iter()
         .find(|action| !view.allows_agent(action, source))
@@ -8974,19 +9163,20 @@ async fn session_member_owners(
 /// session belongs to is judged for read and send access. A session whose
 /// owner cannot be established is refused unless the caller is an admin.
 /// A refusal names only the session the caller supplied: neither the owner
-/// nor the access the caller lacked.
+/// nor the access the caller lacked. A session of a member private to
+/// another person is refused whether or not access is enforced.
 async fn attached_session_access_violation(
     view: Option<&AccessView>,
     handle: &MobHandle,
     identity_runtime: Option<&Arc<crate::identity_first::IdentityRuntime>>,
     session_id: &meerkat_core::types::SessionId,
 ) -> Option<JsonRpcError> {
-    let view = view.filter(|view| view.enforced())?;
+    let view = view?;
     let owners = session_member_owners(handle, identity_runtime, session_id)
         .await
         .unwrap_or_default();
     if owners.is_empty() {
-        return (!view.is_admin()).then(|| JsonRpcError {
+        return (view.enforced() && !view.is_admin()).then(|| JsonRpcError {
             code: ACCESS_DENIED_RPC_CODE,
             message: "access denied: the session has no established owner".to_string(),
             data: Some(json!({
@@ -9646,6 +9836,17 @@ fn identity_hidden_by_policy_error(identity: &str) -> JsonRpcError {
     }
 }
 
+/// The answer to a request naming a member the console does not hold, also
+/// given for a member the caller may not know of
+/// ([`AccessView::hides_agent`]): the two cannot be told apart.
+fn unknown_identity_rpc_error(identity: &str) -> JsonRpcError {
+    JsonRpcError {
+        code: -32001,
+        message: format!("unknown identity: {identity}"),
+        data: None,
+    }
+}
+
 fn identity_status_visible_to_console(
     visibility_policy: &dyn ConsoleVisibilityPolicy,
     status: &crate::identity_first::IdentityStatus,
@@ -10071,6 +10272,18 @@ async fn handle_console_aggregator_rpc(
     if let Some(response) = handle_access_admin_rpc(access, access_view, &request) {
         return response;
     }
+    // Every agent check below, and the memory reads that judge each row's
+    // identity by the attributes recorded under the name this Console gives
+    // it, read the caller's audience: it is primed from the Console's
+    // runtimes first, as the send gate primes it, whether or not access is
+    // enforced (the private-owner rule reads it too).
+    if let (Some(aggregator), Some(view)) = (&console_aggregator, access_view) {
+        Box::pin(prime_access_cache_from_aggregator(
+            aggregator,
+            &view.controller(),
+        ))
+        .await;
+    }
     // The identity a record listing is filtered by is judged in
     // `shared_panels::dispatch`, under the name this Console gives it and
     // after its runtimes' access attributes are recorded; this check would
@@ -10093,10 +10306,10 @@ async fn handle_console_aggregator_rpc(
             let Some(aggregator) = &console_aggregator else {
                 return console_aggregator_unavailable(response_id);
             };
-            // The memory reads judge each row's identity by the attributes
-            // recorded under the name this Console gives it, so they are
-            // recorded first, as the send gate records them.
-            if shared_panels::MEMORY_READ_METHODS.contains(&method)
+            // A caller without an audience (none of the Console's own
+            // routes) has its access controller primed here, as before.
+            if access_view.is_none()
+                && shared_panels::MEMORY_READ_METHODS.contains(&method)
                 && let Some(controller) = access.filter(|controller| controller.enabled())
             {
                 Box::pin(prime_access_cache_from_aggregator(aggregator, controller)).await;
@@ -10481,11 +10694,15 @@ async fn handle_console_runtime_rpc_with_visibility(
     // access decision (the gate below and per-row result filtering) so
     // label/role rules resolve here exactly as they do on
     // `/console/experience`. RPC callers must not depend on having polled the
-    // experience endpoint first.
-    if let Some(controller) = access.filter(|controller| controller.enabled()) {
-        prime_access_cache_from_runtime(runtime, controller).await;
+    // experience endpoint first. The caller's audience is primed whether or
+    // not access is enforced: the private-owner rule reads it too.
+    if let Some(controller) = access_view
+        .map(AccessView::controller)
+        .or_else(|| access.filter(|controller| controller.enabled()).cloned())
+    {
+        prime_access_cache_from_runtime(runtime, &controller).await;
         if let Some(identity_runtime) = identity_runtime.as_ref() {
-            prime_current_runtime_aliases(identity_runtime, controller).await;
+            prime_current_runtime_aliases(identity_runtime, &controller).await;
         }
     }
     // A change checks its caller again after the reads above, before it is
@@ -12945,7 +13162,10 @@ async fn handle_console_runtime_rpc_with_visibility(
                         // revocation published while this request waited for
                         // the owner is honored.
                         Some(controller) => {
-                            let fence = controller.decision_fence(Some(&decider.principal));
+                            let fence = controller.decision_fence(
+                                Some(&decider.principal),
+                                access_view.and_then(AccessView::private_owner_key),
+                            );
                             let outcome = owner.decide_gating_action_authorized(request, |entry| {
                                 if fence.enforced() && !fence.allows(ACTION_GATING_DECIDE) {
                                     return Err("access denied to gating decisions");
@@ -13024,7 +13244,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                     }
                 },
             };
-            if let Err(message) = crate::member_comms_id::validate_raw_identity_labels(&labels) {
+            if let Err(message) = crate::member_comms_id::validate_member_creation_labels(&labels) {
                 return invalid_params(response_id, message);
             }
             let context = request.params.get("context").cloned();
@@ -14188,13 +14408,14 @@ async fn handle_console_runtime_rpc_with_visibility(
                     let entries: Vec<Value> = ready
                         .into_iter()
                         // Per-agent visibility: a caller only sees readiness
-                        // for agents they may `agent.view`. The cache was
-                        // primed from the roster at dispatch.
+                        // for agents they may `agent.view`, enforced access
+                        // or not (an agent private to another person is no
+                        // one else's). The cache was primed from the roster
+                        // at dispatch.
                         .filter_map(|(identity, snapshot)| {
                             let identity = identity.to_string();
-                            let visible = access_view
-                                .filter(|view| view.enforced())
-                                .is_none_or(|view| view.can_view_agent(&identity));
+                            let visible =
+                                access_view.is_none_or(|view| view.can_view_agent(&identity));
                             visible.then(|| {
                                 serde_json::json!({
                                     "agent_identity": identity,
@@ -14235,12 +14456,11 @@ async fn handle_console_runtime_rpc_with_visibility(
             let entries: Vec<Value> = completed
                 .into_iter()
                 // Per-agent visibility: even an `agent.spawn`-gated caller only
-                // collects completions for agents they may `agent.view`.
+                // collects completions for agents they may `agent.view`,
+                // enforced access or not.
                 .filter_map(|(mid, snapshot)| {
                     let mid = mid.to_string();
-                    let visible = access_view
-                        .filter(|view| view.enforced())
-                        .is_none_or(|view| view.can_view_agent(&mid));
+                    let visible = access_view.is_none_or(|view| view.can_view_agent(&mid));
                     visible.then(|| {
                         serde_json::json!({
                             "member_id": mid,
@@ -14659,6 +14879,12 @@ async fn handle_console_runtime_rpc_with_visibility(
                 &params.source_member_id,
                 &params.agent_identity,
                 params.display_name.as_deref(),
+                // Who opens the side chat: the connection's principal, never
+                // a request field.
+                authenticated_principal,
+                // Who the side chat is private to: the connection's verified
+                // person on a console with sign-in, never a request field.
+                governance.side_chat_owner.as_deref(),
             ))
             .await
             {
@@ -16597,14 +16823,14 @@ fn baseline_spec_visible_to_console(
 /// agent-created sub-mobs are recorded the same way, with their delegate host
 /// and source mob, so an identity never holds a different value depending on
 /// which route recorded it last. An identity known only to the spawn registry
-/// is primed registry-only, so lineage rules resolve for it too.
+/// is primed registry-only, so lineage rules resolve for it too. It primes
+/// whether or not `access`'s configuration is enabled: the private-owner rule
+/// ([`crate::access::PRIVATE_TO_LABEL`]) reads the cache too, and each route
+/// primes the controller its own decisions read.
 pub(crate) async fn prime_access_cache_from_runtime(
     runtime: &MobRuntime,
     access: &AccessController,
 ) {
-    if !access.enabled() {
-        return;
-    }
     prime_access_cache_from_runtime_in_namespace(runtime, access, "").await;
     if let Some(identity_runtime) = runtime.installed_identity_runtime() {
         prime_current_runtime_aliases(&identity_runtime, access).await;
@@ -16617,9 +16843,6 @@ pub(crate) async fn prime_current_runtime_aliases(
     identity_runtime: &crate::identity_first::IdentityRuntime,
     access: &AccessController,
 ) {
-    if !access.enabled() {
-        return;
-    }
     // Unreadable history records nothing: an alias the controller does not
     // know as current is decided as not current (admin only), never allowed.
     let statuses = match identity_runtime.statuses().await {
@@ -16644,9 +16867,6 @@ pub(crate) async fn prime_current_runtime_aliases(
 }
 
 pub(crate) async fn prime_access_cache_from_handle(handle: &MobHandle, access: &AccessController) {
-    if !access.enabled() {
-        return;
-    }
     let registered = BTreeMap::new();
     let mut roster_identities = BTreeSet::new();
     let members = live_member_access_attributes(

@@ -680,10 +680,14 @@ impl crate::console_schedules::ConsoleScheduleDoor for ConsoleSendDoor {
         sender
             .admitted_now(&self.decisions, &self.session_fences, send.defined_at)
             .map_err(|refusal| format!("the Console refused the scheduled send: {refusal}"))?;
-        let access_view = self
-            .access
-            .as_ref()
-            .map(|controller| controller.view_for_subject(sender.principal()));
+        // The sender's agent audience, as its live request would hold it:
+        // a person owns the agents private to them.
+        let private_owner_key = super::private_owner_key_of_send_scope(&sender.scope());
+        let access_view = super::console_audience_view(
+            self.access.as_ref(),
+            sender.principal(),
+            private_owner_key.as_deref(),
+        );
         let governance = ConsoleSendGovernance {
             ingress: self.governed_ingress.current(),
             human: None,
@@ -691,6 +695,7 @@ impl crate::console_schedules::ConsoleScheduleDoor for ConsoleSendDoor {
             runtime_governed: self.runtime.native_work_governed(),
             access: self.access.clone(),
             verification: None,
+            side_chat_owner: None,
         };
         let request = ConsoleSendRequest {
             identity: send.identity.clone(),
@@ -712,7 +717,7 @@ impl crate::console_schedules::ConsoleScheduleDoor for ConsoleSendDoor {
         };
         Box::pin(send_as_admitted_console_caller(
             &path,
-            access_view.as_ref(),
+            Some(&access_view),
             &governance,
             request,
         ))

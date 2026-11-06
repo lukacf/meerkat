@@ -86,6 +86,9 @@ impl ToolApplicationIngress for Ingress {
                 .is_none_or(|aggregator| !aggregator.application_runtime_is_current(registration))
         }) || auth.principal != self.principal
             || (fresh_io && self.state.decisions.console.read_only)
+            // An agent private to another person is unavailable to the
+            // caller, enforced access or not.
+            || auth.audience.hides_agent(&self.public_identity)
             || auth.access_view.as_ref().is_some_and(|view| {
                 view.enforced()
                     && (!view.allows_agent(ACTION_AGENT_VIEW, &self.public_identity)
@@ -109,6 +112,7 @@ impl ToolApplicationIngress for Ingress {
     > {
         Box::pin(async move {
             self.revalidate()?;
+            self.refuse_private_target().await?;
             authorize_session_in_namespace(
                 &self.state,
                 &self.request,
@@ -125,6 +129,32 @@ impl ToolApplicationIngress for Ingress {
 
     fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
         self
+    }
+}
+
+impl Ingress {
+    /// Refuse a target the caller may not know of
+    /// ([`AccessView::hides_agent`]: an agent private to another person),
+    /// with the caller's audience primed from the live roster first, so the
+    /// refusal holds on a console without access control too, whose
+    /// audience is the request's own.
+    async fn refuse_private_target(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        let auth = console_request_auth_context(&self.state, &self.headers, &self.uri)
+            .ok_or(meerkat_core::OperationAuthorizationError::Unavailable)?;
+        if let Some(runtime) = self.state.runtime.as_ref() {
+            prime_access_cache_from_runtime_in_namespace(
+                runtime,
+                &auth.audience.controller(),
+                self.registration
+                    .as_ref()
+                    .map_or("", |registration| registration.namespace()),
+            )
+            .await;
+        }
+        if auth.audience.hides_agent(&self.public_identity) {
+            return Err(meerkat_core::OperationAuthorizationError::Unavailable);
+        }
+        Ok(())
     }
 }
 

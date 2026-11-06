@@ -101,6 +101,13 @@ struct SeatCore {
     /// Core admits a delivery to a live member onto the member's session
     /// and records it; otherwise it delivers nothing.
     admits_deliveries: bool,
+    /// Every delivery Core was asked for when it admits deliveries: the
+    /// refused ones (a wake refused typed) included.
+    delivery_attempts: AtomicUsize,
+    /// Core ends the host preparation it keeps for an identity at that
+    /// identity's declaration, first-boot request or not (its declared
+    /// apply answers the identity it holds seated on that session).
+    ends_host_preparation_at_declaration: bool,
     /// The state directory whose first-boot manifest each rotation reads, to
     /// record whether the manifest still listed the identity's row.
     manifest_dir: Option<std::path::PathBuf>,
@@ -772,17 +779,25 @@ impl SessionBridge for SeatCore {
                 "{runtime_id}: a seat delivers nothing"
             )));
         }
-        let pending = lock(&self.host_pending).iter().any(|identity| {
-            self.core
-                .live_member(identity)
-                .ok()
-                .flatten()
-                .is_some_and(|live| &live.agent_runtime_id == runtime_id)
-        });
-        if pending {
-            return Err(BridgeError::Mob(format!(
-                "{runtime_id}: Core refuses the wake while the host preparation is pending"
-            )));
+        let pending = lock(&self.host_pending)
+            .iter()
+            .find(|identity| {
+                self.core
+                    .live_member(identity)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|live| &live.agent_runtime_id == runtime_id)
+            })
+            .cloned();
+        self.delivery_attempts.fetch_add(1, Ordering::SeqCst);
+        if let Some(identity) = pending {
+            return Err(BridgeError::MemberWakeRefused {
+                identity: member_id(&identity),
+                refusal: meerkat_mob::MemberWakeRefusal::HostPreparationPending,
+                detail: format!(
+                    "{runtime_id}: Core refuses the wake while the host preparation is pending"
+                ),
+            });
         }
         // Core's dispatch wakes a member that is not materialized, and
         // refuses that wake for a build preparation retry it keeps.
@@ -912,6 +927,11 @@ impl SessionBridge for SeatCore {
     ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
     {
         self.apply_calls.fetch_add(1, Ordering::SeqCst);
+        if self.ends_host_preparation_at_declaration {
+            for declared in &roster.identities {
+                lock(&self.host_pending).remove(&declared.spec.identity);
+            }
+        }
         let mut carried_out = BTreeSet::new();
         for (identity, request) in &roster.first_boot_requests {
             if matches!(request, meerkat_mob::FirstBootRequest::Resume { .. })
@@ -4542,10 +4562,11 @@ async fn a_seeded_identity_core_already_holds_has_its_host_preparation_ended() {
     );
 }
 
-/// A delivery to an identity whose first-boot row is still owed declares the
-/// identity first, with the row's `Resume` request: Core keeps the member it
-/// holds on the row's session and carries the request out, which ends its
-/// host preparation, so the delivery goes through. Nothing is seated.
+/// A delivery to an identity whose first-boot row Meta's own records still
+/// hold declares the identity first, with the row's `Resume` request: Core
+/// keeps the member it holds on the row's session and carries the request
+/// out, which ends its host preparation, so the delivery goes through, and
+/// Core is asked for it once. Nothing is seated.
 #[tokio::test]
 async fn a_delivery_to_a_seeded_identity_ends_its_host_preparation_first() {
     let alice = identity("personal:alice");
@@ -4578,6 +4599,11 @@ async fn a_delivery_to_a_seeded_identity_ends_its_host_preparation_first() {
         .await
         .expect("the delivery goes through");
 
+    assert_eq!(
+        core.delivery_attempts.load(Ordering::SeqCst),
+        1,
+        "declared first, the delivery reaches Core once"
+    );
     assert!(
         !lock(&core.host_pending).contains(&alice),
         "the delivery's declaration ended the mark"
@@ -4589,6 +4615,135 @@ async fn a_delivery_to_a_seeded_identity_ends_its_host_preparation_first() {
         None,
         "the carried-out row leaves the manifest"
     );
+}
+
+/// The door answers Core's typed refusal of a delivery's wake for a host
+/// preparation Core keeps that Meta's own first-boot records do not name
+/// (`HostPreparationPending`): Meta keeps no copy of Core's mark, so the
+/// delivery reaches Core and is refused there; the door declares the
+/// identity once, Core ends its mark at that declaration, and the delivery
+/// goes through on the door's one retry.
+///
+/// RED before the door answered Core's refusal: the refusal surfaced, and
+/// nothing was declared or retried.
+#[tokio::test]
+async fn a_delivery_core_refuses_for_a_host_preparation_meta_s_records_do_not_name_is_declared_and_retried()
+ {
+    let alice = identity("personal:alice");
+    let session = SessionId::new();
+    let core = Arc::new(SeatCore {
+        admits_deliveries: true,
+        ends_host_preparation_at_declaration: true,
+        ..SeatCore::default()
+    });
+    let runtime = runtime_over(None, &core);
+    register_live(&runtime, &core.core, spec(&alice), 0, session.clone())
+        .await
+        .expect("registered live");
+    lock(&core.host_pending).insert(alice.clone());
+    let applied = core.apply_calls.load(Ordering::SeqCst);
+
+    let delivered = runtime.send(&alice, &text("hello")).await;
+
+    assert!(
+        delivered.is_ok(),
+        "the delivery goes through on the door's retry: {delivered:?}"
+    );
+    assert_eq!(
+        core.delivery_attempts.load(Ordering::SeqCst),
+        2,
+        "refused for the host preparation, then delivered on the retry"
+    );
+    assert_eq!(
+        core.apply_calls.load(Ordering::SeqCst) - applied,
+        1,
+        "the door declared alice once"
+    );
+    assert!(
+        !lock(&core.host_pending).contains(&alice),
+        "the declaration ended the mark"
+    );
+    assert_eq!(lock(&core.delivered).len(), 1, "one delivery");
+}
+
+/// When Core refuses the retried delivery again for its host preparation
+/// (the declaration did not end it), the second refusal surfaces typed
+/// and retryable: the door declares once and retries once, never in a
+/// loop, and nothing is delivered.
+///
+/// RED before the door answered Core's refusal: the first refusal
+/// surfaced, and nothing was declared or retried.
+#[tokio::test]
+async fn a_second_host_preparation_refusal_after_the_door_declared_surfaces_typed() {
+    let alice = identity("personal:alice");
+    let session = SessionId::new();
+    let core = Arc::new(SeatCore {
+        admits_deliveries: true,
+        ..SeatCore::default()
+    });
+    let runtime = runtime_over(None, &core);
+    register_live(&runtime, &core.core, spec(&alice), 0, session.clone())
+        .await
+        .expect("registered live");
+    lock(&core.host_pending).insert(alice.clone());
+    let applied = core.apply_calls.load(Ordering::SeqCst);
+
+    let refused = runtime.send(&alice, &text("hello")).await;
+
+    assert!(
+        matches!(
+            refused,
+            Err(IdentityRuntimeError::IdentityWakeRetryable { .. })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        core.delivery_attempts.load(Ordering::SeqCst),
+        2,
+        "refused, declared, and refused once more"
+    );
+    assert_eq!(
+        core.apply_calls.load(Ordering::SeqCst) - applied,
+        1,
+        "the door declared alice once"
+    );
+    assert!(lock(&core.delivered).is_empty(), "nothing was delivered");
+}
+
+/// Source guard: Meta keeps no copy of the host preparation Core keeps for
+/// an identity (the members it handed the mob as host-pending before its
+/// build): the door answers Core's typed refusal instead.
+///
+/// RED before the copy went: the identity runtime kept `host_pending_seeded`,
+/// seeded by both compositions.
+#[test]
+fn the_door_keeps_no_copy_of_core_s_host_preparation() {
+    let sources = [
+        ("identity_first/runtime.rs", include_str!("../runtime.rs")),
+        (
+            "identity_first/runtime/declare.rs",
+            include_str!("declare.rs"),
+        ),
+        ("rpc_gateway.rs", include_str!("../../rpc_gateway.rs")),
+        (
+            "unified_runtime/builder.rs",
+            include_str!("../../unified_runtime/builder.rs"),
+        ),
+    ];
+    for (file, source) in sources {
+        let production = production_code(source);
+        assert!(
+            !production.trim().is_empty(),
+            "{file}: no production code was read"
+        );
+        for name in ["host_pending_seeded", "seed_host_pending"] {
+            assert!(
+                !production.contains(name),
+                "{file} names `{name}`: Core's host preparation is Core's, answered from its \
+                 typed wake refusal"
+            );
+        }
+    }
 }
 
 /// The members Meta hands the mob as host-pending before its build name

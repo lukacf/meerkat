@@ -35,6 +35,46 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat-core`: `HttpAuthorizationContent` gains the public field
+  `initiator: HttpRequestInitiator`, a new enum (`User`, the default, and
+  `Agent`) that says who a provider request continues. Code that builds the
+  struct with a literal sets the field or adds `..Default::default()`.
+
+### Added
+
+- `meerkat-llm-core`: `LlmRequest::initiator` says who a request continues,
+  from its last message; `PreparedLlmRequest::agent_initiated` marks a
+  request-local call (a compaction summary, a tool's own model call) as the
+  agent's own work, and `PreparedLlmRequest::initiator` reads either.
+
+### Changed
+
+- GitHub Copilot inference requests carry `X-Initiator`: `agent` when the
+  request continues the agent's own work (after a tool result or the
+  assistant's own output, and for a compaction summary or a tool's own
+  model call), `user` otherwise, as other Copilot clients send it. A
+  request and its retry after a 401 carry the same value.
+
+### Fixed
+
+- `meerkat-openai`: on the GitHub Copilot Responses route, a response no
+  longer fails the turn for good when Copilot gives its output items new
+  ids. Copilot re-identifies an item on most events of its lifecycle while
+  the item's `output_index` stays, and the route matched completed and
+  terminal items by content and refused every other shape. An item is now
+  its `output_index` slot: it keeps the first id any event of the slot
+  carried, and the terminal output is taken when it lines up with the
+  slots, each item committed under its slot's id with its own reasoning
+  ciphertext. A terminal output that does not line up (an item missing,
+  extra, of another kind, or with other content than the completed one)
+  and a stream that contradicts itself fail the response with a retryable
+  incomplete-response error that names the slot, so the turn is tried
+  again, and nothing of that response is committed. A stream that ends with
+  `[DONE]` and no terminal response commits its completed items. Other
+  OpenAI routes are unchanged.
+
 ## [0.9.10] - 2026-11-04
 
 ### Highlights

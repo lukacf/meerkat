@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- Tokens minted with an `auth_config` shared secret (`provider: "jwt"`)
+  are shared-account tokens unless the configuration declares
+  `accounts: "personal"`: such a token identifies a principal and never
+  counts as a person.
+- Rust: `TrustedOidcRuntimeConfig` gains `shared_account_tokens`
+  (`#[serde(default)]`, so a serialized state keeps today's behaviour). A
+  host that builds the struct literally adds `shared_account_tokens: false`
+  to keep today's behaviour.
+- On an open console with an access controller, an anonymous caller is
+  bound by every deny rule that names a subject or a group.
+
+### Security
+
+- Tokens minted with an `auth_config` shared secret no longer count as a
+  person unless the configuration declares `accounts: "personal"`.
+- On a console without sign-in, a deny rule that names a person or a group
+  also applies to callers who send no token, so leaving out a token never
+  escapes it.
+
+### Upgrade
+
+- A front that mints one token per person with a shared secret adds
+  `"accounts": "personal"` to its `auth_config`.
+- On an open console with an access controller, grant anonymous callers
+  explicitly, or sign people in.
+
+### Added
+
+- `meta/console/whoami` reports who the console acts as: the actor
+  (`person`, `service`, `token_principal` or `anonymous`), the posture, the
+  login expiry, whether the caller may administer access, the approver ids
+  it holds, and an opaque `caller_scope`.
+- `auth_config.accounts` (`"personal"` or `"shared"`) states whether an
+  issuer's tokens name persons; the Python and TypeScript auth config
+  builders carry it. The TypeScript `JwtAuthConfig.accounts` member is
+  optional, so a config built by hand without it still type-checks.
+
 ## [0.9.10] - 2026-11-04
 
 Meta 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10 and Connect

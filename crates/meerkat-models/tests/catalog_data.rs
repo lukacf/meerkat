@@ -634,8 +634,8 @@ fn gpt_6_astra_owns_defaults_and_projects_independent_input_limit() {
             .profile_witness_for_provider(Provider::Other, "gpt-6-astra")
             .is_none()
     );
-    // The separate input ceiling is a GPT-6 family property (Astra, Sol and
-    // Luna all document 922,000); every other catalog entry projects none.
+    // The separate input ceiling is a GPT-6 family property (Astra, Sol, Terra
+    // and Luna all document 922,000); every other catalog entry projects none.
     for entry in catalog() {
         let family = capabilities_for(Provider::OpenAI, entry.id).map(|caps| caps.model_family);
         if family == Some("gpt-6") {

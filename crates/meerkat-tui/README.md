@@ -573,6 +573,9 @@ then global); Ctrl-X Ctrl-S interrupts and sends the input; Ctrl-O toggles
 the last reasoning block; Ctrl+↑/↓ select a helper in the panel under the
 input and Enter on an empty input opens its full view (Esc returns);
 PgUp/PgDn and Shift+↑/↓ scroll; Home/End jump when the editor is empty.
+Long lines wrap at the width of the input field (which grows up to six
+rows, then scrolls to the cursor), and ↑/↓ move by wrapped rows before
+reaching history.
 
 The mouse is captured by default: the wheel scrolls and a click expands or
 collapses a tool call's output (Ctrl-T for the latest). Dragging selects text

@@ -112,7 +112,9 @@ them.
   Running helpers (and those finished this turn) are listed in a panel
   under the input; Ctrl+↑/↓ select one and Enter on an empty input opens
   its full view (its prose, reasoning, tool calls and nested helpers) in
-  place of the transcript until Esc. See
+  place of the transcript until Esc. Long lines in the input editor wrap
+  at the field width instead of scrolling sideways; the field grows up to
+  six rows and ↑/↓ move by wrapped rows. See
   `crates/meerkat-tui/README.md`.
 
 - `meerkat-mob-mcp`: `MobMcpState::with_implicit_mob_customizer` takes an

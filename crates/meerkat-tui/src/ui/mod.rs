@@ -3887,6 +3887,45 @@ mod tests {
     }
 
     #[test]
+    fn up_moves_a_visual_row_within_a_wrapped_line_keeping_the_column() {
+        let mut app = App::new(StatusInfo::default()).with_history(vec!["old".into()]);
+        app.input.set_wrap_width(10);
+        type_str(&mut app, "abcdefghijklmnopqrstuvwxy");
+        app.update(key(KeyCode::Left));
+        app.update(key(KeyCode::Left));
+        assert_eq!(app.input.cursor(), (0, 23));
+        app.update(key(KeyCode::Up));
+        assert_eq!(app.input.cursor(), (0, 13));
+        app.update(key(KeyCode::Up));
+        assert_eq!(app.input.cursor(), (0, 3));
+        assert_eq!(app.input.text(), "abcdefghijklmnopqrstuvwxy");
+        // On the first visual row Up recalls history as before.
+        app.update(key(KeyCode::Up));
+        assert_eq!(app.input.text(), "old");
+    }
+
+    #[test]
+    fn down_moves_a_visual_row_within_a_wrapped_line_then_recalls_newer_history() {
+        let mut app = App::new(StatusInfo::default())
+            .with_history(vec!["abcdefghijklmnopqrstuvwxy".into()]);
+        app.input.set_wrap_width(10);
+        type_str(&mut app, "dra");
+        app.update(key(KeyCode::Up));
+        assert_eq!(app.input.text(), "abcdefghijklmnopqrstuvwxy");
+        assert_eq!(app.input.cursor(), (0, 25));
+        app.update(key(KeyCode::Up));
+        app.update(key(KeyCode::Up));
+        assert_eq!(app.input.cursor(), (0, 5));
+        app.update(key(KeyCode::Down));
+        assert_eq!(app.input.cursor(), (0, 15));
+        app.update(key(KeyCode::Down));
+        assert_eq!(app.input.cursor(), (0, 25));
+        // On the last visual row Down recalls newer history (the draft).
+        app.update(key(KeyCode::Down));
+        assert_eq!(app.input.text(), "dra");
+    }
+
+    #[test]
     fn take_submitted_drains_prompts_and_commands() {
         let mut app = App::new(StatusInfo::default());
         type_str(&mut app, "hello");

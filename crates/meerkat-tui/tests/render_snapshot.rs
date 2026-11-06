@@ -145,6 +145,41 @@ fn long_transcript_follows_bottom_and_scrolls_back() {
 }
 
 #[test]
+fn a_long_input_line_wraps_and_the_transcript_shrinks() {
+    let mut app = sample_app();
+    for i in 0..20 {
+        app.transcript.push(Block::User {
+            text: format!("prompt {i}"),
+        });
+    }
+    for c in "abcdefghijklmnopqrstuvwxy".chars() {
+        app.update(Msg::Key(ratatui::crossterm::event::KeyEvent::from(
+            ratatui::crossterm::event::KeyCode::Char(c),
+        )));
+    }
+    let mut terminal = Terminal::new(TestBackend::new(20, H)).unwrap();
+    terminal
+        .draw(|f| draw_at(f, &mut app, Instant::now()))
+        .unwrap();
+    let rows = rows(terminal.backend().buffer());
+    // 18 columns after the prompt prefix: the line takes two rows, so the
+    // transcript has 8 rows (one fewer than with a one-row input).
+    assert_eq!(rows[6], "› prompt 19");
+    assert_eq!(rows[7], "");
+    assert!(rows[8].starts_with('─'), "{:?}", rows[8]);
+    assert_eq!(rows[9], "› abcdefghijklmnopqr");
+    assert_eq!(rows[10], "  stuvwxy");
+    // The cursor is on the second row, after its 7 chars.
+    assert_eq!(
+        terminal.get_cursor_position().unwrap(),
+        ratatui::layout::Position::new(9, 10)
+    );
+    // Mouse hit-testing sees the shorter transcript.
+    assert!(app.block_at_row(7).is_some());
+    assert!(app.block_at_row(8).is_none());
+}
+
+#[test]
 fn escalation_modal_is_drawn_over_the_transcript() {
     let mut app = sample_app();
     app.update(Msg::Escalation(

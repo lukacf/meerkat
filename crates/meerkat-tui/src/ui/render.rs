@@ -16,8 +16,11 @@ use super::transcript::{
 };
 use super::{App, HistorySearch, StatusInfo};
 
-/// Maximum visible input lines.
+/// Maximum visible input rows (visual rows: long lines wrap; the field
+/// scrolls to keep the cursor's row visible).
 pub const MAX_INPUT_LINES: usize = 6;
+/// Columns of the input prompt prefix (`› ` / two spaces).
+const INPUT_PREFIX_W: usize = 2;
 /// Most lines of the helper panel under the input.
 pub const MAX_PANEL_LINES: usize = 6;
 /// Maximum diff lines shown under a tool block.
@@ -37,10 +40,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 /// [`draw`] with an explicit clock (for deterministic tests).
 pub fn draw_at(frame: &mut Frame<'_>, app: &mut App, now: Instant) {
     let area = frame.area();
+    // The input block has only a top border, so its inner width is the
+    // area's; the prompt prefix takes two columns of each visual row.
+    app.input
+        .set_wrap_width(usize::from(area.width).saturating_sub(INPUT_PREFIX_W).max(1));
     let input_rows = if app.search().is_some() {
         1
     } else {
-        app.input.lines().len().clamp(1, MAX_INPUT_LINES) as u16
+        app.input.layout().len().clamp(1, MAX_INPUT_LINES) as u16
     };
     let panel = app.helper_panel();
     let panel_rows = panel.len().min(MAX_PANEL_LINES) as u16;
@@ -204,40 +211,42 @@ fn draw_input(frame: &mut Frame<'_>, app: &App, area: Rect, now: Instant) {
         return;
     }
 
-    let prefix_w = 2usize;
-    let avail = usize::from(inner.width).saturating_sub(prefix_w).max(1);
-    let (row, _) = app.input.cursor();
+    let layout = app.input.layout();
+    let (cursor_vrow, cursor_vcol) = app.input.cursor_visual(&layout);
     let rows = usize::from(inner.height).max(1);
-    let first = row.saturating_sub(rows - 1);
-    let cursor_dc = app.input.cursor_display_col();
-    let hscroll = cursor_dc.saturating_sub(avail - 1);
+    let first = cursor_vrow.saturating_sub(rows - 1);
 
     let prompt_style = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
-    let lines: Vec<Line<'static>> = app
-        .input
-        .lines()
+    let input_lines = app.input.lines();
+    let lines: Vec<Line<'static>> = layout
+        .rows()
         .iter()
-        .enumerate()
         .skip(first)
         .take(rows)
-        .map(|(i, raw)| {
-            let clean = sanitize(raw);
-            let shown = if i == row {
-                truncate_to_width(&skip_columns(&clean, hscroll), avail)
+        .map(|vr| {
+            let raw: String = input_lines
+                .get(vr.line)
+                .map(|l| l.chars().skip(vr.start).take(vr.end - vr.start).collect())
+                .unwrap_or_default();
+            let prefix = if vr.line == 0 && vr.start == 0 {
+                "› "
             } else {
-                truncate_to_width(&clean, avail)
+                "  "
             };
-            let prefix = if i == 0 { "› " } else { "  " };
-            Line::from(vec![Span::styled(prefix, prompt_style), Span::raw(shown)])
+            Line::from(vec![
+                Span::styled(prefix, prompt_style),
+                Span::raw(sanitize(&raw)),
+            ])
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
 
     if app.modal.is_none() {
-        let x = inner.x + (prefix_w + cursor_dc - hscroll) as u16;
-        let y = inner.y + (row - first) as u16;
+        let x = usize::from(inner.x) + INPUT_PREFIX_W + cursor_vcol;
+        let x = u16::try_from(x).unwrap_or(u16::MAX);
+        let y = inner.y + u16::try_from(cursor_vrow - first).unwrap_or(0);
         frame.set_cursor_position(Position::new(x.min(inner.right().saturating_sub(1)), y));
     }
 }

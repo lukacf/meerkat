@@ -1,7 +1,9 @@
 //! Multi-line prompt editor with history.
 //!
 //! The cursor column is a char index into the current line; display columns are
-//! computed with `unicode-width` when rendering.
+//! computed with `unicode-width` when rendering. Logical lines soft-wrap at the
+//! field width ([`wrap_layout`]); wrapping is layout only, the stored lines are
+//! never split.
 
 use super::markdown::{display_width, sanitize};
 
@@ -14,6 +16,8 @@ pub struct InputEditor {
     history: Vec<String>,
     history_pos: Option<usize>,
     draft: Option<String>,
+    /// Columns a visual row holds (set by the renderer; 0 = do not wrap).
+    wrap_width: usize,
 }
 
 impl Default for InputEditor {
@@ -30,6 +34,147 @@ fn char_len(line: &str) -> usize {
     line.chars().count()
 }
 
+/// Display columns one char of a stored line takes once sanitized for the
+/// screen (a tab expands, a control char becomes a replacement glyph).
+fn cell_width(ch: char) -> usize {
+    let mut buf = [0u8; 4];
+    display_width(&sanitize(ch.encode_utf8(&mut buf)))
+}
+
+/// One visual row of the wrapped input: chars `start..end` of logical line
+/// `line`, `width` display columns wide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisualRow {
+    pub line: usize,
+    pub start: usize,
+    pub end: usize,
+    pub width: usize,
+}
+
+/// The input's logical lines soft-wrapped into visual rows (see [`wrap_layout`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrapLayout {
+    rows: Vec<VisualRow>,
+}
+
+/// Wrap `lines` at `width` display columns, at char boundaries (no word wrap).
+///
+/// A wide char never splits: it starts a new row when it does not fit. A
+/// zero-width char stays on the row of the char before it. A line of width 0
+/// still takes one row, and a line whose last row is exactly full gets an
+/// empty row after it, where the cursor at its end sits. `width == 0` means
+/// no wrapping (one row per line).
+pub fn wrap_layout(lines: &[String], width: usize) -> WrapLayout {
+    let limit = if width == 0 { usize::MAX } else { width };
+    let mut rows = Vec::with_capacity(lines.len());
+    for (line, text) in lines.iter().enumerate() {
+        let (mut start, mut used, mut idx) = (0, 0usize, 0);
+        for ch in text.chars() {
+            let w = cell_width(ch);
+            if w > 0 && used > 0 && used.saturating_add(w) > limit {
+                rows.push(VisualRow {
+                    line,
+                    start,
+                    end: idx,
+                    width: used,
+                });
+                start = idx;
+                used = 0;
+            }
+            used += w;
+            idx += 1;
+        }
+        rows.push(VisualRow {
+            line,
+            start,
+            end: idx,
+            width: used,
+        });
+        if idx > start && used >= limit {
+            rows.push(VisualRow {
+                line,
+                start: idx,
+                end: idx,
+                width: 0,
+            });
+        }
+    }
+    if rows.is_empty() {
+        rows.push(VisualRow {
+            line: 0,
+            start: 0,
+            end: 0,
+            width: 0,
+        });
+    }
+    WrapLayout { rows }
+}
+
+impl WrapLayout {
+    /// The visual rows, top to bottom.
+    pub fn rows(&self) -> &[VisualRow] {
+        &self.rows
+    }
+
+    /// Number of visual rows (at least 1).
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Always false: a layout has at least one row.
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    /// The visual `(row, display column)` of logical `(row, char column)`.
+    /// A position at a row boundary belongs to the later row.
+    pub fn to_visual(&self, lines: &[String], row: usize, col: usize) -> (usize, usize) {
+        let mut found = None;
+        for (i, r) in self.rows.iter().enumerate() {
+            if r.line > row {
+                break;
+            }
+            if r.line == row && r.start <= col {
+                found = Some(i);
+            }
+        }
+        let Some(i) = found else {
+            return (0, 0);
+        };
+        let start = self.rows.get(i).map_or(0, |r| r.start);
+        let text = lines.get(row).map_or("", String::as_str);
+        let vcol = text
+            .chars()
+            .skip(start)
+            .take(col.saturating_sub(start))
+            .map(cell_width)
+            .sum();
+        (i, vcol)
+    }
+
+    /// The logical `(row, char column)` nearest visual `(vrow, vcol)`: the
+    /// last char boundary of the row at or left of `vcol`. Only the last row
+    /// of a line can hold the position after its last char (elsewhere that
+    /// position is the next row's start). `None` past the last row.
+    pub fn from_visual(&self, lines: &[String], vrow: usize, vcol: usize) -> Option<(usize, usize)> {
+        let r = *self.rows.get(vrow)?;
+        let text = lines.get(r.line).map_or("", String::as_str);
+        let (mut col, mut used) = (r.start, 0usize);
+        for ch in text.chars().skip(r.start).take(r.end - r.start) {
+            used += cell_width(ch);
+            if used > vcol {
+                break;
+            }
+            col += 1;
+        }
+        let last_of_line = self.rows.get(vrow + 1).is_none_or(|n| n.line != r.line);
+        if !last_of_line && col >= r.end {
+            col = r.end.saturating_sub(1).max(r.start);
+        }
+        Some((r.line, col))
+    }
+}
+
 impl InputEditor {
     /// An empty editor with no history.
     pub fn new() -> Self {
@@ -40,7 +185,24 @@ impl InputEditor {
             history: Vec::new(),
             history_pos: None,
             draft: None,
+            wrap_width: 0,
         }
+    }
+
+    /// Set the columns a visual row holds (0 = do not wrap). The renderer
+    /// sets it from the field width each frame; Up/Down move by visual rows.
+    pub fn set_wrap_width(&mut self, width: usize) {
+        self.wrap_width = width;
+    }
+
+    /// The current lines wrapped at the wrap width.
+    pub fn layout(&self) -> WrapLayout {
+        wrap_layout(&self.lines, self.wrap_width)
+    }
+
+    /// The cursor's visual `(row, display column)` in `layout`.
+    pub fn cursor_visual(&self, layout: &WrapLayout) -> (usize, usize) {
+        layout.to_visual(&self.lines, self.row, self.col)
     }
 
     /// Seed the history (oldest first).
@@ -62,12 +224,6 @@ impl InputEditor {
     /// Cursor as `(row, char column)`.
     pub fn cursor(&self) -> (usize, usize) {
         (self.row, self.col)
-    }
-
-    /// Display column of the cursor within its line.
-    pub fn cursor_display_col(&self) -> usize {
-        let line = self.current();
-        display_width(&sanitize(&line[..byte_index(line, self.col)]))
     }
 
     /// Full text joined with `\n`.
@@ -266,11 +422,21 @@ impl InputEditor {
         self.col = 0;
     }
 
-    /// Up arrow: move up a line, or recall older history from the first line.
+    /// Move the cursor to visual row `vrow` at display column `vcol` (clamped).
+    fn move_to_visual(&mut self, layout: &WrapLayout, vrow: usize, vcol: usize) {
+        if let Some((row, col)) = layout.from_visual(&self.lines, vrow, vcol) {
+            self.row = row;
+            self.col = col;
+        }
+    }
+
+    /// Up arrow: move up a visual row, or recall older history from the
+    /// first visual row.
     pub fn up(&mut self) {
-        if self.row > 0 {
-            self.row -= 1;
-            self.col = self.col.min(char_len(self.current()));
+        let layout = self.layout();
+        let (vrow, vcol) = self.cursor_visual(&layout);
+        if vrow > 0 {
+            self.move_to_visual(&layout, vrow - 1, vcol);
             return;
         }
         let next = match self.history_pos {
@@ -287,11 +453,13 @@ impl InputEditor {
         self.set_text(&entry);
     }
 
-    /// Down arrow: move down a line, or recall newer history from the last line.
+    /// Down arrow: move down a visual row, or recall newer history from the
+    /// last visual row.
     pub fn down(&mut self) {
-        if self.row + 1 < self.lines.len() {
-            self.row += 1;
-            self.col = self.col.min(char_len(self.current()));
+        let layout = self.layout();
+        let (vrow, vcol) = self.cursor_visual(&layout);
+        if vrow + 1 < layout.len() {
+            self.move_to_visual(&layout, vrow + 1, vcol);
             return;
         }
         let Some(p) = self.history_pos else {
@@ -407,5 +575,102 @@ mod tests {
         e.insert_str("   ");
         e.take();
         assert_eq!(e.history().len(), 1);
+    }
+
+    fn lines(texts: &[&str]) -> Vec<String> {
+        texts.iter().map(|t| (*t).to_string()).collect()
+    }
+
+    fn spans(layout: &WrapLayout) -> Vec<(usize, usize, usize)> {
+        layout
+            .rows()
+            .iter()
+            .map(|r| (r.line, r.start, r.end))
+            .collect()
+    }
+
+    #[test]
+    fn wrap_layout_splits_a_long_line_at_the_width() {
+        let ls = lines(&["abcdefghijklmnopqrstuvwxy"]);
+        let layout = wrap_layout(&ls, 10);
+        assert_eq!(spans(&layout), vec![(0, 0, 10), (0, 10, 20), (0, 20, 25)]);
+        assert_eq!(
+            layout.rows().iter().map(|r| r.width).collect::<Vec<_>>(),
+            vec![10, 10, 5]
+        );
+        assert_eq!(layout.to_visual(&ls, 0, 25), (2, 5));
+        assert_eq!(layout.to_visual(&ls, 0, 3), (0, 3));
+    }
+
+    #[test]
+    fn wrap_layout_never_splits_a_wide_char() {
+        // 4 narrow + 3 wide (2 columns each) = 10 columns at width 5.
+        let ls = lines(&["abcd日本語"]);
+        let layout = wrap_layout(&ls, 5);
+        assert_eq!(spans(&layout), vec![(0, 0, 4), (0, 4, 6), (0, 6, 7)]);
+        assert!(layout.rows().iter().all(|r| r.width <= 5));
+        assert_eq!(layout.to_visual(&ls, 0, 5), (1, 2));
+        // A zero-width joiner stays on the row of the char before it.
+        let ls = lines(&["abcde\u{200D}f"]);
+        assert_eq!(spans(&wrap_layout(&ls, 5)), vec![(0, 0, 6), (0, 6, 7)]);
+    }
+
+    #[test]
+    fn wrap_layout_gives_an_empty_line_one_row() {
+        let ls = lines(&["", "ab", ""]);
+        let layout = wrap_layout(&ls, 10);
+        assert_eq!(spans(&layout), vec![(0, 0, 0), (1, 0, 2), (2, 0, 0)]);
+        assert_eq!(layout.to_visual(&ls, 2, 0), (2, 0));
+        assert_eq!(wrap_layout(&[], 10).len(), 1);
+    }
+
+    #[test]
+    fn wrap_layout_maps_row_ends_to_the_next_row() {
+        let ls = lines(&["abcdefghijklmnopqrstuvwxy"]);
+        let layout = wrap_layout(&ls, 10);
+        // The boundary position belongs to the later row.
+        assert_eq!(layout.to_visual(&ls, 0, 10), (1, 0));
+        assert_eq!(layout.to_visual(&ls, 0, 20), (2, 0));
+        // A column past a row's end clamps to its last char, except on the
+        // line's last row.
+        assert_eq!(layout.from_visual(&ls, 0, 99), Some((0, 9)));
+        assert_eq!(layout.from_visual(&ls, 2, 99), Some((0, 25)));
+        assert_eq!(layout.from_visual(&ls, 1, 4), Some((0, 14)));
+        assert_eq!(layout.from_visual(&ls, 3, 0), None);
+    }
+
+    #[test]
+    fn wrap_layout_puts_the_cursor_after_an_exactly_full_line_on_the_next_row() {
+        let ls = lines(&["abcdefghij", "k"]);
+        let layout = wrap_layout(&ls, 10);
+        assert_eq!(spans(&layout), vec![(0, 0, 10), (0, 10, 10), (1, 0, 1)]);
+        assert_eq!(layout.to_visual(&ls, 0, 10), (1, 0));
+        assert_eq!(layout.from_visual(&ls, 1, 0), Some((0, 10)));
+        assert_eq!(layout.from_visual(&ls, 0, 99), Some((0, 9)));
+    }
+
+    #[test]
+    fn wrap_width_zero_does_not_wrap() {
+        let ls = lines(&["abcdefghijklmnopqrstuvwxy"]);
+        assert_eq!(spans(&wrap_layout(&ls, 0)), vec![(0, 0, 25)]);
+    }
+
+    #[test]
+    fn up_and_down_move_by_visual_rows() {
+        let mut e = InputEditor::new().with_history(vec!["old".into()]);
+        e.set_wrap_width(10);
+        e.insert_str("abcdefghijklmnopqrstuvwxy");
+        e.left();
+        e.left();
+        assert_eq!(e.cursor(), (0, 23));
+        e.up();
+        assert_eq!(e.cursor(), (0, 13));
+        e.up();
+        assert_eq!(e.cursor(), (0, 3));
+        e.down();
+        assert_eq!(e.cursor(), (0, 13));
+        e.up();
+        e.up();
+        assert_eq!(e.text(), "old");
     }
 }

@@ -4,7 +4,7 @@
 use meerkat_core::{AssistantBlock, ProviderMeta, ServerToolKind};
 use meerkat_llm_core::LlmError;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::client::{
     message_citations_content, openai_response_meta, parse_tool_call_arguments,
@@ -235,213 +235,309 @@ fn item_id<'a>(item: &'a Value, kind: &str) -> Option<&'a str> {
     .and_then(Value::as_str)
 }
 
-/// The item kinds whose completed identity GitHub Copilot's Responses stream
-/// re-issues in the terminal response.
-pub(crate) const COPILOT_ALIASED_KINDS: [&str; 2] = ["message", "reasoning"];
+/// The kind an output item's `type` names on the Copilot route: a web search
+/// result belongs to its web search call.
+fn copilot_item_kind(item_type: &str) -> &str {
+    match item_type {
+        "web_search_result" => "web_search_call",
+        other => other,
+    }
+}
 
-/// Whether two items of `kind` are the same item for Copilot's
-/// re-identification: for a message, the same role, phase and full content;
-/// for reasoning, every field except the top-level id and the opaque
-/// `encrypted_content` (which must be a string on both when present), so the
-/// terminal id and ciphertext pair is taken as provider-owned. On the items
-/// it accepts this is an equivalence; a reasoning item whose
-/// `encrypted_content` is not a string matches nothing, not even itself.
+/// The kind of item a Responses stream event of `event_type` that names its
+/// item by `item_id` belongs to; `None` for events that name no item.
+fn copilot_event_kind(event_type: &str) -> Option<&'static str> {
+    let event = event_type.strip_prefix("response.")?;
+    if event.starts_with("output_text.")
+        || event.starts_with("content_part.")
+        || event.starts_with("refusal.")
+    {
+        Some("message")
+    } else if event.starts_with("reasoning") {
+        Some("reasoning")
+    } else if event.starts_with("function_call_arguments.") {
+        Some("function_call")
+    } else if event.starts_with("web_search_call.") {
+        Some("web_search_call")
+    } else {
+        None
+    }
+}
+
+/// Whether two items of `kind` that one Copilot slot carried on different
+/// events are the same item apart from Copilot's re-identification: for a
+/// message, the same role, phase and full content; for a function call, the
+/// same call_id, name and arguments; for anything else every field but the
+/// id and the slot's `output_index`, and for reasoning also the opaque
+/// `encrypted_content`, which Copilot re-encodes.
 fn copilot_same_item(kind: &str, left: &Value, right: &Value) -> bool {
+    let fields = |item: &Value, names: &[&str]| -> Vec<Option<Value>> {
+        names.iter().map(|name| item.get(*name).cloned()).collect()
+    };
     match kind {
         "message" => {
-            let semantics = |item: &Value| {
-                (
-                    item.get("role").cloned(),
-                    item.get("phase").cloned(),
-                    item.get("content").cloned(),
-                )
-            };
-            semantics(left) == semantics(right)
+            fields(left, &["role", "phase", "content"])
+                == fields(right, &["role", "phase", "content"])
         }
-        "reasoning" => {
-            let opaque_ok = |item: &Value| {
-                item.get("encrypted_content")
-                    .is_none_or(|ciphertext| ciphertext.is_string())
-            };
-            let visible = |item: &Value| {
+        "function_call" => {
+            fields(left, &["call_id", "name", "arguments"])
+                == fields(right, &["call_id", "name", "arguments"])
+        }
+        _ => {
+            let comparable = |item: &Value| {
                 let mut item = item.clone();
                 if let Some(object) = item.as_object_mut() {
                     object.remove("id");
-                    object.remove("encrypted_content");
+                    object.remove("output_index");
+                    if kind == "reasoning" {
+                        object.remove("encrypted_content");
+                    }
                 }
                 item
             };
-            opaque_ok(left) && opaque_ok(right) && visible(left) == visible(right)
+            comparable(left) == comparable(right)
         }
-        _ => false,
     }
 }
 
-/// Copilot's completed-to-terminal identity aliases, one map per aliased kind.
+/// The outcome of a GitHub Copilot Responses stream whose terminal output
+/// does not line up with the items the stream announced, or that
+/// contradicts itself ([`CopilotSlots`]): the retryable
+/// [`LlmError::IncompleteResponse`], so the turn is tried again and nothing
+/// of this response is committed.
+pub(crate) fn copilot_mismatch(detail: impl std::fmt::Display) -> LlmError {
+    LlmError::IncompleteResponse {
+        message: format!("GitHub Copilot Responses output does not match its stream: {detail}"),
+    }
+}
+
+/// A coverage refusal on the Copilot route ([`validate_completed_coverage`],
+/// [`validate_coverage`]): the terminal output lacks an item the stream
+/// carried, which is the same mismatch as [`copilot_mismatch`].
+pub(crate) fn copilot_coverage_mismatch(error: LlmError) -> LlmError {
+    match error {
+        LlmError::StreamParseError { message } => copilot_mismatch(message),
+        other => other,
+    }
+}
+
+/// The output items of one GitHub Copilot Responses stream, by slot.
+///
+/// Copilot gives an output item a new id on most events of its lifecycle
+/// (added, deltas, done, the terminal response) while the item's wire
+/// `output_index` stays, and it re-encodes a reasoning item's ciphertext in
+/// the terminal response. On that route an item is its `output_index` slot:
+/// the first non-empty id any event naming the slot carries is the item's
+/// id, and every later event of the slot carries that id instead of its own.
+/// An event that names no slot keeps its ids unless an earlier event carried
+/// them at a slot. Function calls keep their `call_id`, and no ciphertext is
+/// moved or merged.
+///
+/// The terminal output is paired with the slots by each item's own
+/// `output_index`, else by its array position, and is taken only when it
+/// lines up with them: exactly one terminal item for every slot the stream
+/// announced and none for another, each of its slot's kind and, where the
+/// stream completed the slot, the same item apart from its id
+/// ([`copilot_same_item`]). Each terminal item then carries its slot's id and
+/// keeps everything else, its ciphertext included. A terminal output that
+/// does not line up, and a stream that contradicts itself (another kind at a
+/// slot, one id at two slots, a slot added or completed again as a different
+/// item), is never repaired: no item is invented, moved or merged, and the
+/// response ends with [`copilot_mismatch`].
 #[derive(Debug, Default)]
-pub(crate) struct CopilotAliases {
-    by_kind: HashMap<&'static str, HashMap<String, String>>,
+pub(crate) struct CopilotSlots {
+    slots: BTreeMap<u64, CopilotSlot>,
+    /// Every id an event carried at a slot, to that slot.
+    seen: HashMap<String, u64>,
 }
 
-impl CopilotAliases {
-    /// The terminal identity of a completed item of `kind` with `id`: its
-    /// proven alias, or its own id when the terminal output kept it.
-    pub(crate) fn terminal_id<'a>(&'a self, kind: &str, id: &'a str) -> &'a str {
-        self.by_kind
-            .get(kind)
-            .and_then(|aliases| aliases.get(id))
-            .map_or(id, String::as_str)
-    }
+#[derive(Debug)]
+struct CopilotSlot {
+    /// The first id an event naming the slot carried.
+    id: String,
+    /// The kind of the slot's item, once an event names it.
+    kind: Option<String>,
+    /// The item the slot's first `response.output_item.added` carried.
+    added: Option<Value>,
+    /// The item the slot's first `response.output_item.done` carried.
+    completed: Option<Value>,
+}
 
-    /// `item` with its completed id replaced by its terminal alias.
-    pub(crate) fn apply(&self, item: &Value) -> Value {
-        let mut item = item.clone();
-        let Some(kind) = item.get("type").and_then(Value::as_str).map(str::to_owned) else {
-            return item;
-        };
-        if let Some(alias) = item
-            .get("id")
+impl CopilotSlots {
+    /// Give a stream event's ids their slot's identity. `output_index` is
+    /// the event's slot, `item` the item it carries (an added or done item,
+    /// or a reasoning completion) and `item_id` the item it names.
+    pub(crate) fn observe(
+        &mut self,
+        event_type: &str,
+        output_index: Option<u64>,
+        mut item: Option<&mut Value>,
+        item_id: Option<&mut String>,
+    ) -> Result<(), LlmError> {
+        let kind = match item
+            .as_deref()
+            .and_then(|item| item.get("type"))
             .and_then(Value::as_str)
-            .and_then(|id| self.by_kind.get(kind.as_str())?.get(id))
-            .cloned()
-            && let Some(object) = item.as_object_mut()
         {
-            object.insert("id".to_owned(), Value::String(alias));
-        }
-        item
-    }
-}
-
-/// GitHub Copilot's Responses stream re-identifies completed messages and
-/// reasoning: an item completed by `response.output_item.done` as `F` can be
-/// carried by the terminal response as `G`. For that route only, return the
-/// aliases `F -> G` for the re-identified completed items (those whose id
-/// the terminal output lacks), each to a terminal item of the same type that
-/// no completed item claims and that [`copilot_same_item`] proves the same
-/// item. Identity conflicts are refused before anything is aliased: a
-/// completed id reused by two completed items, and a terminal id carried by
-/// two terminal items.
-///
-/// One response can hold several items of a type that differ only in their
-/// ids and ciphertext (two reasoning items without a summary, say), so items
-/// are matched by group: the group of a re-identified completed item is the
-/// k re-identified completed items and the m unclaimed terminal items that
-/// are the same item as it ([`copilot_same_item`] is an equivalence on the
-/// items it accepts). A group is aliased only when it is complete on both
-/// sides, k = m: walking the completed items in their given order, each
-/// takes the first terminal item of its group, in output order, that no
-/// earlier one took. Pairing inside a complete group is immaterial to the
-/// verdicts and the committed blocks: the blocks are lowered from the
-/// terminal items, each keeping its own id and ciphertext, and every pairing
-/// covers the same terminal ids, which carry the same visible content, so
-/// the coverage checks in the client give the same verdicts. The live events
-/// match too, unless a streamed id of one item is the terminal id of
-/// another, where the client's one-pass streamed-id reconciliation depends
-/// on the slot order. Array positions are never used to decide which items
-/// are the same; inside a complete group they only pick one of these
-/// pairings.
-///
-/// Otherwise a re-identified completed item is refused, by its group:
-/// - m = 0: as a re-identification with different content when an unclaimed
-///   terminal item of its type exists, otherwise by the ordinary coverage
-///   check as omitted;
-/// - k < m: as having no one-to-one match, since nothing tells which
-///   terminal item is the extra one;
-/// - k > m: as having no one-to-one match, at the first item of the group
-///   left without a terminal item.
-///
-/// Function calls (keyed by `call_id`) and other references are never
-/// aliased, and the terminal identity is kept.
-pub(crate) fn copilot_item_aliases<'a>(
-    output: &[Value],
-    completed: impl IntoIterator<Item = &'a Value>,
-) -> Result<CopilotAliases, LlmError> {
-    let completed: Vec<&Value> = completed.into_iter().collect();
-    let mut aliases = CopilotAliases::default();
-    for kind in COPILOT_ALIASED_KINDS {
-        let of_kind = |item: &&Value| item.get("type").and_then(Value::as_str) == Some(kind);
-        let completed: Vec<&Value> = completed.iter().copied().filter(of_kind).collect();
-        let terminal: Vec<&Value> = output.iter().filter(of_kind).collect();
-        let mut completed_ids = HashSet::new();
-        for item in &completed {
-            if let Some(id) = item.get("id").and_then(Value::as_str)
-                && !completed_ids.insert(id)
+            Some(item_type) => copilot_item_kind(item_type).to_owned(),
+            None => match copilot_event_kind(event_type) {
+                Some(kind) => kind.to_owned(),
+                None => return Ok(()),
+            },
+        };
+        let carried_item_id = item
+            .as_deref()
+            .and_then(|item| item.get("id"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
+        let named_item_id = item_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .map(String::to_owned);
+        let Some(index) = output_index else {
+            // An event that names no slot: an id an earlier event carried
+            // at a slot is that slot's, any other id stays as it is.
+            let slot_id = |id: Option<&String>| {
+                let index = self.seen.get(id?)?;
+                self.slots.get(index).map(|slot| slot.id.clone())
+            };
+            if let Some(item) = item
+                && let Some(slot_id) = slot_id(carried_item_id.as_ref())
             {
-                return Err(malformed(format!(
-                    "completed Responses {kind} id '{id}' is reused by two completed items"
-                )));
+                item["id"] = Value::String(slot_id);
             }
-        }
-        let mut terminal_ids = HashSet::new();
-        for item in &terminal {
-            if let Some(id) = item.get("id").and_then(Value::as_str)
-                && !terminal_ids.insert(id)
+            if let Some(item_id) = item_id
+                && let Some(slot_id) = slot_id(named_item_id.as_ref())
             {
-                return Err(malformed(format!(
-                    "terminal Responses output repeats {kind} id '{id}'"
-                )));
+                *item_id = slot_id;
             }
+            return Ok(());
+        };
+        for id in carried_item_id.iter().chain(named_item_id.iter()) {
+            self.place(index, id, &kind)?;
         }
-        let unclaimed: Vec<&Value> = terminal
-            .iter()
-            .copied()
-            .filter(|item| {
-                item.get("id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| !completed_ids.contains(id))
-            })
-            .collect();
-        let reidentified: Vec<(&str, &Value)> = completed
-            .iter()
-            .copied()
-            .filter_map(|item| item.get("id").and_then(Value::as_str).map(|id| (id, item)))
-            .filter(|(id, _)| !terminal_ids.contains(id))
-            .collect();
-        let mut kind_aliases = HashMap::new();
-        let mut aliased_targets: HashSet<&str> = HashSet::new();
-        for &(done_id, done) in &reidentified {
-            // Its group: the unclaimed terminal items that are the same item,
-            // in output order, and the re-identified completed items that are.
-            let group_terminal: Vec<&str> = unclaimed
-                .iter()
-                .filter(|candidate| copilot_same_item(kind, done, candidate))
-                .filter_map(|candidate| candidate.get("id").and_then(Value::as_str))
-                .collect();
-            if group_terminal.is_empty() {
-                if unclaimed.is_empty() {
-                    continue;
+        let Some(slot) = self.slots.get_mut(&index) else {
+            // An event that carries no id cannot open a slot.
+            return Ok(());
+        };
+        if let Some(slot_kind) = slot.kind.as_deref()
+            && slot_kind != kind
+        {
+            return Err(copilot_mismatch(format!(
+                "a {kind} at output_index {index}, which holds a {slot_kind}"
+            )));
+        }
+        if let Some(item) = item.as_deref_mut()
+            && item.get("id").is_some_and(Value::is_string)
+        {
+            item["id"] = Value::String(slot.id.clone());
+        }
+        if let Some(item_id) = item_id {
+            item_id.clone_from(&slot.id);
+        }
+        let (first, again) = match event_type {
+            "response.output_item.added" => (&mut slot.added, "added"),
+            "response.output_item.done" => (&mut slot.completed, "completed"),
+            _ => return Ok(()),
+        };
+        if let Some(item) = item.as_deref() {
+            if let Some(previous) = first.as_ref() {
+                if !copilot_same_item(&kind, previous, item) {
+                    return Err(copilot_mismatch(format!(
+                        "output_index {index} was {again} again as a different item"
+                    )));
                 }
-                return Err(malformed(format!(
-                    "terminal Responses output re-identified completed {kind} item '{done_id}' with different content"
+            } else {
+                *first = Some(item.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// Record `id`, carried by an event of a `kind` item at `index`: the
+    /// first id a slot sees is its identity.
+    fn place(&mut self, index: u64, id: &str, kind: &str) -> Result<(), LlmError> {
+        if let Some(&other) = self.seen.get(id)
+            && other != index
+        {
+            return Err(copilot_mismatch(format!(
+                "id '{id}' appears at output_index {other} and {index}"
+            )));
+        }
+        let slot = self.slots.entry(index).or_insert_with(|| CopilotSlot {
+            id: id.to_owned(),
+            kind: None,
+            added: None,
+            completed: None,
+        });
+        if slot.kind.is_none() {
+            slot.kind = Some(kind.to_owned());
+        }
+        self.seen.entry(id.to_owned()).or_insert(index);
+        Ok(())
+    }
+
+    /// Pair the terminal `response`'s output with the slots, give each item
+    /// its slot's id and order the output by slot. Without slots the output
+    /// stays as the provider sent it; an `output` that is not an array is
+    /// left for the caller to refuse.
+    pub(crate) fn reconcile_terminal(&self, response: &mut Value) -> Result<(), LlmError> {
+        if self.slots.is_empty() {
+            return Ok(());
+        }
+        let output = match response.get_mut("output") {
+            Some(Value::Array(output)) => std::mem::take(output),
+            None | Some(Value::Null) => Vec::new(),
+            Some(_) => return Ok(()),
+        };
+        let mut paired: BTreeMap<u64, Value> = BTreeMap::new();
+        for (position, mut item) in output.into_iter().enumerate() {
+            let index = item
+                .get("output_index")
+                .and_then(Value::as_u64)
+                .unwrap_or(position as u64);
+            let Some(slot) = self.slots.get(&index) else {
+                return Err(copilot_mismatch(format!(
+                    "the terminal output has an item at output_index {index} the stream never announced"
+                )));
+            };
+            let kind = item
+                .get("type")
+                .and_then(Value::as_str)
+                .map_or("untyped item", copilot_item_kind)
+                .to_owned();
+            if let Some(slot_kind) = slot.kind.as_deref()
+                && slot_kind != kind
+            {
+                return Err(copilot_mismatch(format!(
+                    "the terminal output has a {kind} at output_index {index}, where the stream had a {slot_kind}"
                 )));
             }
-            let group_completed = reidentified
-                .iter()
-                .filter(|(_, other)| copilot_same_item(kind, done, other))
-                .count();
-            // Only a complete group pairs: with more terminal items than
-            // completed ones nothing tells which one is extra, and with fewer
-            // the last completed items find none left.
-            let target = if group_completed < group_terminal.len() {
-                None
-            } else {
-                group_terminal
-                    .iter()
-                    .copied()
-                    .find(|id| !aliased_targets.contains(id))
-            };
-            let Some(target) = target else {
-                return Err(malformed(format!(
-                    "terminal Responses output has no one-to-one match for re-identified completed {kind} item '{done_id}' ({group_completed} re-identified completed and {} unclaimed terminal items with the same content)",
-                    group_terminal.len()
+            if let Some(completed) = slot.completed.as_ref()
+                && !copilot_same_item(&kind, completed, &item)
+            {
+                return Err(copilot_mismatch(format!(
+                    "the terminal output's item at output_index {index} differs from the completed one"
                 )));
-            };
-            aliased_targets.insert(target);
-            kind_aliases.insert(done_id.to_owned(), target.to_owned());
+            }
+            if item.get("id").is_some_and(Value::is_string) {
+                item["id"] = Value::String(slot.id.clone());
+            }
+            if paired.insert(index, item).is_some() {
+                return Err(copilot_mismatch(format!(
+                    "the terminal output has two items at output_index {index}"
+                )));
+            }
         }
-        aliases.by_kind.insert(kind, kind_aliases);
+        if let Some(index) = self.slots.keys().find(|index| !paired.contains_key(index)) {
+            return Err(copilot_mismatch(format!(
+                "output_index {index} is missing from the terminal output"
+            )));
+        }
+        response["output"] = Value::Array(paired.into_values().collect());
+        Ok(())
     }
-    Ok(aliases)
 }
 
 /// Atomic item-done events need coverage even when they emitted no deltas.

@@ -150,9 +150,8 @@ pub struct OpenAiClient {
     /// DynamicAuthorizer envelope (host-managed OAuth refresh, etc.).
     authorizer: Option<std::sync::Arc<dyn meerkat_core::HttpAuthorizer>>,
     supports_image_input: bool,
-    /// The GitHub Copilot Responses route re-identifies output items between
-    /// their done events and the terminal response; see
-    /// [`Self::with_copilot_responses_item_identity`].
+    /// The GitHub Copilot Responses route identifies output items by their
+    /// `output_index` slot; see [`Self::with_copilot_responses_item_identity`].
     copilot_responses_item_identity: bool,
 }
 
@@ -970,19 +969,17 @@ impl OpenAiClient {
         self
     }
 
-    /// For the GitHub Copilot Responses route only. Copilot re-identifies a
-    /// message or reasoning item on every event of its lifecycle (added,
-    /// deltas, done, terminal) while its wire `output_index` stays. Events of
-    /// an added item's lifecycle are recorded under its canonical (first
-    /// added) id; a completed message or reasoning item the terminal output
-    /// lacks by id is aliased one to one to a terminal item that is the same
-    /// item, several equal items only as a group with as many on each side
-    /// (see `responses_output::copilot_item_aliases`), keeping the terminal
-    /// identity (and, for reasoning, its ciphertext); and the streamed ids of
-    /// each completed lifecycle are reconciled with that terminal identity.
-    /// Conflicting items at one `output_index` and reused or repeated ids are
-    /// protocol errors, and coverage stays strict afterwards. Function calls
-    /// keep their `call_id` identity. Other routes are unchanged.
+    /// For the GitHub Copilot Responses route only. Copilot gives an output
+    /// item a new id on most events of its lifecycle (added, deltas, done,
+    /// terminal) while its wire `output_index` stays, so on this route an
+    /// item is its `output_index` slot: the first id any event of the slot
+    /// carries is the item's id, and the terminal output is taken only when
+    /// it lines up with the slots, each item under its slot's id with its
+    /// own ciphertext (see `responses_output::CopilotSlots`). A terminal
+    /// output that does not line up, or a stream that contradicts itself,
+    /// fails the response with the retryable
+    /// [`LlmError::IncompleteResponse`] and commits nothing. Function calls
+    /// keep their `call_id`. Other routes are unchanged.
     pub fn with_copilot_responses_item_identity(mut self) -> Self {
         self.copilot_responses_item_identity = true;
         self
@@ -2825,13 +2822,16 @@ impl OpenAiClient {
             let mut streamed_text_items: HashSet<String> = HashSet::new();
             let mut assistant_items: HashMap<String, Value> = HashMap::new();
             let mut completed_items: std::collections::BTreeMap<ResponsesOutputIndex, Value> = std::collections::BTreeMap::new();
-            // Copilot only: the item kind and canonical (first added) id of
-            // each message/reasoning item lifecycle, by its wire output_index.
-            let mut copilot_slots: HashMap<u64, (String, String)> = HashMap::new();
-            // Copilot only: each slot's first added item, and the slot each
-            // canonical id belongs to, so lifecycles stay one to one.
-            let mut copilot_slot_items: HashMap<u64, Value> = HashMap::new();
-            let mut copilot_canonical_slots: HashMap<String, u64> = HashMap::new();
+            // Copilot only: each output item's identity by its wire
+            // output_index slot (see `responses_output::CopilotSlots`).
+            let mut copilot_slots = crate::responses_output::CopilotSlots::default();
+            let copilot_coverage = |error: LlmError| {
+                if copilot_item_identity {
+                    crate::responses_output::copilot_coverage_mismatch(error)
+                } else {
+                    error
+                }
+            };
             let mut streamed_tool_ids: HashSet<String> = HashSet::with_capacity(4);
             let mut response_item_tool_calls: HashMap<String, (String, String)> =
                 HashMap::with_capacity(4);
@@ -2859,7 +2859,7 @@ impl OpenAiClient {
                                 let blocks = crate::responses_output::lower_items(completed_items.values(), active_response_id.as_deref())?;
                                 crate::responses_output::validate_coverage(
                                     &blocks, &streamed_tool_ids, &streamed_reasoning_ids, &streamed_text_items, &streamed_web_search_ids,
-                                )?;
+                                ).map_err(copilot_coverage)?;
                                 yield LlmEvent::AssistantOutput { blocks };
                             }
                             done_emitted = true;
@@ -2894,7 +2894,21 @@ impl OpenAiClient {
                         None
                     };
 
-                    if let Some(event) = parsed_event {
+                    if let Some(mut event) = parsed_event {
+                        let terminal_event = event.event_type == "response.completed"
+                            || event.event_type == "response.incomplete"
+                            || event.event_type == "response.done";
+                        // Copilot re-identifies an output item on most
+                        // events of its lifecycle while its wire output_index
+                        // stays: every event of a slot carries the slot's id.
+                        if copilot_item_identity && !terminal_event {
+                            copilot_slots.observe(
+                                &event.event_type,
+                                event.output_index,
+                                event.item.as_mut(),
+                                event.item_id.as_mut(),
+                            )?;
+                        }
                         if let Some(response_id) = event
                             .response
                             .as_ref()
@@ -2906,10 +2920,7 @@ impl OpenAiClient {
                         // object. `response.incomplete` is terminal too (for example,
                         // when max_output_tokens is exhausted), so it must take the
                         // same output/usage projection path as `response.completed`.
-                        if event.event_type == "response.completed"
-                            || event.event_type == "response.incomplete"
-                            || event.event_type == "response.done"
-                        {
+                        if terminal_event {
                             if done_emitted {
                                 // Already processed a terminal event, skip
                                 continue;
@@ -2922,7 +2933,7 @@ impl OpenAiClient {
                                 };
                                 continue;
                             }
-                            if let Some(response_obj) = &event.response {
+                            if let Some(response_obj) = event.response.as_mut() {
                                 if let Err(error) = validate_responses_terminal_status(
                                     &event.event_type,
                                     response_obj,
@@ -2934,48 +2945,17 @@ impl OpenAiClient {
                                     };
                                     continue;
                                 }
+                                // On Copilot the terminal output is taken
+                                // only when it lines up with the stream's
+                                // slots, each item under its slot's id.
+                                if copilot_item_identity {
+                                    copilot_slots.reconcile_terminal(response_obj)?;
+                                }
+                                let response_obj = &*response_obj;
                                 let final_blocks = match response_obj.get("output") {
-                                    Some(Value::Array(output)) if !output.is_empty() && copilot_item_identity => {
-                                        // Copilot re-identifies completed messages in the
-                                        // terminal response: alias each proven same message
-                                        // to its terminal id in both coverage inputs, then
-                                        // check coverage strictly.
-                                        let aliases = crate::responses_output::copilot_item_aliases(output, completed_items.values())?;
-                                        let completed: Vec<Value> = completed_items
-                                            .values()
-                                            .map(|item| aliases.apply(item))
-                                            .collect();
-                                        crate::responses_output::validate_completed_coverage(output, completed.iter())?;
-                                        // Reconcile the streamed ids of each completed
-                                        // lifecycle (its canonical id and its completed
-                                        // id) with that item's terminal identity.
-                                        for (index, item) in &completed_items {
-                                            let (Some(kind), Some(done_id)) = (
-                                                item.get("type").and_then(Value::as_str),
-                                                item.get("id").and_then(Value::as_str),
-                                            ) else {
-                                                continue;
-                                            };
-                                            let streamed = match kind {
-                                                "message" => &mut streamed_text_items,
-                                                "reasoning" => &mut streamed_reasoning_ids,
-                                                _ => continue,
-                                            };
-                                            let terminal_id = aliases.terminal_id(kind, done_id).to_owned();
-                                            let canonical = copilot_slots
-                                                .get(&index.0)
-                                                .filter(|(slot_kind, _)| slot_kind == kind)
-                                                .map(|(_, canonical)| canonical.as_str());
-                                            for observed in [Some(done_id), canonical].into_iter().flatten() {
-                                                if observed != terminal_id && streamed.remove(observed) {
-                                                    streamed.insert(terminal_id.clone());
-                                                }
-                                            }
-                                        }
-                                        Some(crate::responses_output::lower_items(output, active_response_id.as_deref())?)
-                                    },
                                     Some(Value::Array(output)) if !output.is_empty() => {
-                                        crate::responses_output::validate_completed_coverage(output, completed_items.values())?;
+                                        crate::responses_output::validate_completed_coverage(output, completed_items.values())
+                                            .map_err(copilot_coverage)?;
                                         Some(crate::responses_output::lower_items(output, active_response_id.as_deref())?)
                                     },
                                     Some(Value::Array(_)) | None if !completed_items.is_empty() => Some(
@@ -2987,7 +2967,7 @@ impl OpenAiClient {
                                 if let Some(blocks) = final_blocks.as_ref() {
                                     crate::responses_output::validate_coverage(
                                         blocks, &streamed_tool_ids, &streamed_reasoning_ids, &streamed_text_items, &streamed_web_search_ids,
-                                    )?;
+                                    ).map_err(copilot_coverage)?;
                                 }
                                 // Process output items
                                 if let Some(output) = response_obj.get("output").and_then(|o| o.as_array()) {
@@ -3179,40 +3159,6 @@ impl OpenAiClient {
                         else if event.event_type == "response.output_item.added" {
                             if let Some(item) = &event.item {
                                 crate::responses_output::validate_item(item)?;
-                                // Copilot re-identifies an item on every event of
-                                // its lifecycle; its wire output_index stays. The
-                                // first added id is that lifecycle's canonical id.
-                                if copilot_item_identity
-                                    && let Some(index) = event.output_index
-                                    && let Some(kind) = item.get("type").and_then(Value::as_str)
-                                    && crate::responses_output::COPILOT_ALIASED_KINDS.contains(&kind)
-                                    && let Some(id) = item.get("id").and_then(Value::as_str)
-                                {
-                                    // One lifecycle per slot and one slot per canonical
-                                    // id: only an identical retransmission may repeat.
-                                    match copilot_slot_items.get(&index) {
-                                        Some(first) if first != item => {
-                                            Err(LlmError::StreamParseError {
-                                                message: format!(
-                                                    "conflicting Responses output items added at output_index {index}"
-                                                ),
-                                            })?;
-                                        }
-                                        Some(_) => {}
-                                        None => {
-                                            if let Some(other) = copilot_canonical_slots.get(id) {
-                                                Err(LlmError::StreamParseError {
-                                                    message: format!(
-                                                        "Responses output item id '{id}' added at output_index {other} and {index}"
-                                                    ),
-                                                })?;
-                                            }
-                                            copilot_canonical_slots.insert(id.to_owned(), index);
-                                            copilot_slot_items.insert(index, item.clone());
-                                            copilot_slots.insert(index, (kind.to_owned(), id.to_owned()));
-                                        }
-                                    }
-                                }
                                 if item.get("type").and_then(Value::as_str) == Some("message")
                                     && let Some(id) = item.get("id").and_then(Value::as_str)
                                 {
@@ -3250,15 +3196,8 @@ impl OpenAiClient {
                         }
                         else if event.event_type == "response.output_text.delta" {
                             if let Some(delta) = &event.delta {
-                                // On Copilot, a delta of an added message's lifecycle
-                                // (same wire output_index) carries its canonical id.
-                                let item_id = match (copilot_item_identity, event.output_index) {
-                                    (true, Some(index)) => match copilot_slots.get(&index) {
-                                        Some((kind, canonical)) if kind == "message" => Some(canonical.clone()),
-                                        _ => event.item_id.clone(),
-                                    },
-                                    _ => event.item_id.clone(),
-                                };
+                                // On Copilot the item id is already the slot's.
+                                let item_id = event.item_id.clone();
                                 if let Some(id) = &item_id {
                                     streamed_text_items.insert(id.clone());
                                 } else {
@@ -3343,17 +3282,6 @@ impl OpenAiClient {
                             if let Some(item) = &event.item {
                                 crate::responses_output::validate_item(item)?;
                                 if let Some(index) = event.output_index {
-                                    if copilot_item_identity
-                                        && completed_items
-                                            .get(&ResponsesOutputIndex(index))
-                                            .is_some_and(|previous| previous != item)
-                                    {
-                                        Err(LlmError::StreamParseError {
-                                            message: format!(
-                                                "conflicting Responses output items completed at output_index {index}"
-                                            ),
-                                        })?;
-                                    }
                                     completed_items.insert(ResponsesOutputIndex(index), item.clone());
                                 }
                             }
@@ -3433,16 +3361,7 @@ impl OpenAiClient {
                                     saw_terminal_fallback_output = true;
                                 }
 
-                                // On Copilot, a completion of an added reasoning
-                                // item's lifecycle carries its canonical id.
-                                let streamed_id = match (copilot_item_identity, event.output_index) {
-                                    (true, Some(index)) => match copilot_slots.get(&index) {
-                                        Some((kind, canonical)) if kind == "reasoning" => canonical.clone(),
-                                        _ => reasoning_id.to_string(),
-                                    },
-                                    _ => reasoning_id.to_string(),
-                                };
-                                streamed_reasoning_ids.insert(streamed_id);
+                                streamed_reasoning_ids.insert(reasoning_id.to_string());
                                 if !summary_text.trim().is_empty() || meta.is_some() {
                                     saw_terminal_fallback_output = true;
                                 }

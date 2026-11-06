@@ -40862,7 +40862,8 @@ async fn a_member_taken_over_at_a_running_start_is_woken_from_dormant_and_report
 /// A member taken over at a Running start whose recovery's wake is refused
 /// retryably (the host asks to retry its build preparation) stays
 /// retryable: it is Dormant, not Broken, its boot obligation still owed,
-/// and the owed retry wakes it Live once the host prepares it.
+/// and the build preparation's retry wakes it Live once the host prepares
+/// it.
 #[cfg(feature = "runtime-adapter")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_taken_over_members_recovery_refused_retryably_stays_dormant_until_its_retry() {
@@ -40955,7 +40956,7 @@ async fn a_taken_over_members_recovery_refused_retryably_stays_dormant_until_its
         }
     })
     .await
-    .expect("the owed retry wakes the member Live");
+    .expect("the build preparation's retry wakes the member Live");
     paused
         .resumed
         .member(&identity)

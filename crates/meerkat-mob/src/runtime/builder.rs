@@ -8429,10 +8429,20 @@ impl MobBuilder {
 
     /// Backoff of the retry that wakes a member whose boot work is still
     /// owed after its boot wake was refused retryably (an unavailable resume
-    /// gate, a host that asked to retry its build preparation, the wake
-    /// bound): the mob wakes it again after `initial`, doubling up to `max`,
-    /// until it is live, its restore fails for good, or its obligation is
-    /// gone. A delivery to the member meanwhile wakes it at once.
+    /// gate, the wake bound): the mob wakes it again after `initial`,
+    /// doubling up to `max`, until it is live, its restore fails for good,
+    /// or its obligation is gone. A delivery to the member meanwhile wakes
+    /// it at once.
+    ///
+    /// A build preparation the host asked to retry
+    /// ([`super::MemberBuildPreparationRefusal::Retryable`]) has a retry
+    /// timer of its own on the same backoff, armed by the step that records
+    /// it: until it fires (or the host retries,
+    /// [`super::MobHandle::resolve_member_build_preparation`]) every wake of
+    /// the member, a delivery's included, is refused
+    /// ([`crate::MemberWakeRefusal::BuildPreparationRetry`]); when it fires,
+    /// work the member still owes wakes it, and a member that owes none
+    /// stays dormant until its next delivery.
     pub fn with_member_wake_retry_backoff(
         mut self,
         initial: std::time::Duration,
@@ -12382,7 +12392,7 @@ impl RetryableRestoreCause {
     /// The typed refusal a caller waiting on the wake gets.
     pub(super) fn wake_refusal(self) -> crate::MemberWakeRefusal {
         match self {
-            Self::BuildPreparation => crate::MemberWakeRefusal::HostPreparationPending,
+            Self::BuildPreparation => crate::MemberWakeRefusal::BuildPreparationRetry,
             Self::SeatCreateUnavailable | Self::RestoreUnavailable => {
                 crate::MemberWakeRefusal::ResumeGateUnavailable
             }

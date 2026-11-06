@@ -374,9 +374,17 @@ pub enum MemberWakeRefusal {
     LifecycleOriginFenced,
     /// The mob is a candidate composition, which never materializes members.
     NonAuthoritativeComposition,
-    /// The member's host has preparation pending for it (a first-boot row,
-    /// or its build preparation asked to be retried).
+    /// The member's host has preparation pending for it: a first-boot row
+    /// it has not carried out, or a role move it has not declared.
     HostPreparationPending,
+    /// The member's host asked to retry its build preparation
+    /// ([`crate::MemberBuildPreparationRefusal::Retryable`]): its wakes are
+    /// refused until the host retries it
+    /// ([`crate::MobHandle::resolve_member_build_preparation`]) or the mob's
+    /// own retry timer does. On the wire (its token, the peer-message
+    /// refusal) it is `host_preparation_pending`, as before.
+    #[serde(rename = "host_preparation_pending", skip_deserializing)]
+    BuildPreparationRetry,
     /// The member's restore could not proceed now and keeps its authority:
     /// its durable resume gate was unavailable, a lifecycle operation on its
     /// session (the takeover of its attachment) was still in flight, or the
@@ -401,6 +409,7 @@ impl MemberWakeRefusal {
         match self {
             Self::MobNotRunning
             | Self::HostPreparationPending
+            | Self::BuildPreparationRetry
             | Self::ResumeGateUnavailable
             | Self::WakeTimedOut
             | Self::AdmissionClosed
@@ -420,7 +429,9 @@ impl MemberWakeRefusal {
             Self::MobNotRunning => "mob_not_running",
             Self::LifecycleOriginFenced => "lifecycle_origin_fenced",
             Self::NonAuthoritativeComposition => "non_authoritative_composition",
-            Self::HostPreparationPending => "host_preparation_pending",
+            Self::HostPreparationPending | Self::BuildPreparationRetry => {
+                "host_preparation_pending"
+            }
             Self::ResumeGateUnavailable => "resume_gate_unavailable",
             Self::WakeTimedOut => "wake_timed_out",
             Self::AdmissionClosed => "admission_closed",
@@ -437,7 +448,9 @@ impl MemberWakeRefusal {
             Self::MobNotRunning => PeerWakeRefusal::MobNotRunning,
             Self::LifecycleOriginFenced => PeerWakeRefusal::LifecycleOriginFenced,
             Self::NonAuthoritativeComposition => PeerWakeRefusal::NonAuthoritativeComposition,
-            Self::HostPreparationPending => PeerWakeRefusal::HostPreparationPending,
+            Self::HostPreparationPending | Self::BuildPreparationRetry => {
+                PeerWakeRefusal::HostPreparationPending
+            }
             Self::ResumeGateUnavailable => PeerWakeRefusal::ResumeGateUnavailable,
             Self::WakeTimedOut => PeerWakeRefusal::WakeTimedOut,
             Self::AdmissionClosed => PeerWakeRefusal::AdmissionClosed,
@@ -3383,6 +3396,7 @@ impl MobError {
                         meerkat_contracts::ErrorCode::CapabilityUnavailable
                     }
                     MemberWakeRefusal::HostPreparationPending
+                    | MemberWakeRefusal::BuildPreparationRetry
                     | MemberWakeRefusal::ResumeGateUnavailable
                     | MemberWakeRefusal::WakeTimedOut
                     | MemberWakeRefusal::AdmissionClosed

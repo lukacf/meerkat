@@ -97,6 +97,9 @@ impl MobCommand {
             | Self::SpawnAttachedForkedParticipant { .. }
             // Releasing a host's run-start hold lets the member start runs.
             | Self::ReleaseMemberRunStarts { .. }
+            // Retrying a build preparation the host asked to retry lets the
+            // member's next wake be built.
+            | Self::ResolveMemberBuildPreparation { .. }
             // A dormant seat creates members (and spawns the fresh ones that
             // owe a kickoff): the authority class of a spawn.
             | Self::PlanDormantSeats { .. }
@@ -246,6 +249,7 @@ impl MobCommand {
             | Self::WakeMember { .. }
             | Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
+            | Self::RetryMemberBuildPreparation { .. }
             // An owed edge repair is the actor's own timer.
             | Self::RepairOwedEdge { .. }
             // The release of a held member is the actor's own self-send.
@@ -488,7 +492,9 @@ impl MobCommand {
             | Self::OpenDeclaredApply { .. }
             // Operator instructions are the host's; no agent writes them.
             | Self::SetOperatorInstruction { .. }
-            | Self::RevokeOperatorInstruction { .. } => AgentLaneAdmission::HostOnly,
+            | Self::RevokeOperatorInstruction { .. }
+            // The build preparation the host asked to retry is the host's.
+            | Self::ResolveMemberBuildPreparation { .. } => AgentLaneAdmission::HostOnly,
 
             // Spawns, seats, work, flows, objectives and forked participants.
             Self::Spawn { .. }
@@ -558,6 +564,7 @@ impl MobCommand {
             | Self::WakeMember { .. }
             | Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
+            | Self::RetryMemberBuildPreparation { .. }
             | Self::RepairOwedEdge { .. }
             | Self::ReleaseHeldMember { .. }
             | Self::StartupMemberRecovered { .. }
@@ -703,6 +710,7 @@ impl MobCommand {
             }
             Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
+            | Self::RetryMemberBuildPreparation { .. }
             | Self::RepairOwedEdge { .. }
             | Self::ReleaseHeldMember { .. } => {}
             Self::ReloadMemberRegistration { reply_tx, .. } => {
@@ -755,6 +763,9 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::ReleaseMemberRunStarts { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::ResolveMemberBuildPreparation { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::PlanDormantSeats { reply_tx, .. } => {

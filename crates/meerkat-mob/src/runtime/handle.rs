@@ -9559,6 +9559,27 @@ impl MobHandle {
         .await?
     }
 
+    /// Retry the build preparation this host asked to retry for a member:
+    /// the member's wake was refused
+    /// ([`crate::MemberWakeRefusal::BuildPreparationRetry`]) because the
+    /// host's [`super::MemberBuildPreparer`] answered
+    /// [`super::MemberBuildPreparationRefusal::Retryable`], and MobMachine
+    /// holds the member's wakes for that cause until a retry ends it. This
+    /// ends it, so the member's next wake asks the preparer again; the mob
+    /// also ends it on its own retry timer, at the owed-wake backoff. A
+    /// member with no such cause is a no-op. Gated by
+    /// [`crate::ControlScope::SendCommand`]; the agent lane never runs it.
+    pub async fn resolve_member_build_preparation(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::ResolveMemberBuildPreparation {
+            agent_identity: agent_identity.clone(),
+            reply_tx,
+        })
+        .await?
+    }
+
     /// Current mob lifecycle state, read directly from the DSL authority
     /// via the actor command channel. There is no atomic shadow: the DSL
     /// authority is the single source of truth (dogma #1, #13, #17).

@@ -29943,6 +29943,17 @@ impl MobActor {
                     self.inline_step_watchdog.set_step("retry_owed_member_wake");
                     boxed_arm_future(|| self.retry_owed_member_wake(agent_identity)).await;
                 }
+                MobCommand::RetryMemberBuildPreparation { agent_identity } => {
+                    self.inline_step_watchdog
+                        .set_step("retry_member_build_preparation");
+                    boxed_arm_future(|| self.retry_member_build_preparation(agent_identity)).await;
+                }
+                MobCommand::ResolveMemberBuildPreparation {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    let _ = reply_tx.send(self.resolve_member_build_preparation(&agent_identity));
+                }
                 MobCommand::RepairOwedEdge { edge } => {
                     self.inline_step_watchdog.set_step("repair_owed_edge");
                     boxed_arm_future(|| self.repair_owed_edge(edge)).await;

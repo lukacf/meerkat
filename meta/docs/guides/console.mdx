@@ -435,6 +435,9 @@ as they were.
 
 - The side chat runs with the agent's role, profile and model overrides and
   tools, and inherits the agent's labels.
+- It records who opened it: your console principal, in its
+  `side_chat_creator` label (nothing on an open console when you sent no
+  token). The record grants nothing.
 - On a console with sign-in, a side chat is private to the person who
   opened it: its audience is the agent's narrowed to that person, plus the
   access admins (`admins`). Everyone else meets it on no surface (sidebar,

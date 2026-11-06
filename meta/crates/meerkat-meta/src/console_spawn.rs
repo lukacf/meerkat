@@ -134,12 +134,14 @@ impl ConsoleSpawnSink {
             .await;
 
         let mut labels = seed.labels.clone();
-        // A spawn never names a side chat's source or its private owner:
-        // only the console's projection of Meerkat's fork record writes them
+        // A spawn never names a side chat's source, creator or private
+        // owner: only the console's projection of Meerkat's fork record
+        // writes them
         // (`crate::side_chat::project_side_chat_lineage`), so the registry
         // never holds them.
         labels.remove(crate::side_chat::SIDE_CHAT_OF_LABEL);
         labels.remove(crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL);
+        labels.remove(crate::side_chat::SIDE_CHAT_CREATOR_LABEL);
         labels.remove(crate::access::PRIVATE_TO_LABEL);
         // Lineage is runtime-derived truth: ABAC inheritance hangs off
         // `spawned_by`, so a caller-supplied label must never spoof (or
@@ -290,7 +292,7 @@ pub(crate) fn spawned_by_from_comms_name(comms_name: &str) -> Option<String> {
 /// only the spawn registry may assert these keys.
 ///
 /// A side chat's lineage goes too: the console writes a side chat's source
-/// only where Meerkat's roster agrees
+/// and creator only where Meerkat's roster agrees
 /// ([`crate::side_chat::project_side_chat_lineage`]), never from a label.
 /// So does a private owner ([`crate::access::PRIVATE_TO_LABEL`]), which only
 /// a verified side chat's fork record names.
@@ -300,6 +302,7 @@ pub(crate) fn sanitize_unverified_lineage_labels(labels: &mut BTreeMap<String, S
     labels.remove(VIA_TOOL_LABEL);
     labels.remove(crate::side_chat::SIDE_CHAT_OF_LABEL);
     labels.remove(crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL);
+    labels.remove(crate::side_chat::SIDE_CHAT_CREATOR_LABEL);
     labels.remove(crate::access::PRIVATE_TO_LABEL);
 }
 
@@ -631,10 +634,11 @@ pub(crate) fn merge_registered_labels(
             labels.insert(key.clone(), value.clone());
         } else if key != crate::side_chat::SIDE_CHAT_OF_LABEL
             && key != crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL
+            && key != crate::side_chat::SIDE_CHAT_CREATOR_LABEL
             && key != crate::access::PRIVATE_TO_LABEL
         {
-            // A spawn's own labels never name a side chat's source or a
-            // private owner.
+            // A spawn's own labels never name a side chat's source, creator
+            // or private owner.
             labels.entry(key.clone()).or_insert_with(|| value.clone());
         }
     }

@@ -679,6 +679,14 @@ The side chat:
   streams; either label supplied any other way, in spawn or roster labels or
   an identity's declaration, is dropped. A multi-runtime Console names the
   agent with its runtime's prefix, as it names the side chat;
+- records who opened it: the fork writes the caller's console principal
+  (the principal `meta/console/whoami` reports as the caller's own) into the
+  side chat's `side_chat_creator` label, and nothing for a caller without
+  one (an anonymous caller of an open Console). The label is read only from
+  a side chat Meerkat's roster verifies, on the same surfaces as
+  `side_chat_of`; a `side_chat_creator` label supplied any other way, or
+  carried by the agent and copied by the fork, is dropped. It records the
+  creator and grants nothing;
 - does not take the agent's own console flags: where the agent carries them,
   `addressable`, `singleton`, `console_watched`, `console_degraded`,
   `console_degraded_reason`, `console_alert_level`, `console_inbox_count`
@@ -706,11 +714,15 @@ Result:
   "side_chat_of": "router:main",
   "source_member_id": "router:main",
   "source_session_id": "0199a7e0-...",
+  "creator": "alice@example.com",
   "retention": "until_closed",
   "instructions": [],
   "cache_inheritance": { "...": "Meerkat's fork cache inheritance" }
 }
 ```
+
+`creator` is the caller's own console principal, as the side chat's
+`side_chat_creator` label records it; `null` for a caller without one.
 
 Errors: `-32055` (typed refusal, see the error codes above), `-32030`
 (`agent.view` or `agent.send` refused on the agent, `agent.spawn` refused on

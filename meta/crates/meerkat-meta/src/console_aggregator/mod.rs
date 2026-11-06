@@ -9583,13 +9583,14 @@ fn captured_lineage(
     if provenance.lineage.is_empty() {
         let record = &provenance.identity;
         // Lineage capture predates side chats, so a provenance captured
-        // without it names a spawner at most: a `side_chat_of` label a
-        // member carried then is an ordinary label, neither a parent nor a
-        // side chat's lineage, and a private owner, which only a verified
-        // side chat names, is none.
+        // without it names a spawner at most: a `side_chat_of` (or side chat
+        // creator) label a member carried then is an ordinary label, neither
+        // a parent nor a side chat's lineage, and a private owner, which only
+        // a verified side chat names, is none.
         let mut labels = record.labels.clone();
         labels.remove(crate::side_chat::SIDE_CHAT_OF_LABEL);
         labels.remove(crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL);
+        labels.remove(crate::side_chat::SIDE_CHAT_CREATOR_LABEL);
         labels.remove(crate::access::PRIVATE_TO_LABEL);
         let parent =
             crate::console_spawn::lineage_parent(&labels).map(|parent| parent.identity.to_string());

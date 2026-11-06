@@ -14879,6 +14879,9 @@ async fn handle_console_runtime_rpc_with_visibility(
                 &params.source_member_id,
                 &params.agent_identity,
                 params.display_name.as_deref(),
+                // Who opens the side chat: the connection's principal, never
+                // a request field.
+                authenticated_principal,
                 // Who the side chat is private to: the connection's verified
                 // person on a console with sign-in, never a request field.
                 governance.side_chat_owner.as_deref(),

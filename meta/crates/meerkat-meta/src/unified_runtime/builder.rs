@@ -1994,6 +1994,16 @@ impl UnifiedRuntimeBuilder {
             )
         });
         let agent_customizer = self.composed_agent_customizer(agent_memory_provider.clone());
+        // A console side chat inherits its source's tool overlay, recorder
+        // included: every member build binds a side chat's `memory` tool to
+        // the side chat's own identity with this provider, on the classic
+        // and the identity-first path alike.
+        if let Some(provider) = agent_memory_provider.as_ref() {
+            mob_spec.side_chat_memory_slot().fill(
+                provider.clone(),
+                self.agent_memory_config.clone().unwrap_or_default(),
+            );
+        }
 
         // Classic (roster-less) agent memory: register the per-spawn memory
         // customizer on the mob runtime itself, so every member spawn —

@@ -435,11 +435,30 @@ as they were.
 
 - The side chat runs with the agent's role, profile and model overrides and
   tools, and inherits the agent's labels.
-- Its audience is exactly the agent's: every agent check on a side chat is
-  the agent's, so whoever may see the agent, send to it or retire it may do
-  the same with its side chats, a deny on the agent hides them, and a grant
-  on the side chat's own name grants nothing (see
-  [Side chats](/concepts/access-control#side-chats)).
+- It records who opened it: your console principal, in its
+  `side_chat_creator` label (nothing on an open console when you sent no
+  token). The record grants nothing.
+- On a console with sign-in, a side chat is private to the person who
+  opened it: its audience is the agent's narrowed to that person, plus the
+  access admins (`admins`). Everyone else meets it on no surface (sidebar,
+  member lists, topology, timeline, streams, inspection, memory) and is
+  answered as for a member the console does not hold when they read it,
+  send to it, close it or fork it (`-32001` `unknown identity`, or `404`
+  `unknown_identity` from `POST /console/send`). This holds with or
+  without an access configuration. Its header says who can see it:
+  **Private: only you and access admins can see it.**, or, to an access
+  admin, that it is private to the person who opened it.
+- On a console without sign-in, a side chat stays shared, and so does one
+  opened by a caller who is not a signed-in person (a service token) or
+  before side chats were private. A shared side chat's audience is exactly
+  the agent's: every agent check on it is the agent's, so whoever may see
+  the agent, send to it or retire it may do the same with its side chats, a
+  deny on the agent hides them, and a grant on the side chat's own name
+  grants nothing (see [Side chats](/concepts/access-control#side-chats)).
+  Its header says it is shared.
+- A side chat's memory is its own: its `memory` tool writes to the side
+  chat's identity, never to the agent it was forked from, and the memory
+  distiller never reads a private side chat's conversation.
 - It is never wired to a peer, whatever the agent's role: no other agent can
   address it, and none lists it as a peer. The runtime seats it exempt from
   the mob definition's wiring rules (`auto_wire_orchestrator`,

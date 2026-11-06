@@ -92,6 +92,22 @@ pub(crate) fn validate_raw_identity_labels(
     Ok(())
 }
 
+/// Validate the labels a member-creation request may supply: those
+/// [`validate_raw_identity_labels`] accepts, without a private owner
+/// ([`crate::access::PRIVATE_TO_LABEL`]), which only Meta's console side chat
+/// fork records.
+pub(crate) fn validate_member_creation_labels(
+    labels: &std::collections::BTreeMap<String, String>,
+) -> Result<(), &'static str> {
+    validate_raw_identity_labels(labels)?;
+    if labels.contains_key(crate::access::PRIVATE_TO_LABEL) {
+        return Err(
+            "labels.console.private_to names a private owner, which only a console side chat fork records; member creation may not supply it",
+        );
+    }
+    Ok(())
+}
+
 /// True when `s` is a valid meerkat 0.7 comms-name component
 /// (mirrors `meerkat_core::connection::validate_member_comms_name_component`).
 #[cfg(test)]

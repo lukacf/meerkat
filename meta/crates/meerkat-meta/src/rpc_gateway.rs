@@ -18952,6 +18952,9 @@ external_addressable = true
     // memory-stack region below can bind the tracker into every member build
     // (bootstrap members included - their decorators read the slot per call).
     let dispatch_taint_slot = mob_spec.dispatch_taint_slot();
+    // The memory-stack region below also fills the slot a console side
+    // chat's `memory` tool is bound to its own identity with.
+    let side_chat_memory_slot = mob_spec.side_chat_memory_slot();
 
     let timeout = GATEWAY_RUNTIME_EVENT_DRAIN_TIMEOUT;
     let persistent_metadata: Arc<dyn PersistentMetadataStore> = if persistent_state.is_some() {
@@ -19566,6 +19569,15 @@ external_addressable = true
             } else {
                 None
             };
+        // A console side chat inherits its source's tool overlay, recorder
+        // included: every member build binds a side chat's `memory` tool to
+        // the side chat's own identity with this provider.
+        if let (Some(agent_memory), Some(provider)) = (
+            gateway_options.agent_memory.as_ref(),
+            agent_memory_provider.as_ref(),
+        ) {
+            side_chat_memory_slot.fill(provider.clone(), agent_memory.config.clone());
+        }
         // §7.2 / §16 Q1 operator-resolver seam. The PROVISIONAL keying is
         // the console auth principal; that resolver lives with the console
         // auth wiring and plugs in here as one line of glue. Until it is

@@ -830,7 +830,8 @@ pub(super) async fn handle_ensure_member(
                 }
             };
             if let Some(labels) = labels.as_ref()
-                && let Err(message) = crate::member_comms_id::validate_raw_identity_labels(labels)
+                && let Err(message) =
+                    crate::member_comms_id::validate_member_creation_labels(labels)
             {
                 return JsonRpcResponse {
                     jsonrpc: JSONRPC_VERSION.to_string(),

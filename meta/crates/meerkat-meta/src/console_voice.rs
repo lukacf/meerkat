@@ -254,10 +254,18 @@ pub(crate) trait ConsoleVoiceSession: Send + Sync {
 pub(crate) trait ConsoleVoiceHost: Send + Sync {
     /// Validate current target authorization and the configured OpenAI
     /// credential using the same authority as open, without opening a provider.
-    async fn ready(&self, principal: &str, identity: &str) -> Result<bool, VoiceError>;
+    /// The caller owns the agents private to `private_owner_key`
+    /// ([`crate::access::PRIVATE_TO_LABEL`]).
+    async fn ready(
+        &self,
+        principal: &str,
+        private_owner_key: Option<&str>,
+        identity: &str,
+    ) -> Result<bool, VoiceError>;
     async fn open(
         &self,
         principal: &str,
+        private_owner_key: Option<&str>,
         identity: &str,
     ) -> Result<Arc<dyn ConsoleVoiceSession>, VoiceError>;
 }
@@ -551,11 +559,16 @@ pub struct ConsoleVoiceController {
     /// `meta/live/*` door when both are registered. `None` means console
     /// voice is the only door and needs no arbitration.
     arbiter: Option<Arc<LiveOwnerArbiter>>,
-    /// In-flight readiness checks by `(principal, identity)`. Concurrent
-    /// checks for one target (the console's poll and a click, two tabs)
-    /// share one check instead of each paying for the full probe.
-    readiness_flights: Arc<std::sync::Mutex<HashMap<(String, String), ReadinessFlightEntry>>>,
+    /// In-flight readiness checks by `(principal, private-owner key,
+    /// identity)`. Concurrent checks for one target (the console's poll and
+    /// a click, two tabs) share one check instead of each paying for the
+    /// full probe.
+    readiness_flights: Arc<std::sync::Mutex<HashMap<ReadinessFlightKey, ReadinessFlightEntry>>>,
 }
+
+/// One readiness check's caller and target: the principal, the private-owner
+/// key it owns private agents under, and the identity.
+type ReadinessFlightKey = (String, Option<String>, String);
 
 type ReadinessResult = Result<VoiceReadinessReport, VoiceError>;
 type SharedReadiness =
@@ -742,7 +755,13 @@ impl ConsoleVoiceController {
 
     /// Authentication readiness is independent of whether a voice request
     /// already owns the target; it is not permission to open a second channel.
-    pub(crate) async fn ready(&self, principal: &str, identity: &str) -> Result<bool, VoiceError> {
+    /// The caller owns the agents private to `private_owner_key`.
+    pub(crate) async fn ready(
+        &self,
+        principal: &str,
+        private_owner_key: Option<&str>,
+        identity: &str,
+    ) -> Result<bool, VoiceError> {
         validate_identity(identity)?;
         if principal.trim().is_empty() {
             return Err(VoiceError::Unauthorized);
@@ -755,7 +774,7 @@ impl ConsoleVoiceController {
             return Ok(false);
         }
         match &self.host {
-            Some(host) => host.ready(principal, identity).await,
+            Some(host) => host.ready(principal, private_owner_key, identity).await,
             None => {
                 tracing::warn!(
                     identity,
@@ -775,22 +794,29 @@ impl ConsoleVoiceController {
         principal: &str,
         identity: &str,
     ) -> Result<VoiceReadinessReport, VoiceError> {
-        self.readiness_flight(principal, identity)?.result.await
+        self.readiness_flight(principal, None, identity)?
+            .result
+            .await
     }
 
-    /// Start, or join, the readiness check for `(principal, identity)`.
-    /// The check runs while at least one returned flight is held; it is
-    /// cancelled when the last one is dropped.
+    /// Start, or join, the readiness check for `(principal,
+    /// private_owner_key, identity)`. The check runs while at least one
+    /// returned flight is held; it is cancelled when the last one is dropped.
     pub(crate) fn readiness_flight(
         &self,
         principal: &str,
+        private_owner_key: Option<&str>,
         identity: &str,
     ) -> Result<ReadinessFlight, VoiceError> {
         validate_identity(identity)?;
         if principal.trim().is_empty() {
             return Err(VoiceError::Unauthorized);
         }
-        let key = (principal.to_string(), identity.to_string());
+        let key: ReadinessFlightKey = (
+            principal.to_string(),
+            private_owner_key.map(str::to_string),
+            identity.to_string(),
+        );
         let mut flights = self
             .readiness_flights
             .lock()
@@ -813,7 +839,7 @@ impl ConsoleVoiceController {
         let check: futures::future::BoxFuture<'static, ReadinessResult> =
             Box::pin(readiness_trace::scope(Arc::clone(&trace), async move {
                 let result = controller
-                    .check_readiness(&flight_key.0, &flight_key.1)
+                    .check_readiness(&flight_key.0, flight_key.1.as_deref(), &flight_key.2)
                     .await;
                 flight_trace.finish();
                 // A finished check is never joined: the next caller starts
@@ -849,6 +875,7 @@ impl ConsoleVoiceController {
     async fn check_readiness(
         &self,
         principal: &str,
+        private_owner_key: Option<&str>,
         identity: &str,
     ) -> Result<VoiceReadinessReport, VoiceError> {
         readiness_trace::enter(readiness_trace::VoiceReadinessStage::Arbiter);
@@ -869,7 +896,7 @@ impl ConsoleVoiceController {
             });
         }
         Ok(VoiceReadinessReport {
-            available: self.ready(principal, identity).await?,
+            available: self.ready(principal, private_owner_key, identity).await?,
             reason: None,
             holder: None,
         })
@@ -1012,7 +1039,7 @@ impl ConsoleVoiceController {
         principal: &str,
         request: VoiceRequest,
     ) -> Result<PendingLiveChannelHandle, VoiceError> {
-        self.open_while_authenticated(principal, request, None)
+        self.open_while_authenticated(principal, None, request, None)
             .await
     }
 
@@ -1020,10 +1047,12 @@ impl ConsoleVoiceController {
     /// ends once `authentication` lapses (the Console's verifier no longer
     /// accepts the token, on its expiry or on a session fence), as an open
     /// stream does. A retried open of the same request keeps the first
-    /// open's watch.
+    /// open's watch. The caller owns the agents private to
+    /// `private_owner_key`.
     pub(crate) async fn open_while_authenticated(
         &self,
         principal: &str,
+        private_owner_key: Option<&str>,
         request: VoiceRequest,
         authentication: Option<crate::http_sse::StreamAuthentication>,
     ) -> Result<PendingLiveChannelHandle, VoiceError> {
@@ -1072,6 +1101,7 @@ impl ConsoleVoiceController {
             }
             let host = Arc::clone(host);
             let owner = principal.to_string();
+            let owner_key = private_owner_key.map(str::to_string);
             let pending = Arc::clone(&slot);
             tokio::spawn(async move {
                 let arbiter_started = tokio::time::Instant::now();
@@ -1116,7 +1146,9 @@ impl ConsoleVoiceController {
                 };
                 let arbiter_ms = elapsed_ms(arbiter_started);
                 let host_open_started = tokio::time::Instant::now();
-                let result = host.open(&owner, &request.identity).await;
+                let result = host
+                    .open(&owner, owner_key.as_deref(), &request.identity)
+                    .await;
                 tracing::info!(
                     target: "meerkat_meta::console_voice::timing",
                     identity = %request.identity,
@@ -1289,13 +1321,19 @@ pub(crate) mod closing_test_support {
 
     #[async_trait]
     impl ConsoleVoiceHost for ClosingVoiceHost {
-        async fn ready(&self, _principal: &str, _identity: &str) -> Result<bool, VoiceError> {
+        async fn ready(
+            &self,
+            _principal: &str,
+            _private_owner_key: Option<&str>,
+            _identity: &str,
+        ) -> Result<bool, VoiceError> {
             Ok(true)
         }
 
         async fn open(
             &self,
             _principal: &str,
+            _private_owner_key: Option<&str>,
             _identity: &str,
         ) -> Result<Arc<dyn ConsoleVoiceSession>, VoiceError> {
             Ok(Arc::clone(&self.session) as Arc<dyn ConsoleVoiceSession>)
@@ -1353,7 +1391,12 @@ pub(crate) mod readiness_test_support {
 
     #[async_trait]
     impl ConsoleVoiceHost for ParkedReadyHost {
-        async fn ready(&self, _principal: &str, _identity: &str) -> Result<bool, VoiceError> {
+        async fn ready(
+            &self,
+            _principal: &str,
+            _private_owner_key: Option<&str>,
+            _identity: &str,
+        ) -> Result<bool, VoiceError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let mut guard = CancelGuard {
                 host: self,
@@ -1370,6 +1413,7 @@ pub(crate) mod readiness_test_support {
         async fn open(
             &self,
             _principal: &str,
+            _private_owner_key: Option<&str>,
             _identity: &str,
         ) -> Result<Arc<dyn ConsoleVoiceSession>, VoiceError> {
             Err(VoiceError::Unavailable)
@@ -1492,7 +1536,12 @@ mod tests {
 
     #[async_trait]
     impl ConsoleVoiceHost for Host {
-        async fn ready(&self, _principal: &str, identity: &str) -> Result<bool, VoiceError> {
+        async fn ready(
+            &self,
+            _principal: &str,
+            _private_owner_key: Option<&str>,
+            identity: &str,
+        ) -> Result<bool, VoiceError> {
             self.checked_identities
                 .lock()
                 .await
@@ -1503,6 +1552,7 @@ mod tests {
         async fn open(
             &self,
             _principal: &str,
+            _private_owner_key: Option<&str>,
             _identity: &str,
         ) -> Result<Arc<dyn ConsoleVoiceSession>, VoiceError> {
             self.opens.fetch_add(1, Ordering::SeqCst);
@@ -2020,7 +2070,7 @@ mod tests {
         assert!(host.checked_identities.lock().await.is_empty());
         assert!(
             controller
-                .ready("alice", "agent-a")
+                .ready("alice", None, "agent-a")
                 .await
                 .expect("target readiness")
         );
@@ -2149,7 +2199,7 @@ mod tests {
         let controller = ConsoleVoiceController::new(host.clone());
         assert!(
             controller
-                .ready("alice", "agent-a")
+                .ready("alice", None, "agent-a")
                 .await
                 .expect("readiness")
         );
@@ -2171,7 +2221,7 @@ mod tests {
         );
         assert!(
             controller
-                .ready("alice", "agent-a")
+                .ready("alice", None, "agent-a")
                 .await
                 .expect("active readiness")
         );
@@ -2179,7 +2229,7 @@ mod tests {
         host.ready.store(false, Ordering::SeqCst);
         assert!(
             !controller
-                .ready("alice", "agent-a")
+                .ready("alice", None, "agent-a")
                 .await
                 .expect("revoked readiness")
         );
@@ -2474,13 +2524,13 @@ mod tests {
         let host = ParkedReadyHost::new(VoiceReadinessStage::DurableSource);
         let controller = host.controller();
         let first = controller
-            .readiness_flight("alice", "agent-a")
+            .readiness_flight("alice", None, "agent-a")
             .expect("first flight");
         let second = controller
-            .readiness_flight("alice", "agent-a")
+            .readiness_flight("alice", None, "agent-a")
             .expect("second flight");
         let other_principal = controller
-            .readiness_flight("bob", "agent-a")
+            .readiness_flight("bob", None, "agent-a")
             .expect("other principal flight");
         assert!(!first.joined);
         assert!(second.joined, "a check in flight is joined");
@@ -2510,7 +2560,7 @@ mod tests {
         assert_eq!(first.trace.snapshot().active, None, "finished");
         drop((first, second, other_principal));
         let fresh = controller
-            .readiness_flight("alice", "agent-a")
+            .readiness_flight("alice", None, "agent-a")
             .expect("fresh flight");
         assert!(!fresh.joined, "a finished check is never joined");
         host.release.add_permits(1);
@@ -2526,10 +2576,10 @@ mod tests {
         let host = ParkedReadyHost::new(VoiceReadinessStage::Probe);
         let controller = host.controller();
         let first = controller
-            .readiness_flight("alice", "agent-a")
+            .readiness_flight("alice", None, "agent-a")
             .expect("first");
         let joined = controller
-            .readiness_flight("alice", "agent-a")
+            .readiness_flight("alice", None, "agent-a")
             .expect("joined");
         let started = host.started.notified();
         let polling = tokio::spawn(first.result.clone());
@@ -2549,7 +2599,7 @@ mod tests {
             "the last hold dropped cancels the host check"
         );
         let retry = controller
-            .readiness_flight("alice", "agent-a")
+            .readiness_flight("alice", None, "agent-a")
             .expect("retry");
         assert!(!retry.joined, "a cancelled check is not joined");
         host.release.add_permits(1);

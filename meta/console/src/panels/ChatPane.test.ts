@@ -435,6 +435,50 @@ test("a side chat pane names its source and offers Close side chat", () => {
   assert.match(html, /Not inherited: app\.skills\/billing/);
 });
 
+test("side_chat_header_names_its_audience", () => {
+  const sideChatPane = (audience: string | undefined): string => {
+    const agent = {
+      agent_id: "alpha-side-ab12",
+      member_id: "alpha-side-ab12",
+      identity: "alpha-side-ab12",
+      label: "Alpha (side chat)",
+      kind: "mob_agent",
+      role: "worker",
+      state: "active",
+      side_chat_of: "alpha",
+      ...(audience === undefined ? {} : { side_chat_audience: audience }),
+    };
+    return renderToStaticMarkup(
+      React.createElement(ChatPane, {
+        agent,
+        agentLabel: "Alpha (side chat)",
+        identity: "alpha-side-ab12",
+        entries: [],
+        phase: null,
+        draft: "",
+        sending: false,
+        readOnly: false,
+        staged: [],
+        onDraftChange: () => undefined,
+        onStagedChange: () => undefined,
+        onSend: () => true,
+        sideChatOfLabel: "Alpha",
+      }),
+    );
+  };
+  const audienceOf = (html: string): string | null =>
+    html.match(/data-testid="side-chat-audience:alpha-side-ab12"[^>]*>([^<]*)</)?.[1] ?? null;
+
+  assert.equal(audienceOf(sideChatPane("private_to_you")), "Private: only you and access admins can see it.");
+  assert.equal(
+    audienceOf(sideChatPane("private_to_creator")),
+    "Private to the person who opened it. You see it as an access admin.",
+  );
+  assert.equal(audienceOf(sideChatPane("shared")), "Shared: everyone who can see Alpha can see it.");
+  // A server that names no audience: the banner claims none.
+  assert.equal(audienceOf(sideChatPane(undefined)), null);
+});
+
 function renderChat(args: {
   entries: ConversationTimelineEntry[];
   phase: "waiting" | "tool-executing" | "generating" | null;

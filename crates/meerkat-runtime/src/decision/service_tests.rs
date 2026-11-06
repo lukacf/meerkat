@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use meerkat_core::approval::consent::{
-    AuthenticatedApprover, ConsentEligibility, ConsentIneligible,
+    AuthenticatedApprover, ConsentEligibility, ConsentIneligible, HostAuthenticationScope,
 };
 use meerkat_core::approval::decision::{
     ApproverId, AttestedDecision, AttributedReview, ConsentProvenance, DecisionContractError,
@@ -1307,6 +1307,88 @@ fn a_torn_row_is_unreadable_and_never_executes() {
             .expect_err("an invariant refuses the row"),
         DecisionError::Unreadable { .. }
     ));
+}
+
+/// Every file under `dir`, recursively.
+fn files_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("read the directory") {
+        let path = entry.expect("directory entry").path();
+        if path.is_dir() {
+            files.extend(files_under(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
+
+/// A decision made in a login keeps the digest of that login, never the
+/// login itself: the decided row reads back with the digest, and no byte of
+/// any file the SQLite store wrote names the login.
+#[test]
+fn a_decision_made_in_a_login_stores_its_digest_and_never_the_login() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store: Arc<dyn DecisionStore> = Arc::new(SqliteDecisionStore::in_store_path(dir.path()));
+    let clock: Arc<dyn DecisionClock> = ManualClock::at(HELD_AT);
+    let service = DurableDecisionService::with_clock(store, clock);
+    let rendering = rendering();
+    let decision_id = service
+        .hold(hold_request(&rendering), true)
+        .expect("hold")
+        .decision_id;
+    service
+        .present(&decision_id, &presentation(&rendering))
+        .expect("present");
+    let login = HostAuthenticationScope::new("login-of-alice-7f3a");
+    let approver = AuthenticatedApprover::new(
+        principal(PrincipalKind::Human, "alice"),
+        ApprovalAssurance::PersonAuthenticated,
+    )
+    .expect("authenticated human")
+    .with_authentication_scope(login.clone());
+    let decision = AttestedDecision::new(
+        approver,
+        DecisionIngress::new("console").expect("ingress"),
+        reference("event-1"),
+        OBSERVED_AT,
+        approver_id(),
+        rendering.subject_digest(),
+        true,
+    )
+    .expect("attested decision");
+    service
+        .decide(&decision_id, &decision, &Eligibility::current())
+        .expect("approve");
+
+    let row = service
+        .get(&decision_id)
+        .expect("the decided row reads back");
+    let Some(outcome) = row.outcome.as_ref() else {
+        panic!("an approved row has its outcome");
+    };
+    let evidence = serde_json::to_value(&outcome.evidence).expect("encode the evidence");
+    assert_eq!(
+        evidence["authentication_scope_digest"],
+        serde_json::json!(login.digest().as_str()),
+        "the evidence keeps the digest of the login"
+    );
+    assert!(
+        evidence.get("authentication_scope").is_none(),
+        "the evidence does not keep the login: {evidence}"
+    );
+    let files = files_under(dir.path());
+    assert!(!files.is_empty(), "the store wrote its files");
+    for path in files {
+        let bytes = std::fs::read(&path).expect("read a store file");
+        assert!(
+            !bytes
+                .windows(login.as_str().len())
+                .any(|window| window == login.as_str().as_bytes()),
+            "{} names the login",
+            path.display()
+        );
+    }
 }
 
 #[test]

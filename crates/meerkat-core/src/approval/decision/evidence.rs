@@ -14,7 +14,7 @@ use super::{
     PresentationRecord, Sha256Digest,
 };
 use crate::approval::ApprovalAssurance;
-use crate::approval::consent::AuthenticatedApprover;
+use crate::approval::consent::{AuthenticatedApprover, HostAuthenticationScope};
 use crate::{PrincipalKind, PrincipalRef, SessionId};
 
 /// Largest decision reason or review feedback, in bytes.
@@ -208,10 +208,11 @@ impl AttestedDecision {
             decider: self.decider.clone(),
             principal: self.approver.principal().clone(),
             assurance: self.approver.assurance(),
-            authentication_scope: self
+            authentication_scope: None,
+            authentication_scope_digest: self
                 .approver
                 .authentication_scope()
-                .map(|scope| scope.as_str().to_owned()),
+                .map(HostAuthenticationScope::digest),
             ingress: self.ingress.clone(),
             event_ref: self.event_ref.clone(),
             observed_at_ms: Some(self.observed_at_ms),
@@ -339,9 +340,20 @@ pub enum DecisionEvidence {
         decider: DecisionPrincipalKey,
         principal: PrincipalRef,
         assurance: ApprovalAssurance,
-        /// The host authentication scope (login or session) of the event.
+        /// The host authentication scope (login or session) of the event,
+        /// as evidence recorded before the login digest kept it. Evidence
+        /// recorded since keeps `authentication_scope_digest` instead and
+        /// never writes this field; evidence that has it decodes, and keeps
+        /// its bytes and its digest.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         authentication_scope: Option<String>,
+        /// The digest of the host authentication scope (the login or
+        /// session) the decision event was authenticated in, when the host
+        /// named one ([`HostAuthenticationScope::digest`]): `sha256:` and 64
+        /// lowercase hex digits. Never the scope itself. Absent in evidence
+        /// recorded before the digest was.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        authentication_scope_digest: Option<Sha256Digest>,
         ingress: DecisionIngress,
         event_ref: DecisionReference,
         /// When the ingress observed the decision event, in UNIX

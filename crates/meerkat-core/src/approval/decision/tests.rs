@@ -5,11 +5,12 @@
 
 use std::num::NonZeroU32;
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::parts::part_ranges;
 use super::*;
-use crate::approval::consent::AuthenticatedApprover;
+use crate::approval::consent::{AuthenticatedApprover, HostAuthenticationScope};
 use crate::approval::{ApprovalAssurance, ApprovalStoreError};
 use crate::{PrincipalKind, PrincipalRef, SessionId, TrustDomainId};
 
@@ -57,24 +58,6 @@ fn hold_request(
         Some(digest) => request.with_expected_subject_digest(digest),
         None => request,
     }
-}
-
-fn attested(approve: bool) -> AttestedDecision {
-    let approver = AuthenticatedApprover::new(
-        principal(PrincipalKind::Human, "alice", "example.org"),
-        ApprovalAssurance::PersonAuthenticated,
-    )
-    .expect("authenticated human");
-    AttestedDecision::new(
-        approver,
-        DecisionIngress::new("console").expect("ingress"),
-        reference("event-1"),
-        7,
-        approver_id(),
-        Sha256Digest::of(b"the rendering"),
-        approve,
-    )
-    .expect("attested decision")
 }
 
 #[test]
@@ -261,7 +244,7 @@ fn decision_id_derives_from_kind_and_subject_key() {
 
 #[test]
 fn evidence_digest_changes_with_any_evidence_field() {
-    let human = attested(true)
+    let human = attested_in(&HostAuthenticationScope::new("login-1"), true)
         .with_presentation(PresentationRecord::complete(
             PresentationAudience::Approver {
                 approver_id: approver_id(),
@@ -295,7 +278,7 @@ fn evidence_digest_changes_with_any_evidence_field() {
         assert_ne!(evidence, human, "the change must change the evidence");
         evidence.digest().expect("digest")
     };
-    let changes: [(&str, &dyn Fn(&mut DecisionEvidence)); 13] = [
+    let changes: [(&str, &dyn Fn(&mut DecisionEvidence)); 15] = [
         ("decider", &|evidence| {
             if let DecisionEvidence::Human { decider, .. } = evidence {
                 *decider = key(PrincipalKind::Human, "bob");
@@ -318,6 +301,25 @@ fn evidence_digest_changes_with_any_evidence_field() {
             } = evidence
             {
                 *authentication_scope = Some("login-2".to_owned());
+            }
+        }),
+        ("authentication scope digest", &|evidence| {
+            if let DecisionEvidence::Human {
+                authentication_scope_digest,
+                ..
+            } = evidence
+            {
+                *authentication_scope_digest =
+                    Some(HostAuthenticationScope::new("login-2").digest());
+            }
+        }),
+        ("no authentication scope digest", &|evidence| {
+            if let DecisionEvidence::Human {
+                authentication_scope_digest,
+                ..
+            } = evidence
+            {
+                *authentication_scope_digest = None;
             }
         }),
         ("ingress", &|evidence| {
@@ -719,6 +721,10 @@ const REVIEW_EVIDENCE_DIGEST: &str =
 /// session id, a presentation record, a canonical part), serializes changes
 /// these bytes and fails here, before it would tear every decided row. Such
 /// a change needs a new evidence domain and a migration of the stored rows.
+/// The human evidence here keeps the login itself, as evidence recorded
+/// before the login digest did (`the_new_evidence_encoding_and_its_digest_are_pinned`
+/// pins the form recorded now): it still decodes, and keeps its bytes and
+/// its digest.
 #[test]
 fn the_evidence_encoding_and_its_digest_are_pinned() {
     let rendering = rendering("Release build 7.");
@@ -727,6 +733,7 @@ fn the_evidence_encoding_and_its_digest_are_pinned() {
         principal: principal(PrincipalKind::Human, "alice", "example.org"),
         assurance: ApprovalAssurance::PersonAuthenticated,
         authentication_scope: Some("login-1".to_owned()),
+        authentication_scope_digest: None,
         ingress: DecisionIngress::new("web").expect("ingress"),
         event_ref: reference("event-1"),
         observed_at_ms: None,
@@ -847,4 +854,206 @@ fn the_evidence_records_the_observed_time_and_older_evidence_keeps_its_digest() 
             "the evidence keeps its pinned digest"
         );
     }
+}
+
+/// `alice`'s attested decision, approved or rejected, made in `login`.
+fn attested_in(login: &HostAuthenticationScope, approve: bool) -> AttestedDecision {
+    let approver = AuthenticatedApprover::new(
+        principal(PrincipalKind::Human, "alice", "example.org"),
+        ApprovalAssurance::PersonAuthenticated,
+    )
+    .expect("authenticated human")
+    .with_authentication_scope(login.clone());
+    AttestedDecision::new(
+        approver,
+        DecisionIngress::new("console").expect("ingress"),
+        reference("event-1"),
+        7,
+        approver_id(),
+        Sha256Digest::of(b"the rendering"),
+        approve,
+    )
+    .expect("attested decision")
+}
+
+/// A human decision made in a login keeps the digest of that login in its
+/// evidence, as a consent decision does, and never the login itself.
+#[test]
+fn new_evidence_keeps_the_login_digest_not_the_login() {
+    let login = HostAuthenticationScope::new("login-1");
+    let evidence = attested_in(&login, true).evidence();
+    let stored = serde_json::to_value(&evidence).expect("encode");
+    assert_eq!(
+        stored["authentication_scope_digest"],
+        serde_json::json!(login.digest().as_str()),
+        "the evidence keeps the digest of the login"
+    );
+    assert!(
+        stored.get("authentication_scope").is_none(),
+        "the evidence does not keep the login: {stored}"
+    );
+    assert!(
+        !serde_json::to_string(&evidence)
+            .expect("encode")
+            .contains(login.as_str()),
+        "no byte of the evidence names the login"
+    );
+}
+
+/// The pinned JSON of the human evidence of
+/// `the_new_evidence_encoding_and_its_digest_are_pinned`: the evidence of
+/// `HUMAN_OBSERVED_EVIDENCE_JSON` as a decision made in the login `login-1`
+/// records it now, with the digest of the login where evidence recorded
+/// before kept the login.
+const HUMAN_LOGIN_DIGEST_EVIDENCE_JSON: &str = concat!(
+    r#"{"kind":"human","#,
+    r#""decider":"principal:[\"human\",\"example.org\",\"alice\"]","#,
+    r#""principal":{"kind":"human","id":"alice","#,
+    r#""qualification":{"kind":"qualified","trust_domain_id":"example.org"}},"#,
+    r#""assurance":"person_authenticated","#,
+    r#""authentication_scope_digest":"#,
+    r#""sha256:9055b0b547c61f8ee25b0e3412f8df48e31f8ccb1187359932070d9a5d518273","#,
+    r#""ingress":"web","#,
+    r#""event_ref":"event-1","#,
+    r#""observed_at_ms":7,"#,
+    r#""approver_id":"team:owners","#,
+    r#""presented_digest":"#,
+    r#""sha256:6d7131a1a32893cc4a947ca6d83471bca641ab725a2ef83dd356f59c0b4e3f5b","#,
+    r#""presentation":{"#,
+    r#""audience":{"kind":"approver","approver_id":"team:owners"},"#,
+    r#""subject_digest":"#,
+    r#""sha256:6d7131a1a32893cc4a947ca6d83471bca641ab725a2ef83dd356f59c0b4e3f5b","#,
+    r#""parts_shown":[{"index":0,"count":1,"#,
+    r#""part_digest":"#,
+    r#""sha256:6d7131a1a32893cc4a947ca6d83471bca641ab725a2ef83dd356f59c0b4e3f5b"}],"#,
+    r#""channel_ref":"channel-1","#,
+    r#""message_ref":"message-1","#,
+    r#""at_ms":5},"#,
+    r#""approve":true,"#,
+    r#""reason":"looks right"}"#,
+);
+const HUMAN_LOGIN_DIGEST_EVIDENCE_DIGEST: &str =
+    "sha256:79e13deef87155afa569a72fd5e5713909050c8ed389e0dd8177970cd81349de";
+
+/// The evidence an attested decision made in a login records has a pinned
+/// encoding and digest, under the same evidence domain as the evidence
+/// recorded before it, which keeps its own bytes and digest
+/// (`the_evidence_records_the_observed_time_and_older_evidence_keeps_its_digest`).
+#[test]
+fn the_new_evidence_encoding_and_its_digest_are_pinned() {
+    let rendering = rendering("Release build 7.");
+    let approver = AuthenticatedApprover::new(
+        principal(PrincipalKind::Human, "alice", "example.org"),
+        ApprovalAssurance::PersonAuthenticated,
+    )
+    .expect("authenticated human")
+    .with_authentication_scope(HostAuthenticationScope::new("login-1"));
+    let evidence = AttestedDecision::new(
+        approver,
+        DecisionIngress::new("web").expect("ingress"),
+        reference("event-1"),
+        7,
+        approver_id(),
+        rendering.subject_digest(),
+        true,
+    )
+    .expect("attested decision")
+    .with_presentation(PresentationRecord::complete(
+        PresentationAudience::Approver {
+            approver_id: approver_id(),
+        },
+        &rendering,
+        None,
+        reference("channel-1"),
+        reference("message-1"),
+        5,
+    ))
+    .with_reason("looks right")
+    .expect("reason")
+    .evidence();
+    assert_eq!(
+        serde_json::to_string(&evidence).expect("encode"),
+        HUMAN_LOGIN_DIGEST_EVIDENCE_JSON,
+        "the evidence's bytes"
+    );
+    assert_eq!(
+        evidence.digest().expect("digest").as_str(),
+        HUMAN_LOGIN_DIGEST_EVIDENCE_DIGEST,
+        "the evidence's digest"
+    );
+    assert_eq!(
+        &serde_json::from_str::<DecisionEvidence>(HUMAN_LOGIN_DIGEST_EVIDENCE_JSON)
+            .expect("the pinned bytes decode"),
+        &evidence,
+        "the evidence decodes from its pinned bytes"
+    );
+}
+
+/// Human decision evidence as Core 0.9.9 and 0.9.10 define it, keeping the
+/// login itself: the shape an older Core decodes a stored row's evidence
+/// with.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum HumanEvidenceBefore0911 {
+    Human {
+        decider: DecisionPrincipalKey,
+        principal: PrincipalRef,
+        assurance: ApprovalAssurance,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        authentication_scope: Option<String>,
+        ingress: DecisionIngress,
+        event_ref: DecisionReference,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observed_at_ms: Option<u64>,
+        approver_id: ApproverId,
+        presented_digest: Sha256Digest,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        presentation: Option<PresentationRecord>,
+        approve: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+}
+
+/// The digest an older Core computes of the evidence it decoded, and
+/// compares with the digest the row's machine state binds.
+fn digest_before_0911(evidence: &HumanEvidenceBefore0911) -> Sha256Digest {
+    #[derive(Serialize)]
+    struct DigestMaterial<'a> {
+        domain: &'static str,
+        evidence: &'a HumanEvidenceBefore0911,
+    }
+    let bytes = serde_json::to_vec(&DigestMaterial {
+        domain: "meerkat.decision.evidence.v1",
+        evidence,
+    })
+    .expect("encode");
+    Sha256Digest::of(&bytes)
+}
+
+/// A Core before 0.9.11 decodes the evidence of a decision made in a login
+/// (it ignores the field it does not know), but the digest it computes is
+/// not the one the row's machine state binds: it reads the row as torn,
+/// lists it unreadable and never executes it. The older shape is checked
+/// against the older Core's own pinned evidence first, so the difference
+/// is the login digest alone.
+#[test]
+fn a_core_before_0911_reads_new_human_evidence_as_torn() {
+    let own: HumanEvidenceBefore0911 = serde_json::from_str(HUMAN_OBSERVED_EVIDENCE_JSON)
+        .expect("an older Core decodes the evidence it recorded");
+    assert_eq!(
+        digest_before_0911(&own).as_str(),
+        HUMAN_OBSERVED_EVIDENCE_DIGEST,
+        "the older shape digests the older evidence as the older Core does"
+    );
+
+    let evidence = attested_in(&HostAuthenticationScope::new("login-1"), true).evidence();
+    let stored = serde_json::to_string(&evidence).expect("encode");
+    let read: HumanEvidenceBefore0911 =
+        serde_json::from_str(&stored).expect("an older Core decodes the new evidence");
+    assert_ne!(
+        digest_before_0911(&read),
+        evidence.digest().expect("digest"),
+        "an older Core's digest of the new evidence is not the row's: the row is torn"
+    );
 }

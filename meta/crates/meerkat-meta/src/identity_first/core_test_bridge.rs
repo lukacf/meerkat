@@ -42,10 +42,10 @@ use meerkat_core::types::SessionId;
 
 use super::IdentityRuntime;
 use super::bridge::{
-    BridgeDelivery, BridgeError, BridgeMemberReload, DeclaredIdentityAnswer, DeclaredIdentityBuild,
-    DeclaredRosterAnswer, DeclaredRosterRequest, DormantSeatRequest, DormantSeatResult,
-    HostHumanInputError, MemberLifecycleJournalHead, MemberLifecycleJournalPage,
-    MemberRuntimeBinding, MemberStanding, ResumeSessionOutcome, SessionBridge,
+    BridgeDelivery, BridgeError, BridgeMemberReload, CoreIdentityEntry, DeclaredIdentityAnswer,
+    DeclaredIdentityBuild, DeclaredRosterAnswer, DeclaredRosterRequest, DormantSeatRequest,
+    DormantSeatResult, HostHumanInputError, MemberLifecycleJournalHead, MemberLifecycleJournalPage,
+    MemberRuntimeBinding, MemberStanding, ResumeRejectionKind, ResumeSessionOutcome, SessionBridge,
     UnlistedIdentityAnswer,
 };
 use super::core_test_members::CoreTestMembers;
@@ -204,6 +204,14 @@ pub(crate) async fn register_live(
 pub(crate) struct DeclaredSet(Mutex<BTreeSet<AgentIdentity>>);
 
 impl DeclaredSet {
+    /// Whether Core holds `identity` declared: an identity entry.
+    pub(crate) fn contains(&self, identity: &AgentIdentity) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(identity)
+    }
+
     /// Hold `roster`'s identities declared and, for a complete roster,
     /// unlist each identity held declared that it does not list, as Core's
     /// seal does: `bridge` retires its live member
@@ -536,6 +544,14 @@ pub(crate) struct CoreReadsBridge {
     binding_reads_refused: AtomicBool,
     /// Set by [`Self::refuse_standing_reads`].
     standing_reads_refused: AtomicBool,
+    /// Set by [`Self::refuse_entry_reads`].
+    entry_reads_refused: AtomicBool,
+    /// Set by [`Self::fail_entry_reads`]. `None`: every read of Core's entry
+    /// of an identity answers.
+    entry_fault: Mutex<Option<HistoryReadFault>>,
+    /// The identities whose wake Core refuses, with the refusal's kind
+    /// ([`Self::refuse_wakes_of`]).
+    wake_refusals: Mutex<BTreeMap<AgentIdentity, ResumeRejectionKind>>,
     /// The identities Core holds declared.
     declared: DeclaredSet,
     /// Set while the declared apply unlists ([`DeclaredSet::apply`]): each
@@ -663,6 +679,73 @@ impl CoreReadsBridge {
         self.standing_reads_refused.store(true, Ordering::SeqCst);
     }
 
+    /// From now on Core's entry of an identity answers `Unsupported`: a
+    /// bridge without that read.
+    pub(crate) fn refuse_entry_reads(&self) {
+        self.entry_reads_refused.store(true, Ordering::SeqCst);
+    }
+
+    /// From now on Core refuses each wake of `identity`'s live member with a
+    /// resume refusal of `kind`, naming the member's session, as the session
+    /// bridge answers Core's refusal; until [`Self::allow_wakes_of`].
+    pub(crate) fn refuse_wakes_of(&self, identity: &AgentIdentity, kind: ResumeRejectionKind) {
+        self.wake_refusals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(identity.clone(), kind);
+    }
+
+    /// Core wakes `identity`'s member again.
+    pub(crate) fn allow_wakes_of(&self, identity: &AgentIdentity) {
+        self.wake_refusals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(identity);
+    }
+
+    /// Core holds `identity` declared, an identity entry, as an earlier
+    /// declared apply of the mob left it (another process's roster pass).
+    pub(crate) fn hold_declared(&self, identity: &AgentIdentity) {
+        self.declared
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(identity.clone());
+    }
+
+    /// From now on, the next `answered` reads of Core's entry of an identity
+    /// answer, the `failed` reads after them fail as a read Core could not
+    /// serve does, and later reads answer again (as
+    /// [`Self::fail_history_reads`] for the member history).
+    pub(crate) fn fail_entry_reads(&self, answered: u64, failed: u64) {
+        *self
+            .entry_fault
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(HistoryReadFault { answered, failed });
+    }
+
+    /// One read of Core's entry of an identity against the fault, if any.
+    fn take_entry_read(&self) -> Result<(), BridgeError> {
+        let mut guard = self
+            .entry_fault
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(fault) = guard.as_mut() else {
+            return Ok(());
+        };
+        if fault.answered > 0 {
+            fault.answered -= 1;
+            return Ok(());
+        }
+        if fault.failed > 0 {
+            fault.failed -= 1;
+            return Err(BridgeError::Mob(
+                "Core's entry of the identity cannot be read (test fault)".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// One read of Core's member history against the fault, if any.
     fn take_history_read(&self) -> Result<(), BridgeError> {
         let mut guard = self
@@ -730,6 +813,22 @@ impl SessionBridge for CoreReadsBridge {
         &self,
         identity: &AgentIdentity,
     ) -> Result<Option<MemberRuntimeBinding>, BridgeError> {
+        let refusal = self
+            .wake_refusals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(identity)
+            .copied();
+        if let Some(kind) = refusal
+            && let Some(live) = self.core.live_member(identity)?
+            && let Some(session_id) = live.session_id
+        {
+            return Err(BridgeError::ResumeRejected {
+                kind,
+                session_id,
+                detail: format!("Core refused the wake of {identity} (test refusal)"),
+            });
+        }
         self.core.live_member(identity)
     }
 
@@ -786,6 +885,21 @@ impl SessionBridge for CoreReadsBridge {
             });
         }
         self.core.member_standing(identity)
+    }
+
+    async fn identity_entry(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<CoreIdentityEntry, BridgeError> {
+        if self.entry_reads_refused.load(Ordering::SeqCst) {
+            return Err(BridgeError::Unsupported {
+                operation: "identity_entry",
+            });
+        }
+        self.take_entry_read()?;
+        Ok(self
+            .core
+            .identity_entry(identity, self.declared.contains(identity)))
     }
 
     async fn identity_management(

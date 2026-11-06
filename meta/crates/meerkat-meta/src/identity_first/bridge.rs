@@ -4601,6 +4601,211 @@ impl MemberStanding {
     }
 }
 
+/// What Core's MobMachine records for one identity's name
+/// ([`SessionBridge::identity_entry`], `MobHandle::identity_entry`): how
+/// Core holds the name, the member that holds it, the host preparation its
+/// entry owes and the session its last member's retirement archived. Read
+/// from the machine state the mob's actor last published: no store read, no
+/// actor command, and it never wakes a member. The identity runtime builds
+/// every view of an identity's lifecycle from it. Build one with its
+/// constructors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CoreIdentityEntry {
+    /// How Core holds the name.
+    pub kind: CoreNameKind,
+    /// The member that holds the name, if one does: the entry's member, or
+    /// the worker member that holds a name Core holds as no entry.
+    pub member: Option<CoreMember>,
+    /// The host preparation Core holds the entry's member for, with its
+    /// cause: while one is owed, Core refuses the member's wakes.
+    pub host_preparation: Option<meerkat_mob::HostPreparationCause>,
+    /// The session Core archived the entry's last member on, while no member
+    /// holds the entry: the entry's next seat revives it.
+    pub archived_session: Option<meerkat_core::types::SessionId>,
+}
+
+impl CoreIdentityEntry {
+    /// Core holds the name as an identity entry.
+    pub fn entry() -> Self {
+        Self::of_kind(CoreNameKind::Entry)
+    }
+
+    /// Core holds the name as no identity entry: a worker member holds it
+    /// ([`Self::with_member`]), or nothing does.
+    pub fn not_an_entry() -> Self {
+        Self::of_kind(CoreNameKind::NotAnEntry)
+    }
+
+    /// Core reserves the name: its entry is one this build of Core cannot
+    /// read, or the identity was removed.
+    pub fn reserved() -> Self {
+        Self::of_kind(CoreNameKind::Reserved)
+    }
+
+    fn of_kind(kind: CoreNameKind) -> Self {
+        Self {
+            kind,
+            member: None,
+            host_preparation: None,
+            archived_session: None,
+        }
+    }
+
+    /// The read, with the member that holds the name.
+    #[must_use]
+    pub fn with_member(mut self, member: CoreMember) -> Self {
+        self.member = Some(member);
+        self
+    }
+
+    /// The read, with the host preparation the entry owes.
+    #[must_use]
+    pub fn with_host_preparation(mut self, cause: meerkat_mob::HostPreparationCause) -> Self {
+        self.host_preparation = Some(cause);
+        self
+    }
+
+    /// The read, with the session the entry's last member's retirement
+    /// archived.
+    #[must_use]
+    pub fn with_archived_session(mut self, session_id: meerkat_core::types::SessionId) -> Self {
+        self.archived_session = Some(session_id);
+        self
+    }
+
+    /// Whether Core holds the name as an identity entry, or reserves it: a
+    /// name only the identity's host acts on, which Core refuses to every
+    /// door but the identity's own.
+    pub fn is_entry_or_reserved(&self) -> bool {
+        matches!(self.kind, CoreNameKind::Entry | CoreNameKind::Reserved)
+    }
+
+    /// The member's role move Core holds: the host's roster moved the
+    /// member to another role without declaring the migration.
+    pub fn holds_role_migration(&self) -> bool {
+        self.host_preparation == Some(meerkat_mob::HostPreparationCause::RoleMigrationUndeclared)
+    }
+}
+
+/// How Core holds a name ([`CoreIdentityEntry::kind`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CoreNameKind {
+    /// An identity entry: a host declared it, or it was created.
+    Entry,
+    /// No identity entry: a worker member holds it, or nothing does.
+    NotAnEntry,
+    /// Reserved: the name's entry is one this build of Core cannot read, or
+    /// the identity was removed.
+    Reserved,
+}
+
+/// The member that holds a name in Core's mob ([`CoreIdentityEntry::member`]),
+/// as MobMachine records it. It never says whether the member is
+/// materialized in this process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CoreMember {
+    /// The incarnation's generation.
+    pub generation: u64,
+    /// The session the member is bound to; `None` for a member bound to no
+    /// session.
+    pub session_id: Option<meerkat_core::types::SessionId>,
+    /// The role the incarnation runs.
+    pub profile: meerkat_mob::ProfileName,
+    /// The runtime mode the incarnation runs in.
+    pub runtime_mode: meerkat_mob::MobRuntimeMode,
+    /// The member's retirement started and has not ended.
+    pub retiring: bool,
+    /// Set while Core holds the member Broken.
+    pub broken: Option<CoreBrokenMember>,
+}
+
+impl CoreMember {
+    /// The incarnation `generation` holds the name, bound to `session_id`
+    /// under `profile` in `runtime_mode`.
+    pub fn seated(
+        generation: u64,
+        session_id: Option<meerkat_core::types::SessionId>,
+        profile: meerkat_mob::ProfileName,
+        runtime_mode: meerkat_mob::MobRuntimeMode,
+    ) -> Self {
+        Self {
+            generation,
+            session_id,
+            profile,
+            runtime_mode,
+            retiring: false,
+            broken: None,
+        }
+    }
+
+    /// The member, with its retirement started.
+    #[must_use]
+    pub fn retiring(mut self) -> Self {
+        self.retiring = true;
+        self
+    }
+
+    /// The member, held Broken by Core.
+    #[must_use]
+    pub fn with_broken(mut self, broken: CoreBrokenMember) -> Self {
+        self.broken = Some(broken);
+        self
+    }
+}
+
+/// A member Core holds Broken ([`CoreMember::broken`]): its restore failed,
+/// or its host refused its restored registration. Core answers every later
+/// wake of it the same until a lifecycle step replaces it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CoreBrokenMember {
+    /// Core's reason.
+    pub reason: String,
+    /// The stable refusal code, when the host refused the member.
+    pub code: Option<String>,
+    /// Core's durable resume hold, when the failed restore was a resume Core
+    /// held: the session is kept, and the hold names what clears it.
+    pub hold: Option<meerkat_core::service::DurableResumeHold>,
+    /// The session the failed restore named.
+    pub session_id: Option<meerkat_core::types::SessionId>,
+}
+
+impl CoreBrokenMember {
+    /// Core holds the member Broken for `reason`.
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            code: None,
+            hold: None,
+            session_id: None,
+        }
+    }
+
+    /// The fact, with the stable refusal code of the host's refusal.
+    #[must_use]
+    pub fn with_code(mut self, code: impl Into<String>) -> Self {
+        self.code = Some(code.into());
+        self
+    }
+
+    /// The fact, with Core's durable resume hold.
+    #[must_use]
+    pub fn with_hold(mut self, hold: meerkat_core::service::DurableResumeHold) -> Self {
+        self.hold = Some(hold);
+        self
+    }
+
+    /// The fact, with the session the failed restore named.
+    #[must_use]
+    pub fn with_session(mut self, session_id: meerkat_core::types::SessionId) -> Self {
+        self.session_id = Some(session_id);
+        self
+    }
+}
+
 /// A [`MemberLifecycleFact`] at its journal cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -4767,6 +4972,88 @@ fn member_standing_of(
         Some(other) => {
             return Err(BridgeError::Mob(format!(
                 "Core answered a member standing this build cannot read: {other:?}"
+            )));
+        }
+    })
+}
+
+/// Meta's [`CoreIdentityEntry`] of Core's read of one identity
+/// (`MobHandle::identity_entry`). The resume hold of a member Core holds
+/// Broken is not part of Core's read; [`MobSessionBridge`] adds it from
+/// Core's own answer for the member. A read this build cannot read is
+/// answered as an error, never as one it can.
+fn core_identity_entry_of(
+    read: &meerkat_mob::IdentityEntryRead,
+) -> Result<CoreIdentityEntry, BridgeError> {
+    fn member_of(
+        standing: &meerkat_mob::EntryStanding,
+        broken: Option<&meerkat_mob::MemberBrokenFact>,
+    ) -> Result<Option<CoreMember>, BridgeError> {
+        let (seated, retiring) = match standing {
+            meerkat_mob::EntryStanding::Seated(member) => (member, false),
+            meerkat_mob::EntryStanding::Retiring(member) => (member, true),
+            meerkat_mob::EntryStanding::Unseated(_) => return Ok(None),
+            other => {
+                return Err(BridgeError::Mob(format!(
+                    "Core answered a member standing this build cannot read: {other:?}"
+                )));
+            }
+        };
+        let mut member = CoreMember::seated(
+            seated.generation.get(),
+            seated.session_id.clone(),
+            seated.profile.clone(),
+            seated.runtime_mode,
+        );
+        if retiring {
+            member = member.retiring();
+        }
+        if let Some(fact) = broken {
+            let mut broken = CoreBrokenMember::new(fact.reason.clone());
+            if let Some(code) = &fact.code {
+                broken = broken.with_code(code.clone());
+            }
+            member = member.with_broken(broken);
+        }
+        Ok(Some(member))
+    }
+
+    Ok(match read {
+        meerkat_mob::IdentityEntryRead::Entry(view) => {
+            let mut entry = CoreIdentityEntry::entry();
+            if let Some(member) = member_of(&view.standing, view.broken.as_ref())? {
+                entry = entry.with_member(member);
+            }
+            if let Some(cause) = view.host_preparation {
+                entry = entry.with_host_preparation(cause);
+            }
+            if let Some(session_id) = &view.archived_session {
+                entry = entry.with_archived_session(session_id.clone());
+            }
+            entry
+        }
+        meerkat_mob::IdentityEntryRead::NotAnEntry { worker } => {
+            let mut entry = CoreIdentityEntry::not_an_entry();
+            if let Some(worker) = worker
+                && let Some(member) = member_of(&worker.standing, worker.broken.as_ref())?
+            {
+                entry = entry.with_member(member);
+            }
+            entry
+        }
+        meerkat_mob::IdentityEntryRead::Unreadable { member } => {
+            let mut entry = CoreIdentityEntry::reserved();
+            if let Some(standing) = member
+                && let Some(member) = member_of(standing, None)?
+            {
+                entry = entry.with_member(member);
+            }
+            entry
+        }
+        meerkat_mob::IdentityEntryRead::Removed => CoreIdentityEntry::reserved(),
+        other => {
+            return Err(BridgeError::Mob(format!(
+                "Core answered an identity read this build cannot read: {other:?}"
             )));
         }
     })
@@ -5211,6 +5498,30 @@ pub trait SessionBridge: Send + Sync {
     ) -> Result<MemberStanding, BridgeError> {
         Err(BridgeError::Unsupported {
             operation: "member_standing",
+        })
+    }
+
+    /// Core's read of `identity`'s name (`MobHandle::identity_entry`): how
+    /// Core holds it (an identity entry, no entry, or a reserved name), the
+    /// member that holds it with Core's Broken fact and that fact's resume
+    /// hold, the host preparation its entry owes, and the session its last
+    /// member's retirement archived. Read from the machine state the mob's
+    /// actor last published: no store read and no actor command, and it never
+    /// wakes a member. The identity runtime builds every view of an
+    /// identity's lifecycle from it (`status`, `statuses`, `member_health`,
+    /// the bootstrap status) and chooses an identity's door by it.
+    ///
+    /// The default fails closed: a bridge that cannot read Core's entry
+    /// answers [`BridgeError::Unsupported`], and every view of an identity
+    /// over it refuses typed (history unavailable, retryable) instead of
+    /// reading a member live, or not Broken, on a read that could not tell. A
+    /// bridge that wraps another forwards it.
+    async fn identity_entry(
+        &self,
+        _identity: &AgentIdentity,
+    ) -> Result<CoreIdentityEntry, BridgeError> {
+        Err(BridgeError::Unsupported {
+            operation: "identity_entry",
         })
     }
 
@@ -9543,6 +9854,48 @@ impl SessionBridge for MobSessionBridge {
         }
     }
 
+    async fn identity_entry(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<CoreIdentityEntry, BridgeError> {
+        let member_id = member_id_for_identity(identity);
+        let read = match self.handle.identity_entry(&member_id) {
+            Ok(read) => read,
+            // The handle's principal may not list the mob's members: this
+            // bridge cannot read Core's entry, now or later.
+            Err(meerkat_mob::MobError::ScopeDenied(denial)) => {
+                tracing::warn!(
+                    ?denial,
+                    "the session bridge's mob handle may not read Core's entry of an identity"
+                );
+                return Err(BridgeError::Unsupported {
+                    operation: "identity_entry",
+                });
+            }
+            Err(error) => {
+                return Err(BridgeError::Mob(format!(
+                    "reading Core's entry of {identity}: {error}"
+                )));
+            }
+        };
+        let mut entry = core_identity_entry_of(&read)?;
+        // A member Core holds Broken: Core's answer for the member names the
+        // failed restore's session and its durable resume hold, which the
+        // machine's read does not carry. Read without the mob actor.
+        if let Some(broken) = entry
+            .member
+            .as_mut()
+            .and_then(|member| member.broken.as_mut())
+            && let Err(meerkat_mob::MobError::MemberRestoreFailed {
+                session_id, hold, ..
+            }) = self.handle.member(&member_id).await
+        {
+            broken.hold = hold;
+            broken.session_id = session_id;
+        }
+        Ok(entry)
+    }
+
     async fn identity_management(
         &self,
         identity: &AgentIdentity,
@@ -10647,6 +11000,13 @@ impl SessionBridge for super::PublicSessionBridge {
         identity: &AgentIdentity,
     ) -> Result<MemberStanding, BridgeError> {
         self.bridge.member_standing(identity).await
+    }
+
+    async fn identity_entry(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<CoreIdentityEntry, BridgeError> {
+        self.bridge.identity_entry(identity).await
     }
 
     async fn identity_management(

@@ -637,6 +637,13 @@ impl SessionBridge for ObservedBridge {
         self.inner.member_standing(identity).await
     }
 
+    async fn identity_entry(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<CoreIdentityEntry, BridgeError> {
+        self.inner.identity_entry(identity).await
+    }
+
     async fn identity_management(
         &self,
         identity: &AgentIdentity,

@@ -33,8 +33,9 @@ use meerkat_core::session_owner_wake::{
     SessionOwnerWakeFuture, SessionOwnerWakeOutcome, SessionOwnerWakeRegistry, SessionOwnerWaker,
 };
 use meerkat_core::tool_grant::{
-    GatedToolTable, ToolGrantCall, ToolGrantGate, ToolGrantId, ToolGrantIssuer, ToolGrantRefusal,
-    ToolGrantSubject, ToolGrantTarget,
+    GatedToolTable, ToolGrantAgentRequest, ToolGrantAgentRequestRefusal, ToolGrantCall,
+    ToolGrantGate, ToolGrantId, ToolGrantIssuer, ToolGrantRefusal, ToolGrantSubject,
+    ToolGrantTarget,
 };
 use meerkat_core::types::{SessionId, ToolDef, ToolName, ToolProvenance, ToolSourceKind};
 use meerkat_core::{PrincipalKind, PrincipalRef, RunId, TrustDomainId};
@@ -49,10 +50,11 @@ use meerkat_runtime::tool_grant::{
     StoredToolGrant, TOOL_GRANT_ISSUE_BODY, TOOL_GRANT_ISSUE_KIND, TOOL_GRANT_ISSUE_RENDERER,
     ToolGrantAuditEvent, ToolGrantAuditRow, ToolGrantClock, ToolGrantClockError,
     ToolGrantExpiryDriver, ToolGrantIssueBody, ToolGrantIssueExecutor, ToolGrantIssueRequest,
-    ToolGrantRefusalKind, ToolGrantRequest, ToolGrantRequestNotice, ToolGrantRequestNotices,
-    ToolGrantRequestOrigin, ToolGrantRequestOutcome, ToolGrantRequestPolicy, ToolGrantRevocation,
-    ToolGrantRunObserver, ToolGrantService, ToolGrantServiceError, ToolGrantStatus,
-    ToolGrantWindow, hold_tool_grant_request, tool_grant_requests_of,
+    ToolGrantRefusalKind, ToolGrantRequest, ToolGrantRequestHost, ToolGrantRequestNotice,
+    ToolGrantRequestNotices, ToolGrantRequestOrigin, ToolGrantRequestOutcome,
+    ToolGrantRequestPolicy, ToolGrantRevocation, ToolGrantRunObserver, ToolGrantService,
+    ToolGrantServiceError, ToolGrantStatus, ToolGrantWindow, hold_tool_grant_request,
+    tool_grant_requests_of,
 };
 
 /// The host clock reading every test starts at, in UNIX ms.
@@ -1759,7 +1761,7 @@ async fn a_request_holds_a_decision_and_issues_nothing_until_approved() {
                 .is_none(),
             "{backend:?}"
         );
-        let requests = tool_grant_requests_of(&rig.decisions, &subject, false).unwrap();
+        let requests = tool_grant_requests_of(&rig.decisions, &subject, None).unwrap();
         assert_eq!(
             requests
                 .iter()
@@ -1919,12 +1921,12 @@ async fn a_rejected_or_expired_request_issues_nothing_and_lists_declined() {
 
         assert!(rig.grants.list(&subject).await.unwrap().grants.is_empty());
         assert!(
-            tool_grant_requests_of(&rig.decisions, &subject, false)
+            tool_grant_requests_of(&rig.decisions, &subject, None)
                 .unwrap()
                 .is_empty(),
             "{backend:?}: no request is open"
         );
-        let mut declined = tool_grant_requests_of(&rig.decisions, &subject, true)
+        let mut declined = tool_grant_requests_of(&rig.decisions, &subject, Some(T0))
             .unwrap()
             .into_iter()
             .map(|(decision, _)| (decision.decision_id, decision.state.phase))
@@ -2120,5 +2122,170 @@ async fn a_current_run_request_approved_after_its_run_ended_is_closed_run_ended(
             .unwrap()
             .expect("the run-scoped grant");
         assert_eq!(grant.run_scope, Some(second_run));
+    }
+}
+
+/// The principal a host names an agent's requests by.
+fn agent_requester() -> DecisionPrincipalKey {
+    DecisionPrincipalKey::of(&principal_of(PrincipalKind::PersonalAgent, "agent"))
+        .expect("principal key")
+}
+
+/// An agent's request through its session's grant seam holds a
+/// `tool_grant.issue` decision whose requester is the principal the host
+/// names its agents by, for the host's approver, about the agent's own
+/// session: the agent names neither. Its run and tool call are the request's
+/// key, so a replayed call answers the decision it held. A runtime whose host
+/// configured no requests takes none.
+#[tokio::test]
+async fn an_agent_held_request_names_the_agent_as_requester() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let clock = FakeClock::at(T0);
+        let machine = durable.machine(&clock);
+        let session_id = SessionId::new();
+        let bindings = machine
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("bindings prepare");
+        let grants = Arc::clone(
+            bindings
+                .tool_grants()
+                .expect("the runtime carries the session's grants"),
+        );
+        let target = ToolGrantTarget::Family {
+            family: "shell".to_string(),
+            names: shell_family(),
+        };
+        let run_id = RunId::new();
+        let ask = |call_id: &'static str| ToolGrantAgentRequest {
+            target: &target,
+            duration: REQUESTED_FOR,
+            reason: Some("rotate the logs"),
+            run_id: &run_id,
+            call_id,
+        };
+
+        assert_eq!(
+            grants.request_grant(ask("call-1")).await,
+            Err(ToolGrantAgentRequestRefusal::NotTaken),
+            "{backend:?}: no host configured"
+        );
+
+        let decisions = DurableDecisionService::with_clock(
+            Arc::new(InMemoryDecisionStore::new()),
+            Arc::clone(&clock) as Arc<dyn DecisionClock>,
+        );
+        machine.set_tool_grant_request_host(Some(ToolGrantRequestHost {
+            decisions: decisions.clone(),
+            policy: ToolGrantRequestPolicy::default(),
+            requester: agent_requester(),
+        }));
+
+        let receipt = grants
+            .request_grant(ask("call-1"))
+            .await
+            .expect("the request is held");
+        let held = decisions.get(&receipt.decision_id).expect("the decision");
+        assert_eq!(held.descriptor.kind.as_str(), TOOL_GRANT_ISSUE_KIND);
+        assert_eq!(held.descriptor.requester, agent_requester(), "{backend:?}");
+        assert_eq!(held.descriptor.approver_id.as_str(), "operator");
+        assert_eq!(held.state.phase, DecisionPhase::Open);
+        assert_eq!(receipt.phase, DecisionPhase::Open);
+        assert_eq!(receipt.deadline_at_ms, held.descriptor.deadline_at_ms);
+        assert_eq!(
+            receipt.grant_id,
+            ToolGrantId::approved(&receipt.decision_id),
+            "{backend:?}"
+        );
+        let body = ToolGrantIssueBody::of(&held).expect("the held body");
+        assert_eq!(body.subject, ToolGrantSubject::session(session_id.clone()));
+        assert_eq!(body.target, target);
+        assert_eq!(body.duration_ms, 600_000);
+        assert_eq!(body.run_scope, None);
+        assert_eq!(body.reason.as_deref(), Some("rotate the logs"));
+        assert_eq!(
+            body.origin,
+            ToolGrantRequestOrigin::Agent {
+                run_id: run_id.clone(),
+                call_id: "call-1".to_owned(),
+            }
+        );
+
+        // A replayed call answers the decision it held; another call is
+        // another request.
+        let replayed = grants
+            .request_grant(ask("call-1"))
+            .await
+            .expect("the replay answers");
+        assert_eq!(replayed.decision_id, receipt.decision_id, "{backend:?}");
+        let another = grants
+            .request_grant(ask("call-2"))
+            .await
+            .expect("another request");
+        assert_ne!(another.decision_id, receipt.decision_id, "{backend:?}");
+        assert!(
+            machine
+                .list_tool_grants(&ToolGrantSubject::session(session_id))
+                .await
+                .unwrap()
+                .grants
+                .is_empty(),
+            "{backend:?}: nothing is issued"
+        );
+    }
+}
+
+/// A list shows a declined request only while its deadline is within the
+/// grant policy's maximum lifetime of now: it reads the recent requests
+/// through the store's phase and deadline index, never the whole decision
+/// history. An open request is listed while it waits, and an older declined
+/// decision stays readable as a decision.
+#[tokio::test]
+async fn a_declined_request_is_listed_only_within_the_grant_lifetime() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let rig = RequestRig::new(&durable);
+        let machine = durable.machine(&rig.clock);
+        let session_id = SessionId::new();
+        let subject = ToolGrantSubject::session(session_id.clone());
+        let rejected = rig.request(&session_id, "ask-1", None);
+        rig.decide(&rejected, false);
+        let deadline_ms = rejected.descriptor.deadline_at_ms;
+        let lifetime_ms = machine.tool_grant_service().policy().max_lifetime_ms();
+        let listed = |include_ended: bool| {
+            machine
+                .list_tool_grant_requests(&rig.decisions, &subject, include_ended)
+                .expect("the requests")
+                .into_iter()
+                .map(|(decision, _)| decision.decision_id)
+                .collect::<Vec<_>>()
+        };
+
+        rig.clock.set(deadline_ms + lifetime_ms);
+        assert_eq!(
+            listed(true),
+            vec![rejected.decision_id.clone()],
+            "{backend:?}: within the lifetime"
+        );
+        assert!(listed(false).is_empty(), "{backend:?}");
+
+        rig.clock.set(deadline_ms + lifetime_ms + 1);
+        assert!(listed(true).is_empty(), "{backend:?}: past the lifetime");
+        assert_eq!(
+            rig.decisions
+                .get(&rejected.decision_id)
+                .expect("the decision stays readable")
+                .state
+                .phase,
+            DecisionPhase::Rejected
+        );
+
+        let open = rig.request(&session_id, "ask-2", None);
+        assert_eq!(
+            listed(true),
+            vec![open.decision_id.clone()],
+            "{backend:?}: an open request is listed"
+        );
     }
 }

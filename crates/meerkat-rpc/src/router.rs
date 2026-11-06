@@ -8286,6 +8286,45 @@ mod tests {
                 Some(meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()),
                 "{refused:?}"
             );
+            // Nor does it take its agents' requests.
+            assert!(
+                router
+                    .runtime
+                    .runtime_adapter()
+                    .tool_grant_service()
+                    .request_host()
+                    .is_none()
+            );
+        }
+
+        /// While it runs the executor of their kind, `rkat-rpc` takes its
+        /// agents' grant requests: each names the realm's agent (the stock
+        /// composition's executor) as its requester and is held for the
+        /// approver id `operator`.
+        #[tokio::test]
+        async fn rkat_rpc_takes_agent_grant_requests_as_the_realm_agent() {
+            let temp = tempfile::tempdir().unwrap();
+            let (_router, runtime) = persistent_router(temp.path()).await;
+            let host = runtime
+                .runtime_adapter()
+                .tool_grant_service()
+                .request_host()
+                .expect("rkat-rpc takes its agents' requests");
+            let agent = meerkat_core::PrincipalRef::in_domain(
+                meerkat_core::PrincipalKind::PersonalAgent,
+                "rkat-agent",
+                meerkat_core::TrustDomainId::new("rkat-realm-grants").expect("trust domain"),
+            )
+            .expect("principal");
+            assert_eq!(
+                host.requester,
+                meerkat_core::approval::decision::DecisionPrincipalKey::of(&agent)
+                    .expect("principal key")
+            );
+            assert_eq!(
+                host.policy,
+                meerkat_runtime::tool_grant::ToolGrantRequestPolicy::default()
+            );
         }
     }
 

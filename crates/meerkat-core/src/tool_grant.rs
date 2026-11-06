@@ -24,6 +24,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{SessionId, ToolName, ToolNameSet};
 
+mod request_tool;
+
 /// Refusal code: no live grant covers the gated name.
 pub const TOOL_GRANT_REQUIRED_CODE: &str = "tool_grant_required";
 /// Refusal code: the grant covering the gated name reached its deadline.

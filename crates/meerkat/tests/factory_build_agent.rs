@@ -6359,4 +6359,47 @@ mod scoped_tool_grants {
             shell_gate()
         );
     }
+
+    /// `request_tool_grant` is mounted by every gated build, visible (the
+    /// tool itself is not gated), and by no ungated build.
+    #[tokio::test]
+    async fn request_tool_grant_is_mounted_only_by_a_gated_build() {
+        use meerkat_core::tool_grant::REQUEST_TOOL_GRANT_TOOL;
+
+        let temp = tempfile::tempdir().unwrap();
+        let factory = temp_factory(&temp);
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let on_machine = &machine;
+        let build = move |gate: Option<GrantGatedTools>| {
+            gated_runtime_build(
+                on_machine,
+                Session::new(),
+                meerkat_core::SessionBuildIntent::Mint,
+                gate,
+            )
+        };
+        let mounted = |agent: &meerkat::DynAgent| {
+            let (base, visible) = names(agent);
+            (
+                base.iter().any(|name| name == REQUEST_TOOL_GRANT_TOOL),
+                visible.contains(REQUEST_TOOL_GRANT_TOOL),
+            )
+        };
+
+        let agent = factory
+            .build_agent(build(Some(shell_gate())).await, &Config::default())
+            .await
+            .expect("a gated build builds");
+        assert_eq!(
+            mounted(&agent),
+            (true, true),
+            "a gated build mounts it open"
+        );
+
+        let agent = factory
+            .build_agent(build(None).await, &Config::default())
+            .await
+            .expect("an ungated build builds");
+        assert_eq!(mounted(&agent), (false, false), "nothing is gated");
+    }
 }

@@ -319,6 +319,71 @@ fn owed_due_and_count_queries_use_their_indexes() {
     );
 }
 
+/// A list bounded by a deadline reads only its phase's decisions due at or
+/// after the bound, through the phase and deadline index, so a caller that
+/// lists recent ended decisions never reads the store's whole history.
+#[test]
+fn a_deadline_bounded_list_reads_recent_decisions_through_the_phase_and_deadline_index() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteDecisionStore::in_store_path(dir.path());
+    let old = stored(
+        "subject-old",
+        DecisionPhase::Rejected,
+        DecisionNotice::Delivered,
+        100,
+    );
+    let recent = stored(
+        "subject-recent",
+        DecisionPhase::Rejected,
+        DecisionNotice::Delivered,
+        1_000,
+    );
+    let open = stored(
+        "subject-open",
+        DecisionPhase::Open,
+        DecisionNotice::NotDue,
+        1_000,
+    );
+    for row in [&old, &recent, &open] {
+        store.insert_if_absent(row).expect("insert");
+    }
+    let filter = DecisionListFilter::default()
+        .with_kind(DecisionKind::new("release").expect("kind"))
+        .with_phase(DecisionPhase::Rejected)
+        .with_deadline_from(500);
+    assert!(filter.matches(&recent), "the in-memory reading agrees");
+    assert!(!filter.matches(&old) && !filter.matches(&open));
+
+    let listed: Vec<String> = store
+        .list(&filter, None, 10)
+        .expect("list")
+        .rows
+        .iter()
+        .map(|row| row.decision_id().to_owned())
+        .collect();
+    assert_eq!(listed, vec![recent.decision_id.as_str().to_owned()]);
+    assert_eq!(store.count(&filter).expect("count"), 1);
+
+    let conn = rusqlite::Connection::open(store.path()).expect("open");
+    let (sql, values) = list_query(&filter, None, 10);
+    let mut statement = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .expect("explain");
+    let details = statement
+        .query_map(params_from_iter(values.iter()), |row| {
+            row.get::<_, String>(3)
+        })
+        .expect("plan")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("plan rows");
+    assert!(
+        details
+            .iter()
+            .any(|detail| detail.contains("approval_decisions_phase_deadline_idx")),
+        "the bounded list reads the phase and deadline index: {details:?}"
+    );
+}
+
 #[test]
 fn queries_page_in_decision_id_order_and_keep_an_undecodable_row_unreadable() {
     let dir = tempfile::tempdir().expect("tempdir");

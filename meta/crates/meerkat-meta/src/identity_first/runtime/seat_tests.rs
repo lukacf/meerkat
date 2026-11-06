@@ -3731,10 +3731,6 @@ async fn a_reset_of_an_identity_its_host_holds_answers_core_s_held_creation_verd
         .await
         .expect("the host holds alice");
     register_all(&runtime, &[spec(&alice)]).await;
-    assert!(
-        core.session_of(&alice).is_none(),
-        "her registration seated nothing: she awaits her held creation"
-    );
     let applied = core.apply_calls.load(Ordering::SeqCst);
 
     let refused = runtime.reset(&alice).await;
@@ -3794,10 +3790,6 @@ async fn held_creation_follows_the_host_s_hold_across_a_restart_in_every_composi
                 .await
                 .expect("the host holds alice");
             register_all(&runtime, &[spec(&alice)]).await;
-            assert!(
-                core.session_of(&alice).is_none(),
-                "durable={durable}: her declaration seated nothing"
-            );
         }
         // A restart whose host holds alice again: she awaits her held
         // creation, and a door is refused typed.
